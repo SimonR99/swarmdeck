@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from ..bus import bus, mark_session_start, session_elapsed, stamps
 from ..events.logger import events
 from ..fleet.registry import registry
-from ..mapsvc.service import GridMeta, map_service
+from ..mapsvc.service import GridMeta, MapService, map_service
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -51,11 +51,21 @@ _alerts: dict[str, dict[str, Any]] = {}
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
-    global CONFIG
+    global CONFIG, map_service
     p = Path(path) if path else REPO / "study" / "4robot.yaml"
     CONFIG = yaml.safe_load(p.read_text()) if p.exists() else {}
-    for rid, pose in (CONFIG.get("map", {}).get("start_poses") or {}).items():
-        map_service.set_transform(rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0))
+
+    mcfg = CONFIG.get("map", {}) or {}
+    # Rebuild the service so resolution/extent follow the config.
+    new_service = MapService(
+        resolution=float(mcfg.get("resolution", 0.05)),
+        size_m=float(mcfg.get("size_m", 30.0)),
+    )
+    new_service.set_mode(mcfg.get("merge_mode", "static"))
+    for rid, pose in (mcfg.get("start_poses") or {}).items():
+        new_service.set_transform(rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0))
+
+    map_service.__dict__.update(new_service.__dict__)
     return CONFIG
 
 
@@ -202,6 +212,12 @@ async def get_map() -> Response:
         media_type="image/png",
         headers={"Cache-Control": "no-cache", "X-Map-Seq": str(map_service.seq)},
     )
+
+
+@app.get("/api/map/status")
+async def get_map_status() -> dict[str, Any]:
+    """Merge mode, per-robot transforms, and registration quality (FR-M6)."""
+    return map_service.status()
 
 
 @app.get("/api/map/info")

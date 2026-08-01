@@ -50,12 +50,39 @@ make ui
 | `study/` | Session configs (`1robot.yaml`, `2robot.yaml`, `4robot.yaml`) |
 | `sessions/` | Recorded output, one directory per session |
 
+## Map merging
+
+Each robot runs its own 2D SLAM, so every map is in that robot's own frame with the
+origin wherever it started. `mapsvc` merges them:
+
+- **`static`** — transforms come from configured start poses. Always available.
+- **`auto`** — transforms estimated by grid registration (FFT cross-correlation over a
+  yaw sweep, numpy only). Verified against Gazebo ground truth at **7.8 cm** with two
+  robots at unknown relative poses.
+
+A ratio test rejects ambiguous alignments, so a repetitive building yields "not
+confident" rather than a confident-but-wrong merge; the merge then keeps `static`
+transforms. Registration needs the robots to have seen the same places — check
+`GET /api/map/status` for `score`, `ratio` and `overlap`.
+
 ## Tests
 
 ```bash
 make test                                # backend pytest + frontend typecheck
 bash tests/integration/test_sim_headless.sh   # headless Gazebo, ~60 s
 ```
+
+Manual stack for debugging:
+
+```bash
+bash tests/integration/run_stack.sh 2      # gazebo + 2 robots + SLAM, headless
+python3 swarmdeck_ros/src/swarmdeck_sim/scenario/explore.py --robots 2 --seconds 240
+bash tests/integration/stop_stack.sh
+```
+
+`explore.py` is reactive obstacle-avoiding wandering. Do **not** drive the robots
+open-loop: a robot jammed against a wall spins its wheels, odometry integrates motion
+that never happened, and SLAM (which uses odometry as its prior) produces a useless map.
 
 ## Adding a robot type
 

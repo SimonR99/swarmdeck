@@ -51,8 +51,12 @@ echo "   ok: lidar, odom, imu, camera, ground truth"
 
 echo "== 5. lidar produces data =="
 W=$(timeout 12 gz topic -e -n 1 -t /robot_0/scan/points 2>/dev/null | grep -m1 '^width' | awk '{print $2}')
+H=$(timeout 12 gz topic -e -n 1 -t /robot_0/scan/points 2>/dev/null | grep -m1 '^height' | awk '{print $2}')
 [[ "${W:-0}" -gt 0 ]] || fail "lidar produced no points"
-echo "   ok: $W points per ring"
+# Single ring is required: a multi-ring lidar cannot feed 2D SLAM through a
+# height band (each ring truncates at a different range). See KNOWN_ISSUES.md.
+[[ "${H:-0}" == "1" ]] || fail "lidar must be single-ring for 2D SLAM, got height=$H"
+echo "   ok: $W beams, $H ring"
 
 echo "== 6. robot drives =="
 BEFORE=$(timeout 8 gz topic -e -n 1 -t /robot_0/odom 2>/dev/null | grep -A2 position | grep 'x:' | awk '{print $2}')

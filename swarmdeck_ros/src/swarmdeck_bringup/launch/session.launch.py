@@ -29,12 +29,15 @@ REPO = Path(__file__).resolve().parents[4]
 def bridge_args(ns: str) -> list[str]:
     """gz <-> ROS 2 topic bridges for one robot."""
     return [
+        # Single-ring lidar -> Gazebo publishes a usable LaserScan directly.
+        f"/{ns}/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
         f"/{ns}/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
         f"/{ns}/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
         f"/{ns}/imu@sensor_msgs/msg/Imu[gz.msgs.IMU",
         f"/{ns}/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
         f"/{ns}/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry",
         f"/{ns}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
+        f"/{ns}/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
     ]
 
 
@@ -102,11 +105,7 @@ def setup(context, *args, **kwargs):
                 PythonLaunchDescriptionSource(
                     [FindPackageShare("swarmdeck_slam"), "/launch/slam.launch.py"]
                 ),
-                launch_arguments={
-                    "namespace": ns,
-                    "height_min": str(band[0]),
-                    "height_max": str(band[1]),
-                }.items(),
+                launch_arguments={"namespace": ns, "use_sim_time": "true"}.items(),
             )
         )
 

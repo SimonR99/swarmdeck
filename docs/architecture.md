@@ -7,8 +7,8 @@
 2. **Four data classes, four transports.** Commands, telemetry, map, and video have
    opposite requirements. One channel cannot serve them. See §3.
 3. **The backend owns state; the browser is a view.** Reload must never lose the map.
-4. **Adopt, don't author.** SLAM Toolbox, Nav2, `multirobot_map_merge`, MediaMTX, MCAP.
-   Custom code only for adapters, map service, and GUI.
+4. **Adopt, don't author.** SLAM Toolbox, Nav2, MediaMTX, MCAP. Custom code only for
+   adapters, map service (including registration), and GUI.
 5. **Config is data.** Robot count, thresholds, seeds, merge mode in versioned YAML.
 6. **Every module testable alone**, with the rest mocked.
 
@@ -144,8 +144,8 @@ the vendor SDK. The contract does not care — that is the point of the seam.
 | Package | Responsibility |
 |---|---|
 | `swarmdeck_description` | URDF/xacro robot model, sensor config |
-| `swarmdeck_sim` | Gazebo worlds, model spawning, seeded scenario generator |
-| `swarmdeck_slam` | `pointcloud_to_laserscan` + SLAM Toolbox bringup per namespace |
+| `swarmdeck_sim` | Gazebo worlds, model spawning, seeded scenario generator, reactive explorer |
+| `swarmdeck_slam` | SLAM Toolbox bringup per namespace (single-ring lidar, no scan conversion) |
 | `swarmdeck_nav` | Nav2 params and per-namespace bringup |
 | `swarmdeck_perception` | ONNX detector node, projection of detections to map frame |
 | `swarmdeck_media` | Camera → GStreamer → RTSP encoder node |
@@ -198,16 +198,38 @@ already-corrected grids and needs no keyframe machinery of its own.
 
 | Mode | How | When |
 |---|---|---|
-| `static` | Start poses from config → fixed `T_world_robot` | Default. Always available. Build first. |
-| `auto` | `multirobot_map_merge` estimates transforms by feature-matching the grids | Unknown starts (FR-S4) |
+| `static` | Start poses from config → fixed `T_world_robot` | Default. Always available. |
+| `auto` | Grid registration estimates `T_world_robot` | Unknown starts (FR-S4) |
 
-`multirobot_map_merge` (from `m-explore-ros2`, source build) is purpose-built for
-merging N occupancy grids with unknown relative poses. It is far lighter than a
-pose-graph SLAM backend and needs no inter-robot communication — which matters for a
-mixed fleet, since a ROS 1 robot cannot join a ROS 2 distributed SLAM system.
+`static` is a permanent fallback, not a stepping stone: if registration is unconfident
+the merge keeps the configured transforms rather than guessing.
 
-`static` mode is a permanent fallback, not a stepping stone: if transform estimation
-fails or drifts, the system still runs with known start poses.
+**Registration algorithm** (`mapsvc/registration.py`, numpy only):
+
+```
+for each candidate yaw (4 deg coarse, then 0.5 deg fine around the winner):
+    rotate robot B's occupied cells
+    FFT cross-correlate against robot A's occupied cells   # every shift at once
+    keep the best peak
+```
+
+FFT cross-correlation evaluates *all* translations in one O(n log n) pass, so cost is
+one transform per yaw candidate rather than a full 3D sweep. It needs no inter-robot
+communication, which matters for a mixed ROS 1 / ROS 2 fleet that cannot share a SLAM
+system, and no OpenCV/PCL.
+
+A **ratio test** guards the result: the best rival peak outside a neighbourhood of the
+winner, over the winner. In a building of near-identical rooms, shifting by one room
+width scores almost as well as the truth, so a near-tie (ratio > 0.80) is reported as
+*not confident* and ignored. This is what prevents a confident-but-wrong merge.
+
+Accepted only when `overlap >= 80 cells`, `score >= 0.20`, `ratio <= 0.80`.
+
+Measured against Gazebo ground truth with two robots at unknown relative poses:
+**7.8 cm translation error, exact yaw** (score 0.54, ratio 0.58, 2149 overlapping cells).
+
+Registration requires the robots to have **seen the same places**. With disjoint coverage
+the problem is ill-posed and the ratio test correctly refuses — see `docs/KNOWN_ISSUES.md`.
 
 ### 5.3 Map Service state
 

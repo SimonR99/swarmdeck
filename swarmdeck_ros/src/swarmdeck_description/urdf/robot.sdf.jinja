@@ -43,8 +43,17 @@
           <scan>
             <horizontal><samples>360</samples><resolution>1</resolution>
               <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
-            <vertical><samples>8</samples><resolution>1</resolution>
-              <min_angle>-0.26</min_angle><max_angle>0.26</max_angle></vertical>
+            <!--
+              Single ring. The map is 2D, and a multi-ring lidar is actively
+              harmful here: any height band you pick truncates each ring at a
+              different range (a +/-0.15 m band caps every ring below 4 m of the
+              lidar's 16 m), which shreds the scan into a hatched wedge.
+              One ring also means Gazebo publishes a usable gz.msgs.LaserScan
+              directly, so pointcloud_to_laserscan drops out of the pipeline.
+              Raise <samples> only if you add a separate 2D sensor for SLAM.
+            -->
+            <vertical><samples>1</samples><resolution>1</resolution>
+              <min_angle>0</min_angle><max_angle>0</max_angle></vertical>
           </scan>
           <range><min>0.15</min><max>16.0</max><resolution>0.01</resolution></range>
           <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
