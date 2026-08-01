@@ -1,0 +1,112 @@
+@import 'tailwindcss';
+
+/* ------------------------------------------------------------------
+   SwarmDeck design tokens.
+   Dark-first control-room palette. Change values here, not in components.
+   ------------------------------------------------------------------ */
+@theme {
+  --color-bg: #0a0e14;
+  --color-surface: #111823;
+  --color-surface-2: #172131;
+  --color-surface-3: #1e2b3d;
+  --color-border: #24344a;
+  --color-border-strong: #33475f;
+
+  --color-fg: #e6edf6;
+  --color-fg-muted: #8ba0bb;
+  --color-fg-dim: #5b7089;
+
+  --color-accent: #38bdf8;
+  --color-accent-fg: #04222f;
+
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-danger: #f87171;
+  --color-critical: #ef4444;
+
+  /* Per-robot identity colours, up to 5 robots */
+  --color-robot-0: #38bdf8;
+  --color-robot-1: #a78bfa;
+  --color-robot-2: #34d399;
+  --color-robot-3: #fb923c;
+  --color-robot-4: #f472b6;
+
+  --radius-card: 0.875rem;
+
+  --font-sans: 'Inter var', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+    overscroll-behavior: none;
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    /* Touch-first: no accidental text selection or tap highlight */
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+
+  /* Slim scrollbars that match the palette */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-strong) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border-radius: 3px;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Minimum comfortable touch target on a 10in tablet */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .panel-glow {
+    box-shadow:
+      0 0 0 1px var(--color-border),
+      0 8px 24px -12px rgb(0 0 0 / 0.8);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 0.7;
+  }
+  70% {
+    box-shadow: 0 0 0 10px transparent;
+    opacity: 0;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 0;
+  }
+}
+.animate-ping-ring {
+  animation: pulse-ring 1.8s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+}

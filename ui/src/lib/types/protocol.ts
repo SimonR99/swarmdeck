@@ -1,0 +1,120 @@
+/**
+ * SwarmDeck protocol v1 — GUI side.
+ * Mirrors adapters/protocol/README.md. Keep in sync with server/schemas/.
+ */
+
+export const PROTOCOL_VERSION = 1;
+
+export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop';
+export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
+export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop';
+export type AlertLevel = 'info' | 'warn' | 'critical';
+
+export interface Pose {
+  x: number;
+  y: number;
+  yaw: number;
+}
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface Stamps {
+  t_mono: number;
+  t_wall: number;
+  t_sess: number;
+}
+
+export interface RobotState extends Stamps {
+  type: 'robot_state';
+  robot_id: string;
+  robot_type: string;
+  pose: Pose;
+  battery: number | null;
+  mode: RobotMode;
+  nav_status: NavStatus;
+  goal: Point | null;
+  capabilities: Capability[];
+  unattended_s: number;
+  online: boolean;
+}
+
+export interface Detection {
+  id: string;
+  class: string;
+  score: number;
+  robot_id: string;
+  camera: string;
+  bbox: [number, number, number, number] | null;
+  map_position: Point | null;
+  first_seen: number;
+  last_seen: number;
+  observations: number;
+}
+
+export interface MapInfo {
+  resolution: number;
+  width: number;
+  height: number;
+  origin: Point;
+  seq: number;
+}
+
+export interface MapPatch {
+  type: 'map_patch';
+  seq: number;
+  resolution: number;
+  origin: Point;
+  x0: number;
+  y0: number;
+  w: number;
+  h: number;
+  /** base64(zlib(int8[])) row-major, -1 unknown / 0 free / 100 occupied */
+  data: string;
+}
+
+export interface Alert {
+  id: string;
+  level: AlertLevel;
+  kind: 'unattended' | 'nav_failure' | 'adapter_disconnect' | 'stream_loss' | 'fault';
+  robot_id: string | null;
+  message: string;
+  t_wall: number;
+  acknowledged: boolean;
+}
+
+export interface SessionState {
+  type: 'session_state';
+  running: boolean;
+  name: string | null;
+  started_at: number | null;
+  elapsed_s: number;
+  recording: boolean;
+}
+
+/* ---------- server → GUI ---------- */
+
+export type ServerMessage =
+  | RobotState
+  | MapPatch
+  | SessionState
+  | { type: 'fleet_change'; robots: RobotState[] }
+  | { type: 'detection'; detection: Detection }
+  | { type: 'alert'; alert: Alert }
+  | { type: 'alert_clear'; id: string }
+  | { type: 'map_info'; info: MapInfo };
+
+/* ---------- GUI → server ---------- */
+
+export type ClientMessage =
+  | { type: 'set_goal'; robot_id: string; payload: Point }
+  | { type: 'cancel_goal'; robot_id: string }
+  | { type: 'select_robots'; robot_ids: string[] }
+  | { type: 'switch_camera'; robot_id: string }
+  | { type: 'acknowledge_alert'; id: string }
+  | { type: 'report_target'; robot_id: string; payload: Point }
+  | { type: 'stop_all' };
+
+export type ClientAction = ClientMessage['type'];

@@ -1,0 +1,278 @@
+import { deflate } from 'pako';
+import type { ServerMessage, RobotState, MapInfo } from '$lib/types/protocol';
+
+/**
+ * Standalone fleet simulator.
+ * Lets the whole GUI run with no backend, no ROS, no Gazebo — used for UI work
+ * and as the fallback when the websocket is unreachable.
+ */
+
+const RES = 0.05;
+const W = 800;
+const H = 800;
+const ORIGIN = { x: -20, y: -20 };
+const REVEAL_R = 45; // cells
+
+interface MockRobot {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  yaw: number;
+  target: { x: number; y: number } | null;
+  battery: number;
+  navStatus: RobotState['nav_status'];
+  mode: RobotState['mode'];
+  lastAttended: number;
+  caps: RobotState['capabilities'];
+}
+
+/** Ground-truth world: outer walls, rooms, corridors. */
+function buildTruth(): Int8Array {
+  const t = new Int8Array(W * H).fill(0);
+  const wall = (x0: number, y0: number, x1: number, y1: number) => {
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) if (x >= 0 && x < W && y >= 0 && y < H) t[y * W + x] = 100;
+  };
+  wall(60, 60, 740, 68); // outer
+  wall(60, 732, 740, 740);
+  wall(60, 60, 68, 740);
+  wall(732, 60, 740, 740);
+  // interior rooms
+  wall(250, 60, 258, 320);
+  wall(250, 440, 258, 740);
+  wall(500, 60, 508, 260);
+  wall(500, 380, 508, 740);
+  wall(258, 380, 500, 388);
+  wall(508, 500, 740, 508);
+  wall(60, 250, 180, 258);
+  return t;
+}
+
+export class MockFleet {
+  private truth = buildTruth();
+  private known = new Int8Array(W * H).fill(-1);
+  private robots: MockRobot[] = [];
+  private timers: number[] = [];
+  private seq = 0;
+  private t0 = performance.now();
+  private detectionSeq = 0;
+
+  constructor(
+    private emit: (m: ServerMessage) => void,
+    private count = 4
+  ) {}
+
+  start() {
+    const starts = [
+      { x: -14, y: -14 },
+      { x: 10, y: -14 },
+      { x: -14, y: 10 },
+      { x: 10, y: 10 },
+      { x: 0, y: 0 }
+    ];
+    for (let i = 0; i < Math.min(this.count, 5); i++) {
+      this.robots.push({
+        id: `robot_${i}`,
+        type: i === 0 ? 'spot' : 'diffdrive',
+        x: starts[i].x,
+        y: starts[i].y,
+        yaw: Math.random() * Math.PI * 2,
+        target: null,
+        battery: 0.7 + Math.random() * 0.3,
+        navStatus: 'idle',
+        mode: 'idle',
+        lastAttended: 0,
+        caps: ['navigate', 'map', 'camera', 'battery', 'estop']
+      });
+    }
+
+    const info: MapInfo = { resolution: RES, width: W, height: H, origin: ORIGIN, seq: 0 };
+    this.emit({ type: 'map_info', info });
+
+    this.timers.push(setInterval(() => this.step(0.2), 200) as unknown as number);
+    this.timers.push(setInterval(() => this.pushPatch(), 600) as unknown as number);
+    this.timers.push(setInterval(() => this.maybeDetect(), 5200) as unknown as number);
+
+    this.emit({
+      type: 'session_state',
+      running: true,
+      name: `mock_${this.count}robot`,
+      started_at: Date.now() / 1000,
+      elapsed_s: 0,
+      recording: true
+    });
+  }
+
+  stop() {
+    this.timers.forEach(clearInterval);
+    this.timers = [];
+  }
+
+  command(robotId: string, kind: string, payload?: { x: number; y: number }) {
+    const r = this.robots.find((x) => x.id === robotId);
+    if (!r) return;
+    r.lastAttended = 0;
+    if (kind === 'set_goal' && payload) {
+      r.target = { ...payload };
+      r.navStatus = 'active';
+      r.mode = 'nav';
+    } else if (kind === 'cancel_goal') {
+      r.target = null;
+      r.navStatus = 'cancelled';
+      r.mode = 'idle';
+    } else if (kind === 'stop') {
+      r.target = null;
+      r.navStatus = 'idle';
+      r.mode = 'estop';
+    }
+  }
+
+  stopAll() {
+    this.robots.forEach((r) => {
+      r.target = null;
+      r.navStatus = 'idle';
+      r.mode = 'estop';
+    });
+  }
+
+  private step(dt: number) {
+    const tMono = (performance.now() - this.t0) / 1000;
+    for (const r of this.robots) {
+      if (r.mode !== 'estop') {
+        if (!r.target) {
+          // idle wander so the map keeps growing without operator input
+          if (Math.random() < 0.02) {
+            r.target = { x: -16 + Math.random() * 32, y: -16 + Math.random() * 32 };
+            r.navStatus = 'active';
+            r.mode = 'nav';
+          }
+        } else {
+          const dx = r.target.x - r.x;
+          const dy = r.target.y - r.y;
+          const d = Math.hypot(dx, dy);
+          if (d < 0.25) {
+            r.target = null;
+            r.navStatus = 'succeeded';
+            r.mode = 'idle';
+          } else {
+            const speed = 1.1;
+            r.yaw = Math.atan2(dy, dx);
+            r.x += (dx / d) * speed * dt;
+            r.y += (dy / d) * speed * dt;
+          }
+        }
+      }
+      r.battery = Math.max(0.05, r.battery - dt * 0.00035);
+      r.lastAttended += dt;
+      this.reveal(r.x, r.y);
+
+      this.emit({
+        type: 'robot_state',
+        robot_id: r.id,
+        robot_type: r.type,
+        t_mono: tMono,
+        t_wall: Date.now() / 1000,
+        t_sess: tMono,
+        pose: { x: r.x, y: r.y, yaw: r.yaw },
+        battery: r.battery,
+        mode: r.mode,
+        nav_status: r.navStatus,
+        goal: r.target,
+        capabilities: r.caps,
+        unattended_s: r.lastAttended,
+        online: true
+      });
+
+      if (r.lastAttended > 45 && r.lastAttended < 45.3) {
+        this.emit({
+          type: 'alert',
+          alert: {
+            id: `unattended_${r.id}`,
+            level: 'warn',
+            kind: 'unattended',
+            robot_id: r.id,
+            message: `${r.id} unattended for 45 s`,
+            t_wall: Date.now() / 1000,
+            acknowledged: false
+          }
+        });
+      }
+    }
+  }
+
+  /** Reveal ground truth within sensor radius, simulating SLAM. */
+  private reveal(wx: number, wy: number) {
+    const cx = Math.round((wx - ORIGIN.x) / RES);
+    const cy = Math.round(H - (wy - ORIGIN.y) / RES);
+    for (let y = cy - REVEAL_R; y <= cy + REVEAL_R; y++) {
+      if (y < 0 || y >= H) continue;
+      for (let x = cx - REVEAL_R; x <= cx + REVEAL_R; x++) {
+        if (x < 0 || x >= W) continue;
+        if ((x - cx) ** 2 + (y - cy) ** 2 > REVEAL_R * REVEAL_R) continue;
+        this.known[y * W + x] = this.truth[y * W + x];
+      }
+    }
+  }
+
+  /** Push the bounding box around all robots as a patch. */
+  private pushPatch() {
+    if (!this.robots.length) return;
+    let x0 = W,
+      y0 = H,
+      x1 = 0,
+      y1 = 0;
+    for (const r of this.robots) {
+      const cx = Math.round((r.x - ORIGIN.x) / RES);
+      const cy = Math.round(H - (r.y - ORIGIN.y) / RES);
+      x0 = Math.max(0, Math.min(x0, cx - REVEAL_R - 2));
+      y0 = Math.max(0, Math.min(y0, cy - REVEAL_R - 2));
+      x1 = Math.min(W, Math.max(x1, cx + REVEAL_R + 2));
+      y1 = Math.min(H, Math.max(y1, cy + REVEAL_R + 2));
+    }
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w <= 0 || h <= 0) return;
+
+    const sub = new Int8Array(w * h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) sub[y * w + x] = this.known[(y0 + y) * W + (x0 + x)];
+
+    const deflated = deflate(new Uint8Array(sub.buffer));
+    let bin = '';
+    for (let i = 0; i < deflated.length; i++) bin += String.fromCharCode(deflated[i]);
+
+    this.emit({
+      type: 'map_patch',
+      seq: ++this.seq,
+      resolution: RES,
+      origin: ORIGIN,
+      x0,
+      y0,
+      w,
+      h,
+      data: btoa(bin)
+    });
+  }
+
+  private maybeDetect() {
+    if (!this.robots.length || Math.random() > 0.55) return;
+    const r = this.robots[Math.floor(Math.random() * this.robots.length)];
+    const now = Date.now() / 1000;
+    this.emit({
+      type: 'detection',
+      detection: {
+        id: `duck_${++this.detectionSeq}`,
+        class: 'duck',
+        score: 0.72 + Math.random() * 0.26,
+        robot_id: r.id,
+        camera: 'front',
+        bbox: [0.18 + Math.random() * 0.5, 0.22 + Math.random() * 0.4, 0.16, 0.22],
+        map_position: { x: r.x + (Math.random() - 0.5) * 3, y: r.y + (Math.random() - 0.5) * 3 },
+        first_seen: now,
+        last_seen: now,
+        observations: 1
+      }
+    });
+  }
+}

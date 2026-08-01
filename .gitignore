@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.svelte-kit/
+*.tsbuildinfo
+
+# ROS 2
+build/
+install/
+log/
+
+# Sessions (recorded output)
+sessions/*
+!sessions/.gitkeep
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local overrides
+.env
+.env.local
+*.local.yaml

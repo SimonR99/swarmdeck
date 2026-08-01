@@ -1,0 +1,31 @@
+# SwarmDeck session config
+name: 4robot
+seed: 20260801
+
+fleet:
+  robot_count: 4
+  robot_prefix: robot_
+
+map:
+  merge_mode: static        # static | auto
+  resolution: 0.05
+  height_band: [0.10, 1.80] # 3D lidar -> 2D scan slice
+  start_poses:              # used by merge_mode: static
+    robot_0: {x:  0.0, y:  0.0, yaw: 0.0}
+    robot_1: {x:  4.0, y:  0.0, yaw: 1.5708}
+    robot_2: {x:  0.0, y:  4.0, yaw: 3.1416}
+    robot_3: {x:  4.0, y:  4.0, yaw: -1.5708}
+
+alerts:
+  unattended_threshold_s: 45
+  nav_failure: true
+  adapter_disconnect: true
+
+video:
+  width: 640
+  height: 480
+  fps: 15
+
+recording:
+  enabled: true
+  output_dir: sessions
