@@ -108,6 +108,10 @@ class MapService:
         img[...] = (26, 34, 48)  # unknown
         img[self.merged == 0] = (219, 231, 245)  # free
         img[self.merged >= 50] = (39, 56, 79)  # occupied
+        # OccupancyGrid row 0 is at origin_y (world "bottom"); image row 0 renders
+        # at the top. Flip so the PNG matches the frontend's worldToGrid, which
+        # does gy = height - (y - origin_y)/res.
+        img = np.flipud(img)
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG", optimize=True)
         return buf.getvalue()
