@@ -41,12 +41,27 @@ def generate_launch_description() -> LaunchDescription:
                 package="tf2_ros",
                 executable="static_transform_publisher",
                 name="lidar_tf",
+                namespace=ns,
                 arguments=[
-                    "--x", "0.10", "--z", "0.16",
+                    "--x", "-0.07", "--z", "0.402",
                     "--frame-id", [ns, "/base_link"],
                     "--child-frame-id", [ns, "/base_link/lidar"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
+                remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
+            ),
+            Node(
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                name="proximity_lidar_tf",
+                namespace=ns,
+                arguments=[
+                    "--x", "0.24", "--z", "0.05",
+                    "--frame-id", [ns, "/base_link"],
+                    "--child-frame-id", [ns, "/base_link/proximity_lidar"],
+                ],
+                parameters=[{"use_sim_time": use_sim}],
+                remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
             ),
             Node(
                 package="slam_toolbox",
@@ -54,7 +69,13 @@ def generate_launch_description() -> LaunchDescription:
                 name="slam_toolbox",
                 namespace=ns,
                 # Remap, do NOT use the scan_topic parameter — see docstring.
-                remappings=[("scan", [ns, "/scan"]), ("/map", [ns, "/map"])],
+                remappings=[
+                    ("/scan", "scan"),
+                    ("/map", "map"),
+                    ("/map_metadata", "map_metadata"),
+                    ("/tf", "tf"),
+                    ("/tf_static", "tf_static"),
+                ],
                 parameters=[
                     slam_params,
                     {

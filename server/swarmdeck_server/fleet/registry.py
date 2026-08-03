@@ -21,6 +21,7 @@ class Robot:
     robot_type: str = "unknown"
     adapter: str = ""
     ros: str = ""
+    coordinate_frame: str = "local"
     capabilities: list[str] = field(default_factory=list)
     footprint_radius: float = 0.3
 
@@ -29,6 +30,7 @@ class Robot:
     mode: str = "idle"
     nav_status: str = "idle"
     goal: dict[str, float] | None = None
+    planned_path: list[dict[str, float]] = field(default_factory=list)
 
     last_seen: float = field(default_factory=time.monotonic)
     last_attended: float = field(default_factory=time.monotonic)
@@ -51,6 +53,7 @@ class Robot:
             "mode": self.mode,
             "nav_status": self.nav_status,
             "goal": self.goal,
+            "planned_path": self.planned_path,
             "capabilities": self.capabilities,
             "unattended_s": round(self.unattended_s, 2),
             "online": self.online,
@@ -69,6 +72,9 @@ class Registry:
         r.robot_type = msg.get("robot_type", "unknown")
         r.adapter = msg.get("adapter", "")
         r.ros = msg.get("ros", "")
+        r.coordinate_frame = (
+            "merged" if msg.get("coordinate_frame") == "merged" else "local"
+        )
         r.capabilities = list(msg.get("capabilities", []))
         r.footprint_radius = float(msg.get("footprint_radius", 0.3))
         r.last_seen = time.monotonic()
@@ -91,6 +97,8 @@ class Registry:
             r.nav_status = msg["nav_status"]
         if "goal" in msg:
             r.goal = msg["goal"]
+        if "planned_path" in msg:
+            r.planned_path = list(msg["planned_path"] or [])[:200]
         return r
 
     def attend(self, robot_id: str) -> None:

@@ -44,7 +44,7 @@ sleep 10
 
 echo "== 4. sensors publish =="
 TOPICS="$(timeout 10 gz topic -l 2>/dev/null)"
-for t in scan/points odom imu camera/image_raw ground_truth; do
+for t in scan/points proximity_scan odom imu camera/image_raw ground_truth; do
   echo "$TOPICS" | grep -q "/robot_0/$t" || fail "missing topic /robot_0/$t"
 done
 echo "   ok: lidar, odom, imu, camera, ground truth"

@@ -43,6 +43,7 @@ class Explorer(Node):
         self.pubs: dict[str, object] = {}
         self.turn_dir: dict[str, float] = {}
         self.stuck_since: dict[str, float] = {}
+        self.running = True
 
         for rid in robot_ids:
             self.create_subscription(
@@ -65,6 +66,8 @@ class Explorer(Node):
         return float(r[sel].min()) if sel.any() else float("inf")
 
     def step(self) -> None:
+        if not self.running:
+            return
         for rid, pub in self.pubs.items():
             s = self.scan.get(rid)
             if s is None:
@@ -98,6 +101,9 @@ class Explorer(Node):
             pub.publish(cmd)
 
     def halt(self) -> None:
+        # Disable the timer first. Otherwise it can overwrite this zero command
+        # during the grace period before rclpy shuts down.
+        self.running = False
         for pub in self.pubs.values():
             pub.publish(Twist())
 
@@ -115,15 +121,17 @@ def main() -> None:
     node = Explorer(ids, seed=args.seed)
     node.set_parameters([rclpy.parameter.Parameter("use_sim_time", value=True)])
 
-    threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
     try:
         time.sleep(args.seconds)
     except KeyboardInterrupt:
         pass
     node.halt()
     time.sleep(0.5)
-    node.destroy_node()
     rclpy.shutdown()
+    spin_thread.join(timeout=2.0)
+    node.destroy_node()
 
 
 if __name__ == "__main__":

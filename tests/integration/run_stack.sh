@@ -39,6 +39,7 @@ for i in $(seq 0 $((N-1))); do
   ns="robot_$i"
   setsid nohup ros2 run ros_gz_bridge parameter_bridge \
     "/$ns/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan" \
+    "/$ns/proximity_scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan" \
     "/$ns/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry" \
     "/$ns/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry" \
     "/$ns/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist" \
@@ -49,9 +50,13 @@ for i in $(seq 0 $((N-1))); do
     --ros-args -r "/$ns/tf:=/tf" -p use_sim_time:=true \
     </dev/null >"$LOGS/tf_$ns.log" 2>&1 & disown
   setsid nohup ros2 run tf2_ros static_transform_publisher \
-    --x 0.10 --z 0.16 --frame-id "$ns/base_link" --child-frame-id "$ns/base_link/lidar" \
+    --x -0.07 --z 0.402 --frame-id "$ns/base_link" --child-frame-id "$ns/base_link/lidar" \
     --ros-args -p use_sim_time:=true \
     </dev/null >"$LOGS/tfs_$ns.log" 2>&1 & disown
+  setsid nohup ros2 run tf2_ros static_transform_publisher \
+    --x 0.24 --z 0.05 --frame-id "$ns/base_link" --child-frame-id "$ns/base_link/proximity_lidar" \
+    --ros-args -p use_sim_time:=true \
+    </dev/null >"$LOGS/tfs_proximity_$ns.log" 2>&1 & disown
 done
 sleep 8
 

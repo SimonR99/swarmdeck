@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from ..bus import bus, mark_session_start, session_elapsed, stamps
+from ..config.settings import SettingsStore
 from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
@@ -27,6 +28,7 @@ from ..mapsvc.service import GridMeta, MapService, map_service
 async def lifespan(_: FastAPI):
     if not CONFIG:
         load_config()
+    settings_store.load()
     tasks = [
         asyncio.create_task(state_loop()),
         asyncio.create_task(map_loop()),
@@ -40,11 +42,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="SwarmDeck", lifespan=lifespan)
 
 REPO = Path(__file__).resolve().parents[3]
+settings_store = SettingsStore(REPO / "sessions" / "settings.json")
 CONFIG: dict[str, Any] = {}
 SESSION: dict[str, Any] = {"running": False, "name": None, "started_at": None, "recording": False}
 
 _gui_clients: set[WebSocket] = set()
 _alerts: dict[str, dict[str, Any]] = {}
+_camera_frames: dict[str, tuple[bytes, float, int]] = {}
+_detections: dict[str, dict[str, Any]] = {}
+_camera_seq = 0
 
 
 # ----------------------------------------------------------------- config
@@ -66,6 +72,8 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         new_service.set_transform(rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0))
 
     map_service.__dict__.update(new_service.__dict__)
+    _camera_frames.clear()
+    _detections.clear()
     return CONFIG
 
 
@@ -112,11 +120,11 @@ async def clear_alert(alert_id: str) -> None:
 
 async def state_loop() -> None:
     """5 Hz robot_state fan-out (FR-R3)."""
-    threshold = float((CONFIG.get("alerts") or {}).get("unattended_threshold_s", 45))
     while True:
         await asyncio.sleep(0.2)
+        threshold = float(settings_store.value["unattended_threshold_s"])
         for r in list(registry.robots.values()):
-            await broadcast(r.to_state())
+            await broadcast(robot_state(r))
 
             aid = f"unattended_{r.robot_id}"
             if r.online and r.unattended_s > threshold:
@@ -163,17 +171,69 @@ def session_state() -> dict[str, Any]:
     }
 
 
+def robot_state(robot: Any) -> dict[str, Any]:
+    """Expose adapter-local state in the GUI's shared merged-map frame."""
+    state = robot.to_state()
+    if robot.coordinate_frame == "merged":
+        return state
+    state["pose"] = map_service.robot_to_world(robot.robot_id, state["pose"])
+    if state["goal"]:
+        state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
+    state["planned_path"] = [
+        map_service.robot_to_world(robot.robot_id, point)
+        for point in state.get("planned_path", [])
+    ]
+    return state
+
+
+def fleet_snapshot() -> list[dict[str, Any]]:
+    return [robot_state(robot) for robot in registry.robots.values()]
+
+
+def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | None:
+    """Find a duplicate goal after normalizing every robot to the shared frame."""
+    for rid, robot in registry.robots.items():
+        if rid == exclude or not robot.goal:
+            continue
+        current = (
+            robot.goal
+            if robot.coordinate_frame == "merged"
+            else map_service.robot_to_world(rid, robot.goal)
+        )
+        if abs(current["x"] - goal["x"]) < tol and abs(current["y"] - goal["y"]) < tol:
+            return rid
+    return None
+
+
 # ----------------------------------------------------------------- REST
 
 
 @app.get("/api/config")
 async def get_config() -> dict[str, Any]:
-    return {"config": CONFIG, "protocol": 1}
+    return {"config": CONFIG, "settings": settings_store.value, "protocol": 1}
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict[str, Any]:
+    return {"type": "settings_state", "settings": settings_store.value}
+
+
+@app.put("/api/settings")
+async def put_settings(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    settings = settings_store.save(payload)
+    events.log("settings_update", {"settings": settings})
+    message = {"type": "settings_state", "settings": settings}
+    await broadcast(message)
+    return message
 
 
 @app.get("/api/fleet")
 async def get_fleet() -> dict[str, Any]:
-    return {"robots": registry.snapshot()}
+    return {"robots": fleet_snapshot()}
 
 
 @app.get("/api/session")
@@ -225,6 +285,28 @@ async def get_map_info() -> dict[str, Any]:
     return {"type": "map_info", "info": map_service.meta.as_dict(map_service.seq)}
 
 
+@app.get("/api/map/local/{robot_id}")
+async def get_local_map(robot_id: str) -> Response:
+    """The robot's unregistered SLAM grid, expressed in its own map frame."""
+    content = map_service.local_png(robot_id)
+    info = map_service.local_info(robot_id)
+    if content is None or info is None:
+        return JSONResponse({"error": "local map not available"}, status_code=404)
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(info["seq"])},
+    )
+
+
+@app.get("/api/map/local/{robot_id}/info")
+async def get_local_map_info(robot_id: str) -> Response:
+    info = map_service.local_info(robot_id)
+    if info is None:
+        return JSONResponse({"error": "local map not available"}, status_code=404)
+    return JSONResponse(info)
+
+
 @app.post("/api/adapter/map")
 async def post_map(request: Request) -> dict[str, Any]:
     """Adapter uploads its occupancy grid (zlib int8, row-major)."""
@@ -246,6 +328,47 @@ async def post_map(request: Request) -> dict[str, Any]:
     return {"ok": True, "cells": int(cells.size)}
 
 
+@app.post("/api/adapter/camera")
+async def post_camera(request: Request) -> Any:
+    """Accept a throttled JPEG preview from an adapter.
+
+    This is the ROS-free fallback when the low-latency WHEP pipeline is not
+    installed. Adapters remain responsible for converting their native camera
+    format into a browser-ready JPEG.
+    """
+    global _camera_seq
+
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    if request.headers.get("content-type", "").split(";", 1)[0] != "image/jpeg":
+        return JSONResponse({"error": "image/jpeg required"}, status_code=415)
+    frame = await request.body()
+    if not frame or len(frame) > 2_000_000 or not frame.startswith(b"\xff\xd8"):
+        return JSONResponse({"error": "invalid JPEG frame"}, status_code=400)
+
+    _camera_seq += 1
+    _camera_frames[rid] = (frame, time.monotonic(), _camera_seq)
+    return {"ok": True, "bytes": len(frame), "seq": _camera_seq}
+
+
+@app.get("/api/camera/{robot_id}")
+async def get_camera(robot_id: str) -> Response:
+    current = _camera_frames.get(robot_id)
+    if current is None:
+        return Response(status_code=404, headers={"Cache-Control": "no-store"})
+    frame, received_at, seq = current
+    return Response(
+        content=frame,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Camera-Seq": str(seq),
+            "X-Frame-Age-Ms": str(int((time.monotonic() - received_at) * 1000)),
+        },
+    )
+
+
 # ----------------------------------------------------------------- GUI socket
 
 
@@ -255,8 +378,9 @@ async def gui_socket(ws: WebSocket) -> None:
     _gui_clients.add(ws)
     try:
         await ws.send_json({"type": "map_info", "info": map_service.meta.as_dict(map_service.seq)})
-        await ws.send_json({"type": "fleet_change", "robots": registry.snapshot()})
+        await ws.send_json({"type": "fleet_change", "robots": fleet_snapshot()})
         await ws.send_json(session_state())
+        await ws.send_json({"type": "settings_state", "settings": settings_store.value})
         for a in _alerts.values():
             await ws.send_json({"type": "alert", "alert": a})
 
@@ -284,17 +408,50 @@ async def handle_gui_message(msg: dict[str, Any]) -> None:
         goal = msg.get("payload") or {}
         if not registry.can(rid, "navigate"):
             return
-        taken_by = registry.goal_taken(goal, exclude=rid)
+        taken_by = goal_taken(goal, exclude=rid)
         if taken_by:
             await raise_alert(
                 f"dupgoal_{rid}", "warn", "fault",
                 f"Goal already assigned to {taken_by}", rid,
             )
             return
-        await registry.send(rid, {"type": "navigate_to", "goal": goal, **stamps()})
+        robot = registry.robots[rid]
+        local_goal = (
+            goal
+            if robot.coordinate_frame == "merged"
+            else map_service.world_to_robot(rid, goal)
+        )
+        sent = await registry.send(
+            rid, {"type": "navigate_to", "goal": local_goal, **stamps()}
+        )
+        if sent:
+            # Reserve immediately. Waiting for the adapter's next 5 Hz state
+            # packet leaves a race where back-to-back UI messages can assign
+            # the same destination to multiple robots.
+            robot.goal = local_goal
+            robot.nav_status = "active"
+            robot.mode = "nav"
 
     elif kind == "cancel_goal":
-        await registry.send(rid, {"type": "cancel_goal", **stamps()})
+        sent = await registry.send(rid, {"type": "cancel_goal", **stamps()})
+        if sent and rid in registry.robots:
+            registry.robots[rid].goal = None
+
+    elif kind == "drive":
+        if not registry.can(rid, "navigate"):
+            return
+        payload = msg.get("payload") or {}
+        try:
+            linear = max(-0.45, min(0.45, float(payload.get("linear", 0.0))))
+            angular = max(-1.2, min(1.2, float(payload.get("angular", 0.0))))
+        except (TypeError, ValueError):
+            return
+        sent = await registry.send(
+            rid,
+            {"type": "drive", "linear": linear, "angular": angular, **stamps()},
+        )
+        if sent:
+            registry.robots[rid].goal = None
 
     elif kind == "stop_all":
         for robot_id in list(registry.robots):
@@ -329,8 +486,10 @@ async def adapter_socket(ws: WebSocket) -> None:
                     return
                 r = registry.hello(msg, ws)
                 robot_id = r.robot_id
+                if r.coordinate_frame == "merged":
+                    map_service.set_transform(robot_id, 0.0, 0.0, 0.0)
                 await ws.send_json({"type": "hello_ack", "robot_id": robot_id})
-                await broadcast({"type": "fleet_change", "robots": registry.snapshot()})
+                await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
                 events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
 
             elif kind == "robot_state":
@@ -338,18 +497,22 @@ async def adapter_socket(ws: WebSocket) -> None:
 
             elif kind == "detections":
                 for item in msg.get("items", []):
+                    detection_id = f"{msg['robot_id']}:{item.get('id', item.get('class', 'object'))}"
+                    previous = _detections.get(detection_id)
+                    now = time.time()
                     det = {
-                        "id": f"{msg['robot_id']}_{item.get('class')}_{int(time.time()*10)}",
+                        "id": detection_id,
                         "class": item.get("class", "object"),
                         "score": item.get("score", 0.0),
                         "robot_id": msg["robot_id"],
                         "camera": msg.get("camera", "front"),
                         "bbox": item.get("bbox"),
                         "map_position": item.get("map_position"),
-                        "first_seen": time.time(),
-                        "last_seen": time.time(),
-                        "observations": 1,
+                        "first_seen": previous["first_seen"] if previous else now,
+                        "last_seen": now,
+                        "observations": (previous["observations"] + 1) if previous else 1,
                     }
+                    _detections[detection_id] = det
                     await broadcast({"type": "detection", "detection": det})
 
             elif kind == "map_meta":

@@ -10,6 +10,7 @@ transforms and `auto` merging has ground truth to be scored against.
 from __future__ import annotations
 
 import argparse
+import math
 import subprocess
 import sys
 import tempfile
@@ -33,10 +34,16 @@ def render(name: str, color: str) -> str:
     return TEMPLATE.read_text().replace("{{NAME}}", name).replace("{{COLOR}}", color)
 
 
+def yaw_quaternion(yaw: float) -> tuple[float, float]:
+    """Return the normalized planar quaternion components (z, w)."""
+    return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+
+
 def spawn(world: str, name: str, sdf: str, x: float, y: float, yaw: float) -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".sdf", delete=False) as fh:
         fh.write(sdf)
         path = fh.name
+    qz, qw = yaw_quaternion(yaw)
     cmd = [
         "gz", "service", "-s", f"/world/{world}/create",
         "--reqtype", "gz.msgs.EntityFactory",
@@ -45,7 +52,7 @@ def spawn(world: str, name: str, sdf: str, x: float, y: float, yaw: float) -> bo
         "--req",
         f'sdf_filename: "{path}", name: "{name}", '
         f'pose: {{position: {{x: {x}, y: {y}, z: 0.15}}, '
-        f'orientation: {{z: {yaw / 2:.6f}, w: 1.0}}}}',
+        f'orientation: {{z: {qz:.9f}, w: {qw:.9f}}}}}',
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     ok = "true" in r.stdout.lower()
@@ -56,13 +63,16 @@ def spawn(world: str, name: str, sdf: str, x: float, y: float, yaw: float) -> bo
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
+    ap.add_argument("--robots", type=int, default=None,
+                    help="override the fleet count from the study config")
     ap.add_argument("--world", default="swarmdeck_indoor")
     ap.add_argument("--dry-run", action="store_true", help="render SDFs without spawning")
     ap.add_argument("--outdir", default=None, help="write rendered SDFs here")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text())
-    count = int(cfg.get("fleet", {}).get("robot_count", 4))
+    configured_count = int(cfg.get("fleet", {}).get("robot_count", 4))
+    count = configured_count if args.robots is None else max(1, min(args.robots, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
     starts = cfg.get("map", {}).get("start_poses", {})
 

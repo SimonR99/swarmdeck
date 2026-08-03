@@ -9,7 +9,8 @@
 3. **The backend owns state; the browser is a view.** Reload must never lose the map.
 4. **Adopt, don't author.** SLAM Toolbox, Nav2, MediaMTX, MCAP. Custom code only for
    adapters, map service (including registration), and GUI.
-5. **Config is data.** Robot count, thresholds, seeds, merge mode in versioned YAML.
+5. **Config is data.** Study geometry stays in versioned YAML; operator preferences
+   are validated and atomically persisted as JSON.
 6. **Every module testable alone**, with the rest mocked.
 
 ## 2. System diagram
@@ -147,7 +148,7 @@ the vendor SDK. The contract does not care — that is the point of the seam.
 | `swarmdeck_sim` | Gazebo worlds, model spawning, seeded scenario generator, reactive explorer |
 | `swarmdeck_slam` | SLAM Toolbox bringup per namespace (single-ring lidar, no scan conversion) |
 | `swarmdeck_nav` | Nav2 params and per-namespace bringup |
-| `swarmdeck_perception` | ONNX detector node, projection of detections to map frame |
+| `adapters/perception` | Portable RGB perception with no ROS/Gazebo dependency |
 | `swarmdeck_media` | Camera → GStreamer → RTSP encoder node |
 | `swarmdeck_bringup` | Top-level launch, config resolution, one-command start |
 
@@ -198,11 +199,15 @@ already-corrected grids and needs no keyframe machinery of its own.
 
 | Mode | How | When |
 |---|---|---|
-| `static` | Start poses from config → fixed `T_world_robot` | Default. Always available. |
+| `static` | Start poses from config → fixed `T_world_robot` | Operator explicitly trusts surveyed starts. |
 | `auto` | Grid registration estimates `T_world_robot` | Unknown starts (FR-S4) |
 
-`static` is a permanent fallback, not a stepping stone: if registration is unconfident
-the merge keeps the configured transforms rather than guessing.
+In `auto`, configured starts are safety/search priors only. They are not registration
+evidence and are never used to overlay unregistered grids. Until a match is accepted,
+selecting a robot displays its native local SLAM grid. Once matches are accepted, the
+reference and its accepted peers form the global-map membership; robots outside that
+connected set continue to show local maps. `static` remains available when surveyed
+transforms are an explicit deployment guarantee.
 
 **Registration algorithm** (`mapsvc/registration.py`, numpy only):
 
@@ -223,7 +228,9 @@ winner, over the winner. In a building of near-identical rooms, shifting by one 
 width scores almost as well as the truth, so a near-tie (ratio > 0.80) is reported as
 *not confident* and ignored. This is what prevents a confident-but-wrong merge.
 
-Accepted only when `overlap >= 80 cells`, `score >= 0.20`, `ratio <= 0.80`.
+Accepted only when `overlap >= 80 cells`, `score >= 0.20`, `ratio <= 0.80`. If a
+configured start pose is available, the candidate must also remain within 2 m and
+30 degrees of that safety prior; otherwise it is rejected and remains local.
 
 Measured against Gazebo ground truth with two robots at unknown relative poses:
 **7.8 cm translation error, exact yaw** (score 0.54, ratio 0.58, 2149 overlapping cells).
@@ -237,6 +244,7 @@ the problem is ill-posed and the ratio test correctly refuses — see `docs/KNOW
 grids:      robot_id → {stamp, origin, resolution, w, h, data}   # latest per robot
 transforms: robot_id → T_world_robot                             # 2D: x, y, theta
 merged:     {origin, resolution, w, h, data}                     # derived
+members:    set[robot_id]                                        # accepted global component
 ```
 
 Merged grid is regenerated when any robot's grid or transform changes, then diffed
@@ -247,6 +255,8 @@ against the previous version to emit a patch.
 - **Full grid**: `GET /api/map` → PNG (grey = unknown, black = occupied, white = free)
   plus a JSON sidecar for origin and resolution. ETag-cached, fetched on connect and
   reload.
+- **Local grid**: `GET /api/map/local/{robot_id}` plus `/info` → that robot's raw SLAM
+  map and native frame, used whenever it is outside the accepted global component.
 - **Patches**: changed bounding box only, over WebSocket, throttled to 2 Hz.
 
 ```jsonc
@@ -296,6 +306,16 @@ Latency budget (target < 300 ms):
 
 Measured with a timestamp burned into the frame and read back from a screen capture.
 
+### 6.1 Portable rubber-duck perception
+
+`adapters/perception/duck_detector.py` accepts an ordinary OpenCV BGR frame and returns
+normalized adapter-protocol boxes. It imports neither ROS nor Gazebo and never reads
+simulation entity names, positions, segmentation buffers, or ground truth. The current
+real-time baseline combines yellow-body and adjacent orange-beak evidence; the
+`detect_bgr` boundary is the replacement point for a trained ONNX implementation after
+licensed, representative real-camera data is available. This keeps transport, UI, and
+real-robot integration unchanged when the model is upgraded.
+
 ## 7. Frontend
 
 **Stack:** TypeScript, Svelte, Canvas2D, Vite. No three.js — the map is 2D.
@@ -309,6 +329,7 @@ touch-first, single-screen.
 | `map` | `ImageData` grid + origin/resolution, patch-applied | HTTP + WS patches |
 | `detections` | map entities with position and provenance | WS |
 | `alerts` | active alerts, ack state | WS |
+| `settings` | thresholds, fleet inventory, perception controls | HTTP + WS |
 | `ui` | selection, active camera, view transform | local |
 
 **Rules**
@@ -316,16 +337,25 @@ touch-first, single-screen.
 - WebSocket only, never long-polling.
 - Map renders to an offscreen canvas; patches blit into it. Never re-fetch the whole
   grid for an incremental change.
-- Robots, trails, goals, and detections draw as overlay layers above the map canvas.
+- Robots, actual trails, dashed planner paths, goals, and detections draw as overlay
+  layers above the map canvas.
 - On reconnect, fetch the full grid once, then resume patches.
 - Every operator action goes through one `sendAction()` chokepoint that stamps and logs
   it — so the event log cannot drift from what the UI actually did.
+
+**Navigation sensing:** the top 360-degree lidar feeds SLAM and both costmaps for walls
+and room geometry. A bumper-height forward proximity scan feeds only Nav2's obstacle
+layers so another low robot cannot pass below the mapping beam. Sensor topics are fully
+qualified because costmap plugins run in nested `local_costmap` / `global_costmap`
+namespaces.
 - Render only from declared capabilities; never assume a robot can navigate or map.
 
 ## 8. Backend API
 
 ```
 GET  /api/config                 resolved config + versions
+GET  /api/settings               persisted operator settings
+PUT  /api/settings               validate, atomically save, and broadcast settings
 GET  /api/fleet                  connected robots and capabilities
 GET  /api/session                current session state
 POST /api/session/start|stop
@@ -345,7 +375,9 @@ GUI → server: `set_goal`, `cancel_goal`, `select_robots`, `switch_camera`,
   "t_mono": 18234.55, "t_wall": 1754038800.1, "t_sess": 142.5,
   "pose": {"x":1.2,"y":-3.4,"yaw":0.78},
   "battery": 0.82, "mode": "nav", "nav_status": "active",
-  "goal": {"x":5.0,"y":2.0}, "unattended_s": 12.4 }
+  "goal": {"x":5.0,"y":2.0},
+  "planned_path": [{"x":1.2,"y":-3.4},{"x":2.1,"y":-2.7}],
+  "unattended_s": 12.4 }
 
 // operator action, GUI → server, mirrored into events.jsonl
 { "type": "set_goal", "seq": 41, "robot_id": "robot_1",
@@ -365,6 +397,7 @@ swarmdeck/
 ├── docs/                          architecture.md · requirements.md · roadmap.md
 ├── adapters/
 │   ├── protocol/                  SHARED CONTRACT — schemas + reference client
+│   ├── perception/                portable RGB detectors
 │   ├── adapter_sim/
 │   ├── adapter_ros2/
 │   ├── adapter_ros1/              Noetic container, Dockerfile included
@@ -375,7 +408,6 @@ swarmdeck/
 │   ├── swarmdeck_sim/             worlds/ launch/ scenario/
 │   ├── swarmdeck_slam/            pointcloud_to_laserscan + slam_toolbox config
 │   ├── swarmdeck_nav/             config/nav2_params.yaml launch/
-│   ├── swarmdeck_perception/      models/ nodes/
 │   ├── swarmdeck_media/
 │   └── swarmdeck_bringup/         launch/session.launch.py
 ├── server/

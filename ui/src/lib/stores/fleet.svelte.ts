@@ -1,13 +1,8 @@
 import type { RobotState, Capability } from '$lib/types/protocol';
+import { settings, DEFAULT_ROBOT_COLORS } from './settings.svelte';
 
-/** Identity colour per robot, assigned by join order. Max 5 (see requirements). */
-export const ROBOT_COLORS = [
-  'var(--color-robot-0)',
-  'var(--color-robot-1)',
-  'var(--color-robot-2)',
-  'var(--color-robot-3)',
-  'var(--color-robot-4)'
-];
+/** Identity colour per robot, configured via settings or falling back to default theme colours. */
+export const ROBOT_COLORS = DEFAULT_ROBOT_COLORS;
 
 const state = $state({
   robots: {} as Record<string, RobotState>,
@@ -38,6 +33,8 @@ export const fleet = {
   },
 
   colorOf(id: string): string {
+    const config = settings.value.robots.find((r) => r.id === id);
+    if (config?.color) return config.color;
     const i = state.order.indexOf(id);
     return ROBOT_COLORS[i < 0 ? 0 : i % ROBOT_COLORS.length];
   },
@@ -58,6 +55,7 @@ export const fleet = {
   apply(msg: RobotState) {
     if (!state.robots[msg.robot_id]) {
       state.order = [...state.order, msg.robot_id];
+      if (state.selected.length === 0) state.selected = [msg.robot_id];
       // First robot to arrive becomes the default camera.
       if (state.activeCamera === null && msg.capabilities?.includes('camera')) {
         state.activeCamera = msg.robot_id;
@@ -95,6 +93,12 @@ export const fleet = {
 
   setCamera(id: string) {
     state.activeCamera = id;
+  },
+
+  /** Make one robot the operator focus for camera, map, and navigation. */
+  focus(id: string) {
+    state.selected = [id];
+    if (this.can(id, 'camera')) state.activeCamera = id;
   },
 
   reset() {

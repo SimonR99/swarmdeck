@@ -2,11 +2,13 @@ import type { ClientMessage, ServerMessage, Point } from '$lib/types/protocol';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
 import { session } from '$lib/stores/session.svelte';
+import { settings } from '$lib/stores/settings.svelte';
 import { MockFleet } from './mock';
 
 /**
- * Single connection to the backend, with automatic fallback to the local
- * simulator so the GUI is always usable.
+ * Single connection to the backend. The local simulator is opt-in with
+ * `?mock=1`; a live dashboard must never silently replace Gazebo data with
+ * synthetic robots when the backend is unavailable.
  *
  * Every operator action goes through sendAction() — the one chokepoint that
  * stamps and logs, so the event log cannot drift from what the UI did.
@@ -20,6 +22,8 @@ let ws: WebSocket | null = null;
 let mock: MockFleet | null = null;
 let retry = 0;
 let retryTimer: number | null = null;
+let tickTimer: number | null = null;
+let started = false;
 
 function dispatch(msg: ServerMessage) {
   switch (msg.type) {
@@ -30,10 +34,11 @@ function dispatch(msg: ServerMessage) {
       msg.robots.forEach((r) => fleet.apply(r));
       break;
     case 'map_info':
-      mapStore.setInfo(msg.info);
+      mapStore.setGlobalInfo(msg.info);
+      void mapStore.loadFullPng(msg.info);
       break;
     case 'map_patch':
-      mapStore.applyPatch(msg);
+      mapStore.applyGlobalPatch(msg);
       break;
     case 'detection':
       session.addDetection(msg.detection);
@@ -47,17 +52,23 @@ function dispatch(msg: ServerMessage) {
     case 'session_state':
       session.setSession(msg);
       break;
+    case 'settings_state':
+      settings.apply(msg.settings);
+      break;
   }
 }
 
 function startMock() {
-  if (mock) return;
+  if (!started || mock) return;
   session.setConnection('mock');
   mock = new MockFleet(dispatch, MOCK_ROBOTS);
   mock.start();
 }
 
 function connect() {
+  if (!started || ws?.readyState === WebSocket.CONNECTING || ws?.readyState === WebSocket.OPEN) {
+    return;
+  }
   if (FORCE_MOCK) {
     startMock();
     return;
@@ -67,12 +78,15 @@ function connect() {
   try {
     ws = new WebSocket(`${proto}://${location.host}/ws`);
   } catch {
-    startMock();
+    session.setConnection('lost');
+    retryTimer = window.setTimeout(connect, 1000);
     return;
   }
 
   ws.onopen = () => {
     retry = 0;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
     session.setConnection('live');
   };
 
@@ -86,13 +100,9 @@ function connect() {
 
   ws.onclose = () => {
     ws = null;
+    if (!started) return;
     session.setConnection('lost');
-    // Two failed attempts and we fall back to the simulator rather than
-    // leaving the operator with a dead screen.
-    if (++retry >= 2) {
-      startMock();
-      return;
-    }
+    retry++;
     retryTimer = setTimeout(connect, Math.min(1000 * retry, 5000)) as unknown as number;
   };
 
@@ -106,6 +116,8 @@ function send(msg: ClientMessage) {
     // Mirror commands into the simulator so the UI behaves identically.
     if (msg.type === 'set_goal') mock.command(msg.robot_id, 'set_goal', msg.payload);
     else if (msg.type === 'cancel_goal') mock.command(msg.robot_id, 'cancel_goal');
+    else if (msg.type === 'drive' && msg.payload.linear === 0 && msg.payload.angular === 0)
+      mock.command(msg.robot_id, 'cancel_goal');
     else if (msg.type === 'stop_all') mock.stopAll();
   }
 }
@@ -121,6 +133,9 @@ export const actions = {
   },
   cancelGoal(robotId: string) {
     sendAction({ type: 'cancel_goal', robot_id: robotId });
+  },
+  drive(robotId: string, linear: number, angular: number) {
+    sendAction({ type: 'drive', robot_id: robotId, payload: { linear, angular } });
   },
   selectRobots(ids: string[]) {
     sendAction({ type: 'select_robots', robot_ids: ids });
@@ -141,12 +156,23 @@ export const actions = {
 };
 
 export function startConnection() {
+  if (started) return;
+  started = true;
   connect();
-  setInterval(() => session.tick(1), 1000);
+  tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
 }
 
 export function teardown() {
+  if (!started) return;
+  started = false;
   if (retryTimer) clearTimeout(retryTimer);
+  if (tickTimer) clearInterval(tickTimer);
+  retryTimer = null;
+  tickTimer = null;
+  if (ws) ws.onclose = null;
   ws?.close();
+  ws = null;
   mock?.stop();
+  mock = null;
+  retry = 0;
 }

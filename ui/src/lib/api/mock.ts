@@ -4,7 +4,7 @@ import type { ServerMessage, RobotState, MapInfo } from '$lib/types/protocol';
 /**
  * Standalone fleet simulator.
  * Lets the whole GUI run with no backend, no ROS, no Gazebo — used for UI work
- * and as the fallback when the websocket is unreachable.
+ * and only runs when explicitly requested with `?mock=1`.
  */
 
 const RES = 0.05;
@@ -179,6 +179,7 @@ export class MockFleet {
         mode: r.mode,
         nav_status: r.navStatus,
         goal: r.target,
+        planned_path: r.target ? [{ x: r.x, y: r.y }, r.target] : [],
         capabilities: r.caps,
         unattended_s: r.lastAttended,
         online: true

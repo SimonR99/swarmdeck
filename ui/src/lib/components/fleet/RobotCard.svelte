@@ -52,14 +52,16 @@
     <div class="min-w-0">
       <div class="flex items-center gap-2">
         <StatusDot tone={statusTone as never} pulse={robot.nav_status === 'active'} />
-        <span class="truncate text-sm font-semibold" style="color:{color}">{shortName}</span>
+        <span class="truncate text-[13px] font-semibold tracking-tight" style="color:{color}">
+          {shortName}
+        </span>
         {#if robot.robot_type !== 'diffdrive'}
           <span class="truncate text-[10px] uppercase tracking-wide text-fg-dim">
             {robot.robot_type}
           </span>
         {/if}
       </div>
-      <div class="mt-0.5 text-[11px] tabular text-fg-dim">
+      <div class="mt-1 text-[10px] tabular text-fg-dim">
         {robot.pose.x.toFixed(1)}, {robot.pose.y.toFixed(1)} m
       </div>
     </div>
@@ -76,7 +78,7 @@
     </div>
   </div>
 
-  <div class="mt-2 flex items-center gap-2">
+  <div class="mt-2.5 flex items-center gap-2">
     <Badge
       tone={robot.mode === 'estop'
         ? 'danger'
@@ -106,9 +108,9 @@
   {#if selected}
     <div class="mt-3 flex gap-1.5 border-t border-border pt-2.5">
       <button
-        class="inline-flex h-9 flex-1 touch-target items-center justify-center gap-1.5 rounded-lg
-               border border-border bg-surface-2 text-[11px] font-medium text-fg-muted
-               transition-colors hover:bg-surface-3 hover:text-fg disabled:opacity-40"
+        class="inline-flex h-8 flex-1 touch-target items-center justify-center gap-1.5 rounded-[4px]
+               border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+               transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
         disabled={!fleet.can(robot.robot_id, 'camera')}
         onclick={(e) => {
           e.stopPropagation();
@@ -119,9 +121,9 @@
         <Video class="h-3.5 w-3.5" /> View
       </button>
       <button
-        class="inline-flex h-9 flex-1 touch-target items-center justify-center gap-1.5 rounded-lg
-               border border-border bg-surface-2 text-[11px] font-medium text-fg-muted
-               transition-colors hover:bg-surface-3 hover:text-fg disabled:opacity-40"
+        class="inline-flex h-8 flex-1 touch-target items-center justify-center gap-1.5 rounded-[4px]
+               border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+               transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
         disabled={robot.nav_status !== 'active'}
         onclick={(e) => {
           e.stopPropagation();
@@ -133,7 +135,7 @@
     </div>
     {#if fleet.can(robot.robot_id, 'navigate')}
       <div class="mt-1.5 flex items-center gap-1.5 text-[10px] text-fg-dim">
-        <Navigation class="h-3 w-3" /> Tap the map to send a goal
+        <Navigation class="h-3 w-3" /> Use Point nav to choose a destination
       </div>
     {/if}
   {/if}

@@ -4,39 +4,86 @@ Live list. Update as things are resolved.
 
 ## Open
 
-### 1. Frontend never visually confirmed
+### 1. Production video pipeline unbuilt
 
-Builds clean and `svelte-check` reports 0 errors, but Chrome in this environment cannot
-reach the dev server (`localhost`, `127.0.0.1`, and the LAN IP all fail), so the layout
-has never been seen rendered. Open `http://localhost:5173/?mock=1&robots=4` and check
-before trusting it.
+`swarmdeck_media` is an empty package and MediaMTX is not installed, so the target WHEP
+path and its <300 ms latency criterion remain Phase 4 work. Simulation cameras now use a
+verified 5 Hz JPEG preview fallback through the adapter and ROS-free backend.
 
-### 2. Video pipeline unbuilt
-
-`swarmdeck_media` is an empty package and MediaMTX is not installed. `CameraPanel`
-degrades to a "no signal" placeholder, which *is* verified. Phase 4.
-
-### 3. Registration needs shared coverage
+### 2. Registration needs shared coverage
 
 `auto` mode aligns two maps to ~8 cm, but only when the robots have actually seen the
 same places. With largely disjoint coverage the problem is ill-posed and the ratio test
-correctly refuses to answer — the merge then falls back to `static` transforms. This is
-inherent to map registration, not a bug, but it means exploration has to be arranged so
-robots overlap. Measured: ~2150 overlapping occupied cells gave score 0.54, ratio 0.58.
+correctly refuses to answer. The dashboard then shows each selected robot's local map;
+it does not overlay grids using configured spawn priors. This is inherent to map
+registration, not a bug, but it means exploration has to be arranged so robots overlap.
+Measured: ~2150 overlapping occupied cells gave score 0.54, ratio 0.58.
 
-### 4. Nav2 not yet wired
+### 3. Duck detector is a portable classical baseline, not a trained neural model
 
-`nav2_params.yaml` exists and Nav2 is installed, but nothing launches it and
-`adapter_sim.navigate_to` publishes `goal_pose` with no planner listening. Phase 3.
-`scenario/explore.py` provides reactive wandering in the meantime.
+The shipped detector already produces live RGB bounding boxes in Gazebo and accepts
+the same BGR frames from a physical camera, but it currently uses colour/shape evidence.
+A publicly available fine-tuned YOLO duck model was not embedded because its own model
+card warns that the training data has unresolved licensing. The detector API is kept
+model-shaped (`detect_bgr` in, normalized boxes out), so a licensed ONNX model can
+replace the baseline without changing ROS, the adapter protocol, backend, or UI. A
+production model still needs licensed real-camera training/validation data covering the
+actual lighting and duck variants.
 
-### 5. `spawn_fleet.py` quaternion is wrong for non-zero yaw
+### 4. Sudden lateral displacement needs exteroceptive odometry
 
-It emits `orientation: {z: yaw/2, w: 1.0}`, which is only correct at yaw = 0. Should be
-`z = sin(yaw/2), w = cos(yaw/2)`. Harmless today because all start poses use yaw 0, but
-it will silently mis-place robots the moment one doesn't.
+Gazebo's DiffDrive odometry, like wheel encoders on hardware, cannot directly observe a
+robot being dragged sideways. The adapter already displays SLAM Toolbox's corrected
+`map -> odom -> base_link` pose, so ordinary scan matching and loop closure repair drift,
+but a large instantaneous displacement can remain wrong until lidar SLAM finds the place
+again. Wheel + IMU EKF fusion improves heading and short-term motion but cannot provide
+an absolute translation constraint; a production robot that must recover immediately
+from "kidnapping" needs lidar odometry, visual odometry, landmarks, or global
+relocalization. Gazebo ground truth remains scoring-only and is not fed into navigation.
 
 ## Resolved
+
+### Nav2 costmaps could not see other robots
+
+Two issues were stacked. Relative `scan` names resolved below the costmap nodes as
+`/robot_N/local_costmap/scan`, where no sensor published, and the high mapping lidar
+passed above the short Duckiebot collision body. Costmap sources now use absolute
+per-robot topics, and a separate bumper-height forward proximity scan marks robots and
+low obstacles without contaminating SLAM. In a controlled test, a robot 0.60 m ahead
+added 13 lethal cells plus an inflated safety region to the live local costmap.
+
+### Frontend rendering and map reload visually confirmed
+
+The light, compact interface is verified at 1440×900 in headless Chrome against the
+live backend. A one-robot exploration grew the map to 58,522 known cells, and a fresh
+browser session restored and rendered that full map. The reconnect path now fetches
+`GET /api/map` before resuming incremental patches.
+
+### Nav2/diagnostic_updater ABI mismatch
+
+`nav2_lifecycle_manager` 1.3.12 expected a constructor absent from the installed
+`ros-jazzy-diagnostic-updater` 4.2.6. Upgrading diagnostic_updater to 4.2.7 restored
+both SLAM and Nav2 lifecycle managers.
+
+### Simulation clock and namespaced SLAM topics were not wired
+
+The one-command launch had no Gazebo `/clock` bridge, and SLAM remappings expanded to
+global `/scan` plus a duplicated `/robot_0/robot_0/map`. Bringup now creates one shared
+clock bridge, while SLAM scan, map, metadata, and TF topics stay inside each robot's
+namespace. Verified with a live map and a successful one-metre Nav2 goal.
+
+### Nav2 was configured but not wired
+
+Phase 3 now launches one lifecycle-managed Nav2 stack per robot, and `adapter_sim` uses
+the `NavigateToPose` action with result and cancellation tracking. The backend converts
+poses and goals between each robot's SLAM frame and the shared merged-map frame.
+One-robot end-to-end navigation is verified; multi-robot reliability still needs a soak
+run.
+
+### `spawn_fleet.py` emitted invalid non-zero-yaw quaternions
+
+It used `{z: yaw/2, w: 1.0}` even though the 4-robot config starts two robots at π yaw.
+It now emits the normalized `{z: sin(yaw/2), w: cos(yaw/2)}` quaternion.
 
 ### The merged map was garbage — four stacked causes
 

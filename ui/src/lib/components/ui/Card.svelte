@@ -24,17 +24,17 @@
   this={interactive ? 'button' : 'div'}
   role={interactive ? 'button' : undefined}
   {onclick}
-  style={accent ? `--card-accent:${accent}` : ''}
+  style={`${accent ? `--card-accent:${accent}` : ''}${selected && accent ? `;border-color:${accent}` : ''}`}
   class="relative w-full overflow-hidden rounded-[--radius-card] border bg-surface text-left
-         transition-colors duration-150
-         {selected ? 'border-[--card-accent] bg-surface-2' : 'border-border'}
-         {interactive ? 'hover:border-border-strong hover:bg-surface-2' : ''}
+         shadow-[0_1px_2px_rgb(0_0_0/0.025)] transition-colors duration-150
+         {selected ? 'bg-surface shadow-sm' : 'border-border'}
+         {interactive ? 'hover:border-border-strong hover:bg-surface-2/40' : ''}
          {padded ? 'p-3' : ''} {klass}"
 >
   {#if accent}
     <span
-      class="absolute inset-y-0 left-0 w-[3px] transition-opacity duration-150"
-      style="background:{accent}; opacity:{selected ? 1 : 0.45}"
+      class="absolute inset-y-0 left-0 w-0.5 transition-opacity duration-150"
+      style="background:{accent}; opacity:{selected ? 1 : 0}"
     ></span>
   {/if}
   {@render children?.()}

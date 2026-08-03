@@ -1,9 +1,15 @@
 <?xml version="1.0" ?>
 <!--
-  SwarmDeck robot: differential drive, 3D lidar, IMU, RGB camera.
-  Placeholders {{NAME}} and {{COLOR}} are filled by spawn_fleet.py.
-  The 3D lidar is reduced to a 2D scan downstream by pointcloud_to_laserscan
-  (FR-S3 / FR-M2) — the map is 2D.
+  SwarmDeck Duckiebot-style research platform.
+
+  The layered chassis, exposed electronics, camera mast, two driven wheels and
+  rear omni-wheel follow the recognisable DB21 layout.  The top-mounted 2D
+  lidar is an intentional mapping payload: a stock Duckiebot is camera/ToF
+  based, while SwarmDeck's requirements call for lidar SLAM.
+
+  Placeholders {{NAME}} and {{COLOR}} are filled by spawn_fleet.py.  Collision,
+  inertia and drive geometry stay deliberately simple and stable; the detailed
+  parts below are visuals, so a richer model does not make navigation brittle.
 -->
 <sdf version="1.9">
   <model name="{{NAME}}">
@@ -19,22 +25,126 @@
       <collision name="collision">
         <geometry><box><size>0.44 0.32 0.18</size></box></geometry>
       </collision>
-      <visual name="visual">
-        <geometry><box><size>0.44 0.32 0.18</size></box></geometry>
-        <material>
-          <ambient>{{COLOR}} 1</ambient>
-          <diffuse>{{COLOR}} 1</diffuse>
-          <emissive>0.05 0.05 0.05 1</emissive>
-        </material>
+      <!-- DB21-style three-deck chassis. -->
+      <visual name="bottom_deck">
+        <pose>0 0 -0.055 0 0 0</pose>
+        <geometry><box><size>0.43 0.30 0.025</size></box></geometry>
+        <material><ambient>0.035 0.05 0.075 1</ambient><diffuse>0.055 0.08 0.12 1</diffuse></material>
       </visual>
-      <visual name="nose">
-        <pose>0.24 0 0 0 0 0</pose>
-        <geometry><box><size>0.06 0.16 0.10</size></box></geometry>
-        <material><ambient>0.9 0.9 0.9 1</ambient><diffuse>1 1 1 1</diffuse></material>
+      <visual name="middle_deck">
+        <pose>-0.015 0 0.035 0 0 0</pose>
+        <geometry><box><size>0.36 0.28 0.022</size></box></geometry>
+        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
+      </visual>
+      <visual name="top_deck">
+        <pose>-0.035 0 0.145 0 0 0</pose>
+        <geometry><box><size>0.31 0.27 0.018</size></box></geometry>
+        <material><ambient>0.035 0.05 0.075 1</ambient><diffuse>0.055 0.08 0.12 1</diffuse></material>
+      </visual>
+
+      <!-- Battery, Jetson and heatsink are visible between the decks. -->
+      <visual name="duckiebattery">
+        <pose>-0.075 0 -0.005 0 0 0</pose>
+        <geometry><box><size>0.18 0.15 0.065</size></box></geometry>
+        <material><ambient>0.9 0.66 0.04 1</ambient><diffuse>1.0 0.76 0.06 1</diffuse></material>
+      </visual>
+      <visual name="jetson">
+        <pose>-0.035 0 0.090 0 0 0</pose>
+        <geometry><box><size>0.15 0.12 0.045</size></box></geometry>
+        <material><ambient>0.08 0.10 0.12 1</ambient><diffuse>0.12 0.15 0.18 1</diffuse></material>
+      </visual>
+      <visual name="heatsink_0">
+        <pose>-0.035 -0.043 0.119 0 0 0</pose>
+        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
+        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
+      </visual>
+      <visual name="heatsink_1">
+        <pose>-0.035 -0.014 0.119 0 0 0</pose>
+        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
+        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
+      </visual>
+      <visual name="heatsink_2">
+        <pose>-0.035 0.014 0.119 0 0 0</pose>
+        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
+        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
+      </visual>
+      <visual name="heatsink_3">
+        <pose>-0.035 0.043 0.119 0 0 0</pose>
+        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
+        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
+      </visual>
+
+      <!-- Six standoffs make the silhouette read as a physical kit robot. -->
+      <visual name="post_front_left">
+        <pose>0.105 0.115 0.082 0 0 0</pose>
+        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
+        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
+      </visual>
+      <visual name="post_front_right">
+        <pose>0.105 -0.115 0.082 0 0 0</pose>
+        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
+        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
+      </visual>
+      <visual name="post_rear_left">
+        <pose>-0.165 0.115 0.082 0 0 0</pose>
+        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
+        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
+      </visual>
+      <visual name="post_rear_right">
+        <pose>-0.165 -0.115 0.082 0 0 0</pose>
+        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
+        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
+      </visual>
+
+      <!-- Camera tower and front bumper / ToF board. -->
+      <visual name="camera_mast_left">
+        <pose>0.105 0.085 0.225 0 0 0</pose>
+        <geometry><box><size>0.018 0.018 0.16</size></box></geometry>
+        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
+      </visual>
+      <visual name="camera_mast_right">
+        <pose>0.105 -0.085 0.225 0 0 0</pose>
+        <geometry><box><size>0.018 0.018 0.16</size></box></geometry>
+        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
+      </visual>
+      <visual name="camera_housing">
+        <pose>0.125 0 0.292 0 0 0</pose>
+        <geometry><box><size>0.055 0.12 0.07</size></box></geometry>
+        <material><ambient>0.025 0.03 0.04 1</ambient><diffuse>0.05 0.06 0.08 1</diffuse></material>
+      </visual>
+      <visual name="camera_lens">
+        <pose>0.157 0 0.292 0 1.5708 0</pose>
+        <geometry><cylinder><radius>0.024</radius><length>0.014</length></cylinder></geometry>
+        <material><ambient>0.02 0.06 0.11 1</ambient><diffuse>0.04 0.11 0.20 1</diffuse>
+          <specular>0.8 0.9 1.0 1</specular></material>
+      </visual>
+      <visual name="front_bumper">
+        <pose>0.225 0 -0.015 0 0 0</pose>
+        <geometry><box><size>0.025 0.25 0.075</size></box></geometry>
+        <material><ambient>0.04 0.12 0.15 1</ambient><diffuse>0.06 0.22 0.26 1</diffuse></material>
+      </visual>
+      <visual name="tof_window">
+        <pose>0.239 0 0 0 0 0</pose>
+        <geometry><box><size>0.008 0.055 0.028</size></box></geometry>
+        <material><ambient>0.02 0.02 0.025 1</ambient><diffuse>0.04 0.04 0.05 1</diffuse></material>
+      </visual>
+
+      <!-- Mapping lidar: not stock DB21 hardware, but a real simulated sensor. -->
+      <visual name="lidar_base">
+        <pose>-0.07 0 0.375 0 0 0</pose>
+        <geometry><cylinder><radius>0.045</radius><length>0.045</length></cylinder></geometry>
+        <material><ambient>0.06 0.07 0.09 1</ambient><diffuse>0.10 0.12 0.15 1</diffuse></material>
+      </visual>
+      <visual name="lidar_ring">
+        <pose>-0.07 0 0.402 0 0 0</pose>
+        <geometry><cylinder><radius>0.038</radius><length>0.012</length></cylinder></geometry>
+        <material><ambient>0.55 0.03 0.03 1</ambient><diffuse>0.85 0.05 0.05 1</diffuse></material>
       </visual>
 
       <sensor name="lidar" type="gpu_lidar">
-        <pose>0.10 0 0.16 0 0 0</pose>
+        <!-- Above the camera tower so the 360-degree scan cannot see the
+             robot's own mast/housing and poison SLAM/Nav2 around the origin. -->
+        <pose>-0.07 0 0.402 0 0 0</pose>
         <topic>{{NAME}}/scan</topic>
         <update_rate>10</update_rate>
         <always_on>1</always_on>
@@ -60,6 +170,32 @@
         </lidar>
       </sensor>
 
+      <!--
+        Bumper-height obstacle lidar for Nav2's rolling costmap. The mapping
+        lidar is intentionally above the camera mast and therefore passes over
+        another Duckiebot's 0.21 m collision body. This forward scan starts
+        just outside the chassis, sees robots and low furniture, and is never
+        fed to SLAM. On hardware this observation source maps naturally to the
+        front ToF / proximity safety sensors.
+      -->
+      <sensor name="proximity_lidar" type="gpu_lidar">
+        <pose>0.24 0 0.05 0 0 0</pose>
+        <topic>{{NAME}}/proximity_scan</topic>
+        <update_rate>15</update_rate>
+        <always_on>1</always_on>
+        <visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>181</samples><resolution>1</resolution>
+              <min_angle>-1.5708</min_angle><max_angle>1.5708</max_angle></horizontal>
+            <vertical><samples>1</samples><resolution>1</resolution>
+              <min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+          </scan>
+          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+        </lidar>
+      </sensor>
+
       <sensor name="imu" type="imu">
         <topic>{{NAME}}/imu</topic>
         <update_rate>50</update_rate>
@@ -67,7 +203,7 @@
       </sensor>
 
       <sensor name="camera" type="camera">
-        <pose>0.22 0 0.12 0 0 0</pose>
+        <pose>0.162 0 0.292 0 0 0</pose>
         <topic>{{NAME}}/camera/image_raw</topic>
         <update_rate>15</update_rate>
         <always_on>1</always_on>
@@ -90,7 +226,11 @@
       </collision>
       <visual name="visual">
         <geometry><cylinder><radius>0.11</radius><length>0.05</length></cylinder></geometry>
-        <material><ambient>0.1 0.1 0.12 1</ambient><diffuse>0.15 0.15 0.18 1</diffuse></material>
+        <material><ambient>0.92 0.66 0.03 1</ambient><diffuse>1.0 0.76 0.04 1</diffuse></material>
+      </visual>
+      <visual name="tire">
+        <geometry><cylinder><radius>0.11</radius><length>0.032</length></cylinder></geometry>
+        <material><ambient>0.045 0.045 0.05 1</ambient><diffuse>0.075 0.075 0.085 1</diffuse></material>
       </visual>
     </link>
 
@@ -105,7 +245,11 @@
       </collision>
       <visual name="visual">
         <geometry><cylinder><radius>0.11</radius><length>0.05</length></cylinder></geometry>
-        <material><ambient>0.1 0.1 0.12 1</ambient><diffuse>0.15 0.15 0.18 1</diffuse></material>
+        <material><ambient>0.92 0.66 0.03 1</ambient><diffuse>1.0 0.76 0.04 1</diffuse></material>
+      </visual>
+      <visual name="tire">
+        <geometry><cylinder><radius>0.11</radius><length>0.032</length></cylinder></geometry>
+        <material><ambient>0.045 0.045 0.05 1</ambient><diffuse>0.075 0.075 0.085 1</diffuse></material>
       </visual>
     </link>
 

@@ -47,8 +47,11 @@ class MapService:
         self.merged = np.full((n, n), UNKNOWN, dtype=np.int8)
         self._prev = self.merged.copy()
         self.robot_grids: dict[str, tuple[GridMeta, np.ndarray]] = {}
+        self.robot_revisions: dict[str, int] = {}
         self.transforms: dict[str, tuple[float, float, float]] = {}
+        self.transform_priors: dict[str, tuple[float, float, float]] = {}
         self.registrations: dict[str, Registration] = {}
+        self.registration_rejections: dict[str, str] = {}
         self.merge_mode = "static"
         self.reference: str | None = None
         self.seq = 0
@@ -61,15 +64,50 @@ class MapService:
     # ------------------------------------------------------------------ setup
 
     def set_transform(self, robot_id: str, x: float, y: float, yaw: float) -> None:
-        self.transforms[robot_id] = (x, y, yaw)
+        transform = (x, y, yaw)
+        self.transforms[robot_id] = transform
+        self.transform_priors[robot_id] = transform
+        # Config order defines a stable reference. Without configured robots,
+        # ingest() still selects the first map that actually arrives.
+        if self.reference is None:
+            self.reference = robot_id
 
     def set_mode(self, mode: str) -> None:
         self.merge_mode = mode if mode in ("static", "auto") else "static"
+
+    def robot_to_world(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
+        """Transform a pose from one robot's SLAM frame into the merged frame."""
+        tx, ty, yaw = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+        c, s = math.cos(yaw), math.sin(yaw)
+        x, y = float(pose["x"]), float(pose["y"])
+        result = dict(pose)
+        result["x"] = tx + x * c - y * s
+        result["y"] = ty + x * s + y * c
+        if "yaw" in pose:
+            result["yaw"] = self._wrap_yaw(float(pose["yaw"]) + yaw)
+        return result
+
+    def world_to_robot(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
+        """Transform a merged-frame pose into one robot's SLAM/navigation frame."""
+        tx, ty, yaw = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+        c, s = math.cos(yaw), math.sin(yaw)
+        dx, dy = float(pose["x"]) - tx, float(pose["y"]) - ty
+        result = dict(pose)
+        result["x"] = dx * c + dy * s
+        result["y"] = -dx * s + dy * c
+        if "yaw" in pose:
+            result["yaw"] = self._wrap_yaw(float(pose["yaw"]) - yaw)
+        return result
+
+    @staticmethod
+    def _wrap_yaw(yaw: float) -> float:
+        return (yaw + math.pi) % (2 * math.pi) - math.pi
 
     # ---------------------------------------------------------------- ingest
 
     def ingest(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
         self.robot_grids[robot_id] = (meta, cells)
+        self.robot_revisions[robot_id] = self.robot_revisions.get(robot_id, 0) + 1
         if self.reference is None:
             self.reference = robot_id
         if self.merge_mode == "auto":
@@ -95,15 +133,56 @@ class MapService:
             mov_cells, (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
         )
         self.registrations[robot_id] = result
-        if result.confident:
-            # Compose with the reference's own world transform.
-            rx, ry, ryaw = self.transforms.get(self.reference or "", (0.0, 0.0, 0.0))
-            c, s = math.cos(ryaw), math.sin(ryaw)
-            wx = rx + result.dx * c - result.dy * s
-            wy = ry + result.dx * s + result.dy * c
-            self.transforms[robot_id] = (wx, wy, ryaw + result.dyaw)
+        if not result.confident:
+            self.registration_rejections[robot_id] = "ambiguous occupancy match"
+            return
+
+        # Compose with the reference's own world transform.
+        rx, ry, ryaw = self.transforms.get(self.reference or "", (0.0, 0.0, 0.0))
+        c, s = math.cos(ryaw), math.sin(ryaw)
+        wx = rx + result.dx * c - result.dy * s
+        wy = ry + result.dx * s + result.dy * c
+        candidate_yaw = self._wrap_yaw(ryaw + result.dyaw)
+
+        # Repetitive rooms can produce a strong but physically impossible FFT
+        # peak. When deployment config provides an approximate start pose, use
+        # it as a safety prior instead of allowing a map match to teleport or
+        # flip a robot. Deployments with genuinely unknown starts omit the prior.
+        prior = self.transform_priors.get(robot_id)
+        if prior is not None:
+            translation_error = math.hypot(wx - prior[0], wy - prior[1])
+            yaw_error = abs(self._wrap_yaw(candidate_yaw - prior[2]))
+            if translation_error > 2.0 or yaw_error > math.radians(30.0):
+                self.registration_rejections[robot_id] = (
+                    f"outside configured prior ({translation_error:.2f} m, "
+                    f"{math.degrees(yaw_error):.1f} deg)"
+                )
+                self.transforms[robot_id] = prior
+                return
+
+        self.registration_rejections.pop(robot_id, None)
+        self.transforms[robot_id] = (wx, wy, candidate_yaw)
 
     # --------------------------------------------------------------- merging
+
+    def global_members(self) -> set[str]:
+        """Robots whose grids are genuinely in the shared map frame.
+
+        Static mode is an operator assertion that all configured transforms are
+        valid.  Auto mode is stricter: a configured start pose is only a search
+        prior, not evidence of registration.  A global map exists once at least
+        one robot has been accepted against the reference.
+        """
+        if self.merge_mode == "static":
+            return set(self.robot_grids)
+        accepted = {
+            rid
+            for rid, result in self.registrations.items()
+            if result.confident and rid not in self.registration_rejections
+        }
+        if not accepted or self.reference is None:
+            return set()
+        return accepted | {self.reference}
 
     def _warp(self, meta: GridMeta, cells: np.ndarray,
               tf: tuple[float, float, float]) -> np.ndarray:
@@ -130,7 +209,10 @@ class MapService:
     def _remerge(self) -> None:
         """Occupied wins over free; free wins over unknown."""
         out = np.full_like(self.merged, UNKNOWN)
+        members = self.global_members()
         for rid, (meta, cells) in self.robot_grids.items():
+            if rid not in members:
+                continue
             tf = self.transforms.get(rid, (0.0, 0.0, 0.0))
             warped = self._warp(meta, cells, tf)
             known = warped != UNKNOWN
@@ -162,23 +244,40 @@ class MapService:
             "data": base64.b64encode(zlib.compress(sub.tobytes())).decode(),
         }
 
-    def as_png(self) -> bytes:
-        """Full grid for GET /api/map — browser-cacheable, survives reload."""
+    @staticmethod
+    def _grid_png(meta: GridMeta, cells: np.ndarray) -> bytes:
+        """Render one occupancy grid in the frontend's top-down orientation."""
         from PIL import Image
 
-        img = np.zeros((self.meta.height, self.meta.width, 3), dtype=np.uint8)
-        img[...] = (26, 34, 48)  # unknown
-        img[self.merged == 0] = (219, 231, 245)  # free
-        img[self.merged >= 50] = (39, 56, 79)  # occupied
-        # Grid row 0 is at origin_y (world "bottom"); image row 0 renders at the
-        # top. Flip so the PNG matches the frontend's worldToGrid, which does
-        # gy = height - (y - origin_y)/res.
+        img = np.zeros((meta.height, meta.width, 3), dtype=np.uint8)
+        img[...] = (229, 232, 236)
+        img[cells == 0] = (255, 255, 255)
+        img[cells >= 50] = (52, 58, 68)
         img = np.flipud(img)
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG", optimize=True)
         return buf.getvalue()
 
+    def as_png(self) -> bytes:
+        """Full grid for GET /api/map — browser-cacheable, survives reload."""
+        return self._grid_png(self.meta, self.merged)
+
+    def local_info(self, robot_id: str) -> dict[str, Any] | None:
+        grid = self.robot_grids.get(robot_id)
+        if grid is None:
+            return None
+        meta, _ = grid
+        return meta.as_dict(self.robot_revisions.get(robot_id, 0))
+
+    def local_png(self, robot_id: str) -> bytes | None:
+        grid = self.robot_grids.get(robot_id)
+        if grid is None:
+            return None
+        meta, cells = grid
+        return self._grid_png(meta, cells)
+
     def status(self) -> dict[str, Any]:
+        members = self.global_members()
         return {
             "mode": self.merge_mode,
             "reference": self.reference,
@@ -192,9 +291,16 @@ class MapService:
                     "overlap": r.overlap,
                     "ratio": round(r.ratio, 3),
                     "confident": r.confident,
+                    "accepted": r.confident and k not in self.registration_rejections,
+                    "rejection": self.registration_rejections.get(k),
                     "dyaw_deg": round(math.degrees(r.dyaw), 2),
                 }
                 for k, r in self.registrations.items()
+            },
+            "global_members": sorted(members),
+            "view_by_robot": {
+                rid: "global" if rid in members else "local"
+                for rid in self.robot_grids
             },
         }
 

@@ -14,8 +14,8 @@
 <div class="pointer-events-none absolute right-3 top-3 z-30 flex w-72 flex-col gap-2">
   {#each session.alerts.slice(0, 4) as a (a.id)}
     <div
-      class="pointer-events-auto flex items-start gap-2 rounded-xl border px-3 py-2
-             backdrop-blur-sm {tones[a.level]}"
+      class="pointer-events-auto flex items-start gap-2 rounded-[4px] border bg-surface/95 px-3 py-2.5
+             shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl {tones[a.level]}"
     >
       {#if a.level === 'critical'}
         <OctagonAlert class="mt-0.5 h-4 w-4 shrink-0" />
@@ -35,7 +35,7 @@
       </div>
 
       <button
-        class="grid h-6 w-6 shrink-0 place-items-center rounded-md opacity-60 hover:opacity-100"
+        class="grid h-6 w-6 shrink-0 place-items-center rounded-[4px] opacity-60 hover:opacity-100"
         onclick={() => actions.acknowledgeAlert(a.id)}
         title="Acknowledge"
       >

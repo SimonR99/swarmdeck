@@ -36,6 +36,7 @@ export interface RobotState extends Stamps {
   mode: RobotMode;
   nav_status: NavStatus;
   goal: Point | null;
+  planned_path: Point[];
   capabilities: Capability[];
   unattended_s: number;
   online: boolean;
@@ -75,6 +76,41 @@ export interface MapPatch {
   data: string;
 }
 
+export interface MapRegistration {
+  score: number;
+  overlap: number;
+  ratio: number;
+  confident: boolean;
+  accepted: boolean;
+  rejection: string | null;
+  dyaw_deg: number;
+}
+
+export interface MapStatus {
+  mode: 'static' | 'auto';
+  reference: string | null;
+  transforms: Record<string, Pose>;
+  registrations: Record<string, MapRegistration>;
+  global_members: string[];
+  view_by_robot: Record<string, 'global' | 'local'>;
+}
+
+export interface RobotConnectionSettings {
+  id: string;
+  enabled: boolean;
+  type: string;
+  endpoint: string;
+  color?: string;
+}
+
+export interface AppSettings {
+  unattended_threshold_s: number;
+  robot_count: number;
+  detection_enabled: boolean;
+  detection_sensitivity: number;
+  robots: RobotConnectionSettings[];
+}
+
 export interface Alert {
   id: string;
   level: AlertLevel;
@@ -104,6 +140,7 @@ export type ServerMessage =
   | { type: 'detection'; detection: Detection }
   | { type: 'alert'; alert: Alert }
   | { type: 'alert_clear'; id: string }
+  | { type: 'settings_state'; settings: AppSettings }
   | { type: 'map_info'; info: MapInfo };
 
 /* ---------- GUI → server ---------- */
@@ -111,6 +148,7 @@ export type ServerMessage =
 export type ClientMessage =
   | { type: 'set_goal'; robot_id: string; payload: Point }
   | { type: 'cancel_goal'; robot_id: string }
+  | { type: 'drive'; robot_id: string; payload: { linear: number; angular: number } }
   | { type: 'select_robots'; robot_ids: string[] }
   | { type: 'switch_camera'; robot_id: string }
   | { type: 'acknowledge_alert'; id: string }

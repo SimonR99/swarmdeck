@@ -2,11 +2,12 @@
 
     ros2 launch swarmdeck_bringup session.launch.py config:=study/4robot.yaml
 
-Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot SLAM.
+Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot SLAM + Nav2.
 The backend and UI run separately (`make server`, `make ui`) because they are
 ROS-free by design.
 """
 
+import json
 from pathlib import Path
 
 import yaml
@@ -32,6 +33,7 @@ def bridge_args(ns: str) -> list[str]:
         # Single-ring lidar -> Gazebo publishes a usable LaserScan directly.
         f"/{ns}/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
         f"/{ns}/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
+        f"/{ns}/proximity_scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
         f"/{ns}/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
         f"/{ns}/imu@sensor_msgs/msg/Imu[gz.msgs.IMU",
         f"/{ns}/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
@@ -51,6 +53,14 @@ def setup(context, *args, **kwargs):
     cfg = yaml.safe_load(cfg_path.read_text())
 
     count = int(cfg.get("fleet", {}).get("robot_count", 4))
+    # Operator settings are deliberately ROS-independent, but the simulated
+    # fleet consumes the persisted count on its next launch.
+    try:
+        persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
+        count = int(persisted.get("robot_count", count))
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
+        pass
+    count = max(1, min(count, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
     band = cfg.get("map", {}).get("height_band", [0.10, 1.80])
     seed = cfg.get("seed", 20260801)
@@ -81,14 +91,24 @@ def setup(context, *args, **kwargs):
             actions=[
                 ExecuteProcess(
                     cmd=["python3", str(scenario / "spawn_fleet.py"),
-                         "--config", str(cfg_path)],
+                         "--config", str(cfg_path), "--robots", str(count)],
                     output="screen",
                 )
             ],
         ),
     ]
 
-    delayed = []
+    delayed = [
+        # Gazebo sensor and TF stamps use simulation time. One global clock
+        # bridge serves every namespaced robot stack.
+        Node(
+            package="ros_gz_bridge",
+            executable="parameter_bridge",
+            name="bridge_clock",
+            arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+            output="screen",
+        )
+    ]
     for i in range(min(count, 5)):
         ns = f"{prefix}{i}"
         delayed.append(
@@ -104,6 +124,14 @@ def setup(context, *args, **kwargs):
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     [FindPackageShare("swarmdeck_slam"), "/launch/slam.launch.py"]
+                ),
+                launch_arguments={"namespace": ns, "use_sim_time": "true"}.items(),
+            )
+        )
+        delayed.append(
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    [FindPackageShare("swarmdeck_nav"), "/launch/nav.launch.py"]
                 ),
                 launch_arguments={"namespace": ns, "use_sim_time": "true"}.items(),
             )

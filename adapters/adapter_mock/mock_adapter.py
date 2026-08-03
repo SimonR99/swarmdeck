@@ -133,6 +133,8 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                             "robot_type": robot.type,
                             "adapter": "adapter_mock/0.1.0",
                             "ros": "none",
+                            # Synthetic poses and maps already share one global frame.
+                            "coordinate_frame": "merged",
                             "capabilities": ["navigate", "map", "camera", "battery", "estop"],
                             "footprint_radius": 0.35,
                         }

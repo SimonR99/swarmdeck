@@ -3,23 +3,27 @@
   import FleetRail from '$lib/components/fleet/FleetRail.svelte';
   import MapView from '$lib/components/map2d/MapView.svelte';
   import CameraPanel from '$lib/components/video/CameraPanel.svelte';
+  import DrivePanel from '$lib/components/controls/DrivePanel.svelte';
   import AlertStack from '$lib/components/alerts/AlertStack.svelte';
-  import { startConnection } from '$lib/api/connection';
+  import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
+  import { startConnection, teardown } from '$lib/api/connection';
   import { PanelRightClose, PanelRightOpen } from 'lucide-svelte';
 
   let cameraOpen = $state(true);
+  let settingsOpen = $state(false);
 
   $effect(() => {
     startConnection();
+    return () => teardown();
   });
 </script>
 
 <div class="flex h-full flex-col overflow-hidden">
-  <TopBar />
+  <TopBar onsettings={() => (settingsOpen = true)} />
 
   <main class="relative flex min-h-0 flex-1 gap-2 p-2">
     <!-- Fleet rail: fixed width, scrolls for up to 5 robots -->
-    <div class="w-[228px] shrink-0 lg:w-[248px]">
+    <div class="w-[208px] shrink-0 lg:w-[216px]">
       <FleetRail />
     </div>
 
@@ -31,14 +35,15 @@
 
     <!-- Camera: collapsible so the map can go full width on a 10in tablet -->
     {#if cameraOpen}
-      <div class="w-[288px] shrink-0 xl:w-[336px]">
+      <div class="flex w-[300px] shrink-0 flex-col gap-2 overflow-y-auto xl:w-[320px]">
         <CameraPanel />
+        <DrivePanel />
       </div>
     {/if}
 
     <button
-      class="absolute right-2 top-2 z-40 grid h-9 w-9 place-items-center rounded-lg border
-             border-border bg-surface/90 text-fg-muted backdrop-blur transition-colors
+      class="panel-glow absolute right-2 top-2 z-40 grid h-8 w-8 place-items-center rounded-[4px]
+             border border-border bg-surface/90 text-fg-muted backdrop-blur-xl transition-colors
              hover:bg-surface-2 {cameraOpen ? 'hidden' : ''}"
       title="Show camera"
       onclick={() => (cameraOpen = true)}
@@ -48,9 +53,9 @@
 
     {#if cameraOpen}
       <button
-        class="absolute right-[296px] top-2 z-40 grid h-9 w-9 place-items-center rounded-lg
-               border border-border bg-surface/90 text-fg-muted backdrop-blur
-               transition-colors hover:bg-surface-2 xl:right-[344px]"
+        class="panel-glow absolute right-[310px] top-2 z-40 grid h-8 w-8 place-items-center
+               rounded-[4px] border border-border bg-surface/90 text-fg-muted backdrop-blur-xl
+               transition-colors hover:bg-surface-2 xl:right-[330px]"
         title="Hide camera"
         onclick={() => (cameraOpen = false)}
       >
@@ -59,3 +64,5 @@
     {/if}
   </main>
 </div>
+
+<SettingsModal open={settingsOpen} onclose={() => (settingsOpen = false)} />

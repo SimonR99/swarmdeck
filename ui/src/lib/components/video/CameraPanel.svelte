@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { tick, untrack } from 'svelte';
   import { VideoOff, Radio } from 'lucide-svelte';
   import Badge from '../ui/Badge.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { session } from '$lib/stores/session.svelte';
+  import { actions } from '$lib/api/connection';
 
   /**
    * WebRTC camera view.
@@ -12,7 +14,15 @@
    */
 
   let video = $state<HTMLVideoElement | null>(null);
+  let imageA = $state<HTMLImageElement | null>(null);
+  let imageB = $state<HTMLImageElement | null>(null);
   let pc: RTCPeerConnection | null = null;
+  let fallbackTimer: number | null = null;
+  let objectA: string | null = null;
+  let objectB: string | null = null;
+  let activeFrame = $state<0 | 1>(0);
+  let fallbackGeneration = 0;
+  let streamSource = $state<'webrtc' | 'jpeg' | null>(null);
   let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
 
   const activeId = $derived(fleet.activeCamera);
@@ -28,6 +38,7 @@
       pc.addTransceiver('video', { direction: 'recvonly' });
       pc.ontrack = (e) => {
         if (video) video.srcObject = e.streams[0];
+        streamSource = 'webrtc';
         streamState = 'live';
       };
       const offer = await pc.createOffer();
@@ -42,41 +53,105 @@
       const answer = await res.text();
       await pc.setRemoteDescription({ type: 'answer', sdp: answer });
     } catch {
-      streamState = 'unavailable';
       teardown();
+      startJpegFallback(robotId);
     }
   }
 
+  function startJpegFallback(robotId: string) {
+    streamSource = 'jpeg';
+    streamState = 'connecting';
+    const generation = ++fallbackGeneration;
+
+    // Fetch, decode, then atomically swap a local object URL. Updating the
+    // visible image's HTTP URL directly exposes its empty/loading state and
+    // causes a white/black flash between every JPEG frame.
+    const refresh = async () => {
+      try {
+        const response = await fetch(
+          `/api/camera/${encodeURIComponent(robotId)}?t=${Date.now()}`,
+          { cache: 'no-store' }
+        );
+        if (!response.ok) throw new Error(`camera ${response.status}`);
+        const objectUrl = URL.createObjectURL(await response.blob());
+        const nextFrame: 0 | 1 = activeFrame === 0 ? 1 : 0;
+        await tick();
+        const target = nextFrame === 0 ? imageA : imageB;
+        if (!target) throw new Error('camera buffer unavailable');
+        const previousInactive = nextFrame === 0 ? objectA : objectB;
+        if (previousInactive) URL.revokeObjectURL(previousInactive);
+        if (nextFrame === 0) {
+          objectA = objectUrl;
+        } else {
+          objectB = objectUrl;
+        }
+        await new Promise<void>((resolve, reject) => {
+          target.onload = () => resolve();
+          target.onerror = () => reject(new Error('camera frame decode failed'));
+          target.src = objectUrl;
+        });
+        await target.decode();
+        if (generation !== fallbackGeneration) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        activeFrame = nextFrame;
+        streamState = 'live';
+      } catch {
+        if (streamState !== 'live') streamState = 'unavailable';
+      } finally {
+        if (generation === fallbackGeneration) {
+          fallbackTimer = window.setTimeout(refresh, 200);
+        }
+      }
+    };
+    void refresh();
+  }
+
   function teardown() {
+    fallbackGeneration++;
     pc?.close();
     pc = null;
+    if (fallbackTimer) clearInterval(fallbackTimer);
+    fallbackTimer = null;
+    imageA?.removeAttribute('src');
+    imageB?.removeAttribute('src');
+    if (objectA) URL.revokeObjectURL(objectA);
+    if (objectB) URL.revokeObjectURL(objectB);
+    objectA = null;
+    objectB = null;
+    activeFrame = 0;
+    streamSource = null;
     if (video) video.srcObject = null;
   }
 
   $effect(() => {
     const id = activeId;
-    if (!id || !fleet.can(id, 'camera')) {
+    // Robot telemetry replaces the state object at 5 Hz. Capability checks
+    // must not become an effect dependency or every telemetry packet tears
+    // down and recreates the camera stream.
+    if (!id || !untrack(() => fleet.can(id, 'camera'))) {
       streamState = 'idle';
       teardown();
       return;
     }
-    connectWhep(id);
-    return () => teardown();
+    untrack(() => connectWhep(id));
+    return () => untrack(teardown);
   });
 </script>
 
 <div
-  class="flex h-full flex-col overflow-hidden rounded-[--radius-card] border border-border bg-surface"
+  class="panel-glow flex flex-col overflow-hidden rounded-[--radius-card] border border-border bg-surface"
 >
-  <div class="flex items-center justify-between border-b border-border px-3 py-2">
+  <div class="flex h-11 items-center justify-between border-b border-border px-3">
     <div class="flex items-center gap-2">
       <Radio class="h-3.5 w-3.5" style="color:{color}" />
-      <span class="text-xs font-semibold" style="color:{color}">
+      <span class="text-[11px] font-semibold tracking-tight" style="color:{color}">
         {activeId ? activeId.replace(/^robot_/, 'R') : 'No camera'}
       </span>
     </div>
     {#if streamState === 'live'}
-      <Badge tone="ok">LIVE</Badge>
+      <Badge tone="ok">Live {streamSource === 'jpeg' ? 'preview' : ''}</Badge>
     {:else if streamState === 'connecting'}
       <Badge tone="accent">…</Badge>
     {:else if streamState === 'unavailable'}
@@ -84,20 +159,41 @@
     {/if}
   </div>
 
-  <div class="relative aspect-video w-full shrink-0 bg-black">
+  <div class="relative m-2 mb-0 aspect-video shrink-0 overflow-hidden rounded-[4px] bg-black">
     <video
       bind:this={video}
-      class="h-full w-full object-cover"
+      class="h-full w-full object-cover {streamSource === 'webrtc' ? '' : 'hidden'}"
       autoplay
       muted
       playsinline
     ></video>
 
+    {#if streamSource === 'jpeg'}
+      <img
+        bind:this={imageA}
+        class="absolute inset-0 h-full w-full object-cover transition-none {activeFrame === 0
+          ? 'z-20'
+          : 'z-10'}"
+        data-active={activeFrame === 0}
+        alt="Live camera for {activeId ?? 'robot'}"
+      />
+      <img
+        bind:this={imageB}
+        class="absolute inset-0 h-full w-full object-cover transition-none {activeFrame === 1
+          ? 'z-20'
+          : 'z-10'}"
+        data-active={activeFrame === 1}
+        alt="Live camera buffer for {activeId ?? 'robot'}"
+      />
+    {/if}
+
     {#if streamState !== 'live'}
-      <div class="absolute inset-0 grid place-items-center bg-surface-2">
+      <div class="absolute inset-0 z-40 grid place-items-center bg-surface-2">
         <div class="flex flex-col items-center gap-2 text-fg-dim">
-          <VideoOff class="h-7 w-7" />
-          <span class="text-[11px]">
+          <div class="grid h-10 w-10 place-items-center rounded-[4px] border border-border bg-surface">
+            <VideoOff class="h-5 w-5" />
+          </div>
+          <span class="text-[10px] font-medium">
             {streamState === 'connecting' ? 'Connecting…' : 'Stream unavailable'}
           </span>
         </div>
@@ -105,7 +201,7 @@
     {/if}
 
     <!-- detection overlay, sized to the video element (never an iframe) -->
-    <div class="pointer-events-none absolute inset-0">
+    <div class="pointer-events-none absolute inset-0 z-30">
       {#each boxes as d (d.id)}
         {#if d.bbox}
           <div
@@ -127,18 +223,19 @@
   </div>
 
   <!-- camera switcher -->
-  <div class="flex flex-wrap gap-1.5 border-t border-border p-2">
+  <div class="flex flex-wrap gap-1.5 p-2">
     {#each fleet.robots.filter((r) => r.capabilities?.includes('camera')) as r (r.robot_id)}
       <button
-        class="h-9 touch-target flex-1 rounded-lg border px-2 text-[11px] font-semibold
+        class="h-8 touch-target flex-1 rounded-[4px] border px-2 text-[10px] font-semibold
                transition-colors
                {fleet.activeCamera === r.robot_id
-          ? 'border-transparent text-bg'
-          : 'border-border bg-surface-2 text-fg-muted hover:bg-surface-3'}"
-        style={fleet.activeCamera === r.robot_id
-          ? `background:${fleet.colorOf(r.robot_id)}`
-          : ''}
-        onclick={() => fleet.setCamera(r.robot_id)}
+          ? 'border-border-strong bg-surface-2 text-fg'
+          : 'border-border bg-surface text-fg-muted hover:bg-surface-2'}"
+        onclick={() => {
+          fleet.focus(r.robot_id);
+          actions.selectRobots(fleet.selected);
+          actions.switchCamera(r.robot_id);
+        }}
       >
         {r.robot_id.replace(/^robot_/, 'R')}
       </button>
@@ -149,7 +246,7 @@
   </div>
 
   {#if robot}
-    <div class="border-t border-border px-3 py-2 text-[11px] text-fg-dim">
+    <div class="mt-auto border-t border-border px-3 py-2.5 text-[10px] text-fg-dim">
       <div class="flex justify-between">
         <span>Detections</span>
         <span class="tabular text-fg-muted">

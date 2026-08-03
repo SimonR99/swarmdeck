@@ -1,7 +1,9 @@
 # SwarmDeck
 
-Multi-robot supervision stack: a simulated fleet of lidar-equipped robots, a merged 2D
-map, and a browser GUI from which one operator supervises all of them.
+Multi-robot supervision stack: a simulated fleet of lidar-equipped Duckiebot-style
+robots, a merged 2D map, and a browser GUI from which one operator supervises all of
+them. The Gazebo model follows the DB21 layered differential-drive layout and adds a
+top-deck 2D lidar as a SwarmDeck mapping payload.
 
 **The backend has no ROS dependency.** Robots connect through a version-agnostic
 [adapter contract](adapters/protocol/README.md), so ROS 2 robots, ROS 1 robots, and
@@ -23,6 +25,19 @@ make ui               # terminal 3 — GUI on :5173
 
 Open <http://localhost:5173>. Four robots wander, build a shared map, raise alerts and
 report detections. Click a robot card to select it, then tap the map to send a goal.
+The map supports pan/zoom, fleet and selection centring, click-to-select markers, a
+metric grid, trails, labels, sensor/footprint overlays, map revision metadata, and live
+registration diagnostics from `GET /api/map/status`.
+
+The live map distinguishes the path already travelled (solid) from Nav2's current
+predicted path (dashed). The settings button persists the unattended-warning delay,
+expected fleet size, adapter identities/endpoints, and perception controls in
+`sessions/settings.json`; the fleet size is consumed on the next Gazebo/adapter start.
+
+The simulation adapter also exposes a 5 Hz JPEG camera preview when MediaMTX/WHEP is not
+installed, so camera frames remain visible during development. A portable RGB-only
+rubber-duck detector publishes normalized boxes over the same adapter contract and the
+camera panel draws them without using Gazebo entity IDs.
 
 **GUI only, nothing else running:** <http://localhost:5173/?mock=1&robots=4> — the
 frontend falls back to a built-in simulator, so UI work needs no backend at all.
@@ -34,9 +49,13 @@ cd swarmdeck_ros && colcon build --symlink-install && source install/setup.bash
 ros2 launch swarmdeck_bringup session.launch.py config:=study/4robot.yaml
 # then, separately:
 make server
-python3 adapters/adapter_sim/adapter_sim.py --robots 4
+python3 adapters/adapter_sim/adapter_sim.py   # count comes from persistent settings
 make ui
 ```
+
+The seeded 24 m indoor world contains five procedural yellow rubber ducks, tables,
+chairs, paintings, and plants. All objects are ordinary SDF geometry with collisions
+where appropriate, so lidar mapping and camera perception see the same environment.
 
 ## Layout
 
@@ -64,6 +83,12 @@ A ratio test rejects ambiguous alignments, so a repetitive building yields "not
 confident" rather than a confident-but-wrong merge; the merge then keeps `static`
 transforms. Registration needs the robots to have seen the same places — check
 `GET /api/map/status` for `score`, `ratio` and `overlap`.
+
+This registration is automatic whenever `merge_mode: auto`, but it is not a shared
+multi-robot pose graph. Each robot performs its own SLAM Toolbox loop closure first;
+the map service then aligns the corrected occupancy grids. Confident registration can
+update the inter-robot transform, while ambiguous or physically implausible candidates
+leave the configured deployment prior in place.
 
 ## Tests
 
@@ -95,6 +120,10 @@ Write one adapter. Touch nothing else (NFR-9).
 4. Optionally push occupancy grids and push camera to MediaMTX over RTSP.
 
 `adapters/adapter_mock/mock_adapter.py` is a complete ~200-line reference with no ROS.
+
+By default, goals and robot state use the robot's local navigation-map frame on the
+adapter socket. The backend converts them to the merged-map frame seen by the GUI;
+synthetic adapters may explicitly declare that they already use the merged frame.
 
 ## Prerequisites
 

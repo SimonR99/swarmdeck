@@ -26,19 +26,19 @@
 
   const variants: Record<Variant, string> = {
     default:
-      'bg-surface-2 text-fg border border-border hover:bg-surface-3 active:bg-surface-3',
+      'bg-surface text-fg border border-border shadow-sm hover:bg-surface-2 active:bg-surface-3',
     primary:
-      'bg-accent text-accent-fg border border-accent hover:brightness-110 active:brightness-95 font-semibold',
+      'bg-accent text-accent-fg border border-accent shadow-sm hover:brightness-95 active:brightness-90 font-semibold',
     ghost: 'bg-transparent text-fg-muted border border-transparent hover:bg-surface-2 hover:text-fg',
     danger:
-      'bg-critical text-white border border-critical hover:brightness-110 active:brightness-95 font-semibold',
-    outline: 'bg-transparent text-fg border border-border-strong hover:bg-surface-2'
+      'bg-critical text-white border border-critical shadow-sm hover:brightness-95 active:brightness-90 font-semibold',
+    outline: 'bg-surface text-fg border border-border shadow-sm hover:bg-surface-2'
   };
 
   const sizes: Record<Size, string> = {
-    sm: 'h-9 px-3 text-xs gap-1.5 rounded-lg',
-    md: 'h-11 px-4 text-sm gap-2 rounded-xl',
-    lg: 'h-13 px-5 text-base gap-2.5 rounded-xl'
+    sm: 'h-8 px-3 text-[11px] gap-1.5 rounded-[4px]',
+    md: 'h-9 px-4 text-xs gap-2 rounded-[4px]',
+    lg: 'h-11 px-5 text-sm gap-2.5 rounded-[5px]'
   };
 </script>
 

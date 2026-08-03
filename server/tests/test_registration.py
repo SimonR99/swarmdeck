@@ -128,3 +128,79 @@ def test_merge_occupied_beats_free():
     assert (svc.merged >= 50).sum() > 0
     assert (svc.merged == 0).sum() > 0
     assert svc.merged.min() == -1
+
+
+def test_registration_cannot_override_configured_prior(monkeypatch):
+    """A symmetric-map false positive must fail closed to the known start pose."""
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    wrong = Registration(dx=0.0, dy=0.0, dyaw=math.pi, score=0.6, overlap=300, ratio=0.5)
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: wrong)
+
+    svc = MapService(resolution=0.1, size_m=20.0)
+    svc.set_mode("auto")
+    svc.set_transform("reference", 3.0, 0.0, math.pi)
+    svc.set_transform("moving", -9.0, 0.0, 0.0)
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -10.0, -10.0)
+    cells = np.zeros((n, n), np.int8)
+    cells[50:150, 80:84] = 100
+
+    svc.ingest("reference", meta, cells)
+    svc.ingest("moving", meta, cells)
+
+    assert svc.transforms["moving"] == (-9.0, 0.0, 0.0)
+    status = svc.status()["registrations"]["moving"]
+    assert status["confident"] is True
+    assert status["accepted"] is False
+    assert "outside configured prior" in status["rejection"]
+
+
+def test_auto_mode_keeps_unregistered_maps_local(monkeypatch):
+    """A spawn/config prior must not make two SLAM grids look registered."""
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    ambiguous = Registration(dx=0, dy=0, dyaw=0, score=0.1, overlap=20, ratio=0.95)
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
+
+    svc = MapService(resolution=0.1, size_m=20.0)
+    svc.set_mode("auto")
+    svc.set_transform("r0", 0, 0, 0)
+    svc.set_transform("r1", 0, 0, 0)
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -10, -10)
+    ref = np.full((n, n), -1, np.int8)
+    ref[20:30, 20:30] = 100
+    moving = np.full((n, n), -1, np.int8)
+    moving[150:160, 150:160] = 100
+
+    svc.ingest("r0", meta, ref)
+    svc.ingest("r1", meta, moving)
+
+    status = svc.status()
+    assert status["global_members"] == []
+    assert status["view_by_robot"] == {"r0": "local", "r1": "local"}
+    assert np.all(svc.merged == -1), "there is no global grid before a registration"
+
+
+def test_auto_mode_exposes_global_map_after_accepted_match(monkeypatch):
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    accepted = Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200, ratio=0.2)
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: accepted)
+
+    svc = MapService(resolution=0.1, size_m=20.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -10, -10)
+    cells = np.zeros((n, n), np.int8)
+    cells[80:90, 80:90] = 100
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells)
+
+    status = svc.status()
+    assert status["global_members"] == ["r0", "r1"]
+    assert status["view_by_robot"] == {"r0": "global", "r1": "global"}
