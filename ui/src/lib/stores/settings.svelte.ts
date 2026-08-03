@@ -10,6 +10,7 @@ export const DEFAULT_ROBOT_COLORS = [
 
 const fallback: AppSettings = {
   unattended_threshold_s: 45,
+  alert_suppress_s: 30,
   robot_count: 4,
   detection_enabled: true,
   detection_sensitivity: 0.55,

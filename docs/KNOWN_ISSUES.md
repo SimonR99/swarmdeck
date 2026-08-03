@@ -12,12 +12,18 @@ verified 5 Hz JPEG preview fallback through the adapter and ROS-free backend.
 
 ### 2. Registration needs shared coverage
 
-`auto` mode aligns two maps to ~8 cm, but only when the robots have actually seen the
-same places. With largely disjoint coverage the problem is ill-posed and the ratio test
-correctly refuses to answer. The dashboard then shows each selected robot's local map;
-it does not overlay grids using configured spawn priors. This is inherent to map
-registration, not a bug, but it means exploration has to be arranged so robots overlap.
-Measured: ~2150 overlapping occupied cells gave score 0.54, ratio 0.58.
+`auto` mode aligns two maps to a few centimetres, but only when the robots have actually
+seen the same places. With largely disjoint coverage the problem is ill-posed. The
+dashboard then shows each selected robot's local map; it does not overlay grids using
+configured spawn priors. This is inherent to map registration, not a bug, but it means
+exploration has to be arranged so robots overlap.
+
+Coverage is now measured rather than assumed: `support` is the fraction of the smaller
+map's known area shared with the reference, and a match below 0.35 is refused however well
+it scores. Near-disjoint coverage of a building with strong repeated structure can still
+produce a wrong answer — `support` and `yaw_ratio` cut this sharply but cannot make an
+ill-posed problem well-posed. Treat `auto` mode without configured start poses as
+best-effort; with priors, a wrong match fails closed to the prior.
 
 ### 3. Duck detector is a portable classical baseline, not a trained neural model
 
@@ -30,7 +36,24 @@ replace the baseline without changing ROS, the adapter protocol, backend, or UI.
 production model still needs licensed real-camera training/validation data covering the
 actual lighting and duck variants.
 
-### 4. Sudden lateral displacement needs exteroceptive odometry
+### 4. The merged map is a stitcher, not multi-robot SLAM
+
+Every robot runs a private pose graph and the backend aligns the finished grids afterwards,
+so no robot's drift is ever corrected by another robot's observations. There is no
+inter-robot loop closure, no shared graph, and no transitive registration — a robot that
+overlaps robot 2 but not the reference can never join the global map. Nav2 also still plans
+on each robot's own map rather than the merged one (FR-M8). This is a deliberate
+consequence of the ROS-free backend, not an oversight, but it caps what the fleet can do.
+docs/collaborative-slam.md sets out what would change and a staged path.
+
+### 5. 3D SLAM path is wired but unproven
+
+`fleet.lidar_rings > 1` and `slam_backend:=rtabmap` are implemented and syntax-checked but
+have never been run against Gazebo; they need `make docker-up`. RTAB-Map's RGB loop closure
+(`use_camera:=true`) additionally needs the simulated `camera_info` topic name confirmed
+with `gz topic -l`, which is why the lidar-only path is the default.
+
+### 6. Sudden lateral displacement needs exteroceptive odometry
 
 Gazebo's DiffDrive odometry, like wheel encoders on hardware, cannot directly observe a
 robot being dragged sideways. The adapter already displays SLAM Toolbox's corrected
@@ -42,6 +65,35 @@ from "kidnapping" needs lidar odometry, visual odometry, landmarks, or global
 relocalization. Gazebo ground truth remains scoring-only and is not fed into navigation.
 
 ## Resolved
+
+### Registration silently reported confident 90-degree errors
+
+The correlation peak in yaw is under a degree wide (a yaw error at radius `r` displaces a
+point by `r·dyaw`), and the coarse sweep sampled every 4 deg, so it could miss the true peak
+entirely and lock onto the building shell's own 90 deg symmetry. On this project's test
+floor plan, **13 of 52 headings falling between coarse samples produced a confident answer
+exactly 90 deg wrong**, with up to 1.8 m of translation error. The ratio test could not see
+it, because it only compares rival *translations* within the winning yaw.
+
+It hid because the six parametrised test yaws (0, 0, 35, −60, 120, 175) are all on or within
+1 deg of the 4 deg grid, and because `4robot.yaml` starts robots at 0, 0, π, π — every
+relative heading in the demo is 0 or 180 deg, exactly on the grid.
+
+Fixed by making every search stage sample finely enough to find its own peak: the coarse
+stage correlates against a *dilated* reference so the peak is wide enough to hit on a 4 deg
+grid, distinct rotation hypotheses are then ranked against each other at a resolution that
+can separate them (`yaw_ratio`), free space votes against matches that drive walls through
+known-empty rooms, and the peak is interpolated to sub-cell precision. Now 52/52 correct on
+the same sweep, 0.1–3 cm and under 0.1 deg, and a genuinely symmetric building is refused
+instead of guessed. Regression tests cover off-grid yaws and symmetric plans.
+
+### Map ingest blocked the server event loop
+
+`POST /api/adapter/map` awaited nothing and ran ~190 ms of registration numpy inline, so
+with three non-reference robots at 0.5 Hz roughly a quarter of the event loop was consumed
+in 190 ms blocks and every WebSocket stuttered, telemetry included. Ingest now runs through
+`asyncio.to_thread` under a lock, and an already-registered robot refines in a narrow yaw
+window instead of re-sweeping all 360 deg on every upload.
 
 ### Nav2 costmaps could not see other robots
 
@@ -97,6 +149,19 @@ is inherently range-dependent. Fixed by making the lidar **single-ring**, which 
 Gazebo publish a usable `LaserScan` directly and removes `pointcloud_to_laserscan` from
 the pipeline entirely.
 
+*Amended after later audit.* The diagnosis above is right, including that no band and no
+choice of filter frame can fix it — the truncation is geometric. But the root cause is
+narrower than "multi-ring", and going single-ring gave up the 3D sensor to avoid it.
+Gazebo spreads N vertical samples evenly across `[min_angle, max_angle]` **inclusive**, so
+an **even** N leaves no ring at elevation 0 and every ring is tilted. A ring at elevation
+`e` survives a band of half-height `h` only to `h/sin(e)`; with 8 rings over ±0.26 rad the
+innermost sits at 0.0371 rad, giving `0.15/sin(0.0371) = 4.04 m` — exactly the 4 m that was
+measured. An **odd** ring count puts one ring at exactly 0 elevation, which passes any band
+at full range, and the tilted rings then add real 3D structure. `fleet.lidar_rings` now
+selects the ring count, `spawn_fleet.py` refuses an even value, and a tight band selects
+the horizontal ring (a wide one would only admit floor returns near the robot). See
+docs/collaborative-slam.md §2.4.
+
 **2. The world was not enclosed.** 40 × 40 m with a dozen thin partitions meant that from
 most poses nothing was within sensor range, so SLAM carved a giant free-space starburst
 with no structure to scan-match against. Fixed by a compact 24 × 24 m building with rooms
@@ -112,6 +177,8 @@ SLAM uses odometry as its motion prior, so this alone guarantees a broken map. F
 identical rooms, shifting by one room width scores nearly as well as the truth, and the
 merge locked onto a 5.9 m error. Fixed by irregular room widths plus distinct interior
 features, and by adding a **ratio test** so near-ties are rejected rather than trusted.
+(That ratio test turned out to cover only rival translations at one heading, which is how
+the 90 deg failures above survived it. Rotation hypotheses are now ratio-tested too.)
 
 After all four: ground truth scores 0.509 against 0.11–0.16 for neighbouring offsets, and
 registration recovers it to **7.8 cm** with exact yaw.

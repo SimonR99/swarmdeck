@@ -19,6 +19,7 @@
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { actions } from '$lib/api/connection';
+  import type { MapRegistration } from '$lib/types/protocol';
 
   let host = $state<HTMLDivElement | null>(null);
   let canvas = $state<HTMLCanvasElement | null>(null);
@@ -573,6 +574,15 @@
   const acceptedRegistrations = $derived(
     registrationEntries.filter(([, item]) => item.accepted).length
   );
+
+  /** Why a match has not been accepted, in terms the operator can act on:
+   *  drive the robots through the same rooms, versus this building cannot be
+   *  told apart under rotation and needs a configured start pose. */
+  function registrationBlocker(item: MapRegistration): string {
+    if (item.support < 0.35) return 'Waiting for overlap';
+    if (item.yaw_ratio > 0.8) return 'Rotation ambiguous';
+    return 'Too little detail';
+  }
 </script>
 
 <div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-card] border border-border bg-bg">
@@ -722,13 +732,15 @@
                   : item.rejection?.startsWith('outside')
                     ? 'text-warn'
                     : 'text-fg-muted'}"
-                title={item.rejection ?? `score ${item.score}`}
+                title={item.rejection ??
+                  `score ${item.score} · shared area ${(item.support * 100).toFixed(0)}%` +
+                    ` · rival rotation ${(item.yaw_ratio * 100).toFixed(0)}%`}
               >
                 {item.accepted
                   ? `Matched · ${(item.score * 100).toFixed(0)}%`
                   : item.rejection?.startsWith('outside')
                     ? 'Configured prior held'
-                    : 'Waiting for overlap'}
+                    : registrationBlocker(item)}
               </span>
             </div>
           {/each}

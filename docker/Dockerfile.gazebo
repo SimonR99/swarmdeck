@@ -1,0 +1,55 @@
+# SwarmDeck Gazebo + ROS 2 Jazzy (Harmonic) simulation image.
+# Builds swarmdeck_ros and runs session.launch.py + adapter_sim.
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    QT_QPA_PLATFORM=offscreen \
+    GZ_SIM_RESOURCE_PATH=/app/swarmdeck_ros/src \
+    ROS_DOMAIN_ID=42
+
+# Gazebo Harmonic (via ros_gz vendor pkgs), SLAM, Nav2, and adapter runtime deps.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl \
+      python3-pip \
+      python3-numpy \
+      python3-yaml \
+      python3-opencv \
+      python3-colcon-common-extensions \
+      ros-jazzy-ros-gz \
+      ros-jazzy-ros-gz-sim \
+      ros-jazzy-ros-gz-bridge \
+      ros-jazzy-slam-toolbox \
+      ros-jazzy-navigation2 \
+      ros-jazzy-nav2-bringup \
+      ros-jazzy-nav2-msgs \
+      ros-jazzy-pointcloud-to-laserscan \
+      ros-jazzy-rtabmap-slam \
+      ros-jazzy-rtabmap-util \
+      ros-jazzy-tf2-ros \
+      ros-jazzy-tf2-tools \
+      mesa-vulkan-drivers \
+      libgl1-mesa-dri \
+      libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Adapter protocol deps (system Python; ROS image is not PEP 668 gated the same way).
+RUN pip3 install --break-system-packages --no-cache-dir websockets
+
+WORKDIR /app
+COPY swarmdeck_ros /app/swarmdeck_ros
+COPY adapters /app/adapters
+COPY study /app/study
+COPY docker/gazebo-entrypoint.sh /usr/local/bin/gazebo-entrypoint.sh
+RUN chmod +x /usr/local/bin/gazebo-entrypoint.sh \
+    && mkdir -p /app/sessions
+
+# Symlink-install keeps launch-file REPO = parents[4] pointing at /app.
+WORKDIR /app/swarmdeck_ros
+RUN . /opt/ros/jazzy/setup.sh \
+    && colcon build --symlink-install --packages-select \
+         swarmdeck_description swarmdeck_sim swarmdeck_slam swarmdeck_nav swarmdeck_bringup
+
+WORKDIR /app
+ENTRYPOINT ["/usr/local/bin/gazebo-entrypoint.sh"]

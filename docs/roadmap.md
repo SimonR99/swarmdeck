@@ -16,7 +16,8 @@ true to continue). Do not advance past a failing exit criterion.
 - Install (verified in apt): `ros-jazzy-navigation2`, `ros-jazzy-nav2-bringup`,
   `ros-jazzy-slam-toolbox`, `ros-jazzy-pointcloud-to-laserscan`,
   `ros-jazzy-nav2-map-server`. Plus MediaMTX, GStreamer, ONNX Runtime.
-- Source build: `m-explore-ros2` (`multirobot_map_merge`).
+- ~~Source build: `m-explore-ros2` (`multirobot_map_merge`).~~ Not used — see Phase 5.
+  `ros-jazzy-rtabmap-slam` + `ros-jazzy-rtabmap-util` for the optional 3D SLAM backend.
 - `swarmdeck_description`: one robot with lidar, IMU, odom, camera.
 - `swarmdeck_sim`: indoor world, seeded spawner.
 - Headless sim smoke test, `timeout`-wrapped with PID reaping.
@@ -101,7 +102,10 @@ re-fetch on incremental change.
 - Namespaced stacks `/robot_0` … `/robot_3`; bringup parameterized by robot count.
 - **`static` merge mode first** — known start poses, fixed transforms.
 - Ground-truth accuracy scoring node (translation/rotation error per robot).
-- Then `auto` mode: `multirobot_map_merge` for unknown relative starts (FR-S4).
+- Then `auto` mode for unknown relative starts (FR-S4). **Shipped differently from the plan:**
+  this line named `multirobot_map_merge`, but that is a ROS 2 node and the backend must import
+  no ROS (acceptance criterion 12), so registration is implemented in `mapsvc` with numpy —
+  see `docs/architecture.md` §5.2 and `docs/collaborative-slam.md`.
 - UI: multi-robot selection, duplicate-goal rejection, per-robot trails.
 
 **Demo:** four robots with unknown starts converge to one aligned map after observing
@@ -180,7 +184,7 @@ shared areas.
 | Adapter contract changes late | Every adapter reworked | Fixed and CI-validated in Phase 1, before any adapter exists |
 | Spot's ROS version unknown | Could block real-robot integration | Isolated behind the adapter seam; Phase 8 has three documented paths including a ROS-free one |
 | ROS 1 cannot run on the 24.04 host | No native ROS 1 path at all | Adapters never share a ROS graph; `adapter_ros1` ships as a Noetic container |
-| `multirobot_map_merge` unreliable on sparse maps | Blocks unknown-start condition | `static` mode ships first and remains permanent |
+| Grid registration unreliable on sparse maps (originally written against `multirobot_map_merge`) | Blocks unknown-start condition | `static` mode ships first and remains permanent; `support`/`ratio`/`yaw_ratio` make a weak match refuse rather than guess |
 | 4 robots + 4 cameras too heavy for one workstation | Frame drops, unusable GUI | Measure in Phase 5; reduce camera resolution and lidar rate before robot count |
 | Orphaned `gz sim` processes hold DDS ports | Silent cross-test contamination | Solved in Phase 0, enforced in CI |
 | GUI leaks planner-specific commands | ROS 1 robots cannot accept goals | Phase 3 note; contract review in CI |

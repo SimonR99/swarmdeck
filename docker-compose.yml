@@ -1,0 +1,97 @@
+# SwarmDeck Docker stack
+#
+# Default (full sim):  docker compose --profile gazebo up --build -d
+#                      make docker-up
+#
+# Mock fleet only:     docker compose --profile mock up --build -d
+#                      make docker-up-mock
+#
+# UI: http://localhost:5173   API: http://localhost:8080
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    image: swarmdeck-server:local
+    command:
+      - python
+      - -m
+      - swarmdeck_server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - --config
+      - /app/study/4robot.yaml
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./sessions:/app/sessions
+      - ./study:/app/study:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/config"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 8s
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    image: swarmdeck-ui:local
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+
+  # Full stack: Gazebo Harmonic + SLAM + Nav2 + adapter_sim
+  gazebo:
+    profiles: ["gazebo"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gazebo
+    image: swarmdeck-gazebo:local
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BACKEND_HOST: server
+      BACKEND_PORT: "8080"
+      SWARMDECK_CONFIG: /app/study/4robot.yaml
+      HEADLESS: "true"
+      ADAPTER_DELAY: "${ADAPTER_DELAY:-45}"
+      ROS_DOMAIN_ID: "42"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    volumes:
+      - ./sessions:/app/sessions
+      - ./study:/app/study:ro
+    shm_size: "2gb"
+    restart: unless-stopped
+
+  # Synthetic fleet (no Gazebo / ROS)
+  mock:
+    profiles: ["mock"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    image: swarmdeck-server:local
+    depends_on:
+      server:
+        condition: service_healthy
+    command:
+      - python
+      - adapters/adapter_mock/mock_adapter.py
+      - --host
+      - server
+      - --port
+      - "8080"
+      - --robots
+      - "${MOCK_ROBOTS:-4}"
+    healthcheck:
+      disable: true
+    restart: unless-stopped

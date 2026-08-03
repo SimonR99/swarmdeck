@@ -79,11 +79,18 @@ export interface MapPatch {
 export interface MapRegistration {
   score: number;
   overlap: number;
+  /** Runner-up translation peak over the best, at the winning yaw. */
   ratio: number;
+  /** Best rival at a different rotation over the best; catches symmetric aliases. */
+  yaw_ratio: number;
+  /** Fraction of the smaller map's known area shared with the reference. */
+  support: number;
   confident: boolean;
   accepted: boolean;
   rejection: string | null;
   dyaw_deg: number;
+  /** True once accepted, when the search refines instead of sweeping all rotations. */
+  locked: boolean;
 }
 
 export interface MapStatus {
@@ -105,6 +112,8 @@ export interface RobotConnectionSettings {
 
 export interface AppSettings {
   unattended_threshold_s: number;
+  /** After clearing an alert, same id stays suppressed for this many seconds. */
+  alert_suppress_s: number;
   robot_count: number;
   detection_enabled: boolean;
   detection_sensitivity: number;

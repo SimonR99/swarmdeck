@@ -11,6 +11,7 @@ def test_settings_round_trip_and_validation(tmp_path):
 
     saved = store.save({
         "unattended_threshold_s": 2,
+        "alert_suppress_s": -5,
         "robot_count": 9,
         "detection_enabled": False,
         "detection_sensitivity": 1.5,
@@ -22,6 +23,7 @@ def test_settings_round_trip_and_validation(tmp_path):
     })
 
     assert saved["unattended_threshold_s"] == 10
+    assert saved["alert_suppress_s"] == 0
     assert saved["robot_count"] == 2
     assert saved["detection_enabled"] is False
     assert saved["detection_sensitivity"] == 1.0

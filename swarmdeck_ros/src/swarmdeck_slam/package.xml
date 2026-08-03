@@ -2,11 +2,15 @@
 <package format="3">
   <name>swarmdeck_slam</name>
   <version>0.1.0</version>
-  <description>2D SLAM: pointcloud_to_laserscan + slam_toolbox</description>
+  <description>Per-robot SLAM: slam_toolbox on a planar scan, or rtabmap on a 3D cloud</description>
   <maintainer email="swarmdeck@mistlab.ca">SwarmDeck</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <!-- Slices the planar scan out of a multi-ring lidar's cloud. -->
   <exec_depend>pointcloud_to_laserscan</exec_depend>
+  <!-- slam_backend:=rtabmap. Optional at runtime; the default path never loads it. -->
+  <exec_depend>rtabmap_slam</exec_depend>
+  <exec_depend>rtabmap_util</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

@@ -48,6 +48,8 @@ SESSION: dict[str, Any] = {"running": False, "name": None, "started_at": None, "
 
 _gui_clients: set[WebSocket] = set()
 _alerts: dict[str, dict[str, Any]] = {}
+# alert_id → wall-clock time until which raise_alert is a no-op (after acknowledge)
+_alert_suppress_until: dict[str, float] = {}
 _camera_frames: dict[str, tuple[bytes, float, int]] = {}
 _detections: dict[str, dict[str, Any]] = {}
 _camera_seq = 0
@@ -96,6 +98,11 @@ async def raise_alert(
 ) -> None:
     if alert_id in _alerts:
         return
+    until = _alert_suppress_until.get(alert_id)
+    if until is not None:
+        if time.time() < until:
+            return
+        _alert_suppress_until.pop(alert_id, None)
     alert = {
         "id": alert_id,
         "level": level,
@@ -113,6 +120,14 @@ async def raise_alert(
 async def clear_alert(alert_id: str) -> None:
     if _alerts.pop(alert_id, None) is not None:
         await broadcast({"type": "alert_clear", "id": alert_id})
+
+
+def suppress_alert(alert_id: str) -> None:
+    """Prevent the same alert id from reappearing for alert_suppress_s seconds."""
+    seconds = float(settings_store.value.get("alert_suppress_s", 30))
+    if seconds <= 0 or not alert_id:
+        return
+    _alert_suppress_until[alert_id] = time.time() + seconds
 
 
 # ----------------------------------------------------------------- loops
@@ -324,7 +339,7 @@ async def post_map(request: Request) -> dict[str, Any]:
     )
     raw = zlib.decompress(await request.body())
     cells = np.frombuffer(raw, dtype=np.int8).reshape(meta.height, meta.width)
-    map_service.ingest(rid, meta, cells)
+    await map_service.ingest_async(rid, meta, cells)
     return {"ok": True, "cells": int(cells.size)}
 
 
@@ -462,6 +477,7 @@ async def handle_gui_message(msg: dict[str, Any]) -> None:
         aid = msg.get("id", "")
         if aid in _alerts:
             _alerts[aid]["acknowledged"] = True
+        suppress_alert(aid)
         await clear_alert(aid)
 
     elif kind in ("select_robots", "switch_camera", "report_target"):

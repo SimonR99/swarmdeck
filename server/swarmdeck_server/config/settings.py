@@ -13,6 +13,7 @@ DEFAULT_COLORS = ["#007aff", "#8944ab", "#008f87", "#c93400", "#d30f72"]
 def defaults() -> dict[str, Any]:
     return {
         "unattended_threshold_s": 45,
+        "alert_suppress_s": 30,
         "robot_count": 4,
         "detection_enabled": True,
         "detection_sensitivity": 0.55,
@@ -48,6 +49,12 @@ class SettingsStore:
         try:
             base["unattended_threshold_s"] = int(
                 max(10, min(3600, float(source.get("unattended_threshold_s", 45))))
+            )
+        except (TypeError, ValueError):
+            pass
+        try:
+            base["alert_suppress_s"] = int(
+                max(0, min(3600, float(source.get("alert_suppress_s", 30))))
             )
         except (TypeError, ValueError):
             pass

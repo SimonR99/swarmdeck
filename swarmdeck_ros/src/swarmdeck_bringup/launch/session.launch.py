@@ -5,6 +5,9 @@
 Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot SLAM + Nav2.
 The backend and UI run separately (`make server`, `make ui`) because they are
 ROS-free by design.
+
+`slam_backend:=rtabmap` swaps 2D SLAM Toolbox for RTAB-Map on the 3D cloud, which
+needs `fleet.lidar_rings` raised to an odd value in the study config.
 """
 
 import json
@@ -27,11 +30,16 @@ from launch_ros.substitutions import FindPackageShare
 REPO = Path(__file__).resolve().parents[4]
 
 
-def bridge_args(ns: str) -> list[str]:
-    """gz <-> ROS 2 topic bridges for one robot."""
-    return [
-        # Single-ring lidar -> Gazebo publishes a usable LaserScan directly.
-        f"/{ns}/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
+def bridge_args(ns: str, lidar_rings: int = 1) -> list[str]:
+    """gz <-> ROS 2 topic bridges for one robot.
+
+    With one ring, Gazebo's own LaserScan on `<ns>/scan` is exactly the planar
+    scan SLAM wants, so bridge it. With several rings that message is no longer a
+    planar slice, and `pointcloud_to_laserscan` publishes `<ns>/scan` instead —
+    bridging it too would put two publishers on one topic and let SLAM alternate
+    between them.
+    """
+    args = [
         f"/{ns}/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
         f"/{ns}/proximity_scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
         f"/{ns}/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
@@ -41,11 +49,15 @@ def bridge_args(ns: str) -> list[str]:
         f"/{ns}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
         f"/{ns}/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
     ]
+    if lidar_rings == 1:
+        args.insert(0, f"/{ns}/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan")
+    return args
 
 
 def setup(context, *args, **kwargs):
     cfg_arg = LaunchConfiguration("config").perform(context)
     headless = LaunchConfiguration("headless").perform(context).lower() == "true"
+    slam_backend = LaunchConfiguration("slam_backend").perform(context).lower()
 
     cfg_path = Path(cfg_arg)
     if not cfg_path.is_absolute():
@@ -62,8 +74,17 @@ def setup(context, *args, **kwargs):
         pass
     count = max(1, min(count, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
-    band = cfg.get("map", {}).get("height_band", [0.10, 1.80])
+    lidar_rings = int(cfg.get("fleet", {}).get("lidar_rings", 1))
     seed = cfg.get("seed", 20260801)
+
+    # RTAB-Map registers against the cloud's vertical structure, which a
+    # single-ring lidar does not have. Fail here rather than start a stack that
+    # comes up healthy and maps badly.
+    if slam_backend == "rtabmap" and lidar_rings < 3:
+        raise RuntimeError(
+            f"slam_backend:=rtabmap needs a 3D cloud, but fleet.lidar_rings is "
+            f"{lidar_rings} in {cfg_path.name}. Set it to an odd value >= 9."
+        )
 
     sim_share = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim"
     world = sim_share / "worlds" / "indoor.sdf"
@@ -91,7 +112,8 @@ def setup(context, *args, **kwargs):
             actions=[
                 ExecuteProcess(
                     cmd=["python3", str(scenario / "spawn_fleet.py"),
-                         "--config", str(cfg_path), "--robots", str(count)],
+                         "--config", str(cfg_path), "--robots", str(count),
+                         "--lidar-rings", str(lidar_rings)],
                     output="screen",
                 )
             ],
@@ -116,16 +138,26 @@ def setup(context, *args, **kwargs):
                 package="ros_gz_bridge",
                 executable="parameter_bridge",
                 name=f"bridge_{ns}",
-                arguments=bridge_args(ns),
+                arguments=bridge_args(ns, lidar_rings),
                 output="screen",
             )
         )
+        if slam_backend == "rtabmap":
+            slam_args = {"namespace": ns, "use_sim_time": "true"}
+            slam_launch = "/launch/slam_rtabmap.launch.py"
+        else:
+            slam_args = {
+                "namespace": ns,
+                "use_sim_time": "true",
+                "lidar_rings": str(lidar_rings),
+            }
+            slam_launch = "/launch/slam.launch.py"
         delayed.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_slam"), "/launch/slam.launch.py"]
+                    [FindPackageShare("swarmdeck_slam"), slam_launch]
                 ),
-                launch_arguments={"namespace": ns, "use_sim_time": "true"}.items(),
+                launch_arguments=slam_args.items(),
             )
         )
         delayed.append(
@@ -146,6 +178,13 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("config", default_value="study/4robot.yaml"),
             DeclareLaunchArgument("headless", default_value="true"),
+            DeclareLaunchArgument(
+                "slam_backend",
+                default_value="toolbox",
+                choices=["toolbox", "rtabmap"],
+                description="toolbox = 2D SLAM Toolbox; rtabmap = 3D cloud + "
+                            "optional visual loop closure (needs lidar_rings > 1)",
+            ),
             OpaqueFunction(function=setup),
         ]
     )

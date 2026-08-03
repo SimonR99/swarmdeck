@@ -7,36 +7,60 @@ import math
 import numpy as np
 import pytest
 
-from swarmdeck_server.mapsvc.registration import register
+from swarmdeck_server.mapsvc.registration import COARSE_STEP, register
 from swarmdeck_server.mapsvc.service import GridMeta, MapService
 
 RES, N, OX, OY = 0.05, 400, -10.0, -10.0
 
 
-def build_plan() -> np.ndarray:
-    """An asymmetric floor plan: outer shell plus distinctive interior walls."""
-    g = np.full((N, N), -1, np.int8)
-
+def _rect_fn(g):
     def rect(x0, y0, x1, y1, v=100):
         i0, i1 = int((x0 - OX) / RES), int((x1 - OX) / RES)
         j0, j1 = int((y0 - OY) / RES), int((y1 - OY) / RES)
         g[j0:j1, i0:i1] = v
 
+    return rect
+
+
+def _shell(rect):
     rect(-8, -8, 8, -7.8)
     rect(-8, 7.8, 8, 8)
     rect(-8, -8, -7.8, 8)
     rect(7.8, -8, 8, 8)
-    rect(-2, -8, -1.8, 2)      # asymmetric interior
-    rect(3, -1, 3.2, 8)
-    rect(-8, 3, -2, 3.2)
-    rect(4.5, -5, 7.8, -4.8)
 
+
+def _flood_free(g):
     free = np.zeros_like(g, bool)
     i0, i1 = int((-7.8 - OX) / RES), int((7.8 - OX) / RES)
     j0, j1 = int((-7.8 - OY) / RES), int((7.8 - OY) / RES)
     free[j0:j1, i0:i1] = True
     g[free & (g == -1)] = 0
     return g
+
+
+def build_plan() -> np.ndarray:
+    """An asymmetric floor plan: outer shell plus distinctive interior walls."""
+    g = np.full((N, N), -1, np.int8)
+    rect = _rect_fn(g)
+    _shell(rect)
+    rect(-2, -8, -1.8, 2)      # asymmetric interior
+    rect(3, -1, 3.2, 8)
+    rect(-8, 3, -2, 3.2)
+    rect(4.5, -5, 7.8, -4.8)
+    return _flood_free(g)
+
+
+def build_symmetric_plan() -> np.ndarray:
+    """A square shell with a centred cross: identical under 90 deg rotation.
+
+    There is no unique answer here, so the only correct behaviour is to refuse.
+    """
+    g = np.full((N, N), -1, np.int8)
+    rect = _rect_fn(g)
+    _shell(rect)
+    rect(-0.1, -8, 0.1, 8)
+    rect(-8, -0.1, 8, 0.1)
+    return _flood_free(g)
 
 
 def reframe(g: np.ndarray, dx: float, dy: float, dyaw: float) -> np.ndarray:
@@ -68,6 +92,91 @@ def test_register_recovers_transform(dx, dy, dyaw_deg):
     assert math.hypot(r.dx - dx, r.dy - dy) < 0.35, f"translation off: {r.dx},{r.dy}"
     dyaw_err = (math.degrees(r.dyaw) - dyaw_deg + 180) % 360 - 180
     assert abs(dyaw_err) < 2.0, f"yaw off by {dyaw_err} deg"
+
+
+# Yaws deliberately off the coarse sweep's sampling grid. The correlation peak in
+# yaw is under a degree wide, so a coarse pass that samples on this grid without
+# blurring first misses the true peak entirely and locks onto the square shell's
+# 90 deg symmetry — reporting high confidence and a 90 deg error.
+@pytest.mark.parametrize("dyaw_deg", [2.0, 17.0, 30.0, 45.0, 58.0, 93.0, 137.0, -26.0, -110.0])
+def test_register_survives_yaw_off_the_coarse_grid(dyaw_deg):
+    assert not np.any(
+        np.isclose(np.arange(-180.0, 180.0, COARSE_STEP), dyaw_deg)
+    ), "this case is meant to fall between coarse samples"
+
+    ref = build_plan()
+    mov = reframe(ref, 1.1, -0.6, math.radians(dyaw_deg))
+    r = register(ref, (RES, OX, OY), mov, (RES, OX, OY))
+
+    assert r.confident, f"not confident: score={r.score} yaw_ratio={r.yaw_ratio}"
+    dyaw_err = (math.degrees(r.dyaw) - dyaw_deg + 180) % 360 - 180
+    assert abs(dyaw_err) < 1.0, f"yaw off by {dyaw_err} deg"
+    assert math.hypot(r.dx - 1.1, r.dy + 0.6) < 0.10, f"translation off: {r.dx},{r.dy}"
+
+
+def test_register_is_accurate_to_sub_cell():
+    """Sub-cell interpolation, not the search raster, sets the accuracy floor."""
+    ref = build_plan()
+    mov = reframe(ref, 1.37, -2.09, math.radians(23.0))
+    r = register(ref, (RES, OX, OY), mov, (RES, OX, OY))
+
+    assert r.confident
+    assert math.hypot(r.dx - 1.37, r.dy + 2.09) < 0.08
+    assert abs((math.degrees(r.dyaw) - 23.0 + 180) % 360 - 180) < 0.5
+
+
+@pytest.mark.parametrize("dyaw_deg", [0.0, 17.0, 43.0])
+def test_register_refuses_a_symmetric_building(dyaw_deg):
+    """A 90 deg-symmetric plan has no unique answer, so it must not report one."""
+    ref = build_symmetric_plan()
+    mov = reframe(ref, 1.0, -0.5, math.radians(dyaw_deg))
+    r = register(ref, (RES, OX, OY), mov, (RES, OX, OY))
+
+    assert not r.confident, (
+        f"claimed a unique alignment of a symmetric plan: "
+        f"score={r.score} ratio={r.ratio} yaw_ratio={r.yaw_ratio}"
+    )
+
+
+def test_register_refuses_when_coverage_barely_overlaps():
+    """A good score over a sliver of shared area is not evidence."""
+    ref = build_plan()
+    mov = reframe(ref, 0.0, 0.0, math.radians(20.0))
+    west = ref.copy()
+    west[:, int((-4.0 - OX) / RES):] = -1
+    east = mov.copy()
+    east[:, : int((4.0 - OX) / RES)] = -1
+
+    r = register(west, (RES, OX, OY), east, (RES, OX, OY))
+    assert r.support < 1.0
+    if r.confident:
+        dyaw_err = (math.degrees(r.dyaw) - 20.0 + 180) % 360 - 180
+        assert abs(dyaw_err) < 2.0, "confident but wrong on near-disjoint coverage"
+
+
+def test_yaw_prior_restricts_the_search():
+    """A prior must both find the answer and refuse one outside its window."""
+    ref = build_plan()
+    mov = reframe(ref, 1.1, -0.6, math.radians(37.0))
+
+    good = register(
+        ref, (RES, OX, OY), mov, (RES, OX, OY), yaw_prior=math.radians(30.0)
+    )
+    assert good.confident
+    assert abs((math.degrees(good.dyaw) - 37.0 + 180) % 360 - 180) < 1.0
+
+    # The true yaw is far outside this window, so the true peak is not a
+    # candidate and the result must not be presented as trustworthy.
+    blind = register(
+        ref,
+        (RES, OX, OY),
+        mov,
+        (RES, OX, OY),
+        yaw_prior=math.radians(-120.0),
+        yaw_window_deg=10.0,
+    )
+    assert abs((math.degrees(blind.dyaw) - 37.0 + 180) % 360 - 180) > 5.0
+    assert not blind.confident
 
 
 def test_register_rejects_when_no_overlap():

@@ -8,6 +8,7 @@ as bounding-box patches (architecture.md §5).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import math
@@ -20,6 +21,12 @@ import numpy as np
 from .registration import Registration, register
 
 UNKNOWN = -1
+
+# Yaw search window around a prior, degrees. The wide window is for a configured
+# start pose, which is only approximate; the narrow one is for a robot already
+# registered, where the answer is known and only drifts.
+PRIOR_WINDOW_DEG = 40.0
+LOCKED_WINDOW_DEG = 8.0
 
 
 @dataclass
@@ -52,9 +59,13 @@ class MapService:
         self.transform_priors: dict[str, tuple[float, float, float]] = {}
         self.registrations: dict[str, Registration] = {}
         self.registration_rejections: dict[str, str] = {}
+        self.locked_dyaw: dict[str, float] = {}
         self.merge_mode = "static"
         self.reference: str | None = None
         self.seq = 0
+        # Serialises ingests when they are offloaded off the event loop, so two
+        # adapters uploading at once cannot interleave inside the shared grids.
+        self._ingest_lock = asyncio.Lock()
 
         # Precomputed world-cell centre coordinates, for the backward warp.
         cx = self.meta.origin_x + (np.arange(n) + 0.5) * resolution
@@ -114,6 +125,16 @@ class MapService:
             self._reregister(robot_id)
         self._remerge()
 
+    async def ingest_async(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
+        """Ingest without stalling the event loop.
+
+        Registration is hundreds of milliseconds of numpy. Called inline from an
+        async request handler it blocks every websocket on the server, so
+        telemetry visibly stutters each time a robot uploads a map.
+        """
+        async with self._ingest_lock:
+            await asyncio.to_thread(self.ingest, robot_id, meta, cells)
+
     # ------------------------------------------------------------ registration
 
     def _reregister(self, robot_id: str) -> None:
@@ -128,17 +149,39 @@ class MapService:
 
         ref_meta, ref_cells = ref
         mov_meta, mov_cells = mov
+
+        # Compose with the reference's own world transform.
+        rx, ry, ryaw = self.transforms.get(self.reference or "", (0.0, 0.0, 0.0))
+
+        # Narrow the rotation search when the answer is already approximately
+        # known. Once locked this is a refinement, not a fresh global search, and
+        # a configured start pose is a legitimate window because a result more
+        # than 30 deg from it is rejected below regardless.
+        locked = self.locked_dyaw.get(robot_id)
+        configured = self.transform_priors.get(robot_id)
+        if locked is not None:
+            yaw_prior: float | None = locked
+            window = LOCKED_WINDOW_DEG
+        elif configured is not None:
+            yaw_prior = self._wrap_yaw(configured[2] - ryaw)
+            window = PRIOR_WINDOW_DEG
+        else:
+            yaw_prior = None  # unknown start: nothing to narrow the sweep with
+            window = PRIOR_WINDOW_DEG
+
         result = register(
             ref_cells, (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
             mov_cells, (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
+            yaw_prior=yaw_prior,
+            yaw_window_deg=window,
         )
         self.registrations[robot_id] = result
         if not result.confident:
             self.registration_rejections[robot_id] = "ambiguous occupancy match"
+            # A locked robot that stops matching has to go back to searching
+            # widely, or a bad lock is self-perpetuating.
+            self.locked_dyaw.pop(robot_id, None)
             return
-
-        # Compose with the reference's own world transform.
-        rx, ry, ryaw = self.transforms.get(self.reference or "", (0.0, 0.0, 0.0))
         c, s = math.cos(ryaw), math.sin(ryaw)
         wx = rx + result.dx * c - result.dy * s
         wy = ry + result.dx * s + result.dy * c
@@ -158,10 +201,12 @@ class MapService:
                     f"{math.degrees(yaw_error):.1f} deg)"
                 )
                 self.transforms[robot_id] = prior
+                self.locked_dyaw.pop(robot_id, None)
                 return
 
         self.registration_rejections.pop(robot_id, None)
         self.transforms[robot_id] = (wx, wy, candidate_yaw)
+        self.locked_dyaw[robot_id] = result.dyaw
 
     # --------------------------------------------------------------- merging
 
@@ -290,10 +335,13 @@ class MapService:
                     "score": round(r.score, 4),
                     "overlap": r.overlap,
                     "ratio": round(r.ratio, 3),
+                    "yaw_ratio": round(r.yaw_ratio, 3),
+                    "support": round(r.support, 3),
                     "confident": r.confident,
                     "accepted": r.confident and k not in self.registration_rejections,
                     "rejection": self.registration_rejections.get(k),
                     "dyaw_deg": round(math.degrees(r.dyaw), 2),
+                    "locked": k in self.locked_dyaw,
                 }
                 for k, r in self.registrations.items()
             },

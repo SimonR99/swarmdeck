@@ -165,6 +165,80 @@ def test_map_merge_two_robots():
     assert svc.merged[2, 2] == -1
 
 
+def test_ingest_async_does_not_block_the_event_loop():
+    """Registration is hundreds of ms of numpy; inline it stalls every socket."""
+    import time
+
+    svc = MapService(resolution=0.1, size_m=10.0)
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[10:20, 10:20] = 0
+
+    def slow_ingest(*_args, **_kwargs):
+        time.sleep(0.30)
+
+    svc.ingest = slow_ingest  # type: ignore[method-assign]
+
+    async def scenario() -> int:
+        ticks = 0
+
+        async def heartbeat() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        beat = asyncio.create_task(heartbeat())
+        await svc.ingest_async("r0", meta, cells)
+        beat.cancel()
+        return ticks
+
+    # A blocked loop would let through nearly none of these.
+    assert asyncio.run(scenario()) > 10
+
+
+def test_auto_mode_locks_on_and_stops_searching_all_rotations():
+    """Once registered, a robot's transform is refined, not re-derived.
+
+    A full 360 deg sweep on every upload is both wasted work and a fresh chance
+    to jump onto a symmetric alias.
+    """
+    import swarmdeck_server.mapsvc.service as service_module
+    from swarmdeck_server.mapsvc.registration import Registration
+
+    calls: list[dict] = []
+
+    def fake_register(*_args, **kwargs):
+        calls.append(kwargs)
+        return Registration(
+            dx=0.0, dy=0.0, dyaw=0.2, score=0.9, overlap=500,
+            ratio=0.1, yaw_ratio=0.2, support=0.9,
+        )
+
+    original = service_module.register
+    service_module.register = fake_register
+    try:
+        svc = MapService(resolution=0.1, size_m=10.0)
+        svc.set_mode("auto")
+        n = svc.meta.width
+        meta = GridMeta(0.1, n, n, -5.0, -5.0)
+        cells = np.full((n, n), -1, dtype=np.int8)
+        cells[10:30, 10:30] = 0
+        cells[10:12, 10:30] = 100
+
+        svc.ingest("ref", meta, cells)
+        svc.ingest("mov", meta, cells)
+        svc.ingest("mov", meta, cells)
+    finally:
+        service_module.register = original
+
+    assert len(calls) == 2
+    assert calls[0]["yaw_prior"] is None, "no prior configured, so search widely"
+    assert calls[1]["yaw_prior"] == pytest.approx(0.2), "should refine the accepted yaw"
+    assert calls[1]["yaw_window_deg"] < calls[0]["yaw_window_deg"]
+
+
 def test_patch_is_incremental():
     svc = MapService(resolution=0.1, size_m=10.0)
     n = svc.meta.width

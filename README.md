@@ -12,19 +12,28 @@ Gazebo can coexist in one fleet.
 See [`docs/`](docs/) for [architecture](docs/architecture.md),
 [requirements](docs/requirements.md), and the [roadmap](docs/roadmap.md).
 
-## Quick start — no ROS, no Gazebo
+## Quick start — Docker (recommended)
 
-The fastest way to see the whole GUI working:
+Full stack (Gazebo Harmonic + SLAM + Nav2 + `adapter_sim` + backend + UI):
 
 ```bash
-make install          # ui deps + server venv
-make server           # terminal 1 — backend on :8080
-make mock N=4         # terminal 2 — 4 synthetic robots
-make ui               # terminal 3 — GUI on :5173
+make docker-up          # or: docker compose --profile gazebo up --build -d
 ```
 
-Open <http://localhost:5173>. Four robots wander, build a shared map, raise alerts and
-report detections. Click a robot card to select it, then tap the map to send a goal.
+Open <http://localhost:5173>. Robots appear after Gazebo/SLAM come up (~45 s).
+API is on <http://localhost:8080>. Stop with `make docker-down`.
+
+Synthetic fleet only (no Gazebo/ROS — useful for UI/backend work):
+
+```bash
+make docker-up-mock     # or: docker compose --profile mock up --build -d
+```
+
+```bash
+make docker-logs        # follow logs
+make docker-test        # backend pytest in the server image
+```
+
 The map supports pan/zoom, fleet and selection centring, click-to-select markers, a
 metric grid, trails, labels, sensor/footprint overlays, map revision metadata, and live
 registration diagnostics from `GET /api/map/status`.
@@ -38,6 +47,19 @@ The simulation adapter also exposes a 5 Hz JPEG camera preview when MediaMTX/WHE
 installed, so camera frames remain visible during development. A portable RGB-only
 rubber-duck detector publishes normalized boxes over the same adapter contract and the
 camera panel draws them without using Gazebo entity IDs.
+
+## Quick start — local (no Docker)
+
+Needs Node.js and Python 3.10+ with `venv` (`sudo apt install python3-venv` on Debian/Ubuntu):
+
+```bash
+make install          # ui deps + server venv
+make server           # terminal 1 — backend on :8080
+make mock N=4         # terminal 2 — 4 synthetic robots
+make ui               # terminal 3 — GUI on :5173
+```
+
+Open <http://localhost:5173>.
 
 **GUI only, nothing else running:** <http://localhost:5173/?mock=1&robots=4> — the
 frontend falls back to a built-in simulator, so UI work needs no backend at all.
@@ -68,6 +90,7 @@ where appropriate, so lidar mapping and camera perception see the same environme
 | `ui/` | Svelte 5 + Tailwind frontend |
 | `study/` | Session configs (`1robot.yaml`, `2robot.yaml`, `4robot.yaml`) |
 | `sessions/` | Recorded output, one directory per session |
+| `docker/` | Server, UI, and Gazebo/ROS images; compose file at repo root |
 
 ## Map merging
 
@@ -75,20 +98,31 @@ Each robot runs its own 2D SLAM, so every map is in that robot's own frame with 
 origin wherever it started. `mapsvc` merges them:
 
 - **`static`** — transforms come from configured start poses. Always available.
-- **`auto`** — transforms estimated by grid registration (FFT cross-correlation over a
-  yaw sweep, numpy only). Verified against Gazebo ground truth at **7.8 cm** with two
-  robots at unknown relative poses.
+- **`auto`** — transforms estimated by grid registration (signed FFT cross-correlation over
+  a coarse-to-fine yaw sweep, numpy only). Verified against Gazebo ground truth at **7.8 cm**
+  with two robots at unknown relative poses; 52/52 correct at 0.1–3 cm on a synthetic
+  all-headings sweep.
 
-A ratio test rejects ambiguous alignments, so a repetitive building yields "not
-confident" rather than a confident-but-wrong merge; the merge then keeps `static`
-transforms. Registration needs the robots to have seen the same places — check
-`GET /api/map/status` for `score`, `ratio` and `overlap`.
+Four rejection tests guard the result — `score`, `ratio` (rival translation), `yaw_ratio`
+(rival rotation), and `support` (shared known area) — so a repetitive building yields "not
+confident" rather than a confident-but-wrong merge, and the merge keeps `static` transforms.
+Registration needs the robots to have seen the same places; `GET /api/map/status` reports all
+four metrics, and the map view explains which test refused.
 
-This registration is automatic whenever `merge_mode: auto`, but it is not a shared
-multi-robot pose graph. Each robot performs its own SLAM Toolbox loop closure first;
-the map service then aligns the corrected occupancy grids. Confident registration can
-update the inter-robot transform, while ambiguous or physically implausible candidates
-leave the configured deployment prior in place.
+This registration is automatic whenever `merge_mode: auto`, but it is **not** a shared
+multi-robot pose graph. Each robot closes its own loops first; the map service then aligns
+the corrected occupancy grids, so one robot's observations never correct another's drift.
+[`docs/collaborative-slam.md`](docs/collaborative-slam.md) explains the limits of that and
+the migration path to true collaborative SLAM.
+
+### Per-robot SLAM backend
+
+`slam_backend:=toolbox` (default) runs SLAM Toolbox on a single-ring lidar. For robots with
+a 3D point cloud and a camera, `slam_backend:=rtabmap` runs RTAB-Map instead — ICP over the
+full cloud plus appearance-based loop closure — publishing the same per-robot
+`OccupancyGrid`, so nothing downstream changes. Set `fleet.lidar_rings` to an **odd** value
+(the spawner refuses even counts, which leave no ring at zero elevation) to get a point
+cloud. This path is implemented but not yet validated in Gazebo.
 
 ## Tests
 
@@ -138,8 +172,14 @@ sudo apt install ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
                  ros-jazzy-nav2-map-server
 ```
 
-Source build: [`m-explore-ros2`](https://github.com/robo-friends/m-explore-ros2)
-(`multirobot_map_merge`) — not packaged for Jazzy. Plus MediaMTX for video.
+For `slam_backend:=rtabmap` (already in the Gazebo image):
+
+```bash
+sudo apt install ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-util
+```
+
+MediaMTX is still needed for video. `multirobot_map_merge` is deliberately *not* used: it is
+a ROS node, and the backend is ROS-free by design — see `docs/architecture.md` §1.
 
 **ROS 1 note.** Noetic is EOL and cannot install on Ubuntu 24.04, and
 `ros-jazzy-ros1-bridge` does not exist. A ROS 1 robot runs `adapter_ros1` in its own

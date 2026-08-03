@@ -91,6 +91,20 @@
           </label>
 
           <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+            Alert clear suppress
+            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+              <input
+                type="number"
+                min="0"
+                max="3600"
+                bind:value={draft.alert_suppress_s}
+                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none"
+              />
+              <span class="text-fg-dim">seconds</span>
+            </div>
+          </label>
+
+          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
             Expected robots
             <select
               value={draft.robot_count}
@@ -101,6 +115,9 @@
             </select>
           </label>
         </div>
+        <p class="mt-2 text-[10px] text-fg-dim">
+          After you clear an alert, the same condition will not reappear until the suppress window ends.
+        </p>
 
         <div class="my-4 border-t border-border"></div>
         <div class="flex items-center justify-between gap-4">

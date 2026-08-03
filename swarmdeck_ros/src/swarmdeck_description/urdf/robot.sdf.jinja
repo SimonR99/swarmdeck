@@ -154,16 +154,26 @@
             <horizontal><samples>360</samples><resolution>1</resolution>
               <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
             <!--
-              Single ring. The map is 2D, and a multi-ring lidar is actively
-              harmful here: any height band you pick truncates each ring at a
-              different range (a +/-0.15 m band caps every ring below 4 m of the
-              lidar's 16 m), which shreds the scan into a hatched wedge.
-              One ring also means Gazebo publishes a usable gz.msgs.LaserScan
-              directly, so pointcloud_to_laserscan drops out of the pipeline.
-              Raise <samples> only if you add a separate 2D sensor for SLAM.
+              Ring count is set by the fleet config (`fleet.lidar_rings`) and
+              defaults to 1, which is the 2D-only configuration: Gazebo then
+              publishes a usable gz.msgs.LaserScan directly and
+              pointcloud_to_laserscan drops out of the pipeline.
+
+              If you raise it, RAISE IT TO AN ODD NUMBER. Gazebo spreads N
+              samples evenly across [min_angle, max_angle] inclusive, so an even
+              N puts no ring at elevation 0 and every ring is tilted. A tilted
+              ring at elevation e crosses a height band of h at range h/sin(e)
+              and is invisible beyond it, so with 8 rings over +/-0.26 rad the
+              innermost sits at 0.0371 rad and a 0.15 m band truncates the whole
+              scan at 4.04 m of the lidar's 16 m — the hatched wedge recorded in
+              docs/KNOWN_ISSUES.md. No band fixes that, and no choice of filter
+              frame fixes it either: the geometry is range-dependent in every
+              frame. An odd N puts one ring at exactly 0 elevation, which passes
+              any band at full range, and the tilted rings then add genuine 3D
+              structure for a 3D-capable SLAM to use.
             -->
-            <vertical><samples>1</samples><resolution>1</resolution>
-              <min_angle>0</min_angle><max_angle>0</max_angle></vertical>
+            <vertical><samples>{{LIDAR_RINGS}}</samples><resolution>1</resolution>
+              <min_angle>{{LIDAR_VMIN}}</min_angle><max_angle>{{LIDAR_VMAX}}</max_angle></vertical>
           </scan>
           <range><min>0.15</min><max>16.0</max><resolution>0.01</resolution></range>
           <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
@@ -196,9 +206,18 @@
         </lidar>
       </sensor>
 
+      <!--
+        200 Hz because this rate is a hard interface requirement, not a taste
+        knob. Lidar-inertial odometry (FAST-LIO2, Point-LIO, LIO-SAM) integrates
+        IMU between scans to de-skew them and to seed registration; below about
+        100 Hz the preintegration error over one 10 Hz scan swamps the benefit
+        and those packages either refuse to initialise or drift. Wheel+IMU EKF
+        fusion is happy at 50 Hz, so drop back only if nothing downstream needs
+        inertial odometry. See docs/collaborative-slam.md.
+      -->
       <sensor name="imu" type="imu">
         <topic>{{NAME}}/imu</topic>
-        <update_rate>50</update_rate>
+        <update_rate>200</update_rate>
         <always_on>1</always_on>
       </sensor>
 

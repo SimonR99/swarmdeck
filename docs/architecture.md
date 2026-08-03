@@ -7,8 +7,14 @@
 2. **Four data classes, four transports.** Commands, telemetry, map, and video have
    opposite requirements. One channel cannot serve them. See §3.
 3. **The backend owns state; the browser is a view.** Reload must never lose the map.
-4. **Adopt, don't author.** SLAM Toolbox, Nav2, MediaMTX, MCAP. Custom code only for
-   adapters, map service (including registration), and GUI.
+4. **Adopt, don't author.** SLAM Toolbox, RTAB-Map, Nav2, MediaMTX, MCAP. Custom code only
+   for adapters, map service (including registration), and GUI. Registration is the one
+   place this principle is knowingly bent: `multirobot_map_merge` is the obvious package to
+   adopt, but it is ROS-node-shaped and would put ROS inside the backend, breaking principle
+   1 and the mixed ROS 1 / ROS 2 fleet it exists for. The cost of that decision is that the
+   algorithm — grid-to-grid correlation with rejection tests — had to be written and
+   calibrated here instead of inherited. §5.2 documents it as a first-class component
+   accordingly.
 5. **Config is data.** Study geometry stays in versioned YAML; operator preferences
    are validated and atomically persisted as JSON.
 6. **Every module testable alone**, with the rest mocked.
@@ -146,7 +152,7 @@ the vendor SDK. The contract does not care — that is the point of the seam.
 |---|---|
 | `swarmdeck_description` | URDF/xacro robot model, sensor config |
 | `swarmdeck_sim` | Gazebo worlds, model spawning, seeded scenario generator, reactive explorer |
-| `swarmdeck_slam` | SLAM Toolbox bringup per namespace (single-ring lidar, no scan conversion) |
+| `swarmdeck_slam` | Per-namespace SLAM bringup: SLAM Toolbox or RTAB-Map, plus cloud→scan slicing when the lidar has multiple rings |
 | `swarmdeck_nav` | Nav2 params and per-namespace bringup |
 | `adapters/perception` | Portable RGB perception with no ROS/Gazebo dependency |
 | `swarmdeck_media` | Camera → GStreamer → RTSP encoder node |
@@ -179,21 +185,31 @@ testable with no simulation and no ROS.
 ### 5.1 Pipeline
 
 ```
-3D lidar → pointcloud_to_laserscan → 2D LaserScan
-              (height band 0.1–1.8 m)
-                        ↓
-                  SLAM Toolbox  (per robot, 2D)
-                        ↓
-              OccupancyGrid per robot
-                        ↓
-   Map Service: transform estimation + grid merge
-                        ↓
-        merged OccupancyGrid → GUI + Nav2 costmaps
+lidar_rings=1:  Gazebo LaserScan ──────────────┐   (default)
+lidar_rings=N:  PointCloud2 → cloud_to_scan ───┤   (odd N; ring at elevation 0)
+                                               ↓
+                        slam_backend:=toolbox → SLAM Toolbox   (per robot, 2D)
+                        slam_backend:=rtabmap → RTAB-Map       (per robot, 3D → 2D grid)
+                                               ↓
+                                     OccupancyGrid per robot
+                                               ↓
+                          Map Service: transform estimation + grid merge
+                                               ↓
+                            merged OccupancyGrid → GUI + Nav2 costmaps
 ```
 
-SLAM Toolbox is the right choice now that the map is 2D — it maintains its own pose
-graph and republishes a corrected grid after loop closure, so the map service consumes
-already-corrected grids and needs no keyframe machinery of its own.
+Either backend maintains its own pose graph and republishes a corrected grid after loop
+closure, so the map service consumes already-corrected grids and needs no keyframe
+machinery of its own. That is also the boundary of the design: correction is *per robot*.
+The map service aligns finished grids and never feeds one robot's observations back into
+another's graph, so inter-robot drift is stitched over rather than corrected. See
+`docs/collaborative-slam.md` for what changes if that is required.
+
+SLAM Toolbox is the default: single-ring lidar, 2D scan matching, Ceres pose graph, and
+the lightest dependency set. RTAB-Map is wired as an alternative (`slam_backend:=rtabmap`)
+for the case the user's real robots present — point cloud plus camera plus uncorrected
+odometry — where ICP over the full cloud and RGB appearance-based loop closure are
+stronger than 2D scan matching. It is implemented but not yet validated against Gazebo.
 
 ### 5.2 Merge modes
 
@@ -209,34 +225,53 @@ reference and its accepted peers form the global-map membership; robots outside 
 connected set continue to show local maps. `static` remains available when surveyed
 transforms are an explicit deployment guarantee.
 
-**Registration algorithm** (`mapsvc/registration.py`, numpy only):
+**Registration algorithm** (`mapsvc/registration.py`, numpy only). Three stages, each
+sampling yaw finely enough to resolve its own correlation peak:
 
 ```
-for each candidate yaw (4 deg coarse, then 0.5 deg fine around the winner):
-    rotate robot B's occupied cells
-    FFT cross-correlate against robot A's occupied cells   # every shift at once
-    keep the best peak
+coarse   4.0 deg over the search window, reference dilated so the peak is 4 deg wide
+medium   0.5 deg around the coarse winner, undilated — ranks rival rotations (yaw_ratio)
+fine     0.1 deg around the medium winner, then parabolic interpolation to sub-cell
 ```
 
-FFT cross-correlation evaluates *all* translations in one O(n log n) pass, so cost is
-one transform per yaw candidate rather than a full 3D sweep. It needs no inter-robot
-communication, which matters for a mixed ROS 1 / ROS 2 fleet that cannot share a SLAM
-system, and no OpenCV/PCL.
+Within each yaw candidate, FFT cross-correlation evaluates *all* translations in one
+O(n log n) pass, so cost is one transform per yaw candidate rather than a full 3D sweep.
+The correlation is **signed**: occupied-on-occupied scores +1, occupied-on-free −1, with a
+one-cell neutral guard band around walls so that a near-miss is not punished as hard as
+driving a wall through a known-empty room. Free space is what disambiguates buildings whose
+walls alone are ambiguous. Needs no inter-robot communication, which matters for a mixed
+ROS 1 / ROS 2 fleet that cannot share a SLAM system, and no OpenCV/PCL.
 
-A **ratio test** guards the result: the best rival peak outside a neighbourhood of the
-winner, over the winner. In a building of near-identical rooms, shifting by one room
-width scores almost as well as the truth, so a near-tie (ratio > 0.80) is reported as
-*not confident* and ignored. This is what prevents a confident-but-wrong merge.
+The dilated coarse stage is the load-bearing detail. A yaw error of `dyaw` displaces a point
+at radius `r` by `r·dyaw`, so at 20 m the undilated peak is well under a degree wide and a
+4 deg sweep steps straight over it — which is exactly how the first implementation produced
+confident 90 deg errors (see `docs/KNOWN_ISSUES.md`).
 
-Accepted only when `overlap >= 80 cells`, `score >= 0.20`, `ratio <= 0.80`. If a
-configured start pose is available, the candidate must also remain within 2 m and
-30 degrees of that safety prior; otherwise it is rejected and remains local.
+Four **rejection tests** guard the result, all necessary:
+
+| Metric | Rejects | Threshold |
+|---|---|---|
+| `score` | Weak agreement — wrong or too little to see | `>= 0.20` |
+| `ratio` | Rival *translation* at the winning yaw scores nearly as well | `<= 0.80` |
+| `yaw_ratio` | Rival *rotation* scores nearly as well (symmetric building) | `<= 0.80` |
+| `support` | Fraction of the smaller map's known area shared with the reference | `>= 0.35` |
+
+Plus `overlap >= 80` occupied cells in common. If a configured start pose is available, the
+candidate must also remain within 2 m and 30 degrees of that safety prior; otherwise it is
+rejected and remains local.
 
 Measured against Gazebo ground truth with two robots at unknown relative poses:
-**7.8 cm translation error, exact yaw** (score 0.54, ratio 0.58, 2149 overlapping cells).
+**7.8 cm translation error, exact yaw**. On a 52-heading synthetic sweep after the rewrite:
+52/52 correct at 0.1–3 cm and under 0.1 deg, and a rotationally symmetric building is
+refused rather than guessed.
+
+Once a robot's transform is accepted, its yaw is cached and subsequent uploads refine
+within a ±8 deg window instead of re-sweeping 360 deg. Ingest runs on a worker thread
+(`asyncio.to_thread` under a lock) so a ~190 ms registration never blocks the event loop
+and the WebSocket telemetry stream.
 
 Registration requires the robots to have **seen the same places**. With disjoint coverage
-the problem is ill-posed and the ratio test correctly refuses — see `docs/KNOWN_ISSUES.md`.
+the problem is ill-posed and `support` refuses — see `docs/KNOWN_ISSUES.md`.
 
 ### 5.3 Map Service state
 
@@ -406,7 +441,7 @@ swarmdeck/
 ├── swarmdeck_ros/src/
 │   ├── swarmdeck_description/     urdf/ meshes/ config/
 │   ├── swarmdeck_sim/             worlds/ launch/ scenario/
-│   ├── swarmdeck_slam/            pointcloud_to_laserscan + slam_toolbox config
+│   ├── swarmdeck_slam/            slam_toolbox / rtabmap launch + cloud_to_scan
 │   ├── swarmdeck_nav/             config/nav2_params.yaml launch/
 │   ├── swarmdeck_media/
 │   └── swarmdeck_bringup/         launch/session.launch.py
@@ -444,7 +479,12 @@ sessions/S07_4robot_20260801T143000/
 
 ## 10. Deliberate non-goals
 
-- **No 3D map.** Lidar pointclouds reduce to 2D scans. No three.js, no tiles, no voxels.
+- **No 3D map in the GUI.** The operator view is a 2D occupancy grid: no three.js, no tiles,
+  no voxels. RTAB-Map may consume the full point cloud internally and project a 2D grid out,
+  but the merged map and everything the operator sees stay 2D.
+- **No shared pose graph across robots.** Each robot's SLAM is private and the backend merges
+  finished grids. This follows from the ROS-free backend rather than from the mapping being
+  easy; `docs/collaborative-slam.md` states what it costs and what lifting it would take.
 - **No shared ROS graph across machines.** Adapters connect over TCP; each robot's ROS
   domain stays private. No `ros1_bridge`, which does not exist for Jazzy anyway.
 - **No custom ROS messages.** The adapter protocol is the interface.

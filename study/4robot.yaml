@@ -5,12 +5,16 @@ seed: 20260801
 fleet:
   robot_count: 4
   robot_prefix: robot_
+  # Vertical rings on the mapping lidar. 1 keeps the pure-2D pipeline. Odd values
+  # above 1 also publish a 3D cloud on <ns>/scan/points, from which the planar
+  # scan is sliced; an even value is refused, because then no ring is horizontal
+  # and the 2D scan truncates at short range (docs/KNOWN_ISSUES.md).
+  lidar_rings: 1
 
 map:
   merge_mode: auto          # static | auto
   size_m: 30.0              # merged grid extent, metres
   resolution: 0.05
-  height_band: [0.10, 1.80] # unused: lidar is single-ring
   start_poses:              # static transforms, or safety priors in auto mode
     robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
     robot_1: {x: -3.0, y: 0.0, yaw: 0.0}
