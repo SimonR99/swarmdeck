@@ -31,6 +31,13 @@ const state = $state({
   statusUpdatedAt: 0,
   viewMode: 'global' as 'global' | 'local',
   viewRobot: null as string | null,
+  // What the OPERATOR asked for, as opposed to what the backend recommends.
+  // 'auto' follows the backend's view_by_robot; the other two are a deliberate
+  // override. Inspecting one robot's own map is a legitimate thing to want even
+  // once that robot has registered — it is how you tell whether a bad merge is
+  // the registration or the underlying map — and until this existed, a robot
+  // joining the global map silently took the choice away.
+  viewPreference: 'auto' as 'auto' | 'global' | 'local',
   // Live pose-graph state, pushed per robot rather than polled with the rest of
   // map status, because an inter-robot loop closure is the event an operator
   // most wants to see the moment it happens.
@@ -350,9 +357,25 @@ export const mapStore = {
   },
 
   /** Select the map scope implied by robot selection and registration state. */
+  get viewPreference() {
+    return state.viewPreference;
+  },
+
+  /** Operator override for local/global. Re-resolves the current selection. */
+  async setViewPreference(
+    preference: 'auto' | 'global' | 'local',
+    robotId: string | null
+  ) {
+    state.viewPreference = preference;
+    await this.selectRobotView(robotId);
+  },
+
   async selectRobotView(robotId: string | null) {
+    const recommended = robotId && state.status?.view_by_robot?.[robotId] === 'local';
     const desiredLocal = Boolean(
-      robotId && state.status?.view_by_robot?.[robotId] === 'local'
+      robotId &&
+        (state.viewPreference === 'local' ||
+          (state.viewPreference === 'auto' && recommended))
     );
     const desiredMode = desiredLocal ? 'local' : 'global';
     const desiredRobot = desiredLocal ? robotId : null;

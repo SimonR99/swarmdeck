@@ -686,14 +686,33 @@
     </div>
   {/if}
 
-  <div class="pointer-events-none absolute left-3 top-3 z-20 flex items-center gap-1.5">
-    <div
+  <div class="absolute left-3 top-3 z-20 flex items-center gap-1.5">
+    <!--
+      Clickable: the backend recommends local vs global, but the operator must be
+      able to overrule it. Inspecting one robot's own map is how you tell whether
+      a bad merge is the registration or the underlying map, and a robot joining
+      the global map used to take that choice away silently.
+    -->
+    <button
       class="flex items-center gap-2 rounded-[4px] border border-border bg-surface/88 px-2.5 py-1
-             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl"
+             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl
+             transition-colors hover:bg-surface-2 disabled:hover:bg-surface/88"
+      title={fleet.selected[0]
+        ? "Switch between the merged map and this robot's own SLAM map"
+        : 'Select a robot to view its own map'}
+      disabled={!fleet.selected[0]}
+      onclick={() =>
+        mapStore.setViewPreference(
+          mapStore.viewMode === 'local' ? 'global' : 'local',
+          fleet.selected[0] ?? null
+        )}
     >
       <span class="h-1.5 w-1.5 rounded-full {mapStore.ready ? 'bg-ok' : 'bg-warn'}"></span>
       {mapStore.ready ? mapStore.viewLabel : 'Connecting'}
-    </div>
+      {#if fleet.selected[0]}
+        <Layers3 class="h-3 w-3 opacity-50" />
+      {/if}
+    </button>
     {#if mapStore.status}
       <div
         class="rounded-[4px] border border-border bg-surface/88 px-2.5 py-1 text-[10px]
