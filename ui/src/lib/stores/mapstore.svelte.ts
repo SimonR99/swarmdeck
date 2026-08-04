@@ -1,5 +1,5 @@
 import { inflate } from 'pako';
-import type { MapInfo, MapPatch, MapStatus } from '$lib/types/protocol';
+import type { MapInfo, MapPatch, MapStatus, SlamGraph } from '$lib/types/protocol';
 
 /**
  * Occupancy grid, held as an offscreen canvas. The displayed grid is either
@@ -7,11 +7,20 @@ import type { MapInfo, MapPatch, MapStatus } from '$lib/types/protocol';
  * Patches blit in; the full grid is only fetched on connect or reload (NFR-6).
  */
 
-// Slightly darker than the application canvas so explored free space and the
+// Darker than the application canvas so explored free space and the
 // occupancy-grid boundary remain legible without turning the map into a dark UI.
-const UNKNOWN = [229, 232, 236] as const;
+// These must stay in step with `_grid_png` in server/swarmdeck_server/mapsvc/
+// service.py: the same map arrives as a PNG on connect and as int8 patches
+// afterwards, so a mismatch shows up as a seam after a browser reload.
+const UNKNOWN = [214, 218, 224] as const;
 const FREE = [255, 255, 255] as const;
 const OCCUPIED = [52, 58, 68] as const;
+
+// Any pixel darker than this is an occupied cell. Used to recover occupancy from
+// the PNG paths, which deliver colour rather than int8 cells. The three palette
+// entries above are far apart (red channel 52 / 214 / 255), so the threshold is
+// not delicate.
+const OCCUPIED_RED_MAX = 140;
 
 const state = $state({
   info: null as MapInfo | null,
@@ -21,7 +30,11 @@ const state = $state({
   status: null as MapStatus | null,
   statusUpdatedAt: 0,
   viewMode: 'global' as 'global' | 'local',
-  viewRobot: null as string | null
+  viewRobot: null as string | null,
+  // Live pose-graph state, pushed per robot rather than polled with the rest of
+  // map status, because an inter-robot loop closure is the event an operator
+  // most wants to see the moment it happens.
+  slamGraphs: {} as Record<string, SlamGraph>
 });
 
 let canvas: HTMLCanvasElement | null = null;
@@ -30,36 +43,144 @@ let statusLoading = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
 
+/**
+ * Occupancy mask pyramid, and why it exists.
+ *
+ * The grid canvas is one pixel per cell, and `MapView` blits it scaled to fit.
+ * Below one screen pixel per cell — which is most of the useful zoom range on a
+ * 30 m map — neither `drawImage` mode renders a wall: with smoothing on the
+ * browser box-filters, so a one-cell wall is averaged with its free and unknown
+ * neighbours until it is a pale smudge; with smoothing off it point-samples, so
+ * the wall is dropped outright wherever the sampling grid misses it. That is
+ * what made real maps look like dotted fans rather than rooms.
+ *
+ * So occupancy is composited separately, from a mip chain built by 2x2 *max*
+ * rather than by averaging. An isolated occupied cell survives every reduction,
+ * and every level is drawn nearest-neighbour at >= 1 px per cell, so a wall
+ * keeps full contrast at any zoom. Level cell sizes round up, so a level never
+ * covers less ground than the grid it came from.
+ */
+let maskLevels: HTMLCanvasElement[] = [];
+let occupied: Uint8Array | null = null; // 1 byte per cell of the base grid
+let maskDirty = true;
+
 function ensureCanvas(w: number, h: number) {
   if (!canvas) {
     canvas = document.createElement('canvas');
-    ctx = canvas.getContext('2d', { willReadFrequently: false });
+    ctx = canvas.getContext('2d', { willReadFrequently: true });
   }
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
-    ctx = canvas.getContext('2d');
+    ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (ctx) {
       ctx.fillStyle = `rgb(${UNKNOWN.join(',')})`;
       ctx.fillRect(0, 0, w, h);
     }
+    maskLevels = [];
+    occupied = new Uint8Array(w * h);
+    maskDirty = true;
   }
 }
 
-/** Convert an int8 occupancy buffer to RGBA pixels. */
-function toImageData(cells: Int8Array, w: number, h: number): ImageData {
+/** Convert an int8 occupancy buffer to RGBA pixels, recording occupancy. */
+function toImageData(
+  cells: Int8Array,
+  w: number,
+  h: number,
+  x0 = 0,
+  y0 = 0
+): ImageData {
   const img = new ImageData(w, h);
   const px = img.data;
+  const stride = canvas?.width ?? w;
   for (let i = 0; i < cells.length; i++) {
     const v = cells[i];
-    const c = v < 0 ? UNKNOWN : v >= 50 ? OCCUPIED : FREE;
+    const isOccupied = v >= 50;
+    const c = v < 0 ? UNKNOWN : isOccupied ? OCCUPIED : FREE;
     const o = i * 4;
     px[o] = c[0];
     px[o + 1] = c[1];
     px[o + 2] = c[2];
     px[o + 3] = 255;
+    if (occupied) {
+      const gx = x0 + (i % w);
+      const gy = y0 + ((i / w) | 0);
+      occupied[gy * stride + gx] = isOccupied ? 1 : 0;
+    }
   }
+  maskDirty = true;
   return img;
+}
+
+/**
+ * Recover occupancy by reading the grid canvas back.
+ *
+ * Only the PNG paths need this — a full map fetched on connect or reload, and a
+ * robot's local map — because those deliver colour rather than int8 cells. It is
+ * a once-per-load cost, not a per-patch one.
+ */
+function readBackOccupancy() {
+  if (!canvas || !ctx || !occupied) return;
+  const { width: w, height: h } = canvas;
+  const px = ctx.getImageData(0, 0, w, h).data;
+  for (let i = 0; i < occupied.length; i++) {
+    occupied[i] = px[i * 4] < OCCUPIED_RED_MAX ? 1 : 0;
+  }
+  maskDirty = true;
+}
+
+function levelCanvas(w: number, h: number, bits: Uint8Array): HTMLCanvasElement {
+  const level = document.createElement('canvas');
+  level.width = w;
+  level.height = h;
+  const img = new ImageData(w, h);
+  const px = img.data;
+  for (let i = 0; i < bits.length; i++) {
+    if (!bits[i]) continue;
+    const o = i * 4;
+    px[o] = OCCUPIED[0];
+    px[o + 1] = OCCUPIED[1];
+    px[o + 2] = OCCUPIED[2];
+    px[o + 3] = 255;
+  }
+  level.getContext('2d')?.putImageData(img, 0, 0);
+  return level;
+}
+
+/**
+ * Rebuild the pyramid, lazily — only when something has actually changed and a
+ * frame is asking for it. Patches arrive at most at the backend's 2 Hz, so a
+ * full rebuild (a few hundred thousand integer max operations on a 600x600
+ * grid) is cheaper than tracking dirty rectangles through ten levels.
+ */
+function ensureMask() {
+  if (!maskDirty || !canvas || !occupied) return;
+  maskDirty = false;
+  maskLevels = [];
+
+  let bits = occupied;
+  let w = canvas.width;
+  let h = canvas.height;
+  for (;;) {
+    maskLevels.push(levelCanvas(w, h, bits));
+    if (w <= 1 && h <= 1) break;
+    const nw = Math.max(1, Math.ceil(w / 2));
+    const nh = Math.max(1, Math.ceil(h / 2));
+    const next = new Uint8Array(nw * nh);
+    for (let y = 0; y < nh; y++) {
+      const ya = Math.min(y * 2, h - 1) * w;
+      const yb = Math.min(y * 2 + 1, h - 1) * w;
+      for (let x = 0; x < nw; x++) {
+        const xa = Math.min(x * 2, w - 1);
+        const xb = Math.min(x * 2 + 1, w - 1);
+        next[y * nw + x] = bits[ya + xa] | bits[ya + xb] | bits[yb + xa] | bits[yb + xb];
+      }
+    }
+    bits = next;
+    w = nw;
+    h = nh;
+  }
 }
 
 export const mapStore = {
@@ -81,6 +202,17 @@ export const mapStore = {
   get statusUpdatedAt() {
     return state.statusUpdatedAt;
   },
+  get slamGraphs() {
+    return state.slamGraphs;
+  },
+  /** True once any robot reports a collaborative pose graph at all. */
+  get collaborative() {
+    return state.status?.mode === 'cslam' || Object.keys(state.slamGraphs).length > 0;
+  },
+
+  applySlamGraph(robotId: string, graph: SlamGraph) {
+    state.slamGraphs = { ...state.slamGraphs, [robotId]: graph };
+  },
   get viewMode() {
     return state.viewMode;
   },
@@ -94,6 +226,23 @@ export const mapStore = {
   },
   get canvas() {
     return canvas;
+  },
+
+  /**
+   * Occupancy mask to composite over the grid at a given screen scale, or null
+   * when the grid is already at or above one screen pixel per cell and renders
+   * walls correctly on its own.
+   *
+   * Returns the coarsest level that still has at least one screen pixel per mask
+   * cell, so the browser is never asked to downsample occupied cells. Draw it
+   * over the exact rectangle the grid was drawn into, with smoothing off.
+   */
+  occupancyMask(scale: number): HTMLCanvasElement | null {
+    if (scale >= 1 || !canvas) return null;
+    ensureMask();
+    if (!maskLevels.length) return null;
+    const level = Math.min(maskLevels.length - 1, Math.ceil(-Math.log2(scale)));
+    return maskLevels[Math.max(0, level)];
   },
 
   setGlobalInfo(info: MapInfo) {
@@ -131,6 +280,7 @@ export const mapStore = {
       if (ctx) {
         ctx.clearRect(0, 0, info.width, info.height);
         ctx.drawImage(bitmap, 0, 0, info.width, info.height);
+        readBackOccupancy();
       }
       bitmap.close();
       state.info = info;
@@ -166,7 +316,11 @@ export const mapStore = {
 
     const raw = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
     const cells = new Int8Array(inflate(raw).buffer);
-    ctx.putImageData(toImageData(cells, patch.w, patch.h), patch.x0, patch.y0);
+    ctx.putImageData(
+      toImageData(cells, patch.w, patch.h, patch.x0, patch.y0),
+      patch.x0,
+      patch.y0
+    );
 
     state.seq = patch.seq;
     state.revision++;
@@ -181,6 +335,12 @@ export const mapStore = {
       if (!response.ok) throw new Error(`map status ${response.status}`);
       state.status = (await response.json()) as MapStatus;
       state.statusUpdatedAt = Date.now();
+      // The websocket carries these live; folding the polled copy in as well
+      // means a client that connected mid-session, or missed a push, still
+      // shows the graph rather than an empty panel.
+      if (state.status.slam_graphs) {
+        state.slamGraphs = { ...state.slamGraphs, ...state.status.slam_graphs };
+      }
     } catch {
       // The opt-in UI mock does not expose HTTP endpoints. Keep the map usable
       // and simply omit registration health in that mode.
@@ -238,6 +398,7 @@ export const mapStore = {
       ensureCanvas(info.width, info.height);
       ctx?.clearRect(0, 0, info.width, info.height);
       ctx?.drawImage(bitmap, 0, 0, info.width, info.height);
+      readBackOccupancy();
       bitmap.close();
       state.info = info;
       state.seq = info.seq;
@@ -321,6 +482,9 @@ export const mapStore = {
     loadGeneration++;
     canvas = null;
     ctx = null;
+    maskLevels = [];
+    occupied = null;
+    maskDirty = true;
     state.revision++;
   }
 };

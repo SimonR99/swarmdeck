@@ -1,0 +1,44 @@
+# GPU overlay for the Gazebo service.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#                  --profile gazebo up --build -d
+#   make docker-up-gpu
+#
+# Why this is a separate file rather than the default: a `devices` reservation
+# with `driver: nvidia` makes `docker compose up` fail outright on a machine
+# with no NVIDIA runtime, so the base compose file has to stay portable. CI and
+# GPU-less workstations keep using `make docker-up`.
+#
+# What it buys. The base stack runs `LIBGL_ALWAYS_SOFTWARE=1`, so Gazebo's
+# `gpu_lidar` sensors raytrace on the CPU at roughly 0.58x real time. Every
+# sensor-fidelity increase — more rays per revolution, more vertical rings —
+# is paid for out of that budget, which is why the mapping lidar was still at
+# 360 samples per revolution (1.003 deg) and distant walls came out dotted.
+# Moving the raytracing onto the GPU is what makes a realistic lidar
+# affordable; see docs/KNOWN_ISSUES.md #8.
+#
+# Verified on this host: `--gpus all` with NVIDIA_DRIVER_CAPABILITIES=all
+# injects /usr/share/glvnd/egl_vendor.d/10_nvidia.json, which libglvnd loads
+# ahead of 50_mesa.json, so Gazebo's `--headless-rendering` EGL context lands
+# on the discrete GPU rather than llvmpipe.
+
+services:
+  gazebo:
+    environment:
+      # Explicit "0" rather than an empty value: mesa parses this variable as a
+      # boolean and an empty string falls through to its default, which is the
+      # sort of thing that silently un-fixes itself later.
+      LIBGL_ALWAYS_SOFTWARE: "0"
+      NVIDIA_VISIBLE_DEVICES: all
+      # `graphics` is the one that matters here — it injects libEGL_nvidia /
+      # libGLX_nvidia. `compute` and `utility` come along for CUDA-based
+      # perception and for nvidia-smi being usable inside the container.
+      NVIDIA_DRIVER_CAPABILITIES: all
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

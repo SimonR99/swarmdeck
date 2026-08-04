@@ -1,0 +1,116 @@
+# Swarm-SLAM (MISTLab `cslam`) on ROS 2 Jazzy — the Stage 3.0 build spike.
+#
+#   docker build -f docker/Dockerfile.cslam -t swarmdeck-cslam:local .
+#
+# This exists because the riskiest thing about adopting Swarm-SLAM here is not
+# the integration, it is whether it builds at all on this distro. Upstream's
+# instructions are written against Foxy and validate **GTSAM 4.1.1**, while Jazzy
+# ships `ros-jazzy-gtsam` 4.2.0; the lidar front end additionally needs TEASER++
+# with Python bindings (but not torch, which is the image-based path only).
+#
+# Keeping the spike as a Dockerfile rather than a shell transcript means the
+# answer is reproducible and the failure point, if any, is a build log rather
+# than a memory.
+#
+# It deliberately does NOT extend the Gazebo image. Swarm-SLAM runs per robot —
+# on the robot itself in a real deployment — so it gets its own image, and the
+# adapter seam means it never has to share a ROS graph with the backend.
+
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git \
+      python3-pip python3-vcstool python3-numpy python3-scipy \
+      python3-colcon-common-extensions \
+      libeigen3-dev libboost-all-dev libtbb-dev pybind11-dev \
+      libpcl-dev \
+      ros-jazzy-gtsam \
+      ros-jazzy-rmw-zenoh-cpp \
+      ros-jazzy-pcl-conversions \
+      ros-jazzy-perception-pcl \
+      ros-jazzy-tf2-ros \
+      ros-jazzy-rtabmap-odom ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-util \
+    && rm -rf /var/lib/apt/lists/*
+
+# TEASER++ with Python bindings — the lidar registration back end. Built before
+# the workspace so a failure here is unambiguous.
+# TEASER++ and its Python bindings, which cslam's lidar path needs.
+#
+# The bindings are the fiddly part, and every way of getting them wrong fails
+# silently at runtime rather than at build time:
+#
+# * `BUILD_PYTHON_BINDINGS=ON` is the real option. There is no
+#   `TEASERPP_PYTHON_VERSION` in this version, and passing it instead simply
+#   leaves the bindings off — `make teaserpp_python` then reports "No rule to
+#   make target", which reads like a missing dependency rather than a typo'd
+#   flag. `pybind11-dev` must be present for the `find_package(pybind11
+#   REQUIRED)` in `python/CMakeLists.txt`.
+# * `cmake --install` does NOT install them. The module is built to
+#   `build/python/teaserpp_python/_teaserpp.cpython-*.so`, and the `__init__.py`
+#   that turns it into an importable package lives in the SOURCE tree. Both
+#   halves have to be copied; neither alone imports.
+# * No `#` comments inside a continued RUN: Docker hands them to the shell,
+#   where `#` comments out the rest of the line and truncates the chain.
+#
+# Missing bindings still produce an image where cslam compiles and every node
+# starts, and the lidar loop-closure path then dies on `import teaserpp_python`
+# the first time two robots have something to verify. Both the import and the
+# solver symbol are asserted here so that cannot ship.
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/MIT-SPARK/TEASER-plusplus.git \
+    && cmake -S TEASER-plusplus -B TEASER-plusplus/build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DBUILD_TEASER_FPFH=ON \
+         -DBUILD_TESTS=OFF \
+         -DBUILD_PYTHON_BINDINGS=ON \
+    && cmake --build TEASER-plusplus/build -j"$(nproc)" \
+    && cmake --install TEASER-plusplus/build \
+    && ldconfig \
+    && SP="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
+    && cp -r /opt/TEASER-plusplus/python/teaserpp_python "$SP/" \
+    && cp /opt/TEASER-plusplus/build/python/teaserpp_python/_teaserpp*.so \
+          "$SP/teaserpp_python/" \
+    && python3 -c "import teaserpp_python; assert hasattr(teaserpp_python, 'RobustRegistrationSolver'); print('teaserpp_python OK')"
+
+WORKDIR /cslam_ws
+RUN git clone --depth 1 https://github.com/MISTLab/Swarm-SLAM.git src/Swarm-SLAM \
+    && vcs import src < src/Swarm-SLAM/cslam.repos
+
+# Install the repo's OWN requirements.txt rather than a guessed subset. Getting
+# this wrong does not fail the build: colcon compiles cslam regardless, and the
+# Python nodes then die on `import open3d` / `import networkx` the moment they
+# are launched, while the C++ pose_graph_manager starts perfectly and makes the
+# stack look healthy.
+#
+# torch and torchvision are dropped deliberately. They are ~2.5 GB and only the
+# image-based global descriptor (CosPlace) needs them; the lidar front end uses
+# Scan Context, which is why upstream documents lidar mode as torch-free. Put
+# them back if this fleet ever runs the stereo or RGB-D path.
+#
+# `--ignore-installed psutil` first: open3d pulls a newer psutil, and the base
+# image's copy came from apt with no RECORD file, so pip refuses with "Cannot
+# uninstall psutil ... installed by debian" and the whole requirements install
+# aborts. Installing a pip-managed copy alongside satisfies the resolver without
+# pip having to remove a distro package.
+RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed psutil \
+    && sed -e '/^torch/d' -e '/^torchvision/d' src/Swarm-SLAM/requirements.txt > /tmp/req.txt \
+    && pip3 install --break-system-packages --no-cache-dir -r /tmp/req.txt
+
+# Not `|| true`: the whole point of the spike is a definite answer.
+RUN . /opt/ros/jazzy/setup.sh \
+    && colcon build --symlink-install \
+         --cmake-args -DCMAKE_BUILD_TYPE=Release \
+         --packages-skip cslam_experiments
+
+# SwarmDeck's own wiring, built on top of the cslam workspace. Last layer, so
+# editing the launch/config rebuilds in seconds rather than re-running apt.
+COPY swarmdeck_ros/src/swarmdeck_cslam /cslam_ws/src/swarmdeck_cslam
+RUN . /opt/ros/jazzy/setup.sh \
+    && . /cslam_ws/install/setup.sh \
+    && colcon build --symlink-install --packages-select swarmdeck_cslam
+
+CMD ["bash"]

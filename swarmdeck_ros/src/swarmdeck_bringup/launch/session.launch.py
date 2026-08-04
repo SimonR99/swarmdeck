@@ -2,15 +2,27 @@
 
     ros2 launch swarmdeck_bringup session.launch.py config:=study/4robot.yaml
 
-Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot SLAM + Nav2.
-The backend and UI run separately (`make server`, `make ui`) because they are
-ROS-free by design.
+Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot odometry
+fusion + SLAM + Nav2. The backend and UI run separately (`make server`, `make ui`)
+because they are ROS-free by design.
+
+Arguments worth knowing:
 
 `slam_backend:=rtabmap` swaps 2D SLAM Toolbox for RTAB-Map on the 3D cloud, which
-needs `fleet.lidar_rings` raised to an odd value in the study config.
+needs a multi-ring lidar — set `fleet.lidar.profile: generic_32` in the study
+config (see spawn_fleet.py's LIDAR_PROFILES).
+
+`fuse_imu:=false` reverts to the drive plugin's raw wheel odometry. Only useful for
+reproducing what unfused odometry does to a map; wheel odometry alone was measured
+8.8-30.5 m and up to 244 deg wrong on a 24 m floor plan.
+
+`explore_seconds:=N` drives the fleet reactively for N seconds to bootstrap the
+maps, then stops. Nothing moves without either this or an operator goal, and
+issuing goals against an empty map is how robots end up jammed against walls.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import yaml
@@ -29,8 +41,17 @@ from launch_ros.substitutions import FindPackageShare
 
 REPO = Path(__file__).resolve().parents[4]
 
+# Seconds after launch before the first robot's bringup, leaving Gazebo and the
+# fleet spawn time to settle.
+BRINGUP_DELAY = 20.0
+# Gap between successive robots' stacks. See the comment at the loop below: they
+# lose a startup race against each other if brought up simultaneously.
+ROBOT_STAGGER = 6.0
+# Exploration starts after the last robot's stack is up, plus lifecycle settling.
+EXPLORE_LEAD_IN = 25.0
 
-def bridge_args(ns: str, lidar_rings: int = 1) -> list[str]:
+
+def bridge_args(ns: str, lidar_rings: int = 1, fuse_imu: bool = True) -> list[str]:
     """gz <-> ROS 2 topic bridges for one robot.
 
     With one ring, Gazebo's own LaserScan on `<ns>/scan` is exactly the planar
@@ -38,6 +59,11 @@ def bridge_args(ns: str, lidar_rings: int = 1) -> list[str]:
     planar slice, and `pointcloud_to_laserscan` publishes `<ns>/scan` instead —
     bridging it too would put two publishers on one topic and let SLAM alternate
     between them.
+
+    The drive plugin's `<ns>/tf` carries odom -> base_link. When the EKF is fusing
+    the gyro it publishes that same transform, so the bridge is dropped: two
+    publishers of one transform produce a TF tree that flickers between a
+    slip-corrupted estimate and a corrected one, which is worse than either.
     """
     args = [
         f"/{ns}/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked",
@@ -47,8 +73,9 @@ def bridge_args(ns: str, lidar_rings: int = 1) -> list[str]:
         f"/{ns}/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
         f"/{ns}/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry",
         f"/{ns}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
-        f"/{ns}/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
     ]
+    if not fuse_imu:
+        args.append(f"/{ns}/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V")
     if lidar_rings == 1:
         args.insert(0, f"/{ns}/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan")
     return args
@@ -58,6 +85,10 @@ def setup(context, *args, **kwargs):
     cfg_arg = LaunchConfiguration("config").perform(context)
     headless = LaunchConfiguration("headless").perform(context).lower() == "true"
     slam_backend = LaunchConfiguration("slam_backend").perform(context).lower()
+    fuse_imu = LaunchConfiguration("fuse_imu").perform(context).lower() == "true"
+    fuse_cov = LaunchConfiguration("fuse_covariance").perform(context).lower() == "true"
+    grid_3d = LaunchConfiguration("grid_3d").perform(context).lower() == "true"
+    explore_seconds = float(LaunchConfiguration("explore_seconds").perform(context))
 
     cfg_path = Path(cfg_arg)
     if not cfg_path.is_absolute():
@@ -74,21 +105,32 @@ def setup(context, *args, **kwargs):
         pass
     count = max(1, min(count, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
-    lidar_rings = int(cfg.get("fleet", {}).get("lidar_rings", 1))
     seed = cfg.get("seed", 20260801)
+
+    sim_share = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim"
+    world = sim_share / "worlds" / "indoor.sdf"
+    scenario = sim_share / "scenario"
+
+    # Resolve the lidar profile through the spawner's own code rather than
+    # re-reading the YAML here, so the ring count this file bridges on and the
+    # geometry Gazebo is actually given can never disagree. Imported lazily:
+    # test_session_launch.py imports this module for `bridge_args` alone and
+    # should not need the sim package on its path.
+    sys.path.insert(0, str(scenario))
+    from spawn_fleet import lidar_spec  # noqa: E402  (path set immediately above)
+
+    spec = lidar_spec(cfg.get("fleet", {}))
+    lidar_rings = spec.rings
 
     # RTAB-Map registers against the cloud's vertical structure, which a
     # single-ring lidar does not have. Fail here rather than start a stack that
     # comes up healthy and maps badly.
     if slam_backend == "rtabmap" and lidar_rings < 3:
         raise RuntimeError(
-            f"slam_backend:=rtabmap needs a 3D cloud, but fleet.lidar_rings is "
-            f"{lidar_rings} in {cfg_path.name}. Set it to an odd value >= 9."
+            f"slam_backend:=rtabmap needs a 3D cloud, but the lidar resolves to "
+            f"{lidar_rings} ring(s) in {cfg_path.name}. Set fleet.lidar.profile "
+            f"to generic_32, or fleet.lidar.rings to an odd value >= 9."
         )
-
-    sim_share = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim"
-    world = sim_share / "worlds" / "indoor.sdf"
-    scenario = sim_share / "scenario"
 
     actions = [
         # Regenerate the world from the seed so the run is reproducible.
@@ -120,56 +162,111 @@ def setup(context, *args, **kwargs):
         ),
     ]
 
-    delayed = [
-        # Gazebo sensor and TF stamps use simulation time. One global clock
-        # bridge serves every namespaced robot stack.
-        Node(
-            package="ros_gz_bridge",
-            executable="parameter_bridge",
-            name="bridge_clock",
-            arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
-            output="screen",
+    # Gazebo sensor and TF stamps use simulation time. One global clock bridge
+    # serves every namespaced robot stack.
+    actions.append(
+        TimerAction(
+            period=BRINGUP_DELAY,
+            actions=[
+                Node(
+                    package="ros_gz_bridge",
+                    executable="parameter_bridge",
+                    name="bridge_clock",
+                    arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+                    output="screen",
+                )
+            ],
         )
-    ]
+    )
+
+    # Each robot's stack starts on its own offset. Launching four lifecycle
+    # managers, four SLAM nodes and four Nav2 stacks at once on a CPU-starved
+    # container loses the race: `lifecycle_manager_slam` times out on
+    # `slam_toolbox/get_state`, logs "Failed to bring up all requested nodes", and
+    # gives up. The process stays alive but sits in `unconfigured` with no
+    # subscribers, so that robot produces no map and nothing else complains.
     for i in range(min(count, 5)):
         ns = f"{prefix}{i}"
-        delayed.append(
-            Node(
-                package="ros_gz_bridge",
-                executable="parameter_bridge",
-                name=f"bridge_{ns}",
-                arguments=bridge_args(ns, lidar_rings),
-                output="screen",
-            )
-        )
         if slam_backend == "rtabmap":
-            slam_args = {"namespace": ns, "use_sim_time": "true"}
+            slam_args = {
+                "namespace": ns,
+                "use_sim_time": "true",
+                "range_max": str(spec.range_max),
+                "grid_3d": str(grid_3d).lower(),
+            }
             slam_launch = "/launch/slam_rtabmap.launch.py"
         else:
             slam_args = {
                 "namespace": ns,
                 "use_sim_time": "true",
                 "lidar_rings": str(lidar_rings),
+                "fuse_imu": str(fuse_imu).lower(),
+                "fuse_covariance": str(fuse_cov).lower(),
+                "range_max": str(spec.range_max),
             }
             slam_launch = "/launch/slam.launch.py"
-        delayed.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_slam"), slam_launch]
-                ),
-                launch_arguments=slam_args.items(),
-            )
-        )
-        delayed.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_nav"), "/launch/nav.launch.py"]
-                ),
-                launch_arguments={"namespace": ns, "use_sim_time": "true"}.items(),
+
+        actions.append(
+            TimerAction(
+                period=BRINGUP_DELAY + i * ROBOT_STAGGER,
+                actions=[
+                    Node(
+                        package="ros_gz_bridge",
+                        executable="parameter_bridge",
+                        name=f"bridge_{ns}",
+                        # `owns_odom_tf` rather than `fuse_imu`: with the rtabmap
+                        # backend it is icp_odometry that publishes
+                        # odom -> base_link, so the drive plugin's TF must stay
+                        # unbridged there too, whatever fuse_imu says. Two
+                        # publishers of one transform give a TF tree that
+                        # flickers between estimates, which is worse than either.
+                        arguments=bridge_args(
+                            ns, lidar_rings, fuse_imu or slam_backend == "rtabmap"
+                        ),
+                        output="screen",
+                    ),
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            [FindPackageShare("swarmdeck_slam"), slam_launch]
+                        ),
+                        launch_arguments=slam_args.items(),
+                    ),
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            [FindPackageShare("swarmdeck_nav"), "/launch/nav.launch.py"]
+                        ),
+                        launch_arguments={
+                            "namespace": ns,
+                            "use_sim_time": "true",
+                        }.items(),
+                    ),
+                ],
             )
         )
 
-    actions.append(TimerAction(period=20.0, actions=delayed))
+    # Reactive exploration, for a bounded period, then the fleet stops and the
+    # operator drives it through Nav2. Without this nothing moves until someone
+    # sends a goal, and Nav2 sending goals against an empty map drives robots into
+    # walls, where a differential drive spins its wheels and destroys its own
+    # odometry — see scenario/explore.py. `explore.py` publishes cmd_vel directly,
+    # so it fights Nav2 while it runs; that is why it stops rather than persisting.
+    if explore_seconds > 0:
+        actions.append(
+            TimerAction(
+                period=(BRINGUP_DELAY + min(count, 5) * ROBOT_STAGGER
+                        + EXPLORE_LEAD_IN),
+                actions=[
+                    ExecuteProcess(
+                        cmd=["python3", str(scenario / "explore.py"),
+                             "--robots", str(min(count, 5)),
+                             "--prefix", prefix,
+                             "--seconds", str(explore_seconds),
+                             "--seed", str(seed)],
+                        output="screen",
+                    )
+                ],
+            )
+        )
     return actions
 
 
@@ -183,7 +280,36 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="toolbox",
                 choices=["toolbox", "rtabmap"],
                 description="toolbox = 2D SLAM Toolbox; rtabmap = 3D cloud + "
-                            "optional visual loop closure (needs lidar_rings > 1)",
+                            "optional visual loop closure (needs a multi-ring "
+                            "fleet.lidar profile)",
+            ),
+            DeclareLaunchArgument(
+                "fuse_imu",
+                default_value="true",
+                description="EKF-fuse wheel odometry with the gyro and let it own "
+                            "odom -> base_link, instead of trusting the drive "
+                            "plugin's slip-corrupted heading.",
+            ),
+            DeclareLaunchArgument(
+                "fuse_covariance",
+                default_value="false",
+                description="Feed the EKF real per-measurement covariance from "
+                            "covariance_relay.py. False reproduces the filter as "
+                            "it behaved on Gazebo's all-zero covariance.",
+            ),
+            DeclareLaunchArgument(
+                "grid_3d",
+                default_value="false",
+                description="rtabmap backend only: keep occupancy in 3D so the "
+                            "GUI's 3D view shows real structure instead of a flat "
+                            "plane. Halves the real-time factor.",
+            ),
+            DeclareLaunchArgument(
+                "explore_seconds",
+                default_value="0",
+                description="Run reactive exploration for this many seconds after "
+                            "startup to bootstrap the maps, then hand control back "
+                            "to Nav2. 0 disables it.",
             ),
             OpaqueFunction(function=setup),
         ]

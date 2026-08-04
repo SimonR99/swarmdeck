@@ -28,6 +28,10 @@ UNKNOWN = -1
 PRIOR_WINDOW_DEG = 40.0
 LOCKED_WINDOW_DEG = 8.0
 
+# Shared known area, as a fraction of the smaller map, below which the
+# independent cslam cross-check has nothing to compare and stays silent.
+CHECK_MIN_SUPPORT = 0.35
+
 
 @dataclass
 class GridMeta:
@@ -60,6 +64,18 @@ class MapService:
         self.registrations: dict[str, Registration] = {}
         self.registration_rejections: dict[str, str] = {}
         self.locked_dyaw: dict[str, float] = {}
+        # Latest `slam_graph` per robot: keyframe count, inter-robot loop
+        # closures, optimisation residual, and whether the collaborative back end
+        # considers this robot part of the common frame. Only `cslam` mode reads
+        # it; the other modes carry it for display.
+        self.slam_graphs: dict[str, dict[str, Any]] = {}
+        # cslam mode only: how far the independent grid correlation disagrees
+        # with the collaborative back end's alignment, in metres and radians.
+        self.cslam_disagreement: dict[str, tuple[float, float, bool]] = {}
+        # Newest 3D cloud per robot, in that robot's own map frame, as an
+        # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
+        # sends one and the 3D view stays empty rather than wrong.
+        self.robot_clouds: dict[str, np.ndarray] = {}
         self.merge_mode = "static"
         self.reference: str | None = None
         self.seq = 0
@@ -83,8 +99,63 @@ class MapService:
         if self.reference is None:
             self.reference = robot_id
 
+    MODES = ("static", "auto", "cslam")
+
     def set_mode(self, mode: str) -> None:
-        self.merge_mode = mode if mode in ("static", "auto") else "static"
+        self.merge_mode = mode if mode in self.MODES else "static"
+
+    def set_cloud(self, robot_id: str, points: np.ndarray) -> None:
+        """Store one robot's 3D cloud, already voxel-downsampled by the adapter."""
+        self.robot_clouds[robot_id] = points
+
+    def merged_cloud(self) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        """Every member robot's cloud, rotated into the merged frame.
+
+        Returns points (N, 3) float32, a per-point robot index (N,) uint8, and
+        the robot ids those indices refer to. Only robots that are actually in
+        the shared frame contribute — the same rule the 2D merge uses, for the
+        same reason: drawing an unregistered robot's cloud in the shared frame
+        would render a guess as though it were a measurement.
+        """
+        members = self.global_members()
+        chunks: list[np.ndarray] = []
+        indices: list[np.ndarray] = []
+        names: list[str] = []
+        for rid in sorted(self.robot_clouds):
+            if rid not in members:
+                continue
+            points = self.robot_clouds[rid]
+            if points.size == 0:
+                continue
+            tx, ty, yaw = self.transforms.get(rid, (0.0, 0.0, 0.0))
+            c, s = math.cos(yaw), math.sin(yaw)
+            out = np.empty_like(points)
+            # Planar rotation only: the merge frame is SE(2), so z passes through.
+            out[:, 0] = tx + points[:, 0] * c - points[:, 1] * s
+            out[:, 1] = ty + points[:, 0] * s + points[:, 1] * c
+            out[:, 2] = points[:, 2]
+            chunks.append(out)
+            indices.append(np.full(len(out), len(names), dtype=np.uint8))
+            names.append(rid)
+        if not chunks:
+            return (
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros(0, dtype=np.uint8),
+                [],
+            )
+        return np.concatenate(chunks), np.concatenate(indices), names
+
+    def set_slam_graph(self, robot_id: str, graph: dict[str, Any]) -> None:
+        """Record a robot's view of the collaborative pose graph.
+
+        This is what a robot running Swarm-SLAM reports about itself: how many
+        keyframes it holds, which other robots it has closed a loop with, the
+        optimiser's residual, and whether it has been placed in the common frame
+        yet. In `cslam` mode the last of those decides membership of the merged
+        map, so a robot that has not yet met anyone is visibly absent rather than
+        silently overlaid at a guessed pose.
+        """
+        self.slam_graphs[robot_id] = graph
 
     def robot_to_world(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
         """Transform a pose from one robot's SLAM frame into the merged frame."""
@@ -123,6 +194,8 @@ class MapService:
             self.reference = robot_id
         if self.merge_mode == "auto":
             self._reregister(robot_id)
+        elif self.merge_mode == "cslam":
+            self._cslam_check(robot_id)
         self._remerge()
 
     async def ingest_async(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
@@ -208,6 +281,75 @@ class MapService:
         self.transforms[robot_id] = (wx, wy, candidate_yaw)
         self.locked_dyaw[robot_id] = result.dyaw
 
+    # --------------------------------------------------- collaborative back end
+
+    def in_common_frame(self, robot_id: str) -> bool:
+        """Has the collaborative back end placed this robot in the shared frame?
+
+        The reference robot defines the frame, so it is in it by construction.
+        Everyone else has to have closed an inter-robot loop, and says so in its
+        `slam_graph`. Absent that report the answer is no: an unregistered robot
+        overlaid at its configured start pose is exactly the confident-but-wrong
+        merge the rejection tests exist to prevent.
+        """
+        if robot_id == self.reference:
+            return True
+        return bool(self.slam_graphs.get(robot_id, {}).get("in_common_frame"))
+
+    def _cslam_check(self, robot_id: str) -> None:
+        """Score the collaborative alignment against independent evidence.
+
+        In `cslam` mode the transforms are not estimated here — the robots
+        already publish poses and grids in one frame, and `mapsvc` is bookkeeping.
+        That removes this module's job and leaves it a better one: grid
+        correlation is now an *independent* check on the pose graph, using
+        evidence (occupied and free cells over the whole map) that the loop
+        closures did not use.
+
+        Both grids are already in the common frame, so a correct alignment must
+        correlate at approximately identity. Whatever offset the search does find
+        is the disagreement, and it is reported rather than applied. Applying it
+        would defeat the point: the pose graph, not this, is the estimator.
+        """
+        if robot_id == self.reference or not self.in_common_frame(robot_id):
+            self.cslam_disagreement.pop(robot_id, None)
+            return
+        ref = self.robot_grids.get(self.reference or "")
+        mov = self.robot_grids.get(robot_id)
+        if ref is None or mov is None:
+            return
+        ref_meta, ref_cells = ref
+        mov_meta, mov_cells = mov
+        result = register(
+            ref_cells, (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
+            mov_cells, (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
+            yaw_prior=0.0,
+            yaw_window_deg=LOCKED_WINDOW_DEG,
+        )
+        self.registrations[robot_id] = result
+        # Gated on `support` alone, and deliberately not on `confident`.
+        #
+        # The rejection tests exist to stop a wrong transform being *applied*.
+        # Nothing is applied here, so the question is only whether the two maps
+        # overlap enough for the comparison to mean anything — which is exactly
+        # what `support` measures. `ratio` and `yaw_ratio` ask whether rival
+        # hypotheses can be told apart, which is the right question when
+        # choosing a transform and the wrong one when measuring a residual
+        # against a known prior: a symmetric room makes rotations ambiguous
+        # without making the residual unmeasurable.
+        #
+        # `confident` is still carried through to the operator rather than
+        # discarded, because a disagreement drawn from an ambiguous correlation
+        # deserves to be labelled as one.
+        if result.support >= CHECK_MIN_SUPPORT:
+            self.cslam_disagreement[robot_id] = (
+                math.hypot(result.dx, result.dy),
+                abs(result.dyaw),
+                result.confident,
+            )
+        else:
+            self.cslam_disagreement.pop(robot_id, None)
+
     # --------------------------------------------------------------- merging
 
     def global_members(self) -> set[str]:
@@ -220,6 +362,11 @@ class MapService:
         """
         if self.merge_mode == "static":
             return set(self.robot_grids)
+        if self.merge_mode == "cslam":
+            # Membership is the collaborative back end's call, not a correlation
+            # score: a robot is in the map once it has actually closed a loop
+            # with the fleet.
+            return {rid for rid in self.robot_grids if self.in_common_frame(rid)}
         accepted = {
             rid
             for rid, result in self.registrations.items()
@@ -289,15 +436,25 @@ class MapService:
             "data": base64.b64encode(zlib.compress(sub.tobytes())).decode(),
         }
 
-    @staticmethod
-    def _grid_png(meta: GridMeta, cells: np.ndarray) -> bytes:
+    # Unknown / free / occupied. Must stay in step with the palette in
+    # ui/src/lib/stores/mapstore.svelte.ts: the same map reaches the browser as
+    # this PNG on connect and as int8 patches afterwards, so a mismatch shows up
+    # as a seam after a reload. Unknown is well clear of white because at a
+    # glance "explored and empty" and "never seen" are the two states an
+    # operator most needs to tell apart.
+    UNKNOWN_RGB = (214, 218, 224)
+    FREE_RGB = (255, 255, 255)
+    OCCUPIED_RGB = (52, 58, 68)
+
+    @classmethod
+    def _grid_png(cls, meta: GridMeta, cells: np.ndarray) -> bytes:
         """Render one occupancy grid in the frontend's top-down orientation."""
         from PIL import Image
 
         img = np.zeros((meta.height, meta.width, 3), dtype=np.uint8)
-        img[...] = (229, 232, 236)
-        img[cells == 0] = (255, 255, 255)
-        img[cells >= 50] = (52, 58, 68)
+        img[...] = cls.UNKNOWN_RGB
+        img[cells == 0] = cls.FREE_RGB
+        img[cells >= 50] = cls.OCCUPIED_RGB
         img = np.flipud(img)
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG", optimize=True)
@@ -349,6 +506,21 @@ class MapService:
             "view_by_robot": {
                 rid: "global" if rid in members else "local"
                 for rid in self.robot_grids
+            },
+            "slam_graphs": self.slam_graphs,
+            # cslam mode only. Grid correlation no longer produces the transform,
+            # so what it reports is how far it disagrees with the pose graph —
+            # an independent check, using evidence the loop closures did not use.
+            "cslam_disagreement": {
+                rid: {
+                    "metres": round(d, 3),
+                    "degrees": round(math.degrees(a), 2),
+                    # False means the correlation could not separate rival
+                    # hypotheses — a repetitive building, not necessarily a bad
+                    # alignment. Read the number as indicative, not as a verdict.
+                    "confident": confident,
+                }
+                for rid, (d, a, confident) in self.cslam_disagreement.items()
             },
         }
 

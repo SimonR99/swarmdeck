@@ -93,13 +93,40 @@ export interface MapRegistration {
   locked: boolean;
 }
 
+/** One robot's view of a collaborative pose graph (Swarm-SLAM / cslam). */
+export interface SlamGraph {
+  keyframes: number;
+  /** True once the collaborative back end has placed this robot in the common frame. */
+  in_common_frame: boolean;
+  /** Optimiser residual, or null if the back end does not report one. */
+  residual: number | null;
+  /** Loop closures against each other robot — the thing that makes it swarm SLAM. */
+  inter_robot: { other: string; count: number; last_t?: number }[];
+  t_mono?: number;
+}
+
+/**
+ * How far independent grid correlation disagrees with the pose graph's
+ * alignment. In `cslam` mode registration no longer produces the transform, so
+ * what it reports is a cross-check drawn from evidence the loop closures did
+ * not use. `confident: false` means the correlation could not separate rival
+ * hypotheses — indicative, not a verdict.
+ */
+export interface CslamDisagreement {
+  metres: number;
+  degrees: number;
+  confident: boolean;
+}
+
 export interface MapStatus {
-  mode: 'static' | 'auto';
+  mode: 'static' | 'auto' | 'cslam';
   reference: string | null;
   transforms: Record<string, Pose>;
   registrations: Record<string, MapRegistration>;
   global_members: string[];
   view_by_robot: Record<string, 'global' | 'local'>;
+  slam_graphs?: Record<string, SlamGraph>;
+  cslam_disagreement?: Record<string, CslamDisagreement>;
 }
 
 export interface RobotConnectionSettings {
@@ -150,6 +177,7 @@ export type ServerMessage =
   | { type: 'alert'; alert: Alert }
   | { type: 'alert_clear'; id: string }
   | { type: 'settings_state'; settings: AppSettings }
+  | { type: 'slam_graph'; robot_id: string; graph: SlamGraph }
   | { type: 'map_info'; info: MapInfo };
 
 /* ---------- GUI → server ---------- */

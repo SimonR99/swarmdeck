@@ -2,7 +2,14 @@
 # SLAM Toolbox maintains its own pose graph and republishes a corrected grid
 # after loop closure, so the map service consumes already-corrected data
 # (architecture.md §5.1).
-slam_toolbox:
+#
+# The key MUST be `/**`, not `slam_toolbox`. A bare node name resolves to the
+# absolute path `/slam_toolbox`, and these nodes run namespaced as
+# `/robot_N/slam_toolbox`, so the file matched nothing and every parameter below
+# silently fell back to slam_toolbox's own defaults. Nothing warns: the node
+# starts, maps, and looks healthy. Verify after any change with
+# `ros2 param get /robot_0/slam_toolbox minimum_travel_distance`.
+/**:
   ros__parameters:
     solver_plugin: solver_plugins::CeresSolver
     ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
@@ -33,8 +40,15 @@ slam_toolbox:
     # Scan matching
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.3
-    minimum_travel_heading: 0.3
+    # How far the robot must move before another scan enters the graph. Halved
+    # from 0.3: every wall cell is written by some scan, so a sparser keyframe
+    # stream is literally a sparser map, and each keyframe is also a loop-closure
+    # candidate. 0.3 was chosen when the sim was CPU-bound at ~0.58x real time
+    # and every scan was expensive; on the GPU path it is not.
+    # Verify after any change to this file — it has silently failed to load
+    # before: ros2 param get /robot_0/slam_toolbox minimum_travel_distance
+    minimum_travel_distance: 0.15
+    minimum_travel_heading: 0.15
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1

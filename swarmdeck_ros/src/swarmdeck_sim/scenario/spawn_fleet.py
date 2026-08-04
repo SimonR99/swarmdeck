@@ -14,7 +14,9 @@ import math
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Any, Mapping
 
 import yaml
 
@@ -29,39 +31,179 @@ COLORS = [
 HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE.parent.parent / "swarmdeck_description" / "urdf" / "robot.sdf.jinja"
 
-# Vertical spread of a multi-ring mapping lidar, radians. Only used when
-# lidar_rings > 1; a single ring is horizontal by definition.
-LIDAR_VFOV = 0.26
+# +/- 22.5 deg, the vertical spread of a typical 32-beam scanning lidar.
+LIDAR_VFOV_DEFAULT = 0.3927
 
 
-def lidar_scan_fields(rings: int) -> dict[str, str]:
-    """Vertical scan block for the mapping lidar.
+@dataclass(frozen=True)
+class LidarSpec:
+    """Mapping-lidar geometry, in the form the SDF template needs.
 
-    Gazebo distributes N samples evenly across [min_angle, max_angle] inclusive,
-    so an even N leaves no ring at elevation 0 — every ring is then tilted, and a
-    tilted ring vanishes beyond (band height / sin elevation). That is what turned
-    the merged map into a hatched wedge (docs/KNOWN_ISSUES.md), so refuse an even
-    count rather than emit a model that silently maps badly.
+    Every field is validated on construction, because each of these has a
+    failure mode that is silent in Gazebo: the model spawns, the sensor
+    publishes, and the map is quietly worse.
     """
-    if rings < 1:
-        raise ValueError(f"lidar_rings must be >= 1, got {rings}")
-    if rings > 1 and rings % 2 == 0:
+
+    h_samples: int = 1800
+    rings: int = 1
+    vfov: float = 0.0        # half-angle, radians; 0 for a single horizontal ring
+    range_max: float = 30.0
+    rate: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.h_samples < 8:
+            raise ValueError(f"lidar h_samples must be >= 8, got {self.h_samples}")
+        if self.rings < 1:
+            raise ValueError(f"lidar rings must be >= 1, got {self.rings}")
+        if self.rings > 1 and self.rings % 2 == 0:
+            # Gazebo distributes N samples evenly across [min_angle, max_angle]
+            # INCLUSIVE, so an even N leaves no ring at elevation 0 — every ring
+            # is tilted, and a tilted ring at elevation e vanishes beyond
+            # (band half-height / sin e) once a height band slices it. That is
+            # what turned the merged map into a hatched wedge; see
+            # docs/KNOWN_ISSUES.md. Refuse rather than map badly in silence.
+            raise ValueError(
+                f"lidar rings={self.rings} is even, so no ring sits at elevation 0 "
+                f"and any height band truncates the 2D scan at short range. "
+                f"Use {self.rings + 1}."
+            )
+        if self.rings == 1 and self.vfov:
+            raise ValueError(
+                f"a single-ring lidar is horizontal by definition, but vfov is "
+                f"{self.vfov}. Set vfov to 0, or raise rings to an odd value > 1."
+            )
+        if self.rings > 1 and self.vfov <= 0:
+            raise ValueError(f"rings={self.rings} needs a vfov > 0, got {self.vfov}")
+        if self.range_max <= 0:
+            raise ValueError(f"lidar range_max must be > 0, got {self.range_max}")
+        if self.rate <= 0:
+            raise ValueError(f"lidar rate must be > 0, got {self.rate}")
+
+    @property
+    def h_step_deg(self) -> float:
+        """Angular step between adjacent rays.
+
+        This is the number that decides whether distant walls come out
+        continuous or dotted: two adjacent returns land `range * radians(step)`
+        apart, so against a 5 cm grid cell a 1.003 deg step (the 360-sample
+        lidar SwarmDeck shipped) separates them by one cell at 2.9 m and three
+        cells at 8.6 m. Real units are 0.1-0.4 deg.
+
+        Divided by N-1, not N, for the same reason the ring count must be odd:
+        Gazebo spreads samples across [min_angle, max_angle] INCLUSIVE. On a full
+        revolution that makes the first and last ray the same bearing, so 360
+        samples buy 359 distinct ones — which is where the 1.003 deg in
+        docs/KNOWN_ISSUES.md comes from rather than a round 1.000.
+        """
+        return 360.0 / (self.h_samples - 1)
+
+    def fields(self) -> dict[str, str]:
+        vmin, vmax = (-self.vfov, self.vfov) if self.rings > 1 else (0.0, 0.0)
+        return {
+            "LIDAR_HSAMPLES": str(self.h_samples),
+            "LIDAR_RINGS": str(self.rings),
+            "LIDAR_VMIN": f"{vmin:.5f}",
+            "LIDAR_VMAX": f"{vmax:.5f}",
+            "LIDAR_RANGE_MAX": f"{self.range_max:g}",
+            "LIDAR_RATE": f"{self.rate:g}",
+        }
+
+
+# Named sensor profiles. The point of the table is that swapping the fleet's
+# lidar is a one-line config change rather than an SDF edit, so what gets tuned
+# in simulation can be re-pointed at whatever hardware is actually bought.
+#
+# `vlp16` and `os1_32` are approximations of uniformly spaced spinning units and
+# are honest as ring models. A Livox Mid-360 deliberately has NO profile here: it
+# scans a non-repetitive rosette, which a fixed ring count does not represent at
+# all, and pretending otherwise would make simulated results transfer badly.
+LIDAR_PROFILES: dict[str, LidarSpec] = {
+    # Exactly what SwarmDeck shipped. Kept as the A/B control for measuring any
+    # of the changes below — not as a thing to run.
+    "legacy_360": LidarSpec(h_samples=360, rings=1, vfov=0.0, range_max=16.0),
+    # 0.2 deg planar scan: same 2D pipeline, walls that stay continuous to the
+    # far end of a 24 m building.
+    "generic_2d": LidarSpec(h_samples=1800, rings=1, vfov=0.0, range_max=30.0),
+    # Generic 32-beam 3D unit, the target for the IMU + 3D lidar stack.
+    # 1024 columns rather than the 2D profiles' 1800: this is what a real
+    # 32-beam unit does (an OS1-32 is 32x1024 at 10 Hz), and the product is what
+    # costs. At 1800 the fleet emits 4 x 594k points/s, which starved
+    # ros_gz_bridge badly enough that clouds arrived at 2-3 Hz instead of 10 and
+    # lidar odometry could not keep a lock. Raise `rings` before `h_samples` if
+    # more fidelity is needed: vertical structure is what ICP registers on.
+    "generic_32": LidarSpec(
+        h_samples=1024, rings=33, vfov=LIDAR_VFOV_DEFAULT, range_max=30.0
+    ),
+    "vlp16": LidarSpec(h_samples=1800, rings=17, vfov=0.2618, range_max=100.0),
+    "os1_32": LidarSpec(
+        h_samples=1024, rings=33, vfov=LIDAR_VFOV_DEFAULT, range_max=100.0
+    ),
+}
+
+DEFAULT_LIDAR_PROFILE = "generic_2d"
+
+_INT_FIELDS = {"h_samples", "rings"}
+_SPEC_FIELDS = {f.name for f in fields(LidarSpec)}
+
+
+def lidar_spec(
+    fleet_cfg: Mapping[str, Any] | None, rings_override: int | None = None
+) -> LidarSpec:
+    """Resolve `fleet.lidar` — a profile name plus per-field overrides.
+
+    ```yaml
+    fleet:
+      lidar:
+        profile: generic_32     # see LIDAR_PROFILES
+        h_samples: 2048         # any field may be overridden individually
+    ```
+
+    `fleet.lidar_rings` is the pre-profile spelling and still works: it sets the
+    ring count on top of whichever profile is in force.
+    """
+    fleet_cfg = fleet_cfg or {}
+    block = dict(fleet_cfg.get("lidar") or {})
+    name = block.pop("profile", DEFAULT_LIDAR_PROFILE)
+    if name not in LIDAR_PROFILES:
         raise ValueError(
-            f"lidar_rings={rings} is even, so no ring sits at elevation 0 and any "
-            f"height band truncates the 2D scan at short range. Use {rings + 1}."
+            f"unknown lidar profile {name!r}; available: {sorted(LIDAR_PROFILES)}"
         )
-    if rings == 1:
-        return {"LIDAR_RINGS": "1", "LIDAR_VMIN": "0", "LIDAR_VMAX": "0"}
-    return {
-        "LIDAR_RINGS": str(rings),
-        "LIDAR_VMIN": f"{-LIDAR_VFOV:.5f}",
-        "LIDAR_VMAX": f"{LIDAR_VFOV:.5f}",
+    spec = LIDAR_PROFILES[name]
+
+    legacy_rings = fleet_cfg.get("lidar_rings")
+    if legacy_rings is not None and "rings" not in block:
+        block["rings"] = legacy_rings
+    if rings_override is not None:
+        block["rings"] = rings_override
+
+    unknown = set(block) - _SPEC_FIELDS
+    if unknown:
+        raise ValueError(
+            f"unknown fleet.lidar keys {sorted(unknown)}; expected "
+            f"'profile' or any of {sorted(_SPEC_FIELDS)}"
+        )
+    block = {
+        key: (int(value) if key in _INT_FIELDS else float(value))
+        for key, value in block.items()
     }
 
+    # Ring count and vfov are not independent, and LidarSpec (correctly) refuses
+    # the two contradictory combinations. Rather than make every config restate
+    # both, fill in the one that was not asked for.
+    rings = block.get("rings", spec.rings)
+    if "vfov" not in block:
+        if rings == 1:
+            block["vfov"] = 0.0
+        elif not spec.vfov:
+            # Raising a planar profile to several rings — the `lidar_rings: 9`
+            # spelling does exactly this — has to pick a spread from somewhere.
+            block["vfov"] = LIDAR_VFOV_DEFAULT
+    return replace(spec, **block)
 
-def render(name: str, color: str, rings: int = 1) -> str:
+
+def render(name: str, color: str, spec: LidarSpec | None = None) -> str:
     sdf = TEMPLATE.read_text().replace("{{NAME}}", name).replace("{{COLOR}}", color)
-    for key, value in lidar_scan_fields(rings).items():
+    for key, value in (spec or LidarSpec()).fields().items():
         sdf = sdf.replace("{{" + key + "}}", value)
     return sdf
 
@@ -101,26 +243,27 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="render SDFs without spawning")
     ap.add_argument("--outdir", default=None, help="write rendered SDFs here")
     ap.add_argument("--lidar-rings", type=int, default=None,
-                    help="vertical rings on the mapping lidar; 1 is 2D-only, "
+                    help="override the ring count from the config; 1 is 2D-only, "
                          "odd values > 1 also publish a usable 3D cloud")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text())
-    configured_count = int(cfg.get("fleet", {}).get("robot_count", 4))
+    fleet_cfg = cfg.get("fleet", {})
+    configured_count = int(fleet_cfg.get("robot_count", 4))
     count = configured_count if args.robots is None else max(1, min(args.robots, 5))
-    prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
+    prefix = fleet_cfg.get("robot_prefix", "robot_")
     starts = cfg.get("map", {}).get("start_poses", {})
-    rings = (
-        int(cfg.get("fleet", {}).get("lidar_rings", 1))
-        if args.lidar_rings is None
-        else args.lidar_rings
+    spec = lidar_spec(fleet_cfg, args.lidar_rings)
+    print(
+        f"[spawn] lidar {spec.h_samples} samples/rev ({spec.h_step_deg:.3f} deg), "
+        f"{spec.rings} ring(s), {spec.range_max:g} m, {spec.rate:g} Hz"
     )
 
     ok = True
     for i in range(min(count, 5)):
         name = f"{prefix}{i}"
         pose = starts.get(name, {"x": i * 3.0, "y": 0.0, "yaw": 0.0})
-        sdf = render(name, COLORS[i % len(COLORS)], rings)
+        sdf = render(name, COLORS[i % len(COLORS)], spec)
 
         if args.outdir:
             out = Path(args.outdir) / f"{name}.sdf"

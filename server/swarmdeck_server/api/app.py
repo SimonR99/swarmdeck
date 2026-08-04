@@ -24,6 +24,14 @@ from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
 
+# 2 adds one optional adapter message, `slam_graph`, carrying a robot's view of a
+# collaborative pose graph. Purely additive: a protocol-1 adapter never sends it
+# and is fully supported, which is the whole point of versioning it rather than
+# redefining `hello`.
+PROTOCOL_VERSION = 2
+SUPPORTED_PROTOCOLS = (1, 2)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if not CONFIG:
@@ -225,7 +233,12 @@ def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | 
 
 @app.get("/api/config")
 async def get_config() -> dict[str, Any]:
-    return {"config": CONFIG, "settings": settings_store.value, "protocol": 1}
+    return {
+        "config": CONFIG,
+        "settings": settings_store.value,
+        "protocol": PROTOCOL_VERSION,
+        "supported_protocols": list(SUPPORTED_PROTOCOLS),
+    }
 
 
 @app.get("/api/settings")
@@ -341,6 +354,63 @@ async def post_map(request: Request) -> dict[str, Any]:
     cells = np.frombuffer(raw, dtype=np.int8).reshape(meta.height, meta.width)
     await map_service.ingest_async(rid, meta, cells)
     return {"ok": True, "cells": int(cells.size)}
+
+
+# 1 cm, which is finer than the 5 cm occupancy grid and keeps a cloud inside
+# int16 out to +/-327 m. Quantising at the transport rather than sending float32
+# halves the bytes for a view whose points are one pixel on screen.
+CLOUD_SCALE = 0.01
+
+
+@app.post("/api/adapter/cloud")
+async def post_cloud(request: Request) -> Any:
+    """Adapter uploads its 3D map cloud (zlib int16 xyz triples, 1 cm units).
+
+    Optional, and deliberately so: a robot on 2D SLAM has no such cloud, never
+    calls this, and the GUI's 3D view simply stays empty for it. Throttle to
+    0.5 Hz — this is a view of an accumulated map, not a sensor stream.
+    """
+    import zlib
+
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    scale = float(request.query_params.get("scale", CLOUD_SCALE))
+    try:
+        raw = zlib.decompress(await request.body())
+        quantised = np.frombuffer(raw, dtype=np.int16)
+    except (zlib.error, ValueError):
+        return JSONResponse({"error": "malformed cloud"}, status_code=400)
+    if quantised.size % 3:
+        return JSONResponse({"error": "xyz triples expected"}, status_code=400)
+    points = quantised.reshape(-1, 3).astype(np.float32) * scale
+    map_service.set_cloud(rid, points)
+    return {"ok": True, "points": int(len(points))}
+
+
+@app.get("/api/map/cloud")
+async def get_cloud() -> Response:
+    """The merged 3D cloud for the GUI's optional 3D view.
+
+    Same shape as the 2D map's transport: one HTTP fetch of everything, polled
+    slowly, rather than a stream. A cloud is large and changes slowly, and the
+    3D view is not on the operator's critical path.
+    """
+    import zlib
+
+    points, indices, names = map_service.merged_cloud()
+    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
+    body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
+    return Response(
+        content=body,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Cloud-Points": str(len(points)),
+            "X-Cloud-Scale": str(CLOUD_SCALE),
+            "X-Cloud-Robots": ",".join(names),
+        },
+    )
 
 
 @app.post("/api/adapter/camera")
@@ -497,7 +567,10 @@ async def adapter_socket(ws: WebSocket) -> None:
             kind = msg.get("type", "")
 
             if kind == "hello":
-                if msg.get("protocol") != 1:
+                # 2 adds the optional `slam_graph` message and nothing else, so a
+                # protocol-1 adapter stays valid forever. Rejecting it would
+                # break exactly the mixed-fleet property the contract exists for.
+                if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
                     await ws.close(code=4400)
                     return
                 r = registry.hello(msg, ws)
@@ -533,6 +606,23 @@ async def adapter_socket(ws: WebSocket) -> None:
 
             elif kind == "map_meta":
                 pass  # metadata accompanies the HTTP upload
+
+            elif kind == "slam_graph":
+                # Optional (protocol 2). A robot running a collaborative back end
+                # reports its own view of the shared pose graph; adapters that do
+                # not run one simply never send this and nothing downstream
+                # changes.
+                rid = msg.get("robot_id")
+                if rid:
+                    graph = {
+                        "keyframes": int(msg.get("keyframes", 0)),
+                        "in_common_frame": bool(msg.get("in_common_frame", False)),
+                        "residual": msg.get("residual"),
+                        "inter_robot": msg.get("inter_robot", []),
+                        "t_mono": msg.get("t_mono"),
+                    }
+                    map_service.set_slam_graph(rid, graph)
+                    await broadcast({"type": "slam_graph", "robot_id": rid, "graph": graph})
 
             # Unknown types are ignored, not fatal (protocol rule 3).
     except WebSocketDisconnect:

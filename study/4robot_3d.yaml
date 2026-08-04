@@ -1,0 +1,47 @@
+# Four robots on a 3D lidar + IMU, mapped by RTAB-Map instead of SLAM Toolbox.
+#
+#   SLAM_BACKEND=rtabmap SWARMDECK_CONFIG=/app/study/4robot_3d.yaml make docker-up-gpu
+#
+# Identical to 4robot.yaml except the lidar profile. `generic_32` publishes a
+# real point cloud on <ns>/scan/points, which is what icp_odometry registers
+# against and what RTAB-Map segments into ground and obstacles — neither of which
+# a single horizontal ring can support.
+#
+# This is the configuration that matches the target hardware (3D lidar + IMU), so
+# it is the one to tune against once the actual sensor is chosen: swap
+# `profile` for `vlp16`, `os1_32`, or a new entry in spawn_fleet.py.
+#
+# Rendering 33 rings x 1800 samples is 60x the raytracing of the old sensor. Run
+# it on the GPU; software rendering will not hold real time.
+name: 4robot_3d
+seed: 20260801
+
+fleet:
+  robot_count: 4
+  robot_prefix: robot_
+  lidar:
+    profile: generic_32
+
+map:
+  merge_mode: auto
+  size_m: 30.0
+  resolution: 0.05
+  start_poses:
+    robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
+    robot_1: {x: -3.0, y: 0.0, yaw: 0.0}
+    robot_2: {x: 3.0, y: 0.0, yaw: 3.1416}
+    robot_3: {x: 9.0, y: 0.0, yaw: 3.1416}
+
+alerts:
+  unattended_threshold_s: 45
+  nav_failure: true
+  adapter_disconnect: true
+
+video:
+  width: 640
+  height: 480
+  fps: 15
+
+recording:
+  enabled: true
+  output_dir: sessions

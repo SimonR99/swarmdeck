@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-jazzy-nav2-bringup \
       ros-jazzy-nav2-msgs \
       ros-jazzy-pointcloud-to-laserscan \
+      ros-jazzy-robot-localization \
+      ros-jazzy-rtabmap-odom \
       ros-jazzy-rtabmap-slam \
       ros-jazzy-rtabmap-util \
       ros-jazzy-tf2-ros \

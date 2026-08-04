@@ -1,0 +1,109 @@
+# Wheel + IMU fusion, one instance per robot namespace, producing odom -> base_link.
+#
+# Why this exists: wheel odometry alone was measured 8.8-30.5 m and up to 244 deg
+# wrong inside a 24 m building. A differential drive that is jammed keeps turning
+# its wheels, so the drive plugin integrates motion that never happened -- exactly
+# what a real robot's encoders do. SLAM Toolbox uses odom as its motion prior and
+# only searches a small window around it, so a prior that wrong cannot be rescued
+# by scan matching.
+#
+# What is fused, and what is deliberately NOT:
+#
+#   wheels -> vx, vy      Linear velocity only. Never the wheel-derived heading,
+#                         because that is the channel slip destroys.
+#   gyro   -> yaw rate    Rotation measured directly, so a spinning-in-place jam
+#                         no longer injects phantom heading.
+#
+# The IMU's absolute orientation is ignored on purpose. Gazebo publishes a
+# perfect world-referenced quaternion, and a real MEMS IMU without a magnetometer
+# has no absolute yaw at all, so fusing it would be borrowing ground truth. Rate
+# only is what the hardware can actually deliver.
+#
+# This cannot fix translational slip: at a constant velocity there is no inertial
+# signature distinguishing "driving" from "stuck with the wheels spinning", so
+# nothing here substitutes for keeping the robots off the walls. It fixes the
+# heading channel, which is what rotates an entire laser scan and ruins a map.
+#
+# Frames are injected by slam.launch.py because they carry the robot namespace.
+# world_frame == odom_frame, so this is a continuous, locally smooth, drifting
+# estimate. Correcting the drift globally remains SLAM Toolbox's job.
+# The key is `/**` because these nodes run namespaced (`/robot_N/ekf_node`) and a
+# bare node-name key resolves to `/ekf_node`, matching nothing — silently. See the
+# same note in slam_toolbox.yaml.
+/**:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: true
+    publish_acceleration: false
+    print_diagnostics: false
+    debug: false
+
+    # Element order is x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw.
+    #
+    # Gazebo's RAW topics, with their all-zero covariance — and that is a
+    # measured decision, not an oversight.
+    #
+    # covariance_relay.py exists to restamp these with the sensor's real noise,
+    # and feeding it to this filter made the filter TEN TIMES WORSE. Over a
+    # 300 s four-robot run, same seed, only the topics differing:
+    #
+    #                     wheel odom   EKF
+    #   real covariance     1.55 m     4.80 m   (robot_3: 17.02 m)
+    #   zero covariance     1.47 m     0.46 m   (worst robot: 0.83 m)
+    #
+    # With an all-zero R the Kalman gain is 1 and the filter tracks each
+    # measurement exactly; `process_noise_covariance` below was tuned in that
+    # regime and is what makes it work. Introduce a realistic R and the same
+    # process noise now lets prediction error accumulate between updates, and
+    # the estimate wanders — worse than the wheel odometry it is meant to
+    # improve, which is this package's oldest warning sign.
+    #
+    # Fixing it properly means re-tuning process_noise_covariance against real
+    # covariance, which is a measurement campaign rather than an edit. Until
+    # someone does that, `fuse_covariance:=true` switches these to odom_cov /
+    # imu_cov for anyone who wants to run it. The relay is still built and still
+    # used: RTAB-Map's icp_odometry consumes imu_cov on the 3D path, where it
+    # weighs the inertial prior properly.
+    odom0: odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+    # A differential drive cannot move sideways, so vy is a genuine constraint
+    # rather than a measurement, and is trusted accordingly.
+    odom0_twist_rejection_threshold: 5.0
+
+    imu0: imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 50
+    imu0_remove_gravitational_acceleration: true
+
+    # Process noise, and with zero measurement covariance above it is the
+    # filter's only notion of uncertainty. That is why these values are load
+    # bearing and why changing the measurement side without re-tuning them
+    # breaks the filter — see the note on odom0.
+    process_noise_covariance: [0.02, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.02, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.02, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.03, 0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.005, 0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.005, 0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.005, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.01]

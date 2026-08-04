@@ -16,14 +16,30 @@ BACKEND_HOST="${BACKEND_HOST:-server}"
 BACKEND_PORT="${BACKEND_PORT:-8080}"
 CONFIG="${SWARMDECK_CONFIG:-/app/study/4robot.yaml}"
 HEADLESS="${HEADLESS:-true}"
-ADAPTER_DELAY="${ADAPTER_DELAY:-45}"
+# Must outlast session.launch.py's staggered per-robot bringup, or the adapter
+# starts advertising robots whose SLAM is not active yet.
+ADAPTER_DELAY="${ADAPTER_DELAY:-60}"
+SLAM_BACKEND="${SLAM_BACKEND:-toolbox}"
+FUSE_IMU="${FUSE_IMU:-true}"
+FUSE_COVARIANCE="${FUSE_COVARIANCE:-false}"
+GRID_3D="${GRID_3D:-false}"
+# Seconds of reactive exploration after startup, to bootstrap the maps before the
+# operator takes over. 0 leaves the fleet stationary until a goal arrives.
+EXPLORE_SECONDS="${EXPLORE_SECONDS:-0}"
 
 mkdir -p /app/sessions
 
-echo "[gazebo] launching session config=${CONFIG} headless=${HEADLESS}"
+echo "[gazebo] launching session config=${CONFIG} headless=${HEADLESS}" \
+     "slam_backend=${SLAM_BACKEND} fuse_imu=${FUSE_IMU}" \
+     "explore_seconds=${EXPLORE_SECONDS}"
 ros2 launch swarmdeck_bringup session.launch.py \
   "config:=${CONFIG}" \
-  "headless:=${HEADLESS}" &
+  "headless:=${HEADLESS}" \
+  "slam_backend:=${SLAM_BACKEND}" \
+  "fuse_imu:=${FUSE_IMU}" \
+  "fuse_covariance:=${FUSE_COVARIANCE}" \
+  "grid_3d:=${GRID_3D}" \
+  "explore_seconds:=${EXPLORE_SECONDS}" &
 LAUNCH_PID=$!
 
 cleanup() {

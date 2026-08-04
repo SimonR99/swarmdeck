@@ -1,0 +1,82 @@
+# Swarm-SLAM, lidar front end, for the SwarmDeck fleet.
+#
+# Keys and structure taken from upstream's own `kitti_lidar.yaml` inside a built
+# cslam workspace, not from documentation — an earlier version of this file was
+# written from the docs and had invented half its parameter names, which ROS 2
+# would have accepted in silence.
+#
+# Topics are relative and the nodes run namespaced per robot, so `odom_icp`
+# resolves to `/robot_N/odom_icp`.
+/**:
+  ros__parameters:
+    frontend:
+      sensor_type: "lidar"
+      # The lidar odometry from slam_rtabmap.launch.py, NOT the wheel topic on
+      # <ns>/odom. cslam integrates whatever it is given here as the motion
+      # prior between keyframes, so handing it wheel odometry would feed the
+      # pose graph the one channel that cannot observe slip.
+      # Overridden by cslam.launch.py with ABSOLUTE paths into the fleet's
+      # namespace (`/robot_N/...`). These relative defaults would resolve under
+      # cslam's own `/rN` namespace, where nothing publishes.
+      odom_topic: "odom_icp"
+      pointcloud_topic: "scan/points"
+      # 0.2 m rather than KITTI's 0.5: this is a 24 m building with 6 m rooms,
+      # and at 0.5 m a doorway is three voxels wide.
+      voxel_size: 0.2
+      registration_min_inliers: 100
+      # Descriptors exchanged between robots. The paper's argument is that this
+      # is the scarce resource, so it is a budget, not a firehose.
+      inter_robot_loop_closure_budget: 5
+      inter_robot_detection_period_sec: 5
+      max_queue_size: 10
+      similarity_threshold: 0.9
+      global_descriptors_topic: "global_descriptors"
+      global_descriptor_technique: "scancontext"
+      intra_loop_min_inbetween_keyframes: 20
+      detection_publication_period_sec: 1.0
+      detection_publication_max_elems_per_msg: 100
+      enable_intra_robot_loop_closures: true
+      # How far a robot moves before it keeps a keyframe. Too large and two
+      # robots can pass through the same room without either holding a frame
+      # from it, which is exactly the event the whole system exists to catch.
+      #
+      # 0.25 rather than upstream's 0.5, because the simulated fleet is slow:
+      # running 12 cslam nodes alongside Gazebo and four RTAB-Map stacks drops
+      # the real-time factor far enough that robots cover ~1.4 cm of ground per
+      # wall-clock second. At 0.5 m spacing that is one keyframe per robot every
+      # ~36 s, which looks exactly like "cslam is producing nothing" for the
+      # first several minutes of a run. Halving it doubles the rate at which the
+      # graph — and therefore any inter-robot encounter — can accumulate.
+      keyframe_generation_ratio_distance: 0.25
+      # Gazebo does not hardware-sync the cloud and odometry.
+      pointcloud_odom_approx_time_sync_s: 0.1
+      use_vertex_cover_selection: true
+      map_manager_process_period_ms: 100
+
+    neighbor_management:
+      # On an ad-hoc network robots drop out routinely; the graph must survive
+      # it rather than treat a silent neighbour as a failure.
+      enable_neighbor_monitoring: true
+      max_heartbeat_delay_sec: 5.0
+      init_delay_sec: 5.0
+      heartbeat_period_sec: 1.0
+
+    backend:
+      # 10 s before the first optimisation: with four robots meeting early there
+      # is nothing to optimise until keyframes have actually accumulated.
+      pose_graph_optimization_start_period_ms: 10000
+      pose_graph_optimization_loop_period_ms: 100
+      max_waiting_time_sec: 3600
+      # Publishes the inter-robot transforms as TF, which is what lets each
+      # adapter report poses already in the common frame.
+      enable_broadcast_tf_frames: true
+
+    evaluation:
+      enable_logs: false
+      log_folder: "results"
+      enable_gps_recording: false
+      enable_sparsification_comparison: false
+
+    visualization:
+      enable: true
+      publishing_period_ms: 1000

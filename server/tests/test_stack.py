@@ -40,7 +40,9 @@ def test_config_endpoint():
     with TestClient(app) as c:
         r = c.get("/api/config")
         assert r.status_code == 200
-        assert r.json()["protocol"] == 1
+        # A protocol-1 adapter must stay valid: v2 only adds an optional message.
+        assert r.json()["protocol"] == 2
+        assert 1 in r.json()["supported_protocols"]
 
 
 def test_map_png_roundtrip():
@@ -49,7 +51,7 @@ def test_map_png_roundtrip():
         assert r.status_code == 200
         assert r.headers["content-type"] == "image/png"
         image = Image.open(io.BytesIO(r.content))
-        assert image.getpixel((0, 0)) == (229, 232, 236)
+        assert image.getpixel((0, 0)) == MapService.UNKNOWN_RGB
 
 
 def test_local_map_png_and_info_roundtrip():
@@ -347,3 +349,183 @@ def test_drive_routing_is_bounded():
     finally:
         app_registry.robots.clear()
         app_registry._sinks.clear()
+
+
+# --------------------------------------------------------------- cslam mode
+
+
+def _plan_grid(n: int) -> np.ndarray:
+    """A small asymmetric floor plan, so registration has something to lock on."""
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[5:n - 5, 5:n - 5] = 0
+    cells[5, 5:n - 5] = 100
+    cells[n - 6, 5:n - 5] = 100
+    cells[5:n - 5, 5] = 100
+    cells[5:n - 5, n - 6] = 100
+    cells[5:n // 2, n // 3] = 100          # an interior wall, off centre
+    cells[n // 2 + 4, n // 3:n - 8] = 100  # and a second, so the plan is not symmetric
+    return cells
+
+
+def _cslam_service() -> tuple[MapService, GridMeta, np.ndarray]:
+    svc = MapService(resolution=0.1, size_m=6.0)
+    svc.set_mode("cslam")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -3.0, -3.0)
+    # Robots running a collaborative back end publish in the common frame, so
+    # their transforms are identity — mapsvc is bookkeeping, not an estimator.
+    svc.set_transform("r0", 0.0, 0.0, 0.0)
+    svc.set_transform("r1", 0.0, 0.0, 0.0)
+    return svc, meta, _plan_grid(n)
+
+
+def test_cslam_mode_is_accepted():
+    svc = MapService()
+    svc.set_mode("cslam")
+    assert svc.merge_mode == "cslam"
+    svc.set_mode("nonsense")
+    assert svc.merge_mode == "static"
+
+
+def test_cslam_excludes_a_robot_that_has_not_joined_the_common_frame():
+    """Absent an inter-robot loop closure, a robot is not in the shared map.
+    Overlaying it at its configured start pose is the confident-but-wrong merge
+    the rejection tests exist to prevent."""
+    svc, meta, cells = _cslam_service()
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells)
+    assert svc.global_members() == {"r0"}          # r0 is the reference
+    assert svc.status()["view_by_robot"]["r1"] == "local"
+
+
+def test_cslam_admits_a_robot_once_its_graph_says_so():
+    svc, meta, cells = _cslam_service()
+    svc.ingest("r0", meta, cells)
+    svc.set_slam_graph("r1", {"keyframes": 40, "in_common_frame": True,
+                              "residual": 0.02, "inter_robot": [{"other": "r0", "count": 3}]})
+    svc.ingest("r1", meta, cells)
+    assert svc.global_members() == {"r0", "r1"}
+
+
+def test_cslam_reports_disagreement_rather_than_correcting_it():
+    """Grid correlation stops being the estimator and becomes an independent
+    check, using evidence (free space over the whole map) the loop closures did
+    not use. Two identical grids in one frame must agree at ~zero, and the
+    transform must be left alone either way."""
+    svc, meta, cells = _cslam_service()
+    svc.ingest("r0", meta, cells)
+    svc.set_slam_graph("r1", {"keyframes": 40, "in_common_frame": True})
+    svc.ingest("r1", meta, cells)
+
+    assert svc.transforms["r1"] == (0.0, 0.0, 0.0), "the check must not move anything"
+    disagreement = svc.status()["cslam_disagreement"]
+    assert "r1" in disagreement, "identical grids should be checkable"
+    assert disagreement["r1"]["metres"] < 0.2
+    assert abs(disagreement["r1"]["degrees"]) < 5.0
+
+
+def test_cslam_disagreement_is_visible_when_the_alignment_is_wrong():
+    """A robot whose grid is offset from where the pose graph puts it must show
+    up as a number, not as a silently smeared map."""
+    svc, meta, cells = _cslam_service()
+    svc.ingest("r0", meta, cells)
+    svc.set_slam_graph("r1", {"keyframes": 40, "in_common_frame": True})
+    shifted = np.full_like(cells, -1)
+    shifted[:, 6:] = cells[:, :-6]          # 6 cells = 0.6 m of error
+    svc.ingest("r1", meta, shifted)
+
+    disagreement = svc.status()["cslam_disagreement"]
+    assert "r1" in disagreement
+    assert disagreement["r1"]["metres"] > 0.3
+
+
+def test_slam_graph_survives_into_status_in_every_mode():
+    svc = MapService()
+    svc.set_slam_graph("r0", {"keyframes": 12, "in_common_frame": True,
+                              "inter_robot": [{"other": "r1", "count": 2}]})
+    assert svc.status()["slam_graphs"]["r0"]["keyframes"] == 12
+
+
+# ------------------------------------------------------------- 3D cloud
+
+
+def test_cloud_upload_and_merge_roundtrip():
+    """A cloud uploaded in a robot's own frame comes back in the merged one."""
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("static")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[10:20, 10:20] = 0
+
+    # r1 sits 2 m along x, rotated a quarter turn.
+    svc.set_transform("r0", 0.0, 0.0, 0.0)
+    svc.set_transform("r1", 2.0, 0.0, math.pi / 2)
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells)
+    svc.set_cloud("r0", np.array([[1.0, 0.0, 0.5]], dtype=np.float32))
+    svc.set_cloud("r1", np.array([[1.0, 0.0, 0.5]], dtype=np.float32))
+
+    points, indices, names = svc.merged_cloud()
+    assert names == ["r0", "r1"]
+    assert len(points) == 2
+    assert points[0] == pytest.approx([1.0, 0.0, 0.5], abs=1e-5)
+    # (1, 0) rotated 90 deg then offset by (2, 0) lands at (2, 1). z is untouched:
+    # the merge frame is SE(2), so height passes straight through.
+    assert points[1] == pytest.approx([2.0, 1.0, 0.5], abs=1e-5)
+    assert list(indices) == [0, 1]
+
+
+def test_merged_cloud_excludes_unregistered_robots():
+    """Drawing an unregistered robot's cloud in the shared frame would render a
+    guess as though it were a measurement — the same rule the 2D merge uses."""
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("cslam")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[10:20, 10:20] = 0
+    svc.set_transform("r0", 0.0, 0.0, 0.0)
+    svc.set_transform("r1", 0.0, 0.0, 0.0)
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells)
+    svc.set_cloud("r0", np.ones((5, 3), dtype=np.float32))
+    svc.set_cloud("r1", np.ones((5, 3), dtype=np.float32))
+
+    # r1 has not joined the common frame, so only the reference contributes.
+    _, _, names = svc.merged_cloud()
+    assert names == ["r0"]
+
+
+def test_cloud_endpoints_roundtrip():
+    import zlib
+
+    points = np.array([[1.0, 2.0, 0.5], [-1.0, 0.0, 1.25]], dtype=np.float32)
+    body = zlib.compress(np.round(points / 0.01).astype(np.int16).tobytes())
+    # `static` is the operator asserting the transforms are valid, which is what
+    # makes robot_0 a member. In `auto` a lone robot has nothing to register
+    # against and is deliberately excluded, so the merged cloud would be empty —
+    # correct behaviour, but it would be testing membership rather than the
+    # endpoints these assertions are about.
+    map_service.set_mode("static")
+    n = 40
+    map_service.ingest("robot_0", GridMeta(0.1, n, n, -2.0, -2.0),
+                       np.full((n, n), -1, np.int8))
+    with TestClient(app) as c:
+        assert c.post("/api/adapter/cloud", content=body).status_code == 400
+        posted = c.post("/api/adapter/cloud?robot_id=robot_0", content=body)
+        assert posted.status_code == 200
+        assert posted.json()["points"] == 2
+
+        got = c.get("/api/map/cloud")
+        assert got.status_code == 200
+        assert int(got.headers["X-Cloud-Points"]) >= 2
+        assert "robot_0" in got.headers["X-Cloud-Robots"]
+
+
+def test_malformed_cloud_is_refused_not_crashed():
+    with TestClient(app) as c:
+        assert c.post("/api/adapter/cloud?robot_id=r0", content=b"not zlib").status_code == 400
+        import zlib
+        odd = zlib.compress(np.zeros(4, dtype=np.int16).tobytes())  # not a triple
+        assert c.post("/api/adapter/cloud?robot_id=r0", content=odd).status_code == 400

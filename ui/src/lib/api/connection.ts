@@ -55,6 +55,9 @@ function dispatch(msg: ServerMessage) {
     case 'settings_state':
       settings.apply(msg.settings);
       break;
+    case 'slam_graph':
+      mapStore.applySlamGraph(msg.robot_id, msg.graph);
+      break;
   }
 }
 
