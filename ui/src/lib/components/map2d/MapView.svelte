@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    Box,
     Crosshair,
     Focus,
     Grid3X3,
@@ -13,6 +14,7 @@
     Tags,
     Trash2
   } from 'lucide-svelte';
+  import Map3D from '$lib/components/map3d/Map3D.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { session } from '$lib/stores/session.svelte';
@@ -27,6 +29,14 @@
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
+  // `?view=3d` opens straight into the point cloud. The frontend already takes
+  // `?mock=1&robots=4`, so URL-driven view state is the existing idiom here —
+  // and it is the only way to reach the 3D view from a headless browser, which
+  // is how it gets verified.
+  let show3D = $state(
+    typeof location !== 'undefined' &&
+      new URLSearchParams(location.search).get('view') === '3d'
+  );
   let showGrid = $state(true);
   let showTrails = $state(true);
   let showLabels = $state(true);
@@ -179,6 +189,51 @@
     ctx.restore();
   }
 
+  /**
+   * Inter-robot loop closures, drawn between the two robots' current positions.
+   *
+   * This is the one thing on the map that a stitched fleet cannot show: a line
+   * here means those two robots recognised the same place and constrained each
+   * other's pose graph, which is what corrects both their drift. The line is
+   * therefore between robots, not between the keyframes that closed — an
+   * operator wants to know who has met whom, and the keyframe pair is detail.
+   */
+  function drawLoopClosures(ctx: CanvasRenderingContext2D) {
+    const graphs = mapStore.slamGraphs;
+    if (!showPlans) return;
+    const seen = new Set<string>();
+    ctx.save();
+    ctx.setLineDash([1, 3]);
+    ctx.lineWidth = 1.5;
+    for (const [robotId, graph] of Object.entries(graphs)) {
+      const a = fleet.get(robotId);
+      if (!a) continue;
+      for (const link of graph.inter_robot) {
+        // Both robots report the same pair; draw it once.
+        const key = [robotId, link.other].sort().join('|');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const b = fleet.get(link.other);
+        if (!b) continue;
+        const ga = mapStore.worldToGrid(a.pose.x, a.pose.y);
+        const gb = mapStore.worldToGrid(b.pose.x, b.pose.y);
+        if (!ga || !gb) continue;
+        const pa = screenOf(ga.gx, ga.gy);
+        const pb = screenOf(gb.gx, gb.gy);
+        ctx.beginPath();
+        ctx.moveTo(pa.sx, pa.sy);
+        ctx.lineTo(pb.sx, pb.sy);
+        // More closures is more confidence, up to a point worth seeing.
+        ctx.globalAlpha = Math.min(0.75, 0.25 + link.count * 0.06);
+        ctx.strokeStyle = '#0b5cad';
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+  }
+
   function draw() {
     if (!canvas || !host) return;
     const ctx = canvas.getContext('2d');
@@ -209,11 +264,25 @@
 
     // occupancy grid
     if (grid && info) {
+      const gw = info.width * view.scale;
+      const gh = info.height * view.scale;
       ctx.imageSmoothingEnabled = view.scale < 1;
-      ctx.drawImage(grid, view.tx, view.ty, info.width * view.scale, info.height * view.scale);
+      ctx.drawImage(grid, view.tx, view.ty, gw, gh);
+
+      // Below one screen pixel per cell the grid alone cannot render a wall:
+      // smoothing averages a one-cell wall into its neighbours until it is a
+      // pale smudge, and nearest-neighbour drops it wherever the sampling grid
+      // misses. Composite a max-pooled occupancy mask on top, point-sampled, so
+      // walls keep full contrast at every zoom. See mapstore.svelte.ts.
+      const mask = mapStore.occupancyMask(view.scale);
+      if (mask) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(mask, view.tx, view.ty, gw, gh);
+      }
     }
 
     drawMetricGrid(ctx, w, h);
+    drawLoopClosures(ctx);
 
     // detections
     for (const d of session.detections) {
@@ -586,6 +655,18 @@
 </script>
 
 <div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-card] border border-border bg-bg">
+  <!--
+    The 3D view sits over the 2D one rather than replacing it. 2D stays the
+    operator's working surface — it is where goals are set and where the fleet
+    is supervised — and 3D is a way of inspecting what the robots have actually
+    built. Mounted only while shown, so a fleet on 2D SLAM never pays for a
+    WebGL context it has no cloud to fill.
+  -->
+  {#if show3D}
+    <div class="absolute inset-0 z-10">
+      <Map3D active={show3D} />
+    </div>
+  {/if}
   <div bind:this={host} class="absolute inset-0">
     <canvas
       bind:this={canvas}
@@ -605,14 +686,33 @@
     </div>
   {/if}
 
-  <div class="pointer-events-none absolute left-3 top-3 flex items-center gap-1.5">
-    <div
+  <div class="absolute left-3 top-3 z-20 flex items-center gap-1.5">
+    <!--
+      Clickable: the backend recommends local vs global, but the operator must be
+      able to overrule it. Inspecting one robot's own map is how you tell whether
+      a bad merge is the registration or the underlying map, and a robot joining
+      the global map used to take that choice away silently.
+    -->
+    <button
       class="flex items-center gap-2 rounded-[4px] border border-border bg-surface/88 px-2.5 py-1
-             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl"
+             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl
+             transition-colors hover:bg-surface-2 disabled:hover:bg-surface/88"
+      title={fleet.selected[0]
+        ? "Switch between the merged map and this robot's own SLAM map"
+        : 'Select a robot to view its own map'}
+      disabled={!fleet.selected[0]}
+      onclick={() =>
+        mapStore.setViewPreference(
+          mapStore.viewMode === 'local' ? 'global' : 'local',
+          fleet.selected[0] ?? null
+        )}
     >
       <span class="h-1.5 w-1.5 rounded-full {mapStore.ready ? 'bg-ok' : 'bg-warn'}"></span>
       {mapStore.ready ? mapStore.viewLabel : 'Connecting'}
-    </div>
+      {#if fleet.selected[0]}
+        <Layers3 class="h-3 w-3 opacity-50" />
+      {/if}
+    </button>
     {#if mapStore.status}
       <div
         class="rounded-[4px] border border-border bg-surface/88 px-2.5 py-1 text-[10px]
@@ -644,7 +744,19 @@
   {/if}
 
   <!-- Map layers and registration diagnostics. -->
-  <div class="absolute bottom-3 right-14">
+  {#if show3D}
+    <button
+      class="panel-glow absolute bottom-3 right-3 z-20 flex h-8 items-center gap-1.5 rounded-[4px]
+             border border-border bg-surface/95 px-2.5 text-[10px] font-medium text-accent
+             transition-colors hover:bg-surface-2"
+      title="Back to the 2D map"
+      onclick={() => (show3D = false)}
+    >
+      <Box class="h-3.5 w-3.5" /> Exit 3D
+    </button>
+  {/if}
+
+  <div class="absolute bottom-3 right-14 z-20">
     <button
       title="Map layers"
       class="panel-glow flex h-8 items-center gap-1.5 rounded-[4px] border border-border
@@ -700,6 +812,13 @@
           <span class="font-semibold {showSensors ? 'text-accent' : 'text-fg-dim'}">{showSensors ? 'ON' : 'OFF'}</span>
         </button>
         <button
+          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          onclick={() => (show3D = !show3D)}
+        >
+          <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D cloud</span>
+          <span class="font-semibold {show3D ? 'text-accent' : 'text-fg-dim'}">{show3D ? 'ON' : 'OFF'}</span>
+        </button>
+        <button
           class="mt-1 flex h-7 w-full items-center gap-2 rounded-[3px] border-t border-border px-1.5
                  text-fg-muted hover:bg-surface-2"
           onclick={clearTrails}
@@ -714,7 +833,7 @@
         <div class="flex items-center gap-3 px-1 py-1 text-fg-dim">
           <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 border border-border bg-white"></i> Free</span>
           <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#343a44]"></i> Wall</span>
-          <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#e5e8ec]"></i> Unknown</span>
+          <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#d6dae0]"></i> Unknown</span>
         </div>
 
         {#if mapStore.status}
@@ -750,7 +869,9 @@
   </div>
 
   <!-- view controls -->
-  <div class="panel-glow absolute bottom-3 right-3 flex flex-col overflow-hidden rounded-[4px] border border-border bg-surface/95">
+  <!-- 2D-only: these drive the canvas transform, not the 3D orbit camera. -->
+  {#if !show3D}
+  <div class="panel-glow absolute bottom-3 right-3 z-20 flex flex-col overflow-hidden rounded-[4px] border border-border bg-surface/95">
     <button
       title="Follow fleet"
       class="grid h-9 w-9 touch-target place-items-center border-b border-border
@@ -799,10 +920,11 @@
       <Maximize2 class="h-4 w-4" />
     </button>
   </div>
+  {/if}
 
   <!-- cursor readout -->
   <div
-    class="pointer-events-none absolute bottom-3 left-3 flex items-center gap-2 rounded-[4px]
+    class="pointer-events-none absolute bottom-3 left-3 z-20 flex items-center gap-2 rounded-[4px]
            border border-border bg-surface/88 px-2.5 py-1 text-[10px] tabular text-fg-dim
            shadow-sm backdrop-blur-xl"
   >

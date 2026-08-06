@@ -48,8 +48,10 @@ def build_truth() -> np.ndarray:
 
 
 class MockRobot:
-    def __init__(self, idx: int, host: str) -> None:
+    def __init__(self, idx: int, host: str, fleet_size: int = 1) -> None:
         self.id = f"robot_{idx}"
+        # Who else is out there, for the synthetic pose graph in slam_graph().
+        self.peers = [f"robot_{i}" for i in range(fleet_size) if i != idx]
         self.type = "spot" if idx == 0 else "diffdrive"
         starts = [(-14, -14), (10, -14), (-14, 10), (10, 10), (0, 0)]
         self.x, self.y = starts[idx % 5]
@@ -105,6 +107,65 @@ class MockRobot:
             "goal": self.target,
         }
 
+    def slam_graph(self) -> dict:
+        """A synthetic collaborative pose graph (protocol 2, optional).
+
+        Real swarm SLAM reports this from its own back end. Here it is modelled
+        just faithfully enough to drive the GUI: keyframes accumulate with time,
+        a robot joins the common frame only once it has closed a loop with
+        someone, and closures against near neighbours accrue faster than against
+        distant ones — because meeting is what produces them.
+        """
+        elapsed = time.monotonic() - self.t0
+        links = []
+        for other in self.peers:
+            # Neighbours in the fleet ordering stand in for spatial proximity.
+            gap = abs(int(other.split("_")[-1]) - int(self.id.split("_")[-1]))
+            count = max(0, int(elapsed / (12.0 * gap)) if gap else 0)
+            if count:
+                links.append({"other": other, "count": count, "last_t": round(elapsed, 1)})
+        return {
+            "type": "slam_graph",
+            "robot_id": self.id,
+            "t_mono": round(elapsed, 4),
+            "keyframes": int(elapsed * 1.5),
+            "in_common_frame": bool(links),
+            "residual": round(0.12 / (1 + len(links)), 4),
+            "inter_robot": links,
+        }
+
+    def upload_cloud(self) -> None:
+        """A synthetic 3D cloud: this robot's known walls, extruded upward.
+
+        Real robots send an accumulated 3D map from their SLAM back end. This
+        stands in for it so the GUI's 3D view can be developed and demonstrated
+        with no ROS at all, exactly as the synthetic grid does for the 2D map.
+        """
+        ys, xs = np.nonzero(self.known >= 50)
+        if not len(xs):
+            return
+        # One column of points per occupied cell, so walls read as walls.
+        heights = np.arange(0.1, 1.9, 0.2, dtype=np.float32)
+        wx = (xs * RES + ORIGIN[0]).astype(np.float32)
+        wy = ((N - ys) * RES + ORIGIN[1]).astype(np.float32)
+        points = np.column_stack(
+            [
+                np.repeat(wx, len(heights)),
+                np.repeat(wy, len(heights)),
+                np.tile(heights, len(wx)),
+            ]
+        )
+        body = zlib.compress(np.round(points / 0.01).astype(np.int16).tobytes(), 1)
+        req = urllib.request.Request(
+            f"{self.host}/api/adapter/cloud?robot_id={self.id}&scale=0.01",
+            data=body,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception as exc:
+            print(f"[{self.id}] cloud upload failed: {exc}")
+
     def upload_map(self) -> None:
         body = zlib.compress(np.ascontiguousarray(self.known).tobytes())
         url = (
@@ -128,7 +189,7 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                     json.dumps(
                         {
                             "type": "hello",
-                            "protocol": 1,
+                            "protocol": 2,
                             "robot_id": robot.id,
                             "robot_type": robot.type,
                             "adapter": "adapter_mock/0.1.0",
@@ -158,6 +219,8 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
 
                 async def tx() -> None:
                     last_map = 0.0
+                    last_graph = 0.0
+                    last_cloud = 0.0
                     while True:
                         robot.step(0.2)
                         await ws.send(json.dumps(robot.state()))
@@ -184,10 +247,24 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                                 )
                             )
                         now = time.monotonic()
+                        # A synthetic collaborative pose graph (protocol 2).
+                        # Real swarm SLAM reports this from its own back end;
+                        # here it exists so the GUI's swarm panel and the
+                        # backend's `merge_mode: cslam` can be exercised without
+                        # a ROS 2 fleet, exactly as the rest of this adapter
+                        # exercises the map and detection paths.
+                        if now - last_graph > 3.0:
+                            last_graph = now
+                            await ws.send(json.dumps(robot.slam_graph()))
                         if now - last_map > 2.0:
                             last_map = now
                             await asyncio.get_running_loop().run_in_executor(
                                 None, robot.upload_map
+                            )
+                        if now - last_cloud > 4.0:
+                            last_cloud = now
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, robot.upload_cloud
                             )
                         await asyncio.sleep(0.2)
 
@@ -206,7 +283,8 @@ async def main() -> None:
 
     ws_url = f"ws://{args.host}:{args.port}/adapter"
     http_url = f"http://{args.host}:{args.port}"
-    robots = [MockRobot(i, http_url) for i in range(min(args.robots, 5))]
+    count = min(args.robots, 5)
+    robots = [MockRobot(i, http_url, count) for i in range(count)]
     print(f"[adapter_mock] {len(robots)} robots -> {ws_url}")
     await asyncio.gather(*(run_robot(r, ws_url, http_url) for r in robots))
 

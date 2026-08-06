@@ -4,6 +4,7 @@
   import MapView from '$lib/components/map2d/MapView.svelte';
   import CameraPanel from '$lib/components/video/CameraPanel.svelte';
   import DrivePanel from '$lib/components/controls/DrivePanel.svelte';
+  import SwarmGraphPanel from '$lib/components/slam/SwarmGraphPanel.svelte';
   import AlertStack from '$lib/components/alerts/AlertStack.svelte';
   import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
   import { startConnection, teardown } from '$lib/api/connection';
@@ -38,6 +39,7 @@
       <div class="flex w-[300px] shrink-0 flex-col gap-2 overflow-y-auto xl:w-[320px]">
         <CameraPanel />
         <DrivePanel />
+        <SwarmGraphPanel />
       </div>
     {/if}
 

@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>swarmdeck_cslam</name>
+  <version>0.1.0</version>
+  <description>
+    Wires MISTLab's Swarm-SLAM (cslam) to SwarmDeck's per-robot namespacing.
+    Optional: the fleet runs without it, merging finished grids instead.
+  </description>
+  <maintainer email="swarmdeck@mistlab.ca">SwarmDeck</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <!-- cslam is NOT an apt package; see docker/Dockerfile.cslam for the build. -->
+  <exec_depend>rtabmap_odom</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

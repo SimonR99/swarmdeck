@@ -1,0 +1,46 @@
+# A/B control: the fleet exactly as it was before the lidar profiles landed.
+#
+# Identical to 4robot.yaml in every respect except the mapping lidar, which goes
+# back to 360 samples per revolution over 16 m — 1.003 deg between rays, so
+# adjacent returns land one 5 cm cell apart at 2.9 m and three cells apart at
+# 8.6 m, and distant walls come out as dotted fans.
+#
+#   SWARMDECK_CONFIG=/app/study/baseline_legacy.yaml make docker-up-gpu
+#
+# Run it on the GPU like the real configs, so a comparison isolates the sensor
+# rather than measuring the simulator's real-time factor as well.
+#
+# This file exists to keep "the map got better" a measurement instead of an
+# opinion. Do not tune it; its whole value is that it does not move.
+name: baseline_legacy
+seed: 20260801
+
+fleet:
+  robot_count: 4
+  robot_prefix: robot_
+  lidar:
+    profile: legacy_360
+
+map:
+  merge_mode: auto
+  size_m: 30.0
+  resolution: 0.05
+  start_poses:
+    robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
+    robot_1: {x: -3.0, y: 0.0, yaw: 0.0}
+    robot_2: {x: 3.0, y: 0.0, yaw: 3.1416}
+    robot_3: {x: 9.0, y: 0.0, yaw: 3.1416}
+
+alerts:
+  unattended_threshold_s: 45
+  nav_failure: true
+  adapter_disconnect: true
+
+video:
+  width: 640
+  height: 480
+  fps: 15
+
+recording:
+  enabled: true
+  output_dir: sessions

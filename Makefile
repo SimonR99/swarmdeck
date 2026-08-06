@@ -1,5 +1,6 @@
 .PHONY: help install ui ui-build server mock sim test clean \
-        docker-build docker-up docker-up-mock docker-down docker-logs docker-ps docker-test
+        docker-build docker-up docker-up-gpu docker-up-cslam docker-up-mock docker-down docker-logs \
+        docker-ps docker-test docker-test-launch
 
 help:
 	@echo "SwarmDeck"
@@ -10,10 +11,13 @@ help:
 	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
 	@echo "  make demo            server + mock + ui, all at once"
 	@echo "  make docker-up       Docker: server + UI + Gazebo/SLAM/Nav2/adapter_sim"
+	@echo "  make docker-up-gpu   as docker-up, with Gazebo rendering on an NVIDIA GPU"
+	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
 	@echo "  make docker-up-mock  Docker: server + UI + synthetic mock fleet"
 	@echo "  make docker-down     stop Docker stack"
 	@echo "  make docker-logs     follow Docker logs"
 	@echo "  make docker-test     run backend tests inside Docker"
+	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
 	@echo "  make sim             launch Gazebo simulation (host ROS)"
 	@echo "  make test            run all tests (local venv)"
 
@@ -46,7 +50,10 @@ sim:
 
 test:
 	cd server && $(CLEANENV) .venv/bin/python -m pytest tests -q
-	$(CLEANENV) server/.venv/bin/python -m pytest swarmdeck_ros/src/swarmdeck_sim/test -q
+	$(CLEANENV) server/.venv/bin/python -m pytest \
+	  swarmdeck_ros/src/swarmdeck_sim/test \
+	  swarmdeck_ros/src/swarmdeck_bringup/test \
+	  adapters/test -q
 	cd ui && npm run check
 
 docker-build:
@@ -57,6 +64,25 @@ docker-up:
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
+
+# Same stack with Gazebo rendering on the GPU. Software rendering caps the sim
+# at ~0.58x real time, which is the budget every lidar-fidelity increase has to
+# come out of; see docker-compose.gpu.yml.
+GPU_COMPOSE = -f docker-compose.yml -f docker-compose.gpu.yml
+docker-up-gpu:
+	docker compose $(GPU_COMPOSE) --profile gazebo up --build -d
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "Backend API:      http://localhost:8080/api/config"
+	@echo "Fleet:            Gazebo (GPU) + adapter_sim (allow ~45s for robots to appear)"
+
+# Collaborative SLAM: the fleet plus Swarm-SLAM. Needs the 3D lidar profile and
+# the RTAB-Map backend, since cslam's motion prior is the lidar odometry.
+CSLAM_COMPOSE = -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.cslam.yml
+docker-up-cslam:
+	SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+	  docker compose $(CSLAM_COMPOSE) --profile gazebo up --build -d
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
 
 docker-up-mock:
 	docker compose --profile mock up --build -d
@@ -75,6 +101,15 @@ docker-ps:
 docker-test:
 	docker compose build server
 	docker compose run --rm --no-deps server python -m pytest /app/server/tests -q
+
+# Launch files are plain Python that nothing executes until Gazebo starts, so an
+# undefined name in one costs a full stack startup to find. This builds every
+# LaunchDescription in the ROS image, which takes under a second.
+docker-test-launch:
+	docker compose build gazebo
+	docker compose run --rm --no-deps --entrypoint bash gazebo -lc \
+	  'source /opt/ros/jazzy/setup.bash && source /app/swarmdeck_ros/install/setup.bash && \
+	   cd /app && python3 -m pytest swarmdeck_ros/src/swarmdeck_bringup/test -q'
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log}

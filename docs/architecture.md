@@ -152,7 +152,7 @@ the vendor SDK. The contract does not care — that is the point of the seam.
 |---|---|
 | `swarmdeck_description` | URDF/xacro robot model, sensor config |
 | `swarmdeck_sim` | Gazebo worlds, model spawning, seeded scenario generator, reactive explorer |
-| `swarmdeck_slam` | Per-namespace SLAM bringup: SLAM Toolbox or RTAB-Map, plus cloud→scan slicing when the lidar has multiple rings |
+| `swarmdeck_slam` | Per-namespace localisation and mapping: wheel/gyro EKF, sensor static TFs, SLAM Toolbox or RTAB-Map, plus cloud→scan slicing when the lidar has multiple rings |
 | `swarmdeck_nav` | Nav2 params and per-namespace bringup |
 | `adapters/perception` | Portable RGB perception with no ROS/Gazebo dependency |
 | `swarmdeck_media` | Camera → GStreamer → RTSP encoder node |
@@ -185,6 +185,10 @@ testable with no simulation and no ROS.
 ### 5.1 Pipeline
 
 ```
+wheel odom ──┐
+             ├─► EKF (robot_localization) ──► odom → base_link
+gyro 200 Hz ─┘                                     │
+                                                   ↓
 lidar_rings=1:  Gazebo LaserScan ──────────────┐   (default)
 lidar_rings=N:  PointCloud2 → cloud_to_scan ───┤   (odd N; ring at elevation 0)
                                                ↓
@@ -197,6 +201,14 @@ lidar_rings=N:  PointCloud2 → cloud_to_scan ───┤   (odd N; ring at ele
                                                ↓
                             merged OccupancyGrid → GUI + Nav2 costmaps
 ```
+
+The EKF exists because SLAM only searches a small window around its motion prior, so the
+prior has to be roughly right before scan matching can do anything. It fuses wheel
+*velocity* with gyro *rate* — never wheel-derived heading, which is what slip destroys, and
+never the IMU's absolute orientation, which no magnetometer-free MEMS IMU actually has.
+Measured over 120 s of driving it cuts odometry drift 3-45x (21 m travelled: 1.87 m → 0.04 m).
+`fuse_imu:=false` reverts to raw wheel odometry, and the drive plugin's TF bridge is dropped
+whenever the EKF is on so only one node publishes `odom → base_link`.
 
 Either backend maintains its own pose graph and republishes a corrected grid after loop
 closure, so the map service consumes already-corrected grids and needs no keyframe

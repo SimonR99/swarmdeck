@@ -94,8 +94,28 @@
 <section class="panel-glow flex shrink-0 flex-col rounded-[--radius-card] border border-border bg-surface">
   <header class="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
     <div>
-      <div class="text-[11px] font-semibold text-fg">Robot control</div>
-      <div class="mt-0.5 text-[9px] text-fg-dim">Hold to drive · release to stop</div>
+      <!--
+        Name the robot being driven. The controls act on `fleet.selected[0]`, so
+        with several robots selected the arrows move whichever happens to be
+        first — which presents as "this robot will not move" while a different
+        one drives off. Saying which one costs nothing and removes the whole
+        class of confusion.
+      -->
+      <div class="flex items-center gap-1.5 text-[11px] font-semibold text-fg">
+        Robot control
+        {#if activeId}
+          <span class="font-medium" style="color:{fleet.colorOf(activeId)}">
+            {activeId.replace(/^robot_/, 'R')}
+          </span>
+        {/if}
+      </div>
+      <div class="mt-0.5 text-[9px] text-fg-dim">
+        {#if fleet.selected.length > 1}
+          Drives {activeId?.replace(/^robot_/, 'R')} only · {fleet.selected.length} selected
+        {:else}
+          Hold to drive · release to stop
+        {/if}
+      </div>
     </div>
     <Badge tone={robot?.mode === 'teleop' ? 'accent' : robot?.nav_status === 'active' ? 'ok' : 'neutral'}>
       {robot?.mode === 'teleop' ? driveLabel : robot?.nav_status === 'active' ? 'NAV ACTIVE' : 'STANDBY'}

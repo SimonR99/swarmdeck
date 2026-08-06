@@ -146,16 +146,28 @@
              robot's own mast/housing and poison SLAM/Nav2 around the origin. -->
         <pose>-0.07 0 0.402 0 0 0</pose>
         <topic>{{NAME}}/scan</topic>
-        <update_rate>10</update_rate>
+        <update_rate>{{LIDAR_RATE}}</update_rate>
         <always_on>1</always_on>
         <visualize>false</visualize>
         <lidar>
           <scan>
-            <horizontal><samples>360</samples><resolution>1</resolution>
+            <!--
+              Samples per revolution comes from the fleet config
+              (`fleet.lidar`), because it is the single biggest lever on map
+              quality. Adjacent rays land `range * 2pi/samples` apart, so the
+              360 samples this model originally hardcoded (1.003 deg) put them
+              one 5 cm cell apart at 2.9 m and three cells apart at 8.6 m —
+              which is why distant walls came out dotted rather than continuous,
+              and why both scan matching and grid registration (each of which
+              counts occupied cells) were working from thin evidence. Real units
+              are 0.1-0.4 deg. See spawn_fleet.py's LIDAR_PROFILES.
+            -->
+            <horizontal><samples>{{LIDAR_HSAMPLES}}</samples><resolution>1</resolution>
               <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
             <!--
-              Ring count is set by the fleet config (`fleet.lidar_rings`) and
-              defaults to 1, which is the 2D-only configuration: Gazebo then
+              Ring count is set by the fleet config (`fleet.lidar`, or the older
+              `fleet.lidar_rings`) and defaults to 1, which is the 2D-only
+              configuration: Gazebo then
               publishes a usable gz.msgs.LaserScan directly and
               pointcloud_to_laserscan drops out of the pipeline.
 
@@ -175,7 +187,7 @@
             <vertical><samples>{{LIDAR_RINGS}}</samples><resolution>1</resolution>
               <min_angle>{{LIDAR_VMIN}}</min_angle><max_angle>{{LIDAR_VMAX}}</max_angle></vertical>
           </scan>
-          <range><min>0.15</min><max>16.0</max><resolution>0.01</resolution></range>
+          <range><min>0.15</min><max>{{LIDAR_RANGE_MAX}}</max><resolution>0.01</resolution></range>
           <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
         </lidar>
       </sensor>
@@ -215,10 +227,38 @@
         fusion is happy at 50 Hz, so drop back only if nothing downstream needs
         inertial odometry. See docs/collaborative-slam.md.
       -->
+      <!--
+        The noise block is not optional. Gazebo's default IMU is NOISELESS: it
+        reports the simulator's exact angular rate. Fusing that into an EKF and
+        then reporting that drift went away would be measuring ground truth
+        laundered through a filter, and the result would not transfer to
+        hardware. These are consumer-MEMS figures (MPU-6050 class): a gyro rate
+        noise density of ~0.005 deg/s/sqrt(Hz) over a 100 Hz band gives about
+        9e-4 rad/s, plus a slow bias random walk so heading drifts the way a real
+        gyro's does. Downstream must earn its accuracy against that.
+      -->
       <sensor name="imu" type="imu">
         <topic>{{NAME}}/imu</topic>
         <update_rate>200</update_rate>
         <always_on>1</always_on>
+        <imu>
+          <angular_velocity>
+            <x><noise type="gaussian"><mean>0.0</mean><stddev>9.0e-4</stddev>
+              <bias_mean>7.5e-6</bias_mean><bias_stddev>8.0e-6</bias_stddev></noise></x>
+            <y><noise type="gaussian"><mean>0.0</mean><stddev>9.0e-4</stddev>
+              <bias_mean>7.5e-6</bias_mean><bias_stddev>8.0e-6</bias_stddev></noise></y>
+            <z><noise type="gaussian"><mean>0.0</mean><stddev>9.0e-4</stddev>
+              <bias_mean>7.5e-6</bias_mean><bias_stddev>8.0e-6</bias_stddev></noise></z>
+          </angular_velocity>
+          <linear_acceleration>
+            <x><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev>
+              <bias_mean>0.1</bias_mean><bias_stddev>1.0e-3</bias_stddev></noise></x>
+            <y><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev>
+              <bias_mean>0.1</bias_mean><bias_stddev>1.0e-3</bias_stddev></noise></y>
+            <z><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev>
+              <bias_mean>0.1</bias_mean><bias_stddev>1.0e-3</bias_stddev></noise></z>
+          </linear_acceleration>
+        </imu>
       </sensor>
 
       <sensor name="camera" type="camera">

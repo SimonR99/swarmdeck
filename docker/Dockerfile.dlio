@@ -1,0 +1,51 @@
+# Direct LiDAR-Inertial Odometry (vectr-ucla/direct_lidar_inertial_odometry),
+# as an alternative to RTAB-Map's icp_odometry for the odom -> base_link link.
+#
+# Why bother, given icp_odometry already works: DLIO de-skews every point using
+# a continuous-time motion model built from the IMU, rather than treating a scan
+# as instantaneous. A 10 Hz scan taken while turning at 0.8 rad/s sweeps 4.6 deg
+# during one revolution, which at 10 m is 0.8 m of distortion that a
+# non-deskewing front end registers as though it were structure. That error is
+# systematic and grows with rotation rate, which is why it matters most for the
+# yaw channel — where this fleet is weakest (6-20 deg on the 3D path).
+#
+# TWO FACTS THAT DECIDE WHETHER THIS IS WORTH RUNNING:
+#
+# 1. Upstream's default branch is ROS 1 / catkin. Only `feature/ros2` builds
+#    against ROS 2, and it is a community port, last touched Nov 2024. Pinned
+#    below by commit so a silent upstream change cannot alter results.
+# 2. Gazebo's cloud carries `x y z intensity ring` and NO per-point timestamp
+#    (verified on a live topic), so in simulation there is nothing to de-skew
+#    with and DLIO's headline advantage cannot appear. On real hardware every
+#    driver worth using stamps points — Ouster `t`, Velodyne `time`, Livox
+#    `offset_time` — and the advantage is real. Treat simulation numbers as a
+#    floor, not a measurement of what DLIO does on a robot.
+FROM ros:jazzy-ros-base
+
+SHELL ["/bin/bash", "-lc"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git \
+      libomp-dev libpcl-dev libeigen3-dev \
+      ros-jazzy-pcl-ros ros-jazzy-pcl-conversions \
+      ros-jazzy-nav2-msgs ros-jazzy-rmw-cyclonedds-cpp \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /dlio_ws
+RUN git clone --branch feature/ros2 \
+      https://github.com/vectr-ucla/direct_lidar_inertial_odometry.git \
+      src/direct_lidar_inertial_odometry \
+    && git -C src/direct_lidar_inertial_odometry checkout c8acc37
+
+RUN source /opt/ros/jazzy/setup.bash \
+    && colcon build --symlink-install \
+         --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && source install/setup.bash \
+    && ros2 pkg executables direct_lidar_inertial_odometry
+
+COPY swarmdeck_ros/src/swarmdeck_dlio /dlio_ws/src/swarmdeck_dlio
+RUN source /opt/ros/jazzy/setup.bash \
+    && source /dlio_ws/install/setup.bash \
+    && colcon build --symlink-install --packages-select swarmdeck_dlio
+
+CMD ["bash"]

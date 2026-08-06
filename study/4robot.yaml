@@ -5,11 +5,21 @@ seed: 20260801
 fleet:
   robot_count: 4
   robot_prefix: robot_
-  # Vertical rings on the mapping lidar. 1 keeps the pure-2D pipeline. Odd values
-  # above 1 also publish a 3D cloud on <ns>/scan/points, from which the planar
-  # scan is sliced; an even value is refused, because then no ring is horizontal
-  # and the 2D scan truncates at short range (docs/KNOWN_ISSUES.md).
-  lidar_rings: 1
+  # Mapping lidar. `profile` names an entry in spawn_fleet.py's LIDAR_PROFILES;
+  # any individual field may be overridden beneath it.
+  #
+  #   legacy_360  360 samples/rev, 1 ring, 16 m — what SwarmDeck shipped, kept
+  #               as the A/B control. 1.003 deg per ray, which is why distant
+  #               walls used to come out dotted.
+  #   generic_2d  1800 samples/rev (0.2 deg), 1 ring, 30 m — same 2D pipeline,
+  #               continuous walls.
+  #   generic_32  as above plus 33 rings over +/-22.5 deg, so <ns>/scan/points
+  #               carries real 3D structure. Needs slam_backend:=rtabmap.
+  #
+  # Rings must be 1 or an odd value: an even count leaves no ring at elevation 0,
+  # and the sliced 2D scan then truncates at short range (docs/KNOWN_ISSUES.md).
+  lidar:
+    profile: generic_2d
 
 map:
   merge_mode: auto          # static | auto

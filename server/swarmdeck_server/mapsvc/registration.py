@@ -467,3 +467,100 @@ def register(
         float(yaw_ratio),
         float(support),
     )
+
+
+# --------------------------------------------------------------- 3D bands
+
+# Height bands, metres above the floor. Chosen so each captures structure the
+# others do not: furniture and low obstacles, the band a 2D lidar would see,
+# and doorframe/upper-wall structure. A building that is ambiguous in one band
+# is rarely ambiguous in all three.
+HEIGHT_BANDS = ((0.10, 0.55), (0.55, 1.10), (1.10, 1.80))
+
+
+def height_band_grid(
+    points: np.ndarray, band: tuple[float, float], res: float, meta: tuple[int, int, float, float]
+) -> np.ndarray:
+    """Rasterise one height slice of a cloud into an occupancy grid.
+
+    Produces the same int8 convention `register` already consumes (occupied /
+    unknown), so a band can be fed straight through the existing 2D pipeline
+    rather than needing a second correlation implementation.
+    """
+    width, height, ox, oy = meta
+    grid = np.full((height, width), -1, dtype=np.int8)
+    if points.size == 0:
+        return grid
+    lo, hi = band
+    inband = points[(points[:, 2] >= lo) & (points[:, 2] < hi)]
+    if not len(inband):
+        return grid
+    gx = ((inband[:, 0] - ox) / res).astype(np.int32)
+    gy = ((inband[:, 1] - oy) / res).astype(np.int32)
+    ok = (gx >= 0) & (gx < width) & (gy >= 0) & (gy < height)
+    grid[gy[ok], gx[ok]] = 100
+    return grid
+
+
+def register_3d(
+    ref_points: np.ndarray,
+    mov_points: np.ndarray,
+    res: float,
+    meta: tuple[int, int, float, float],
+    *,
+    yaw_prior: float | None = None,
+    yaw_window_deg: float = 40.0,
+) -> Registration:
+    """Register two clouds by correlating several height bands independently.
+
+    Why bands rather than one flattened grid: a flattened projection throws away
+    exactly the information that disambiguates rotation. A corridor of similar
+    rooms looks the same at 0 and 180 deg in plan view — that is the measured
+    failure, `yaw_ratio` up to 0.736 — but its vertical structure usually does
+    not, because furniture, doorframes and wall fixtures are not symmetric.
+
+    The winner is the yaw the bands AGREE on. A rival rotation that happens to
+    fit one band almost never fits all three, so the combined `yaw_ratio` falls
+    even when each band alone is ambiguous. Returns the best band's geometry
+    with the agreement-weighted ambiguity metrics.
+    """
+    results: list[Registration] = []
+    for band in HEIGHT_BANDS:
+        ref_grid = height_band_grid(ref_points, band, res, meta)
+        mov_grid = height_band_grid(mov_points, band, res, meta)
+        if (ref_grid == 100).sum() < 40 or (mov_grid == 100).sum() < 40:
+            continue
+        results.append(
+            register(
+                ref_grid, (res, meta[2], meta[3]),
+                mov_grid, (res, meta[2], meta[3]),
+                yaw_prior=yaw_prior, yaw_window_deg=yaw_window_deg,
+            )
+        )
+
+    if not results:
+        return Registration(0.0, 0.0, 0.0, 0.0, 0, 1.0, 1.0, 0.0)
+    if len(results) == 1:
+        return results[0]
+
+    best = max(results, key=lambda r: r.score)
+    # Do the bands agree? Spread in the recovered yaw is the honest measure of
+    # whether the vertical structure actually resolved the rotation, and it is
+    # information a single flattened grid cannot produce at all.
+    yaws = np.array([_wrap(r.dyaw - best.dyaw) for r in results])
+    spread = float(np.abs(yaws).max())
+    agree = spread < math.radians(6.0)
+
+    return Registration(
+        dx=best.dx,
+        dy=best.dy,
+        dyaw=best.dyaw,
+        score=best.score,
+        overlap=best.overlap,
+        ratio=best.ratio,
+        # Bands that agree corroborate each other, so the rival hypothesis is
+        # weaker than any single band suggests; bands that disagree mean the
+        # rotation is genuinely unresolved and must not be trusted.
+        yaw_ratio=min(r.yaw_ratio for r in results) if agree else 1.0,
+        support=float(np.mean([r.support for r in results])),
+    )

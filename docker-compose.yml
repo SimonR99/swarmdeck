@@ -23,7 +23,12 @@ services:
       - --port
       - "8080"
       - --config
-      - /app/study/4robot.yaml
+      # The SAME config the fleet runs. Hardcoding this meant the backend could
+      # silently use different map resolution, extent, start poses and
+      # merge_mode from the simulation it was serving — `merge_mode: cslam` in a
+      # study file simply never took effect, because the server was still
+      # reading 4robot.yaml.
+      - "${SWARMDECK_CONFIG:-/app/study/4robot.yaml}"
     ports:
       - "8080:8080"
     volumes:
@@ -62,9 +67,17 @@ services:
     environment:
       BACKEND_HOST: server
       BACKEND_PORT: "8080"
-      SWARMDECK_CONFIG: /app/study/4robot.yaml
+      # SWARMDECK_CONFIG=/app/study/baseline_legacy.yaml reproduces the sensor
+      # the project shipped before the lidar profiles, as an A/B control.
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/study/4robot.yaml}"
       HEADLESS: "true"
-      ADAPTER_DELAY: "${ADAPTER_DELAY:-45}"
+      ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
+      SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
+      FUSE_IMU: "${FUSE_IMU:-true}"
+      # Bootstrap the maps by exploring, then stop and hand the fleet to the
+      # operator. Without this nothing drives, and goals issued against an empty
+      # map jam robots into walls where wheel slip destroys their odometry.
+      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
     volumes:

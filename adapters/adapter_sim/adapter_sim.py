@@ -37,12 +37,85 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2
+from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 # Keep perception reusable by real adapters without packaging it into ROS.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from adapters.perception.duck_detector import RubberDuckDetector
+
+
+# Voxel edge for downsampling the 3D map before upload, metres. Coarser than the
+# 5 cm occupancy grid on purpose: this feeds a view whose points are one pixel.
+CLOUD_VOXEL = 0.10
+# Transport quantisation. 1 cm keeps a cloud well inside int16 and is far finer
+# than the voxel above, so it costs nothing in fidelity.
+CLOUD_SCALE = 0.01
+
+
+# Newest collaborative pose graph per robot, as reported by
+# swarmdeck_cslam's graph_reporter. Empty unless Swarm-SLAM is running, in
+# which case the GUI's swarm panel appears on its own.
+SLAM_GRAPHS: dict[str, dict] = {}
+
+
+def _on_slam_graph(msg) -> None:
+    """cslam pose-graph summary, arriving as JSON on a std_msgs/String.
+
+    Deliberately not a cslam message type: `cslam_common_interfaces` is built in
+    the cslam image and absent here, and a subscriber cannot deserialise a type
+    it does not have — it would simply never fire. See graph_reporter.py.
+    """
+    try:
+        graph = json.loads(msg.data)
+    except (ValueError, TypeError):
+        return
+    rid = graph.get("robot_id")
+    if isinstance(rid, str):
+        SLAM_GRAPHS[rid] = graph
+
+
+# The collaborative back end's own merged grid, if one is running. Fleet-wide
+# rather than per robot: cslam produces a single map in its common frame from
+# every robot's keyframes, so there is nothing to merge afterwards.
+CSLAM_GRID: dict[str, object] = {}
+
+
+def _on_cslam_grid(msg) -> None:
+    CSLAM_GRID["grid"] = msg
+    CSLAM_GRID["dirty"] = True
+
+
+def upload_cslam_grid(http_url: str) -> None:
+    """Push the back end's merged grid straight to the backend, unmerged.
+
+    Uploading it as a per-robot map instead would send it back through the
+    merge, which would transform a grid that is already in the common frame and
+    reintroduce exactly the mismatch cslam_grid.py exists to remove.
+    """
+    if not CSLAM_GRID.get("dirty"):
+        return
+    CSLAM_GRID["dirty"] = False
+    g = CSLAM_GRID.get("grid")
+    if g is None:
+        return
+    cells = np.array(g.data, dtype=np.int8)
+    body = zlib.compress(np.ascontiguousarray(cells).tobytes())
+    url = (
+        f"{http_url}/api/adapter/global_map?resolution={g.info.resolution}"
+        f"&width={g.info.width}&height={g.info.height}"
+        f"&origin_x={g.info.origin.position.x}&origin_y={g.info.origin.position.y}"
+    )
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/octet-stream"}
+            ),
+            timeout=5,
+        ).read()
+    except Exception as exc:
+        print(f"[adapter_sim] cslam grid upload failed: {exc}")
 
 
 def yaw_of(q) -> float:
@@ -58,14 +131,21 @@ class RobotBridge:
         self.http_url = http_url
         self.t0 = time.monotonic()
 
-        self.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        # Two links of the same TF chain: map_frame -> odom -> base_link. Both
+        # come off the robot's namespaced /tf, which is the only place they are
+        # guaranteed to be consistent with each other. See map_pose().
         self._map_to_odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        self._odom_to_base: dict[str, float] | None = None
+        self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        self._warned_no_tf_base = False
         self.goal: dict | None = None
         self.planned_path: list[dict[str, float]] = []
         self.nav_status = "idle"
         self.mode = "idle"
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
+        self._cloud: PointCloud2 | None = None
+        self._cloud_dirty = False
         self._camera_frame: Image | None = None
         self._camera_dirty = False
         self._camera_encoding_warned = False
@@ -85,6 +165,15 @@ class RobotBridge:
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         node.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, latched)
+        # RTAB-Map's accumulated 3D map, for the GUI's optional 3D view. This is
+        # the assembled map in the robot's own map frame, NOT the raw sensor
+        # cloud on scan/points: the view wants what the robot has built, and the
+        # sensor stream would be both wrong (lidar frame) and far too fast.
+        # SLAM Toolbox publishes nothing here, so the 2D fleet simply has no 3D
+        # view rather than a misleading one.
+        node.create_subscription(
+            PointCloud2, f"/{robot_id}/cloud_map", self._on_cloud, latched
+        )
         node.create_subscription(NavPath, f"/{robot_id}/plan", self._on_plan, 10)
         node.create_subscription(
             Image,
@@ -99,35 +188,165 @@ class RobotBridge:
         self.pub_cmd = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)
 
     def _on_odom(self, msg: Odometry) -> None:
+        """Wheel odometry — a FALLBACK only. See map_pose() for why."""
         p = msg.pose.pose
-        self.pose = {"x": p.position.x, "y": p.position.y, "yaw": yaw_of(p.orientation)}
+        self._odom_topic_pose = {
+            "x": p.position.x,
+            "y": p.position.y,
+            "yaw": yaw_of(p.orientation),
+        }
 
     def _on_tf(self, msg: TFMessage) -> None:
-        """Track SLAM's map->odom correction from the namespaced TF topic."""
+        """Track both links of map_frame -> odom -> base_link from robot /tf."""
         map_frame = f"{self.id}/map_frame"
         odom_frame = f"{self.id}/odom"
+        base_frame = f"{self.id}/base_link"
         for stamped in msg.transforms:
+            t = stamped.transform
+            value = {
+                "x": t.translation.x,
+                "y": t.translation.y,
+                "yaw": yaw_of(t.rotation),
+            }
             if stamped.header.frame_id == map_frame and stamped.child_frame_id == odom_frame:
-                t = stamped.transform
-                self._map_to_odom = {
-                    "x": t.translation.x,
-                    "y": t.translation.y,
-                    "yaw": yaw_of(t.rotation),
-                }
+                self._map_to_odom = value
+            elif stamped.header.frame_id == odom_frame and stamped.child_frame_id == base_frame:
+                self._odom_to_base = value
+
+    @staticmethod
+    def _compose(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+        """SE(2) composition: the pose of `b` expressed in `a`'s parent frame."""
+        c, s = math.cos(a["yaw"]), math.sin(a["yaw"])
+        return {
+            "x": a["x"] + b["x"] * c - b["y"] * s,
+            "y": a["y"] + b["x"] * s + b["y"] * c,
+            "yaw": (a["yaw"] + b["yaw"] + math.pi) % (2 * math.pi) - math.pi,
+        }
 
     def map_pose(self) -> dict[str, float]:
-        """Compose map->odom with odom->base so the icon matches the SLAM grid."""
-        tf = self._map_to_odom
-        c, s = math.cos(tf["yaw"]), math.sin(tf["yaw"])
-        return {
-            "x": tf["x"] + self.pose["x"] * c - self.pose["y"] * s,
-            "y": tf["y"] + self.pose["x"] * s + self.pose["y"] * c,
-            "yaw": (tf["yaw"] + self.pose["yaw"] + math.pi) % (2 * math.pi) - math.pi,
-        }
+        """Where this robot is in its own SLAM map frame.
+
+        Both links come from TF, and that is the whole point. `odom -> base_link`
+        is owned by the EKF (or, with `fuse_imu:=false`, by the drive plugin's
+        bridged TF), while `/<ns>/odom` carries the drive plugin's *raw wheel*
+        integration regardless. Composing SLAM's correction with the wheel topic
+        mixes two different chains: SLAM computed `map_frame -> odom` against the
+        EKF's `base_link`, so the result is off by exactly however far wheel
+        odometry has diverged from the filter.
+
+        That was not theoretical. Measured live on a four-robot run, the wheel
+        topic differed from the EKF by 0.18-0.48 m per robot, and the pose the
+        GUI drew was wrong against Gazebo ground truth by 0.16-0.47 m — the same
+        numbers, robot for robot. Composing from TF instead brings it to ~0.07 m,
+        which is SLAM's own residual. Worse, wheel odometry is the channel that
+        breaks catastrophically when a differential drive jams and spins its
+        wheels (8.8-30.5 m of error measured in docs/KNOWN_ISSUES.md), which is
+        why robot markers would occasionally jump right off the building.
+
+        The wheel topic remains a fallback for a robot whose TF carries no
+        `odom -> base_link` at all, because reporting the map origin forever is a
+        worse failure than reporting a drifting pose — but it says so out loud.
+        """
+        base = self._odom_to_base
+        if base is None:
+            if not self._warned_no_tf_base:
+                self._warned_no_tf_base = True
+                self.node.get_logger().warn(
+                    f"[{self.id}] no {self.id}/odom -> {self.id}/base_link on TF; "
+                    f"falling back to raw wheel odometry for the reported pose, "
+                    f"which will disagree with the map whenever the wheels slip."
+                )
+            base = self._odom_topic_pose
+        return self._compose(self._map_to_odom, base)
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
         self._grid_dirty = True
+
+    def cslam_origin(self, graph: dict) -> dict | None:
+        """This robot's SLAM map frame expressed in cslam's common frame.
+
+        cslam reports where the robot IS in the common frame; the adapter knows
+        where the same robot is in its own map frame. The transform between the
+        two frames is therefore
+
+            T_map->common  =  pose_common  o  pose_own^-1
+
+        which is exactly what the map service needs to place this robot's grid.
+        Returns None until cslam has actually merged this robot with someone:
+        before that it reports its own frame as the common one, and publishing
+        an identity transform would claim a merge that has not happened.
+        """
+        common = graph.get("common")
+        if not isinstance(common, dict) or not graph.get("in_common_frame"):
+            return None
+        own = self.map_pose()
+        cyaw = float(common.get("yaw", 0.0))
+        dyaw = (cyaw - own["yaw"] + math.pi) % (2 * math.pi) - math.pi
+        c, s = math.cos(dyaw), math.sin(dyaw)
+        return {
+            "x": float(common.get("x", 0.0)) - (own["x"] * c - own["y"] * s),
+            "y": float(common.get("y", 0.0)) - (own["x"] * s + own["y"] * c),
+            "yaw": dyaw,
+            "frame": common.get("frame"),
+        }
+
+    def _on_cloud(self, msg: PointCloud2) -> None:
+        self._cloud = msg
+        self._cloud_dirty = True
+
+    @staticmethod
+    def _cloud_xyz(msg: PointCloud2) -> np.ndarray:
+        """Extract xyz from a PointCloud2 without pulling in point_cloud2 helpers.
+
+        Reads the x/y/z field offsets rather than assuming they are the first
+        three floats: RTAB-Map's cloud carries intensity and ring fields too, and
+        their placement is not something to guess at.
+        """
+        offsets = {f.name: f.offset for f in msg.fields if f.name in ("x", "y", "z")}
+        if len(offsets) != 3:
+            return np.zeros((0, 3), dtype=np.float32)
+        raw = np.frombuffer(msg.data, dtype=np.uint8)
+        count = len(raw) // msg.point_step if msg.point_step else 0
+        if not count:
+            return np.zeros((0, 3), dtype=np.float32)
+        rows = raw[: count * msg.point_step].reshape(count, msg.point_step)
+        columns = [
+            rows[:, offsets[axis] : offsets[axis] + 4].copy().view(np.float32).ravel()
+            for axis in ("x", "y", "z")
+        ]
+        points = np.stack(columns, axis=1)
+        return points[np.isfinite(points).all(axis=1)]
+
+    def upload_cloud(self) -> None:
+        """Voxel-downsample the 3D map and push it, quantised to 1 cm.
+
+        Downsampling happens here rather than in the backend because this is the
+        expensive end of a link that should stay cheap: a full RTAB-Map cloud is
+        millions of points, and the view draws each one as a single pixel.
+        """
+        if not self._cloud_dirty or self._cloud is None:
+            return
+        self._cloud_dirty = False
+        points = self._cloud_xyz(self._cloud)
+        if not len(points):
+            return
+        # Deduplicate onto a voxel lattice: one point per occupied cell.
+        keys = np.round(points / CLOUD_VOXEL).astype(np.int32)
+        _, keep = np.unique(keys, axis=0, return_index=True)
+        quantised = np.round(points[keep] / CLOUD_SCALE).astype(np.int16)
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
+                    f"&scale={CLOUD_SCALE}",
+                    data=zlib.compress(quantised.tobytes(), 1),
+                    headers={"Content-Type": "application/octet-stream"},
+                ),
+                timeout=5,
+            ).read()
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] cloud upload failed: {exc}")
 
     def _on_camera(self, msg: Image) -> None:
         self._camera_frame = msg
@@ -153,7 +372,9 @@ class RobotBridge:
     def hello(self) -> dict:
         return {
             "type": "hello",
-            "protocol": 1,
+            # 2: adds the optional slam_graph message, emitted only when
+            # Swarm-SLAM is running and graph_reporter is publishing.
+            "protocol": 2,
             "robot_id": self.id,
             "robot_type": "duckiebot_db21",
             "adapter": "adapter_sim/0.1.0",
@@ -411,6 +632,9 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
 
                 async def tx() -> None:
                     last_map = 0.0
+                    last_cloud = 0.0
+                    last_graph = 0.0
+                    last_cslam_grid = 0.0
                     last_camera = 0.0
                     last_settings = 0.0
                     loop = asyncio.get_running_loop()
@@ -421,6 +645,48 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         if now - last_map > 2.0:
                             last_map = now
                             await loop.run_in_executor(None, bridge.upload_map)
+                        # Slower than the grid: a 3D map changes gradually and
+                        # is an order of magnitude more bytes.
+                        graph = SLAM_GRAPHS.get(bridge.id)
+                        if graph is not None and now - last_graph > 3.0:
+                            last_graph = now
+                            payload = {
+                                "type": "slam_graph",
+                                "robot_id": bridge.id,
+                                "t_mono": round(now - bridge.t0, 4),
+                                "keyframes": graph.get("keyframes", 0),
+                                "in_common_frame": graph.get(
+                                    "in_common_frame", False
+                                ),
+                                "residual": graph.get("residual"),
+                                "inter_robot": graph.get("inter_robot", []),
+                            }
+                            origin = bridge.cslam_origin(graph)
+                            if origin is not None:
+                                payload["origin"] = origin
+                            # The robot's pose AS THE BACK END SEES IT, in the
+                            # common frame. Sent verbatim so the backend can use
+                            # it directly instead of transforming a pose out of
+                            # RTAB-Map's frame: composing across two independent
+                            # SLAM estimates is what produced 8-18 m of error,
+                            # and the composition is unnecessary once the grid is
+                            # cslam's too.
+                            common = graph.get("common")
+                            if isinstance(common, dict) and graph.get("in_common_frame"):
+                                payload["common_pose"] = {
+                                    "x": float(common.get("x", 0.0)),
+                                    "y": float(common.get("y", 0.0)),
+                                    "yaw": float(common.get("yaw", 0.0)),
+                                }
+                            await ws.send(json.dumps(payload))
+                        if now - last_cslam_grid > 4.0:
+                            last_cslam_grid = now
+                            await loop.run_in_executor(
+                                None, upload_cslam_grid, bridge.http_url
+                            )
+                        if now - last_cloud > 4.0:
+                            last_cloud = now
+                            await loop.run_in_executor(None, bridge.upload_cloud)
                         if now - last_camera > 0.2:
                             last_camera = now
                             await loop.run_in_executor(None, bridge.upload_camera)
@@ -469,6 +735,12 @@ def main() -> None:
             print(f"[adapter_sim] settings unavailable ({exc}); using 4 robots")
             robot_count = 4
     robot_count = max(1, min(robot_count, 5))
+    node.create_subscription(String, "/swarmdeck/slam_graph", _on_slam_graph, 10)
+    node.create_subscription(
+        OccupancyGrid, "/cslam/map", _on_cslam_grid,
+        QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                   durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+    )
     bridges = [
         RobotBridge(node, f"{args.prefix}{i}", http_url) for i in range(robot_count)
     ]
