@@ -80,6 +80,16 @@ HOME_TIMEOUT = 75.0
 # Proportional gain from bearing error to yaw rate while homing.
 HOME_GAIN = 1.2
 
+# A robot commanded to drive that covers less than this in WEDGE_WINDOW seconds
+# is wedged, not slow. 0.12 m over 8 s is far below anything the reactive
+# controller produces when it is actually moving, so this cannot fire on a robot
+# that is merely turning in place.
+WEDGE_DISTANCE = 0.12
+WEDGE_WINDOW = 8.0
+# How long to spend backing out once wedged. Long enough to clear whatever the
+# robot climbed onto, short enough not to reverse across the building.
+WEDGE_ESCAPE = 3.5
+
 # Seconds a rendezvous leg may take before the pair gives up and wanders again.
 #
 # Generous on purpose, and the number is arithmetic rather than taste. With the
@@ -122,6 +132,17 @@ class Explorer(Node):
         self.starts: dict[str, tuple[float, float, float]] = dict(starts or {})
         self.rendezvous_target: dict[str, tuple[float, float]] = {}
         self.muster: tuple[float, float] | None = None
+        # Wedge detection. A differential drive jammed against geometry keeps
+        # turning its wheels, so neither the scan nor the commanded velocity
+        # reveals it — only the absence of actual displacement does. Left
+        # undetected this is not a cosmetic problem: a wedged robot stops
+        # producing keyframes, so it never closes an inter-robot loop, and in
+        # Swarm-SLAM the LOWEST-ID robot is elected optimizer whether or not it
+        # is connected to anyone. One wedged robot_0 therefore stalls the whole
+        # fleet's collaborative optimisation, silently.
+        self.wedge_until: dict[str, float] = {}
+        self.wedge_ref: dict[str, tuple[float, float, float]] = {}
+        self.wedge_reported: set[str] = set()
         self.cycle = 0
         self.cycle_since = time.monotonic()
 
@@ -154,6 +175,8 @@ class Explorer(Node):
             self.pubs[rid] = self.create_publisher(Twist, f"/{rid}/cmd_vel", 10)
             self.turn_dir[rid] = 1.0
             self.stuck_since[rid] = 0.0
+            self.wedge_until[rid] = 0.0
+            self.wedge_ref[rid] = None
             self.phase[rid] = "wander"
             self.phase_since[rid] = time.monotonic()
 
@@ -346,6 +369,35 @@ class Explorer(Node):
                 f"({self.muster[0]:.1f}, {self.muster[1]:.1f})"
             )
 
+    def _wedged(self, rid: str, now: float) -> bool:
+        """Has this robot stopped moving despite being driven?
+
+        Compares commanded intent against actual odometry displacement over a
+        window. Uses `<ns>/odom` deliberately: wheel odometry is the channel
+        that CANNOT see slip, so if even it reports no displacement the robot is
+        not merely slipping, it is pinned.
+        """
+        pose = self.pose.get(rid)
+        if pose is None:
+            return False
+        ref = self.wedge_ref.get(rid)
+        if ref is None or now - ref[2] > WEDGE_WINDOW:
+            moved = (
+                math.hypot(pose[0] - ref[0], pose[1] - ref[1])
+                if ref is not None
+                else float("inf")
+            )
+            self.wedge_ref[rid] = (pose[0], pose[1], now)
+            if ref is not None and moved < WEDGE_DISTANCE:
+                if rid not in self.wedge_reported:
+                    self.wedge_reported.add(rid)
+                    self.get_logger().warn(
+                        f"{rid} moved {moved:.2f} m in {WEDGE_WINDOW:.0f} s while "
+                        f"being driven: wedged, backing out"
+                    )
+                return True
+        return False
+
     def step(self) -> None:
         if not self.running:
             return
@@ -355,6 +407,22 @@ class Explorer(Node):
             if self.scan.get(rid) is None:
                 continue
             self._advance_phase(rid, now)
+
+            # A wedged robot outranks every other behaviour: it cannot explore,
+            # cannot map, and — because it stops producing keyframes — silently
+            # stalls the fleet's collaborative optimisation if it happens to be
+            # the lowest-ID robot. Back out and turn hard before doing anything
+            # else.
+            if now < self.wedge_until.get(rid, 0.0):
+                escape = Twist()
+                escape.linear.x = -0.22
+                escape.angular.z = 1.0 * self.turn_dir[rid]
+                pub.publish(escape)
+                continue
+            if self._wedged(rid, now):
+                self.wedge_until[rid] = now + WEDGE_ESCAPE
+                self.turn_dir[rid] = -self.turn_dir[rid]
+                continue
 
             front = self._nearest(rid, 0, 25)
             left = self._nearest(rid, 55, 30)

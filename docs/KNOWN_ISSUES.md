@@ -55,34 +55,86 @@ on each robot's own map rather than the merged one (FR-M8). This is a deliberate
 consequence of the ROS-free backend, not an oversight, but it caps what the fleet can do.
 docs/collaborative-slam.md sets out what would change and a staged path.
 
-### 5. cslam-driven merge: three defects fixed, still not accurate enough to ship
+### 5. cslam's own pose estimates are wrong; the SwarmDeck plumbing is not the problem
 
-`merge_mode: cslam` remains **off by default**. Grid registration (`auto`) measures
-0.03-0.20 m against ground truth; the cslam path measures 0.08-15.8 m depending on the
-robot. Three real defects were found and fixed along the way, and they are worth recording
-because each was independently correct:
+**This was measured directly, outside SwarmDeck.** `cslamtruth.py` compares
+`/rN/cslam/current_pose_estimate` against Gazebo ground truth, composing with the anchor
+robot's configured start pose (cslam anchors its common frame at the lowest-id robot's
+first keyframe — Swarm-SLAM paper, anchor selection). With all four robots merged into one
+frame and **6 of 6 pairs linked by verified closures**:
 
-1. **Mixed geometry and poses.** Grids came from RTAB-Map, transforms from cslam — two
-   independently optimised trajectories that disagree by metres. Fixed by `cslam_grid.py`,
-   which renders cslam's OWN keyframe clouds at cslam's OWN optimised poses, so the map and
-   the transform are the same estimate by construction.
-2. **Composed poses across both systems.** The adapter derived a transform from RTAB-Map's
-   pose and cslam's pose. Fixed by reporting cslam's common-frame pose verbatim
-   (`common_pose`) and using it directly.
-3. **Unanchored common frame.** cslam anchors its frame at the origin robot's first
-   keyframe, i.e. that robot's start pose — an 8.8 m offset for a robot spawned at x = -9.
-   Fixed by composing with the reference robot's configured start pose.
+```text
+robot    cslam frame  cslam pose + anchor      ground truth             error
+robot_0  robot0_map   ( -17.59,  -7.48, -31.5)  (   3.00,   1.25,  95.8)   22.37 m  127.3 deg
+robot_1  robot0_map   ( -16.77,   8.86,-135.3)  (   0.49,  -7.92,  20.3)   24.07 m  155.6 deg
+robot_2  robot0_map   ( -14.15,   4.54, -14.9)  (  -2.68,  -3.75,-155.0)   14.15 m  140.1 deg
+robot_3  robot0_map   ( -20.73,   9.00, 135.3)  (  -4.35,  -0.04,-148.1)   18.72 m   76.5 deg
+```
 
-After all three, results are *bimodal*: robot_2 at 0.08 m and robot_1 at 2.16 m, but
-robot_0 at 10.2 m and robot_3 at 15.8 m, with yaw wrong by 37-158 deg across the board.
-That pattern — some robots nearly perfect, others badly wrong, in the same run — points at
-cslam's per-robot optimised poses themselves rather than at the plumbing carrying them.
-The likely candidates are the reported pose being a keyframe pose rather than the live one,
-and a yaw convention difference between GTSAM's SE(3) and the SE(2) merge.
+Every robot correctly reports `robot0_map`, so **the frames merged**; the poses inside that
+frame are 14-24 m and 76-155 deg wrong. Before merging, each robot in its own frame was
+0.84-5.58 m out. **Merging made it worse**, which is the signature of false inter-robot
+loop closures rather than of odometry drift — a wrong closure welds two graphs at the wrong
+place and the optimiser spreads that error across both trajectories.
 
-The plumbing is now correct and unit-tested end to end. What is unverified is cslam's own
-output, which needs comparing `/rN/cslam/current_pose_estimate` against ground truth
-directly, independent of SwarmDeck, before any more integration work.
+This settles a question three rounds of integration work could not: the SwarmDeck side is
+correct. `cslam_grid.py` builds the map from cslam's own keyframes at cslam's own poses,
+the adapter forwards cslam's common-frame pose verbatim, and the backend anchors it to the
+configured start pose. All of that is right, and the map is still wrong, because the input
+is wrong.
+
+**Root cause of the stall that hid this for so long.** Swarm-SLAM elects the lowest-id
+robot as optimizer (`is_optimizer()` compares ids only), while `connected_robots_` is
+populated *exclusively* from verified inter-robot closures. A robot that has met nobody is
+therefore unconnected and still wins the election, and the connected cluster defers to it:
+
+* robot_0 wedged against geometry and stopped moving
+* it stopped producing keyframes (frozen at 107 while others reached 300+)
+* with no keyframes it got no inter-robot closures, so it was unconnected
+* it still held the optimizer election, so robots 1-3 — which had a fully connected
+  triangle of verified closures — published **empty** optimisation results and kept
+  reporting poses in their own frames
+* nothing logged an error anywhere
+
+Two mitigations now ship. `explore.py` detects a wedged robot by comparing commanded motion
+against actual odometry displacement (0.04 m in 8 s while being driven) and backs it out;
+`graph_reporter.py` warns when the elected optimizer has no closures. With both, the fleet
+reached **6 of 6 linked pairs and all four robots merged** for the first time.
+
+**CONFIRMED: false loop closures are the cause, and verification strictness fixes it.**
+Three configurations measured against ground truth on matched runs:
+
+| `registration_min_inliers` / `similarity_threshold` | pairs linked | merged-robot error |
+|---|---|---|
+| 100 / 0.90 (upstream defaults) | 6 of 6 | 14.15 - 24.07 m |
+| 175 / 0.92 | 5 of 6 | 0.50 - 40.71 m |
+| **250 / 0.95 (now shipped)** | 1 of 6 | **0.73 - 3.07 m** |
+
+Accuracy is **monotonically inverse** to how many closures are accepted — there is no happy
+middle, and 175/0.92 still admitted one that put a robot 40 m out. Upstream's defaults merge
+everything and get everything wrong. We ship the strict end: fewer robots merge, and the
+ones that do are right, which is the same trade grid registration already makes by refusing
+rather than guessing.
+
+That does mean the collaborative map is currently *partial*. It is still worth having: a
+correct two-robot merge beats a confidently wrong four-robot one, and the GUI shows exactly
+who is in and who is not.
+
+**Where to go next**, in order of expected value:
+
+1. **Better place recognition** is the real fix, because it attacks the cause rather than
+   filtering the symptom. ScanContext is rotation-tolerant but weak to lateral shift and to
+   repeated structure. Scan Context++ targets exactly that; learned descriptors are the
+   other direction. Our own height-band `register_3d` is the same idea — vertical structure
+   disambiguates what a plan view cannot — and could feed cslam rather than only the merge.
+2. **The back end runs GTSAM's GNC robust optimizer with DEFAULT parameters** and exposes no
+   tuning at all. GNC tolerates outliers up to a breakdown point, past which the solution is
+   garbage rather than degraded — consistent with what we measured. Exposing `GncParams`
+   would be a small, high-value upstream patch.
+3. **Odometry drift is a separate, smaller problem.** With strict verification one unmerged
+   robot still sat 19.5 m out in its OWN frame with only 0.8 deg of heading error — pure
+   translation drift, not a merging fault. That is where a better odometry front end (DLIO
+   with de-skewing on real hardware) would help.
 
 ### (superseded) cslam cannot drive the merge while the grids come from RTAB-Map
 

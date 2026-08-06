@@ -23,13 +23,39 @@
       # 0.2 m rather than KITTI's 0.5: this is a 24 m building with 6 m rooms,
       # and at 0.5 m a doorway is three voxels wide.
       voxel_size: 0.2
-      registration_min_inliers: 100
+      # TEASER++ inliers required before a candidate becomes a VERIFIED
+      # inter-robot closure. This and `similarity_threshold` below are the two
+      # knobs that decide the accuracy of the whole collaborative map, and the
+      # trade-off between them was measured directly against Gazebo ground
+      # truth:
+      #
+      #   inliers / similarity   pairs linked   error of merged robots
+      #   100 / 0.90 (upstream)      6 of 6      14.15 - 24.07 m
+      #   175 / 0.92                 5 of 6       0.50 - 40.71 m
+      #   250 / 0.95 (shipped)       1 of 6       0.73 -  3.07 m
+      #
+      # Accuracy is MONOTONICALLY INVERSE to how many closures are accepted, so
+      # there is no happy middle: 175/0.92 still admitted a closure that put one
+      # robot 40 m out. Upstream's defaults merge everything and get everything
+      # wrong, because a false closure welds two pose graphs at the wrong place
+      # and the optimiser then spreads that error across both trajectories —
+      # making the merged answer worse than the un-merged one.
+      #
+      # This building is deliberately repetitive and the Swarm-SLAM paper
+      # attributes its own outliers to exactly that, "many similar-looking
+      # sections". So we ship the strict end: fewer robots merge, and the ones
+      # that do are right. That is the same trade this repo already makes in
+      # grid registration, which refuses rather than guessing.
+      registration_min_inliers: 250
       # Descriptors exchanged between robots. The paper's argument is that this
       # is the scarce resource, so it is a budget, not a firehose.
       inter_robot_loop_closure_budget: 5
       inter_robot_detection_period_sec: 5
       max_queue_size: 10
-      similarity_threshold: 0.9
+      # ScanContext cosine similarity a candidate must clear before it is even
+      # sent for geometric verification. See registration_min_inliers above for
+      # the measured trade-off; these two move together.
+      similarity_threshold: 0.95
       global_descriptors_topic: "global_descriptors"
       global_descriptor_technique: "scancontext"
       intra_loop_min_inbetween_keyframes: 20

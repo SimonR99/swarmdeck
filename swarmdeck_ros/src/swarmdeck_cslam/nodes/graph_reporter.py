@@ -100,7 +100,42 @@ class GraphReporter(Node):
         self.closures[key] = self.closures.get(key, 0) + 1
         self.last_closure_t[key] = self.get_clock().now().nanoseconds * 1e-9
 
+    def _check_optimizer_stall(self) -> None:
+        """Warn when the elected optimizer is not connected to the fleet.
+
+        Swarm-SLAM elects the robot with the lowest id as optimizer, and that
+        election does NOT consider whether the robot has any inter-robot loop
+        closures (`is_optimizer()` in decentralized_pgo.cpp compares ids only).
+        `connected_robots_` is populated exclusively from verified inter-robot
+        closures, so a robot that has met nobody is unconnected — yet still wins
+        the election, and every other robot defers to it.
+
+        The result is a fleet-wide stall with no error anywhere: the connected
+        cluster publishes EMPTY optimisation results, every robot keeps
+        reporting poses in its own frame, and the merge silently never happens.
+        Measured on a run where robot_0 wedged against geometry: robots 1-3 had
+        a fully connected triangle of verified closures and still could not
+        merge, because robot_0 held the election and had nothing to optimise.
+
+        Nothing here can fix the election — that is upstream behaviour — but an
+        operator who knows this is happening can go and unstick the robot.
+        """
+        if not self.keyframes:
+            return
+        lowest = min(self.keyframes)
+        linked = {r for pair in self.closures for r in pair}
+        if lowest in linked or not linked:
+            return
+        self.get_logger().warn(
+            f"robot_{lowest} has no inter-robot loop closures but holds the "
+            f"optimizer election (lowest id). Robots {sorted(linked)} have "
+            f"closures and CANNOT merge until robot_{lowest} joins them or "
+            f"leaves the graph.",
+            throttle_duration_sec=30.0,
+        )
+
     def _publish(self) -> None:
+        self._check_optimizer_stall()
         for robot, keyframes in sorted(self.keyframes.items()):
             links = []
             for (a, b), n in sorted(self.closures.items()):
