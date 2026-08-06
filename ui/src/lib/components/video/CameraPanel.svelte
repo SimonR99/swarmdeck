@@ -18,41 +18,91 @@
   let imageB = $state<HTMLImageElement | null>(null);
   let pc: RTCPeerConnection | null = null;
   let fallbackTimer: number | null = null;
+  let whepRetryTimer: number | null = null;
   let objectA: string | null = null;
   let objectB: string | null = null;
   let activeFrame = $state<0 | 1>(0);
   let fallbackGeneration = 0;
   let streamSource = $state<'webrtc' | 'jpeg' | null>(null);
   let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
+  let mediaAspect = $state(16 / 9);
 
   const activeId = $derived(fleet.activeCamera);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
   const color = $derived(activeId ? fleet.colorOf(activeId) : 'var(--color-fg-dim)');
   const boxes = $derived(activeId ? session.bboxesFor(activeId) : []);
 
+  function setMediaAspect(width: number, height: number) {
+    if (width > 0 && height > 0) mediaAspect = width / height;
+  }
+
+  function updateVideoAspect() {
+    if (video) setMediaAspect(video.videoWidth, video.videoHeight);
+  }
+
+  async function waitForIceGathering(connection: RTCPeerConnection) {
+    if (connection.iceGatheringState === 'complete') return;
+    await new Promise<void>((resolve) => {
+      const timeout = window.setTimeout(resolve, 2000);
+      const changed = () => {
+        if (connection.iceGatheringState !== 'complete') return;
+        clearTimeout(timeout);
+        connection.removeEventListener('icegatheringstatechange', changed);
+        resolve();
+      };
+      connection.addEventListener('icegatheringstatechange', changed);
+    });
+  }
+
   async function connectWhep(robotId: string) {
     teardown();
     streamState = 'connecting';
+    let connection: RTCPeerConnection | null = null;
     try {
-      pc = new RTCPeerConnection({ iceServers: [] });
-      pc.addTransceiver('video', { direction: 'recvonly' });
-      pc.ontrack = (e) => {
+      const candidate = new RTCPeerConnection({ iceServers: [] });
+      connection = candidate;
+      pc = candidate;
+      const transceiver = candidate.addTransceiver('video', { direction: 'recvonly' });
+      // Teleoperation values freshness over concealment. The standards-based
+      // hint is best-effort: Chrome clamps it to what current network
+      // conditions can sustain, while browsers without it keep their default.
+      const receiver = transceiver.receiver as RTCRtpReceiver & {
+        jitterBufferTarget?: number | null;
+      };
+      if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
+      candidate.ontrack = (e) => {
         if (video) video.srcObject = e.streams[0];
         streamSource = 'webrtc';
         streamState = 'live';
       };
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      candidate.onconnectionstatechange = () => {
+        if (
+          pc === candidate &&
+          (candidate.connectionState === 'failed' || candidate.connectionState === 'disconnected')
+        ) {
+          teardown();
+          startJpegFallback(robotId);
+        }
+      };
+      const offer = await candidate.createOffer();
+      await candidate.setLocalDescription(offer);
+      // This client deliberately does not implement trickle-ICE PATCHes. Wait
+      // until host candidates are in the SDP before sending the one-shot WHEP
+      // offer; otherwise a fast POST can contain no usable media candidate.
+      await waitForIceGathering(candidate);
+      if (pc !== candidate) return;
 
       const res = await fetch(`/whep/${robotId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
-        body: offer.sdp
+        body: candidate.localDescription?.sdp
       });
       if (!res.ok) throw new Error(`whep ${res.status}`);
       const answer = await res.text();
-      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+      if (pc !== candidate) return;
+      await candidate.setRemoteDescription({ type: 'answer', sdp: answer });
     } catch {
+      if (pc !== connection) return;
       teardown();
       startJpegFallback(robotId);
     }
@@ -86,7 +136,10 @@
           objectB = objectUrl;
         }
         await new Promise<void>((resolve, reject) => {
-          target.onload = () => resolve();
+          target.onload = () => {
+            setMediaAspect(target.naturalWidth, target.naturalHeight);
+            resolve();
+          };
           target.onerror = () => reject(new Error('camera frame decode failed'));
           target.src = objectUrl;
         });
@@ -106,14 +159,20 @@
       }
     };
     void refresh();
+    // Keep the JPEG path useful during a media-server restart, but return to
+    // low-latency video automatically once WHEP is available again.
+    whepRetryTimer = window.setTimeout(() => connectWhep(robotId), 10_000);
   }
 
   function teardown() {
     fallbackGeneration++;
-    pc?.close();
+    const closing = pc;
     pc = null;
-    if (fallbackTimer) clearInterval(fallbackTimer);
+    closing?.close();
+    if (fallbackTimer) clearTimeout(fallbackTimer);
     fallbackTimer = null;
+    if (whepRetryTimer) clearTimeout(whepRetryTimer);
+    whepRetryTimer = null;
     imageA?.removeAttribute('src');
     imageB?.removeAttribute('src');
     if (objectA) URL.revokeObjectURL(objectA);
@@ -122,6 +181,7 @@
     objectB = null;
     activeFrame = 0;
     streamSource = null;
+    mediaAspect = 16 / 9;
     if (video) video.srcObject = null;
   }
 
@@ -159,19 +219,24 @@
     {/if}
   </div>
 
-  <div class="relative m-2 mb-0 aspect-video shrink-0 overflow-hidden rounded-[4px] bg-black">
+  <div
+    class="relative m-2 mb-0 shrink-0 overflow-hidden rounded-[4px] bg-black"
+    style="aspect-ratio: {mediaAspect}"
+  >
     <video
       bind:this={video}
-      class="h-full w-full object-cover {streamSource === 'webrtc' ? '' : 'hidden'}"
+      class="h-full w-full object-contain {streamSource === 'webrtc' ? '' : 'hidden'}"
       autoplay
       muted
       playsinline
+      onloadedmetadata={updateVideoAspect}
+      onresize={updateVideoAspect}
     ></video>
 
     {#if streamSource === 'jpeg'}
       <img
         bind:this={imageA}
-        class="absolute inset-0 h-full w-full object-cover transition-none {activeFrame === 0
+        class="absolute inset-0 h-full w-full object-contain transition-none {activeFrame === 0
           ? 'z-20'
           : 'z-10'}"
         data-active={activeFrame === 0}
@@ -179,7 +244,7 @@
       />
       <img
         bind:this={imageB}
-        class="absolute inset-0 h-full w-full object-cover transition-none {activeFrame === 1
+        class="absolute inset-0 h-full w-full object-contain transition-none {activeFrame === 1
           ? 'z-20'
           : 'z-10'}"
         data-active={activeFrame === 1}

@@ -18,7 +18,7 @@
 
   const MAX_ANGULAR_SPEED = 0.8;
   const JOYSTICK_RADIUS = 45;
-  const JOYSTICK_DEAD_ZONE = 0.08;
+  const JOYSTICK_DEAD_ZONE = 0.06;
 
   let driveTimer: number | null = null;
   let driving = false;
@@ -58,19 +58,25 @@
     return [linear, angular];
   }
 
-  function applyDeadZone(value: number): number {
-    const magnitude = Math.abs(value);
-    if (magnitude <= JOYSTICK_DEAD_ZONE) return 0;
-    return Math.sign(value) * ((magnitude - JOYSTICK_DEAD_ZONE) / (1 - JOYSTICK_DEAD_ZONE));
+  function joystickVector(): [number, number] {
+    const stickDistance = Math.min(1, Math.hypot(joystickX, joystickY));
+    if (stickDistance <= JOYSTICK_DEAD_ZONE) return [0, 0];
+
+    // Remove one circular dead zone without changing the stick direction.
+    // Applying a dead zone to X and Y independently makes diagonal motion
+    // bend as either axis crosses its threshold. Past the centre zone, this
+    // maps displacement linearly from 0 at its edge to 1 at full travel.
+    const outputDistance =
+      (stickDistance - JOYSTICK_DEAD_ZONE) / (1 - JOYSTICK_DEAD_ZONE);
+    const scale = outputDistance / stickDistance;
+    return [
+      -joystickY * scale * maxSpeed,
+      -joystickX * scale * MAX_ANGULAR_SPEED
+    ];
   }
 
   function currentVector(): [number, number] {
-    if (joystickPointer !== null) {
-      return [
-        -applyDeadZone(joystickY) * maxSpeed,
-        -applyDeadZone(joystickX) * MAX_ANGULAR_SPEED
-      ];
-    }
+    if (joystickPointer !== null) return joystickVector();
     return vectorFor(keyDirs);
   }
 
