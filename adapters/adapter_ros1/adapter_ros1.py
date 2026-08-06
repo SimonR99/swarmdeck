@@ -51,7 +51,7 @@ import websockets
 import yaml
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from sensor_msgs.msg import BatteryState, CompressedImage, Image, PointCloud2
+from sensor_msgs.msg import BatteryState, CompressedImage, Image, Joy, PointCloud2
 from std_msgs.msg import Int8
 from tf2_ros import Buffer, TransformListener
 
@@ -59,6 +59,8 @@ from tf2_ros import Buffer, TransformListener
 # containers run this file directly, so the repository root is not otherwise on
 # sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from adapters.perception.depth_projection import point_for_bbox, transform_point
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -106,6 +108,10 @@ DEFAULTS: dict[str, Any] = {
         "battery": "",       # empty disables the capability
         "camera": "",
         "camera_compressed": "",
+        # Organised PointCloud2 whose pixels are aligned with the RGB image.
+        # When present, detections gain a map_position; otherwise bbox-only
+        # detection continues unchanged.
+        "camera_depth_points": "",
         # `move_base_simple/goal`-style single-goal topic (geometry_msgs/PoseStamped) —
         # the interface stacks like CMU's local_planner use instead of an
         # actionlib server. Takes priority over `actions.navigate_to_pose`
@@ -127,7 +133,21 @@ DEFAULTS: dict[str, Any] = {
         # Leave empty for a nav stack that already respects nav_stop/cancel
         # cleanly on its own.
         "nav_cmd_vel": "",
+        # sensor_msgs/Joy, for a nav stack whose speed comes from a joystick
+        # throttle axis with no software override (confirmed true of
+        # pathFollower: joystickHandler sets joySpeed = |axes[1]| completely
+        # unconditionally — no autonomyMode gate, unlike every other speed
+        # source it has). If set, this adapter fakes that axis at nav_joy_hz
+        # while nav_status is "active" and zero otherwise. Real safety still
+        # comes from nav_cmd_vel only being relayed while nav_status is
+        # "active" (_on_nav_cmd_vel) — this does not need to be itself
+        # trusted as a safety mechanism, only a plausible one.
+        "nav_joy": "",
     },
+    # Throttle magnitude published on nav_joy's axes[1], 0..1. The stack
+    # rescales its own output to maxSpeed regardless (confirmed live), so
+    # this mostly just needs to be reliably nonzero — not tuned as a speed.
+    "nav_joy_throttle": 0.5,
     # Height band for `map_cloud` points, metres, in the map_frame (NOT
     # relative to the robot — this stack has no live z estimate to be relative
     # to, since the EKF publishing map_frame runs `two_d_mode: true`). Points
@@ -153,6 +173,9 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "period_s": 0.2,
         "sensitivity": 0.55,
+        "depth_min_m": 0.15,
+        "depth_max_m": 8.0,
+        "depth_max_age_s": 0.35,
     },
     # A drive command older than this stops the robot. Teleop over a network is
     # only safe with a deadman: if the link drops mid-command the robot must not
@@ -210,6 +233,7 @@ class HardwareBridge:
         self._last_drive_at = 0.0
         self._camera_jpeg: bytes | None = None
         self._camera_dirty = False
+        self._camera_depth_cloud: PointCloud2 | None = None
         perception = cfg.get("perception", {})
         self._detector = None
         self._detection_enabled = bool(perception.get("enabled", True))
@@ -253,6 +277,13 @@ class HardwareBridge:
             )
         elif topics.get("camera"):
             rospy.Subscriber(topics["camera"], Image, self._on_camera_raw, queue_size=1)
+        if topics.get("camera_depth_points"):
+            rospy.Subscriber(
+                topics["camera_depth_points"],
+                PointCloud2,
+                self._on_camera_depth_cloud,
+                queue_size=1,
+            )
         if topics.get("nav_cmd_vel"):
             rospy.Subscriber(
                 topics["nav_cmd_vel"], Twist, self._on_nav_cmd_vel, queue_size=10
@@ -270,6 +301,11 @@ class HardwareBridge:
             rospy.Publisher(topics["nav_stop"], Int8, queue_size=1)
             if topics.get("nav_stop") else None
         )
+        self.pub_nav_joy = (
+            rospy.Publisher(topics["nav_joy"], Joy, queue_size=1)
+            if topics.get("nav_joy") else None
+        )
+        self._nav_joy_throttle = float(cfg.get("nav_joy_throttle", 0.5))
 
         # `nav_goal` (topic-based, e.g. local_planner) takes priority over
         # `actions.navigate_to_pose` (actionlib, e.g. move_base) when both are
@@ -399,7 +435,7 @@ class HardwareBridge:
             return
         self._camera_jpeg = bytes(msg.data)
         self._camera_dirty = True
-        self._detect_jpeg(self._camera_jpeg)
+        self._detect_jpeg(self._camera_jpeg, getattr(msg, "header", None))
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Encoding here rather than shipping raw: the protocol's preview channel
@@ -418,11 +454,11 @@ class HardwareBridge:
             if ok:
                 self._camera_jpeg = buf.tobytes()
                 self._camera_dirty = True
-                self._detect_bgr(frame)
+                self._detect_bgr(frame, image_header=getattr(msg, "header", None))
         except (ValueError, TypeError):
             return
 
-    def _detect_jpeg(self, jpeg: bytes) -> None:
+    def _detect_jpeg(self, jpeg: bytes, image_header=None) -> None:
         if not self._detection_due():
             return
         try:
@@ -430,7 +466,7 @@ class HardwareBridge:
 
             frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
-                self._detect_bgr(frame, due_checked=True)
+                self._detect_bgr(frame, due_checked=True, image_header=image_header)
         except (ValueError, TypeError):
             return
 
@@ -443,13 +479,79 @@ class HardwareBridge:
         self._last_detection_at = now
         return True
 
-    def _detect_bgr(self, frame: np.ndarray, *, due_checked: bool = False) -> None:
+    def _on_camera_depth_cloud(self, msg: PointCloud2) -> None:
+        # Keep the message, not a 640x480 XYZ copy, so a conversion is paid only
+        # for the few pixels inside a detection box and only at detector rate.
+        self._camera_depth_cloud = msg
+
+    @staticmethod
+    def _stamp_seconds(header) -> float | None:
+        stamp = getattr(header, "stamp", None)
+        if stamp is None:
+            return None
+        try:
+            value = float(stamp.to_sec())
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return value if value > 0.0 and math.isfinite(value) else None
+
+    def _depth_map_position(self, bbox, image_header=None) -> dict[str, float] | None:
+        cloud = self._camera_depth_cloud
+        if cloud is None:
+            return None
+        perception = self.cfg.get("perception", {})
+        image_time = self._stamp_seconds(image_header)
+        cloud_time = self._stamp_seconds(getattr(cloud, "header", None))
+        max_age = float(perception.get("depth_max_age_s", 0.35))
+        if image_time is not None and cloud_time is not None and abs(image_time - cloud_time) > max_age:
+            return None
+
+        camera_point = point_for_bbox(
+            cloud,
+            bbox,
+            min_range_m=float(perception.get("depth_min_m", 0.15)),
+            max_range_m=float(perception.get("depth_max_m", 8.0)),
+        )
+        if camera_point is None:
+            return None
+        frame_id = getattr(getattr(cloud, "header", None), "frame_id", "")
+        if not frame_id:
+            return None
+        try:
+            if frame_id == self.map_frame:
+                map_point = camera_point
+            else:
+                stamp = getattr(getattr(cloud, "header", None), "stamp", rospy.Time(0))
+                tf = self.tf_buffer.lookup_transform(
+                    self.map_frame, frame_id, stamp, rospy.Duration(0.1)
+                )
+                map_point = transform_point(camera_point, tf.transform)
+            if map_point is None:
+                return None
+            return {"x": round(float(map_point[0]), 3), "y": round(float(map_point[1]), 3)}
+        except Exception as exc:
+            rospy.logwarn_throttle(
+                10.0,
+                f"[{self.id}] cannot place camera detection in {self.map_frame}: {exc}",
+            )
+            return None
+
+    def _detect_bgr(
+        self,
+        frame: np.ndarray,
+        *,
+        due_checked: bool = False,
+        image_header=None,
+    ) -> None:
         if not due_checked and not self._detection_due():
             return
-        self._detections = [
-            detection.as_protocol(f"duck_{index}")
-            for index, detection in enumerate(self._detector.detect_bgr(frame))
-        ]
+        self._detections = []
+        for index, detection in enumerate(self._detector.detect_bgr(frame)):
+            item = detection.as_protocol(f"duck_{index}")
+            item["map_position"] = self._depth_map_position(
+                detection.bbox, image_header
+            )
+            self._detections.append(item)
 
     def take_detections(self) -> list[dict] | None:
         current = self._detections
@@ -666,6 +768,26 @@ class HardwareBridge:
             self.mode = "idle"
             self.goal = None
 
+    def _pump_nav_joy(self) -> None:
+        """Fake the joystick throttle pathFollower's speed gate requires.
+
+        `joystickHandler` sets `joySpeed = |axes[1]|` unconditionally, and
+        this build has no staleness timeout on it (the check exists in
+        source but is commented out) — publishing once would latch a nonzero
+        speed forever internally. Publish a fresh value every tick instead,
+        the way a real joystick would, and always zero when not actively
+        navigating. This does not need to be trusted as the safety
+        mechanism — `_on_nav_cmd_vel` only relays to the real cmd_vel while
+        nav_status is "active" regardless of what pathFollower thinks
+        internally, and that's what actually stops the robot.
+        """
+        if self.pub_nav_joy is None:
+            return
+        msg = Joy()
+        msg.axes = [0.0, self._nav_joy_throttle if self.nav_status == "active" else 0.0, 0.0]
+        msg.buttons = [0, 0, 0, 0]
+        self.pub_nav_joy.publish(msg)
+
     def cancel_goal(self) -> None:
         self._goal_generation += 1
         if self.nav_client is not None:
@@ -857,6 +979,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         await ws.send(json.dumps(bridge.state()))
                         bridge.drive_watchdog()
                         bridge._check_topic_nav_progress()
+                        bridge._pump_nav_joy()
                         now = time.monotonic()
                         if now - last_map > float(rates["map_period_s"]):
                             last_map = now

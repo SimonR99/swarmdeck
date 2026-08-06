@@ -65,6 +65,8 @@ def _bridge(mod, cfg_override=None):
     bridge.pub_cmd = MagicMock() if cfg["topics"].get("cmd_vel") else None
     bridge.pub_nav_goal = MagicMock() if cfg["topics"].get("nav_goal") else None
     bridge.pub_nav_stop = MagicMock() if cfg["topics"].get("nav_stop") else None
+    bridge.pub_nav_joy = MagicMock() if cfg["topics"].get("nav_joy") else None
+    bridge._nav_joy_throttle = float(cfg.get("nav_joy_throttle", 0.5))
     # Mirrors HardwareBridge.__init__: nav_goal (topic-based) takes priority
     # over actions.navigate_to_pose (actionlib) when both are configured.
     bridge.nav_client = (
@@ -288,6 +290,28 @@ def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
     bridge.nav_status = "active"
     bridge._on_nav_cmd_vel(twist)
     bridge.pub_cmd.publish.assert_called_once_with(twist)
+
+
+def test_nav_joy_publishes_nonzero_throttle_only_while_navigating(mod):
+    """joystickHandler sets joySpeed unconditionally from axes[1] — this is
+    the fake throttle that unlocks pathFollower's speed with no real stick."""
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}, "nav_joy_throttle": 0.5})
+
+    bridge.nav_status = "idle"
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert sent.axes[1] == 0.0
+
+    bridge.nav_status = "active"
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert sent.axes[1] == 0.5
+
+
+def test_nav_joy_is_a_noop_when_unconfigured(mod):
+    bridge = _bridge(mod, {"topics": {"nav_joy": ""}})
+    bridge.nav_status = "active"
+    bridge._pump_nav_joy()  # must not raise with pub_nav_joy None
 
 
 def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):

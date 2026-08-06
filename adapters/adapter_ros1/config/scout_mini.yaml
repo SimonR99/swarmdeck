@@ -61,6 +61,10 @@ topics:
   # topic per the protocol's own guidance (raw at full rate is the most expensive
   # thing an adapter can subscribe to over a robot's network).
   camera_compressed: /d400_arm/color/image_raw/compressed
+  # D435i organised depth cloud textured/aligned to the color stream. The
+  # adapter samples this inside each RGB detection and transforms the XYZ point
+  # from its optical frame into odom_lidar for the persistent map marker.
+  camera_depth_points: /d400_arm/depth/color/points
   # local_planner's localPlanner + pathFollower (mist_ws/.../local_planner_agx.launch,
   # launched separately from the trimmed SLAM launch, 2026-08-06) both subscribe
   # this — the standard RViz "2D Nav Goal" topic, not a custom one. Confirmed from
@@ -81,6 +85,21 @@ topics:
   # through only while nav_status is "active" (see _on_nav_cmd_vel). Without
   # this, teleop does not reliably work whenever local_planner is running.
   nav_cmd_vel: /cmd_vel_nav
+  # pathFollower's linear speed is gated by joySpeed, which joystickHandler sets
+  # unconditionally from |axes[1]| — no autonomyMode check, unlike every other
+  # speed source it has. Confirmed live: a real path was computing fine but the
+  # robot never moved, because nothing publishes a joystick here. This fakes
+  # that axis (see nav_joy_throttle) while nav_status is "active".
+  # autonomyMode is left false (local_planner_agx_scout.launch default) — true
+  # switches the goal source to RelativeSetPointX/Y (/setpoint_position/local),
+  # which nothing publishes, and the robot silently reports goalReached for a
+  # goal it never looked at. False keeps goalX/Y (/move_base_simple/goal, what
+  # we send) as the goal source, which is what nav_goal above depends on.
+  nav_joy: /joy
+
+# Rescaled to maxSpeed (0.4 m/s) by pathFollower regardless of magnitude
+# (confirmed live) — this mostly just needs to be reliably nonzero.
+nav_joy_throttle: 0.5
 
 # No gbplanner (global exploration planner) is running — only local_planner's
 # reactive local avoidance, whose adjacentRange is 5 m. A goal beyond what the

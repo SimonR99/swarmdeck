@@ -16,6 +16,9 @@ topics:
   battery: ""
   camera: ""
   camera_compressed: ""
+  # Optional organised PointCloud2 aligned pixel-for-pixel with the RGB image.
+  # Enables detection map positions without changing the camera preview path.
+  camera_depth_points: ""
 
 actions:
   # actionlib namespace for move_base's SimpleActionServer — the ROS 1
