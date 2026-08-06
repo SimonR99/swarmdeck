@@ -8,7 +8,7 @@ maintained spec, and two of these four machines are shared with other people's w
 | Robot | SSH alias | Platform | Reachable | `rclpy` (native) | `rospy` (native) | SwarmDeck cloned | Adapter config |
 |---|---|---|---|---|---|---|---|
 | tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM, map, camera, teleop and `navigate_to` all verified working |
-| botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (Docker only) | no | yes, `/ssd/swarmdeck` | **configured**: SuperOdometry + registered-cloud map, not launched |
+| botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (Docker only) | no | yes, `/ssd/swarmdeck` | **live**: SuperOdometry pose, 2D raytraced map and 3D cloud verified; e-stop interface available |
 | aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (docker-only, containers busy) | no | yes, `/ssd/swarmdeck` | not started |
 | spot | `spot` | Boston Dynamics Spot + Orin payload | **no** | unknown | unknown | not attempted | not started |
 
@@ -214,6 +214,21 @@ functional on tars, not just wired — the only caveat carried forward is the po
 warning below, since goal coordinates are expressed in that same drifting frame, and the
 5 m `adjacentRange` local-only horizon (no `gbplanner`).
 
+**One more real bug, found by the operator during normal use**: a goal placed *behind*
+the robot drove it straight ahead anyway, as if the goal were in front. Root cause: the
+fix above only got `pathFollower`'s *speed* right — `localPlanner.cpp` separately
+computes `joyDir = atan2(axes[2], axes[1])`, the candidate-path *direction*, straight
+from the joystick axes with no `autonomyMode` gate and no reference to `goalX/Y` at all.
+Publishing a constant `axes=[0, throttle, 0]` always signalled "goal straight ahead," so
+the first live nav test having driven correctly was coincidence — the goal happened to
+already be roughly ahead. Fixed: `_pump_nav_joy` now computes the real bearing from the
+robot's current pose to the goal every tick and encodes it into both axes so `atan2`
+recovers it exactly; `axes[1]` goes negative for a rear goal (safe — `pathFollower` takes
+`|axes[1]|` for speed, sign only ever changes direction). Verified live, supervised,
+camera-checked: a goal 1.0 m directly behind drove the robot there in reverse
+(`twoWayDrive: true` — it backs up rather than turning around), confirmed via
+consistently negative `linear.x` and pose converging on the correct point.
+
 **Map is now live too**: LVI-SAM has no 2D grid of its own, so `adapter_ros1.py` forwards
 `/lvi_sam/lidar/mapping/cloud_registered` (`topics.map_cloud`) and the backend raytraces
 it into one server-side (`mapsvc/scan_grid.py`) — see the commit history for the design
@@ -293,19 +308,22 @@ standard workflow is `cd /ssd/mist_ws && ./docker_setup.sh` (also present under
 workspace (`control`, `driver`, plus `build`/`install`) — the MIST lab's shared multi-robot
 codebase, not SwarmDeck-specific.
 
-**SwarmDeck configuration is ready, but deliberately not launched.** Botman uses
+**SwarmDeck configuration launched and verified on 2026-08-06.** Botman uses
 SuperOdometry in SLAM mode (`localization_mode: false`) with Ouster lidar/IMU. It
-publishes `/laser_odometry`, high-rate `/state_estimation`, `/registered_scan`, and TF
-`map -> os_lidar`; the Bunker base consumes `/cmd_vel`. There is no OccupancyGrid and no
-TF connection to the driver's independent `odom -> base_link` tree. SwarmDeck therefore
-uses `os_lidar` for pose and raytraces the registered scan server-side. See
+publishes `/laser_odometry` and `/registered_scan`; the source-declared
+`/state_estimation` and `map -> os_lidar` TF had no live samples. The Bunker base consumes
+`/cmd_vel`. There is no OccupancyGrid and no TF connection to the driver's independent
+`odom -> base_link` tree. SwarmDeck therefore uses `/laser_odometry` directly for the
+map-frame sensor pose and raytraces the registered scan server-side. See
 `docs/botman.md` and `adapters/adapter_ros2/config/bunker.yaml` for the source-by-source
 audit.
 
 The adapter has its own generic Humble image and does not install anything into MIST's
 image. `docker-compose.robot-botman.yml` mounts `/ssd/mist_ws` read-only and calls its
-existing `rover_launch bunker_gnm.launch.py` interface. First launch remains an
-operator-supervised hardware step.
+existing `rover_launch bunker_gnm.launch.py` interface. Host IPC is shared so Fast DDS
+point clouds cross the container boundary. The live backend showed Botman's updating
+pose, local 2D map, and merged 3D cloud; only `map` and `estop` are advertised because
+the robot currently has no `/dev/video0`.
 
 **SwarmDeck terrain prepared:**
 - Cloned to `/ssd/swarmdeck`.
@@ -395,10 +413,10 @@ On each of the three reachable robots:
   against a live `roscore` starts touching tars's real ROS graph (even before sending any
   `drive` command, TF/odometry subscriptions begin flowing), which deserves an explicit
   go-ahead rather than happening as a side effect of "prepare the terrain."
-- **Botman has not been launched from SwarmDeck.** Its dedicated adapter image and config
-  are ready, but starting the base driver changes the robot to commanded mode and must be
-  done with an operator and physical e-stop. Aslan still needs the same file-by-file audit
-  and dedicated adapter setup.
+- **Botman is running from SwarmDeck.** Its dedicated adapter image and project-owned
+  config are live; starting the base driver changes the robot to commanded mode, so future
+  restarts still require an operator and physical e-stop. Aslan still needs the same
+  file-by-file audit and dedicated adapter setup.
 - **No `adapters/adapter_ros2/config/<robot>.yaml` exists for Aslan.** Botman's driver and
   SLAM sources were read file-by-file once it became idle; Aslan's were not. Botman's
   values remain a documented source-derived hypothesis until the first supervised live
@@ -420,8 +438,8 @@ running), run `adapter_ros1.py --robot-id tars_0 --config config/scout_mini.yaml
 doesn't. `navigate_to_pose` has no real target yet either way — that needs a translation
 layer onto gbplanner/RosBuzz, not a config change.
 
-For Botman, re-check `who` and `docker ps`, put an operator at the e-stop, then use the
-self-contained command in `docs/botman.md`; validate `/state_estimation`,
-`/registered_scan`, `map -> os_lidar`, the 2D height band, and the deadman in that order.
+For Botman restarts, re-check `who` and `docker ps`, put an operator at the e-stop, then
+use the self-contained command in `docs/botman.md`; validate `/laser_odometry`,
+`/registered_scan`, the 2D height band, merged 3D cloud, and deadman in that order.
 For Aslan, coordinate with whoever is using its `bunker` container and repeat Botman's
 read-only source audit before writing a configuration.
