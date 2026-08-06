@@ -51,7 +51,7 @@ import websockets
 import yaml
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from sensor_msgs.msg import BatteryState, CompressedImage, Image, Joy, PointCloud2
+from sensor_msgs.msg import BatteryState, CameraInfo, CompressedImage, Image, Joy, PointCloud2
 from std_msgs.msg import Int8
 from tf2_ros import Buffer, TransformListener
 
@@ -60,7 +60,11 @@ from tf2_ros import Buffer, TransformListener
 # sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from adapters.perception.depth_projection import point_for_bbox, transform_point
+from adapters.perception.depth_projection import (
+    point_for_bbox,
+    point_for_depth_image,
+    transform_point,
+)
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -108,6 +112,10 @@ DEFAULTS: dict[str, Any] = {
         "battery": "",       # empty disables the capability
         "camera": "",
         "camera_compressed": "",
+        # RGB-aligned depth image and its CameraInfo. Preferred over a point
+        # cloud because many depth drivers publish unordered clouds by default.
+        "camera_depth": "",
+        "camera_info": "",
         # Organised PointCloud2 whose pixels are aligned with the RGB image.
         # When present, detections gain a map_position; otherwise bbox-only
         # detection continues unchanged.
@@ -133,20 +141,24 @@ DEFAULTS: dict[str, Any] = {
         # Leave empty for a nav stack that already respects nav_stop/cancel
         # cleanly on its own.
         "nav_cmd_vel": "",
-        # sensor_msgs/Joy, for a nav stack whose speed comes from a joystick
-        # throttle axis with no software override (confirmed true of
-        # pathFollower: joystickHandler sets joySpeed = |axes[1]| completely
-        # unconditionally — no autonomyMode gate, unlike every other speed
-        # source it has). If set, this adapter fakes that axis at nav_joy_hz
-        # while nav_status is "active" and zero otherwise. Real safety still
-        # comes from nav_cmd_vel only being relayed while nav_status is
-        # "active" (_on_nav_cmd_vel) — this does not need to be itself
-        # trusted as a safety mechanism, only a plausible one.
+        # sensor_msgs/Joy, for a nav stack whose speed AND path direction both
+        # come from a joystick with no software override (confirmed true of
+        # local_planner: pathFollower.joystickHandler sets joySpeed = |axes[1]|
+        # and localPlanner.joystickHandler sets joyDir = atan2(axes[2], axes[1])
+        # — neither has an autonomyMode gate, unlike every other speed/direction
+        # source either node has). If set, this adapter fakes both axes every
+        # tick from the real bearing to the goal (see _pump_nav_joy) while
+        # nav_status is "active", zero otherwise. Real safety still comes from
+        # nav_cmd_vel only being relayed while nav_status is "active"
+        # (_on_nav_cmd_vel) — this does not need to be itself trusted as a
+        # safety mechanism, only a plausible one.
         "nav_joy": "",
     },
-    # Throttle magnitude published on nav_joy's axes[1], 0..1. The stack
-    # rescales its own output to maxSpeed regardless (confirmed live), so
-    # this mostly just needs to be reliably nonzero — not tuned as a speed.
+    # Magnitude of the fake nav_joy vector, 0..1 — NOT a speed by itself, see
+    # _pump_nav_joy: axes[1]/axes[2] together encode the bearing to the goal,
+    # and this is that vector's length. The stack rescales its own output to
+    # maxSpeed regardless (confirmed live), so this mostly just needs to stay
+    # comfortably nonzero after being split into cos/sin components.
     "nav_joy_throttle": 0.5,
     # Height band for `map_cloud` points, metres, in the map_frame (NOT
     # relative to the robot — this stack has no live z estimate to be relative
@@ -233,6 +245,8 @@ class HardwareBridge:
         self._last_drive_at = 0.0
         self._camera_jpeg: bytes | None = None
         self._camera_dirty = False
+        self._camera_depth_image: Image | None = None
+        self._camera_info: CameraInfo | None = None
         self._camera_depth_cloud: PointCloud2 | None = None
         perception = cfg.get("perception", {})
         self._detector = None
@@ -283,6 +297,14 @@ class HardwareBridge:
                 PointCloud2,
                 self._on_camera_depth_cloud,
                 queue_size=1,
+            )
+        if topics.get("camera_depth"):
+            rospy.Subscriber(
+                topics["camera_depth"], Image, self._on_camera_depth, queue_size=1
+            )
+        if topics.get("camera_info"):
+            rospy.Subscriber(
+                topics["camera_info"], CameraInfo, self._on_camera_info, queue_size=1
             )
         if topics.get("nav_cmd_vel"):
             rospy.Subscriber(
@@ -484,6 +506,12 @@ class HardwareBridge:
         # for the few pixels inside a detection box and only at detector rate.
         self._camera_depth_cloud = msg
 
+    def _on_camera_depth(self, msg: Image) -> None:
+        self._camera_depth_image = msg
+
+    def _on_camera_info(self, msg: CameraInfo) -> None:
+        self._camera_info = msg
+
     @staticmethod
     def _stamp_seconds(header) -> float | None:
         stamp = getattr(header, "stamp", None)
@@ -496,32 +524,50 @@ class HardwareBridge:
         return value if value > 0.0 and math.isfinite(value) else None
 
     def _depth_map_position(self, bbox, image_header=None) -> dict[str, float] | None:
-        cloud = self._camera_depth_cloud
-        if cloud is None:
-            return None
         perception = self.cfg.get("perception", {})
         image_time = self._stamp_seconds(image_header)
-        cloud_time = self._stamp_seconds(getattr(cloud, "header", None))
         max_age = float(perception.get("depth_max_age_s", 0.35))
-        if image_time is not None and cloud_time is not None and abs(image_time - cloud_time) > max_age:
-            return None
+        min_range = float(perception.get("depth_min_m", 0.15))
+        max_range = float(perception.get("depth_max_m", 8.0))
+        camera_point = None
+        source_header = None
 
-        camera_point = point_for_bbox(
-            cloud,
-            bbox,
-            min_range_m=float(perception.get("depth_min_m", 0.15)),
-            max_range_m=float(perception.get("depth_max_m", 8.0)),
-        )
-        if camera_point is None:
+        depth_image = self._camera_depth_image
+        camera_info = self._camera_info
+        if depth_image is not None and camera_info is not None:
+            depth_header = getattr(depth_image, "header", None)
+            depth_time = self._stamp_seconds(depth_header)
+            if image_time is None or depth_time is None or abs(image_time - depth_time) <= max_age:
+                configured_scale = perception.get("depth_scale")
+                camera_point = point_for_depth_image(
+                    depth_image,
+                    camera_info,
+                    bbox,
+                    min_range_m=min_range,
+                    max_range_m=max_range,
+                    depth_scale=None if configured_scale is None else float(configured_scale),
+                )
+                source_header = depth_header
+
+        cloud = self._camera_depth_cloud
+        if camera_point is None and cloud is not None:
+            cloud_header = getattr(cloud, "header", None)
+            cloud_time = self._stamp_seconds(cloud_header)
+            if image_time is None or cloud_time is None or abs(image_time - cloud_time) <= max_age:
+                camera_point = point_for_bbox(
+                    cloud, bbox, min_range_m=min_range, max_range_m=max_range
+                )
+                source_header = cloud_header
+        if camera_point is None or source_header is None:
             return None
-        frame_id = getattr(getattr(cloud, "header", None), "frame_id", "")
+        frame_id = getattr(source_header, "frame_id", "")
         if not frame_id:
             return None
         try:
             if frame_id == self.map_frame:
                 map_point = camera_point
             else:
-                stamp = getattr(getattr(cloud, "header", None), "stamp", rospy.Time(0))
+                stamp = getattr(source_header, "stamp", rospy.Time(0))
                 tf = self.tf_buffer.lookup_transform(
                     self.map_frame, frame_id, stamp, rospy.Duration(0.1)
                 )
@@ -769,14 +815,35 @@ class HardwareBridge:
             self.goal = None
 
     def _pump_nav_joy(self) -> None:
-        """Fake the joystick throttle pathFollower's speed gate requires.
+        """Fake the joystick pathFollower's speed AND localPlanner's path
+        DIRECTION both come from, unconditionally, with `autonomyMode: false`.
 
-        `joystickHandler` sets `joySpeed = |axes[1]|` unconditionally, and
-        this build has no staleness timeout on it (the check exists in
-        source but is commented out) — publishing once would latch a nonzero
-        speed forever internally. Publish a fresh value every tick instead,
-        the way a real joystick would, and always zero when not actively
-        navigating. This does not need to be trusted as the safety
+        Two independent things read this, in two different executables:
+
+          * pathFollower.joystickHandler: `joySpeed = |axes[1]|` — the speed
+            gate (see the DEFAULTS comment on `topics.nav_joy`).
+          * localPlanner.joystickHandler: `joyDir = atan2(axes[2], axes[1])`
+            — which CANDIDATE PATH direction gets selected from the path
+            library. This is NOT derived from goalX/Y at all when
+            `autonomyMode` is false; only the joystick's own axes drive it.
+
+        Publishing a constant axes[1]=throttle, axes[2]=0 (an earlier version
+        of this method) therefore always signalled "goal straight ahead" —
+        confirmed live: a goal placed behind the robot still drove forward,
+        because joyDir never moved off zero. Fixed by computing the real
+        bearing from the robot's current pose to the goal, every tick (the
+        bearing changes as the robot moves/turns, same reason the
+        RelativeSetPoint scheme needs continuous updates too), and encoding
+        it into both axes so `atan2(axes[2], axes[1])` equals that bearing.
+        `axes[1]` can go negative for a goal behind the robot — pathFollower
+        takes `|axes[1]|` for speed, so sign only ever affects direction,
+        never zeroes the speed gate.
+
+        This build has no joystick staleness timeout (the check exists in
+        source but is commented out) — publishing once would latch a stale
+        direction/speed forever internally. Publish a fresh value every tick
+        instead, the way a real joystick would, and always zero when not
+        actively navigating. None of this needs to be trusted as the safety
         mechanism — `_on_nav_cmd_vel` only relays to the real cmd_vel while
         nav_status is "active" regardless of what pathFollower thinks
         internally, and that's what actually stops the robot.
@@ -784,7 +851,18 @@ class HardwareBridge:
         if self.pub_nav_joy is None:
             return
         msg = Joy()
-        msg.axes = [0.0, self._nav_joy_throttle if self.nav_status == "active" else 0.0, 0.0]
+        if self.nav_status == "active" and self.goal is not None:
+            pose = self.map_pose()
+            dx = self.goal["x"] - pose["x"]
+            dy = self.goal["y"] - pose["y"]
+            c, s = math.cos(pose["yaw"]), math.sin(pose["yaw"])
+            forward = dx * c + dy * s
+            left = -dx * s + dy * c
+            bearing = math.atan2(left, forward)
+            t = self._nav_joy_throttle
+            msg.axes = [0.0, math.cos(bearing) * t, math.sin(bearing) * t]
+        else:
+            msg.axes = [0.0, 0.0, 0.0]
         msg.buttons = [0, 0, 0, 0]
         self.pub_nav_joy.publish(msg)
 

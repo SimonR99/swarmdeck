@@ -14,6 +14,7 @@ docs/hardware-bringup.md.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -80,6 +81,9 @@ def _bridge(mod, cfg_override=None):
     bridge._goal_generation = 0
     bridge._last_drive_at = 0.0
     bridge._last_cloud_prepare_at = 0.0
+    bridge._camera_depth_image = None
+    bridge._camera_info = None
+    bridge._camera_depth_cloud = None
     return bridge
 
 
@@ -116,6 +120,56 @@ def test_camera_capability_needs_a_real_topic(mod):
     assert "camera" not in no_cam.capabilities()
     raw_only = _bridge(mod, {"topics": {"camera": "image_raw"}})
     assert "camera" in raw_only.capabilities()
+
+
+def _stamp(seconds: float):
+    return type("Stamp", (), {"to_sec": lambda self: seconds})()
+
+
+def _depth_image(mod, *, stamp: float, frame: str = "map"):
+    values = mod.np.full((8, 8), 2000, dtype="<u2")
+    header = type("Header", (), {"stamp": _stamp(stamp), "frame_id": frame})()
+    return type(
+        "Image",
+        (),
+        {
+            "width": 8,
+            "height": 8,
+            "encoding": "16UC1",
+            "is_bigendian": False,
+            "step": 16,
+            "data": values.tobytes(),
+            "header": header,
+        },
+    )()
+
+
+def test_aligned_depth_detection_becomes_a_map_position(mod):
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0)
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    position = bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header)
+
+    assert position == pytest.approx({"x": 0.0, "y": 0.0}, abs=0.3)
+
+
+def test_stale_depth_is_not_attached_to_a_new_detection(mod):
+    bridge = _bridge(mod, {"perception": {"depth_max_age_s": 0.2}})
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0)
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    image_header = type("Header", (), {"stamp": _stamp(10.5)})()
+
+    assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
 
 
 def test_battery_normalisation_handles_percent_and_nan(mod):
@@ -292,20 +346,67 @@ def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
     bridge.pub_cmd.publish.assert_called_once_with(twist)
 
 
-def test_nav_joy_publishes_nonzero_throttle_only_while_navigating(mod):
-    """joystickHandler sets joySpeed unconditionally from axes[1] — this is
-    the fake throttle that unlocks pathFollower's speed with no real stick."""
+def _bearing_of(sent) -> float:
+    return math.degrees(math.atan2(sent.axes[2], sent.axes[1]))
+
+
+def test_nav_joy_is_zero_when_idle_or_no_goal(mod):
     bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}, "nav_joy_throttle": 0.5})
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
 
     bridge.nav_status = "idle"
+    bridge.goal = {"x": 5.0, "y": 0.0}
     bridge._pump_nav_joy()
     sent = bridge.pub_nav_joy.publish.call_args[0][0]
-    assert sent.axes[1] == 0.0
+    assert sent.axes == [0.0, 0.0, 0.0]
 
     bridge.nav_status = "active"
+    bridge.goal = None
     bridge._pump_nav_joy()
     sent = bridge.pub_nav_joy.publish.call_args[0][0]
-    assert sent.axes[1] == 0.5
+    assert sent.axes == [0.0, 0.0, 0.0]
+
+
+def test_nav_joy_encodes_the_real_bearing_to_the_goal(mod):
+    """The bug this fixes: a constant axes[1]/zero axes[2] always signalled
+    "goal straight ahead" to localPlanner's joyDir = atan2(axes[2], axes[1]),
+    so a goal placed behind the robot still drove it forward."""
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}, "nav_joy_throttle": 0.5})
+    bridge.nav_status = "active"
+
+    # Goal straight ahead (body frame == world frame, yaw 0).
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge.goal = {"x": 5.0, "y": 0.0}
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert _bearing_of(sent) == pytest.approx(0.0, abs=1e-6)
+    assert sent.axes[1] > 0  # forward component must be positive when ahead
+
+    # Goal directly behind — this is exactly the case that used to fail.
+    bridge.goal = {"x": -5.0, "y": 0.0}
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert abs(_bearing_of(sent)) == pytest.approx(180.0, abs=1e-6)
+    assert sent.axes[1] < 0  # forward component must flip sign when behind
+
+    # Goal to the left, robot facing +x.
+    bridge.goal = {"x": 0.0, "y": 5.0}
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert _bearing_of(sent) == pytest.approx(90.0, abs=1e-6)
+
+
+def test_nav_joy_bearing_accounts_for_robot_heading(mod):
+    """A goal that's "ahead" in world coordinates but the robot is already
+    facing away from it must report a bearing near 180 deg, not 0."""
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}, "nav_joy_throttle": 0.5})
+    bridge.nav_status = "active"
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": math.pi}  # facing -x
+    bridge.goal = {"x": 5.0, "y": 0.0}  # world +x, i.e. behind this heading
+
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert abs(_bearing_of(sent)) == pytest.approx(180.0, abs=1e-4)
 
 
 def test_nav_joy_is_a_noop_when_unconfigured(mod):

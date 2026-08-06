@@ -61,10 +61,11 @@ topics:
   # topic per the protocol's own guidance (raw at full rate is the most expensive
   # thing an adapter can subscribe to over a robot's network).
   camera_compressed: /d400_arm/color/image_raw/compressed
-  # D435i organised depth cloud textured/aligned to the color stream. The
-  # adapter samples this inside each RGB detection and transforms the XYZ point
-  # from its optical frame into odom_lidar for the persistent map marker.
-  camera_depth_points: /d400_arm/depth/color/points
+  # rs_d400.launch enables align_depth=true at the same 640x480 resolution as
+  # color. The adapter deprojects this image with the aligned CameraInfo, then
+  # transforms the camera-space XYZ into odom_lidar for the map marker.
+  camera_depth: /d400_arm/aligned_depth_to_color/image_raw
+  camera_info: /d400_arm/aligned_depth_to_color/camera_info
   # local_planner's localPlanner + pathFollower (mist_ws/.../local_planner_agx.launch,
   # launched separately from the trimmed SLAM launch, 2026-08-06) both subscribe
   # this — the standard RViz "2D Nav Goal" topic, not a custom one. Confirmed from
