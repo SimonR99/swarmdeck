@@ -122,10 +122,7 @@ needs `rclpy` — the config tells a bridge what topics to carry, but importing 
 doesn't make it see ROS 1 topics. That needs an actual `ros1_bridge` (untried) or running
 the adapter inside a ROS 2 docker image bridged to this graph. **`adapter_ros1.py`
 sidesteps this entirely** — it's the more direct path for tars specifically, precisely
-because tars's own stack is ROS 1. Regardless of which adapter, `navigate_to_pose` has no
-real target on this robot today — tars drives via gbplanner/RosBuzz, not `move_base` or
-Nav2, so a goal will correctly report `nav_status: failed` rather than hang, but nothing
-will actually navigate until a translation layer exists onto that stack.
+because tars's own stack is ROS 1.
 
 **tars is live**, as of this pass (2026-08-06, still running): `adapters/adapter_ros1/launch/scout_mini_slam.launch`
 brings up sensors + LVI-SAM + the EKF + `scout_base_node` — `rover_agx.launch` with
@@ -147,11 +144,29 @@ rover  12700  python3 adapter_ros1.py --robot-id tars_0 ...
 ```
 
 To stop: `ssh scout` then `kill <pid>...` (PIDs will differ on restart — `pgrep -af
-"roslaunch scout_mini_slam|rs_d400|adapter_ros1"` finds them). `navigate`/`estop` are
-advertised per protocol convention from config alone (mirroring `adapter_ros2`'s
-behaviour), not because a `move_base` server actually exists — a `navigate_to` from the
-GUI will fail cleanly (`nav_status: failed`) rather than move the robot, but `drive`/`stop`
-(teleop) will actually command real wheels the moment they're sent.
+"roslaunch scout_mini_slam|rs_d400|local_planner_agx|adapter_ros1"` finds them).
+
+**Navigation is now live too** (2026-08-06, same day): `local_planner_agx.launch`
+(`localPlanner` + `pathFollower` + `loamInterface`) launched separately, alongside the
+SLAM stack — reactive local obstacle avoidance (`checkObstacle: true`, `maxSpeed: 0.4
+m/s`), **not** a global planner (no `gbplanner`, `adjacentRange: 5 m` only). It takes
+goals on `/move_base_simple/goal` (`geometry_msgs/PoseStamped`, the standard RViz "2D Nav
+Goal" topic — confirmed from source, not actionlib), so `adapter_ros1.py` gained a
+topic-based `navigate_to` path (`topics.nav_goal`/`topics.nav_stop`) that takes priority
+over the actionlib one when both are configured. Confirmed before wiring it up: `/cmd_vel`
+stayed all-zero with `localPlanner`/`pathFollower` running and no goal sent — launching
+does not, by itself, move the robot. `topics.nav_stop` (`/stop`, `std_msgs/Int8`) is
+wired into both `cancel_goal` and `drive()`, so operator teleop force-stops
+`pathFollower` rather than racing it on the shared `cmd_vel` topic. **No goal has been
+sent yet** — that's the next, operator-supervised step, not something done unattended
+over SSH.
+
+**Map is now live too**: LVI-SAM has no 2D grid of its own, so `adapter_ros1.py` forwards
+`/lvi_sam/lidar/mapping/cloud_registered` (`topics.map_cloud`) and the backend raytraces
+it into one server-side (`mapsvc/scan_grid.py`) — see the commit history for the design
+reasoning. Confirmed: `GET /api/map` decodes to real free/occupied cells, not blank.
+`rtabmap-ros`/`octomap-server` were considered and explicitly NOT installed — the
+scan-grid approach needed no new packages on the robot at all.
 
 **Camera added** (also 2026-08-06, same pass): a RealSense D435i was connected and
 `rover_launch/launch/rs_d400.launch` (already installed — `ros-noetic-realsense2-camera`
@@ -171,18 +186,8 @@ launch) and no loop-closure/error/reset lines appear in the SLAM log — it's ju
 further this pass — the lidar↔IMU extrinsics in `params_ouster_scout_vectornav.yaml`
 were flagged as unverified from the start (see the file itself), and this is exactly the
 kind of error a wrong extrinsic produces. Worth checking before doing anything
-motion-related (teleop or otherwise) based on the displayed pose.
-
-**No map still.** Neither `ros-noetic-rtabmap-ros` nor `ros-noetic-octomap-server` is
-installed (both are apt-available, checked via `apt-cache policy` — this needs `sudo`,
-which needs a password not available non-interactively over SSH, so it wasn't done).
-`mist_ws` already has `voxblox`/`octomap_world` built from source, but neither publishes
-`nav_msgs/OccupancyGrid` (checked: no `OccupancyGrid` usage anywhere in
-`mist_ws/src/mapping/`) — they're 3D-query libraries for `gbplanner`, not a drop-in 2D
-grid source. RTAB-Map remains the recommended path (see the collaborative-slam.md
-discussion) and now has everything it would want (odom, the Ouster cloud, and the D435i
-for appearance-based loop closure) — it just needs `sudo apt install
-ros-noetic-rtabmap-ros` run by someone with the password.
+motion-related (teleop or otherwise) based on the displayed pose — including the first
+real `navigate_to` goal, whose target is expressed in this same drifting frame.
 
 **SwarmDeck terrain prepared:**
 - Cloned to `/ssd/swarmdeck` (public repo, plain `git clone`, no auth needed).
