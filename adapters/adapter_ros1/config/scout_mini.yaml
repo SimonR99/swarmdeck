@@ -39,8 +39,13 @@ topics:
   # Published by rover_scout_adapter.py (control/adapters/scripts/rover_scout_adapter.py)
   # from the driver's ScoutStatus message, not by scout_base_node itself.
   battery: /robot_battery
-  camera: ""              # rover_agx.launch has its T265/realsense include commented out — no camera live today
-  camera_compressed: ""
+  camera: ""
+  # A RealSense D435i (rover_launch/launch/rs_d400.launch, namespace `d400_arm`,
+  # t265 group commented out) was connected and launched separately from the trimmed
+  # SLAM launch, 2026-08-06 — confirmed publishing at ~30 Hz. Prefer the compressed
+  # topic per the protocol's own guidance (raw at full rate is the most expensive
+  # thing an adapter can subscribe to over a robot's network).
+  camera_compressed: /d400_arm/color/image_raw/compressed
 
 actions:
   # No move_base (or any actionlib nav server) runs on tars today — it drives via

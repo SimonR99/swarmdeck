@@ -142,17 +142,47 @@ the SSH session:
 
 ```
 rover  10049  roslaunch .../scout_mini_slam.launch
-rover  10695  python3 adapter_ros1.py --robot-id tars_0 ...
+rover  11627  roslaunch rover_launch rs_d400.launch
+rover  12700  python3 adapter_ros1.py --robot-id tars_0 ...
 ```
 
-To stop: `ssh scout` then `kill 10049 10695` (PIDs will differ on restart — `pgrep -af
-"roslaunch scout_mini_slam|adapter_ros1"` finds them). `navigate`/`estop` are advertised
-per protocol convention from config alone (mirroring `adapter_ros2`'s behaviour), not
-because a `move_base` server actually exists — a `navigate_to` from the GUI will fail
-cleanly (`nav_status: failed`) rather than move the robot, but `drive`/`stop` (teleop)
-will actually command real wheels the moment they're sent. No map: nothing in this trimmed
-stack (or the full one) publishes a `nav_msgs/OccupancyGrid` — see the RTAB-Map note
-elsewhere in this conversation for the planned fix.
+To stop: `ssh scout` then `kill <pid>...` (PIDs will differ on restart — `pgrep -af
+"roslaunch scout_mini_slam|rs_d400|adapter_ros1"` finds them). `navigate`/`estop` are
+advertised per protocol convention from config alone (mirroring `adapter_ros2`'s
+behaviour), not because a `move_base` server actually exists — a `navigate_to` from the
+GUI will fail cleanly (`nav_status: failed`) rather than move the robot, but `drive`/`stop`
+(teleop) will actually command real wheels the moment they're sent.
+
+**Camera added** (also 2026-08-06, same pass): a RealSense D435i was connected and
+`rover_launch/launch/rs_d400.launch` (already installed — `ros-noetic-realsense2-camera`
+via apt, no new install) launched separately, alongside the SLAM stack, not part of the
+trimmed launch file. Confirmed `/d400_arm/color/image_raw` at ~30 Hz.
+`scout_mini.yaml`'s `topics.camera_compressed` now points at
+`/d400_arm/color/image_raw/compressed`; `capabilities` now includes `camera`. The D435i
+also has its own depth cloud (`/d400_arm/depth/color/points`), unused so far.
+
+**⚠ Pose is drifting significantly while the robot sits still.** A few minutes after
+connecting, `tars_0`'s reported pose moved from near-origin to `(x=-1.82, y=6.91,
+yaw=-59°)` and kept changing — confirmed against both the EKF's TF and LVI-SAM's own
+`/lvi_sam/lidar/mapping/odometry` directly, so this is LVI-SAM's own estimate drifting,
+not an adapter bug. No robot motion happened (nothing publishes `cmd_vel` in this
+launch) and no loop-closure/error/reset lines appear in the SLAM log — it's just walking.
+**Do not trust `tars_0`'s displayed position in the GUI right now.** Not investigated
+further this pass — the lidar↔IMU extrinsics in `params_ouster_scout_vectornav.yaml`
+were flagged as unverified from the start (see the file itself), and this is exactly the
+kind of error a wrong extrinsic produces. Worth checking before doing anything
+motion-related (teleop or otherwise) based on the displayed pose.
+
+**No map still.** Neither `ros-noetic-rtabmap-ros` nor `ros-noetic-octomap-server` is
+installed (both are apt-available, checked via `apt-cache policy` — this needs `sudo`,
+which needs a password not available non-interactively over SSH, so it wasn't done).
+`mist_ws` already has `voxblox`/`octomap_world` built from source, but neither publishes
+`nav_msgs/OccupancyGrid` (checked: no `OccupancyGrid` usage anywhere in
+`mist_ws/src/mapping/`) — they're 3D-query libraries for `gbplanner`, not a drop-in 2D
+grid source. RTAB-Map remains the recommended path (see the collaborative-slam.md
+discussion) and now has everything it would want (odom, the Ouster cloud, and the D435i
+for appearance-based loop closure) — it just needs `sudo apt install
+ros-noetic-rtabmap-ros` run by someone with the password.
 
 **SwarmDeck terrain prepared:**
 - Cloned to `/ssd/swarmdeck` (public repo, plain `git clone`, no auth needed).
