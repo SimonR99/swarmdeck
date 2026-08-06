@@ -22,16 +22,30 @@ footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link b
 map_frame: odom_lidar
 base_frame: base_link_filtered
 
+# Ouster is mounted above base_link_filtered; LVI-SAM's frame origin is roughly
+# the sensor's own start pose (confirmed live: z ~0.26 m there). This band is a
+# starting guess at "obstacle height, not ground or ceiling" in that frame —
+# NOT calibrated against the real mount height. Check the actual map once it's
+# up: a mostly-empty grid means the band missed the room; a solid gray disc
+# means it's catching the floor.
+map_cloud_height_band:
+  min_z: -0.3
+  max_z: 0.5
+
 topics:
   # /odometry/filtered is the EKF's fused output (fusing LVI-SAM lidar odometry), and is
   # what this stack's own rover_scout_adapter.py subscribes to for pose — prefer it over
   # scout_base_node's raw `odom` wheel odometry.
   odom: /odometry/filtered
-  # No OccupancyGrid publisher exists in rover_agx.launch. LVI-SAM produces a 3D point
-  # cloud map, not a 2D grid; voxblox/octomap nodes exist elsewhere in mist_ws but are
-  # not wired into this launch file. Left empty per protocol rule 4 (never advertise a
-  # capability that times out) until something actually publishes nav_msgs/OccupancyGrid.
+  # No OccupancyGrid publisher exists in rover_agx.launch, and none is being added —
+  # see map_cloud below instead.
   map: ""
+  # LVI-SAM's per-scan registered cloud, already transformed into odom_lidar (same
+  # frame as map_frame above) — confirmed live, ~5 Hz, 2026-08-06. The backend
+  # raytraces this into a grid itself (mapsvc/scan_grid.py); nothing new runs on
+  # the robot for it. cloud_registered_raw (undownsampled) also exists if this one
+  # turns out too sparse once we look at the actual map.
+  map_cloud: /lvi_sam/lidar/mapping/cloud_registered
   plan: ""
   # scout_messenger.cpp subscribes "/cmd_vel" with a leading slash, so it is the global
   # topic regardless of any namespace scout_base.launch wraps the node in.

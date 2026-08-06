@@ -432,6 +432,40 @@ async def post_cloud(request: Request) -> Any:
     return {"ok": True, "points": int(len(points))}
 
 
+@app.post("/api/adapter/scan")
+async def post_scan(request: Request) -> Any:
+    """One lidar scan for a robot with no `OccupancyGrid` publisher of its own.
+
+    Body: zlib int16 xy pairs (1 cm units, already deduplicated onto a voxel
+    lattice by the adapter — see adapter_ros1.py). `origin_x`/`origin_y` are
+    the sensor's position in the SAME frame as the points, at capture time,
+    used to raytrace free space back to it — see `mapsvc/scan_grid.py`. Feeds
+    the same `ingest()` a robot that publishes its own grid uses, so
+    registration and merging are unaffected either way.
+    """
+    import zlib
+
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    try:
+        origin_x = float(request.query_params["origin_x"])
+        origin_y = float(request.query_params["origin_y"])
+    except (KeyError, ValueError):
+        return JSONResponse({"error": "origin_x/origin_y required"}, status_code=400)
+    scale = float(request.query_params.get("scale", CLOUD_SCALE))
+    try:
+        raw = zlib.decompress(await request.body())
+        quantised = np.frombuffer(raw, dtype=np.int16)
+    except (zlib.error, ValueError):
+        return JSONResponse({"error": "malformed scan"}, status_code=400)
+    if quantised.size % 2:
+        return JSONResponse({"error": "xy pairs expected"}, status_code=400)
+    points = quantised.reshape(-1, 2).astype(np.float32) * scale
+    await map_service.ingest_scan_async(rid, origin_x, origin_y, points)
+    return {"ok": True, "points": int(len(points))}
+
+
 @app.get("/api/map/cloud")
 async def get_cloud() -> Response:
     """The merged 3D cloud for the GUI's optional 3D view.

@@ -50,8 +50,18 @@ import websockets
 import yaml
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from sensor_msgs.msg import BatteryState, CompressedImage, Image
+from sensor_msgs.msg import BatteryState, CompressedImage, Image, PointCloud2
 from tf2_ros import Buffer, TransformListener
+
+# Transport quantisation for `map_cloud` uploads, matching adapter_sim's
+# `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
+MAP_CLOUD_SCALE = 0.01
+# Dedup edge for scan points before upload, metres. Matches the backend's
+# default occupancy grid resolution (mapsvc.service.MapService) — one
+# candidate point per grid cell is exactly what the raytracer needs, and
+# finer than that would just be bandwidth spent on points that land in the
+# same cell anyway.
+MAP_CLOUD_VOXEL = 0.05
 
 # move_base is the common case but not the only one; see `navigate_to` below.
 try:
@@ -74,12 +84,26 @@ DEFAULTS: dict[str, Any] = {
     "topics": {
         "odom": "odom",
         "map": "map",
+        # PointCloud2, for a robot whose SLAM stack registers a cloud but never
+        # projects one to a 2D OccupancyGrid (LVI-SAM, LOAM-family stacks in
+        # general). Mutually additive with `map`, not a fallback for it: the
+        # backend raytraces this into a grid itself (mapsvc/scan_grid.py)
+        # rather than the adapter needing its own occupancy-grid mapper.
+        "map_cloud": "",
         "plan": "plan",
         "cmd_vel": "cmd_vel",
         "battery": "",       # empty disables the capability
         "camera": "",
         "camera_compressed": "",
     },
+    # Height band for `map_cloud` points, metres, in the map_frame (NOT
+    # relative to the robot — this stack has no live z estimate to be relative
+    # to, since the EKF publishing map_frame runs `two_d_mode: true`). Points
+    # outside are dropped before upload: ground and ceiling returns would
+    # otherwise flood the grid with false occupied cells. The default is a
+    # starting guess, not a calibration — verify against the actual map that
+    # comes out, per docs/hardware-bringup.md.
+    "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
     # `move_base`'s actionlib namespace — the ROS 1 convention, the way
     # `navigate_to_pose` is the ROS 2/Nav2 one.
     "actions": {"navigate_to_pose": "move_base"},
@@ -130,6 +154,8 @@ class HardwareBridge:
 
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
+        self._scan_points: np.ndarray | None = None
+        self._scan_dirty = False
         self.planned_path: list[dict[str, float]] = []
         self.battery: float | None = None
         self.nav_status = "idle"
@@ -150,6 +176,10 @@ class HardwareBridge:
             rospy.Subscriber(topics["odom"], Odometry, self._on_odom, queue_size=10)
         if topics.get("map"):
             rospy.Subscriber(topics["map"], OccupancyGrid, self._on_map, queue_size=1)
+        if topics.get("map_cloud"):
+            rospy.Subscriber(
+                topics["map_cloud"], PointCloud2, self._on_map_cloud, queue_size=1
+            )
         if topics.get("plan"):
             rospy.Subscriber(topics["plan"], NavPath, self._on_plan, queue_size=10)
         if topics.get("battery"):
@@ -182,7 +212,7 @@ class HardwareBridge:
         caps: list[str] = []
         if self.nav_client is not None:
             caps.append("navigate")
-        if self.cfg["topics"].get("map"):
+        if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
             caps.append("map")
         if self.cfg["topics"].get("camera") or self.cfg["topics"].get("camera_compressed"):
             caps.append("camera")
@@ -205,6 +235,55 @@ class HardwareBridge:
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
         self._grid_dirty = True
+
+    @staticmethod
+    def _cloud_xyz(msg: PointCloud2) -> np.ndarray:
+        """Extract xyz from a PointCloud2 without pulling in point_cloud2 helpers.
+
+        Reads the x/y/z field offsets rather than assuming they are the first
+        three floats: LVI-SAM's registered cloud carries intensity too, and its
+        placement is not something to guess at. Mirrors adapter_sim's
+        `_cloud_xyz` exactly — same wire format, same reasoning.
+        """
+        offsets = {f.name: f.offset for f in msg.fields if f.name in ("x", "y", "z")}
+        if len(offsets) != 3:
+            return np.zeros((0, 3), dtype=np.float32)
+        raw = np.frombuffer(msg.data, dtype=np.uint8)
+        count = len(raw) // msg.point_step if msg.point_step else 0
+        if not count:
+            return np.zeros((0, 3), dtype=np.float32)
+        rows = raw[: count * msg.point_step].reshape(count, msg.point_step)
+        columns = [
+            rows[:, offsets[axis] : offsets[axis] + 4].copy().view(np.float32).ravel()
+            for axis in ("x", "y", "z")
+        ]
+        points = np.stack(columns, axis=1)
+        return points[np.isfinite(points).all(axis=1)]
+
+    def _on_map_cloud(self, msg: PointCloud2) -> None:
+        """Height-band filter, then dedup onto the grid lattice.
+
+        Both happen here rather than server-side for the same reason
+        `adapter_sim.upload_cloud` downsamples before sending: this is the
+        expensive end of a link that should stay cheap, and a raw registered
+        scan can be tens of thousands of points for what the raytracer only
+        needs a few hundred of.
+        """
+        points = self._cloud_xyz(msg)
+        if not len(points):
+            return
+        band = self.cfg.get("map_cloud_height_band", {})
+        min_z = float(band.get("min_z", -1e9))
+        max_z = float(band.get("max_z", 1e9))
+        xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
+        if not len(xy):
+            self._scan_points = np.zeros((0, 2), dtype=np.float32)
+            self._scan_dirty = True
+            return
+        keys = np.round(xy / MAP_CLOUD_VOXEL).astype(np.int32)
+        _, keep = np.unique(keys, axis=0, return_index=True)
+        self._scan_points = xy[keep]
+        self._scan_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
         self.planned_path = [
@@ -424,6 +503,36 @@ class HardwareBridge:
             },
         }
 
+    def upload_scan(self) -> None:
+        """Push the latest deduplicated scan; the backend raytraces it.
+
+        No `map_meta` to send afterwards, unlike `upload_map` — the merged
+        grid's diff reaches the GUI through the existing 2 Hz patch broadcast
+        regardless of which upload path fed it (`app.py`'s `map_loop`), so
+        there is nothing extra to announce here.
+        """
+        if not self._scan_dirty or self._scan_points is None:
+            return
+        self._scan_dirty = False
+        if not len(self._scan_points):
+            return
+        origin = self.map_pose()
+        quantised = np.round(self._scan_points / MAP_CLOUD_SCALE).astype(np.int16)
+        url = (
+            f"{self.http_url}/api/adapter/scan?robot_id={self.id}"
+            f"&origin_x={origin['x']}&origin_y={origin['y']}&scale={MAP_CLOUD_SCALE}"
+        )
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url, data=zlib.compress(quantised.tobytes()),
+                    headers={"Content-Type": "application/octet-stream"},
+                ),
+                timeout=5,
+            ).read()
+        except Exception as exc:
+            rospy.logwarn(f"[{self.id}] scan upload failed: {exc}")
+
     def upload_camera(self) -> None:
         if not self._camera_dirty or self._camera_jpeg is None:
             return
@@ -507,6 +616,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             meta = await loop.run_in_executor(None, bridge.upload_map)
                             if meta:
                                 await ws.send(json.dumps(meta))
+                            await loop.run_in_executor(None, bridge.upload_scan)
                         if now - last_cam > float(rates["camera_period_s"]):
                             last_cam = now
                             await loop.run_in_executor(None, bridge.upload_camera)

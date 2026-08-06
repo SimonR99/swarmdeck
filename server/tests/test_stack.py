@@ -531,6 +531,39 @@ def test_malformed_cloud_is_refused_not_crashed():
         assert c.post("/api/adapter/cloud?robot_id=r0", content=odd).status_code == 400
 
 
+def test_scan_endpoint_builds_a_local_map_for_a_robot_with_no_native_grid():
+    """The whole point of /api/adapter/scan: a robot that never uploads
+    /api/adapter/map still ends up with a local grid the GUI can show."""
+    points = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    body = zlib.compress(np.round(points / 0.01).astype(np.int16).tobytes())
+    with TestClient(app) as c:
+        assert c.post("/api/adapter/scan?robot_id=r0", content=body).status_code == 400
+        posted = c.post(
+            "/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0", content=body
+        )
+        assert posted.status_code == 200
+        assert posted.json()["points"] == 2
+
+        info = c.get("/api/map/local/r0/info")
+        assert info.status_code == 200
+        png = c.get("/api/map/local/r0")
+        assert png.status_code == 200
+        assert png.headers["content-type"] == "image/png"
+
+
+def test_malformed_scan_is_refused_not_crashed():
+    with TestClient(app) as c:
+        assert (
+            c.post("/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0",
+                   content=b"not zlib").status_code == 400
+        )
+        odd = zlib.compress(np.zeros(3, dtype=np.int16).tobytes())  # not a pair
+        assert (
+            c.post("/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0",
+                   content=odd).status_code == 400
+        )
+
+
 # ------------------------------------------------- cslam drives the merge
 
 

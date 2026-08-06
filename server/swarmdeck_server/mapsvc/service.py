@@ -13,12 +13,13 @@ import base64
 import io
 import math
 import zlib
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+from .grid_meta import GridMeta
 from .registration import Registration, register
+from .scan_grid import ScanGridAccumulator
 
 UNKNOWN = -1
 
@@ -31,24 +32,6 @@ LOCKED_WINDOW_DEG = 8.0
 # Shared known area, as a fraction of the smaller map, below which the
 # independent cslam cross-check has nothing to compare and stays silent.
 CHECK_MIN_SUPPORT = 0.35
-
-
-@dataclass
-class GridMeta:
-    resolution: float
-    width: int
-    height: int
-    origin_x: float
-    origin_y: float
-
-    def as_dict(self, seq: int = 0) -> dict[str, Any]:
-        return {
-            "resolution": self.resolution,
-            "width": self.width,
-            "height": self.height,
-            "origin": {"x": self.origin_x, "y": self.origin_y},
-            "seq": seq,
-        }
 
 
 class MapService:
@@ -76,6 +59,11 @@ class MapService:
         # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
+        # Per-robot raytraced grid, for robots whose SLAM stack has no
+        # OccupancyGrid of its own — see scan_grid.py. Separate from
+        # `robot_grids`, which `ingest_scan` feeds into via the same `ingest()`
+        # a robot with a native grid uses.
+        self._scan_grids: dict[str, ScanGridAccumulator] = {}
         # A ready-made merged grid supplied by a collaborative back end, already
         # in its common frame. When present in `cslam` mode there is nothing to
         # merge: the back end has done it, from its own keyframes at its own
@@ -316,6 +304,32 @@ class MapService:
         """
         async with self._ingest_lock:
             await asyncio.to_thread(self.ingest, robot_id, meta, cells)
+
+    def ingest_scan(
+        self, robot_id: str, origin_x: float, origin_y: float, points_xy: np.ndarray
+    ) -> None:
+        """Accumulate one lidar scan into a raytraced grid, then ingest it.
+
+        For a robot with no `OccupancyGrid` publisher of its own: the adapter
+        forwards already-registered scan points plus the sensor position
+        instead of a finished grid, `ScanGridAccumulator` builds one up scan by
+        scan, and it is fed into exactly the same `ingest()` a robot that DOES
+        publish its own grid uses — so registration, merging and everything
+        downstream neither knows nor cares which kind of robot this is.
+        """
+        acc = self._scan_grids.get(robot_id)
+        if acc is None:
+            acc = ScanGridAccumulator(origin_x, origin_y, resolution=self.meta.resolution)
+            self._scan_grids[robot_id] = acc
+        acc.integrate(origin_x, origin_y, points_xy)
+        self.ingest(robot_id, acc.meta, acc.cells)
+
+    async def ingest_scan_async(
+        self, robot_id: str, origin_x: float, origin_y: float, points_xy: np.ndarray
+    ) -> None:
+        """`ingest_scan`, off the event loop — see `ingest_async`."""
+        async with self._ingest_lock:
+            await asyncio.to_thread(self.ingest_scan, robot_id, origin_x, origin_y, points_xy)
 
     # ------------------------------------------------------------ registration
 

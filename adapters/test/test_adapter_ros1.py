@@ -178,3 +178,68 @@ def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):
         assert cfg["rates"]["state_hz"] > 0
         # The preview cap in the protocol is 5 Hz; never configure faster.
         assert cfg["rates"]["camera_period_s"] >= 0.2, f"{name} exceeds the 5 Hz cap"
+
+
+def test_map_cloud_alone_still_advertises_the_map_capability(mod):
+    """A robot with no OccupancyGrid publisher, only a registered cloud, must
+    still show up as map-capable — the backend builds the grid server-side."""
+    bridge = _bridge(mod, {"topics": {"map": "", "map_cloud": "cloud_registered"}})
+    assert "map" in bridge.capabilities()
+
+    neither = _bridge(mod, {"topics": {"map": "", "map_cloud": ""}})
+    assert "map" not in neither.capabilities()
+
+
+class _FakeField:
+    def __init__(self, name: str, offset: int) -> None:
+        self.name = name
+        self.offset = offset
+
+
+def _fake_cloud(points, extra_fields=()):
+    """A minimal PointCloud2-shaped object: enough for `_cloud_xyz` to parse.
+
+    `extra_fields` lets a field (like intensity) sit BEFORE x/y/z in the byte
+    layout, so the test can catch code that assumes x/y/z are the first three
+    floats instead of reading `field.offset` like the real message requires.
+    """
+    import struct
+
+    prefix_names = list(extra_fields)
+    field_names = prefix_names + ["x", "y", "z"]
+    fields = [_FakeField(name, i * 4) for i, name in enumerate(field_names)]
+    point_step = len(field_names) * 4
+    data = b"".join(
+        struct.pack("<%df" % len(field_names), *([0.0] * len(prefix_names)), *p)
+        for p in points
+    )
+    return type("M", (), {
+        "fields": fields, "point_step": point_step, "data": data,
+    })()
+
+
+def test_cloud_xyz_reads_field_offsets_not_position(mod):
+    """x/y/z are not necessarily the first fields — LVI-SAM's cloud carries
+    intensity too, and reading fixed offsets would silently misread it."""
+    msg = _fake_cloud([(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)], extra_fields=["intensity"])
+    points = mod.HardwareBridge._cloud_xyz(msg)
+    assert points.shape == (2, 3)
+    assert points[0].tolist() == pytest.approx([1.0, 2.0, 3.0])
+    assert points[1].tolist() == pytest.approx([4.0, 5.0, 6.0])
+
+
+def test_on_map_cloud_drops_points_outside_the_height_band(mod):
+    bridge = _bridge(mod, {"map_cloud_height_band": {"min_z": 0.0, "max_z": 1.0}})
+    msg = _fake_cloud([(1.0, 0.0, -0.5), (2.0, 0.0, 0.5), (3.0, 0.0, 5.0)])
+    bridge._on_map_cloud(msg)
+    assert bridge._scan_points.shape[0] == 1
+    assert bridge._scan_points[0].tolist() == pytest.approx([2.0, 0.0])
+    assert bridge._scan_dirty is True
+
+
+def test_on_map_cloud_dedups_onto_the_grid_lattice(mod):
+    bridge = _bridge(mod, {"map_cloud_height_band": {"min_z": -1.0, "max_z": 1.0}})
+    # Two points a millimetre apart land in the same 5 cm cell.
+    msg = _fake_cloud([(1.000, 0.000, 0.0), (1.001, 0.001, 0.0), (5.0, 5.0, 0.0)])
+    bridge._on_map_cloud(msg)
+    assert bridge._scan_points.shape[0] == 2

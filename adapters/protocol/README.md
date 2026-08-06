@@ -102,6 +102,28 @@ Body: zlib-compressed int8[] row-major, -1 unknown, 0 free, 100 occupied
 
 Send `map_meta` on the WebSocket immediately after, so the backend can interpret it.
 
+## Map-from-scan upload
+
+For a robot whose SLAM stack registers a point cloud but never projects one to a 2D
+`OccupancyGrid` (a LOAM-family pipeline like LVI-SAM is the common case) — send scans
+instead of a finished grid, and the backend raytraces them into one itself
+(`mapsvc/scan_grid.py`), then feeds it through the exact same merge/registration path a
+native grid uses:
+
+```
+POST /api/adapter/scan?robot_id=robot_0&origin_x=1.2&origin_y=-3.4
+Content-Type: application/octet-stream
+Body: zlib-compressed int16[] xy pairs, 1 cm units (points * 100, rounded)
+```
+
+`origin_x`/`origin_y` are the sensor's position, in the same frame as the points, at
+capture time — used to raytrace free space from the sensor back to each return. Points
+should already be deduplicated onto (roughly) the grid's resolution before upload; a raw
+registered scan is far denser than a raytraced grid needs. Mutually exclusive in
+practice with `POST /api/adapter/map` per robot, not mutually exclusive in the protocol —
+an adapter advertising `map` because it configures this path rather than a native grid
+topic is exactly protocol rule 4 working as intended.
+
 ## Camera preview fallback
 
 MediaMTX/WHEP remains the production low-latency path. During development, or when that
