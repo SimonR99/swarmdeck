@@ -59,7 +59,6 @@ from tf2_ros import Buffer, TransformListener
 # containers run this file directly, so the repository root is not otherwise on
 # sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from adapters.perception.duck_detector import RubberDuckDetector
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -70,6 +69,10 @@ MAP_CLOUD_SCALE = 0.01
 # finer than that would just be bandwidth spent on points that land in the
 # same cell anyway.
 MAP_CLOUD_VOXEL = 0.05
+# Voxel edge for the optional 3D viewer, metres. This is deliberately coarser
+# than the 2D raytracing lattice: points render as tiny sprites, so sending
+# several returns inside one 10 cm cube only spends robot/network/backend time.
+MAP_CLOUD_3D_VOXEL = 0.10
 
 # move_base is the common case but not the only one; see `navigate_to` below.
 try:
@@ -114,6 +117,16 @@ DEFAULTS: dict[str, Any] = {
         # stack without one just can't be preempted as cleanly by teleop or
         # cancel_goal, which then fall back to zeroing cmd_vel once.
         "nav_stop": "",
+        # Where a topic-based nav stack's OWN cmd_vel output lands when it has
+        # been remapped away from the real `/cmd_vel` (see
+        # launch/local_planner_muxed.launch). If set, this adapter relays it
+        # to the real `cmd_vel` topic ONLY while nav_status is "active" — the
+        # adapter becomes the sole arbiter of the real topic, so a nav stack
+        # that publishes continuously even when idle (confirmed true of
+        # local_planner's pathFollower) never gets to race teleop for it.
+        # Leave empty for a nav stack that already respects nav_stop/cancel
+        # cleanly on its own.
+        "nav_cmd_vel": "",
     },
     # Height band for `map_cloud` points, metres, in the map_frame (NOT
     # relative to the robot — this stack has no live z estimate to be relative
@@ -133,6 +146,7 @@ DEFAULTS: dict[str, Any] = {
     "rates": {
         "state_hz": 5.0,
         "map_period_s": 2.0,
+        "cloud_period_s": 4.0,
         "camera_period_s": 0.2,   # 5 Hz, per the protocol's preview cap
     },
     "perception": {
@@ -184,6 +198,9 @@ class HardwareBridge:
         self._grid_dirty = False
         self._scan_points: np.ndarray | None = None
         self._scan_dirty = False
+        self._cloud_points: np.ndarray | None = None
+        self._cloud_dirty = False
+        self._last_cloud_prepare_at = 0.0
         self.planned_path: list[dict[str, float]] = []
         self.battery: float | None = None
         self.nav_status = "idle"
@@ -194,8 +211,16 @@ class HardwareBridge:
         self._camera_jpeg: bytes | None = None
         self._camera_dirty = False
         perception = cfg.get("perception", {})
-        self._detector = RubberDuckDetector(perception.get("sensitivity", 0.55))
+        self._detector = None
         self._detection_enabled = bool(perception.get("enabled", True))
+        if self._detection_enabled and (topics.get("camera") or topics.get("camera_compressed")):
+            try:
+                from adapters.perception.duck_detector import RubberDuckDetector
+
+                self._detector = RubberDuckDetector(perception.get("sensitivity", 0.55))
+            except ImportError as exc:
+                self._detection_enabled = False
+                rospy.logwarn(f"[{self.id}] camera detection disabled: {exc}")
         self._detection_period_s = max(0.05, float(perception.get("period_s", 0.2)))
         self._last_detection_at = 0.0
         self._detections: list[dict] | None = None
@@ -228,6 +253,10 @@ class HardwareBridge:
             )
         elif topics.get("camera"):
             rospy.Subscriber(topics["camera"], Image, self._on_camera_raw, queue_size=1)
+        if topics.get("nav_cmd_vel"):
+            rospy.Subscriber(
+                topics["nav_cmd_vel"], Twist, self._on_nav_cmd_vel, queue_size=10
+            )
 
         self.pub_cmd = (
             rospy.Publisher(topics["cmd_vel"], Twist, queue_size=10)
@@ -306,17 +335,37 @@ class HardwareBridge:
         return points[np.isfinite(points).all(axis=1)]
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
-        """Height-band filter, then dedup onto the grid lattice.
+        """Prepare one registered XYZ cloud for both map consumers.
 
-        Both happen here rather than server-side for the same reason
-        `adapter_sim.upload_cloud` downsamples before sending: this is the
-        expensive end of a link that should stay cheap, and a raw registered
-        scan can be tens of thousands of points for what the raytracer only
-        needs a few hundred of.
+        The 3D viewer keeps XYZ and downsamples in 10 cm voxels. The 2D map
+        independently height-filters the same input, drops Z, and deduplicates
+        at the occupancy-grid resolution before raytracing. Keeping these as
+        two products matters: a display cloud must not inherit the obstacle
+        height band and lose the floor, ceiling, or upper wall structure.
+
+        Both reductions happen here rather than server-side because this is the
+        expensive end of the link. A registered lidar scan can contain tens of
+        thousands of points that are visually indistinguishable after upload.
         """
         points = self._cloud_xyz(msg)
         if not len(points):
             return
+
+        now = time.monotonic()
+        cloud_period = max(
+            0.1, float(self.cfg.get("rates", {}).get("cloud_period_s", 4.0))
+        )
+        # The source runs at lidar rate (~5 Hz on TARS), but the viewer polls
+        # slowly. A full 3D np.unique() on every scan spent roughly a third of a
+        # CPU core preparing clouds that could never be uploaded. Reduce only
+        # when the next display sample is due; the 2D scan below remains live.
+        if now - self._last_cloud_prepare_at >= cloud_period:
+            self._last_cloud_prepare_at = now
+            cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
+            _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
+            self._cloud_points = points[cloud_keep]
+            self._cloud_dirty = True
+
         band = self.cfg.get("map_cloud_height_band", {})
         min_z = float(band.get("min_z", -1e9))
         max_z = float(band.get("max_z", 1e9))
@@ -386,7 +435,7 @@ class HardwareBridge:
             return
 
     def _detection_due(self) -> bool:
-        if not self._detection_enabled:
+        if not self._detection_enabled or self._detector is None:
             return False
         now = time.monotonic()
         if now - self._last_detection_at < self._detection_period_s:
@@ -417,10 +466,11 @@ class HardwareBridge:
             if self._detection_enabled and not enabled:
                 self._detections = []
             self._detection_enabled = enabled
-            self._detector.sensitivity = max(
-                0.1,
-                min(1.0, float(settings.get("detection_sensitivity", 0.55))),
-            )
+            if self._detector is not None:
+                self._detector.sensitivity = max(
+                    0.1,
+                    min(1.0, float(settings.get("detection_sensitivity", 0.55))),
+                )
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] settings refresh failed: {exc}")
 
@@ -475,19 +525,35 @@ class HardwareBridge:
 
     # ------------------------------------------------------------- commands
 
+    def _on_nav_cmd_vel(self, msg: Twist) -> None:
+        """Relay a topic-based nav stack's own cmd_vel — ONLY while navigating.
+
+        `pathFollower` runs its control loop continuously and publishes to
+        cmd_vel at ~27 Hz regardless of whether a goal is active — confirmed
+        live, it was still streaming zero-velocity Twists with nothing to do.
+        `topics.nav_stop` makes ITS commanded value zero but does not stop it
+        from publishing, so a single teleop publish racing that continuous
+        stream gets overwritten within tens of milliseconds either way.
+        `topics.nav_cmd_vel` (see launch/local_planner_muxed.launch) remaps
+        its output away from the real cmd_vel so this adapter is the ONLY
+        thing that ever publishes there — teleop direct, nav relayed through
+        here, never both racing the same topic.
+        """
+        if self.nav_status == "active" and self.pub_cmd is not None:
+            self.pub_cmd.publish(msg)
+
     def drive(self, linear: float, angular: float) -> None:
         if self.pub_cmd is None:
             return
         moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
-        # A topic-based nav stack (local_planner) publishes to the SAME
-        # cmd_vel we do, continuously, while a goal is active — operator
-        # teleop must win that fight, not race it. Halt it via nav_stop
-        # (pathFollower's own safety-stop input) rather than relying on our
-        # single Twist publish to out-race whatever it sends next.
-        if moving and self.nav_status == "active" and self.pub_nav_stop is not None:
+        # Belt-and-suspenders even with nav_cmd_vel relaying: also tell a nav
+        # stack that respects nav_stop to actually stop trying, and cancel our
+        # own bookkeeping so state() stops reporting a goal teleop just pre-empted.
+        if moving and self.pub_nav_stop is not None:
             self.pub_nav_stop.publish(Int8(data=1))
-            self.nav_status = "cancelled"
-            self.goal = None
+            if self.nav_status == "active":
+                self.nav_status = "cancelled"
+                self.goal = None
         twist = Twist()
         twist.linear.x = float(linear)
         twist.angular.z = float(angular)
@@ -682,6 +748,35 @@ class HardwareBridge:
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] scan upload failed: {exc}")
 
+    def upload_cloud(self) -> None:
+        """Push the latest registered XYZ scan to the optional 3D viewer.
+
+        Unlike ``upload_scan``, this intentionally keeps Z and does no height
+        filtering. The backend already knows how to place each robot's local
+        cloud into the merged frame; this is the same transport used by the
+        simulation adapter and is not tied to a particular SLAM package.
+        """
+        if not self._cloud_dirty or self._cloud_points is None:
+            return
+        self._cloud_dirty = False
+        if not len(self._cloud_points):
+            return
+        quantised = np.round(self._cloud_points / MAP_CLOUD_SCALE).astype(np.int16)
+        url = (
+            f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
+            f"&scale={MAP_CLOUD_SCALE}"
+        )
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url, data=zlib.compress(quantised.tobytes(), 1),
+                    headers={"Content-Type": "application/octet-stream"},
+                ),
+                timeout=5,
+            ).read()
+        except Exception as exc:
+            rospy.logwarn(f"[{self.id}] 3D cloud upload failed: {exc}")
+
     def upload_camera(self) -> None:
         if not self._camera_dirty or self._camera_jpeg is None:
             return
@@ -755,6 +850,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     period = 1.0 / float(rates["state_hz"])
                     loop = asyncio.get_running_loop()
                     last_map = 0.0
+                    last_cloud = 0.0
                     last_cam = 0.0
                     last_settings = 0.0
                     while True:
@@ -768,6 +864,9 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             if meta:
                                 await ws.send(json.dumps(meta))
                             await loop.run_in_executor(None, bridge.upload_scan)
+                        if now - last_cloud > float(rates["cloud_period_s"]):
+                            last_cloud = now
+                            await loop.run_in_executor(None, bridge.upload_cloud)
                         if now - last_cam > float(rates["camera_period_s"]):
                             last_cam = now
                             await loop.run_in_executor(None, bridge.upload_camera)

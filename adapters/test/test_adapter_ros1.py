@@ -77,6 +77,7 @@ def _bridge(mod, cfg_override=None):
     bridge.goal = None
     bridge._goal_generation = 0
     bridge._last_drive_at = 0.0
+    bridge._last_cloud_prepare_at = 0.0
     return bridge
 
 
@@ -273,6 +274,22 @@ def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
     assert bridge.nav_status == "idle"
 
 
+def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
+    """The whole reason this relay exists: pathFollower publishes cmd_vel
+    continuously even when idle, so its output must never reach the real
+    topic except while this adapter has actually asked it to drive."""
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    twist = MagicMock()
+
+    bridge.nav_status = "idle"
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_not_called()
+
+    bridge.nav_status = "active"
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_called_once_with(twist)
+
+
 def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):
     import yaml
 
@@ -348,3 +365,70 @@ def test_on_map_cloud_dedups_onto_the_grid_lattice(mod):
     msg = _fake_cloud([(1.000, 0.000, 0.0), (1.001, 0.001, 0.0), (5.0, 5.0, 0.0)])
     bridge._on_map_cloud(msg)
     assert bridge._scan_points.shape[0] == 2
+
+
+def test_on_map_cloud_keeps_xyz_for_the_3d_view(mod):
+    """The 2D obstacle band must not flatten or filter the display cloud."""
+    bridge = _bridge(mod, {"map_cloud_height_band": {"min_z": 0.0, "max_z": 1.0}})
+    # First two returns share a 10 cm display voxel; the ceiling return is
+    # outside the 2D band but must remain visible in 3D.
+    msg = _fake_cloud([
+        (1.000, 2.000, 0.02),
+        (1.001, 2.001, 0.021),
+        (3.000, 4.000, 2.50),
+    ])
+    bridge._on_map_cloud(msg)
+
+    assert bridge._cloud_points.shape == (2, 3)
+    assert bridge._cloud_points[:, 2].tolist() == pytest.approx([0.02, 2.5])
+    assert bridge._cloud_dirty is True
+    assert bridge._scan_points.shape == (1, 2)
+
+
+def test_3d_downsampling_is_limited_to_the_upload_rate(mod, monkeypatch):
+    bridge = _bridge(mod, {"rates": {"cloud_period_s": 4.0}})
+    now = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: now[0])
+
+    bridge._on_map_cloud(_fake_cloud([(1.0, 2.0, 3.0)]))
+    assert bridge._cloud_points[0].tolist() == pytest.approx([1.0, 2.0, 3.0])
+
+    # The 2D scan still updates at lidar rate, but this second cloud is too soon
+    # to spend another full XYZ voxelisation for a 0.25 Hz display upload.
+    now[0] = 101.0
+    bridge._on_map_cloud(_fake_cloud([(4.0, 5.0, 6.0)]))
+    assert bridge._cloud_points[0].tolist() == pytest.approx([1.0, 2.0, 3.0])
+
+    now[0] = 104.0
+    bridge._on_map_cloud(_fake_cloud([(4.0, 5.0, 6.0)]))
+    assert bridge._cloud_points[0].tolist() == pytest.approx([4.0, 5.0, 6.0])
+
+
+def test_upload_cloud_uses_the_shared_xyz_transport(mod, monkeypatch):
+    bridge = _bridge(mod)
+    bridge.http_url = "http://backend"
+    bridge._cloud_points = mod.np.array(
+        [[1.25, -2.5, 0.75], [3.0, 4.0, 5.0]], dtype=mod.np.float32
+    )
+    bridge._cloud_dirty = True
+    captured = {}
+
+    class Response:
+        def read(self):
+            return b"{}"
+
+    def urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", urlopen)
+    bridge.upload_cloud()
+
+    request = captured["request"]
+    assert request.full_url == (
+        "http://backend/api/adapter/cloud?robot_id=r0&scale=0.01"
+    )
+    decoded = mod.np.frombuffer(mod.zlib.decompress(request.data), dtype=mod.np.int16)
+    assert decoded.reshape(-1, 3).tolist() == [[125, -250, 75], [300, 400, 500]]
+    assert bridge._cloud_dirty is False

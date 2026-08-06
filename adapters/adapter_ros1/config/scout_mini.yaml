@@ -40,11 +40,12 @@ topics:
   # No OccupancyGrid publisher exists in rover_agx.launch, and none is being added —
   # see map_cloud below instead.
   map: ""
-  # LVI-SAM's per-scan registered cloud, already transformed into odom_lidar (same
-  # frame as map_frame above) — confirmed live, ~5 Hz, 2026-08-06. The backend
-  # raytraces this into a grid itself (mapsvc/scan_grid.py); nothing new runs on
-  # the robot for it. cloud_registered_raw (undownsampled) also exists if this one
-  # turns out too sparse once we look at the actual map.
+  # LVI-SAM's per-scan registered XYZ cloud, already transformed into odom_lidar
+  # (same frame as map_frame above) — confirmed live, ~5 Hz, 2026-08-06. The
+  # adapter derives both products from it: a height-filtered XY scan that the
+  # backend raytraces into the 2D map, and a coarser XYZ cloud for the GUI's 3D
+  # viewer. Nothing new runs on the robot for either path. cloud_registered_raw
+  # (undownsampled) also exists if this one proves too sparse.
   map_cloud: /lvi_sam/lidar/mapping/cloud_registered
   plan: ""
   # scout_messenger.cpp subscribes "/cmd_vel" with a leading slash, so it is the global
@@ -67,10 +68,19 @@ topics:
   # global goalX/goalY, same frame as state_estimation (/odometry/filtered, i.e.
   # map_frame above) — no relative-frame conversion needed on our end.
   nav_goal: /move_base_simple/goal
-  # pathFollower's safety-stop input (std_msgs/Int8, 1=halt, 0=resume). Lets
-  # cancel_goal and teleop actually override an in-progress autonomous drive
-  # instead of just racing it on the same /cmd_vel topic.
+  # pathFollower's safety-stop input (std_msgs/Int8, 1=halt, 0=resume). Belt
+  # and suspenders alongside nav_cmd_vel below — makes pathFollower's own
+  # commanded value zero, though it does NOT stop it from publishing (see
+  # nav_cmd_vel for why that distinction matters).
   nav_stop: /stop
+  # pathFollower publishes cmd_vel CONTINUOUSLY, even with no goal active —
+  # confirmed live: ~27 Hz of zero-velocity Twists racing teleop's single
+  # publish and winning. launch/local_planner_muxed.launch remaps
+  # pathFollower's output here instead of the real /cmd_vel; this adapter is
+  # then the only thing that ever publishes the real one, relaying this topic
+  # through only while nav_status is "active" (see _on_nav_cmd_vel). Without
+  # this, teleop does not reliably work whenever local_planner is running.
+  nav_cmd_vel: /cmd_vel_nav
 
 # No gbplanner (global exploration planner) is running — only local_planner's
 # reactive local avoidance, whose adjacentRange is 5 m. A goal beyond what the

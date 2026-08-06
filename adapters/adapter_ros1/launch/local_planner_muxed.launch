@@ -1,0 +1,55 @@
+<!--
+  local_planner_agx.launch, expanded inline (not `<include>`d) so this file
+  can do two things that launch can't otherwise reach:
+
+  1. Remap pathFollower's cmd_vel output away from the real topic.
+     pathFollower runs its control loop continuously and publishes to
+     `/cmd_vel` at ~27 Hz REGARDLESS of whether a goal is active — confirmed
+     live, it was still streaming zero-velocity Twists with no goal in
+     progress at all. A single teleop publish from adapter_ros1 competing
+     against that gets overwritten within tens of milliseconds; asserting
+     `/stop` (the nav_stop topic) makes pathFollower's own commanded value
+     zero but does NOT stop it from publishing, so it doesn't fix the race
+     either. mist_ws's own launch file anticipated exactly this (a
+     commented-out `<remap from="/cmd_vel" to="/cmd_vel_mux_local_planner"/>`,
+     never finished) — adapter_ros1 subscribes `/cmd_vel_nav` here and relays
+     it to the real `/cmd_vel` ONLY while nav_status is "active" (see
+     HardwareBridge._on_nav_cmd_vel), so pathFollower's continuous idle
+     publishing never reaches the real topic, and teleop never races it.
+
+  2. Set autonomyMode:=true. Confirmed live: with the default `false`,
+     pathFollower's linear speed is gated entirely by `joySpeed`, which is
+     ONLY ever set from a joystick's throttle axis or a /speed publisher —
+     neither exists here — so it stays permanently zero. `/path` was
+     computing fine (10 Hz, real candidate trajectories) and `/cmd_vel_nav`
+     stayed all-zero regardless: not a wiring bug, a launch parameter. With
+     autonomyMode true, pathFollower drives joySpeed from goal distance
+     directly (pathFollower.cpp, the `if (autonomyMode) { goaldis = ... }`
+     block) and the result is still rescaled against `maxSpeed` (0.4 m/s)
+     before publishing — the speed cap holds either way.
+     `local_planner_agx.launch` doesn't expose this arg through its
+     `<include>`, hence expanding it here rather than passing an override in.
+-->
+<launch>
+    <arg name="robot_id" default="$(env ROBOT_ID)"/>
+    <arg name="frame" default="LOCAL"/>
+
+    <remap from="/cmd_vel" to="/cmd_vel_nav"/>
+
+    <include file="$(find local_planner)/launch/local_planner_agx_scout.launch">
+        <arg name="frame" value="$(arg frame)"/>
+        <!-- See the file header: autonomyMode true switches the GOAL SOURCE to
+             RelativeSetPointX/Y (via /setpoint_position/local), NOT goalX/goalY
+             (via /move_base_simple/goal) - confirmed live, it silently ignores
+             our goal and reports goalReached immediately. Left false: the path
+             IS computed correctly toward our goal this way, it just needs a
+             speed source that isn't a joystick - see fleet-status.md. -->
+        <arg name="autonomyMode" value="false"/>
+    </include>
+
+    <include file="$(find loam_interface)/launch/loam_interface.launch">
+        <arg name="stateEstimationTopic" value="/odometry/filtered"/>
+        <arg name="registeredScanTopic" value="/os_cloud_node/points"/>
+        <arg name="frame" value="$(arg frame)"/>
+    </include>
+</launch>

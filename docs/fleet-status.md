@@ -130,36 +130,77 @@ brings up sensors + LVI-SAM + the EKF + `scout_base_node` — `rover_agx.launch`
 publishes `cmd_vel` on its own (confirmed by node list: no gbplanner, no local_planner, no
 RosBuzz node running). `/odometry/filtered` confirmed publishing `frame_id: odom_lidar`,
 `child_frame_id: base_link_filtered`, matching `scout_mini.yaml` exactly.
-`adapter_ros1.py --robot-id tars_0 --config config/scout_mini.yaml --host 192.168.1.223`
-is running and connected — `tars_0` appears in `GET /api/fleet` with a live pose and
-`capabilities: [navigate, battery, estop]` (`battery` reads `null`: no publisher, since
+The adapter now runs in the `swarmdeck-adapter` Docker container with host networking and
+is connected — `tars_0` appears in `GET /api/fleet` with a live pose and
+`capabilities: [navigate, map, camera, battery, estop]` (`battery` reads `null`: no publisher, since
 `rover_scout_adapter.py` — the node that republishes it — was deliberately left out of
-the trimmed launch too). Both processes are detached (`nohup ... & disown`) and outlive
-the SSH session:
+the trimmed launch too). ROS sensor/SLAM launches remain detached host processes; the
+adapter and media publisher use Docker's `unless-stopped` restart policy:
 
 ```
 rover  10049  roslaunch .../scout_mini_slam.launch
 rover  11627  roslaunch rover_launch rs_d400.launch
-rover  12700  python3 adapter_ros1.py --robot-id tars_0 ...
+docker        swarmdeck-adapter
+docker        swarmdeck-media
 ```
 
-To stop: `ssh scout` then `kill <pid>...` (PIDs will differ on restart — `pgrep -af
-"roslaunch scout_mini_slam|rs_d400|local_planner_agx|adapter_ros1"` finds them).
+To stop only SwarmDeck's robot-side integration, use `docker stop swarmdeck-adapter
+swarmdeck-media`; do not stop the sensor/SLAM launches with it.
 
-**Navigation is now live too** (2026-08-06, same day): `local_planner_agx.launch`
-(`localPlanner` + `pathFollower` + `loamInterface`) launched separately, alongside the
-SLAM stack — reactive local obstacle avoidance (`checkObstacle: true`, `maxSpeed: 0.4
-m/s`), **not** a global planner (no `gbplanner`, `adjacentRange: 5 m` only). It takes
-goals on `/move_base_simple/goal` (`geometry_msgs/PoseStamped`, the standard RViz "2D Nav
-Goal" topic — confirmed from source, not actionlib), so `adapter_ros1.py` gained a
-topic-based `navigate_to` path (`topics.nav_goal`/`topics.nav_stop`) that takes priority
-over the actionlib one when both are configured. Confirmed before wiring it up: `/cmd_vel`
-stayed all-zero with `localPlanner`/`pathFollower` running and no goal sent — launching
-does not, by itself, move the robot. `topics.nav_stop` (`/stop`, `std_msgs/Int8`) is
-wired into both `cancel_goal` and `drive()`, so operator teleop force-stops
-`pathFollower` rather than racing it on the shared `cmd_vel` topic. **No goal has been
-sent yet** — that's the next, operator-supervised step, not something done unattended
-over SSH.
+**Navigation wiring exists** (2026-08-06): `local_planner_agx.launch` (`localPlanner` +
+`pathFollower` + `loamInterface`) — reactive local obstacle avoidance (`checkObstacle:
+true`, `maxSpeed: 0.4 m/s`), **not** a global planner (no `gbplanner`, `adjacentRange: 5
+m` only). It takes goals on `/move_base_simple/goal` (`geometry_msgs/PoseStamped`, the
+standard RViz "2D Nav Goal" topic — confirmed from source, not actionlib), so
+`adapter_ros1.py` has a topic-based `navigate_to` path (`topics.nav_goal`/
+`topics.nav_stop`) taking priority over the actionlib one when both are configured.
+
+**Two real bugs found and fixed by actually testing teleop and navigate_to live** (later
+same day, after `docs/fleet-status.md` had already called this "live" — it wasn't):
+
+1. **Teleop didn't work whenever `local_planner` was running.** `pathFollower` runs its
+   control loop continuously and publishes to `cmd_vel` at ~27 Hz **regardless of whether
+   a goal is active** — confirmed live, it was streaming zero-velocity Twists with nothing
+   to do. `topics.nav_stop` makes its *commanded value* zero but doesn't stop it
+   *publishing*, so a single teleop Twist racing that stream got overwritten within tens
+   of milliseconds. Fix: `adapters/adapter_ros1/launch/local_planner_muxed.launch` remaps
+   `pathFollower`'s output to `/cmd_vel_nav` (mist_ws's own launch file anticipated this
+   with a commented-out, never-finished `cmd_vel_mux` remap); `adapter_ros1.py` now
+   relays `/cmd_vel_nav` to the real `/cmd_vel` **only** while `nav_status == "active"`
+   (`topics.nav_cmd_vel`, `HardwareBridge._on_nav_cmd_vel`) — it is the sole publisher of
+   the real topic, so nothing ever races teleop again. Verified: 6 consecutive teleop
+   commands arrived on `/cmd_vel` with zero interleaved noise, where before the same test
+   showed 6 messages lost inside 541 (mostly `pathFollower`'s zero-spam).
+2. **`navigate_to` accepts a goal, computes a real path, and never actually drives.**
+   `/path` confirmed publishing at ~10 Hz with genuine multi-point local trajectories the
+   whole time — this is not a wiring problem. `pathFollower`'s linear speed is gated by
+   `joySpeed`, which with `autonomyMode: false` (the default) is **only** ever set from a
+   joystick's throttle axis or a `/speed` publisher, neither of which exists here, so it
+   stays permanently zero forever. Tried `autonomyMode: true` next: that removes the
+   joystick gate, but also switches the goal source from `goalX/goalY` (`/move_base_simple/goal`,
+   what we send) to `RelativeSetPointX/Y` (`/setpoint_position/local`, which nothing
+   publishes) — confirmed live, the robot immediately reports `goalReached` for a goal it
+   never looked at. **Neither mode alone works with an absolute-goal adapter and no
+   joystick.** Reverted to `autonomyMode: false` (correct goal source, zero speed) rather
+   than leave it in the mode that silently ignores the goal — see "Open, needs a decision"
+   below.
+
+Both fixes verified against the real robot, supervised, with fresh camera checks before
+each drive test (once with a person visible nearby — held off until confirmed clear).
+Every test used a small (0.5-1.5 m) goal computed from the robot's *live* pose at send
+time, not a fixed point, given the pose drift below.
+
+**Open, needs a decision, not more unsupervised trial-and-error on the robot:** getting
+`navigate_to` to actually drive needs either (a) publishing a constant/simple value to
+`/speed` (`std_msgs/Float32`) while `nav_status == "active"`, keeping `autonomyMode:
+false` — untried, `speedHandler` in `pathFollower.cpp` suggests this should work but
+**only fires `if (autonomyMode && ...)`**, i.e. it may need `autonomyMode: true` too,
+which reopens problem 2 above; or (b) switching `adapter_ros1.py`'s topic-based nav path
+to publish `/setpoint_position/local` (relative to the vehicle) instead of
+`/move_base_simple/goal` (absolute) when `autonomyMode: true` is in use — a real,
+different implementation, not a config change. Read
+`local_planner_agx_scout.launch`/`pathFollower.cpp` in `mist_ws` before attempting
+either; this CMU stack's dual goal-interface is not documented anywhere else.
 
 **Map is now live too**: LVI-SAM has no 2D grid of its own, so `adapter_ros1.py` forwards
 `/lvi_sam/lidar/mapping/cloud_registered` (`topics.map_cloud`) and the backend raytraces
@@ -175,6 +216,16 @@ trimmed launch file. Confirmed `/d400_arm/color/image_raw` at ~30 Hz.
 `scout_mini.yaml`'s `topics.camera_compressed` now points at
 `/d400_arm/color/image_raw/compressed`; `capabilities` now includes `camera`. The D435i
 also has its own depth cloud (`/d400_arm/depth/color/points`), unused so far.
+
+**Production video and detection validated** (2026-08-06): `swarmdeck-media` subscribes
+to that compressed ROS topic inside Docker, produces baseline-profile H.264 at 640×480,
+15 fps and 1.2 Mbps, and pushes RTSP/TCP to central MediaMTX. Chrome established a real
+WHEP peer connection (`readyState=4`, live unmuted track), and the dashboard rendered the
+stream plus normalized boxes. The classical detector found both physical rubber ducks in
+the initial frame (scores 0.892 and 0.883); during the final live check it continued
+updating the boxes at the configured 5 Hz. Software encoding used about 53 MiB and 29–42%
+of one Xavier CPU core. End-to-end latency is not yet timestamp-instrumented, so this does
+not claim the <300 ms requirement even though the live path is operational.
 
 **⚠ Pose is drifting significantly while the robot sits still.** A few minutes after
 connecting, `tars_0`'s reported pose moved from near-origin to `(x=-1.82, y=6.91,
