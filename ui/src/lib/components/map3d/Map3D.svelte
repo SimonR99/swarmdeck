@@ -16,7 +16,7 @@
   import { inflate } from 'pako';
   import { fleet } from '$lib/stores/fleet.svelte';
 
-  let { active = false }: { active?: boolean } = $props();
+  let { active = false, follow = false }: { active?: boolean; follow?: boolean } = $props();
 
   let canvas = $state<HTMLCanvasElement | null>(null);
   let points = $state(0);
@@ -29,12 +29,24 @@
   let yaw = $state(-0.7);
   let pitch = $state(0.9);
   let distance = $state(28);
-  const target: [number, number, number] = [0, 0, 0.6];
+  let target = $state<[number, number, number]>([0, 0, 0.6]);
+  let bounds: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    minZ: number;
+    maxZ: number;
+  } | null = null;
 
   let gl: WebGL2RenderingContext | null = null;
   let program: WebGLProgram | null = null;
   let positionBuffer: WebGLBuffer | null = null;
   let colourBuffer: WebGLBuffer | null = null;
+  let robotPositionBuffer: WebGLBuffer | null = null;
+  let robotColourBuffer: WebGLBuffer | null = null;
+  let positionLocation = -1;
+  let colourLocation = -1;
   let count = 0;
   let raf = 0;
   // Reactive: the cursor style is bound to it in the markup below.
@@ -45,20 +57,33 @@
     in vec3 a_position;
     in vec3 a_colour;
     uniform mat4 u_viewProjection;
+    uniform bool u_marker;
+    uniform float u_markerSize;
     out vec3 v_colour;
     void main() {
       gl_Position = u_viewProjection * vec4(a_position, 1.0);
       // Nearer points get a slightly larger sprite, which reads as depth
       // without needing lighting or normals.
-      gl_PointSize = clamp(120.0 / gl_Position.w, 1.0, 4.0);
+      gl_PointSize = u_marker ? u_markerSize : clamp(120.0 / gl_Position.w, 1.0, 4.0);
       v_colour = a_colour;
     }`;
 
   const FRAGMENT = `#version 300 es
     precision mediump float;
     in vec3 v_colour;
+    uniform bool u_marker;
     out vec4 outColour;
     void main() {
+      if (u_marker) {
+        float radius = distance(gl_PointCoord, vec2(0.5));
+        if (radius > 0.5) discard;
+        // A white ring keeps the robot readable against a cloud of its own
+        // colour and against both the light background and dark geometry.
+        if (radius > 0.37) {
+          outColour = vec4(1.0);
+          return;
+        }
+      }
       outColour = vec4(v_colour, 1.0);
     }`;
 
@@ -127,6 +152,49 @@
     return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
   }
 
+  function centreRobots(ids?: Set<string>) {
+    const members = fleet.robots.filter((robot) => !ids || ids.has(robot.robot_id));
+    if (!members.length) return false;
+    target = [
+      members.reduce((sum, robot) => sum + robot.pose.x, 0) / members.length,
+      members.reduce((sum, robot) => sum + robot.pose.y, 0) / members.length,
+      0.6
+    ];
+    return true;
+  }
+
+  /** Public camera controls used by MapView's shared 2D/3D toolbar. */
+  export function centreFleet() {
+    centreRobots();
+  }
+
+  export function centreSelected() {
+    centreRobots(new Set(fleet.selected));
+  }
+
+  export function zoomBy(factor: number) {
+    distance = Math.max(3, Math.min(120, distance / factor));
+  }
+
+  export function fitCloud() {
+    if (!bounds) {
+      centreFleet();
+      distance = 28;
+      return;
+    }
+    target = [
+      (bounds.minX + bounds.maxX) / 2,
+      (bounds.minY + bounds.maxY) / 2,
+      (bounds.minZ + bounds.maxZ) / 2
+    ];
+    const diameter = Math.hypot(
+      bounds.maxX - bounds.minX,
+      bounds.maxY - bounds.minY,
+      bounds.maxZ - bounds.minZ
+    );
+    distance = Math.max(3, Math.min(120, diameter * 1.15));
+  }
+
   async function fetchCloud() {
     if (!gl || !positionBuffer || !colourBuffer) return;
     try {
@@ -169,14 +237,61 @@
       // real cloud, not assumed: check the actual z spread.
       let lo = Infinity;
       let hi = -Infinity;
-      for (let i = 2; i < positions.length; i += 3) {
-        if (positions[i] < lo) lo = positions[i];
-        if (positions[i] > hi) hi = positions[i];
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i < positions.length; i += 3) {
+        if (positions[i] < minX) minX = positions[i];
+        if (positions[i] > maxX) maxX = positions[i];
+        if (positions[i + 1] < minY) minY = positions[i + 1];
+        if (positions[i + 1] > maxY) maxY = positions[i + 1];
+        if (positions[i + 2] < lo) lo = positions[i + 2];
+        if (positions[i + 2] > hi) hi = positions[i + 2];
       }
       flat = total > 0 && hi - lo < 0.05;
+      bounds = total > 0
+        ? { minX, maxX, minY, maxY, minZ: lo, maxZ: hi }
+        : null;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  function bindAttributes(position: WebGLBuffer, colour: WebGLBuffer) {
+    if (!gl) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, position);
+    gl.enableVertexAttribArray(positionLocation);
+    gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, colour);
+    gl.enableVertexAttribArray(colourLocation);
+    gl.vertexAttribPointer(colourLocation, 3, gl.FLOAT, false, 0, 0);
+  }
+
+  function drawRobotMarkers(dpr: number) {
+    if (!gl || !program || !robotPositionBuffer || !robotColourBuffer) return;
+    const members = fleet.robots;
+    if (!members.length) return;
+    const positions = new Float32Array(members.length * 3);
+    const colours = new Float32Array(members.length * 3);
+    for (let i = 0; i < members.length; i++) {
+      const robot = members[i];
+      const colour = hexToRgb(fleet.colorOf(robot.robot_id));
+      positions.set([robot.pose.x, robot.pose.y, 0.32], i * 3);
+      colours.set(colour, i * 3);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, robotPositionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, robotColourBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, colours, gl.DYNAMIC_DRAW);
+    bindAttributes(robotPositionBuffer, robotColourBuffer);
+    gl.uniform1i(gl.getUniformLocation(program, 'u_marker'), 1);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_markerSize'), Math.min(30, 16 * dpr));
+    // Position is operational state, not geometry: keep it visible even when
+    // the lidar returns around the robot would otherwise depth-occlude it.
+    gl.disable(gl.DEPTH_TEST);
+    gl.drawArrays(gl.POINTS, 0, members.length);
+    gl.enable(gl.DEPTH_TEST);
   }
 
   function render() {
@@ -192,14 +307,20 @@
     gl.viewport(0, 0, w, h);
     gl.clearColor(0.96, 0.96, 0.97, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    if (!count) return;
+    if (follow) centreRobots();
     gl.useProgram(program);
+    const projection = viewProjection(w / h);
     gl.uniformMatrix4fv(
       gl.getUniformLocation(program, 'u_viewProjection'),
       false,
-      viewProjection(w / h)
+      projection
     );
-    gl.drawArrays(gl.POINTS, 0, count);
+    if (count && positionBuffer && colourBuffer) {
+      bindAttributes(positionBuffer, colourBuffer);
+      gl.uniform1i(gl.getUniformLocation(program, 'u_marker'), 0);
+      gl.drawArrays(gl.POINTS, 0, count);
+    }
+    drawRobotMarkers(dpr);
   }
 
   onMount(() => {
@@ -234,17 +355,13 @@
 
     positionBuffer = gl.createBuffer();
     colourBuffer = gl.createBuffer();
+    robotPositionBuffer = gl.createBuffer();
+    robotColourBuffer = gl.createBuffer();
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
-    for (const [name, buffer] of [
-      ['a_position', positionBuffer],
-      ['a_colour', colourBuffer]
-    ] as const) {
-      const location = gl.getAttribLocation(program, name);
-      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-      gl.enableVertexAttribArray(location);
-      gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 0, 0);
-    }
+    positionLocation = gl.getAttribLocation(program, 'a_position');
+    colourLocation = gl.getAttribLocation(program, 'a_colour');
+    bindAttributes(positionBuffer, colourBuffer);
 
     void fetchCloud();
     // Slow: the merged cloud is an accumulated map, not a sensor stream.
@@ -295,8 +412,8 @@
     {#if error}
       <span class="text-warn">3D unavailable · {error}</span>
     {:else if !points}
-      <!-- Not an error: only a 3D SLAM backend produces a cloud. -->
-      No cloud yet · needs a 3D SLAM backend
+      <!-- Not an error: cloud upload is an optional adapter capability. -->
+      No cloud yet · waiting for registered XYZ data
     {:else}
       {points.toLocaleString()} points · {robots.length} robot{robots.length === 1 ? '' : 's'}
       <span class="ml-1 text-fg-dim/70">drag to orbit · scroll to zoom</span>

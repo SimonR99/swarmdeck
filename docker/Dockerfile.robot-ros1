@@ -1,0 +1,31 @@
+FROM ros:noetic-perception
+
+# The archived Noetic image contains the ROS repository key that expired in
+# 2025. Refresh it before the first apt invocation so builds remain
+# reproducible on robots that already cache this older base image.
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/ros/rosdistro/master/ros.key', '/usr/share/keyrings/ros1-latest-archive-keyring.gpg')"
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gir1.2-gstreamer-1.0 \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-plugins-ugly \
+      gstreamer1.0-tools \
+      python3-gi \
+      python3-pip \
+      python3-yaml \
+      ros-noetic-move-base-msgs \
+      ros-noetic-tf2-ros \
+    && pip3 install --no-cache-dir websockets==10.4 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu packages the RTSP client sink separately from plugins-bad.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gstreamer1.0-rtsp \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY adapters /app/adapters
+
+CMD ["python3", "/app/adapters/adapter_ros1/adapter_ros1.py", "--help"]

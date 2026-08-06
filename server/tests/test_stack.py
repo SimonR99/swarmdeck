@@ -15,6 +15,7 @@ from PIL import Image
 
 from swarmdeck_server.api.app import (
     app,
+    detection_position,
     handle_gui_message,
     load_config,
     map_service,
@@ -109,6 +110,21 @@ def test_registry_capabilities_and_neglect():
 
     reg.hello({"robot_id": "mock", "coordinate_frame": "merged"}, sink=None)
     assert reg.robots["mock"].coordinate_frame == "merged"
+
+
+def test_detection_position_is_normalized_into_the_merged_map():
+    app_registry.robots.clear()
+    try:
+        app_registry.hello({"robot_id": "r0", "coordinate_frame": "local"}, sink=None)
+        map_service.set_transform("r0", 10.0, -2.0, math.pi / 2)
+
+        position = detection_position("r0", {"x": 2.0, "y": 1.0})
+
+        assert position == pytest.approx({"x": 9.0, "y": 0.0})
+        assert detection_position("r0", None) is None
+        assert detection_position("r0", {"x": float("nan"), "y": 1.0}) is None
+    finally:
+        app_registry.robots.clear()
 
 
 def test_duplicate_goal_rejected():

@@ -1,0 +1,44 @@
+# Botman bring-up owned entirely by SwarmDeck. The MIST workspace is mounted
+# read-only and invoked through its installed rover_launch package; this file
+# never edits, rebuilds, or overlays anything in /ssd/mist_ws.
+services:
+  robot_stack:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-stack
+    network_mode: host
+    # Fast DDS uses shared memory for same-host ROS 2 traffic. Both services
+    # must share the host IPC namespace or discovery succeeds while large
+    # PointCloud2/Odometry samples never reach the adapter.
+    ipc: host
+    privileged: true
+    runtime: nvidia
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+    command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
+    restart: unless-stopped
+
+  adapter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-adapter
+    depends_on:
+      - robot_stack
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    command:
+      - python3
+      - /app/adapters/adapter_ros2/adapter_ros2.py
+      - --robot-id
+      - botman_0
+      - --config
+      - /app/adapters/adapter_ros2/config/bunker.yaml
+      - --host
+      - "${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}"
+      - --port
+      - "${BACKEND_PORT:-8080}"
+    restart: unless-stopped

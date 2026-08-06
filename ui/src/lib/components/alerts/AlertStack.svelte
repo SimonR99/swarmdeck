@@ -3,6 +3,7 @@
   import { session } from '$lib/stores/session.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
 
   const tones = {
     info: 'border-accent/35 bg-accent/10 text-accent',
@@ -29,7 +30,7 @@
         <div class="text-[11px] font-semibold leading-tight">{a.message}</div>
         {#if a.robot_id}
           <div class="mt-0.5 text-[10px] opacity-70" style="color:{fleet.colorOf(a.robot_id)}">
-            {a.robot_id}
+            {robotDisplayName(a.robot_id)}
           </div>
         {/if}
       </div>

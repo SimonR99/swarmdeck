@@ -73,6 +73,9 @@ without `map` contributes no grid. **Never assume a capability.**
 polyline. The GUI renders it dashed beside the solid path actually travelled.
 Detection boxes use normalized `[x, y, width, height]` image coordinates; stable item
 IDs let the backend update one observation instead of stacking duplicate boxes.
+`map_position` is optional. Depth-capable adapters derive it from an RGB-aligned depth
+sample and transform that point into their navigation-map frame; adapters without a
+fresh, valid depth/TF result send `null` and the GUI shows only the video box.
 
 ## Backend → adapter
 
@@ -123,6 +126,24 @@ registered scan is far denser than a raytraced grid needs. Mutually exclusive in
 practice with `POST /api/adapter/map` per robot, not mutually exclusive in the protocol —
 an adapter advertising `map` because it configures this path rather than a native grid
 topic is exactly protocol rule 4 working as intended.
+
+## Optional 3D cloud upload
+
+An adapter with registered XYZ points in its declared local map frame may also
+feed the GUI's 3D viewer. This is independent of whether its 2D map comes from
+`POST /api/adapter/map` or `POST /api/adapter/scan`:
+
+```text
+POST /api/adapter/cloud?robot_id=robot_0&scale=0.01
+Content-Type: application/octet-stream
+Body: zlib-compressed int16[] xyz triples (points / scale, rounded)
+```
+
+Voxel-downsample before upload and send slowly (roughly 0.25 Hz). The backend
+retains the newest cloud for each robot and transforms registered members into
+the shared fleet frame. This transport is SLAM-implementation agnostic: the
+points need only be registered in the same local map frame as that robot's pose
+and 2D map.
 
 ## Camera preview fallback
 

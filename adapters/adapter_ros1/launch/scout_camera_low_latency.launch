@@ -3,16 +3,19 @@
     Operator camera profile for the Scout Mini's RealSense D435i.
 
     The camera is connected over USB 2.1 on tars, so the vendor launch's
-    simultaneous 640x480@30 color + depth, aligned-depth and point-cloud
-    pipeline produces stale frames under load. SwarmDeck only consumes the
-    color topic; mapping comes from the Ouster/LVI-SAM path. Keep capture at the
-    same 15 fps that the RTSP publisher sends and do not compute unconsumed
-    depth products.
+    simultaneous 640x480@30 color + depth + point-cloud pipeline produces stale
+    frames under load. Keep both streams at 640x480@15—the lowest profile this
+    driver/device pair negotiated live—and use depth solely for RGB-aligned
+    duck positioning. Point-cloud generation stays off; mapping still comes
+    from Ouster/LVI-SAM.
   -->
   <arg name="camera" default="d400_arm"/>
   <arg name="color_width" default="640"/>
   <arg name="color_height" default="480"/>
   <arg name="color_fps" default="15"/>
+  <arg name="depth_width" default="640"/>
+  <arg name="depth_height" default="480"/>
+  <arg name="depth_fps" default="15"/>
 
   <include file="$(find realsense2_camera)/launch/rs_camera.launch">
     <arg name="camera" value="$(arg camera)"/>
@@ -21,16 +24,25 @@
     <arg name="color_width" value="$(arg color_width)"/>
     <arg name="color_height" value="$(arg color_height)"/>
     <arg name="color_fps" value="$(arg color_fps)"/>
+    <arg name="depth_width" value="$(arg depth_width)"/>
+    <arg name="depth_height" value="$(arg depth_height)"/>
+    <arg name="depth_fps" value="$(arg depth_fps)"/>
     <arg name="enable_color" value="true"/>
-    <arg name="enable_depth" value="false"/>
+    <arg name="enable_depth" value="true"/>
     <arg name="enable_infra" value="false"/>
     <arg name="enable_infra1" value="false"/>
     <arg name="enable_infra2" value="false"/>
     <arg name="enable_gyro" value="false"/>
     <arg name="enable_accel" value="false"/>
     <arg name="enable_pointcloud" value="false"/>
-    <arg name="enable_sync" value="false"/>
-    <arg name="align_depth" value="false"/>
+    <arg name="enable_sync" value="true"/>
+    <arg name="align_depth" value="true"/>
     <arg name="filters" value=""/>
   </include>
+
+  <!-- The robot URDF already calibrates chassis_link -> realsense_d435_link;
+       the driver owns d400_arm_link -> optical frames. Join those two existing
+       trees using the identity mount transform used by MIST's D400 launch. -->
+  <node pkg="tf" type="static_transform_publisher" name="swarmdeck_d400_mount"
+        args="0 0 0 0 0 0 realsense_d435_link d400_arm_link 100"/>
 </launch>

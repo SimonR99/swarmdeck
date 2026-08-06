@@ -21,10 +21,17 @@
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
   import type { MapRegistration } from '$lib/types/protocol';
 
   let host = $state<HTMLDivElement | null>(null);
   let canvas = $state<HTMLCanvasElement | null>(null);
+  let map3D = $state<{
+    centreFleet: () => void;
+    centreSelected: () => void;
+    zoomBy: (factor: number) => void;
+    fitCloud: () => void;
+  } | null>(null);
   let view = $state({ scale: 0.55, tx: 0, ty: 0, initialised: false });
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
@@ -137,6 +144,36 @@
     view.tx += px - after.sx;
     view.ty += py - after.sy;
     follow = false;
+  }
+
+  function toggleFollow() {
+    follow = !follow;
+    if (!follow) return;
+    if (show3D) map3D?.centreFleet();
+    else centreOnFleet();
+  }
+
+  function centreSelectedForView() {
+    if (show3D) {
+      map3D?.centreSelected();
+      follow = false;
+    } else {
+      centreOnSelected();
+    }
+  }
+
+  function zoomForView(factor: number) {
+    if (show3D) map3D?.zoomBy(factor);
+    else zoomBy(factor);
+  }
+
+  function fitView() {
+    if (show3D) {
+      map3D?.fitCloud();
+      follow = false;
+    } else {
+      fitMap();
+    }
   }
 
   function drawMetricGrid(ctx: CanvasRenderingContext2D, width: number, height: number) {
@@ -458,7 +495,7 @@
         ctx.font = '600 10px ui-sans-serif, system-ui';
         ctx.fillStyle = color;
         ctx.textAlign = 'center';
-        ctx.fillText(r.robot_id.replace(/^robot_/, 'R'), sx, sy - 18);
+        ctx.fillText(robotDisplayName(r.robot_id), sx, sy - 18);
       }
     }
 
@@ -664,7 +701,7 @@
   -->
   {#if show3D}
     <div class="absolute inset-0 z-10">
-      <Map3D active={show3D} />
+      <Map3D bind:this={map3D} active={show3D} {follow} />
     </div>
   {/if}
   <div bind:this={host} class="absolute inset-0">
@@ -744,18 +781,6 @@
   {/if}
 
   <!-- Map layers and registration diagnostics. -->
-  {#if show3D}
-    <button
-      class="panel-glow absolute bottom-3 right-3 z-20 flex h-8 items-center gap-1.5 rounded-[4px]
-             border border-border bg-surface/95 px-2.5 text-[10px] font-medium text-accent
-             transition-colors hover:bg-surface-2"
-      title="Back to the 2D map"
-      onclick={() => (show3D = false)}
-    >
-      <Box class="h-3.5 w-3.5" /> Exit 3D
-    </button>
-  {/if}
-
   <div class="absolute bottom-3 right-14 z-20">
     <button
       title="Map layers"
@@ -840,11 +865,13 @@
           <div class="my-2 border-t border-border"></div>
           <div class="flex items-center justify-between text-fg-dim">
             <span>Reference frame</span>
-            <span class="font-medium text-fg-muted">{mapStore.status.reference ?? '—'}</span>
+            <span class="font-medium text-fg-muted">
+              {mapStore.status.reference ? robotDisplayName(mapStore.status.reference) : '—'}
+            </span>
           </div>
           {#each registrationEntries as [robotId, item]}
             <div class="mt-1 flex items-start justify-between gap-2 text-fg-dim">
-              <span>{robotId.replace(/^robot_/, 'R')}</span>
+              <span>{robotDisplayName(robotId)}</span>
               <span
                 class="max-w-36 text-right font-medium {item.accepted
                   ? 'text-ok'
@@ -868,19 +895,14 @@
     {/if}
   </div>
 
-  <!-- view controls -->
-  <!-- 2D-only: these drive the canvas transform, not the 3D orbit camera. -->
-  {#if !show3D}
+  <!-- View controls keep the same meaning in 2D and 3D. -->
   <div class="panel-glow absolute bottom-3 right-3 z-20 flex flex-col overflow-hidden rounded-[4px] border border-border bg-surface/95">
     <button
       title="Follow fleet"
       class="grid h-9 w-9 touch-target place-items-center border-b border-border
              transition-colors hover:bg-surface-2
              {follow ? 'bg-accent/8 text-accent' : 'text-fg-muted'}"
-      onclick={() => {
-        follow = !follow;
-        if (follow) centreOnFleet();
-      }}
+      onclick={toggleFollow}
     >
       <Locate class="h-4 w-4" />
     </button>
@@ -889,7 +911,7 @@
       disabled={fleet.selected.length === 0}
       class="grid h-9 w-9 touch-target place-items-center border-b border-border text-fg-muted
              transition-colors hover:bg-surface-2 disabled:opacity-35"
-      onclick={centreOnSelected}
+      onclick={centreSelectedForView}
     >
       <Focus class="h-4 w-4" />
     </button>
@@ -897,7 +919,7 @@
       title="Zoom in"
       class="grid h-9 w-9 touch-target place-items-center border-b border-border text-fg-muted
              transition-colors hover:bg-surface-2"
-      onclick={() => zoomBy(1.25)}
+      onclick={() => zoomForView(1.25)}
     >
       <Plus class="h-4 w-4" />
     </button>
@@ -905,7 +927,7 @@
       title="Zoom out"
       class="grid h-9 w-9 touch-target place-items-center border-b border-border text-fg-muted
              transition-colors hover:bg-surface-2"
-      onclick={() => zoomBy(1 / 1.25)}
+      onclick={() => zoomForView(1 / 1.25)}
     >
       <Minus class="h-4 w-4" />
     </button>
@@ -913,14 +935,11 @@
       title="Fit fleet"
       class="grid h-9 w-9 touch-target place-items-center text-fg-muted transition-colors
              hover:bg-surface-2"
-      onclick={() => {
-        fitMap();
-      }}
+      onclick={fitView}
     >
       <Maximize2 class="h-4 w-4" />
     </button>
   </div>
-  {/if}
 
   <!-- cursor readout -->
   <div

@@ -1,5 +1,9 @@
 .PHONY: help install ui ui-build server mock sim test clean \
-        docker-build docker-up docker-up-gpu docker-up-cslam docker-up-mock docker-down docker-logs \
+        build-server up-server down-server \
+        build-sim up-sim down-sim \
+        build-mock up-mock down-mock \
+        build-deploy up-deploy down-deploy \
+        docker-up-gpu docker-up-cslam docker-down docker-logs \
         docker-ps docker-test docker-test-launch
 
 help:
@@ -10,11 +14,13 @@ help:
 	@echo "  make server          run backend (http://localhost:8080)"
 	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
 	@echo "  make demo            server + mock + ui, all at once"
-	@echo "  make docker-up       Docker: server + UI + Gazebo/SLAM/Nav2/adapter_sim"
-	@echo "  make docker-up-gpu   as docker-up, with Gazebo rendering on an NVIDIA GPU"
+	@echo "  make [build|up|down]-server  Docker: backend + UI only"
+	@echo "  make [build|up|down]-sim     Docker: Gazebo/SLAM/Nav2/adapter_sim (needs server up)"
+	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
+	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see hardware-bringup.md)"
+	@echo "  make docker-up-gpu   full stack (server+ui+sim), Gazebo rendering on an NVIDIA GPU"
 	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
-	@echo "  make docker-up-mock  Docker: server + UI + synthetic mock fleet"
-	@echo "  make docker-down     stop Docker stack"
+	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
 	@echo "  make docker-logs     follow Docker logs"
 	@echo "  make docker-test     run backend tests inside Docker"
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
@@ -56,16 +62,67 @@ test:
 	  adapters/test -q
 	cd ui && npm run check
 
-docker-build:
-	docker compose --profile gazebo build
+# --- server + UI: the always-on core. Everything else depends on it being up.
+build-server:
+	docker compose build server ui
 
-docker-up:
-	docker compose --profile gazebo up --build -d
+up-server:
+	docker compose up --build -d server ui
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
+
+down-server:
+	docker compose stop server ui
+	docker compose rm -f server ui
+
+# --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
+# docker-compose.yml means this brings the server up too if it isn't already.
+build-sim:
+	docker compose --profile gazebo build gazebo
+
+up-sim:
+	docker compose --profile gazebo up --build -d gazebo
 	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
 
-# Same stack with Gazebo rendering on the GPU. Software rendering caps the sim
+down-sim:
+	docker compose --profile gazebo stop gazebo
+	docker compose --profile gazebo rm -f gazebo
+
+# --- synthetic fleet: no Gazebo/ROS. Also depends_on: server.
+build-mock:
+	docker compose --profile mock build mock
+
+up-mock:
+	docker compose --profile mock up --build -d mock
+	@echo "Fleet:            mock adapter (no Gazebo)"
+
+down-mock:
+	docker compose --profile mock stop mock
+	docker compose --profile mock rm -f mock
+
+# --- real fleet deployment: server + UI + a Zenoh router, so robots on other
+# machines can reach both the backend and each other's ROS graph. No Gazebo, no
+# cslam, no mock — this is the actual bring-up target. UNVERIFIED against
+# physical robots (see docker-compose.zenoh.yml); adapters run per-robot,
+# outside Docker, per docs/hardware-bringup.md.
+ZENOH_COMPOSE = -f docker-compose.yml -f docker-compose.zenoh.yml
+
+build-deploy:
+	docker compose $(ZENOH_COMPOSE) build server ui
+
+up-deploy:
+	docker compose $(ZENOH_COMPOSE) up --build -d server ui zenoh-router
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "Backend API:      http://localhost:8080/api/config"
+	@echo "Zenoh router:     tcp/<this-host>:7447"
+	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
+	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
+
+down-deploy:
+	docker compose $(ZENOH_COMPOSE) stop server ui zenoh-router
+	docker compose $(ZENOH_COMPOSE) rm -f server ui zenoh-router
+
+# Full stack (server+ui+sim) with Gazebo rendering on the GPU. Software rendering caps the sim
 # at ~0.58x real time, which is the budget every lidar-fidelity increase has to
 # come out of; see docker-compose.gpu.yml.
 GPU_COMPOSE = -f docker-compose.yml -f docker-compose.gpu.yml
@@ -83,11 +140,6 @@ docker-up-cslam:
 	  docker compose $(CSLAM_COMPOSE) --profile gazebo up --build -d
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
-
-docker-up-mock:
-	docker compose --profile mock up --build -d
-	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "Fleet:            mock adapter (no Gazebo)"
 
 docker-down:
 	docker compose --profile gazebo --profile mock down

@@ -10,7 +10,7 @@
   let wasOpen = false;
 
   function resizeRobots(count: number) {
-    const bounded = Math.max(1, Math.min(5, Math.round(count)));
+    const bounded = Math.max(1, Math.min(8, Math.round(count)));
     draft.robot_count = bounded;
     while (draft.robots.length < bounded) {
       const index = draft.robots.length;
@@ -111,7 +111,7 @@
               onchange={(event) => resizeRobots(Number(event.currentTarget.value))}
               class="h-9 w-full rounded-[4px] border border-border bg-surface px-2 text-xs text-fg outline-none"
             >
-              {#each [1, 2, 3, 4, 5] as count}<option value={count}>{count}</option>{/each}
+              {#each [1, 2, 3, 4, 5, 6, 7, 8] as count}<option value={count}>{count}</option>{/each}
             </select>
           </label>
         </div>

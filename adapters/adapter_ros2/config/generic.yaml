@@ -16,6 +16,11 @@ topics:
   battery: ""
   camera: ""
   camera_compressed: ""
+  # Preferred depth source: RGB-aligned depth image plus its intrinsics.
+  camera_depth: ""
+  camera_info: ""
+  # Optional organised PointCloud2 aligned pixel-for-pixel with the RGB image.
+  camera_depth_points: ""
 
 actions:
   navigate_to_pose: navigate_to_pose

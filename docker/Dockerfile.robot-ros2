@@ -1,0 +1,18 @@
+FROM ros:humble-ros-base
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3-numpy \
+      python3-opencv \
+      python3-pip \
+      python3-yaml \
+      ros-humble-geometry-msgs \
+      ros-humble-nav-msgs \
+      ros-humble-sensor-msgs \
+      ros-humble-tf2-ros \
+    && pip3 install --no-cache-dir websockets==10.4 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY adapters /app/adapters
+
+CMD ["python3", "/app/adapters/adapter_ros2/adapter_ros2.py", "--help"]

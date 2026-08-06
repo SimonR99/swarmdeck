@@ -65,8 +65,25 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import BatteryState, CompressedImage, Image
+from sensor_msgs.msg import BatteryState, CameraInfo, CompressedImage, Image, PointCloud2
 from tf2_ros import Buffer, TransformListener
+
+# Hardware containers run this file directly, so make the repository's shared
+# perception helpers importable without requiring a Python package install.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from adapters.perception.depth_projection import (
+    point_for_bbox,
+    point_for_depth_image,
+    transform_point,
+)
+
+# Transport quantisation for registered-cloud uploads. One centimetre keeps a
+# normal building-scale map inside int16 while remaining finer than either
+# consumer's display/grid resolution.
+MAP_CLOUD_SCALE = 0.01
+MAP_CLOUD_VOXEL = 0.05
+MAP_CLOUD_3D_VOXEL = 0.10
 
 # Nav2 is the common case but not the only one; see `navigate_to` below.
 try:
@@ -76,6 +93,7 @@ except ImportError:  # pragma: no cover - depends on the robot's install
 
 DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
+    "ros_distro": "jazzy",
     "footprint_radius": 0.35,
     # Frames. `map` and `base_link` are REP-105 names and the only two that must
     # exist; the pose is a tf2 lookup between them rather than a composition of
@@ -86,17 +104,36 @@ DEFAULTS: dict[str, Any] = {
     "topics": {
         "odom": "odom",
         "map": "map",
+        # Registered PointCloud2 for a 3D SLAM stack that does not publish an
+        # OccupancyGrid. The backend raytraces a height-filtered XY view into
+        # a grid and keeps a coarser XYZ view for the optional 3D panel.
+        "map_cloud": "",
         "plan": "plan",
         "cmd_vel": "cmd_vel",
         "battery": "",       # empty disables the capability
         "camera": "",
         "camera_compressed": "",
+        "camera_depth": "",
+        "camera_info": "",
+        # Organised PointCloud2 aligned pixel-for-pixel with the RGB image.
+        # Optional: bbox-only detection still works when it is absent.
+        "camera_depth_points": "",
     },
+    "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
     "actions": {"navigate_to_pose": "navigate_to_pose"},
     "rates": {
         "state_hz": 5.0,
         "map_period_s": 2.0,
+        "cloud_period_s": 4.0,
         "camera_period_s": 0.2,   # 5 Hz, per the protocol's preview cap
+    },
+    "perception": {
+        "enabled": True,
+        "period_s": 0.2,
+        "sensitivity": 0.55,
+        "depth_min_m": 0.15,
+        "depth_max_m": 8.0,
+        "depth_max_age_s": 0.35,
     },
     # A drive command older than this stops the robot. Teleop over a network is
     # only safe with a deadman: if the link drops mid-command the robot must not
@@ -138,6 +175,11 @@ class HardwareBridge:
 
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
+        self._scan_points: np.ndarray | None = None
+        self._scan_dirty = False
+        self._cloud_points: np.ndarray | None = None
+        self._cloud_dirty = False
+        self._last_cloud_prepare_at = 0.0
         self.planned_path: list[dict[str, float]] = []
         self.battery: float | None = None
         self.nav_status = "idle"
@@ -148,6 +190,24 @@ class HardwareBridge:
         self._last_drive_at = 0.0
         self._camera_jpeg: bytes | None = None
         self._camera_dirty = False
+        self._camera_depth_image: Image | None = None
+        self._camera_info: CameraInfo | None = None
+        self._camera_depth_cloud: PointCloud2 | None = None
+        perception = cfg.get("perception", {})
+        self._detector = None
+        self._detection_enabled = bool(perception.get("enabled", True))
+        if self._detection_enabled and (topics.get("camera") or topics.get("camera_compressed")):
+            try:
+                from adapters.perception.duck_detector import RubberDuckDetector
+
+                self._detector = RubberDuckDetector(perception.get("sensitivity", 0.55))
+            except ImportError as exc:
+                self._detection_enabled = False
+                node.get_logger().warn(f"[{self.id}] camera detection disabled: {exc}")
+        self._detection_period_s = max(0.05, float(perception.get("period_s", 0.2)))
+        self._last_detection_at = 0.0
+        self._detections: list[dict] | None = None
+        self._last_depth_warning_at = 0.0
         self._pose_warned = False
 
         # A map is latched: published once and expected to be available to any
@@ -165,6 +225,11 @@ class HardwareBridge:
             node.create_subscription(Odometry, topics["odom"], self._on_odom, 10)
         if topics.get("map"):
             node.create_subscription(OccupancyGrid, topics["map"], self._on_map, latched)
+        if topics.get("map_cloud"):
+            node.create_subscription(
+                PointCloud2, topics["map_cloud"], self._on_map_cloud,
+                qos_profile_sensor_data,
+            )
         if topics.get("plan"):
             node.create_subscription(NavPath, topics["plan"], self._on_plan, 10)
         if topics.get("battery"):
@@ -182,6 +247,27 @@ class HardwareBridge:
         elif topics.get("camera"):
             node.create_subscription(
                 Image, topics["camera"], self._on_camera_raw, qos_profile_sensor_data
+            )
+        if topics.get("camera_depth_points"):
+            node.create_subscription(
+                PointCloud2,
+                topics["camera_depth_points"],
+                self._on_camera_depth_cloud,
+                qos_profile_sensor_data,
+            )
+        if topics.get("camera_depth"):
+            node.create_subscription(
+                Image,
+                topics["camera_depth"],
+                self._on_camera_depth,
+                qos_profile_sensor_data,
+            )
+        if topics.get("camera_info"):
+            node.create_subscription(
+                CameraInfo,
+                topics["camera_info"],
+                self._on_camera_info,
+                qos_profile_sensor_data,
             )
 
         self.pub_cmd = (
@@ -201,7 +287,7 @@ class HardwareBridge:
         caps: list[str] = []
         if self.nav_client is not None:
             caps.append("navigate")
-        if self.cfg["topics"].get("map"):
+        if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
             caps.append("map")
         if self.cfg["topics"].get("camera") or self.cfg["topics"].get("camera_compressed"):
             caps.append("camera")
@@ -215,8 +301,10 @@ class HardwareBridge:
 
     def _on_odom(self, msg: Odometry) -> None:
         # Kept only as a FALLBACK for the pose. See map_pose(): odometry drifts
-        # without bound and is not where a robot's map-frame pose comes from.
+        # without bound unless the publisher explicitly expresses it in the
+        # configured map frame (Botman's /laser_odometry does).
         p = msg.pose.pose
+        self._odom_frame = getattr(msg.header, "frame_id", "")
         self._odom_pose = {
             "x": p.position.x, "y": p.position.y, "yaw": yaw_of(p.orientation)
         }
@@ -224,6 +312,54 @@ class HardwareBridge:
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
         self._grid_dirty = True
+
+    @staticmethod
+    def _cloud_xyz(msg: PointCloud2) -> np.ndarray:
+        """Extract finite xyz values using PointCloud2's declared offsets."""
+        offsets = {f.name: f.offset for f in msg.fields if f.name in ("x", "y", "z")}
+        if len(offsets) != 3:
+            return np.zeros((0, 3), dtype=np.float32)
+        raw = np.frombuffer(msg.data, dtype=np.uint8)
+        count = len(raw) // msg.point_step if msg.point_step else 0
+        if not count:
+            return np.zeros((0, 3), dtype=np.float32)
+        rows = raw[: count * msg.point_step].reshape(count, msg.point_step)
+        columns = [
+            rows[:, offsets[axis] : offsets[axis] + 4].copy().view(np.float32).ravel()
+            for axis in ("x", "y", "z")
+        ]
+        points = np.stack(columns, axis=1)
+        return points[np.isfinite(points).all(axis=1)]
+
+    def _on_map_cloud(self, msg: PointCloud2) -> None:
+        """Reduce one registered scan for the 2D map and optional 3D view."""
+        points = self._cloud_xyz(msg)
+        if not len(points):
+            return
+
+        now = time.monotonic()
+        cloud_period = max(
+            0.1, float(self.cfg.get("rates", {}).get("cloud_period_s", 4.0))
+        )
+        if now - self._last_cloud_prepare_at >= cloud_period:
+            self._last_cloud_prepare_at = now
+            cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
+            _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
+            self._cloud_points = points[cloud_keep]
+            self._cloud_dirty = True
+
+        band = self.cfg.get("map_cloud_height_band", {})
+        min_z = float(band.get("min_z", -1e9))
+        max_z = float(band.get("max_z", 1e9))
+        xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
+        if not len(xy):
+            self._scan_points = np.zeros((0, 2), dtype=np.float32)
+            self._scan_dirty = True
+            return
+        keys = np.round(xy / MAP_CLOUD_VOXEL).astype(np.int32)
+        _, keep = np.unique(keys, axis=0, return_index=True)
+        self._scan_points = xy[keep]
+        self._scan_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
         self.planned_path = [
@@ -245,6 +381,7 @@ class HardwareBridge:
             return
         self._camera_jpeg = bytes(msg.data)
         self._camera_dirty = True
+        self._detect_jpeg(self._camera_jpeg, getattr(msg, "header", None))
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Encoding here rather than shipping raw: the protocol's preview channel
@@ -263,8 +400,153 @@ class HardwareBridge:
             if ok:
                 self._camera_jpeg = buf.tobytes()
                 self._camera_dirty = True
+                self._detect_bgr(frame, image_header=getattr(msg, "header", None))
         except (ValueError, TypeError):
             return
+
+    def _detect_jpeg(self, jpeg: bytes, image_header=None) -> None:
+        if not self._detection_due():
+            return
+        try:
+            import cv2
+
+            frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None:
+                self._detect_bgr(frame, due_checked=True, image_header=image_header)
+        except (ValueError, TypeError):
+            return
+
+    def _detection_due(self) -> bool:
+        if not self._detection_enabled or self._detector is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_detection_at < self._detection_period_s:
+            return False
+        self._last_detection_at = now
+        return True
+
+    def _on_camera_depth_cloud(self, msg: PointCloud2) -> None:
+        self._camera_depth_cloud = msg
+
+    def _on_camera_depth(self, msg: Image) -> None:
+        self._camera_depth_image = msg
+
+    def _on_camera_info(self, msg: CameraInfo) -> None:
+        self._camera_info = msg
+
+    @staticmethod
+    def _stamp_seconds(header) -> float | None:
+        stamp = getattr(header, "stamp", None)
+        if stamp is None:
+            return None
+        try:
+            value = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return value if value > 0.0 and math.isfinite(value) else None
+
+    def _depth_map_position(self, bbox, image_header=None) -> dict[str, float] | None:
+        perception = self.cfg.get("perception", {})
+        image_time = self._stamp_seconds(image_header)
+        max_age = float(perception.get("depth_max_age_s", 0.35))
+        min_range = float(perception.get("depth_min_m", 0.15))
+        max_range = float(perception.get("depth_max_m", 8.0))
+        camera_point = None
+        source_header = None
+
+        depth_image = self._camera_depth_image
+        camera_info = self._camera_info
+        if depth_image is not None and camera_info is not None:
+            depth_header = getattr(depth_image, "header", None)
+            depth_time = self._stamp_seconds(depth_header)
+            if image_time is None or depth_time is None or abs(image_time - depth_time) <= max_age:
+                configured_scale = perception.get("depth_scale")
+                camera_point = point_for_depth_image(
+                    depth_image,
+                    camera_info,
+                    bbox,
+                    min_range_m=min_range,
+                    max_range_m=max_range,
+                    depth_scale=None if configured_scale is None else float(configured_scale),
+                )
+                source_header = depth_header
+
+        cloud = self._camera_depth_cloud
+        if camera_point is None and cloud is not None:
+            cloud_header = getattr(cloud, "header", None)
+            cloud_time = self._stamp_seconds(cloud_header)
+            if image_time is None or cloud_time is None or abs(image_time - cloud_time) <= max_age:
+                camera_point = point_for_bbox(
+                    cloud, bbox, min_range_m=min_range, max_range_m=max_range
+                )
+                source_header = cloud_header
+        if camera_point is None or source_header is None:
+            return None
+        frame_id = getattr(source_header, "frame_id", "")
+        if not frame_id:
+            return None
+        try:
+            if frame_id == self.map_frame:
+                map_point = camera_point
+            else:
+                stamp_msg = getattr(source_header, "stamp", None)
+                stamp = (
+                    rclpy.time.Time.from_msg(stamp_msg)
+                    if stamp_msg is not None
+                    else rclpy.time.Time()
+                )
+                tf = self.tf_buffer.lookup_transform(self.map_frame, frame_id, stamp)
+                map_point = transform_point(camera_point, tf.transform)
+            if map_point is None:
+                return None
+            return {"x": round(float(map_point[0]), 3), "y": round(float(map_point[1]), 3)}
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._last_depth_warning_at >= 10.0:
+                self._last_depth_warning_at = now
+                self.node.get_logger().warn(
+                    f"[{self.id}] cannot place camera detection in {self.map_frame}: {exc}"
+                )
+            return None
+
+    def _detect_bgr(
+        self,
+        frame: np.ndarray,
+        *,
+        due_checked: bool = False,
+        image_header=None,
+    ) -> None:
+        if not due_checked and not self._detection_due():
+            return
+        self._detections = []
+        for index, detection in enumerate(self._detector.detect_bgr(frame)):
+            item = detection.as_protocol(f"duck_{index}")
+            item["map_position"] = self._depth_map_position(
+                detection.bbox, image_header
+            )
+            self._detections.append(item)
+
+    def take_detections(self) -> list[dict] | None:
+        current = self._detections
+        self._detections = None
+        return current
+
+    def refresh_settings(self) -> None:
+        try:
+            with urllib.request.urlopen(f"{self.http_url}/api/settings", timeout=2) as response:
+                payload = json.loads(response.read())
+            settings = payload.get("settings", {})
+            enabled = bool(settings.get("detection_enabled", True))
+            if self._detection_enabled and not enabled:
+                self._detections = []
+            self._detection_enabled = enabled
+            if self._detector is not None:
+                self._detector.sensitivity = max(
+                    0.1,
+                    min(1.0, float(settings.get("detection_sensitivity", 0.55))),
+                )
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 
     # ------------------------------------------------------------- pose
 
@@ -297,10 +579,18 @@ class HardwareBridge:
                 return {"x": 0.0, "y": 0.0, "yaw": 0.0}
             if not self._pose_warned:
                 self._pose_warned = True
+                if getattr(self, "_odom_frame", "") == self.map_frame:
+                    detail = (
+                        f"using direct {self.map_frame}-frame odometry instead"
+                    )
+                else:
+                    detail = (
+                        "falling back to raw odometry, which DRIFTS. Check that SLAM "
+                        "or localisation is running and publishing TF"
+                    )
                 self.node.get_logger().warn(
                     f"[{self.id}] no {self.map_frame} -> {self.base_frame} transform; "
-                    f"falling back to raw odometry, which DRIFTS. Check that SLAM or "
-                    f"localisation is running and publishing TF."
+                    f"{detail}."
                 )
             return dict(fallback)
 
@@ -467,6 +757,54 @@ class HardwareBridge:
             },
         }
 
+    def upload_scan(self) -> None:
+        """Upload registered XY returns for server-side occupancy raytracing."""
+        if not self._scan_dirty or self._scan_points is None:
+            return
+        self._scan_dirty = False
+        if not len(self._scan_points):
+            return
+        origin = self.map_pose()
+        quantised = np.round(self._scan_points / MAP_CLOUD_SCALE).astype(np.int16)
+        url = (
+            f"{self.http_url}/api/adapter/scan?robot_id={self.id}"
+            f"&origin_x={origin['x']}&origin_y={origin['y']}"
+            f"&scale={MAP_CLOUD_SCALE}"
+        )
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url, data=zlib.compress(quantised.tobytes()),
+                    headers={"Content-Type": "application/octet-stream"},
+                ),
+                timeout=5,
+            ).read()
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] scan upload failed: {exc}")
+
+    def upload_cloud(self) -> None:
+        """Upload a voxel-reduced XYZ scan for the optional 3D map view."""
+        if not self._cloud_dirty or self._cloud_points is None:
+            return
+        self._cloud_dirty = False
+        if not len(self._cloud_points):
+            return
+        quantised = np.round(self._cloud_points / MAP_CLOUD_SCALE).astype(np.int16)
+        url = (
+            f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
+            f"&scale={MAP_CLOUD_SCALE}"
+        )
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url, data=zlib.compress(quantised.tobytes(), 1),
+                    headers={"Content-Type": "application/octet-stream"},
+                ),
+                timeout=5,
+            ).read()
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] 3D cloud upload failed: {exc}")
+
     def upload_camera(self) -> None:
         if not self._camera_dirty or self._camera_jpeg is None:
             return
@@ -501,7 +839,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     "robot_id": bridge.id,
                     "robot_type": bridge.cfg["robot_type"],
                     "adapter": "adapter_ros2/0.1.0",
-                    "ros": "jazzy",
+                    "ros": bridge.cfg["ros_distro"],
                     # `local`: a real robot's pose and grid are in its own
                     # navigation-map frame. The backend does the merging.
                     "coordinate_frame": "local",
@@ -540,7 +878,9 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     period = 1.0 / float(rates["state_hz"])
                     loop = asyncio.get_running_loop()
                     last_map = 0.0
+                    last_cloud = 0.0
                     last_cam = 0.0
+                    last_settings = 0.0
                     while True:
                         await ws.send(json.dumps(bridge.state()))
                         bridge.drive_watchdog()
@@ -550,9 +890,25 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             meta = await loop.run_in_executor(None, bridge.upload_map)
                             if meta:
                                 await ws.send(json.dumps(meta))
+                            await loop.run_in_executor(None, bridge.upload_scan)
+                        if now - last_cloud > float(rates["cloud_period_s"]):
+                            last_cloud = now
+                            await loop.run_in_executor(None, bridge.upload_cloud)
                         if now - last_cam > float(rates["camera_period_s"]):
                             last_cam = now
                             await loop.run_in_executor(None, bridge.upload_camera)
+                            detections = bridge.take_detections()
+                            if detections is not None:
+                                await ws.send(json.dumps({
+                                    "type": "detections",
+                                    "robot_id": bridge.id,
+                                    "t_mono": round(now - bridge.t0, 4),
+                                    "camera": "front",
+                                    "items": detections,
+                                }))
+                        if now - last_settings > 5.0:
+                            last_settings = now
+                            await loop.run_in_executor(None, bridge.refresh_settings)
                         await asyncio.sleep(period)
 
                 await asyncio.gather(rx(), tx())

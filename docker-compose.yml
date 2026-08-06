@@ -50,8 +50,25 @@ services:
     depends_on:
       server:
         condition: service_healthy
+      mediamtx:
+        condition: service_started
     ports:
       - "5173:80"
+    restart: unless-stopped
+
+  # Robots publish one H.264 RTSP stream each; MediaMTX fans those streams out
+  # to browser WHEP/WebRTC clients. Port 8891 is the host-side WHEP diagnostic
+  # port (the UI proxies internally to 8889), avoiding common local collisions
+  # on 8889 while keeping MediaMTX's standard container port.
+  mediamtx:
+    image: bluenviron/mediamtx:1
+    environment:
+      MTX_RTSPTRANSPORTS: tcp
+      MTX_WEBRTCADDITIONALHOSTS: "${MEDIAMTX_WEBRTC_HOSTS:-127.0.0.1}"
+    ports:
+      - "8554:8554"
+      - "8891:8889"
+      - "8189:8189/udp"
     restart: unless-stopped
 
   # Full stack: Gazebo Harmonic + SLAM + Nav2 + adapter_sim

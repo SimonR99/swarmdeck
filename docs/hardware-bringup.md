@@ -79,6 +79,30 @@ Set `topics.camera_compressed` in preference to `camera`. A raw stream at full r
 most expensive thing an adapter can subscribe to over a robot's network, and the preview is
 throttled to 5 Hz regardless.
 
+To place detections on the map, configure an RGB-aligned depth source too. Prefer
+`topics.camera_depth` plus `topics.camera_info`; the adapters support `16UC1` depth in
+millimetres and `32FC1` depth in metres. `topics.camera_depth_points` is an alternative
+only when the PointCloud2 is organised and pixel-aligned with RGB—an unordered cloud
+cannot be joined safely to an image bounding box. The depth frame must connect to
+`map_frame` through TF. Stale, sparse, out-of-range, or untransformable samples leave
+`map_position` empty instead of inventing a coordinate.
+
+For ROS 1 robots, the production path runs in two containers on the robot: the adapter
+does detection and sends only boxes/state to the backend, while the media process encodes
+independently and pushes RTSP. From the repository checkout on the robot:
+
+```bash
+export ROBOT_IP=192.168.1.24 ROBOT_ID=tars_0
+export BACKEND_HOST=192.168.1.223
+export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
+export CAMERA_TOPIC=/d400_arm/color/image_raw/compressed
+docker compose -f docker-compose.robot-ros1.yml up -d --build
+```
+
+On the operator host, set `MEDIAMTX_WEBRTC_HOSTS` to its LAN address before starting the
+main Compose stack. TCP 8554 must be reachable from robots and UDP 8189 from browsers.
+The UI proxies `/whep/<robot_id>` to MediaMTX's `/<robot_id>/whep` endpoint.
+
 ## 6. Only now, a second robot
 
 Everything above is per-robot and independent. Fleet problems start here:
@@ -111,8 +135,8 @@ which cannot work across machines.
 
 ## What is still missing regardless
 
-- **No video pipeline.** MediaMTX/WHEP is unbuilt; the 5 Hz JPEG preview is a development
-  fallback, not the <300 ms target.
+- **Video latency is not measured.** The production WebRTC path works on Scout, but the
+  <300 ms target still needs a timestamp-at-capture measurement rather than an estimate.
 - **Collaborative SLAM produces a partial map** at verification thresholds strict enough to
   be accurate. The grid-registration path is the accurate one.
 - **Nothing detects wheel slip in the estimator.** `explore.py` detects a wedged robot

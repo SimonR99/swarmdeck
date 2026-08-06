@@ -1,11 +1,12 @@
 # Hardware readiness
 
-**Short answer: no. This is a simulation stack with no hardware path yet.**
+**Short answer: a hardware path now runs on Scout, but navigation and estimator issues
+remain robot-specific work.**
 
 Everything below is a factual audit, not an estimate of effort. It exists so that "can we
 put this on a robot?" has an answer that does not require reading the whole tree.
 
-## The adapter now exists, and has never met a robot
+## The adapter is live on Scout
 
 `adapters/adapter_ros2/` is the hardware adapter. Unlike `adapter_sim` it hardcodes
 nothing: topic names, frames, rates and the drive deadman all come from a per-robot-type
@@ -19,11 +20,11 @@ composition of transforms recognised by name. `adapter_sim` can compose a chain 
 built that TF tree; a real one has links we do not know about, and hardcoding a path
 through them is exactly how this project once shipped a 0.47 m pose error nobody noticed.
 
-**It has never run against physical hardware.** Seven unit tests cover what is testable
-without a robot — capability advertisement, deep config merge, battery normalisation
-(0..1 vs 0..100 vs NaN), and the teleop deadman. What they cannot test is whether any
-particular topic name, QoS choice or frame is right for your robot. That is what
-`docs/hardware-bringup.md` is for.
+The ROS 1 adapter and Dockerized media publisher have now run against the physical Scout
+Mini (`tars_0`). Its RealSense compressed camera topic feeds both the detector and a
+640×480, 15 fps H.264 RTSP stream; MediaMTX delivers that stream to the dashboard over
+WHEP/WebRTC. See `docs/fleet-status.md` for the robot-specific state and unresolved pose
+drift. Unit tests still cover the protocol behavior independently of hardware.
 
 ## Things that are correct for hardware already
 
@@ -54,8 +55,8 @@ Worth stating, because they are the parts that are usually wrong in a sim-first 
 
 ## Things that are unfinished regardless of platform
 
-- **No video pipeline.** `swarmdeck_media` is empty and MediaMTX is not installed; the 5 Hz
-  JPEG preview is a development fallback, not the <300 ms WHEP target (KNOWN_ISSUES #1).
+- **Video latency is not instrumented.** The WHEP path is working on Scout, but the <300 ms
+  target still needs a capture/display timestamp measurement (KNOWN_ISSUES #1).
 - **The duck detector is a classical colour/shape baseline**, not a trained model, blocked
   on training-data licensing (KNOWN_ISSUES #3).
 - **Collaborative SLAM produces a partial map.** With verification strict enough to be

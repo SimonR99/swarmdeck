@@ -67,8 +67,11 @@ predicted path (dashed). The settings button persists the unattended-warning del
 expected fleet size, adapter identities/endpoints, and perception controls in
 `sessions/settings.json`; the fleet size is consumed on the next Gazebo/adapter start.
 
-The simulation adapter also exposes a 5 Hz JPEG camera preview when MediaMTX/WHEP is not
-installed, so camera frames remain visible during development. A portable RGB-only
+The stack includes MediaMTX for low-latency WHEP/WebRTC video. Set
+`MEDIAMTX_WEBRTC_HOSTS` to the operator host's LAN address when browsers run on other
+machines; robots push H.264 to port 8554. The simulation and hardware adapters retain a
+5 Hz JPEG fallback, so camera frames remain visible if the media service is unavailable.
+A portable RGB-only
 rubber-duck detector publishes normalized boxes over the same adapter contract and the
 camera panel draws them without using Gazebo entity IDs.
 
@@ -386,7 +389,7 @@ sudo apt install ros-jazzy-robot-localization \
                  ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-util
 ```
 
-MediaMTX is still needed for video. `multirobot_map_merge` is deliberately *not* used: it is
+MediaMTX is included in the Docker stack for video. `multirobot_map_merge` is deliberately *not* used: it is
 a ROS node, and the backend is ROS-free by design — see `docs/architecture.md` §1.
 
 **ROS 1 note.** Noetic is EOL and cannot install on Ubuntu 24.04, and

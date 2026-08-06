@@ -4,11 +4,14 @@ Live list. Update as things are resolved.
 
 ## Open
 
-### 1. Production video pipeline unbuilt
+### 1. Production video latency is not instrumented yet
 
-`swarmdeck_media` is an empty package and MediaMTX is not installed, so the target WHEP
-path and its <300 ms latency criterion remain Phase 4 work. Simulation cameras now use a
-verified 5 Hz JPEG preview fallback through the adapter and ROS-free backend.
+The RTSP → MediaMTX → WHEP/WebRTC path is now built and was validated end to end on the
+physical Scout Mini on 2026-08-06: its Docker publisher delivered H.264 640×480 at 15 fps,
+MediaMTX accepted the stream, Chrome reached `readyState=4` with a live video track, and
+the dashboard drew live detector boxes over it. The remaining Phase 4 exit criterion is a
+real end-to-end latency measurement. Burn a capture timestamp into frames and compare it
+at display before claiming the <300 ms target; browser playback alone does not prove it.
 
 ### 2. Registration needs shared coverage
 

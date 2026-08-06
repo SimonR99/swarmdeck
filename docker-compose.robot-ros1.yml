@@ -1,0 +1,47 @@
+# Run this overlay on a ROS 1 robot. The robot's existing drivers and roscore
+# stay on the host; host networking lets these containers join that ROS graph.
+services:
+  adapter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros1
+    image: swarmdeck-robot-ros1:local
+    network_mode: host
+    environment:
+      ROS_MASTER_URI: http://127.0.0.1:11311
+      ROS_IP: "${ROBOT_IP:?set ROBOT_IP to this robot's LAN address}"
+    command:
+      - python3
+      - /app/adapters/adapter_ros1/adapter_ros1.py
+      - --robot-id
+      - "${ROBOT_ID:?set ROBOT_ID}"
+      - --config
+      - "/app/${ROBOT_CONFIG:-adapters/adapter_ros1/config/generic.yaml}"
+      - --host
+      - "${BACKEND_HOST:?set BACKEND_HOST}"
+      - --port
+      - "${BACKEND_PORT:-8080}"
+    restart: unless-stopped
+
+  media:
+    image: swarmdeck-robot-ros1:local
+    depends_on:
+      - adapter
+    network_mode: host
+    environment:
+      ROS_MASTER_URI: http://127.0.0.1:11311
+      ROS_IP: "${ROBOT_IP:?set ROBOT_IP to this robot's LAN address}"
+    command:
+      - python3
+      - /app/adapters/media/ros1_rtsp.py
+      - --robot-id
+      - "${ROBOT_ID:?set ROBOT_ID}"
+      - --topic
+      - "${CAMERA_TOPIC:?set CAMERA_TOPIC to a sensor_msgs/CompressedImage topic}"
+      - --rtsp-url
+      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/${ROBOT_ID}"
+      - --bitrate-kbps
+      - "${VIDEO_BITRATE_KBPS:-1200}"
+      - --fps
+      - "${VIDEO_FPS:-15}"
+    restart: unless-stopped

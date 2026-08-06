@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_COLORS = ["#007aff", "#8944ab", "#008f87", "#c93400", "#d30f72"]
+MAX_ROBOTS = 8
+DEFAULT_COLORS = [
+    "#007aff", "#8944ab", "#008f87", "#c93400",
+    "#d30f72", "#b26a00", "#5865f2", "#2d8a3f",
+]
 
 
 def defaults() -> dict[str, Any]:
@@ -59,7 +63,9 @@ class SettingsStore:
         except (TypeError, ValueError):
             pass
         try:
-            base["robot_count"] = int(max(1, min(5, int(source.get("robot_count", 4)))))
+            base["robot_count"] = int(
+                max(1, min(MAX_ROBOTS, int(source.get("robot_count", 4))))
+            )
         except (TypeError, ValueError):
             pass
         base["detection_enabled"] = bool(source.get("detection_enabled", True))
@@ -74,7 +80,7 @@ class SettingsStore:
         if isinstance(robots, list):
             clean = []
             seen = set()
-            for index, item in enumerate(robots[:5]):
+            for index, item in enumerate(robots[:MAX_ROBOTS]):
                 if not isinstance(item, dict):
                     continue
                 robot_id = str(item.get("id", f"robot_{index}")).strip()[:48]

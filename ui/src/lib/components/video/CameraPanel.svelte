@@ -5,6 +5,7 @@
   import { fleet } from '$lib/stores/fleet.svelte';
   import { session } from '$lib/stores/session.svelte';
   import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
 
   /**
    * WebRTC camera view.
@@ -207,7 +208,7 @@
     <div class="flex items-center gap-2">
       <Radio class="h-3.5 w-3.5" style="color:{color}" />
       <span class="text-[11px] font-semibold tracking-tight" style="color:{color}">
-        {activeId ? activeId.replace(/^robot_/, 'R') : 'No camera'}
+        {activeId ? robotDisplayName(activeId) : 'No camera'}
       </span>
     </div>
     {#if streamState === 'live'}
@@ -240,7 +241,7 @@
           ? 'z-20'
           : 'z-10'}"
         data-active={activeFrame === 0}
-        alt="Live camera for {activeId ?? 'robot'}"
+        alt="Live camera for {activeId ? robotDisplayName(activeId) : 'robot'}"
       />
       <img
         bind:this={imageB}
@@ -248,7 +249,7 @@
           ? 'z-20'
           : 'z-10'}"
         data-active={activeFrame === 1}
-        alt="Live camera buffer for {activeId ?? 'robot'}"
+        alt="Live camera buffer for {activeId ? robotDisplayName(activeId) : 'robot'}"
       />
     {/if}
 
@@ -302,7 +303,7 @@
           actions.switchCamera(r.robot_id);
         }}
       >
-        {r.robot_id.replace(/^robot_/, 'R')}
+        {robotDisplayName(r.robot_id)}
       </button>
     {/each}
     {#if fleet.robots.filter((r) => r.capabilities?.includes('camera')).length === 0}

@@ -61,6 +61,11 @@ def _bridge(mod, cfg_override=None):
     bridge.nav_client = MagicMock() if cfg.get("actions", {}).get("navigate_to_pose") else None
     bridge.mode = "idle"
     bridge._last_drive_at = 0.0
+    bridge._scan_points = None
+    bridge._scan_dirty = False
+    bridge._cloud_points = None
+    bridge._cloud_dirty = False
+    bridge._last_cloud_prepare_at = 0.0
     return bridge
 
 
@@ -136,13 +141,104 @@ def test_drive_watchdog_leaves_an_active_operator_alone(mod):
     assert bridge.mode == "teleop"
 
 
+def test_map_frame_odometry_is_an_explicit_tf_fallback(mod):
+    bridge = _bridge(mod)
+    bridge.map_frame = "map"
+    bridge.base_frame = "os_lidar"
+    bridge._pose_warned = False
+    bridge.tf_buffer = MagicMock()
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
+    msg = MagicMock()
+    msg.header.frame_id = "map"
+    msg.pose.pose.position.x = 1.25
+    msg.pose.pose.position.y = -0.5
+    msg.pose.pose.orientation.x = 0.0
+    msg.pose.pose.orientation.y = 0.0
+    msg.pose.pose.orientation.z = 0.0
+    msg.pose.pose.orientation.w = 1.0
+
+    bridge._on_odom(msg)
+
+    assert bridge.map_pose() == {"x": 1.25, "y": -0.5, "yaw": 0.0}
+    warning = bridge.node.get_logger().warn.call_args[0][0]
+    assert "using direct map-frame odometry" in warning
+    assert "DRIFTS" not in warning
+
+
 def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):
     import yaml
 
-    for name in ("generic", "duckiebot"):
+    for name in ("generic", "duckiebot", "bunker"):
         path = REPO / "adapters" / "adapter_ros2" / "config" / f"{name}.yaml"
         cfg = mod.deep_merge(mod.DEFAULTS, yaml.safe_load(path.read_text()))
         assert cfg["map_frame"] and cfg["base_frame"], f"{name} needs both frames"
         assert cfg["rates"]["state_hz"] > 0
         # The preview cap in the protocol is 5 Hz; never configure faster.
         assert cfg["rates"]["camera_period_s"] >= 0.2, f"{name} exceeds the 5 Hz cap"
+
+
+def test_registered_cloud_alone_advertises_map(mod):
+    bridge = _bridge(mod, {"topics": {"map": "", "map_cloud": "/registered_scan"}})
+    assert "map" in bridge.capabilities()
+
+    neither = _bridge(mod, {"topics": {"map": "", "map_cloud": ""}})
+    assert "map" not in neither.capabilities()
+
+
+class _FakeField:
+    def __init__(self, name: str, offset: int) -> None:
+        self.name = name
+        self.offset = offset
+
+
+def _fake_cloud(points, extra_fields=()):
+    import struct
+
+    names = list(extra_fields) + ["x", "y", "z"]
+    fields = [_FakeField(name, index * 4) for index, name in enumerate(names)]
+    point_step = len(names) * 4
+    data = b"".join(
+        struct.pack("<%df" % len(names), *([0.0] * len(extra_fields)), *point)
+        for point in points
+    )
+    return type("M", (), {"fields": fields, "point_step": point_step, "data": data})()
+
+
+def test_registered_cloud_uses_declared_offsets_and_height_band(mod):
+    bridge = _bridge(mod, {"map_cloud_height_band": {"min_z": 0.0, "max_z": 1.0}})
+    msg = _fake_cloud(
+        [(1.0, 2.0, -0.5), (3.0, 4.0, 0.5), (5.0, 6.0, 2.5)],
+        extra_fields=["intensity"],
+    )
+    bridge._on_map_cloud(msg)
+
+    assert bridge._scan_points.shape == (1, 2)
+    assert bridge._scan_points[0].tolist() == pytest.approx([3.0, 4.0])
+    assert bridge._cloud_points.shape == (3, 3)
+    assert bridge._cloud_points[0].tolist() == pytest.approx([1.0, 2.0, -0.5])
+    assert bridge._cloud_points[1].tolist() == pytest.approx([3.0, 4.0, 0.5])
+    assert bridge._cloud_points[2].tolist() == pytest.approx([5.0, 6.0, 2.5])
+
+
+def test_upload_cloud_uses_shared_xyz_transport(mod, monkeypatch):
+    bridge = _bridge(mod)
+    bridge.http_url = "http://backend"
+    bridge._cloud_points = mod.np.array([[1.25, -2.5, 0.75]], dtype=mod.np.float32)
+    bridge._cloud_dirty = True
+    captured = {}
+
+    class Response:
+        def read(self):
+            return b"{}"
+
+    def urlopen(request, timeout):
+        captured["request"] = request
+        return Response()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", urlopen)
+    bridge.upload_cloud()
+
+    request = captured["request"]
+    assert request.full_url == "http://backend/api/adapter/cloud?robot_id=r0&scale=0.01"
+    decoded = mod.np.frombuffer(mod.zlib.decompress(request.data), dtype=mod.np.int16)
+    assert decoded.reshape(-1, 3).tolist() == [[125, -250, 75]]

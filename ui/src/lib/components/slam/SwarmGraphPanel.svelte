@@ -15,8 +15,7 @@
   import { Link2, Share2, TriangleAlert } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
-
-  const short = (id: string) => id.replace(/^robot_/, 'R');
+  import { robotDisplayName } from '$lib/robotDisplayName';
 
   const rows = $derived(
     Object.entries(mapStore.slamGraphs).sort(([a], [b]) => a.localeCompare(b))
@@ -65,13 +64,13 @@
         <div class="flex items-start justify-between gap-2 text-[10px]">
           <span class="flex items-center gap-1.5 font-medium text-fg-muted">
             <i class="h-2 w-2 rounded-full" style="background:{fleet.colorOf(robotId)}"></i>
-            {short(robotId)}
+            {robotDisplayName(robotId)}
           </span>
           <div class="min-w-0 flex-1 text-right">
             {#if graph.inter_robot.length}
               <div class="text-fg-muted">
                 {#each graph.inter_robot as link, i}<!--
-                  -->{i ? ' · ' : ''}{short(link.other)}<span class="text-fg-dim"
+                  -->{i ? ' · ' : ''}{robotDisplayName(link.other)}<span class="text-fg-dim"
                     >&times;{link.count}</span
                   >{/each}
               </div>

@@ -236,13 +236,10 @@ reasoning. Confirmed: `GET /api/map` decodes to real free/occupied cells, not bl
 `rtabmap-ros`/`octomap-server` were considered and explicitly NOT installed — the
 scan-grid approach needed no new packages on the robot at all.
 
-**Camera added** (also 2026-08-06, same pass): a RealSense D435i was connected and
-`rover_launch/launch/rs_d400.launch` (already installed — `ros-noetic-realsense2-camera`
-via apt, no new install) launched separately, alongside the SLAM stack, not part of the
-trimmed launch file. Confirmed `/d400_arm/color/image_raw` at ~30 Hz.
-`scout_mini.yaml`'s `topics.camera_compressed` now points at
-`/d400_arm/color/image_raw/compressed`; `capabilities` now includes `camera`. The D435i
-also has its own depth cloud (`/d400_arm/depth/color/points`), unused so far.
+**Camera added** (also 2026-08-06, same pass): a RealSense D435i runs separately from the
+trimmed SLAM launch through `launch/scout_camera_low_latency.launch`.
+`scout_mini.yaml`'s `topics.camera_compressed` points at
+`/d400_arm/color/image_raw/compressed`; `capabilities` includes `camera`.
 
 **Production video and detection validated** (2026-08-06): `swarmdeck-media` subscribes
 to that compressed ROS topic inside Docker, produces baseline-profile H.264 at 640×480,
@@ -253,6 +250,16 @@ the initial frame (scores 0.892 and 0.883); during the final live check it conti
 updating the boxes at the configured 5 Hz. Software encoding used about 53 MiB and 29–42%
 of one Xavier CPU core. End-to-end latency is not yet timestamp-instrumented, so this does
 not claim the <300 ms requirement even though the live path is operational.
+
+**Duck map positions are live** (2026-08-06): the low-latency camera profile now enables
+RGB-aligned depth without the USB-expensive point cloud. On this USB 2.1 connection color
+held ~15 Hz and aligned depth ~6.7 Hz. The adapter takes a coherent foreground depth band
+inside each detection box, deprojects it with CameraInfo, and transforms camera XYZ via
+`d400_arm_color_optical_frame` into `odom_lidar`; the server then normalizes that local
+point into the merged map. Live depth+TF probing produced finite camera and map XYZ. No
+duck was in the final camera frame, so the geometry path is hardware-verified but the
+final duck marker still needs the simple visual check of placing one in view. The old
+adapter container remains stopped as `swarmdeck-adapter-pre-duck-map` for rollback.
 
 **⚠ Pose is drifting significantly while the robot sits still.** A few minutes after
 connecting, `tars_0`'s reported pose moved from near-origin to `(x=-1.82, y=6.91,

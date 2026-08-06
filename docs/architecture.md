@@ -363,6 +363,13 @@ real-time baseline combines yellow-body and adjacent orange-beak evidence; the
 licensed, representative real-camera data is available. This keeps transport, UI, and
 real-robot integration unchanged when the model is upgraded.
 
+Hardware adapters join each RGB box to either an aligned depth image plus CameraInfo or
+an organised RGB-aligned PointCloud2. They select a coherent foreground depth band,
+deproject it to camera XYZ, and use tf2 to express the result in the robot's map frame.
+The protocol, backend, and 2D map already treat that optional `map_position` as a
+persistent marker. Invalid or stale depth is bbox-only; it is never replaced by a guessed
+range.
+
 ## 7. Frontend
 
 **Stack:** TypeScript, Svelte, Canvas2D, Vite. No three.js — the map is 2D.

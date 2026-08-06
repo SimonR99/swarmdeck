@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -223,6 +224,23 @@ def robot_state(robot: Any) -> dict[str, Any]:
 
 def fleet_snapshot() -> list[dict[str, Any]]:
     return [robot_state(robot) for robot in registry.robots.values()]
+
+
+def detection_position(robot_id: str, position: Any) -> dict[str, float] | None:
+    """Normalize an adapter-local detection point into the merged-map frame."""
+    if not isinstance(position, dict) or "x" not in position or "y" not in position:
+        return None
+    try:
+        x, y = float(position["x"]), float(position["y"])
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or not math.isfinite(y):
+        return None
+    normalized = {"x": x, "y": y}
+    robot = registry.robots.get(robot_id)
+    if robot is None or robot.coordinate_frame == "merged":
+        return normalized
+    return map_service.robot_to_world(robot_id, normalized)
 
 
 def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | None:
@@ -674,7 +692,9 @@ async def adapter_socket(ws: WebSocket) -> None:
                         "robot_id": msg["robot_id"],
                         "camera": msg.get("camera", "front"),
                         "bbox": item.get("bbox"),
-                        "map_position": item.get("map_position"),
+                        "map_position": detection_position(
+                            msg["robot_id"], item.get("map_position")
+                        ),
                         "first_seen": previous["first_seen"] if previous else now,
                         "last_seen": now,
                         "observations": (previous["observations"] + 1) if previous else 1,

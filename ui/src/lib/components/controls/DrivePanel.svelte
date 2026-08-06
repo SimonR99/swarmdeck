@@ -8,6 +8,7 @@
   import { fleet } from '$lib/stores/fleet.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
   import Badge from '../ui/Badge.svelte';
 
   const activeId = $derived(fleet.selected[0] ?? null);
@@ -217,13 +218,13 @@
         Robot control
         {#if activeId}
           <span class="font-medium" style="color:{fleet.colorOf(activeId)}">
-            {activeId.replace(/^robot_/, 'R')}
+            {robotDisplayName(activeId)}
           </span>
         {/if}
       </div>
       <div class="mt-0.5 text-[9px] text-fg-dim">
         {#if fleet.selected.length > 1}
-          Drives {activeId?.replace(/^robot_/, 'R')} only · {fleet.selected.length} selected
+          Drives {activeId ? robotDisplayName(activeId) : ''} only · {fleet.selected.length} selected
         {:else}
           Hold to drive · release to stop
         {/if}

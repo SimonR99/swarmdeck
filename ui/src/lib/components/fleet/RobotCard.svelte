@@ -6,6 +6,7 @@
   import StatusDot from '../ui/StatusDot.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
   import type { RobotState } from '$lib/types/protocol';
 
   let { robot, unattendedThreshold = 45 }: { robot: RobotState; unattendedThreshold?: number } =
@@ -38,7 +39,7 @@
           : robot.mode.toUpperCase()
   );
 
-  const shortName = $derived(robot.robot_id.replace(/^robot_/, 'R'));
+  const shortName = $derived(robotDisplayName(robot.robot_id));
 </script>
 
 <Card

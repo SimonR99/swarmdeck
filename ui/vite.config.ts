@@ -14,7 +14,13 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://localhost:8080',
-      '/ws': { target: 'ws://localhost:8080', ws: true }
+      '/ws': { target: 'ws://localhost:8080', ws: true },
+      // MediaMTX exposes WHEP as /<stream>/whep. Keep the UI's stable
+      // /whep/<robot> route and perform that transport-specific rewrite here.
+      '/whep': {
+        target: process.env.MEDIAMTX_WHEP_URL ?? 'http://localhost:8891',
+        rewrite: (path) => path.replace(/^\/whep\/([^/]+)$/, '/$1/whep')
+      }
     }
   }
 });

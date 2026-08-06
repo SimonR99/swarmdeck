@@ -5,7 +5,10 @@ export const DEFAULT_ROBOT_COLORS = [
   '#8944ab',
   '#008f87',
   '#c93400',
-  '#d30f72'
+  '#d30f72',
+  '#b26a00',
+  '#5865f2',
+  '#2d8a3f'
 ];
 
 const fallback: AppSettings = {
