@@ -164,6 +164,11 @@ Two things worth knowing if you pick this up:
 To make the simulation comparison meaningful, Gazebo's lidar would have to emit per-point
 timestamps — a change to the sensor model, not to DLIO.
 
+**Sample size caveat:** these numbers come from ONE 90 s window with three robots that
+moved far enough to score. The direction of the result is consistent with deskew being
+disabled, but treat the exact figures as indicative, not as a benchmark. Re-run
+`odomcompare.py` over several windows before quoting them anywhere.
+
 ## Resolved
 
 ### Swarm-SLAM: real inter-robot loop closures, and five silent traps
