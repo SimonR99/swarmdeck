@@ -1,11 +1,8 @@
 <script lang="ts">
   import {
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    ArrowUp,
     CircleSlash,
     Crosshair,
+    Gauge,
     Octagon
   } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
@@ -17,9 +14,24 @@
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
   const canDrive = $derived(Boolean(activeId && fleet.can(activeId, 'navigate') && robot?.online));
 
+  type Direction = 'up' | 'down' | 'left' | 'right';
+
+  const MAX_ANGULAR_SPEED = 0.8;
+  const JOYSTICK_RADIUS = 45;
+  const JOYSTICK_DEAD_ZONE = 0.08;
+
   let driveTimer: number | null = null;
   let driving = false;
   let driveLabel = $state('Ready');
+  let maxSpeed = $state(0.3);
+  let joystickX = $state(0);
+  let joystickY = $state(0);
+  let joystickPointer = $state<number | null>(null);
+  let joystickElement = $state<HTMLButtonElement>();
+
+  // Multiple keyboard inputs can be active at once, so diagonal WASD driving
+  // remains available alongside the touch-first joystick.
+  const keyDirs = new Set<Direction>();
 
   function stopTimer() {
     if (driveTimer !== null) window.clearInterval(driveTimer);
@@ -34,59 +46,153 @@
     driveLabel = 'Ready';
   }
 
-  function startDrive(linear: number, angular: number, label: string, event?: PointerEvent) {
+  function vectorFor(dirs: Set<Direction>): [number, number] {
+    let linear = 0;
+    if (dirs.has('up') && !dirs.has('down')) linear = maxSpeed;
+    else if (dirs.has('down') && !dirs.has('up')) linear = -maxSpeed;
+
+    let angular = 0;
+    if (dirs.has('left') && !dirs.has('right')) angular = MAX_ANGULAR_SPEED;
+    else if (dirs.has('right') && !dirs.has('left')) angular = -MAX_ANGULAR_SPEED;
+
+    return [linear, angular];
+  }
+
+  function applyDeadZone(value: number): number {
+    const magnitude = Math.abs(value);
+    if (magnitude <= JOYSTICK_DEAD_ZONE) return 0;
+    return Math.sign(value) * ((magnitude - JOYSTICK_DEAD_ZONE) / (1 - JOYSTICK_DEAD_ZONE));
+  }
+
+  function currentVector(): [number, number] {
+    if (joystickPointer !== null) {
+      return [
+        -applyDeadZone(joystickY) * maxSpeed,
+        -applyDeadZone(joystickX) * MAX_ANGULAR_SPEED
+      ];
+    }
+    return vectorFor(keyDirs);
+  }
+
+  function labelFor(linear: number, angular: number): string {
+    const parts: string[] = [];
+    if (linear > 0) parts.push('Forward');
+    else if (linear < 0) parts.push('Reverse');
+    if (angular > 0) parts.push('left');
+    else if (angular < 0) parts.push('right');
+    return parts.length ? parts.join(' ') : 'Ready';
+  }
+
+  function updateDrive() {
     if (!activeId || !canDrive) return;
-    event?.preventDefault();
-    stopTimer();
+    const [linear, angular] = currentVector();
+    if (linear === 0 && angular === 0) {
+      stopDrive();
+      return;
+    }
     navigation.cancelGoalMode();
     actions.drive(activeId, linear, angular);
     driving = true;
-    driveLabel = label;
+    driveLabel = labelFor(linear, angular);
+    stopTimer();
     driveTimer = window.setInterval(() => {
       if (activeId) actions.drive(activeId, linear, angular);
     }, 120);
   }
 
   function hardStop() {
+    keyDirs.clear();
+    resetJoystick();
     stopDrive(true);
     if (activeId) actions.cancelGoal(activeId);
   }
 
-  function keyVector(key: string): [number, number, string] | null {
-    if (key === 'ArrowUp' || key.toLowerCase() === 'w') return [0.28, 0, 'Forward'];
-    if (key === 'ArrowDown' || key.toLowerCase() === 's') return [-0.22, 0, 'Reverse'];
-    if (key === 'ArrowLeft' || key.toLowerCase() === 'a') return [0, 0.8, 'Turn left'];
-    if (key === 'ArrowRight' || key.toLowerCase() === 'd') return [0, -0.8, 'Turn right'];
+  function keyDirection(key: string): Direction | null {
+    if (key === 'ArrowUp' || key.toLowerCase() === 'w') return 'up';
+    if (key === 'ArrowDown' || key.toLowerCase() === 's') return 'down';
+    if (key === 'ArrowLeft' || key.toLowerCase() === 'a') return 'left';
+    if (key === 'ArrowRight' || key.toLowerCase() === 'd') return 'right';
     return null;
+  }
+
+  function updateJoystick(event: PointerEvent) {
+    if (event.pointerId !== joystickPointer || !joystickElement) return;
+    event.preventDefault();
+    const rect = joystickElement.getBoundingClientRect();
+    let x = event.clientX - (rect.left + rect.width / 2);
+    let y = event.clientY - (rect.top + rect.height / 2);
+    const distance = Math.hypot(x, y);
+    if (distance > JOYSTICK_RADIUS) {
+      x = (x / distance) * JOYSTICK_RADIUS;
+      y = (y / distance) * JOYSTICK_RADIUS;
+    }
+    joystickX = x / JOYSTICK_RADIUS;
+    joystickY = y / JOYSTICK_RADIUS;
+    updateDrive();
+  }
+
+  function startJoystick(event: PointerEvent) {
+    if (!activeId || !canDrive) return;
+    event.preventDefault();
+    joystickPointer = event.pointerId;
+    joystickElement?.setPointerCapture(event.pointerId);
+    updateJoystick(event);
+  }
+
+  function resetJoystick(pointerId?: number) {
+    if (pointerId !== undefined && pointerId !== joystickPointer) return;
+    joystickPointer = null;
+    joystickX = 0;
+    joystickY = 0;
+  }
+
+  function changeMaxSpeed(event: Event) {
+    maxSpeed = Number((event.currentTarget as HTMLInputElement).value);
+    if (driving) updateDrive();
   }
 
   $effect(() => {
     const id = activeId;
     const down = (event: KeyboardEvent) => {
       if (event.repeat || event.target instanceof HTMLInputElement) return;
-      const vector = keyVector(event.key);
-      if (!vector) return;
+      const direction = keyDirection(event.key);
+      if (!direction) return;
       event.preventDefault();
-      startDrive(...vector);
+      keyDirs.add(direction);
+      updateDrive();
     };
     const up = (event: KeyboardEvent) => {
-      if (keyVector(event.key)) stopDrive();
+      const direction = keyDirection(event.key);
+      if (!direction) return;
+      keyDirs.delete(direction);
+      updateDrive();
     };
-    const pointerUp = () => stopDrive();
+    const pointerUp = (event: PointerEvent) => {
+      if (event.pointerId !== joystickPointer) return;
+      resetJoystick(event.pointerId);
+      updateDrive();
+    };
+    const clearAll = () => {
+      keyDirs.clear();
+      resetJoystick();
+      stopDrive();
+    };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
     window.addEventListener('pointerup', pointerUp);
     window.addEventListener('pointercancel', pointerUp);
-    window.addEventListener('blur', pointerUp);
+    window.addEventListener('blur', clearAll);
     return () => {
       stopTimer();
       if (id && driving) actions.drive(id, 0, 0);
       driving = false;
+      keyDirs.clear();
+      resetJoystick();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
       window.removeEventListener('pointerup', pointerUp);
       window.removeEventListener('pointercancel', pointerUp);
-      window.removeEventListener('blur', pointerUp);
+      window.removeEventListener('blur', clearAll);
     };
   });
 </script>
@@ -96,7 +202,7 @@
     <div>
       <!--
         Name the robot being driven. The controls act on `fleet.selected[0]`, so
-        with several robots selected the arrows move whichever happens to be
+        with several robots selected manual input moves whichever happens to be
         first — which presents as "this robot will not move" while a different
         one drives off. Saying which one costs nothing and removes the whole
         class of confusion.
@@ -123,49 +229,70 @@
   </header>
 
   {#if robot && activeId}
-    <div class="grid grid-cols-[1fr_108px] gap-3 p-3">
-      <div class="min-w-0">
+    <div class="grid grid-cols-[132px_1fr] gap-3 p-3">
+      <div>
         <div class="mb-2 flex items-center justify-between">
           <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">Manual</span>
           <span class="text-[9px] text-fg-dim">WASD / arrows</span>
         </div>
 
-        <div class="grid w-[116px] grid-cols-3 gap-1">
-          <span></span>
+        <div class="relative mx-auto h-[124px] w-[124px]">
           <button
-            aria-label="Drive forward"
+            bind:this={joystickElement}
+            type="button"
+            aria-label="Drive joystick. Push up or down to drive and left or right to turn."
             disabled={!canDrive}
-            class="drive-key"
-            onpointerdown={(event) => startDrive(0.28, 0, 'Forward', event)}
-          ><ArrowUp class="h-4 w-4" /></button>
-          <span></span>
-          <button
-            aria-label="Turn left"
-            disabled={!canDrive}
-            class="drive-key"
-            onpointerdown={(event) => startDrive(0, 0.8, 'Turn left', event)}
-          ><ArrowLeft class="h-4 w-4" /></button>
-          <button aria-label="Stop robot" class="drive-key text-danger" onclick={hardStop}>
-            <Octagon class="h-4 w-4" />
+            class:joystick-active={joystickPointer !== null}
+            class="joystick-base"
+            onpointerdown={startJoystick}
+            onpointermove={updateJoystick}
+          >
+            <span class="joystick-forward" aria-hidden="true">FWD</span>
+            <span class="joystick-reverse" aria-hidden="true">REV</span>
+            <span
+              class="joystick-thumb"
+              style="transform: translate({joystickX * JOYSTICK_RADIUS}px, {joystickY * JOYSTICK_RADIUS}px)"
+              aria-hidden="true"
+            ></span>
           </button>
-          <button
-            aria-label="Turn right"
-            disabled={!canDrive}
-            class="drive-key"
-            onpointerdown={(event) => startDrive(0, -0.8, 'Turn right', event)}
-          ><ArrowRight class="h-4 w-4" /></button>
-          <span></span>
-          <button
-            aria-label="Drive backward"
-            disabled={!canDrive}
-            class="drive-key"
-            onpointerdown={(event) => startDrive(-0.22, 0, 'Reverse', event)}
-          ><ArrowDown class="h-4 w-4" /></button>
         </div>
+
+        <button
+          type="button"
+          aria-label="Stop robot"
+          disabled={!canDrive}
+          class="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-[4px] border
+                 border-danger/40 bg-danger/5 text-[10px] font-semibold text-danger transition-colors
+                 hover:bg-danger/10 disabled:opacity-40"
+          onclick={hardStop}
+        >
+          <Octagon class="h-3.5 w-3.5" /> Stop
+        </button>
       </div>
 
       <div class="border-l border-border pl-3">
-        <div class="mb-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+        <div class="mb-2 flex items-center justify-between">
+          <span class="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+            <Gauge class="h-3 w-3" /> Max speed
+          </span>
+          <output class="tabular text-[10px] font-semibold text-fg">{maxSpeed.toFixed(2)}</output>
+        </div>
+        <input
+          type="range"
+          min="0.1"
+          max="0.6"
+          step="0.05"
+          value={maxSpeed}
+          disabled={!canDrive}
+          aria-label="Maximum manual drive speed in metres per second"
+          class="speed-slider"
+          oninput={changeMaxSpeed}
+        />
+        <div class="mt-0.5 flex justify-between text-[8px] text-fg-dim">
+          <span>0.10</span><span>m/s</span><span>0.60</span>
+        </div>
+
+        <div class="mb-2 mt-3 border-t border-border pt-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
           Point nav
         </div>
         <button
@@ -189,9 +316,6 @@
         >
           <CircleSlash class="h-3 w-3" /> Cancel
         </button>
-        <div class="mt-2 text-[9px] leading-4 text-fg-dim">
-          {navigation.goalMode ? 'Select a free point on the map.' : 'Plan with Nav2 on the live map.'}
-        </div>
       </div>
     </div>
   {:else}
@@ -202,27 +326,69 @@
 </section>
 
 <style>
-  .drive-key {
-    display: grid;
-    width: 36px;
-    height: 36px;
-    place-items: center;
+  .joystick-base {
+    position: relative;
+    display: block;
+    width: 124px;
+    height: 124px;
     border: 1px solid var(--color-border);
-    border-radius: 4px;
-    background: var(--color-surface);
-    color: var(--color-fg-muted);
-    transition: background 120ms, border-color 120ms, color 120ms;
+    border-radius: 9999px;
+    overflow: hidden;
+    background:
+      linear-gradient(var(--color-border), var(--color-border)) center / 1px 78% no-repeat,
+      linear-gradient(90deg, var(--color-border), var(--color-border)) center / 78% 1px no-repeat,
+      radial-gradient(circle, var(--color-surface) 0 47%, var(--color-surface-2) 100%);
+    box-shadow: inset 0 2px 7px rgb(0 0 0 / 0.08);
     touch-action: none;
+    transition: border-color 120ms, box-shadow 120ms;
   }
-  .drive-key:hover:not(:disabled) {
-    background: var(--color-surface-2);
+  .joystick-base:hover:not(:disabled),
+  .joystick-active {
     border-color: var(--color-border-strong);
-    color: var(--color-fg);
+    box-shadow: inset 0 2px 7px rgb(0 0 0 / 0.1), 0 0 0 2px rgb(11 92 173 / 0.08);
   }
-  .drive-key:active:not(:disabled) {
-    background: var(--color-surface-3);
+  .joystick-base:disabled {
+    opacity: 0.4;
   }
-  .drive-key:disabled {
+  .joystick-forward,
+  .joystick-reverse {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--color-fg-dim);
+    font-size: 7px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+  .joystick-forward {
+    top: 8px;
+  }
+  .joystick-reverse {
+    bottom: 8px;
+  }
+  .joystick-thumb {
+    position: absolute;
+    top: 44px;
+    left: 44px;
+    width: 34px;
+    height: 34px;
+    border: 1px solid color-mix(in srgb, var(--color-accent), black 10%);
+    border-radius: 9999px;
+    background: var(--color-accent);
+    box-shadow: 0 3px 8px rgb(0 0 0 / 0.22), inset 0 1px 0 rgb(255 255 255 / 0.28);
+    pointer-events: none;
+    transition: transform 45ms linear;
+  }
+  .joystick-active .joystick-thumb {
+    transition: none;
+  }
+  .speed-slider {
+    width: 100%;
+    height: 28px;
+    accent-color: var(--color-accent);
+    touch-action: pan-x;
+  }
+  .speed-slider:disabled {
     opacity: 0.4;
   }
 </style>
