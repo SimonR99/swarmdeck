@@ -7,8 +7,8 @@ maintained spec, and two of these four machines are shared with other people's w
 
 | Robot | SSH alias | Platform | Reachable | `rclpy` (native) | `rospy` (native) | SwarmDeck cloned | Adapter config |
 |---|---|---|---|---|---|---|---|
-| tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM+base driver launched, `adapter_ros1` connected as `tars_0` |
-| botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (docker-only, containers busy) | no | yes, `/ssd/swarmdeck` | not started |
+| tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM, map, camera, teleop and `navigate_to` all verified working |
+| botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (Docker only) | no | yes, `/ssd/swarmdeck` | **configured**: SuperOdometry + registered-cloud map, not launched |
 | aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (docker-only, containers busy) | no | yes, `/ssd/swarmdeck` | not started |
 | spot | `spot` | Boston Dynamics Spot + Orin payload | **no** | unknown | unknown | not attempted | not started |
 
@@ -16,7 +16,7 @@ maintained spec, and two of these four machines are shared with other people's w
 section). It's still the wrong tool for tars specifically, since tars's actual autonomy
 stack is ROS 1; `adapters/adapter_ros1/` (new this pass) is what actually reaches it
 without a bridge. botman and aslan still have no native ROS of either generation —
-`rclpy`/`rospy` only exist inside their in-use Docker containers.
+`rclpy`/`rospy` exist only inside their Docker images.
 
 ---
 
@@ -190,17 +190,29 @@ each drive test (once with a person visible nearby — held off until confirmed 
 Every test used a small (0.5-1.5 m) goal computed from the robot's *live* pose at send
 time, not a fixed point, given the pose drift below.
 
-**Open, needs a decision, not more unsupervised trial-and-error on the robot:** getting
-`navigate_to` to actually drive needs either (a) publishing a constant/simple value to
-`/speed` (`std_msgs/Float32`) while `nav_status == "active"`, keeping `autonomyMode:
-false` — untried, `speedHandler` in `pathFollower.cpp` suggests this should work but
-**only fires `if (autonomyMode && ...)`**, i.e. it may need `autonomyMode: true` too,
-which reopens problem 2 above; or (b) switching `adapter_ros1.py`'s topic-based nav path
-to publish `/setpoint_position/local` (relative to the vehicle) instead of
-`/move_base_simple/goal` (absolute) when `autonomyMode: true` is in use — a real,
-different implementation, not a config change. Read
-`local_planner_agx_scout.launch`/`pathFollower.cpp` in `mist_ws` before attempting
-either; this CMU stack's dual goal-interface is not documented anywhere else.
+**Resolved** (later same day): neither option above was it. `speedHandler`'s `/speed`
+guard was correctly flagged as suspicious — confirmed it does require `autonomyMode:
+true`, so it was dropped. The actual fix came from reading one function further:
+`joystickHandler` sets `joySpeed = |axes[1]|` **completely unconditionally** — no
+`autonomyMode` check at all, unlike `/speed` and the `autonomyMode` branch. That's the
+one speed input this stack has that doesn't fight the goal source. `adapter_ros1.py`
+gained `topics.nav_joy`: publishes a fake `sensor_msgs/Joy` (`axes[1] =
+nav_joy_throttle`, default 0.5) every state tick while `nav_status == "active"`, zero
+otherwise (`HardwareBridge._pump_nav_joy`) — republished continuously rather than once,
+since this build's joystick-staleness timeout exists in source but is commented out, so
+a one-shot publish would otherwise latch forever. `autonomyMode` stays `false`, so the
+goal source is still `goalX/Y` via `/move_base_simple/goal`, exactly what `topics.nav_goal`
+already sends — zero changes needed there.
+
+**Verified live, supervised, with a fresh camera check immediately before the drive**
+(operator physically beside the robot): sent a real 1.5 m goal computed from the robot's
+live pose. `/cmd_vel` showed genuine smoothly-ramping `linear.x` (the `smoothVelocityGain`
+curve, 0 → 0.28 m/s, still accelerating when the goal was reached), pose moved from
+`(-1.955, 6.663)` to `(-1.199, 5.264)`, `nav_status` transitioned `active` → `succeeded`
+at the correct distance, and the robot stopped cleanly. `navigate_to` is now genuinely
+functional on tars, not just wired — the only caveat carried forward is the pose-drift
+warning below, since goal coordinates are expressed in that same drifting frame, and the
+5 m `adjacentRange` local-only horizon (no `gbplanner`).
 
 **Map is now live too**: LVI-SAM has no 2D grid of its own, so `adapter_ros1.py` forwards
 `/lvi_sam/lidar/mapping/cloud_registered` (`topics.map_cloud`) and the backend raytraces
@@ -259,17 +271,18 @@ real `navigate_to` goal, whose target is expressed in this same drifting frame.
 (the ssh alias resolves `botman.local` via mDNS to one of these). Same tagged
 `192.168.2.2/24` sub-interface as the other two robots — see the VLAN note under scout.
 
-**Current use: active — do not disrupt.** Four SSH sessions from `192.168.1.109` are
-logged in as the shared `botman` user, and two containers were running at the time of
-this audit:
+**Current use: idle as of 2026-08-06 19:05 EDT.** No users were logged in and no
+containers were running when the SwarmDeck configuration audit began. An earlier check
+the same day found four SSH sessions and these two containers, so always re-check before
+starting anything:
 - `dinonav_ros2_2` (`dinonav_ros2:dev`, up ~1 h) — `/ssd/VNMs/DinoNav` mounted, GPU
   passthrough, X11 forwarded.
 - `bunker_super_odom` (`bunker_super_odom:dev`, up ~2 h) — `/ssd/mist_ws` mounted, same
   GPU/X11 setup; two of the four sessions are `docker exec -it` shells attached to it.
 
-This looks like someone actively running SuperOdometry-based SLAM and DinoNav navigation
-on the real robot. Nothing was stopped, restarted, or exec'd into on this container during
-terrain prep, and any future work here should check `who`/`docker ps` again first.
+That earlier state was a SuperOdometry-based SLAM and DinoNav navigation run. The
+SwarmDeck audit used read-only SSH commands only: nothing in `/ssd/mist_ws`, Docker, or
+the ROS graph was changed, and future work must still check `who`/`docker ps` first.
 
 **ROS state:** no native `/opt/ros` at all — this robot runs ROS 2 exclusively through
 Docker. Images relevant to navigation/SLAM: `bunker:dev`, `bunker_super_odom:dev`,
@@ -280,12 +293,19 @@ standard workflow is `cd /ssd/mist_ws && ./docker_setup.sh` (also present under
 workspace (`control`, `driver`, plus `build`/`install`) — the MIST lab's shared multi-robot
 codebase, not SwarmDeck-specific.
 
-**Gap to a working adapter:** `rclpy` only exists inside these project-specific
-containers, none of which currently have `websockets`/`pyyaml` installed, and installing
-into a live, in-use `--rm` container wouldn't persist anyway. The adapter needs its own
-image (or an exec into `bunker_super_odom` once it's safe to touch, with deps installed
-each session) — not attempted here, both because it wasn't necessary for "get the code
-onto the robot" and because the machine is mid-use.
+**SwarmDeck configuration is ready, but deliberately not launched.** Botman uses
+SuperOdometry in SLAM mode (`localization_mode: false`) with Ouster lidar/IMU. It
+publishes `/laser_odometry`, high-rate `/state_estimation`, `/registered_scan`, and TF
+`map -> os_lidar`; the Bunker base consumes `/cmd_vel`. There is no OccupancyGrid and no
+TF connection to the driver's independent `odom -> base_link` tree. SwarmDeck therefore
+uses `os_lidar` for pose and raytraces the registered scan server-side. See
+`docs/botman.md` and `adapters/adapter_ros2/config/bunker.yaml` for the source-by-source
+audit.
+
+The adapter has its own generic Humble image and does not install anything into MIST's
+image. `docker-compose.robot-botman.yml` mounts `/ssd/mist_ws` read-only and calls its
+existing `rover_launch bunker_gnm.launch.py` interface. First launch remains an
+operator-supervised hardware step.
 
 **SwarmDeck terrain prepared:**
 - Cloned to `/ssd/swarmdeck`.
@@ -293,6 +313,8 @@ onto the robot" and because the machine is mid-use.
   were already present at the system Python level.
 - `python3 adapter_ros2.py --help` fails at `import rclpy`, as expected — no native ROS 2
   exists outside the containers above.
+- No files in that checkout or in `/ssd/mist_ws` were changed during the Botman audit;
+  all new configuration is in the operator's SwarmDeck worktree.
 
 ---
 
@@ -373,19 +395,14 @@ On each of the three reachable robots:
   against a live `roscore` starts touching tars's real ROS graph (even before sending any
   `drive` command, TF/odometry subscriptions begin flowing), which deserves an explicit
   go-ahead rather than happening as a side effect of "prepare the terrain."
-- **botman/aslan still have no `rclpy`/`rospy` access set up.** Both need a dedicated
-  container (their existing `bunker*` images are shared, in-use, and `--rm`, so anything
-  installed into them disappears on exit and risks another person's live session). This
-  is real bring-up work, matches `docs/hardware-bringup.md` step 0-1, and deserves a robot
-  in hand and nobody mid-SLAM-run on it.
-- **No `adapters/adapter_ros2/config/<robot>.yaml` for the bunkers.** Unlike scout, their
-  driver stacks weren't read file-by-file this pass — `generic.yaml` is the documented
-  starting point, but filling it in properly means reading real topic names off the
-  `bunker`/`bunker_super_odom` containers, and neither was safe to interrupt for that here.
-  `scout_mini.yaml` (written this pass, see the scout section above) was derived purely by
-  reading `mist_ws`'s launch/config files, not by querying a running graph — treat its
-  topic and frame names as a documented hypothesis, not a verified fact, until someone runs
-  `rostopic echo`/`hz` against them.
+- **Botman has not been launched from SwarmDeck.** Its dedicated adapter image and config
+  are ready, but starting the base driver changes the robot to commanded mode and must be
+  done with an operator and physical e-stop. Aslan still needs the same file-by-file audit
+  and dedicated adapter setup.
+- **No `adapters/adapter_ros2/config/<robot>.yaml` exists for Aslan.** Botman's driver and
+  SLAM sources were read file-by-file once it became idle; Aslan's were not. Botman's
+  values remain a documented source-derived hypothesis until the first supervised live
+  `ros2 topic hz`/TF check.
 - **No sudo/system-package changes, no touching `bunker`/`bunker_super_odom`/
   `dinonav_ros2_2` containers, no killing sessions.** botman and aslan had other people
   actively working on them during this pass.
@@ -403,7 +420,8 @@ running), run `adapter_ros1.py --robot-id tars_0 --config config/scout_mini.yaml
 doesn't. `navigate_to_pose` has no real target yet either way — that needs a translation
 layer onto gbplanner/RosBuzz, not a config change.
 
-For the bunkers, coordinate with whoever is running
-`dinonav_ros2_2`/`bunker_super_odom`/`bunker` before building or attaching anything to
-those containers, then read their driver stacks the same way this pass did for scout
-before writing `botman.yaml`/`aslan.yaml`.
+For Botman, re-check `who` and `docker ps`, put an operator at the e-stop, then use the
+self-contained command in `docs/botman.md`; validate `/state_estimation`,
+`/registered_scan`, `map -> os_lidar`, the 2D height band, and the deadman in that order.
+For Aslan, coordinate with whoever is using its `bunker` container and repeat Botman's
+read-only source audit before writing a configuration.
