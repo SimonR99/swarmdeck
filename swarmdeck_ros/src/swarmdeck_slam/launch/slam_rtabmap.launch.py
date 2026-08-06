@@ -66,6 +66,9 @@ def rtab(value):
 def generate_launch_description() -> LaunchDescription:
     ns = LaunchConfiguration("namespace")
     use_sim = LaunchConfiguration("use_sim_time")
+    lidar_x = LaunchConfiguration("lidar_x")
+    lidar_z = LaunchConfiguration("lidar_z")
+    deskew = LaunchConfiguration("deskew")
     use_camera = LaunchConfiguration("use_camera")
     force_3dof = LaunchConfiguration("force_3dof")
     range_max = LaunchConfiguration("range_max")
@@ -105,7 +108,7 @@ def generate_launch_description() -> LaunchDescription:
         # smear it removes is real: a 10 Hz scan taken while turning at 0.8 rad/s
         # sweeps 4.6 deg during one revolution, which at 10 m is 0.8 m of
         # distortion registered as though it were structure.
-        "deskewing": False,
+        "deskewing": PythonExpression(["'", deskew, "' == 'true'"]),
         # Hold initialisation until the IMU has given a gravity direction, so
         # roll and pitch start observed rather than assumed.
         "wait_imu_to_init": True,
@@ -199,6 +202,23 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("namespace", default_value="robot_0"),
+            # Lidar mount, metres, relative to base_link. Arguments rather than
+            # constants because these are the simulated robot's numbers: on
+            # hardware they come from that unit's URDF or a calibration, and a
+            # wrong extrinsic tilts every scan in a way SLAM cannot recover
+            # from. See docs/hardware-readiness.md.
+            # De-skewing. FALSE by default only because Gazebo's cloud carries
+            # no per-point timestamps (verified: fields are x y z intensity
+            # ring), so there is nothing to interpolate against and enabling it
+            # made icp_odometry stop publishing after two clouds.
+            #
+            # SET TRUE ON HARDWARE. Every driver worth using stamps points, and
+            # the distortion this removes is real: a 10 Hz sweep taken while
+            # turning at 0.8 rad/s smears 4.6 deg, which at 10 m is 0.8 m of
+            # structure that never existed.
+            DeclareLaunchArgument("deskew", default_value="false"),
+            DeclareLaunchArgument("lidar_x", default_value="-0.07"),
+            DeclareLaunchArgument("lidar_z", default_value="0.402"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument(
                 "use_camera",
@@ -244,7 +264,7 @@ def generate_launch_description() -> LaunchDescription:
                 name="lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", "-0.07", "--z", "0.402",
+                    "--x", lidar_x, "--z", lidar_z,
                     "--frame-id", [ns, "/base_link"],
                     "--child-frame-id", [ns, "/base_link/lidar"],
                 ],

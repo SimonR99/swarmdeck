@@ -1,0 +1,31 @@
+# A Duckiebot DB21 with a SwarmDeck lidar payload — the hardware counterpart of
+# the simulated fleet. Topic names follow what the robot's own drivers publish,
+# NOT what Gazebo publishes: this file exists precisely so that difference lives
+# in configuration rather than in code.
+robot_type: duckiebot_db21
+footprint_radius: 0.35
+
+# REP-105 names. Change these if the robot's localisation stack uses others —
+# the pose is a tf2 lookup between exactly this pair.
+map_frame: map
+base_frame: base_link
+
+topics:
+  odom: odom
+  map: map
+  plan: plan
+  cmd_vel: cmd_vel
+  battery: battery_state
+  # Prefer compressed on a real network. Leave `camera` empty when this is set.
+  camera_compressed: camera/image_raw/compressed
+  camera: ""
+
+actions:
+  navigate_to_pose: navigate_to_pose
+
+rates:
+  state_hz: 5.0
+  map_period_s: 2.0
+  camera_period_s: 0.2
+
+drive_timeout_s: 0.45

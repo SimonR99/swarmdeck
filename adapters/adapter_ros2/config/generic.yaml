@@ -1,0 +1,28 @@
+# Minimal starting point for an unknown ROS 2 robot. Everything optional is
+# disabled: an adapter must never advertise a capability it cannot honour
+# (protocol rule 4), so empty topics mean the GUI simply shows no control for
+# that function rather than showing one that times out.
+robot_type: generic
+footprint_radius: 0.35
+
+map_frame: map
+base_frame: base_link
+
+topics:
+  odom: odom
+  map: map
+  plan: ""
+  cmd_vel: cmd_vel
+  battery: ""
+  camera: ""
+  camera_compressed: ""
+
+actions:
+  navigate_to_pose: navigate_to_pose
+
+rates:
+  state_hz: 5.0
+  map_period_s: 2.0
+  camera_period_s: 0.2
+
+drive_timeout_s: 0.45

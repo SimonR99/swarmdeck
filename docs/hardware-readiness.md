@@ -5,16 +5,25 @@
 Everything below is a factual audit, not an estimate of effort. It exists so that "can we
 put this on a robot?" has an answer that does not require reading the whole tree.
 
-## The blocker: there is no hardware adapter
+## The adapter now exists, and has never met a robot
 
-`adapters/` contains `adapter_mock` (synthetic) and `adapter_sim` (Gazebo). That is all.
-The README previously claimed adapters for `ros2`, `ros1` and `spot`; they have never
-existed. The adapter is the **only** component that speaks both a robot's native interface
-and the SwarmDeck protocol, so without one there is nothing to connect a real robot to.
+`adapters/adapter_ros2/` is the hardware adapter. Unlike `adapter_sim` it hardcodes
+nothing: topic names, frames, rates and the drive deadman all come from a per-robot-type
+YAML (`config/generic.yaml`, `config/duckiebot.yaml`), because a real robot's driver names
+its own topics and its URDF names its own frames. Capabilities are derived from what is
+actually configured, so a robot with no camera advertises none rather than advertising one
+that times out.
 
-What a hardware adapter has to do is fully specified — `adapters/protocol/README.md` is the
-contract of record, and `adapter_sim` is a complete working reference at ~700 lines. The
-work is real but bounded, and none of it requires changing the backend.
+The pose is a **tf2 lookup** between the configured `map_frame` and `base_frame`, not a
+composition of transforms recognised by name. `adapter_sim` can compose a chain because we
+built that TF tree; a real one has links we do not know about, and hardcoding a path
+through them is exactly how this project once shipped a 0.47 m pose error nobody noticed.
+
+**It has never run against physical hardware.** Seven unit tests cover what is testable
+without a robot — capability advertisement, deep config merge, battery normalisation
+(0..1 vs 0..100 vs NaN), and the teleop deadman. What they cannot test is whether any
+particular topic name, QoS choice or frame is right for your robot. That is what
+`docs/hardware-bringup.md` is for.
 
 ## Things that are correct for hardware already
 

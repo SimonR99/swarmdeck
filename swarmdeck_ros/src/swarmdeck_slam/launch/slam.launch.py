@@ -47,6 +47,8 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description() -> LaunchDescription:
     ns = LaunchConfiguration("namespace")
     use_sim = LaunchConfiguration("use_sim_time")
+    lidar_x = LaunchConfiguration("lidar_x")
+    lidar_z = LaunchConfiguration("lidar_z")
     rings = LaunchConfiguration("lidar_rings")
     multi_ring = IfCondition(PythonExpression(['"', rings, '" != "1"']))
     fuse_imu = LaunchConfiguration("fuse_imu")
@@ -63,6 +65,13 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("namespace", default_value="robot_0"),
+            # Lidar mount, metres, relative to base_link. Arguments rather than
+            # constants because these are the simulated robot's numbers: on
+            # hardware they come from that unit's URDF or a calibration, and a
+            # wrong extrinsic tilts every scan in a way SLAM cannot recover
+            # from. See docs/hardware-readiness.md.
+            DeclareLaunchArgument("lidar_x", default_value="-0.07"),
+            DeclareLaunchArgument("lidar_z", default_value="0.402"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("lidar_rings", default_value="1"),
             DeclareLaunchArgument(
@@ -144,7 +153,7 @@ def generate_launch_description() -> LaunchDescription:
                 name="lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", "-0.07", "--z", "0.402",
+                    "--x", lidar_x, "--z", lidar_z,
                     "--frame-id", [ns, "/base_link"],
                     "--child-frame-id", [ns, "/base_link/lidar"],
                 ],
