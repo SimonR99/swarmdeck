@@ -595,3 +595,66 @@ def test_cslam_membership_still_requires_a_loop_closure():
     svc.set_cslam_origin("r0", 0.0, 0.0, 0.0, "robot0_map")
     svc.set_cslam_origin("r1", 3.0, 0.0, 0.0, "robot0_map")
     assert "r1" not in svc.global_members()
+
+
+# ------------------------------------------------- 3D band registration
+
+
+def _symmetric_building(with_asymmetric_furniture: bool):
+    """A plan-symmetric corridor: identical at 0 and 180 deg from above.
+
+    Optionally add furniture in ONE low band only, which breaks the symmetry in
+    3D while leaving the 2D projection just as ambiguous as before.
+    """
+    pts = []
+    for x in np.arange(-6.0, 6.0, 0.05):
+        for z in (0.3, 0.8, 1.5):
+            pts.append((x, -2.0, z))
+            pts.append((x, 2.0, z))
+    for y in np.arange(-2.0, 2.0, 0.05):
+        for z in (0.3, 0.8, 1.5):
+            pts.append((-6.0, y, z))
+            pts.append((6.0, y, z))
+    if with_asymmetric_furniture:
+        for x in np.arange(-5.0, -3.0, 0.05):
+            for y in np.arange(-1.0, 1.0, 0.05):
+                pts.append((x, y, 0.35))
+    return np.array(pts, dtype=np.float32)
+
+
+def test_height_bands_break_rotational_aliasing():
+    """The failure this exists for: a plan-symmetric building.
+
+    Flattened to 2D the truth and a 180 deg alias score nearly the same. Vertical
+    structure that is NOT symmetric resolves it, and the bands agreeing is what
+    reports that resolution.
+    """
+    from swarmdeck_server.mapsvc.registration import register_3d
+
+    pts = _symmetric_building(with_asymmetric_furniture=True)
+    meta = (400, 400, -10.0, -10.0)
+    result = register_3d(pts, pts, 0.05, meta)
+    # Registering a cloud against itself must find the identity and say so.
+    assert abs(result.dyaw) < math.radians(3.0)
+    assert result.yaw_ratio < 0.8, "identity match should not look ambiguous"
+
+
+def test_height_band_grid_selects_only_its_band():
+    from swarmdeck_server.mapsvc.registration import height_band_grid
+
+    pts = np.array([[0.0, 0.0, 0.3], [0.5, 0.5, 1.5]], dtype=np.float32)
+    meta = (40, 40, -1.0, -1.0)
+    low = height_band_grid(pts, (0.10, 0.55), 0.05, meta)
+    high = height_band_grid(pts, (1.10, 1.80), 0.05, meta)
+    assert int((low == 100).sum()) == 1
+    assert int((high == 100).sum()) == 1
+    # And the bands must not be the same cell — they are different structure.
+    assert not np.array_equal(low, high)
+
+
+def test_register_3d_degrades_gracefully_without_points():
+    from swarmdeck_server.mapsvc.registration import register_3d
+
+    empty = np.zeros((0, 3), dtype=np.float32)
+    result = register_3d(empty, empty, 0.05, (40, 40, -1.0, -1.0))
+    assert not result.confident

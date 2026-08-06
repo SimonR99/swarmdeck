@@ -214,6 +214,23 @@ of occupied cells in continuous pieces, comparable to the 2D path, on an 82-node
 per robot. De-skewing is off in simulation only, because Gazebo's cloud carries no per-point
 timestamps; turn it on for real hardware, where every driver worth using stamps points.
 
+### Odometry front ends
+
+`icp_odometry` (RTAB-Map) is the shipped one. **DLIO** (vectr-ucla's Direct LiDAR-Inertial
+Odometry) is wired up as an alternative for hardware evaluation:
+
+```bash
+SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+  docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+                 -f docker-compose.dlio.yml --profile gazebo up --build -d
+```
+
+Measured in simulation it is **worse** — 0.262 m vs 0.137 m displacement error, 17.3 vs
+9.7 deg heading — but that is a statement about Gazebo, not about DLIO: its central
+mechanism is per-point de-skewing and Gazebo's cloud carries no per-point timestamps, so
+what is being measured is DLIO without its main idea. It also publishes at ~100 Hz against
+icp_odometry's ~2 Hz. See `docs/KNOWN_ISSUES.md` #6 before drawing conclusions.
+
 ### Swarm SLAM
 
 The merged map is a **stitcher**: each robot keeps a private pose graph and `mapsvc` aligns

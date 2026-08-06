@@ -1,0 +1,51 @@
+# DLIO tuned for the SwarmDeck fleet. Keys follow upstream's cfg/dlio.yaml.
+#
+# The one parameter that matters most here is `pointcloud/deskew`, and it is OFF
+# for simulation. DLIO de-skews using per-point timestamps, and Gazebo's cloud
+# has none — fields are `x y z intensity ring`, verified on a live topic. With
+# deskew on and no timestamps the motion model has nothing to interpolate
+# against, which is the same class of failure that made RTAB-Map's icp_odometry
+# stop publishing after two clouds when its deskewing was enabled.
+#
+# TURN IT ON FOR HARDWARE. It is the reason to run DLIO at all: Ouster stamps
+# `t`, Velodyne `time`, Livox `offset_time`, and the distortion it removes is
+# real — a 10 Hz sweep taken while turning at 0.8 rad/s smears 4.6 deg, which at
+# 10 m is 0.8 m of structure that never existed.
+/**:
+  ros__parameters:
+    version: 1.1.1
+
+    # Adapts the keyframe threshold to the environment's spaciousness. Left on:
+    # a 24 m building with 6 m rooms is exactly the case it handles.
+    adaptive: true
+
+    pointcloud/deskew: false
+    pointcloud/voxelize: true
+
+    frames/odom: odom
+    frames/baselink: base_link
+    frames/lidar: base_link/lidar
+    frames/imu: base_link/imu
+
+    # 0.1 m to match ICP_VOXEL in slam_rtabmap.launch.py, so a comparison
+    # between the two front ends is about the algorithm rather than about one
+    # of them being handed denser data.
+    odom/preprocessing/voxelFilter/res: 0.1
+
+    odom/keyframe/threshD: 1.0
+    odom/keyframe/threshR: 45.0
+
+    odom/submap/keyframe/knn: 10
+    odom/submap/keyframe/kcv: 10
+    odom/submap/keyframe/kcc: 10
+
+    # Gazebo's IMU is noise-modelled by robot.sdf.jinja but not biased, so the
+    # calibration window can be short. On hardware, leave upstream's default and
+    # keep the robot still while it runs.
+    odom/imu/calibration/accel: true
+    odom/imu/calibration/gyro: true
+    # 3.0, not 3: DLIO declares this double, and a bare integer in YAML makes
+    # rclcpp abort the node outright with InvalidParameterTypeException. Same
+    # class of failure as RTAB-Map's string parameters — the message names the
+    # value, not the type, so it reads as though the number were wrong.
+    odom/imu/calibration/time: 3.0

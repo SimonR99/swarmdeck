@@ -19,7 +19,17 @@ lidar sits at 0.402 m and looks straight over another Duckiebot's body, so on th
 mapping scan alone the fleet is invisible to itself and robots jam into each other
 — which is the same wheel-slip failure as jamming into a wall.
 
-Wandering alternates with **homing**, and that is not decoration. A pose graph is
+Wandering alternates with two kinds of long-range leg, and neither is
+decoration.
+
+**Homing** returns a robot to its own start pose, which makes a large
+INTRA-robot loop closure a property of the run. **Muster** sends the whole fleet
+to one shared point, which is the only thing that makes INTER-robot closures
+reliable: they are a different problem, and homing does not solve it. Scheduling
+pairs instead of the whole fleet was tried and is too slow — O(n^2) cycles of
+several minutes each, so robots that spawned far apart never met.
+
+On homing: A pose graph is
 only corrected where it closes a loop, and pure reactive wandering closes loops by
 luck: it is a random walk, so it may or may not revisit anywhere before the run
 ends. Driving back to the start every `--loop-period` seconds makes at least one
@@ -41,7 +51,6 @@ less ground.
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import math
 import random
@@ -112,9 +121,7 @@ class Explorer(Node):
         # be expressed per robot if we know where each one started.
         self.starts: dict[str, tuple[float, float, float]] = dict(starts or {})
         self.rendezvous_target: dict[str, tuple[float, float]] = {}
-        self.pairs: list[tuple[str, str]] = (
-            list(itertools.combinations(sorted(self.starts), 2)) if self.starts else []
-        )
+        self.muster: tuple[float, float] | None = None
         self.cycle = 0
         self.cycle_since = time.monotonic()
 
@@ -213,18 +220,33 @@ class Explorer(Node):
         origin = self.origin.get(rid)
         return None if origin is None else self._error_to(rid, origin)
 
-    def _pair_for(self, cycle: int) -> tuple[str, str] | None:
-        """Which two robots are scheduled to meet on this cycle.
+    def _muster_point(self, cycle: int) -> tuple[float, float] | None:
+        """Where the WHOLE fleet is asked to gather this cycle, in world coords.
 
-        Every unordered pair in turn, so over a long enough run each pair gets
-        the chance to close a loop with the other. Homing to a robot's OWN start
-        pose — the only long-range behaviour before this — produces intra-robot
-        loop closures and leaves inter-robot encounters to chance; on a measured
-        four-robot run only 2 of the 6 possible pairs ever met.
+        One shared point rather than a scheduled pair, and the reason is the
+        arithmetic. Pairwise rotation needs O(n^2) cycles to give every pair a
+        chance — 6 cycles for four robots — and each leg can take minutes, so a
+        full rotation ran for about an hour and robots that started far apart
+        never met at all. A single muster point exposes every pair
+        simultaneously, so one cycle is worth the whole rotation.
+
+        The point moves between cycles: the fleet centroid, then the four
+        quadrant centres of the area the robots span. Gathering at the same spot
+        forever would close the same loops repeatedly and stop the fleet
+        exploring, which is the opposite of what this is for.
         """
-        if len(self.pairs) == 0:
+        if not self.starts:
             return None
-        return self.pairs[cycle % len(self.pairs)]
+        xs = [p[0] for p in self.starts.values()]
+        ys = [p[1] for p in self.starts.values()]
+        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+        # Inset from the extremes: the corners of the spawn box are usually
+        # against a wall, and a muster point inside furniture is unreachable.
+        rx = max(1.0, (max(xs) - min(xs)) * 0.25)
+        ry = max(1.0, (max(ys) - min(ys)) * 0.25 or rx)
+        offsets = [(0.0, 0.0), (-rx, -ry), (rx, -ry), (rx, ry), (-rx, ry)]
+        dx, dy = offsets[cycle % len(offsets)]
+        return (cx + dx, cy + dy)
 
     def _rendezvous_error(self, rid: str) -> tuple[float, float] | None:
         """Error to this cycle's meeting point, or None if not participating.
@@ -238,21 +260,14 @@ class Explorer(Node):
         return None if target is None else self._error_to(rid, target)
 
     def _set_rendezvous(self, cycle: int) -> None:
-        """Resolve this cycle's meeting point into each participant's frame."""
+        """Resolve this cycle's muster point into every robot's own frame."""
         self.rendezvous_target.clear()
-        pair = self._pair_for(cycle)
-        if pair is None:
+        point = self._muster_point(cycle)
+        if point is None:
             return
-        a, b = pair
-        if a not in self.starts or b not in self.starts:
-            return
-        mid = (
-            (self.starts[a][0] + self.starts[b][0]) / 2.0,
-            (self.starts[a][1] + self.starts[b][1]) / 2.0,
-        )
-        for rid in (a, b):
-            sx, sy, syaw = self.starts[rid]
-            dx, dy = mid[0] - sx, mid[1] - sy
+        self.muster = point
+        for rid, (sx, sy, syaw) in self.starts.items():
+            dx, dy = point[0] - sx, point[1] - sy
             c, s = math.cos(-syaw), math.sin(-syaw)
             # World -> that robot's odom frame, whose origin is its spawn pose.
             self.rendezvous_target[rid] = (dx * c - dy * s, dx * s + dy * c)
@@ -308,7 +323,7 @@ class Explorer(Node):
         second, so no pair was ever scheduled long enough to actually travel
         anywhere.
         """
-        if not self.pairs:
+        if not self.starts:
             return
         now = time.monotonic()
         elapsed = now - self.cycle_since
@@ -325,10 +340,10 @@ class Explorer(Node):
         self.cycle += 1
         self.cycle_since = now
         self._set_rendezvous(self.cycle)
-        pair = self._pair_for(self.cycle)
-        if pair:
+        if self.muster is not None:
             self.get_logger().info(
-                f"cycle {self.cycle}: {pair[0]} and {pair[1]} to rendezvous"
+                f"cycle {self.cycle}: fleet muster at "
+                f"({self.muster[0]:.1f}, {self.muster[1]:.1f})"
             )
 
     def step(self) -> None:

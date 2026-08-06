@@ -76,6 +76,15 @@ class MapService:
         # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
+        # A ready-made merged grid supplied by a collaborative back end, already
+        # in its common frame. When present in `cslam` mode there is nothing to
+        # merge: the back end has done it, from its own keyframes at its own
+        # optimised poses, and re-deriving it here could only reintroduce the
+        # frame mismatch this exists to remove.
+        self.global_grid: tuple[GridMeta, np.ndarray] | None = None
+        # Each robot's pose as the collaborative back end reports it, already in
+        # the common frame the merged map uses.
+        self.common_poses: dict[str, dict[str, float]] = {}
         # Which collaborative common frame each robot is currently expressed in.
         # Two robots that have never met report different frames, and merging
         # across them would be meaningless.
@@ -148,6 +157,65 @@ class MapService:
                 [],
             )
         return np.concatenate(chunks), np.concatenate(indices), names
+
+    def set_common_pose(self, robot_id: str, pose: dict[str, float]) -> None:
+        self.common_poses[robot_id] = {
+            "x": float(pose.get("x", 0.0)),
+            "y": float(pose.get("y", 0.0)),
+            "yaw": float(pose.get("yaw", 0.0)),
+        }
+
+    def _common_to_world(self) -> tuple[float, float, float]:
+        """Where the collaborative back end's common frame sits in the world.
+
+        cslam anchors its common frame at the ORIGIN ROBOT's first keyframe —
+        that robot's start pose — not at the world origin. Everything it reports
+        is therefore offset by exactly that pose, which measured as an 8.8 m
+        error for a robot spawned at x = -9. The configured start pose of the
+        reference robot is the same information `merge_mode: static` already
+        relies on, so use it to put the common frame back in the world.
+        """
+        if self.reference is None:
+            return (0.0, 0.0, 0.0)
+        return self.transform_priors.get(self.reference, (0.0, 0.0, 0.0))
+
+    def common_pose(self, robot_id: str) -> dict[str, float] | None:
+        """The back end's own answer for this robot, if it is usable.
+
+        Only in `cslam` mode, only for robots the back end has actually placed
+        in the common frame, and only when that frame is the one the merged map
+        is drawn in — otherwise this would report a pose from a different
+        cluster's frame, which is worse than a transformed one.
+        """
+        if self.merge_mode != "cslam":
+            return None
+        if robot_id not in self.global_members():
+            return None
+        pose = self.common_poses.get(robot_id)
+        if pose is None:
+            return None
+        tx, ty, tyaw = self._common_to_world()
+        c, s = math.cos(tyaw), math.sin(tyaw)
+        return {
+            "x": tx + pose["x"] * c - pose["y"] * s,
+            "y": ty + pose["x"] * s + pose["y"] * c,
+            "yaw": self._wrap_yaw(pose["yaw"] + tyaw),
+        }
+
+    def set_global_grid(self, meta: GridMeta, cells: np.ndarray) -> None:
+        """Adopt a collaborative back end's own merged grid wholesale.
+
+        Only meaningful in `cslam` mode. The grid arrives in the back end's
+        common frame — the same frame `set_cslam_origin` places robots in — so
+        geometry and poses agree by construction. That is the entire fix for the
+        11-16 m error: previously the grids came from RTAB-Map and the poses
+        from cslam, two independently optimised trajectories that disagreed by
+        metres.
+        """
+        if self.merge_mode != "cslam":
+            return
+        self.global_grid = (meta, cells.astype(np.int8, copy=True))
+        self._remerge()
 
     def set_cslam_origin(
         self, robot_id: str, x: float, y: float, yaw: float, frame: str
@@ -449,7 +517,17 @@ class MapService:
         return out
 
     def _remerge(self) -> None:
-        """Occupied wins over free; free wins over unknown."""
+        """Occupied wins over free; free wins over unknown.
+
+        Unless a collaborative back end has supplied a finished grid, in which
+        case that IS the map — see set_global_grid.
+        """
+        if self.merge_mode == "cslam" and self.global_grid is not None:
+            # Same offset as the poses: the back end's grid is in its common
+            # frame, anchored at the reference robot's start pose.
+            meta, cells = self.global_grid
+            self.merged = self._warp(meta, cells, self._common_to_world())
+            return
         out = np.full_like(self.merged, UNKNOWN)
         members = self.global_members()
         for rid, (meta, cells) in self.robot_grids.items():

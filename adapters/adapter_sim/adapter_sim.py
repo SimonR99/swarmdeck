@@ -76,6 +76,48 @@ def _on_slam_graph(msg) -> None:
         SLAM_GRAPHS[rid] = graph
 
 
+# The collaborative back end's own merged grid, if one is running. Fleet-wide
+# rather than per robot: cslam produces a single map in its common frame from
+# every robot's keyframes, so there is nothing to merge afterwards.
+CSLAM_GRID: dict[str, object] = {}
+
+
+def _on_cslam_grid(msg) -> None:
+    CSLAM_GRID["grid"] = msg
+    CSLAM_GRID["dirty"] = True
+
+
+def upload_cslam_grid(http_url: str) -> None:
+    """Push the back end's merged grid straight to the backend, unmerged.
+
+    Uploading it as a per-robot map instead would send it back through the
+    merge, which would transform a grid that is already in the common frame and
+    reintroduce exactly the mismatch cslam_grid.py exists to remove.
+    """
+    if not CSLAM_GRID.get("dirty"):
+        return
+    CSLAM_GRID["dirty"] = False
+    g = CSLAM_GRID.get("grid")
+    if g is None:
+        return
+    cells = np.array(g.data, dtype=np.int8)
+    body = zlib.compress(np.ascontiguousarray(cells).tobytes())
+    url = (
+        f"{http_url}/api/adapter/global_map?resolution={g.info.resolution}"
+        f"&width={g.info.width}&height={g.info.height}"
+        f"&origin_x={g.info.origin.position.x}&origin_y={g.info.origin.position.y}"
+    )
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/octet-stream"}
+            ),
+            timeout=5,
+        ).read()
+    except Exception as exc:
+        print(f"[adapter_sim] cslam grid upload failed: {exc}")
+
+
 def yaw_of(q) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
 
@@ -592,6 +634,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                     last_map = 0.0
                     last_cloud = 0.0
                     last_graph = 0.0
+                    last_cslam_grid = 0.0
                     last_camera = 0.0
                     last_settings = 0.0
                     loop = asyncio.get_running_loop()
@@ -621,7 +664,26 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             origin = bridge.cslam_origin(graph)
                             if origin is not None:
                                 payload["origin"] = origin
+                            # The robot's pose AS THE BACK END SEES IT, in the
+                            # common frame. Sent verbatim so the backend can use
+                            # it directly instead of transforming a pose out of
+                            # RTAB-Map's frame: composing across two independent
+                            # SLAM estimates is what produced 8-18 m of error,
+                            # and the composition is unnecessary once the grid is
+                            # cslam's too.
+                            common = graph.get("common")
+                            if isinstance(common, dict) and graph.get("in_common_frame"):
+                                payload["common_pose"] = {
+                                    "x": float(common.get("x", 0.0)),
+                                    "y": float(common.get("y", 0.0)),
+                                    "yaw": float(common.get("yaw", 0.0)),
+                                }
                             await ws.send(json.dumps(payload))
+                        if now - last_cslam_grid > 4.0:
+                            last_cslam_grid = now
+                            await loop.run_in_executor(
+                                None, upload_cslam_grid, bridge.http_url
+                            )
                         if now - last_cloud > 4.0:
                             last_cloud = now
                             await loop.run_in_executor(None, bridge.upload_cloud)
@@ -674,6 +736,11 @@ def main() -> None:
             robot_count = 4
     robot_count = max(1, min(robot_count, 5))
     node.create_subscription(String, "/swarmdeck/slam_graph", _on_slam_graph, 10)
+    node.create_subscription(
+        OccupancyGrid, "/cslam/map", _on_cslam_grid,
+        QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                   durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+    )
     bridges = [
         RobotBridge(node, f"{args.prefix}{i}", http_url) for i in range(robot_count)
     ]

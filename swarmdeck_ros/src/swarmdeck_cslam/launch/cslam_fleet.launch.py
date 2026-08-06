@@ -47,6 +47,21 @@ def setup(context, *args, **kwargs):
     ] + [
         # Summarises the joint graph onto /swarmdeck/slam_graph for the adapter.
         # One instance for the whole fleet, not one per robot.
+        # The cslam-native occupancy grid: keyframe clouds rendered at the
+        # joint optimiser's own poses, so geometry and transform come from ONE
+        # system. See cslam_grid.py for why mixing two was the bug.
+        Node(
+            package="swarmdeck_cslam",
+            executable="cslam_grid.py",
+            name="cslam_grid",
+            parameters=[{
+                "robots": count,
+                "use_sim_time": use_sim == "true",
+                "resolution": 0.05,
+                "size_m": 30.0,
+            }],
+            output="screen",
+        ),
         Node(
             package="swarmdeck_cslam",
             executable="graph_reporter.py",

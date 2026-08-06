@@ -55,7 +55,36 @@ on each robot's own map rather than the merged one (FR-M8). This is a deliberate
 consequence of the ROS-free backend, not an oversight, but it caps what the fleet can do.
 docs/collaborative-slam.md sets out what would change and a staged path.
 
-### 5. cslam cannot drive the merge while the grids come from RTAB-Map
+### 5. cslam-driven merge: three defects fixed, still not accurate enough to ship
+
+`merge_mode: cslam` remains **off by default**. Grid registration (`auto`) measures
+0.03-0.20 m against ground truth; the cslam path measures 0.08-15.8 m depending on the
+robot. Three real defects were found and fixed along the way, and they are worth recording
+because each was independently correct:
+
+1. **Mixed geometry and poses.** Grids came from RTAB-Map, transforms from cslam — two
+   independently optimised trajectories that disagree by metres. Fixed by `cslam_grid.py`,
+   which renders cslam's OWN keyframe clouds at cslam's OWN optimised poses, so the map and
+   the transform are the same estimate by construction.
+2. **Composed poses across both systems.** The adapter derived a transform from RTAB-Map's
+   pose and cslam's pose. Fixed by reporting cslam's common-frame pose verbatim
+   (`common_pose`) and using it directly.
+3. **Unanchored common frame.** cslam anchors its frame at the origin robot's first
+   keyframe, i.e. that robot's start pose — an 8.8 m offset for a robot spawned at x = -9.
+   Fixed by composing with the reference robot's configured start pose.
+
+After all three, results are *bimodal*: robot_2 at 0.08 m and robot_1 at 2.16 m, but
+robot_0 at 10.2 m and robot_3 at 15.8 m, with yaw wrong by 37-158 deg across the board.
+That pattern — some robots nearly perfect, others badly wrong, in the same run — points at
+cslam's per-robot optimised poses themselves rather than at the plumbing carrying them.
+The likely candidates are the reported pose being a keyframe pose rather than the live one,
+and a yaw convention difference between GTSAM's SE(3) and the SE(2) merge.
+
+The plumbing is now correct and unit-tested end to end. What is unverified is cslam's own
+output, which needs comparing `/rN/cslam/current_pose_estimate` against ground truth
+directly, independent of SwarmDeck, before any more integration work.
+
+### (superseded) cslam cannot drive the merge while the grids come from RTAB-Map
 
 `merge_mode: cslam` is implemented, unit-tested, and wired end to end — and it produces a
 **much worse map than grid registration**. Measured against Gazebo ground truth on a live
@@ -104,6 +133,36 @@ closure repair ordinary drift, but a large instantaneous displacement stays wron
 lidar SLAM recognises the place again. A production robot that must recover immediately
 from "kidnapping" needs lidar odometry, visual odometry, landmarks, or global
 relocalization. Gazebo ground truth remains scoring-only and is never fed into navigation.
+
+### 6. DLIO builds and runs, and is WORSE than icp_odometry in simulation
+
+Direct LiDAR-Inertial Odometry (vectr-ucla) is wired up behind
+`docker-compose.dlio.yml` and measured against Gazebo ground truth over a shared window,
+scoring displacement and heading change (which needs no frame alignment to be fair):
+
+| front end | mean displacement error | mean heading error |
+|---|---|---|
+| `icp_odometry` (RTAB-Map, shipped) | **0.137 m** | **9.7 deg** |
+| DLIO | 0.262 m | 17.3 deg |
+
+**Do not read this as "DLIO is worse".** It is a statement about the simulator. DLIO's
+central mechanism is de-skewing each sweep against a continuous-time IMU model, and
+Gazebo's cloud has NO per-point timestamps — fields are `x y z intensity ring`, verified
+on a live topic — so `pointcloud/deskew` is off and the thing being evaluated is DLIO
+minus its main idea. On hardware, where Ouster stamps `t`, Velodyne `time` and Livox
+`offset_time`, the distortion it removes is real: a 10 Hz sweep taken while turning at
+0.8 rad/s smears 4.6 deg, which at 10 m is 0.8 m of phantom structure.
+
+Two things worth knowing if you pick this up:
+
+* Upstream's default branch is **ROS 1 / catkin**. Only `feature/ros2` builds against
+  ROS 2 — a community port, pinned by commit in `docker/Dockerfile.dlio`.
+* DLIO publishes at ~100 Hz against icp_odometry's ~2 Hz (11,916 vs 269 messages in 30 s),
+  so on a robot that needs a fast pose for control rather than for mapping, that alone may
+  decide it.
+
+To make the simulation comparison meaningful, Gazebo's lidar would have to emit per-point
+timestamps — a change to the sensor model, not to DLIO.
 
 ## Resolved
 

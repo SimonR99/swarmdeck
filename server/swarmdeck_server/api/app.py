@@ -199,6 +199,18 @@ def robot_state(robot: Any) -> dict[str, Any]:
     state = robot.to_state()
     if robot.coordinate_frame == "merged":
         return state
+    # In `cslam` mode the collaborative back end already knows where this robot
+    # is in the frame the map is drawn in, so use that answer rather than
+    # transforming one out of the robot's own SLAM frame. Composing across two
+    # independently optimised trajectories is precisely what put robots 8-18 m
+    # from ground truth.
+    direct = map_service.common_pose(robot.robot_id)
+    if direct is not None:
+        state["pose"] = dict(direct)
+        if state["goal"]:
+            state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
+        state["planned_path"] = []
+        return state
     state["pose"] = map_service.robot_to_world(robot.robot_id, state["pose"])
     if state["goal"]:
         state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
@@ -360,6 +372,38 @@ async def post_map(request: Request) -> dict[str, Any]:
 # int16 out to +/-327 m. Quantising at the transport rather than sending float32
 # halves the bytes for a view whose points are one pixel on screen.
 CLOUD_SCALE = 0.01
+
+
+@app.post("/api/adapter/global_map")
+async def post_global_map(request: Request) -> Any:
+    """A collaborative back end's already-merged grid, in its own common frame.
+
+    Distinct from `/api/adapter/map`, which takes ONE robot's grid to be merged
+    here. This is the whole map, produced by the back end from its own keyframes
+    at its own optimised poses, and in `cslam` mode it is used as-is. Merging it
+    again against per-robot grids from a different SLAM system is exactly the
+    mistake that put robots 11-16 m from ground truth.
+    """
+    import zlib
+
+    meta = GridMeta(
+        resolution=float(request.query_params.get("resolution", 0.05)),
+        width=int(request.query_params.get("width", 0)),
+        height=int(request.query_params.get("height", 0)),
+        origin_x=float(request.query_params.get("origin_x", 0.0)),
+        origin_y=float(request.query_params.get("origin_y", 0.0)),
+    )
+    if meta.width <= 0 or meta.height <= 0:
+        return JSONResponse({"error": "width and height required"}, status_code=400)
+    try:
+        raw = zlib.decompress(await request.body())
+        cells = np.frombuffer(raw, dtype=np.int8)
+    except (zlib.error, ValueError):
+        return JSONResponse({"error": "malformed grid"}, status_code=400)
+    if cells.size != meta.width * meta.height:
+        return JSONResponse({"error": "size mismatch"}, status_code=400)
+    map_service.set_global_grid(meta, cells.reshape(meta.height, meta.width))
+    return {"ok": True, "cells": int(cells.size)}
 
 
 @app.post("/api/adapter/cloud")
@@ -628,6 +672,9 @@ async def adapter_socket(ws: WebSocket) -> None:
                     # transform, which is the whole point of running a joint
                     # pose graph: the transform falls out of the loop closures
                     # instead of being re-estimated from finished maps.
+                    common_pose = msg.get("common_pose")
+                    if isinstance(common_pose, dict):
+                        map_service.set_common_pose(rid, common_pose)
                     origin = msg.get("origin")
                     if isinstance(origin, dict):
                         map_service.set_cslam_origin(
