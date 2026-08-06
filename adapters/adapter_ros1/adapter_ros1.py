@@ -37,6 +37,7 @@ import argparse
 import asyncio
 import json
 import math
+import sys
 import threading
 import time
 import urllib.request
@@ -48,10 +49,17 @@ import numpy as np
 import rospy
 import websockets
 import yaml
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from sensor_msgs.msg import BatteryState, CompressedImage, Image, PointCloud2
+from std_msgs.msg import Int8
 from tf2_ros import Buffer, TransformListener
+
+# Keep perception independent of ROS packaging, as adapter_sim does.  Hardware
+# containers run this file directly, so the repository root is not otherwise on
+# sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from adapters.perception.duck_detector import RubberDuckDetector
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -95,6 +103,17 @@ DEFAULTS: dict[str, Any] = {
         "battery": "",       # empty disables the capability
         "camera": "",
         "camera_compressed": "",
+        # `move_base_simple/goal`-style single-goal topic (geometry_msgs/PoseStamped) —
+        # the interface stacks like CMU's local_planner use instead of an
+        # actionlib server. Takes priority over `actions.navigate_to_pose`
+        # when both are configured: a robot only ever has one real navigation
+        # stack, and this is the more specific of the two settings.
+        "nav_goal": "",
+        # std_msgs/Int8 safety-stop local_planner's pathFollower listens on
+        # (1 = halt, 0 = resume). Optional even when `nav_goal` is set — a
+        # stack without one just can't be preempted as cleanly by teleop or
+        # cancel_goal, which then fall back to zeroing cmd_vel once.
+        "nav_stop": "",
     },
     # Height band for `map_cloud` points, metres, in the map_frame (NOT
     # relative to the robot — this stack has no live z estimate to be relative
@@ -104,6 +123,10 @@ DEFAULTS: dict[str, Any] = {
     # starting guess, not a calibration — verify against the actual map that
     # comes out, per docs/hardware-bringup.md.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
+    # How close counts as "arrived" for a `nav_goal`-topic navigation stack,
+    # metres. Unlike actionlib there is no explicit success signal to wait
+    # for, so this adapter watches its own tf2 pose against the goal.
+    "nav_goal_tolerance_m": 0.5,
     # `move_base`'s actionlib namespace — the ROS 1 convention, the way
     # `navigate_to_pose` is the ROS 2/Nav2 one.
     "actions": {"navigate_to_pose": "move_base"},
@@ -111,6 +134,11 @@ DEFAULTS: dict[str, Any] = {
         "state_hz": 5.0,
         "map_period_s": 2.0,
         "camera_period_s": 0.2,   # 5 Hz, per the protocol's preview cap
+    },
+    "perception": {
+        "enabled": True,
+        "period_s": 0.2,
+        "sensitivity": 0.55,
     },
     # A drive command older than this stops the robot. Teleop over a network is
     # only safe with a deadman: if the link drops mid-command the robot must not
@@ -165,6 +193,12 @@ class HardwareBridge:
         self._last_drive_at = 0.0
         self._camera_jpeg: bytes | None = None
         self._camera_dirty = False
+        perception = cfg.get("perception", {})
+        self._detector = RubberDuckDetector(perception.get("sensitivity", 0.55))
+        self._detection_enabled = bool(perception.get("enabled", True))
+        self._detection_period_s = max(0.05, float(perception.get("period_s", 0.2)))
+        self._last_detection_at = 0.0
+        self._detections: list[dict] | None = None
         self._pose_warned = False
 
         # ROS 1 has no subscriber-side durability setting: a latched publisher
@@ -199,10 +233,21 @@ class HardwareBridge:
             rospy.Publisher(topics["cmd_vel"], Twist, queue_size=10)
             if topics.get("cmd_vel") else None
         )
+        self.pub_nav_goal = (
+            rospy.Publisher(topics["nav_goal"], PoseStamped, queue_size=1)
+            if topics.get("nav_goal") else None
+        )
+        self.pub_nav_stop = (
+            rospy.Publisher(topics["nav_stop"], Int8, queue_size=1)
+            if topics.get("nav_stop") else None
+        )
 
+        # `nav_goal` (topic-based, e.g. local_planner) takes priority over
+        # `actions.navigate_to_pose` (actionlib, e.g. move_base) when both are
+        # configured — see the DEFAULTS comment on `topics.nav_goal`.
         action_name = cfg.get("actions", {}).get("navigate_to_pose")
         self.nav_client = None
-        if action_name and actionlib is not None:
+        if self.pub_nav_goal is None and action_name and actionlib is not None:
             self.nav_client = actionlib.SimpleActionClient(action_name, MoveBaseAction)
 
     # ------------------------------------------------------------- capabilities
@@ -210,7 +255,7 @@ class HardwareBridge:
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""
         caps: list[str] = []
-        if self.nav_client is not None:
+        if self.nav_client is not None or self.pub_nav_goal is not None:
             caps.append("navigate")
         if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
             caps.append("map")
@@ -305,6 +350,7 @@ class HardwareBridge:
             return
         self._camera_jpeg = bytes(msg.data)
         self._camera_dirty = True
+        self._detect_jpeg(self._camera_jpeg)
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Encoding here rather than shipping raw: the protocol's preview channel
@@ -323,8 +369,60 @@ class HardwareBridge:
             if ok:
                 self._camera_jpeg = buf.tobytes()
                 self._camera_dirty = True
+                self._detect_bgr(frame)
         except (ValueError, TypeError):
             return
+
+    def _detect_jpeg(self, jpeg: bytes) -> None:
+        if not self._detection_due():
+            return
+        try:
+            import cv2
+
+            frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None:
+                self._detect_bgr(frame, due_checked=True)
+        except (ValueError, TypeError):
+            return
+
+    def _detection_due(self) -> bool:
+        if not self._detection_enabled:
+            return False
+        now = time.monotonic()
+        if now - self._last_detection_at < self._detection_period_s:
+            return False
+        self._last_detection_at = now
+        return True
+
+    def _detect_bgr(self, frame: np.ndarray, *, due_checked: bool = False) -> None:
+        if not due_checked and not self._detection_due():
+            return
+        self._detections = [
+            detection.as_protocol(f"duck_{index}")
+            for index, detection in enumerate(self._detector.detect_bgr(frame))
+        ]
+
+    def take_detections(self) -> list[dict] | None:
+        current = self._detections
+        self._detections = None
+        return current
+
+    def refresh_settings(self) -> None:
+        """Apply dashboard perception controls without coupling them to ROS."""
+        try:
+            with urllib.request.urlopen(f"{self.http_url}/api/settings", timeout=2) as response:
+                payload = json.loads(response.read())
+            settings = payload.get("settings", {})
+            enabled = bool(settings.get("detection_enabled", True))
+            if self._detection_enabled and not enabled:
+                self._detections = []
+            self._detection_enabled = enabled
+            self._detector.sensitivity = max(
+                0.1,
+                min(1.0, float(settings.get("detection_sensitivity", 0.55))),
+            )
+        except Exception as exc:
+            rospy.logwarn(f"[{self.id}] settings refresh failed: {exc}")
 
     # ------------------------------------------------------------- pose
 
@@ -380,11 +478,20 @@ class HardwareBridge:
     def drive(self, linear: float, angular: float) -> None:
         if self.pub_cmd is None:
             return
+        moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
+        # A topic-based nav stack (local_planner) publishes to the SAME
+        # cmd_vel we do, continuously, while a goal is active — operator
+        # teleop must win that fight, not race it. Halt it via nav_stop
+        # (pathFollower's own safety-stop input) rather than relying on our
+        # single Twist publish to out-race whatever it sends next.
+        if moving and self.nav_status == "active" and self.pub_nav_stop is not None:
+            self.pub_nav_stop.publish(Int8(data=1))
+            self.nav_status = "cancelled"
+            self.goal = None
         twist = Twist()
         twist.linear.x = float(linear)
         twist.angular.z = float(angular)
         self.pub_cmd.publish(twist)
-        moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
@@ -408,6 +515,9 @@ class HardwareBridge:
         self.mode = "estop"
 
     def navigate_to(self, goal: dict[str, float]) -> None:
+        if self.pub_nav_goal is not None:
+            self._navigate_to_topic(goal)
+            return
         if self.nav_client is None:
             return
         if not self.nav_client.wait_for_server(rospy.Duration(2.0)):
@@ -453,6 +563,43 @@ class HardwareBridge:
         self.mode = "idle"
         self.goal = None
 
+    def _navigate_to_topic(self, goal: dict[str, float]) -> None:
+        """`move_base_simple/goal`-style: a plain publish, not an action.
+
+        No actionlib means no "accepted"/"succeeded" callback — a stack like
+        local_planner just starts driving. Progress is instead polled each
+        state tick by `_check_topic_nav_progress` against this adapter's own
+        tf2 pose, the same source `state()` already reports from.
+        """
+        self._goal_generation += 1
+        msg = PoseStamped()
+        msg.header.frame_id = self.map_frame
+        msg.header.stamp = rospy.Time.now()
+        msg.pose.position.x = float(goal["x"])
+        msg.pose.position.y = float(goal["y"])
+        yaw = float(goal.get("yaw", 0.0))
+        msg.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.orientation.w = math.cos(yaw / 2.0)
+
+        self.goal = {"x": float(goal["x"]), "y": float(goal["y"])}
+        self.nav_status = "active"
+        self.mode = "nav"
+        if self.pub_nav_stop is not None:
+            self.pub_nav_stop.publish(Int8(data=0))  # release any prior safety stop
+        self.pub_nav_goal.publish(msg)
+
+    def _check_topic_nav_progress(self) -> None:
+        """Declare arrival once close enough — the only "done" signal a
+        topic-based nav stack gives this adapter."""
+        if self.pub_nav_goal is None or self.nav_status != "active" or self.goal is None:
+            return
+        pose = self.map_pose()
+        dist = math.hypot(pose["x"] - self.goal["x"], pose["y"] - self.goal["y"])
+        if dist <= float(self.cfg.get("nav_goal_tolerance_m", 0.5)):
+            self.nav_status = "succeeded"
+            self.mode = "idle"
+            self.goal = None
+
     def cancel_goal(self) -> None:
         self._goal_generation += 1
         if self.nav_client is not None:
@@ -460,6 +607,8 @@ class HardwareBridge:
                 self.nav_client.cancel_goal()
             except Exception:
                 pass
+        if self.pub_nav_stop is not None:
+            self.pub_nav_stop.publish(Int8(data=1))
         self.goal = None
         self.nav_status = "cancelled"
         self.mode = "idle"
@@ -607,9 +756,11 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     loop = asyncio.get_running_loop()
                     last_map = 0.0
                     last_cam = 0.0
+                    last_settings = 0.0
                     while True:
                         await ws.send(json.dumps(bridge.state()))
                         bridge.drive_watchdog()
+                        bridge._check_topic_nav_progress()
                         now = time.monotonic()
                         if now - last_map > float(rates["map_period_s"]):
                             last_map = now
@@ -620,6 +771,18 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         if now - last_cam > float(rates["camera_period_s"]):
                             last_cam = now
                             await loop.run_in_executor(None, bridge.upload_camera)
+                            detections = bridge.take_detections()
+                            if detections is not None:
+                                await ws.send(json.dumps({
+                                    "type": "detections",
+                                    "robot_id": bridge.id,
+                                    "t_mono": round(now - bridge.t0, 4),
+                                    "camera": "front",
+                                    "items": detections,
+                                }))
+                        if now - last_settings > 5.0:
+                            last_settings = now
+                            await loop.run_in_executor(None, bridge.refresh_settings)
                         await asyncio.sleep(period)
 
                 await asyncio.gather(rx(), tx())

@@ -30,6 +30,7 @@ _STUBBED = [
     "geometry_msgs", "geometry_msgs.msg",
     "nav_msgs", "nav_msgs.msg",
     "sensor_msgs", "sensor_msgs.msg",
+    "std_msgs", "std_msgs.msg",
     "tf2_ros", "websockets", "cv2",
 ]
 
@@ -59,9 +60,22 @@ def _bridge(mod, cfg_override=None):
     bridge = mod.HardwareBridge.__new__(mod.HardwareBridge)
     bridge.cfg = cfg
     bridge.id = "r0"
+    bridge.map_frame = cfg["map_frame"]
+    bridge.base_frame = cfg["base_frame"]
     bridge.pub_cmd = MagicMock() if cfg["topics"].get("cmd_vel") else None
-    bridge.nav_client = MagicMock() if cfg.get("actions", {}).get("navigate_to_pose") else None
+    bridge.pub_nav_goal = MagicMock() if cfg["topics"].get("nav_goal") else None
+    bridge.pub_nav_stop = MagicMock() if cfg["topics"].get("nav_stop") else None
+    # Mirrors HardwareBridge.__init__: nav_goal (topic-based) takes priority
+    # over actions.navigate_to_pose (actionlib) when both are configured.
+    bridge.nav_client = (
+        MagicMock()
+        if bridge.pub_nav_goal is None and cfg.get("actions", {}).get("navigate_to_pose")
+        else None
+    )
     bridge.mode = "idle"
+    bridge.nav_status = "idle"
+    bridge.goal = None
+    bridge._goal_generation = 0
     bridge._last_drive_at = 0.0
     return bridge
 
@@ -166,6 +180,97 @@ def test_cancel_goal_bumps_generation_and_clears_state(mod):
     assert bridge.nav_status == "cancelled"
     assert bridge.mode == "idle"
     bridge.nav_client.cancel_goal.assert_called_once()
+
+
+def test_nav_goal_topic_takes_priority_over_actionlib(mod):
+    """A robot only ever has one real navigation stack — configuring both by
+    accident must not silently create two clients fighting over goals."""
+    bridge = _bridge(mod, {
+        "topics": {"nav_goal": "move_base_simple/goal"},
+        "actions": {"navigate_to_pose": "move_base"},
+    })
+    assert bridge.pub_nav_goal is not None
+    assert bridge.nav_client is None
+    assert "navigate" in bridge.capabilities()
+
+
+def test_navigate_to_topic_publishes_pose_and_releases_any_prior_stop(mod):
+    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
+                                       "nav_stop": "stop"}})
+    bridge._navigate_to_topic({"x": 3.0, "y": -1.0, "yaw": 1.5})
+
+    assert bridge.goal == {"x": 3.0, "y": -1.0}
+    assert bridge.nav_status == "active"
+    assert bridge.mode == "nav"
+    published = bridge.pub_nav_goal.publish.call_args[0][0]
+    assert published.pose.position.x == 3.0
+    assert published.pose.position.y == -1.0
+    bridge.pub_nav_stop.publish.assert_called_once()
+    mod.Int8.assert_any_call(data=0)
+
+
+def test_topic_nav_progress_declares_arrival_within_tolerance(mod):
+    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal"},
+                            "nav_goal_tolerance_m": 0.5})
+    bridge.goal = {"x": 5.0, "y": 5.0}
+    bridge.nav_status = "active"
+    bridge.map_pose = lambda: {"x": 5.3, "y": 5.1, "yaw": 0.0}  # 0.32 m away
+
+    bridge._check_topic_nav_progress()
+    assert bridge.nav_status == "succeeded"
+    assert bridge.goal is None
+    assert bridge.mode == "idle"
+
+
+def test_topic_nav_progress_stays_active_when_far(mod):
+    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal"},
+                            "nav_goal_tolerance_m": 0.5})
+    bridge.goal = {"x": 5.0, "y": 5.0}
+    bridge.nav_status = "active"
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+    bridge._check_topic_nav_progress()
+    assert bridge.nav_status == "active"
+    assert bridge.goal == {"x": 5.0, "y": 5.0}
+
+
+def test_cancel_goal_halts_a_topic_based_nav_stack(mod):
+    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
+                                       "nav_stop": "stop"}})
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 1.0, "y": 1.0}
+
+    bridge.cancel_goal()
+    assert bridge.nav_status == "cancelled"
+    assert bridge.goal is None
+    bridge.pub_nav_stop.publish.assert_called_once()
+    mod.Int8.assert_any_call(data=1)
+
+
+def test_teleop_preempts_an_active_topic_based_nav_goal(mod):
+    """Operator input must always win over autonomy sharing the same cmd_vel."""
+    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
+                                       "nav_stop": "stop"}})
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 2.0, "y": 2.0}
+
+    bridge.drive(0.3, 0.0)
+    assert bridge.nav_status == "cancelled"
+    assert bridge.goal is None
+    assert bridge.mode == "teleop"
+    mod.Int8.assert_any_call(data=1)
+
+
+def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
+    """drive(0, 0) is sent routinely (deadman, initial state) — it must not
+    spuriously cancel a goal that isn't even active."""
+    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
+                                       "nav_stop": "stop"}})
+    bridge.nav_status = "idle"
+
+    bridge.drive(0.0, 0.0)
+    bridge.pub_nav_stop.publish.assert_not_called()
+    assert bridge.nav_status == "idle"
 
 
 def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):

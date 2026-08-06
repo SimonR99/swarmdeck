@@ -7,10 +7,10 @@
 # way. `python3 adapter_ros1.py --robot-id tars_0 --config config/scout_mini.yaml` needs
 # nothing else to start talking to tars's real topics.
 #
-# Audited 2026-08-06 by reading files only — nothing here was run or echoed against a
-# live topic yet. Verify with `rostopic echo`/`rostopic hz` before trusting it, per
-# docs/hardware-bringup.md. `adapter_ros1.py` itself has only been import-checked
-# against tars's real rospy (Noetic) install, never run there.
+# Live on tars since 2026-08-06: SLAM, camera, map, and now navigate_to via
+# local_planner. See docs/fleet-status.md for exactly what's running and what
+# was verified. navigate_to WILL drive the robot once a goal is sent — see the
+# nav_goal/nav_stop comments below before assuming this is inert.
 robot_type: scout_mini
 footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box (scout_mini.urdf.xacro base_x_size/base_y_size) — not the true footprint, since Scout Mini's outline isn't a circle
 
@@ -60,13 +60,27 @@ topics:
   # topic per the protocol's own guidance (raw at full rate is the most expensive
   # thing an adapter can subscribe to over a robot's network).
   camera_compressed: /d400_arm/color/image_raw/compressed
+  # local_planner's localPlanner + pathFollower (mist_ws/.../local_planner_agx.launch,
+  # launched separately from the trimmed SLAM launch, 2026-08-06) both subscribe
+  # this — the standard RViz "2D Nav Goal" topic, not a custom one. Confirmed from
+  # source (goalHandler_pointstamped in both nodes): the pose is used directly as
+  # global goalX/goalY, same frame as state_estimation (/odometry/filtered, i.e.
+  # map_frame above) — no relative-frame conversion needed on our end.
+  nav_goal: /move_base_simple/goal
+  # pathFollower's safety-stop input (std_msgs/Int8, 1=halt, 0=resume). Lets
+  # cancel_goal and teleop actually override an in-progress autonomous drive
+  # instead of just racing it on the same /cmd_vel topic.
+  nav_stop: /stop
 
+# No gbplanner (global exploration planner) is running — only local_planner's
+# reactive local avoidance, whose adjacentRange is 5 m. A goal beyond what the
+# lidar currently sees may not be reachable in one shot; it isn't a global
+# path planner.
 actions:
-  # No move_base (or any actionlib nav server) runs on tars today — it drives via
-  # gbplanner + local_planner + RosBuzz, waypoint/behaviour-driven autonomy, not an
-  # actionlib navigate goal. Left at the ROS 1 convention so this resolves automatically
-  # the day move_base (or an equivalent actionlib server) is added; until then
-  # `navigate_to` will correctly report nav_status: failed rather than hang.
+  # No move_base (actionlib) runs on tars — navigate_to uses topics.nav_goal
+  # above instead (see DEFAULTS in adapter_ros1.py: nav_goal takes priority
+  # over this when both are configured). Left pointed at the ROS 1 convention
+  # so this resolves automatically if move_base is ever added instead.
   navigate_to_pose: move_base
 
 rates:
