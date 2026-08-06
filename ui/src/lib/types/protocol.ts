@@ -102,6 +102,14 @@ export interface SlamGraph {
   residual: number | null;
   /** Loop closures against each other robot — the thing that makes it swarm SLAM. */
   inter_robot: { other: string; count: number; last_t?: number }[];
+  /**
+   * This robot's SLAM frame expressed in the collaborative back end's common
+   * frame. In `cslam` merge mode this REPLACES grid registration as the source
+   * of the merge transform — it falls out of the loop closures rather than
+   * being re-estimated from finished maps. `frame` names the cluster: robots
+   * that have never met report different frames and must not be overlaid.
+   */
+  origin?: { x: number; y: number; yaw: number; frame?: string | null };
   t_mono?: number;
 }
 

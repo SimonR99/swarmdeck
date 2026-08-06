@@ -41,6 +41,8 @@ less ground.
 from __future__ import annotations
 
 import argparse
+import itertools
+import json
 import math
 import random
 import threading
@@ -69,10 +71,27 @@ HOME_TIMEOUT = 75.0
 # Proportional gain from bearing error to yaw rate while homing.
 HOME_GAIN = 1.2
 
+# Seconds a rendezvous leg may take before the pair gives up and wanders again.
+#
+# Generous on purpose, and the number is arithmetic rather than taste. With the
+# cslam stack running, the simulation is slow enough that robots cover roughly
+# 1.4 cm of ground per wall-clock second, so a 6 m leg — the distance between
+# neighbouring spawn poses in this building — takes over 400 s. At the previous
+# 110 s every pair timed out short of the meeting point and wandered off, which
+# looks exactly like "rendezvous does not work".
+RENDEZVOUS_TIMEOUT = 480.0
+# Close enough to a meeting point to count as arrived. Larger than HOME_RADIUS
+# because two robots converging on one spot must not try to occupy it.
+RENDEZVOUS_RADIUS = 2.5
+
 
 class Explorer(Node):
     def __init__(
-        self, robot_ids: list[str], seed: int = 0, loop_period: float = 90.0
+        self,
+        robot_ids: list[str],
+        seed: int = 0,
+        loop_period: float = 90.0,
+        starts: dict[str, tuple[float, float, float]] | None = None,
     ) -> None:
         super().__init__("swarmdeck_explorer")
         self.rng = random.Random(seed)
@@ -88,6 +107,16 @@ class Explorer(Node):
         self.origin: dict[str, tuple[float, float]] = {}
         self.phase: dict[str, str] = {}
         self.phase_since: dict[str, float] = {}
+        # World-frame spawn poses, from the study config. Needed because every
+        # robot steers in its OWN odom frame, so a shared meeting point can only
+        # be expressed per robot if we know where each one started.
+        self.starts: dict[str, tuple[float, float, float]] = dict(starts or {})
+        self.rendezvous_target: dict[str, tuple[float, float]] = {}
+        self.pairs: list[tuple[str, str]] = (
+            list(itertools.combinations(sorted(self.starts), 2)) if self.starts else []
+        )
+        self.cycle = 0
+        self.cycle_since = time.monotonic()
 
         for rid in robot_ids:
             # Sensor-data QoS (BEST_EFFORT), not the default RELIABLE. Which node
@@ -170,36 +199,143 @@ class Explorer(Node):
             default=float("inf"),
         )
 
-    def _home_error(self, rid: str) -> tuple[float, float] | None:
-        """Distance and bearing to the robot's start pose, in its own frame."""
+    def _error_to(self, rid: str, target: tuple[float, float]) -> tuple[float, float] | None:
+        """Distance and bearing from a robot to a target in its OWN odom frame."""
         pose = self.pose.get(rid)
-        origin = self.origin.get(rid)
-        if pose is None or origin is None:
+        if pose is None:
             return None
-        dx, dy = origin[0] - pose[0], origin[1] - pose[1]
+        dx, dy = target[0] - pose[0], target[1] - pose[1]
         bearing = math.atan2(dy, dx) - pose[2]
         return math.hypot(dx, dy), (bearing + math.pi) % (2 * math.pi) - math.pi
 
+    def _home_error(self, rid: str) -> tuple[float, float] | None:
+        """Distance and bearing to the robot's start pose, in its own frame."""
+        origin = self.origin.get(rid)
+        return None if origin is None else self._error_to(rid, origin)
+
+    def _pair_for(self, cycle: int) -> tuple[str, str] | None:
+        """Which two robots are scheduled to meet on this cycle.
+
+        Every unordered pair in turn, so over a long enough run each pair gets
+        the chance to close a loop with the other. Homing to a robot's OWN start
+        pose — the only long-range behaviour before this — produces intra-robot
+        loop closures and leaves inter-robot encounters to chance; on a measured
+        four-robot run only 2 of the 6 possible pairs ever met.
+        """
+        if len(self.pairs) == 0:
+            return None
+        return self.pairs[cycle % len(self.pairs)]
+
+    def _rendezvous_error(self, rid: str) -> tuple[float, float] | None:
+        """Error to this cycle's meeting point, or None if not participating.
+
+        The meeting point is the midpoint of the pair's two start poses, in
+        world coordinates, converted into this robot's odom frame. Start poses
+        come from the study config, not from sensing — the same information
+        `merge_mode: static` already uses. Ground truth stays out of the loop.
+        """
+        target = self.rendezvous_target.get(rid)
+        return None if target is None else self._error_to(rid, target)
+
+    def _set_rendezvous(self, cycle: int) -> None:
+        """Resolve this cycle's meeting point into each participant's frame."""
+        self.rendezvous_target.clear()
+        pair = self._pair_for(cycle)
+        if pair is None:
+            return
+        a, b = pair
+        if a not in self.starts or b not in self.starts:
+            return
+        mid = (
+            (self.starts[a][0] + self.starts[b][0]) / 2.0,
+            (self.starts[a][1] + self.starts[b][1]) / 2.0,
+        )
+        for rid in (a, b):
+            sx, sy, syaw = self.starts[rid]
+            dx, dy = mid[0] - sx, mid[1] - sy
+            c, s = math.cos(-syaw), math.sin(-syaw)
+            # World -> that robot's odom frame, whose origin is its spawn pose.
+            self.rendezvous_target[rid] = (dx * c - dy * s, dx * s + dy * c)
+
     def _advance_phase(self, rid: str, now: float) -> None:
-        """Alternate exploring with a leg back to the start, so the pose graph
-        gets a large loop closure per cycle instead of hoping for one."""
+        """Cycle exploring with two kinds of long-range leg.
+
+        `home` returns a robot to its own start pose, which makes a large
+        INTRA-robot loop closure a property of the run rather than an accident.
+        `rendezvous` sends a scheduled pair to a shared meeting point, which is
+        the only thing that makes INTER-robot closures reliable — the two are
+        different problems and homing alone does not solve the second.
+        """
         if self.loop_period <= 0:
             return
         elapsed = now - self.phase_since[rid]
         if self.phase[rid] == "wander":
-            if elapsed > self.loop_period and self._home_error(rid) is not None:
+            if elapsed <= self.loop_period:
+                return
+            # Rendezvous whenever this robot is scheduled, and home otherwise.
+            # Alternating cycles halved the rate at which pairs could meet, and
+            # intra-robot loop closure is already abundant (~100 keyframes per
+            # robot per run) while INTER-robot encounters are the scarce thing.
+            if self._rendezvous_error(rid) is not None:
+                self.phase[rid] = "rendezvous"
+                self.phase_since[rid] = now
+            elif self._home_error(rid) is not None:
                 self.phase[rid] = "home"
                 self.phase_since[rid] = now
             return
-        error = self._home_error(rid)
-        if error is None or error[0] < HOME_RADIUS or elapsed > HOME_TIMEOUT:
+
+        if self.phase[rid] == "rendezvous":
+            error = self._rendezvous_error(rid)
+            done = (
+                error is None
+                or error[0] < RENDEZVOUS_RADIUS
+                or elapsed > RENDEZVOUS_TIMEOUT
+            )
+        else:
+            error = self._home_error(rid)
+            done = error is None or error[0] < HOME_RADIUS or elapsed > HOME_TIMEOUT
+
+        if done:
             self.phase[rid] = "wander"
             self.phase_since[rid] = now
+
+    def _advance_cycle(self) -> None:
+        """Rotate the pair schedule, at most once per cycle period.
+
+        The gate is its OWN timestamp, not the robots' phase timers. Keying it
+        off `phase_since` instead let the cycle re-fire on every 10 Hz tick once
+        the robots had been wandering long enough — 130 cycles in under a
+        second, so no pair was ever scheduled long enough to actually travel
+        anywhere.
+        """
+        if not self.pairs:
+            return
+        now = time.monotonic()
+        elapsed = now - self.cycle_since
+        if elapsed < max(self.loop_period, 1.0):
+            return
+        # Normally wait for the fleet to finish its legs before re-scheduling,
+        # but never wait forever: a pair grinding against furniture until its
+        # timeout would otherwise freeze the whole rotation and starve every
+        # other pair of the chance to meet.
+        if elapsed < RENDEZVOUS_TIMEOUT + self.loop_period and not all(
+            phase == "wander" for phase in self.phase.values()
+        ):
+            return
+        self.cycle += 1
+        self.cycle_since = now
+        self._set_rendezvous(self.cycle)
+        pair = self._pair_for(self.cycle)
+        if pair:
+            self.get_logger().info(
+                f"cycle {self.cycle}: {pair[0]} and {pair[1]} to rendezvous"
+            )
 
     def step(self) -> None:
         if not self.running:
             return
         now = time.monotonic()
+        self._advance_cycle()
         for rid, pub in self.pubs.items():
             if self.scan.get(rid) is None:
                 continue
@@ -223,7 +359,12 @@ class Explorer(Node):
                 # already decided it is safe to drive — the wall-avoidance bias
                 # stays in the sum, so a robot heading home still gives way to
                 # whatever is beside it.
-                error = self._home_error(rid) if self.phase[rid] == "home" else None
+                if self.phase[rid] == "home":
+                    error = self._home_error(rid)
+                elif self.phase[rid] == "rendezvous":
+                    error = self._rendezvous_error(rid)
+                else:
+                    error = None
                 if error is not None:
                     _, bearing = error
                     cmd.angular.z = max(
@@ -263,11 +404,32 @@ def main() -> None:
                     help="seconds of exploring between legs back to the start "
                          "pose, which is what guarantees a loop closure per "
                          "cycle. 0 disables homing and wanders throughout.")
+    ap.add_argument("--start-poses", default="",
+                    help="JSON {robot_id: {x, y, yaw}} of world-frame spawn "
+                         "poses. Enables scheduled pair rendezvous, which is "
+                         "what makes INTER-robot loop closure reliable rather "
+                         "than incidental. Without it only homing runs.")
     args = ap.parse_args()
+
+    starts: dict[str, tuple[float, float, float]] = {}
+    if args.start_poses:
+        try:
+            for rid, pose in json.loads(args.start_poses).items():
+                starts[rid] = (
+                    float(pose.get("x", 0.0)),
+                    float(pose.get("y", 0.0)),
+                    float(pose.get("yaw", 0.0)),
+                )
+        except (ValueError, TypeError, AttributeError):
+            starts = {}
 
     rclpy.init()
     ids = [f"{args.prefix}{i}" for i in range(args.robots)]
-    node = Explorer(ids, seed=args.seed, loop_period=args.loop_period)
+    starts = {rid: pose for rid, pose in starts.items() if rid in ids}
+    node = Explorer(
+        ids, seed=args.seed, loop_period=args.loop_period, starts=starts
+    )
+    node._set_rendezvous(node.cycle)
     node.set_parameters([rclpy.parameter.Parameter("use_sim_time", value=True)])
 
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)

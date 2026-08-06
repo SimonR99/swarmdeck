@@ -149,6 +149,14 @@ measurements exactly. `fuse_covariance:=true` turns it on for anyone who wants t
 see `docs/KNOWN_ISSUES.md` #7. The relay is used on the 3D path, where RTAB-Map's
 `icp_odometry` weighs the inertial prior by covariance and cannot work around a zero.
 
+Exploration alternates wandering with two kinds of long-range leg. **Homing** returns a robot
+to its own start pose, which makes a large *intra*-robot loop closure a property of the run.
+**Rendezvous** sends a scheduled pair to the midpoint of their two start poses, which is the
+only thing that makes *inter*-robot closures reliable — homing alone left encounters to
+chance, and a measured four-robot run linked only 2 of 6 possible pairs, in two disjoint
+clusters that could not be merged. Meeting points come from the configured start poses, the
+same information `merge_mode: static` uses; ground truth stays out of the loop.
+
 Robots must also be kept off walls: a jammed differential drive spins its wheels and the drive
 plugin integrates motion that never happened, which no filter can undo. `explore_seconds:=N`
 (or `EXPLORE_SECONDS` in Docker, default 600) drives the fleet reactively to bootstrap the
@@ -227,6 +235,17 @@ Swarm SLAM panel shows it live and the map draws a dashed link between robots th
 as JSON, which `adapter_sim` forwards as the protocol's optional `slam_graph` message. That
 indirection is deliberate: `cslam_common_interfaces` exists only in the cslam image, and a
 subscriber cannot deserialise a type it does not have.
+
+`merge_mode: cslam` exists to let the pose graph produce the merge transform instead of grid
+correlation, and it is **not the default, because measured against ground truth it is much
+worse** (11-16 m against 0.03-0.20 m). The grids come from RTAB-Map and the transforms from
+cslam — two independent SLAM systems whose trajectories disagree by metres. See
+`docs/KNOWN_ISSUES.md` #5 for the measurement and what unifying them would take.
+
+Membership requires more than a loop closure. A fleet that has split into groups which never
+met has *two* common frames, and overlaying them would place robots confidently in the wrong
+building — so only robots sharing the majority frame are merged, and the rest are visibly
+absent.
 
 Getting there meant five silent traps — namespace convention, a shared IPC namespace, the
 right front-end executable, TEASER++'s Python bindings, and a fleet that keeps moving. All

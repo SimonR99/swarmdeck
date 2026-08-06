@@ -55,7 +55,40 @@ on each robot's own map rather than the merged one (FR-M8). This is a deliberate
 consequence of the ROS-free backend, not an oversight, but it caps what the fleet can do.
 docs/collaborative-slam.md sets out what would change and a staged path.
 
-### 5. Nothing detects a robot stuck with its wheels spinning
+### 5. cslam cannot drive the merge while the grids come from RTAB-Map
+
+`merge_mode: cslam` is implemented, unit-tested, and wired end to end — and it produces a
+**much worse map than grid registration**. Measured against Gazebo ground truth on a live
+four-robot run:
+
+| | merged-pose error vs ground truth |
+|---|---|
+| `merge_mode: auto` (grid registration) | 0.03-0.20 m |
+| `merge_mode: cslam` (pose graph) | 11-16 m |
+
+The cause is architectural. The occupancy grids come from **RTAB-Map**; the transforms come
+from **cslam**. Those are two independent SLAM systems with separately optimised
+trajectories, and they disagree by metres:
+
+```text
+robot_0  cslam[robot0_map]=(12.67, 0.00)  rtabmap_map=(10.69, 7.86)  gap= 8.10 m
+robot_1  cslam[robot0_map]=( 8.83, 8.31)  rtabmap_map=(-1.04,-8.47)  gap=19.47 m
+robot_3  cslam[robot0_map]=( 2.68,-3.06)  rtabmap_map=(-3.32, 0.09)  gap= 6.79 m
+robot_2  cslam[robot2_map]=( 1.08,-2.13)  rtabmap_map=( 1.08,-2.15)  gap= 0.02 m
+```
+
+robot_2 is the control: cslam had not merged it, so its cslam frame was still its own — and
+there the two systems agree to 2 cm. That is what shows the problem is the frame
+relationship, not the transform arithmetic (`T = pose_common o pose_own^-1`, which is
+correct and tested).
+
+Fixing it means unifying the two rather than adjusting a constant — either feed cslam's
+optimised poses back into RTAB-Map as pose priors, or build the merged grid from cslam's own
+keyframe clouds. Until then `make docker-up-cslam` uses `merge_mode: auto` and cslam earns
+its keep as the loop-closure and monitoring layer; `study/4robot_cslam.yaml` keeps the
+experimental path with its measurements recorded.
+
+### 6. Nothing detects a robot stuck with its wheels spinning
 
 The EKF fixes the heading channel, and `explore.py` keeps robots off walls, but neither
 closes the underlying hole: at a constant velocity there is no inertial signature that

@@ -23,7 +23,12 @@ services:
       - --port
       - "8080"
       - --config
-      - /app/study/4robot.yaml
+      # The SAME config the fleet runs. Hardcoding this meant the backend could
+      # silently use different map resolution, extent, start poses and
+      # merge_mode from the simulation it was serving — `merge_mode: cslam` in a
+      # study file simply never took effect, because the server was still
+      # reading 4robot.yaml.
+      - "${SWARMDECK_CONFIG:-/app/study/4robot.yaml}"
     ports:
       - "8080:8080"
     volumes:

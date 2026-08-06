@@ -221,6 +221,34 @@ class RobotBridge:
         self.grid = msg
         self._grid_dirty = True
 
+    def cslam_origin(self, graph: dict) -> dict | None:
+        """This robot's SLAM map frame expressed in cslam's common frame.
+
+        cslam reports where the robot IS in the common frame; the adapter knows
+        where the same robot is in its own map frame. The transform between the
+        two frames is therefore
+
+            T_map->common  =  pose_common  o  pose_own^-1
+
+        which is exactly what the map service needs to place this robot's grid.
+        Returns None until cslam has actually merged this robot with someone:
+        before that it reports its own frame as the common one, and publishing
+        an identity transform would claim a merge that has not happened.
+        """
+        common = graph.get("common")
+        if not isinstance(common, dict) or not graph.get("in_common_frame"):
+            return None
+        own = self.map_pose()
+        cyaw = float(common.get("yaw", 0.0))
+        dyaw = (cyaw - own["yaw"] + math.pi) % (2 * math.pi) - math.pi
+        c, s = math.cos(dyaw), math.sin(dyaw)
+        return {
+            "x": float(common.get("x", 0.0)) - (own["x"] * c - own["y"] * s),
+            "y": float(common.get("y", 0.0)) - (own["x"] * s + own["y"] * c),
+            "yaw": dyaw,
+            "frame": common.get("frame"),
+        }
+
     def _on_cloud(self, msg: PointCloud2) -> None:
         self._cloud = msg
         self._cloud_dirty = True
@@ -579,21 +607,21 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         graph = SLAM_GRAPHS.get(bridge.id)
                         if graph is not None and now - last_graph > 3.0:
                             last_graph = now
-                            await ws.send(
-                                json.dumps(
-                                    {
-                                        "type": "slam_graph",
-                                        "robot_id": bridge.id,
-                                        "t_mono": round(now - bridge.t0, 4),
-                                        "keyframes": graph.get("keyframes", 0),
-                                        "in_common_frame": graph.get(
-                                            "in_common_frame", False
-                                        ),
-                                        "residual": graph.get("residual"),
-                                        "inter_robot": graph.get("inter_robot", []),
-                                    }
-                                )
-                            )
+                            payload = {
+                                "type": "slam_graph",
+                                "robot_id": bridge.id,
+                                "t_mono": round(now - bridge.t0, 4),
+                                "keyframes": graph.get("keyframes", 0),
+                                "in_common_frame": graph.get(
+                                    "in_common_frame", False
+                                ),
+                                "residual": graph.get("residual"),
+                                "inter_robot": graph.get("inter_robot", []),
+                            }
+                            origin = bridge.cslam_origin(graph)
+                            if origin is not None:
+                                payload["origin"] = origin
+                            await ws.send(json.dumps(payload))
                         if now - last_cloud > 4.0:
                             last_cloud = now
                             await loop.run_in_executor(None, bridge.upload_cloud)

@@ -52,7 +52,15 @@ def generate_launch_description() -> LaunchDescription:
         "angle_max": 3.14159,
         "angle_increment": 0.0174533,   # 360 bins; a costmap needs no more
         "scan_time": 0.1,
-        "range_min": 0.15,
+        # Outside the robot's own footprint (0.35 m radius). A 3D lidar mounted
+        # on the deck sees the robot it is standing on, and 0.15 m let those
+        # self-returns straight through: every flattened scan reported an
+        # obstacle 0.15 m ahead, so `explore.py` sat permanently in its blocked
+        # escape — reversing and spinning in place for the whole run while the
+        # bumper scan showed 2.6-3.3 m of clear floor. The fleet crawled at
+        # ~1.4 cm/s and inter-robot encounters never happened, which read as a
+        # collaborative-SLAM problem and was not one.
+        "range_min": 0.45,
         "range_max": range_max,
         "use_inf": True,
     }

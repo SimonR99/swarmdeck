@@ -529,3 +529,69 @@ def test_malformed_cloud_is_refused_not_crashed():
         import zlib
         odd = zlib.compress(np.zeros(4, dtype=np.int16).tobytes())  # not a triple
         assert c.post("/api/adapter/cloud?robot_id=r0", content=odd).status_code == 400
+
+
+# ------------------------------------------------- cslam drives the merge
+
+
+def _grid(svc, rid, transform=(0.0, 0.0, 0.0)):
+    n = svc.meta.width
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[10:30, 10:30] = 0
+    svc.set_transform(rid, *transform)
+    svc.ingest(rid, GridMeta(svc.meta.resolution, n, n,
+                             svc.meta.origin_x, svc.meta.origin_y), cells)
+
+
+def test_cslam_origin_replaces_the_registration_transform():
+    """In cslam mode the transform comes from the pose graph, not correlation."""
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("cslam")
+    _grid(svc, "r0")
+    _grid(svc, "r1")
+    svc.set_slam_graph("r1", {"in_common_frame": True, "inter_robot": [{"other": "r0"}]})
+    svc.set_cslam_origin("r1", 2.0, -1.0, math.pi / 2, "robot0_map")
+    assert svc.transforms["r1"] == pytest.approx((2.0, -1.0, math.pi / 2))
+
+
+def test_cslam_origin_is_ignored_outside_cslam_mode():
+    """`auto` asked for correlation; silently overriding it would be a trap."""
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("auto")
+    _grid(svc, "r0", (1.0, 1.0, 0.0))
+    svc.set_cslam_origin("r0", 9.0, 9.0, 1.0, "robot0_map")
+    assert svc.transforms["r0"] == pytest.approx((1.0, 1.0, 0.0))
+
+
+def test_disjoint_cslam_clusters_are_not_overlaid():
+    """Two groups that never met have two unrelated common frames.
+
+    Drawing them together would place robots confidently in the wrong building,
+    which is worse than showing fewer robots.
+    """
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("cslam")
+    for rid in ("r0", "r1", "r2"):
+        _grid(svc, rid)
+        svc.set_slam_graph(rid, {"in_common_frame": True,
+                                 "inter_robot": [{"other": "other"}]})
+    # r0 and r1 met each other; r2 is its own island.
+    svc.set_cslam_origin("r0", 0.0, 0.0, 0.0, "robot0_map")
+    svc.set_cslam_origin("r1", 1.0, 0.0, 0.0, "robot0_map")
+    svc.set_cslam_origin("r2", 5.0, 5.0, 0.0, "robot2_map")
+
+    members = svc.global_members()
+    assert {"r0", "r1"} <= members
+    assert "r2" not in members
+
+
+def test_cslam_membership_still_requires_a_loop_closure():
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("cslam")
+    _grid(svc, "r0")
+    _grid(svc, "r1")
+    svc.set_slam_graph("r0", {"in_common_frame": True, "inter_robot": [{"other": "r1"}]})
+    svc.set_slam_graph("r1", {"in_common_frame": False, "inter_robot": []})
+    svc.set_cslam_origin("r0", 0.0, 0.0, 0.0, "robot0_map")
+    svc.set_cslam_origin("r1", 3.0, 0.0, 0.0, "robot0_map")
+    assert "r1" not in svc.global_members()

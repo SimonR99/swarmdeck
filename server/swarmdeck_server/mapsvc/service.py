@@ -76,6 +76,10 @@ class MapService:
         # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
+        # Which collaborative common frame each robot is currently expressed in.
+        # Two robots that have never met report different frames, and merging
+        # across them would be meaningless.
+        self.cslam_frames: dict[str, str] = {}
         self.merge_mode = "static"
         self.reference: str | None = None
         self.seq = 0
@@ -144,6 +148,43 @@ class MapService:
                 [],
             )
         return np.concatenate(chunks), np.concatenate(indices), names
+
+    def set_cslam_origin(
+        self, robot_id: str, x: float, y: float, yaw: float, frame: str
+    ) -> None:
+        """Adopt the collaborative back end's transform for one robot.
+
+        This is what makes `cslam` mode different in kind from `auto`. In `auto`
+        the transform is *re-estimated* from two finished occupancy grids, long
+        after both robots have already been wrong; here it falls out of the
+        inter-robot loop closures themselves, so one robot's observations
+        actually correct another's.
+
+        Only applied in `cslam` mode — in `static` the operator's configured
+        priors win, and in `auto` this would silently override the registration
+        the operator asked for. `frame` records which cluster the robot belongs
+        to: a fleet that has split into two groups that never met has two
+        different common frames, and only robots sharing one may be drawn
+        together. Robots in a minority cluster are held out rather than being
+        placed relative to a frame that means something else.
+        """
+        self.cslam_frames[robot_id] = frame
+        if self.merge_mode != "cslam":
+            return
+        self.transforms[robot_id] = (x, y, yaw)
+        if self.reference is None:
+            self.reference = robot_id
+        self._remerge()
+
+    def cslam_majority_frame(self) -> str | None:
+        """The common frame most of the fleet agrees on, if any."""
+        counts: dict[str, int] = {}
+        for rid, frame in self.cslam_frames.items():
+            if frame and self.in_common_frame(rid):
+                counts[frame] = counts.get(frame, 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda kv: kv[1])[0]
 
     def set_slam_graph(self, robot_id: str, graph: dict[str, Any]) -> None:
         """Record a robot's view of the collaborative pose graph.
@@ -365,8 +406,17 @@ class MapService:
         if self.merge_mode == "cslam":
             # Membership is the collaborative back end's call, not a correlation
             # score: a robot is in the map once it has actually closed a loop
-            # with the fleet.
-            return {rid for rid in self.robot_grids if self.in_common_frame(rid)}
+            # with the fleet AND is expressed in the same common frame as the
+            # majority. A fleet that has split into two groups which never met
+            # has two unrelated frames, and overlaying them would place robots
+            # confidently in the wrong building.
+            majority = self.cslam_majority_frame()
+            return {
+                rid
+                for rid in self.robot_grids
+                if self.in_common_frame(rid)
+                and (majority is None or self.cslam_frames.get(rid) == majority)
+            }
         accepted = {
             rid
             for rid, result in self.registrations.items()

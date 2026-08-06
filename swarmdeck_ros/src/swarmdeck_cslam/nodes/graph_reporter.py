@@ -22,9 +22,11 @@ each robot has, who it has actually met, and whether it is in the common frame.
 from __future__ import annotations
 
 import json
+import math
 
 import rclpy
 from cslam_common_interfaces.msg import InterRobotLoopClosure, KeyframeOdom
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -38,6 +40,13 @@ class GraphReporter(Node):
         period = float(self.get_parameter("publish_period_s").value)
 
         self.keyframes: dict[int, int] = {i: 0 for i in range(count)}
+        # Each robot's pose in whatever frame cslam has placed it in, plus the
+        # name of that frame. The frame is `robot<N>_map` of the ORIGIN robot of
+        # this robot's cluster — so robots that have never met report their own
+        # frame, and two disjoint clusters produce two different common frames.
+        # That distinction is the whole point: only robots sharing an origin can
+        # be drawn on one map.
+        self.common_pose: dict[int, dict] = {}
         # (a, b) -> verified closure count, a < b.
         self.closures: dict[tuple[int, int], int] = {}
         self.last_closure_t: dict[tuple[int, int], float] = {}
@@ -49,6 +58,13 @@ class GraphReporter(Node):
                 (lambda r: lambda _m: self._on_keyframe(r))(i),
                 100,
             )
+        for i in range(count):
+            self.create_subscription(
+                PoseStamped,
+                f"/r{i}/cslam/current_pose_estimate",
+                (lambda r: lambda m: self._on_pose(r, m))(i),
+                10,
+            )
         # One shared topic for the whole fleet — cslam publishes inter-robot
         # closures globally, not per robot.
         self.create_subscription(
@@ -57,6 +73,19 @@ class GraphReporter(Node):
         self.pub = self.create_publisher(String, "/swarmdeck/slam_graph", 10)
         self.create_timer(period, self._publish)
         self.get_logger().info(f"reporting the pose graph for {count} robots")
+
+    @staticmethod
+    def _yaw_of(q) -> float:
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    def _on_pose(self, robot: int, msg: PoseStamped) -> None:
+        self.common_pose[robot] = {
+            "frame": msg.header.frame_id,
+            "x": msg.pose.position.x,
+            "y": msg.pose.position.y,
+            "yaw": self._yaw_of(msg.pose.orientation),
+        }
 
     def _on_keyframe(self, robot: int) -> None:
         self.keyframes[robot] = self.keyframes.get(robot, 0) + 1
@@ -95,6 +124,10 @@ class GraphReporter(Node):
                             # actually tied it to another robot. Before that its
                             # graph is private, however healthy it looks.
                             "in_common_frame": bool(links),
+                            # Pose in the cluster's common frame, and which
+                            # frame that is. The adapter turns this into the
+                            # map-frame transform the merge needs.
+                            "common": self.common_pose.get(robot),
                             "residual": None,
                             "inter_robot": links,
                         }

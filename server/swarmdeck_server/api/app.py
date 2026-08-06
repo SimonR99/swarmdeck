@@ -622,6 +622,21 @@ async def adapter_socket(ws: WebSocket) -> None:
                         "t_mono": msg.get("t_mono"),
                     }
                     map_service.set_slam_graph(rid, graph)
+                    # `origin` is this robot's SLAM frame expressed in the
+                    # collaborative back end's common frame. In `cslam` mode it
+                    # REPLACES grid registration as the source of the merge
+                    # transform, which is the whole point of running a joint
+                    # pose graph: the transform falls out of the loop closures
+                    # instead of being re-estimated from finished maps.
+                    origin = msg.get("origin")
+                    if isinstance(origin, dict):
+                        map_service.set_cslam_origin(
+                            rid,
+                            float(origin.get("x", 0.0)),
+                            float(origin.get("y", 0.0)),
+                            float(origin.get("yaw", 0.0)),
+                            str(origin.get("frame") or ""),
+                        )
                     await broadcast({"type": "slam_graph", "robot_id": rid, "graph": graph})
 
             # Unknown types are ignored, not fatal (protocol rule 3).

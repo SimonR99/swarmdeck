@@ -261,7 +261,15 @@ def setup(context, *args, **kwargs):
                              "--robots", str(min(count, 5)),
                              "--prefix", prefix,
                              "--seconds", str(explore_seconds),
-                             "--seed", str(seed)],
+                             "--seed", str(seed),
+                             # Configured spawn poses, so the explorer can send
+                             # scheduled pairs to a shared meeting point. Every
+                             # robot steers in its own odom frame, so without
+                             # these a common rendezvous cannot be expressed and
+                             # inter-robot encounters stay a matter of luck.
+                             "--start-poses", json.dumps(
+                                 cfg.get("map", {}).get("start_poses", {})
+                             )],
                         output="screen",
                     )
                 ],
