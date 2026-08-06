@@ -1,0 +1,62 @@
+# AgileX Scout Mini "tars" (the `scout` SSH alias). This is NOT a from-scratch bring-up:
+# tars already runs a full ROS 1 autonomy stack — MIST lab's `mist_ws` on /ssd — with
+# VectorNav IMU + Ouster lidar, LVI-SAM SLAM, an EKF, gbplanner exploration and RosBuzz.
+# Every value below was read out of that stack, not measured on the robot or guessed:
+#   - /ssd/mist_ws/src/control/rover_launch/launch/rover_agx.launch   (what actually runs)
+#   - /ssd/mist_ws/src/control/rover_launch/launch/scout_base.launch  (odom/base frames)
+#   - /ssd/mist_ws/src/control/rover_launch/launch/config/ekf_agx.yaml (published TF)
+#   - /ssd/mist_ws/src/control/adapters/scripts/rover_scout_adapter.py (battery/odom topics)
+#   - /ssd/scout_ros/scout_base/src/scout_messenger.cpp                (cmd_vel topic)
+#   - /ssd/scout_ros/scout_description/urdf/scout_mini.urdf.xacro      (footprint)
+# Audited 2026-08-06 by reading files only — nothing here was run or echoed against a
+# live topic. Re-verify with `rostopic echo`/`rostopic hz` before trusting it.
+#
+# THIS CANNOT RUN YET: adapter_ros2.py needs `rclpy` (ROS 2), and every topic above is
+# ROS 1 (`rospy`, `roslaunch`, `catkin`). tars's native ROS 2 (Foxy) install is also
+# broken (see docs/fleet-status.md). Bridging (ros1_bridge, or porting the driver) is a
+# separate piece of work; this file documents what the bridge would need to carry.
+robot_type: scout_mini
+footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box (scout_mini.urdf.xacro base_x_size/base_y_size) — not the true footprint, since Scout Mini's outline isn't a circle
+
+# ekf_agx.yaml's single EKF instance publishes odom_lidar -> base_link_filtered, and
+# nothing in this stack publishes a "map" frame at all. LVI-SAM's fused input
+# (/lvi_sam/lidar/mapping/odometry) is already loop-closure-corrected, so odom_lidar is
+# the closest thing this robot has to a fixed/global frame — use it where the protocol
+# expects "map". Do not default this back to map/base_link; that pair does not exist here.
+map_frame: odom_lidar
+base_frame: base_link_filtered
+
+topics:
+  # /odometry/filtered is the EKF's fused output (fusing LVI-SAM lidar odometry), and is
+  # what this stack's own rover_scout_adapter.py subscribes to for pose — prefer it over
+  # scout_base_node's raw `odom` wheel odometry.
+  odom: /odometry/filtered
+  # No OccupancyGrid publisher exists in rover_agx.launch. LVI-SAM produces a 3D point
+  # cloud map, not a 2D grid; voxblox/octomap nodes exist elsewhere in mist_ws but are
+  # not wired into this launch file. Left empty per protocol rule 4 (never advertise a
+  # capability that times out) until something actually publishes nav_msgs/OccupancyGrid.
+  map: ""
+  plan: ""
+  # scout_messenger.cpp subscribes "/cmd_vel" with a leading slash, so it is the global
+  # topic regardless of any namespace scout_base.launch wraps the node in.
+  cmd_vel: /cmd_vel
+  # Published by rover_scout_adapter.py (control/adapters/scripts/rover_scout_adapter.py)
+  # from the driver's ScoutStatus message, not by scout_base_node itself.
+  battery: /robot_battery
+  camera: ""              # rover_agx.launch has its T265/realsense include commented out — no camera live today
+  camera_compressed: ""
+
+actions:
+  # No move_base or Nav2 action server exists in this stack. tars drives via gbplanner +
+  # local_planner + RosBuzz — waypoint/behavior-driven autonomy, not an actionlib
+  # navigate_to_pose goal. Left at the protocol default; it will not resolve against this
+  # robot as configured, and wiring real navigation needs a translation layer, not a
+  # topic-name fix.
+  navigate_to_pose: navigate_to_pose
+
+rates:
+  state_hz: 5.0
+  map_period_s: 2.0
+  camera_period_s: 0.2
+
+drive_timeout_s: 0.45   # SwarmDeck protocol default — scout_base_node's own cmd_vel watchdog behavior (if any) was not inspected

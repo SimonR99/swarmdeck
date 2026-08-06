@@ -9,13 +9,16 @@ top-deck 2D lidar as a SwarmDeck mapping payload.
 [adapter contract](adapters/protocol/README.md), so ROS 2 robots, ROS 1 robots, and
 Gazebo can coexist in one fleet.
 
-**For real robots**, `adapters/adapter_ros2/` is the hardware adapter and
-[`docs/hardware-bringup.md`](docs/hardware-bringup.md) is the ordered test plan. It has
-**not been run against physical hardware** — the code is unit-tested and the sim-only
-assumptions are now parameters, but every topic name, QoS choice and timeout is a
-hypothesis until a robot proves it.
+**For real robots**, `adapters/adapter_ros2/` (`rclpy`/Nav2) and `adapters/adapter_ros1/`
+(`rospy`/`move_base`) are the hardware adapters — same protocol, same config schema, pick
+whichever matches the robot's own ROS generation. [`docs/hardware-bringup.md`](docs/hardware-bringup.md)
+is the ordered test plan. Neither has **been run against physical hardware** — the code
+is unit-tested and the sim-only assumptions are now parameters, but every topic name,
+QoS/latching choice and timeout is a hypothesis until a robot proves it.
 [`docs/hardware-readiness.md`](docs/hardware-readiness.md) audits what is already correct
-and what still is not.
+and what still is not. [`docs/fleet-status.md`](docs/fleet-status.md) tracks the actual
+physical fleet — per-robot hardware, network and ROS state, and how far terrain prep has
+gotten on each.
 
 See [`docs/`](docs/) for [architecture](docs/architecture.md),
 [requirements](docs/requirements.md), and the [roadmap](docs/roadmap.md).
