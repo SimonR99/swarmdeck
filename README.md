@@ -7,7 +7,10 @@ top-deck 2D lidar as a SwarmDeck mapping payload.
 
 **The backend has no ROS dependency.** Robots connect through a version-agnostic
 [adapter contract](adapters/protocol/README.md), so ROS 2 robots, ROS 1 robots, and
-Gazebo can coexist in one fleet.
+Gazebo could coexist in one fleet — but note that only the Gazebo and synthetic adapters
+are written. **This is a simulation stack; there is no hardware adapter yet.** See
+[`docs/hardware-readiness.md`](docs/hardware-readiness.md) for a full audit of what is
+already correct for robots and what is set for simulation.
 
 See [`docs/`](docs/) for [architecture](docs/architecture.md),
 [requirements](docs/requirements.md), and the [roadmap](docs/roadmap.md).
@@ -97,7 +100,7 @@ where appropriate, so lidar mapping and camera perception see the same environme
 | Path | What |
 |---|---|
 | `adapters/protocol/` | **The contract of record.** Changing it is deliberate and versioned. |
-| `adapters/adapter_*/` | One per robot type: `mock`, `sim`, `ros2`, `ros1`, `spot` |
+| `adapters/adapter_*/` | `mock` (synthetic) and `sim` (Gazebo). **No hardware adapter exists yet** — see `docs/hardware-readiness.md` |
 | `swarmdeck_ros/src/` | Gazebo world, robot model, SLAM, Nav2, bringup |
 | `server/` | FastAPI backend — fleet registry, map merge, events, recording |
 | `ui/` | Svelte 5 + Tailwind frontend |
