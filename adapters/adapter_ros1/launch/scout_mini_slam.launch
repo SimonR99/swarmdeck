@@ -1,0 +1,47 @@
+<!--
+  tars (Scout Mini) — sensors, localization/SLAM, and the base driver only.
+
+  This is `mist_ws/src/control/rover_launch/launch/rover_agx.launch` with the
+  autonomy layer removed: no `local_planner_agx.launch`, no gbplanner include,
+  no `rosbuzz.launch`, no ROSBuzz_Adapter node. Nothing in this file publishes
+  `cmd_vel` on its own — the robot stays stationary until `adapter_ros1.py`
+  forwards an explicit `drive`/`navigate_to` from the SwarmDeck GUI (and
+  `navigate_to` has nowhere to go yet regardless; see
+  adapters/adapter_ros1/config/scout_mini.yaml).
+
+  Requires `mist_ws/devel/setup.bash` sourced (NOT part of tars's default
+  `~/.ros1_bashrc` — that line is commented out there) on top of the usual
+  `/opt/ros/noetic/setup.bash` + `/ssd/catkin_ws/devel/setup.bash`.
+-->
+<launch>
+    <arg name="robot_id" default="$(env ROBOT_ID)"/>
+
+    <!--- Vector nav IMU -->
+    <include file="$(find rover_launch)/launch/vectornav.launch" />
+
+    <!--- Ouster lidar -->
+    <include file="$(find rover_launch)/launch/ouster_new.launch">
+        <arg name="timestamp_mode" value="TIME_FROM_ROS_TIME"/>
+    </include>
+
+    <!--- LVI-SAM: lidar-visual-inertial SLAM -->
+    <include file="$(find lvi_sam)/launch/include/module_sam_agx.launch" />
+
+    <!--- AGX/VectorNav robot_state_publisher (static TF for the sensor mounts) -->
+    <include file="$(find lvi_sam)/launch/include/module_robot_state_publisher_agx_vectornav.launch" />
+
+    <!--- Base driver only. Publishes `odom`, subscribes `/cmd_vel` — nothing
+          here generates cmd_vel on its own. -->
+    <include file ="$(find rover_launch)/launch/scout_base.launch" />
+
+    <!--- EKF: fuses LVI-SAM's lidar odometry, publishes the
+          odom_lidar -> base_link_filtered TF that adapter_ros1's
+          scout_mini.yaml expects as map_frame/base_frame. -->
+    <node pkg="robot_localization" type="ekf_localization_node"
+        name="robot_localization_ekf_node_odom"
+        clear_params="true">
+        <rosparam command="load" file="$(find rover_launch)/launch/config/ekf_agx.yaml" />
+    </node>
+
+    <node pkg="tf" type="static_transform_publisher" name="tf_lidar" args="0.0 0 0.0 0 0 0 ouster_link os_sensor 10" />
+</launch>

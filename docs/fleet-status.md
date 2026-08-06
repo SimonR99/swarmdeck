@@ -7,7 +7,7 @@ maintained spec, and two of these four machines are shared with other people's w
 
 | Robot | SSH alias | Platform | Reachable | `rclpy` (native) | `rospy` (native) | SwarmDeck cloned | Adapter config |
 |---|---|---|---|---|---|---|---|
-| tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | both `adapter_ros2` + `adapter_ros1` `scout_mini.yaml` written; `adapter_ros1` import-verified live |
+| tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM+base driver launched, `adapter_ros1` connected as `tars_0` |
 | botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (docker-only, containers busy) | no | yes, `/ssd/swarmdeck` | not started |
 | aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (docker-only, containers busy) | no | yes, `/ssd/swarmdeck` | not started |
 | spot | `spot` | Boston Dynamics Spot + Orin payload | **no** | unknown | unknown | not attempted | not started |
@@ -126,6 +126,33 @@ because tars's own stack is ROS 1. Regardless of which adapter, `navigate_to_pos
 real target on this robot today — tars drives via gbplanner/RosBuzz, not `move_base` or
 Nav2, so a goal will correctly report `nav_status: failed` rather than hang, but nothing
 will actually navigate until a translation layer exists onto that stack.
+
+**tars is live**, as of this pass (2026-08-06, still running): `adapters/adapter_ros1/launch/scout_mini_slam.launch`
+brings up sensors + LVI-SAM + the EKF + `scout_base_node` — `rover_agx.launch` with
+`local_planner_agx.launch`, the gbplanner include and `rosbuzz.launch` removed, so nothing
+publishes `cmd_vel` on its own (confirmed by node list: no gbplanner, no local_planner, no
+RosBuzz node running). `/odometry/filtered` confirmed publishing `frame_id: odom_lidar`,
+`child_frame_id: base_link_filtered`, matching `scout_mini.yaml` exactly.
+`adapter_ros1.py --robot-id tars_0 --config config/scout_mini.yaml --host 192.168.1.223`
+is running and connected — `tars_0` appears in `GET /api/fleet` with a live pose and
+`capabilities: [navigate, battery, estop]` (`battery` reads `null`: no publisher, since
+`rover_scout_adapter.py` — the node that republishes it — was deliberately left out of
+the trimmed launch too). Both processes are detached (`nohup ... & disown`) and outlive
+the SSH session:
+
+```
+rover  10049  roslaunch .../scout_mini_slam.launch
+rover  10695  python3 adapter_ros1.py --robot-id tars_0 ...
+```
+
+To stop: `ssh scout` then `kill 10049 10695` (PIDs will differ on restart — `pgrep -af
+"roslaunch scout_mini_slam|adapter_ros1"` finds them). `navigate`/`estop` are advertised
+per protocol convention from config alone (mirroring `adapter_ros2`'s behaviour), not
+because a `move_base` server actually exists — a `navigate_to` from the GUI will fail
+cleanly (`nav_status: failed`) rather than move the robot, but `drive`/`stop` (teleop)
+will actually command real wheels the moment they're sent. No map: nothing in this trimmed
+stack (or the full one) publishes a `nav_msgs/OccupancyGrid` — see the RTAB-Map note
+elsewhere in this conversation for the planned fix.
 
 **SwarmDeck terrain prepared:**
 - Cloned to `/ssd/swarmdeck` (public repo, plain `git clone`, no auth needed).
