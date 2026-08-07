@@ -9,6 +9,7 @@
     Maximize2,
     Minus,
     Plus,
+    RotateCcw,
     Route,
     ScanLine,
     Tags,
@@ -49,6 +50,8 @@
   let showLabels = $state(true);
   let showSensors = $state(false);
   let showPlans = $state(true);
+  let resetPending = $state(false);
+  let resetError = $state<string | null>(null);
 
   const trails = new Map<string, { x: number; y: number }[]>();
   const pointers = new Map<number, { x: number; y: number }>();
@@ -119,6 +122,28 @@
 
   function clearTrails() {
     trails.clear();
+  }
+
+  async function resetMaps(robotId?: string) {
+    const label = robotId ? robotDisplayName(robotId) : 'every robot';
+    const confirmed = window.confirm(
+      `Reset the accumulated map for ${label}?\n\n` +
+        'This clears SwarmDeck map data only. Robot-side SLAM and recordings keep running.'
+    );
+    if (!confirmed) return;
+
+    resetPending = true;
+    resetError = null;
+    try {
+      await actions.resetMap(robotId);
+      clearTrails();
+      await mapStore.reloadCurrentView();
+      await mapStore.refreshStatus();
+    } catch (error) {
+      resetError = error instanceof Error ? error.message : 'Map reset failed';
+    } finally {
+      resetPending = false;
+    }
   }
 
   function fitMap() {
@@ -680,6 +705,19 @@
   const acceptedRegistrations = $derived(
     registrationEntries.filter(([, item]) => item.accepted).length
   );
+  const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
+  const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);
+  const resetRobotBlocked = $derived(
+    resetPending ||
+      !resetRobot ||
+      !resetRobot.capabilities.includes('map') ||
+      resetRobot.nav_status === 'active' ||
+      resetRobot.goal !== null
+  );
+  const resetAllBlocked = $derived(
+    resetPending ||
+      fleet.robots.some((robot) => robot.nav_status === 'active' || robot.goal !== null)
+  );
 
   /** Why a match has not been accepted, in terms the operator can act on:
    *  drive the robots through the same rooms, versus this building cannot be
@@ -860,6 +898,37 @@
           <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#343a44]"></i> Wall</span>
           <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#d6dae0]"></i> Unknown</span>
         </div>
+
+        <div class="my-2 border-t border-border"></div>
+        <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
+          Map data
+        </div>
+        <button
+          class="flex h-7 w-full items-center gap-2 rounded-[3px] px-1.5 text-fg-muted
+                 hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-35"
+          title={resetRobot
+            ? resetRobotBlocked
+              ? 'Stop this robot before resetting its map'
+              : `Reset only ${robotDisplayName(resetRobot.robot_id)}`
+            : 'Select exactly one mapping robot'}
+          disabled={resetRobotBlocked}
+          onclick={() => resetRobotId && void resetMaps(resetRobotId)}
+        >
+          <RotateCcw class="h-3.5 w-3.5" />
+          {resetPending && resetRobotId ? 'Resetting…' : resetRobotId ? `Reset ${robotDisplayName(resetRobotId)}` : 'Reset selected map'}
+        </button>
+        <button
+          class="flex h-7 w-full items-center gap-2 rounded-[3px] px-1.5 text-danger
+                 hover:bg-danger/8 disabled:cursor-not-allowed disabled:opacity-35"
+          title={resetAllBlocked ? 'Stop all navigating robots before resetting maps' : 'Reset every accumulated map'}
+          disabled={resetAllBlocked}
+          onclick={() => void resetMaps()}
+        >
+          <Trash2 class="h-3.5 w-3.5" /> Reset all maps
+        </button>
+        {#if resetError}
+          <div class="mt-1 rounded-[3px] bg-danger/8 px-1.5 py-1 text-danger">{resetError}</div>
+        {/if}
 
         {#if mapStore.status}
           <div class="my-2 border-t border-border"></div>

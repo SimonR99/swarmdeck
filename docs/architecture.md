@@ -414,6 +414,8 @@ GET  /api/fleet                  connected robots and capabilities
 GET  /api/session                current session state
 POST /api/session/start|stop
 GET  /api/map                    full merged grid, PNG + JSON sidecar, ETag
+POST /api/map/reset/{robot_id}   clear one stationary robot's accumulated map products
+POST /api/map/reset              clear all accumulated maps while the fleet is stationary
 POST /api/adapter/map            adapter pushes its grid
 WS   /ws                         GUI ↔ backend
 WS   /adapter                    adapter ↔ backend

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Octagon, Circle, Layers3, Settings2 } from 'lucide-svelte';
+  import { Circle, Maximize2, Minimize2, Octagon, Settings2 } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
   import StatusDot from './ui/StatusDot.svelte';
@@ -8,6 +8,53 @@
   import { actions } from '$lib/api/connection';
 
   let { onsettings = () => {} }: { onsettings?: () => void } = $props();
+
+  type FullscreenDocument = Document & {
+    webkitFullscreenElement?: Element | null;
+    webkitExitFullscreen?: () => Promise<void> | void;
+  };
+  type FullscreenRoot = HTMLElement & {
+    webkitRequestFullscreen?: () => Promise<void> | void;
+  };
+
+  let fullscreen = $state(false);
+
+  function syncFullscreen() {
+    const doc = document as FullscreenDocument;
+    fullscreen = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+  }
+
+  async function toggleFullscreen() {
+    const doc = document as FullscreenDocument;
+    const root = document.documentElement as FullscreenRoot;
+    try {
+      if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+        if (doc.exitFullscreen) await doc.exitFullscreen();
+        else if (doc.webkitExitFullscreen) await doc.webkitExitFullscreen();
+      } else if (root.requestFullscreen) {
+        await root.requestFullscreen();
+      } else if (root.webkitRequestFullscreen) {
+        await root.webkitRequestFullscreen();
+      }
+    } catch (error) {
+      // Fullscreen can be refused by browser policy or an embedded webview.
+      // Keep the dashboard usable; the browser's own fullscreen control remains
+      // the fallback on platforms that do not expose the page API.
+      console.warn('[swarmdeck] fullscreen unavailable', error);
+    } finally {
+      syncFullscreen();
+    }
+  }
+
+  $effect(() => {
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    document.addEventListener('webkitfullscreenchange', syncFullscreen);
+    syncFullscreen();
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFullscreen);
+      document.removeEventListener('webkitfullscreenchange', syncFullscreen);
+    };
+  });
 
   const elapsed = $derived(
     `${String(Math.floor(session.elapsed_s / 60)).padStart(2, '0')}:${String(
@@ -50,6 +97,19 @@
       <span class="hidden text-[11px] text-fg-dim sm:inline">{session.name}</span>
     {/if}
     <span class="tabular text-xs font-medium text-fg-muted">{elapsed}</span>
+    <Button
+      variant="ghost"
+      size="sm"
+      class="px-2"
+      title={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+      onclick={() => void toggleFullscreen()}
+    >
+      {#if fullscreen}
+        <Minimize2 class="h-4 w-4" />
+      {:else}
+        <Maximize2 class="h-4 w-4" />
+      {/if}
+    </Button>
     <Button variant="ghost" size="sm" title="Settings" onclick={onsettings} class="px-2">
       <Settings2 class="h-4 w-4" />
     </Button>

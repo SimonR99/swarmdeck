@@ -153,6 +153,15 @@ export const actions = {
   reportTarget(robotId: string, p: Point) {
     sendAction({ type: 'report_target', robot_id: robotId, payload: p });
   },
+  async resetMap(robotId?: string) {
+    const endpoint = robotId
+      ? `/api/map/reset/${encodeURIComponent(robotId)}`
+      : '/api/map/reset';
+    const response = await fetch(endpoint, { method: 'POST' });
+    const result = (await response.json()) as { error?: string; robots?: string[] };
+    if (!response.ok) throw new Error(result.error ?? `map reset ${response.status}`);
+    return result;
+  },
   stopAll() {
     sendAction({ type: 'stop_all' });
   }

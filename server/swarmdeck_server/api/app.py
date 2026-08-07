@@ -343,6 +343,71 @@ async def get_map_info() -> dict[str, Any]:
     return {"type": "map_info", "info": map_service.meta.as_dict(map_service.seq)}
 
 
+def _robots_blocking_map_reset(robot_id: str | None = None) -> list[str]:
+    """Robots whose current command state makes a map reset unsafe."""
+    robots = (
+        [registry.robots[robot_id]]
+        if robot_id in registry.robots
+        else list(registry.robots.values()) if robot_id is None else []
+    )
+    return sorted(
+        robot.robot_id
+        for robot in robots
+        if robot.nav_status == "active" or robot.goal is not None
+    )
+
+
+async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Response:
+    blocked = _robots_blocking_map_reset(robot_id)
+    if blocked:
+        return JSONResponse(
+            {
+                "error": "map reset refused while navigation is active",
+                "robots": blocked,
+            },
+            status_code=409,
+        )
+
+    # A collaborative backend supplies one already-fused grid, so this service
+    # has no per-robot cells it could subtract from it. Clearing one robot would
+    # falsely imply that it had been removed. The explicit fleet reset remains
+    # available and clears that fused product wholesale.
+    if robot_id is not None and map_service.merge_mode == "cslam" and map_service.global_grid is not None:
+        return JSONResponse(
+            {"error": "targeted reset unavailable for a fused collaborative map; reset all maps"},
+            status_code=409,
+        )
+
+    reset = await map_service.reset_robot_async(robot_id)
+    patch = map_service.take_patch()
+    if patch is not None:
+        await broadcast(patch)
+    events.log(
+        "map_reset",
+        {"scope": scope, "robot_id": robot_id, "robots": reset},
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "scope": scope,
+            "robots": reset,
+            "info": map_service.meta.as_dict(map_service.seq),
+        }
+    )
+
+
+@app.post("/api/map/reset/{robot_id}")
+async def reset_robot_map(robot_id: str) -> Response:
+    """Clear one robot's backend map products without restarting its SLAM."""
+    return await _publish_map_reset("robot", robot_id)
+
+
+@app.post("/api/map/reset")
+async def reset_all_maps() -> Response:
+    """Clear every backend map product, provided the fleet is stationary."""
+    return await _publish_map_reset("all")
+
+
 @app.get("/api/map/local/{robot_id}")
 async def get_local_map(robot_id: str) -> Response:
     """The robot's unregistered SLAM grid, expressed in its own map frame."""
@@ -446,7 +511,7 @@ async def post_cloud(request: Request) -> Any:
     if quantised.size % 3:
         return JSONResponse({"error": "xyz triples expected"}, status_code=400)
     points = quantised.reshape(-1, 3).astype(np.float32) * scale
-    map_service.set_cloud(rid, points)
+    await map_service.set_cloud_async(rid, points)
     return {"ok": True, "points": int(len(points))}
 
 

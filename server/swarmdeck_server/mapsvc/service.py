@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from .grid_meta import GridMeta
-from .registration import Registration, register
+from .registration import Registration, register, register_3d, score_transform
 from .scan_grid import ScanGridAccumulator
 
 UNKNOWN = -1
@@ -45,6 +45,11 @@ class MapService:
         self.transforms: dict[str, tuple[float, float, float]] = {}
         self.transform_priors: dict[str, tuple[float, float, float]] = {}
         self.registrations: dict[str, Registration] = {}
+        # Raw height-band proposals and the modality used by the accepted result.
+        # A cloud proposal is never applied directly: `_reregister` first scores
+        # it against the independent occupancy grids.
+        self.cloud_registrations: dict[str, Registration] = {}
+        self.registration_sources: dict[str, str] = {}
         self.registration_rejections: dict[str, str] = {}
         self.locked_dyaw: dict[str, float] = {}
         # Latest `slam_graph` per robot: keyframe count, inter-robot loop
@@ -100,14 +105,119 @@ class MapService:
         if self.reference is None:
             self.reference = robot_id
 
+    def reset_robot(self, robot_id: str | None = None) -> list[str]:
+        """Discard accumulated map state for one robot, or for the whole fleet.
+
+        Configured transform priors survive a reset: they describe deployment
+        geometry, not accumulated sensor data. A targeted reset is intentionally
+        backend-only; the robot's SLAM process keeps running and may repopulate
+        its map immediately.
+        """
+        if robot_id is None:
+            reset_ids = sorted(
+                set(self.robot_grids)
+                | set(self.robot_clouds)
+                | set(self._scan_grids)
+                | set(self.slam_graphs)
+            )
+            self.robot_grids.clear()
+            self.robot_revisions.clear()
+            self.registrations.clear()
+            self.cloud_registrations.clear()
+            self.registration_sources.clear()
+            self.registration_rejections.clear()
+            self.locked_dyaw.clear()
+            self.slam_graphs.clear()
+            self.cslam_disagreement.clear()
+            self.robot_clouds.clear()
+            self._scan_grids.clear()
+            self.global_grid = None
+            self.common_poses.clear()
+            self.cslam_frames.clear()
+            self.transforms = dict(self.transform_priors)
+            self.reference = next(iter(self.transform_priors), None)
+            self._remerge()
+            return reset_ids
+
+        existed = any(
+            robot_id in collection
+            for collection in (
+                self.robot_grids,
+                self.robot_clouds,
+                self._scan_grids,
+                self.slam_graphs,
+                self.common_poses,
+                self.cslam_frames,
+            )
+        )
+        self.robot_grids.pop(robot_id, None)
+        self.robot_revisions.pop(robot_id, None)
+        self.registrations.pop(robot_id, None)
+        self.cloud_registrations.pop(robot_id, None)
+        self.registration_sources.pop(robot_id, None)
+        self.registration_rejections.pop(robot_id, None)
+        self.locked_dyaw.pop(robot_id, None)
+        self.slam_graphs.pop(robot_id, None)
+        self.cslam_disagreement.pop(robot_id, None)
+        self.robot_clouds.pop(robot_id, None)
+        self._scan_grids.pop(robot_id, None)
+        self.common_poses.pop(robot_id, None)
+        self.cslam_frames.pop(robot_id, None)
+
+        prior = self.transform_priors.get(robot_id)
+        if prior is None:
+            self.transforms.pop(robot_id, None)
+        else:
+            self.transforms[robot_id] = prior
+
+        if self.reference == robot_id and prior is None:
+            self.reference = next(iter(self.robot_grids), None)
+            # Every automatic registration was relative to the old reference.
+            self.registrations.clear()
+            self.cloud_registrations.clear()
+            self.registration_sources.clear()
+            self.registration_rejections.clear()
+            self.locked_dyaw.clear()
+
+        self._remerge()
+        return [robot_id] if existed else []
+
+    async def reset_robot_async(self, robot_id: str | None = None) -> list[str]:
+        """Serialise resets against concurrent adapter map uploads."""
+        async with self._ingest_lock:
+            return await asyncio.to_thread(self.reset_robot, robot_id)
+
     MODES = ("static", "auto", "cslam")
 
     def set_mode(self, mode: str) -> None:
         self.merge_mode = mode if mode in self.MODES else "static"
 
     def set_cloud(self, robot_id: str, points: np.ndarray) -> None:
-        """Store one robot's 3D cloud, already voxel-downsampled by the adapter."""
+        """Store a cloud and refresh cloud-assisted registration when applicable."""
         self.robot_clouds[robot_id] = points
+        if self.merge_mode != "auto" or self.reference is None:
+            return
+
+        # A new reference cloud changes every pair; a new moving cloud changes
+        # only its own pair.  Registration runs under the same ingest lock as map
+        # updates (see `set_cloud_async`), so these shared dictionaries cannot be
+        # observed half-updated by concurrent uploads.
+        targets = (
+            [rid for rid in self.robot_clouds if rid != self.reference]
+            if robot_id == self.reference
+            else [robot_id]
+        )
+        for rid in targets:
+            if rid not in self.robot_grids:
+                continue
+            self._update_cloud_registration(rid)
+            self._reregister(rid)
+        self._remerge()
+
+    async def set_cloud_async(self, robot_id: str, points: np.ndarray) -> None:
+        """Cloud storage/registration off the event loop, like grid ingestion."""
+        async with self._ingest_lock:
+            await asyncio.to_thread(self.set_cloud, robot_id, points)
 
     def merged_cloud(self) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Every member robot's cloud, rotated into the merged frame.
@@ -365,15 +475,55 @@ class MapService:
             yaw_prior = None  # unknown start: nothing to narrow the sweep with
             window = PRIOR_WINDOW_DEG
 
-        result = register(
+        grid_result = register(
             ref_cells, (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
             mov_cells, (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
             yaw_prior=yaw_prior,
             yaw_window_deg=window,
         )
+        result = grid_result
+        source = "grid"
+
+        # Prefer a geometrically unambiguous cloud proposal only after the 2D
+        # grids independently confirm its wall overlap and shared known area.
+        # The cloud contributes the rival-translation/yaw tests; the grids
+        # contribute score/overlap/support.  Neither can accept a transform alone.
+        cloud = self.cloud_registrations.get(robot_id)
+        if cloud is None and robot_id in self.robot_clouds:
+            self._update_cloud_registration(robot_id)
+            cloud = self.cloud_registrations.get(robot_id)
+        if cloud is not None:
+            score, overlap, support = score_transform(
+                ref_cells,
+                (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
+                mov_cells,
+                (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
+                cloud.dx,
+                cloud.dy,
+                cloud.dyaw,
+            )
+            cloud_validated = Registration(
+                dx=cloud.dx,
+                dy=cloud.dy,
+                dyaw=cloud.dyaw,
+                score=score,
+                overlap=overlap,
+                ratio=cloud.ratio,
+                yaw_ratio=cloud.yaw_ratio,
+                support=support,
+            )
+            if cloud_validated.confident:
+                result = cloud_validated
+                source = "pointcloud+grid"
+
         self.registrations[robot_id] = result
+        self.registration_sources[robot_id] = source
         if not result.confident:
-            self.registration_rejections[robot_id] = "ambiguous occupancy match"
+            self.registration_rejections[robot_id] = (
+                "ambiguous grid and point-cloud match"
+                if cloud is not None
+                else "ambiguous occupancy match"
+            )
             # A locked robot that stops matching has to go back to searching
             # widely, or a bad lock is self-perpetuating.
             self.locked_dyaw.pop(robot_id, None)
@@ -403,6 +553,77 @@ class MapService:
         self.registration_rejections.pop(robot_id, None)
         self.transforms[robot_id] = (wx, wy, candidate_yaw)
         self.locked_dyaw[robot_id] = result.dyaw
+
+    def _update_cloud_registration(self, robot_id: str) -> None:
+        """Estimate ``T_reference_robot`` from corresponding 3D height slices."""
+        if robot_id == self.reference or self.reference is None:
+            return
+        ref_points = self.robot_clouds.get(self.reference)
+        mov_points = self.robot_clouds.get(robot_id)
+        if ref_points is None or mov_points is None:
+            self.cloud_registrations.pop(robot_id, None)
+            return
+
+        ref_points = ref_points[np.isfinite(ref_points).all(axis=1)]
+        mov_points = mov_points[np.isfinite(mov_points).all(axis=1)]
+
+        # Registration cannot use geometry outside the two local map windows and
+        # neither can the final compositor.  Clipping here also prevents one bad
+        # sensor outlier (or a malformed upload scale) from expanding the FFT
+        # raster to an unbounded allocation.
+        ref_meta = self.robot_grids[self.reference][0]
+        mov_meta = self.robot_grids[robot_id][0]
+
+        def inside_grid(points: np.ndarray, meta: GridMeta) -> np.ndarray:
+            max_x = meta.origin_x + meta.width * meta.resolution
+            max_y = meta.origin_y + meta.height * meta.resolution
+            return points[
+                (points[:, 0] >= meta.origin_x)
+                & (points[:, 0] < max_x)
+                & (points[:, 1] >= meta.origin_y)
+                & (points[:, 1] < max_y)
+            ]
+
+        ref_points = inside_grid(ref_points, ref_meta)
+        mov_points = inside_grid(mov_points, mov_meta)
+        if len(ref_points) < 40 or len(mov_points) < 40:
+            self.cloud_registrations.pop(robot_id, None)
+            return
+
+        # Both clouds need one common raster extent.  Derive it from their local
+        # metric coordinates instead of the merged-map origin: independent SLAM
+        # frames can have very different origins even when the rooms overlap.
+        xy_lo = np.minimum(
+            ref_points[:, :2].min(axis=0), mov_points[:, :2].min(axis=0)
+        )
+        xy_hi = np.maximum(
+            ref_points[:, :2].max(axis=0), mov_points[:, :2].max(axis=0)
+        )
+        resolution = self.meta.resolution
+        origin = np.floor((xy_lo - 0.5) / resolution) * resolution
+        size = np.ceil((xy_hi + 0.5 - origin) / resolution).astype(int) + 1
+
+        ryaw = self.transforms.get(self.reference, (0.0, 0.0, 0.0))[2]
+        locked = self.locked_dyaw.get(robot_id)
+        configured = self.transform_priors.get(robot_id)
+        if locked is not None:
+            yaw_prior: float | None = locked
+            window = LOCKED_WINDOW_DEG
+        elif configured is not None:
+            yaw_prior = self._wrap_yaw(configured[2] - ryaw)
+            window = PRIOR_WINDOW_DEG
+        else:
+            yaw_prior = None
+            window = PRIOR_WINDOW_DEG
+
+        self.cloud_registrations[robot_id] = register_3d(
+            ref_points,
+            mov_points,
+            resolution,
+            (int(size[0]), int(size[1]), float(origin[0]), float(origin[1])),
+            yaw_prior=yaw_prior,
+            yaw_window_deg=window,
+        )
 
     # --------------------------------------------------- collaborative back end
 
@@ -484,7 +705,14 @@ class MapService:
         one robot has been accepted against the reference.
         """
         if self.merge_mode == "static":
-            return set(self.robot_grids)
+            # An unconfigured reference may safely define the world frame at
+            # identity by construction.  Every additional robot needs an explicit
+            # transform; silently defaulting all of them to identity is the exact
+            # failure that overlaid independent hardware maps and clouds.
+            members = {rid for rid in self.robot_grids if rid in self.transforms}
+            if self.reference in self.robot_grids:
+                members.add(self.reference)
+            return members
         if self.merge_mode == "cslam":
             # Membership is the collaborative back end's call, not a correlation
             # score: a robot is in the map once it has actually closed a loop
@@ -641,6 +869,7 @@ class MapService:
                     "rejection": self.registration_rejections.get(k),
                     "dyaw_deg": round(math.degrees(r.dyaw), 2),
                     "locked": k in self.locked_dyaw,
+                    "source": self.registration_sources.get(k, "grid"),
                 }
                 for k, r in self.registrations.items()
             },

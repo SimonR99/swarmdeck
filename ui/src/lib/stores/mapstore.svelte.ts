@@ -356,6 +356,29 @@ export const mapStore = {
     }
   },
 
+  /** Reload whichever full grid is visible after an operator map reset. */
+  async reloadCurrentView() {
+    loadGeneration++;
+    state.seq = -1;
+    state.ready = false;
+    state.revision++;
+
+    if (state.viewMode === 'local' && state.viewRobot) {
+      await this.selectRobotView(state.viewRobot);
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/map/info', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`map info ${response.status}`);
+      const payload = (await response.json()) as { info: MapInfo };
+      globalInfo = payload.info;
+      await this.loadFullPng(payload.info);
+    } catch (error) {
+      console.warn('[swarmdeck] map reset reload failed', error);
+    }
+  },
+
   /** Select the map scope implied by robot selection and registration state. */
   get viewPreference() {
     return state.viewPreference;

@@ -24,6 +24,7 @@ from swarmdeck_server.api.app import (
 from swarmdeck_server.fleet.registry import Registry
 from swarmdeck_server.fleet.registry import registry as app_registry
 from swarmdeck_server.mapsvc.service import GridMeta, MapService
+from swarmdeck_server.mapsvc.scan_grid import ScanGridAccumulator
 
 
 @pytest.fixture(autouse=True)
@@ -75,6 +76,90 @@ def test_local_map_png_and_info_roundtrip():
         assert image.size == (n, n)
 
         assert c.get("/api/map/local/missing").status_code == 404
+
+
+def test_targeted_map_reset_discards_only_one_robots_accumulated_products():
+    svc = MapService(resolution=0.1, size_m=10.0)
+    meta = GridMeta(0.1, 20, 20, -1.0, -1.0)
+    r0_cells = np.full((20, 20), -1, dtype=np.int8)
+    r0_cells[8:12, 8:12] = 100
+    r1_cells = np.full((20, 20), -1, dtype=np.int8)
+    r1_cells[4:16, 4:16] = 0
+
+    svc.set_transform("r0", 0.0, 0.0, 0.0)
+    svc.set_transform("r1", 2.0, 0.0, 0.0)
+    svc.ingest("r0", meta, r0_cells)
+    svc.ingest("r1", meta, r1_cells)
+    svc.set_cloud("r0", np.array([[0.0, 0.0, 0.5]], dtype=np.float32))
+    svc.set_cloud("r1", np.array([[1.0, 0.0, 0.5]], dtype=np.float32))
+    svc._scan_grids["r0"] = ScanGridAccumulator(0.0, 0.0, resolution=0.1, size_m=2.0)
+    svc.set_slam_graph("r0", {"in_common_frame": False})
+
+    assert svc.reset_robot("r0") == ["r0"]
+
+    assert "r0" not in svc.robot_grids
+    assert "r0" not in svc.robot_clouds
+    assert "r0" not in svc._scan_grids
+    assert "r0" not in svc.slam_graphs
+    assert "r1" in svc.robot_grids
+    assert "r1" in svc.robot_clouds
+    assert svc.transforms["r0"] == (0.0, 0.0, 0.0)
+    assert np.any(svc.merged == 0)
+
+
+def test_map_reset_api_refuses_navigation_then_resets_target_only():
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    meta = GridMeta(0.1, 10, 10, -0.5, -0.5)
+    cells = np.zeros((10, 10), dtype=np.int8)
+    map_service.robot_grids["botman"] = (meta, cells)
+    map_service.robot_grids["tars"] = (meta, cells.copy())
+    try:
+        robot = app_registry.hello(
+            {"robot_id": "botman", "capabilities": ["navigate", "map"]},
+            sink=None,
+        )
+        robot.nav_status = "active"
+        robot.goal = {"x": 1.0, "y": 0.0}
+
+        with TestClient(app) as c:
+            blocked = c.post("/api/map/reset/botman")
+            assert blocked.status_code == 409
+            assert blocked.json()["robots"] == ["botman"]
+            assert "botman" in map_service.robot_grids
+
+            robot.nav_status = "idle"
+            robot.goal = None
+            reset = c.post("/api/map/reset/botman")
+            assert reset.status_code == 200
+            assert reset.json()["robots"] == ["botman"]
+            assert "botman" not in map_service.robot_grids
+            assert "tars" in map_service.robot_grids
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_reset_all_maps_api_clears_every_robot_product():
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    meta = GridMeta(0.1, 10, 10, -0.5, -0.5)
+    cells = np.zeros((10, 10), dtype=np.int8)
+    map_service.robot_grids["botman"] = (meta, cells)
+    map_service.robot_grids["tars"] = (meta, cells.copy())
+    map_service.robot_clouds["botman"] = np.zeros((1, 3), dtype=np.float32)
+
+    try:
+        with TestClient(app) as c:
+            reset = c.post("/api/map/reset")
+
+        assert reset.status_code == 200
+        assert reset.json()["robots"] == ["botman", "tars"]
+        assert map_service.robot_grids == {}
+        assert map_service.robot_clouds == {}
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
 
 
 def test_camera_preview_roundtrip():

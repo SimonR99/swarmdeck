@@ -28,6 +28,13 @@ publish its source-declared `map -> os_lidar` TF, so the adapter reads the same
 map-frame sensor pose directly from `/laser_odometry`. The driver's independent
 `odom -> base_link` tree remains deliberately unjoined.
 
+Returns inside the configured 0.65 m footprint are discarded before upload so
+the rearward lidar rays cannot paint the chassis into the persistent server
+grid. If a grid was accumulated before that filter was active, select Botman in
+the map's **Layers → Map data** menu and use **Reset Botman** while it is not
+navigating. This resets only SwarmDeck's accumulator; SuperOdometry and session
+recording continue uninterrupted.
+
 Botman's Bunker chassis is 1023 x 778 mm, so the UI uses a conservative 0.65 m
 circumscribed radius. See the [AgileX Bunker specifications](https://docs.trossenrobotics.com/agilex_bunker_docs/specifications.html).
 
