@@ -185,6 +185,8 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "period_s": 0.2,
         "sensitivity": 0.55,
+        # Empty uses SWARMDECK_DUCK_DETECTOR_URL, then localhost:8091.
+        "detector_url": "",
         "depth_min_m": 0.15,
         "depth_max_m": 8.0,
         "depth_max_age_s": 0.35,
@@ -255,7 +257,10 @@ class HardwareBridge:
             try:
                 from adapters.perception.duck_detector import RubberDuckDetector
 
-                self._detector = RubberDuckDetector(perception.get("sensitivity", 0.55))
+                self._detector = RubberDuckDetector(
+                    perception.get("sensitivity", 0.55),
+                    perception.get("detector_url") or None,
+                )
             except ImportError as exc:
                 self._detection_enabled = False
                 rospy.logwarn(f"[{self.id}] camera detection disabled: {exc}")
@@ -591,13 +596,18 @@ class HardwareBridge:
     ) -> None:
         if not due_checked and not self._detection_due():
             return
-        self._detections = []
+        # Build the next batch off to the side. The websocket thread can call
+        # take_detections() while this ROS callback is waiting for inference;
+        # appending directly to self._detections lets that thread replace the
+        # list with None between proposals.
+        detections = []
         for index, detection in enumerate(self._detector.detect_bgr(frame)):
             item = detection.as_protocol(f"duck_{index}")
             item["map_position"] = self._depth_map_position(
                 detection.bbox, image_header
             )
-            self._detections.append(item)
+            detections.append(item)
+        self._detections = detections
 
     def take_detections(self) -> list[dict] | None:
         current = self._detections

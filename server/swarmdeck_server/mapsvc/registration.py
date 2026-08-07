@@ -315,6 +315,37 @@ def _evaluate(
     return score, overlap, support
 
 
+def score_transform(
+    ref_cells: np.ndarray,
+    ref_meta: tuple[float, float, float],
+    mov_cells: np.ndarray,
+    mov_meta: tuple[float, float, float],
+    dx: float,
+    dy: float,
+    dyaw: float,
+    *,
+    res: float = FINE_RES,
+) -> tuple[float, int, float]:
+    """Score an externally proposed ``T_ref_mov`` against two grids.
+
+    A 3D cloud can resolve a rotation or corridor offset that is ambiguous in a
+    floor projection, but it must not be allowed to place a map on its own.  This
+    exposes the same occupied-overlap and shared-known-area check used by
+    :func:`register`, in the grids' actual metric frames, so a cloud proposal can
+    be independently validated by the occupancy evidence.
+    """
+    return _evaluate(
+        occupied_points(ref_cells, *ref_meta),
+        free_points(ref_cells, *ref_meta),
+        occupied_points(mov_cells, *mov_meta),
+        free_points(mov_cells, *mov_meta),
+        dyaw,
+        dx,
+        dy,
+        res,
+    )
+
+
 def register(
     ref_cells: np.ndarray,
     ref_meta: tuple[float, float, float],
@@ -411,40 +442,51 @@ def register(
         )
         for cand in hypotheses
     ]
-    refined.sort(key=lambda r: -r[3])
-    best = refined[0]
+    # Refine *every* surviving rotation at full resolution before choosing the
+    # winner.  The medium raster can reverse two close hypotheses once thin wall
+    # structure becomes visible; choosing at medium and refining only that one
+    # made the final stage incapable of correcting the mistake.  This happened on
+    # the live mixed-hardware maps: medium selected the 149 deg alias although the
+    # -30 deg fit had the stronger fine-resolution peak.
+    fine_hypotheses: list[tuple[float, float, float, float, float]] = []
+    for candidate in refined:
+        fine_results = _sweep(
+            fine,
+            mov_occ_c,
+            np.deg2rad(
+                np.arange(
+                    math.degrees(candidate[0]) - MEDIUM_STEP,
+                    math.degrees(candidate[0]) + MEDIUM_STEP + 1e-9,
+                    FINE_STEP,
+                )
+            ),
+        )
+        k = max(range(len(fine_results)), key=lambda i: fine_results[i][3])
+        yaw, dx, dy, peak, ratio = fine_results[k]
 
-    # Best surviving hypothesis at a genuinely different rotation. This is the
-    # test the original ratio check could not express, and the one that catches a
-    # square building matching itself at 90 deg.
-    yaw_ratio = (
-        1.0
-        if best[3] <= 0.0
-        else max(0.0, refined[1][3]) / best[3]
-        if len(refined) > 1
-        else 0.0
-    )
+        # Interpolate the yaw peak too: 0.25 deg of residual is 6 cm of error at a
+        # 15 m lever arm, which is the same order as everything else here.
+        if 0 < k < len(fine_results) - 1:
+            yaw += _parabolic(
+                fine_results[k - 1][3], fine_results[k][3], fine_results[k + 1][3]
+            ) * math.radians(FINE_STEP)
+        fine_hypotheses.append((yaw, dx, dy, peak, ratio))
 
-    fine_results = _sweep(
-        fine,
-        mov_occ_c,
-        np.deg2rad(
-            np.arange(
-                math.degrees(best[0]) - MEDIUM_STEP,
-                math.degrees(best[0]) + MEDIUM_STEP + 1e-9,
-                FINE_STEP,
-            )
+    fine_hypotheses.sort(key=lambda r: -r[3])
+    yaw, dx, dy, best_peak, ratio = fine_hypotheses[0]
+
+    # Refinement can make two coarse hypotheses converge onto the same yaw.  Do
+    # not count those as rivals; compare the winner with the best result that is
+    # still a genuinely different rotation after the final stage.
+    rival_peak = max(
+        (
+            max(0.0, item[3])
+            for item in fine_hypotheses[1:]
+            if abs(_wrap(item[0] - yaw)) > sep
         ),
+        default=0.0,
     )
-    k = max(range(len(fine_results)), key=lambda i: fine_results[i][3])
-    yaw, dx, dy, _, ratio = fine_results[k]
-
-    # Interpolate the yaw peak too: 0.25 deg of residual is 6 cm of error at a
-    # 15 m lever arm, which is the same order as everything else here.
-    if 0 < k < len(fine_results) - 1:
-        yaw += _parabolic(
-            fine_results[k - 1][3], fine_results[k][3], fine_results[k + 1][3]
-        ) * math.radians(FINE_STEP)
+    yaw_ratio = 1.0 if best_peak <= 0.0 else rival_peak / best_peak
 
     # Compose: rotate about mov's centroid, then translate onto ref's centroid
     # plus the residual shift the correlation found.
@@ -543,13 +585,26 @@ def register_3d(
     if len(results) == 1:
         return results[0]
 
-    best = max(results, key=lambda r: r.score)
+    # A symmetric band has no yaw information and is free to return either alias;
+    # it must not veto an asymmetric band that actually separated its rival.  Use
+    # only informative bands for the agreement vote.  If none is informative the
+    # cloud remains ambiguous, exactly as a flattened projection would be.
+    informative = [r for r in results if r.yaw_ratio <= 0.80 and r.ratio <= 0.80]
+    voting = informative or results
+    best = max(voting, key=lambda r: r.score)
     # Do the bands agree? Spread in the recovered yaw is the honest measure of
     # whether the vertical structure actually resolved the rotation, and it is
     # information a single flattened grid cannot produce at all.
-    yaws = np.array([_wrap(r.dyaw - best.dyaw) for r in results])
+    yaws = np.array([_wrap(r.dyaw - best.dyaw) for r in voting])
     spread = float(np.abs(yaws).max())
-    agree = spread < math.radians(6.0)
+    translation_spread = max(
+        math.hypot(r.dx - best.dx, r.dy - best.dy) for r in voting
+    )
+    agree = (
+        bool(informative)
+        and spread < math.radians(6.0)
+        and translation_spread < 0.75
+    )
 
     return Registration(
         dx=best.dx,
@@ -561,6 +616,6 @@ def register_3d(
         # Bands that agree corroborate each other, so the rival hypothesis is
         # weaker than any single band suggests; bands that disagree mean the
         # rotation is genuinely unresolved and must not be trusted.
-        yaw_ratio=min(r.yaw_ratio for r in results) if agree else 1.0,
-        support=float(np.mean([r.support for r in results])),
+        yaw_ratio=min(r.yaw_ratio for r in voting) if agree else 1.0,
+        support=float(np.mean([r.support for r in voting])),
     )

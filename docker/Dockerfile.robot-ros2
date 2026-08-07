@@ -1,12 +1,21 @@
 FROM ros:humble-ros-base
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gir1.2-gstreamer-1.0 \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-plugins-ugly \
+      gstreamer1.0-rtsp \
+      gstreamer1.0-tools \
+      python3-gi \
       python3-numpy \
       python3-opencv \
       python3-pip \
       python3-yaml \
       ros-humble-geometry-msgs \
       ros-humble-nav-msgs \
+      ros-humble-nav2-msgs \
       ros-humble-sensor-msgs \
       ros-humble-tf2-ros \
     && pip3 install --no-cache-dir websockets==10.4 \

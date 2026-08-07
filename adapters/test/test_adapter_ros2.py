@@ -56,10 +56,20 @@ def _bridge(mod, cfg_override=None):
     bridge = mod.HardwareBridge.__new__(mod.HardwareBridge)
     bridge.cfg = cfg
     bridge.id = "r0"
+    bridge.map_frame = cfg["map_frame"]
+    bridge.base_frame = cfg["base_frame"]
     bridge.node = MagicMock()
     bridge.pub_cmd = MagicMock() if cfg["topics"].get("cmd_vel") else None
-    bridge.nav_client = MagicMock() if cfg.get("actions", {}).get("navigate_to_pose") else None
+    bridge.nav_client = (
+        MagicMock()
+        if cfg.get("actions", {}).get("navigate_to_pose")
+        else None
+    )
     bridge.mode = "idle"
+    bridge.nav_status = "idle"
+    bridge.goal = None
+    bridge._goal_generation = 0
+    bridge._goal_handle = None
     bridge._last_drive_at = 0.0
     bridge._scan_points = None
     bridge._scan_dirty = False
@@ -218,6 +228,111 @@ def test_registered_cloud_uses_declared_offsets_and_height_band(mod):
     assert bridge._cloud_points[0].tolist() == pytest.approx([1.0, 2.0, -0.5])
     assert bridge._cloud_points[1].tolist() == pytest.approx([3.0, 4.0, 0.5])
     assert bridge._cloud_points[2].tolist() == pytest.approx([5.0, 6.0, 2.5])
+
+
+def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
+    """Nav2 output must not reach the driver outside an active action goal."""
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    twist = MagicMock()
+
+    bridge.nav_status = "idle"
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_not_called()
+
+    bridge.nav_status = "active"
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_called_once_with(twist)
+
+
+def test_teleop_cancels_an_active_action_goal(mod):
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "navigate_to_pose"}})
+    handle = MagicMock()
+    bridge._goal_handle = handle
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 2.0, "y": 2.0}
+
+    bridge.drive(0.1, 0.0)
+
+    handle.cancel_goal_async.assert_called_once_with()
+    assert bridge._goal_handle is None
+    assert bridge.nav_status == "cancelled"
+    assert bridge.goal is None
+    assert bridge.mode == "teleop"
+
+
+def test_stale_accepted_action_response_is_cancelled(mod):
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "navigate_to_pose"}})
+    bridge._goal_generation = 2
+    handle = MagicMock()
+    handle.accepted = True
+    future = MagicMock()
+    future.result.return_value = handle
+
+    bridge._on_goal_response(future, generation=1)
+
+    handle.cancel_goal_async.assert_called_once_with()
+    assert bridge._goal_handle is None
+
+
+def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
+    """drive(0, 0) is sent routinely (deadman, initial state) — it must not
+    spuriously cancel a goal that isn't even active."""
+    bridge = _bridge(mod)
+    bridge.nav_status = "idle"
+
+    bridge.drive(0.0, 0.0)
+    assert bridge.nav_status == "idle"
+
+
+def test_detection_batch_survives_concurrent_collection(mod):
+    """The websocket may collect a batch while the ROS callback builds it."""
+    bridge = _bridge(mod)
+    bridge._detections = None
+    bridge._depth_map_position = MagicMock(return_value=None)
+
+    class Detection:
+        bbox = (0, 0, 1, 1)
+
+        def as_protocol(self, detection_id):
+            return {"id": detection_id}
+
+    class Detector:
+        def detect_bgr(self, _frame):
+            yield Detection()
+            bridge.take_detections()
+            yield Detection()
+
+    bridge._detector = Detector()
+    bridge._detect_bgr(MagicMock(), due_checked=True)
+
+    assert [item["id"] for item in bridge.take_detections()] == ["duck_0", "duck_1"]
+
+
+def test_upload_scan_excludes_returns_inside_robot_footprint(mod, monkeypatch):
+    bridge = _bridge(mod, {"footprint_radius": 0.65})
+    bridge.http_url = "http://backend"
+    bridge.map_pose = MagicMock(return_value={"x": 1.0, "y": 2.0, "yaw": 0.0})
+    bridge._scan_points = mod.np.array(
+        [[1.1, 2.1], [1.3, 2.4], [1.7, 2.0]], dtype=mod.np.float32
+    )
+    bridge._scan_dirty = True
+    captured = {}
+
+    class Response:
+        def read(self):
+            return b"{}"
+
+    def urlopen(request, timeout):
+        captured["request"] = request
+        return Response()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", urlopen)
+    bridge.upload_scan()
+
+    request = captured["request"]
+    assert "origin_x=1.0&origin_y=2.0" in request.full_url
+    decoded = mod.np.frombuffer(mod.zlib.decompress(request.data), dtype=mod.np.int16)
+    assert decoded.reshape(-1, 2).tolist() == [[170, 200]]
 
 
 def test_upload_cloud_uses_shared_xyz_transport(mod, monkeypatch):

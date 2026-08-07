@@ -1,0 +1,25 @@
+FROM ros:humble-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# navigation2 supplies the runtime servers; nav2-bringup supplies their shared
+# behavior trees and plugin libraries. Both packages are published for arm64,
+# which is the architecture of Botman's Jetson AGX Orin.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3-colcon-common-extensions \
+      ros-humble-navigation2 \
+      ros-humble-nav2-bringup \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /nav_ws
+COPY swarmdeck_ros/src/swarmdeck_nav /nav_ws/src/swarmdeck_nav
+RUN . /opt/ros/humble/setup.sh \
+    && colcon build --merge-install --packages-select swarmdeck_nav
+
+COPY docker/robot-nav2-entrypoint.sh /usr/local/bin/robot-nav2-entrypoint.sh
+RUN chmod +x /usr/local/bin/robot-nav2-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/robot-nav2-entrypoint.sh"]
+CMD ["ros2", "launch", "swarmdeck_nav", "botman.launch.py"]

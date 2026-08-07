@@ -18,6 +18,33 @@ services:
     command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
     restart: unless-stopped
 
+  # Botman's physical camera is an OAK-D Pro, which is a DepthAI USB device
+  # (03e7:2485) rather than a V4L2 /dev/video* webcam.  The upstream
+  # bunker_gnm launch only starts usb_cam and leaves its OAK block commented,
+  # so own the missing launch here without changing /ssd/mist_ws.  Its driver
+  # and firmware come from the same existing image/workspace as robot_stack;
+  # the only writable/configuration source is this SwarmDeck checkout.
+  oak_camera:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-oak
+    network_mode: host
+    ipc: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+      - ./adapters/media/config/botman_oak_rgb.yaml:/app/swarmdeck/botman_oak_rgb.yaml:ro
+    command:
+      - ros2
+      - launch
+      - depthai_ros_driver
+      - camera.launch.py
+      - name:=oak
+      - params_file:=/app/swarmdeck/botman_oak_rgb.yaml
+      - rectify_rgb:=false
+      - use_rviz:=false
+    restart: unless-stopped
+
   adapter:
     build:
       context: .
@@ -25,11 +52,22 @@ services:
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-botman-adapter
     depends_on:
-      - robot_stack
+      robot_stack:
+        condition: service_started
+      nav2:
+        # Do not advertise navigation before the lifecycle-managed action
+        # server is active. This also prevents goals being accepted when no
+        # controller is available to execute them.
+        condition: service_healthy
+      oak_camera:
+        condition: service_started
+      duck_detector:
+        condition: service_healthy
     network_mode: host
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      SWARMDECK_DUCK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
       - /app/adapters/adapter_ros2/adapter_ros2.py
@@ -42,3 +80,80 @@ services:
       - --port
       - "${BACKEND_PORT:-8080}"
     restart: unless-stopped
+
+  duck_detector:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.duck-detector
+      args:
+        ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
+    image: swarmdeck-duck-detector:jetpack6
+    container_name: swarmdeck-botman-duck-detector
+    network_mode: host
+    ipc: host
+    runtime: nvidia
+    volumes:
+      - duck_detector_models:/models
+    restart: unless-stopped
+
+  # Production low-latency video path. The adapter independently keeps the
+  # backend's 5 Hz JPEG preview as a fallback; this process converts the same
+  # device-encoded OAK JPEGs to baseline H.264 and pushes an RTSP/TCP stream to
+  # central MediaMTX, where the browser consumes it over WHEP/WebRTC.
+  media:
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-media
+    depends_on:
+      oak_camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    command:
+      - python3
+      - /app/adapters/media/ros2_rtsp.py
+      - --robot-id
+      - botman_0
+      - --topic
+      - /oak/rgb/image_raw/compressed
+      - --rtsp-url
+      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/botman_0"
+      - --bitrate-kbps
+      - "${VIDEO_BITRATE_KBPS:-1200}"
+      - --fps
+      - "${VIDEO_FPS:-15}"
+    restart: unless-stopped
+
+  # Reuses swarmdeck_ros/src/swarmdeck_nav, with Botman-specific frames,
+  # odometry and Ouster scan configuration. Nav2 writes only cmd_vel_nav;
+  # the adapter remains the sole publisher to the real Bunker /cmd_vel and
+  # relays autonomy only while its NavigateToPose goal is active.
+  nav2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-nav2
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-botman-nav2
+    depends_on:
+      - robot_stack
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /nav_ws/install/setup.sh &&
+          ros2 action list | grep -qx '/botman_0/navigate_to_pose' &&
+          ros2 lifecycle get /botman_0/bt_navigator | grep -q '^active'
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  duck_detector_models:

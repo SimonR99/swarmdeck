@@ -1,0 +1,45 @@
+# AgileX Bunker "aslan" (SSH alias `aslan`) running ROS 2 Humble from the
+# `bunker:dev` image with `/ssd/mist_ws_ros2` mounted at `/workspace`.
+#
+# The live sensor/SLAM interfaces are supplied by SuperOdometry and match the
+# other Bunker in the fleet. SwarmDeck keeps a distinct robot ID and Nav2
+# namespace so both machines can share the same backend safely.
+robot_type: agilex_bunker
+ros_distro: humble
+
+# Bunker is 1.023 x 0.778 m. Keep the conservative circumscribed radius used
+# for the other physical Bunker until a calibrated lidar/base transform exists.
+# The registered-cloud map path also reuses it to reject chassis self-returns.
+footprint_radius: 0.65
+
+map_frame: map
+base_frame: os_lidar
+
+map_cloud_height_band:
+  min_z: -0.3
+  max_z: 0.5
+
+topics:
+  odom: /laser_odometry
+  map: ""
+  map_cloud: /registered_scan
+  plan: ""
+  cmd_vel: /cmd_vel
+  battery: ""
+  camera: ""
+  camera_compressed: ""
+  camera_info: ""
+  # Nav2 never publishes to the physical driver. The adapter relays this
+  # isolated output only while its own NavigateToPose goal is active.
+  nav_cmd_vel: /aslan_0/cmd_vel_nav
+
+actions:
+  navigate_to_pose: /aslan_0/navigate_to_pose
+
+rates:
+  state_hz: 5.0
+  map_period_s: 2.0
+  cloud_period_s: 4.0
+  camera_period_s: 0.2
+
+drive_timeout_s: 0.45

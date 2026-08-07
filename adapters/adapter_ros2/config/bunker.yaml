@@ -15,12 +15,14 @@ ros_distro: humble
 
 # Bunker is 1.023 x 0.778 m. The circumscribed radius is 0.643 m; round up so
 # the UI never draws a footprint smaller than the physical tracked chassis.
+# The registered-cloud map path also reuses this radius to reject lidar returns
+# from the chassis itself before they become permanent occupied cells.
 footprint_radius: 0.65
 
-# SuperOdometry publishes map -> os_lidar. The Bunker driver separately
-# publishes odom -> base_link, with no transform connecting those trees, so a
-# map -> base_link lookup cannot succeed. os_lidar is the honest SLAM pose
-# until the robot workspace gains a calibrated static lidar/base transform.
+# SuperOdometry's /laser_odometry carries map -> os_lidar, but the running
+# stack does not broadcast that TF; swarmdeck_nav's odom_to_tf bridge does.
+# The Bunker driver separately publishes odom -> base_link, with no calibrated
+# transform connecting the trees, so os_lidar remains the honest SLAM pose.
 map_frame: map
 base_frame: os_lidar
 
@@ -43,13 +45,20 @@ topics:
   # sensor_msgs/BatteryState percentage, so do not advertise battery yet.
   battery: ""
   camera: ""
-  # The source and old bag mention /usb_cam/image_compressed, but this Botman
-  # has no /dev/video0. Do not advertise a camera that cannot produce frames.
-  camera_compressed: ""
+  # Botman's camera is an OAK-D Pro (MXID 1844301041D4AB0F00), not a V4L2
+  # webcam, so it deliberately has no /dev/video0.  The SwarmDeck-owned
+  # `oak_camera` Compose service launches the existing depthai_ros_driver from
+  # the read-only MIST image and encodes MJPEG on-device at this topic.
+  camera_compressed: /oak/rgb/image_raw/compressed
+  camera_info: /oak/rgb/camera_info
+  # Nav2 is namespaced, but its sensor/driver inputs stay on Botman's existing
+  # global topics. Its smoothed velocity is deliberately isolated from the
+  # real driver: HardwareBridge relays it to /cmd_vel only for an active goal,
+  # keeping teleop, cancellation and e-stop authoritative.
+  nav_cmd_vel: /botman_0/cmd_vel_nav
 
 actions:
-  # DinoNav publishes waypoints; it does not provide Nav2 NavigateToPose.
-  navigate_to_pose: ""
+  navigate_to_pose: /botman_0/navigate_to_pose
 
 rates:
   state_hz: 5.0

@@ -43,22 +43,25 @@ def test_invalid_settings_fall_back_without_throwing(tmp_path):
     assert len(loaded["robots"]) == 4
 
 
-def test_settings_accept_six_robots_for_mixed_hardware_fleet(tmp_path):
+def test_settings_accept_seven_robots_for_mixed_hardware_fleet(tmp_path):
     robots = [
         {"id": f"robot_{index}", "type": "sim", "endpoint": "ws://host/adapter"}
         for index in range(4)
     ] + [
         {"id": "tars_0", "type": "ros1", "endpoint": "ws://host/adapter"},
         {"id": "botman_0", "type": "ros2", "endpoint": "ws://host/adapter"},
+        {"id": "aslan_0", "type": "ros2", "endpoint": "ws://host/adapter"},
     ]
 
     saved = SettingsStore(tmp_path / "settings.json").save({
-        "robot_count": 6,
+        "robot_count": 7,
         "robots": robots,
     })
 
-    assert saved["robot_count"] == 6
+    assert saved["robot_count"] == 7
     assert [robot["id"] for robot in saved["robots"]] == [
-        "robot_0", "robot_1", "robot_2", "robot_3", "tars_0", "botman_0"
+        "robot_0", "robot_1", "robot_2", "robot_3", "tars_0", "botman_0",
+        "aslan_0",
     ]
     assert saved["robots"][5]["color"] == "#b26a00"
+    assert saved["robots"][6]["color"] == "#5865f2"

@@ -357,11 +357,16 @@ Measured with a timestamp burned into the frame and read back from a screen capt
 
 `adapters/perception/duck_detector.py` accepts an ordinary OpenCV BGR frame and returns
 normalized adapter-protocol boxes. It imports neither ROS nor Gazebo and never reads
-simulation entity names, positions, segmentation buffers, or ground truth. The current
-real-time baseline combines yellow-body and adjacent orange-beak evidence; the
-`detect_bgr` boundary is the replacement point for a trained ONNX implementation after
-licensed, representative real-camera data is available. This keeps transport, UI, and
-real-robot integration unchanged when the model is upgraded.
+simulation entity names, positions, segmentation buffers, or ground truth. It sends the
+throttled JPEG to the local `yoloe_server.py` sidecar, which runs YOLOE-26n with the
+validated text prompt `yellow duck toy`. Confidence follows the existing sensitivity
+setting and overlapping proposals are suppressed before publication.
+
+The sidecar boundary keeps PyTorch and CUDA out of ROS images: simulation uses one CPU
+sidecar for the fleet, and every physical robot uses the JetPack image matching its
+onboard NVIDIA computer. If inference is unavailable, the client returns an empty batch;
+camera upload, telemetry and control continue, and the inaccurate colour detector is not
+silently restored.
 
 Hardware adapters join each RGB box to either an aligned depth image plus CameraInfo or
 an organised RGB-aligned PointCloud2. They select a coherent foreground depth band,
@@ -369,6 +374,10 @@ deproject it to camera XYZ, and use tf2 to express the result in the robot's map
 The protocol, backend, and 2D map already treat that optional `map_position` as a
 persistent marker. Invalid or stale depth is bbox-only; it is never replaced by a guessed
 range.
+
+The detector image is based on Ultralytics and is therefore subject to Ultralytics'
+AGPL-3.0 or Enterprise licensing terms. Its zero-shot model still needs validation across
+more rooms, ranges, lighting conditions and duck variants before safety-critical use.
 
 ## 7. Frontend
 

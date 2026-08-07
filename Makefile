@@ -1,4 +1,4 @@
-.PHONY: help install ui ui-build server mock sim test clean \
+.PHONY: help install ui ui-build server mock sim test clean up-scout \
         build-server up-server down-server \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
@@ -18,6 +18,7 @@ help:
 	@echo "  make [build|up|down]-sim     Docker: Gazebo/SLAM/Nav2/adapter_sim (needs server up)"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see hardware-bringup.md)"
+	@echo "  make up-scout        start Scout ROS/SLAM, camera, adapter and media on ssh host 'scout'"
 	@echo "  make docker-up-gpu   full stack (server+ui+sim), Gazebo rendering on an NVIDIA GPU"
 	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
 	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
@@ -61,6 +62,11 @@ test:
 	  swarmdeck_ros/src/swarmdeck_bringup/test \
 	  adapters/test -q
 	cd ui && npm run check
+
+# --- Scout Mini hardware: start the host ROS graph and robot-side containers.
+# Override SCOUT_HOST, SCOUT_REPO, ROBOT_IP, BACKEND_HOST or OUSTER_HOST_NAME as needed.
+up-scout:
+	./scripts/scout-up
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:

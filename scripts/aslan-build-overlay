@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+# Run on Aslan. MIST's workspace is always read-only; all generated and patched
+# build inputs live under the SwarmDeck checkout.
+repo=${ASLAN_REPO:-/ssd/swarmdeck}
+mist_ws=${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}
+overlay=${ASLAN_OVERLAY:-${repo}/.aslan_ros}
+image=${ASLAN_ROS_IMAGE:-bunker:dev}
+
+mkdir -p \
+  "${overlay}/build" \
+  "${overlay}/install" \
+  "${overlay}/log" \
+  "${overlay}/src/super_odometry"
+
+docker run --rm --runtime nvidia --entrypoint bash \
+  -v "${mist_ws}:/workspace:ro" \
+  -v "${repo}:/app/swarmdeck:ro" \
+  -v "${overlay}:/overlay" \
+  -w /tmp \
+  "${image}" -lc '
+    set -Eeo pipefail
+    source /opt/ros/humble/setup.bash
+    source /workspace/install/setup.bash
+
+    colcon --log-base /overlay/log build \
+      --base-paths /workspace/src \
+      --build-base /overlay/build \
+      --install-base /overlay/install \
+      --merge-install \
+      --packages-select bunker_base ouster_ros \
+      --executor sequential \
+      --event-handlers console_cohesion+
+
+    cmake \
+      -S /workspace/src/driver/ouster-ros/ouster-ros/ouster-sdk/thirdparty/sophus \
+      -B /overlay/build/sophus \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/overlay/install \
+      -DSOPHUS_INSTALL=ON \
+      -DBUILD_SOPHUS_TESTS=OFF \
+      -DBUILD_SOPHUS_EXAMPLES=OFF
+    cmake --build /overlay/build/sophus --target install
+
+    cp -a \
+      /workspace/src/localization/SuperOdom/super_odometry/. \
+      /overlay/src/super_odometry/
+    patch -d /overlay/src/super_odometry -p1 \
+      < /app/swarmdeck/patches/aslan-superodom-gtsam.patch
+
+    source /overlay/install/setup.bash
+    colcon --log-base /overlay/log build \
+      --base-paths /overlay/src/super_odometry \
+      --build-base /overlay/build \
+      --install-base /overlay/install \
+      --merge-install \
+      --packages-select super_odometry \
+      --executor sequential \
+      --cmake-clean-cache \
+      --event-handlers console_cohesion+
+  '

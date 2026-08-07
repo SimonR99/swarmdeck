@@ -118,6 +118,10 @@ DEFAULTS: dict[str, Any] = {
         # Organised PointCloud2 aligned pixel-for-pixel with the RGB image.
         # Optional: bbox-only detection still works when it is absent.
         "camera_depth_points": "",
+        # Isolated output from a navigation stack. If set, the adapter relays
+        # it to the real driver only while an action goal is active, keeping
+        # teleop, cancellation and e-stop authoritative.
+        "nav_cmd_vel": "",
     },
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
     "actions": {"navigate_to_pose": "navigate_to_pose"},
@@ -131,6 +135,8 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "period_s": 0.2,
         "sensitivity": 0.55,
+        # Empty uses SWARMDECK_DUCK_DETECTOR_URL, then localhost:8091.
+        "detector_url": "",
         "depth_min_m": 0.15,
         "depth_max_m": 8.0,
         "depth_max_age_s": 0.35,
@@ -200,7 +206,10 @@ class HardwareBridge:
             try:
                 from adapters.perception.duck_detector import RubberDuckDetector
 
-                self._detector = RubberDuckDetector(perception.get("sensitivity", 0.55))
+                self._detector = RubberDuckDetector(
+                    perception.get("sensitivity", 0.55),
+                    perception.get("detector_url") or None,
+                )
             except ImportError as exc:
                 self._detection_enabled = False
                 node.get_logger().warn(f"[{self.id}] camera detection disabled: {exc}")
@@ -269,12 +278,15 @@ class HardwareBridge:
                 self._on_camera_info,
                 qos_profile_sensor_data,
             )
+        if topics.get("nav_cmd_vel"):
+            node.create_subscription(
+                Twist, topics["nav_cmd_vel"], self._on_nav_cmd_vel, 10
+            )
 
         self.pub_cmd = (
             node.create_publisher(Twist, topics["cmd_vel"], 10)
             if topics.get("cmd_vel") else None
         )
-
         action_name = cfg.get("actions", {}).get("navigate_to_pose")
         self.nav_client = None
         if action_name and NavigateToPose is not None:
@@ -518,13 +530,18 @@ class HardwareBridge:
     ) -> None:
         if not due_checked and not self._detection_due():
             return
-        self._detections = []
+        # Build the next batch off to the side. The websocket thread can call
+        # take_detections() while this ROS callback is running; appending
+        # directly to self._detections allowed that thread to replace the list
+        # with None between iterations and kill the ROS executor.
+        detections = []
         for index, detection in enumerate(self._detector.detect_bgr(frame)):
             item = detection.as_protocol(f"duck_{index}")
             item["map_position"] = self._depth_map_position(
                 detection.bbox, image_header
             )
-            self._detections.append(item)
+            detections.append(item)
+        self._detections = detections
 
     def take_detections(self) -> list[dict] | None:
         current = self._detections
@@ -609,14 +626,29 @@ class HardwareBridge:
 
     # ------------------------------------------------------------- commands
 
+    def _on_nav_cmd_vel(self, msg: Twist) -> None:
+        """Relay a navigation stack's own cmd_vel only while navigating.
+
+        `topics.nav_cmd_vel` is the isolated output of Nav2 or a topic-based
+        controller. This adapter is the only publisher to the real driver
+        topic, so teleop, cancellation and e-stop remain authoritative.
+        """
+        if self.nav_status == "active" and self.pub_cmd is not None:
+            self.pub_cmd.publish(msg)
+
     def drive(self, linear: float, angular: float) -> None:
         if self.pub_cmd is None:
             return
+        moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
+        # Operator motion always preempts autonomy. Changing nav_status stops
+        # the isolated velocity relay immediately; cancel_goal() also asks the
+        # action server to terminate its work.
+        if moving and self.nav_status == "active":
+            self.cancel_goal()
         twist = Twist()
         twist.linear.x = float(linear)
         twist.angular.z = float(angular)
         self.pub_cmd.publish(twist)
-        moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
@@ -670,13 +702,19 @@ class HardwareBridge:
         )
 
     def _on_goal_response(self, future, generation: int) -> None:
-        # A stale response must not overwrite the state of a newer goal.
-        if generation != self._goal_generation:
-            return
         try:
             handle = future.result()
         except Exception:
+            if generation != self._goal_generation:
+                return
             self.nav_status = "failed"
+            return
+        # A cancellation or newer goal can win while send_goal_async is still
+        # in flight. Cancel an accepted stale handle instead of abandoning an
+        # action that would continue computing and publishing velocity forever.
+        if generation != self._goal_generation:
+            if handle.accepted:
+                handle.cancel_goal_async()
             return
         if not handle.accepted:
             self.nav_status = "failed"
@@ -765,7 +803,24 @@ class HardwareBridge:
         if not len(self._scan_points):
             return
         origin = self.map_pose()
-        quantised = np.round(self._scan_points / MAP_CLOUD_SCALE).astype(np.int16)
+        points = self._scan_points
+        # A deck-mounted 3D lidar can see the chassis beneath and behind it.
+        # Those returns are already in the map frame, so remove the robot's
+        # configured footprint around the same origin used for raytracing.
+        # Otherwise ScanGridAccumulator quite correctly treats each self-hit
+        # as permanently occupied and the moving robot paints a trail of itself.
+        footprint_radius = max(0.0, float(self.cfg.get("footprint_radius", 0.0)))
+        if footprint_radius:
+            offsets = points - np.array(
+                [origin["x"], origin["y"]], dtype=np.float32
+            )
+            outside_footprint = np.einsum("ij,ij->i", offsets, offsets) > (
+                footprint_radius * footprint_radius
+            )
+            points = points[outside_footprint]
+        if not len(points):
+            return
+        quantised = np.round(points / MAP_CLOUD_SCALE).astype(np.int16)
         url = (
             f"{self.http_url}/api/adapter/scan?robot_id={self.id}"
             f"&origin_x={origin['x']}&origin_y={origin['y']}"

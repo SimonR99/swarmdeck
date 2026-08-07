@@ -120,7 +120,7 @@ shared areas.
 ## Phase 6 — Perception
 **Goal:** detections as persistent map entities.
 
-- `swarmdeck_perception`: ONNX detector per robot camera.
+- `swarmdeck_perception`: shared YOLOE sidecar with CPU and JetPack runtimes.
 - Projection of detections into map coordinates.
 - `detect/`: cross-robot dedup, map-entity lifecycle.
 - UI: map markers, video bbox overlay, "report target" action.

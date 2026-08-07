@@ -1,0 +1,23 @@
+ARG ULTRALYTICS_IMAGE=ultralytics/ultralytics:8.4.14-cpu
+FROM ${ULTRALYTICS_IMAGE}
+
+# YOLOE uses MobileCLIP only while binding the text prompt. Pin the exact
+# upstream revision validated on Botman's JetPack 6 image.
+ARG ULTRALYTICS_CLIP_REF=488e81a6711eea7346872b46ea928b367da8889d
+RUN python3 -m pip install --no-cache-dir \
+      "git+https://github.com/ultralytics/CLIP.git@${ULTRALYTICS_CLIP_REF}"
+
+ENV PYTHONUNBUFFERED=1 \
+    YOLO_CONFIG_DIR=/models/config \
+    SWARMDECK_YOLOE_MODEL=yoloe-26n-seg.pt \
+    SWARMDECK_YOLOE_PROMPT="yellow duck toy"
+
+WORKDIR /app
+COPY adapters /app/adapters
+RUN mkdir -p /models
+WORKDIR /models
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=12 --start-period=90s \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=2).read()"
+
+ENTRYPOINT ["python3", "/app/adapters/perception/yoloe_server.py"]

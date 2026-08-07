@@ -22,6 +22,8 @@ gotten on each.
 
 See [`docs/`](docs/) for [architecture](docs/architecture.md),
 [requirements](docs/requirements.md), and the [roadmap](docs/roadmap.md).
+Physical Bunker procedures are documented separately for
+[Botman](docs/botman.md) and [Aslan](docs/aslan.md).
 
 ## Quick start — Docker (recommended)
 
@@ -71,9 +73,10 @@ The stack includes MediaMTX for low-latency WHEP/WebRTC video. Set
 `MEDIAMTX_WEBRTC_HOSTS` to the operator host's LAN address when browsers run on other
 machines; robots push H.264 to port 8554. The simulation and hardware adapters retain a
 5 Hz JPEG fallback, so camera frames remain visible if the media service is unavailable.
-A portable RGB-only
-rubber-duck detector publishes normalized boxes over the same adapter contract and the
-camera panel draws them without using Gazebo entity IDs.
+A portable RGB-only YOLOE-26n detector publishes normalized boxes over the same adapter
+contract and the camera panel draws them without using Gazebo entity IDs. Inference runs
+in a local sidecar: the CPU image serves all simulated robots, while the ROS 1 and ROS 2
+hardware Compose files select the matching JetPack GPU image.
 
 ## Quick start — local (no Docker)
 
@@ -124,11 +127,15 @@ where appropriate, so lidar mapping and camera perception see the same environme
 Each robot runs its own 2D SLAM, so every map is in that robot's own frame with the
 origin wherever it started. `mapsvc` merges them:
 
-- **`static`** — transforms come from configured start poses. Always available.
+- **`static`** — transforms come from configured start poses. A lone unconfigured
+  reference may define identity; any additional unconfigured robot stays in its
+  local view instead of being silently overlaid at identity.
 - **`auto`** — transforms estimated by grid registration (signed FFT cross-correlation over
-  a coarse-to-fine yaw sweep, numpy only). Verified against Gazebo ground truth at **7.8 cm**
-  with two robots at unknown relative poses; 52/52 correct at 0.1–3 cm on a synthetic
-  all-headings sweep.
+  a coarse-to-fine yaw sweep, numpy only). When both robots upload XYZ, independent
+  height-band registration may propose a transform, but it is accepted only after
+  the occupancy grids validate its wall overlap and shared known area. Verified
+  against Gazebo ground truth at **7.8 cm** with two robots at unknown relative
+  poses; 52/52 correct at 0.1–3 cm on a synthetic all-headings sweep.
 
 Four rejection tests guard the result — `score`, `ratio` (rival translation), `yaw_ratio`
 (rival rotation), and `support` (shared known area) — so a repetitive building yields "not

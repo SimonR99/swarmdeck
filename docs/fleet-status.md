@@ -9,7 +9,7 @@ maintained spec, and two of these four machines are shared with other people's w
 |---|---|---|---|---|---|---|---|
 | tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM, map, camera, teleop and `navigate_to` all verified working |
 | botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (Docker only) | no | yes, `/ssd/swarmdeck` | **live**: SuperOdometry pose, 2D raytraced map and 3D cloud verified; e-stop interface available |
-| aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (docker-only, containers busy) | no | yes, `/ssd/swarmdeck` | not started |
+| aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | **no** (dropped off LAN during build) | no (Docker only) | no | yes, `/ssd/swarmdeck` | config + ROS overlay built; live stack blocked by hardware/network |
 | spot | `spot` | Boston Dynamics Spot + Orin payload | **no** | unknown | unknown | not attempted | not started |
 
 `rclpy` works natively on tars (correcting this doc's own earlier claim — see the tars
@@ -245,11 +245,13 @@ trimmed SLAM launch through `launch/scout_camera_low_latency.launch`.
 to that compressed ROS topic inside Docker, produces baseline-profile H.264 at 640×480,
 15 fps and 1.2 Mbps, and pushes RTSP/TCP to central MediaMTX. Chrome established a real
 WHEP peer connection (`readyState=4`, live unmuted track), and the dashboard rendered the
-stream plus normalized boxes. The classical detector found both physical rubber ducks in
-the initial frame (scores 0.892 and 0.883); during the final live check it continued
-updating the boxes at the configured 5 Hz. Software encoding used about 53 MiB and 29–42%
-of one Xavier CPU core. End-to-end latency is not yet timestamp-instrumented, so this does
-not claim the <300 ms requirement even though the live path is operational.
+stream plus normalized boxes. Detection now uses the shared JetPack 5 YOLOE sidecar
+(`yoloe-26n-seg.pt`, prompt `yellow duck toy`) rather than the former HSV classifier.
+The sidecar found both physical rubber ducks (scores 0.656 and 0.414 on its captured
+validation frame); the final backend WebSocket check received both live IDs at 0.676 and
+0.341. It used about 1.59 GiB of GPU memory. Software video encoding used about 53 MiB
+and 29–42% of one Xavier CPU core. End-to-end latency is not yet timestamp-instrumented,
+so this does not claim the <300 ms requirement even though the live path is operational.
 
 **Duck map positions are live** (2026-08-06): the low-latency camera profile now enables
 RGB-aligned depth without the USB-expensive point cloud. On this USB 2.1 connection color
@@ -329,8 +331,53 @@ The adapter has its own generic Humble image and does not install anything into 
 image. `docker-compose.robot-botman.yml` mounts `/ssd/mist_ws` read-only and calls its
 existing `rover_launch bunker_gnm.launch.py` interface. Host IPC is shared so Fast DDS
 point clouds cross the container boundary. The live backend showed Botman's updating
-pose, local 2D map, and merged 3D cloud; only `map` and `estop` are advertised because
-the robot currently has no `/dev/video0`.
+pose, local 2D map, and merged 3D cloud. The initial camera conclusion was incomplete:
+Botman has no `/dev/video0` because its physical camera is an OAK-D Pro, not because no
+camera is attached. A later unplug/replug check found DepthAI USB device `03e7:2485`;
+the installed driver identified OAK-D Pro MXID `1844301041D4AB0F00` at SuperSpeed and
+published RGB successfully. SwarmDeck now owns a separate `oak_camera` service and a
+15 Hz on-device MJPEG profile at `/oak/rgb/image_raw/compressed`, without modifying the
+MIST workspace. A separate `swarmdeck-botman-media` service converts those frames to
+constrained-baseline H.264 (1280x720 at 15 fps, 1.2 Mbps), pushes RTSP/TCP to MediaMTX,
+and was verified through a real Chrome WHEP connection with a live decoded video track.
+The backend's 5 Hz JPEG endpoint remains available as fallback.
+
+Rubber-duck inference is also live in the separate JetPack 6 YOLOE sidecar, using the
+same `yoloe-26n-seg.pt` model and `yellow duck toy` prompt as every other adapter. A
+direct live-frame request returned the two physical ducks (scores 0.812 and 0.746), and
+the backend WebSocket subsequently showed both `botman_0:duck_0` and
+`botman_0:duck_1` updating. The detector used about 1.09 GiB; camera, WebRTC publishing,
+navigation, and robot control remain separate services.
+
+**Navigation audit and repository implementation, 2026-08-06 — not yet deployed or
+motion-tested.** A read-only search found two robot-side planners, neither of which can
+implement SwarmDeck click-to-navigate:
+
+- DinoNav follows a pre-recorded topological image sequence toward a goal image index
+  selected at process launch. It has no live absolute `(x, y)` goal input.
+- TARE Planner is built under `/ssd/mist_ws`, but it is an autonomous exploration
+  planner that publishes `/way_point`; the robot workspace contains no corresponding
+  local controller and TARE exposes no `NavigateToPose` action.
+
+The repository now reuses its existing `swarmdeck_nav` Nav2 nodes with a dedicated
+Humble configuration. Live read-only checks confirmed the required inputs:
+`/laser_odometry` is `map` -> `os_lidar` and carries pose plus twist, while
+`/ouster/scan` is a 10 Hz `LaserScan` in `os_lidar`. A small repository-owned bridge
+broadcasts the missing `map -> os_lidar` TF directly from that odometry. Because Botman
+has no `OccupancyGrid`, Nav2 uses rolling 8 m local and 40 m global obstacle costmaps
+from the Ouster scan.
+
+Nav2 is namespaced under `/botman_0`, exposes `/botman_0/navigate_to_pose`, and emits
+only `/botman_0/cmd_vel_nav`. The adapter remains the sole publisher to the real
+`/cmd_vel` and relays autonomous velocity only while its action goal is active. Teleop
+now cancels the Nav2 action, including the send-goal race where an accepted handle
+arrives after cancellation. Compose waits for an active lifecycle-managed navigator
+before starting the adapter.
+
+No remote file, image, container, or ROS process was changed for this Nav2 addition,
+and no motion command was sent. The new image still needs to be built on the arm64
+robot, followed by the no-motion TF/action/costmap checks and the supervised first-goal
+procedure in `docs/botman.md`.
 
 **SwarmDeck terrain prepared:**
 - Cloned to `/ssd/swarmdeck`.
@@ -351,11 +398,9 @@ the robot currently has no `/dev/video0`.
 **Network:** `eno1` on `192.168.1.139/24`; same tagged `192.168.2.2/24` sub-interface as
 the other two (VLAN note under scout applies here too).
 
-**Current use: active — do not disrupt.** Two SSH sessions from `192.168.1.143` logged in
-as the shared `aslan` user. One container running: `bunker` (`bunker:dev`, up ~1 h,
-`ROS_DISTRO=humble` confirmed via `docker exec`), `/ssd/mist_ws_ros2` mounted, GPU
-passthrough, `--network=host`, `--privileged`. Treat this the same as botman's containers
-— nothing was touched.
+**Current use:** no users or containers were active at the start of the 2026-08-06
+bring-up. Aslan later became unreachable at both `aslan.local` and `192.168.1.139`
+during a Docker image build. No robot process or motion command was started.
 
 **ROS state:** no native `/opt/ros`; ROS 2 Humble lives in the `bunker:dev` container
 (base image `dustynv/ros:humble-desktop-l4t-r36.4.0`). Bash history shows a real fight to
@@ -378,6 +423,13 @@ below had to work around.
   --user`, since neither `pip3` nor the `ensurepip` module existed), then installed
   `websockets --user`. `pyyaml`/`numpy` were already present.
 - `python3 adapter_ros2.py --help` fails at `import rclpy`, as expected.
+- Added the dedicated `aslan_0` adapter, minimal hardware launch, isolated Nav2
+  launch, Compose graph and backend/UI settings. See `docs/aslan.md`.
+- Built an isolated ROS overlay successfully with `bunker_base`, `ouster_ros`,
+  vendored Sophus and a GTSAM-compatible `super_odometry`; the MIST workspace
+  stayed read-only.
+- Hardware audit found only down `can0`/`can1` interfaces (the launch expects
+  `can2`) and no reachable Ouster at configured address `192.168.50.165`.
 
 ---
 
@@ -424,10 +476,11 @@ On each of the three reachable robots:
   config are live; starting the base driver changes the robot to commanded mode, so future
   restarts still require an operator and physical e-stop. Aslan still needs the same
   file-by-file audit and dedicated adapter setup.
-- **No `adapters/adapter_ros2/config/<robot>.yaml` exists for Aslan.** Botman's driver and
-  SLAM sources were read file-by-file once it became idle; Aslan's were not. Botman's
-  values remain a documented source-derived hypothesis until the first supervised live
-  `ros2 topic hz`/TF check.
+- **Aslan's software is prepared but its live graph is unverified.** The missing
+  ROS packages compile in SwarmDeck's isolated overlay and static wiring tests
+  pass. The robot went offline before its Nav2/adapter image build and no-motion
+  launch could be confirmed; lidar, CAN, TF, map and command ownership still
+  require live checks.
 - **No sudo/system-package changes, no touching `bunker`/`bunker_super_odom`/
   `dinonav_ros2_2` containers, no killing sessions.** botman and aslan had other people
   actively working on them during this pass.
@@ -448,5 +501,5 @@ layer onto gbplanner/RosBuzz, not a config change.
 For Botman restarts, re-check `who` and `docker ps`, put an operator at the e-stop, then
 use the self-contained command in `docs/botman.md`; validate `/laser_odometry`,
 `/registered_scan`, the 2D height band, merged 3D cloud, and deadman in that order.
-For Aslan, coordinate with whoever is using its `bunker` container and repeat Botman's
-read-only source audit before writing a configuration.
+For Aslan, restore LAN access, identify/restore the Ouster network and CAN adapter,
+then follow the no-motion and supervised steps in `docs/aslan.md`.

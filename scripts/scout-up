@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+# Run from the operator workstation. Each setting can be overridden inline, e.g.
+# SCOUT_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 make up-scout
+scout_host=${SCOUT_HOST:-scout}
+scout_repo=${SCOUT_REPO:-/ssd/swarmdeck}
+robot_id=${ROBOT_ID:-tars_0}
+robot_ip=${ROBOT_IP:-192.168.1.24}
+backend_host=${BACKEND_HOST:-192.168.1.223}
+ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
+camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
+
+echo "Starting ${robot_id} on ${scout_host}..."
+
+ssh "${scout_host}" bash --noprofile --norc -s -- \
+  "${scout_repo}" \
+  "${robot_id}" \
+  "${robot_ip}" \
+  "${backend_host}" \
+  "${ouster_host}" \
+  "${camera_topic}" <<'REMOTE_SCRIPT'
+set -Eeuo pipefail
+
+repo=$1
+robot_id=$2
+robot_ip=$3
+backend_host=$4
+ouster_host=$5
+camera_topic=$6
+
+slam_log=/tmp/swarmdeck-scout-slam.log
+camera_log=/tmp/swarmdeck-scout-camera.log
+slam_launch="${repo}/adapters/adapter_ros1/launch/scout_mini_slam.launch"
+
+# Catkin's generated setup hooks inspect variables before defining them, so nounset
+# must be disabled only while those trusted environment scripts are sourced.
+set +u
+source /opt/ros/noetic/setup.bash
+source /ssd/catkin_ws/devel/setup.bash
+source /ssd/mist_ws/devel/setup.bash
+set -u
+
+export ROBOT_ID="${robot_id}"
+export OUSTER_HOST_NAME="${ouster_host}"
+
+start_detached() {
+  local label=$1
+  local pattern=$2
+  local log_file=$3
+  shift 3
+
+  if pgrep -f "${pattern}" >/dev/null; then
+    echo "${label}: already running"
+    return
+  fi
+
+  nohup "$@" >"${log_file}" 2>&1 </dev/null &
+  echo "${label}: started (log: ${log_file})"
+}
+
+wait_for_master() {
+  local attempt
+  for attempt in {1..15}; do
+    if rosnode list >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+
+  echo "ROS master did not become available; recent SLAM log:" >&2
+  tail -n 40 "${slam_log}" >&2 || true
+  return 1
+}
+
+require_topic() {
+  local topic=$1
+  local label=$2
+
+  if timeout 20 rostopic echo -n 1 "${topic}" >/dev/null 2>&1; then
+    echo "${label}: receiving data"
+    return
+  fi
+
+  echo "${label}: no data received on ${topic}" >&2
+  return 1
+}
+
+require_subscriber() {
+  local topic=$1
+  local subscriber=$2
+  local label=$3
+  local attempt
+
+  for attempt in {1..30}; do
+    if rostopic info "${topic}" 2>/dev/null | grep -Fq "${subscriber}"; then
+      echo "${label}: subscribed"
+      return
+    fi
+    sleep 1
+  done
+
+  echo "${label}: did not subscribe to ${topic}" >&2
+  return 1
+}
+
+start_detached \
+  "ROS/SLAM" \
+  "[r]oslaunch .*${slam_launch}" \
+  "${slam_log}" \
+  roslaunch "${slam_launch}"
+
+wait_for_master
+
+start_detached \
+  "RealSense camera" \
+  "[r]oslaunch rover_launch rs_d400.launch" \
+  "${camera_log}" \
+  roslaunch rover_launch rs_d400.launch
+
+export ROBOT_IP="${robot_ip}"
+export BACKEND_HOST="${backend_host}"
+export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
+export CAMERA_TOPIC="${camera_topic}"
+
+(
+  cd "${repo}"
+  if docker inspect swarmdeck-duck-detector swarmdeck-adapter swarmdeck-media >/dev/null 2>&1; then
+    docker start swarmdeck-duck-detector >/dev/null
+    camera_graph=$(rostopic info "${camera_topic}" 2>/dev/null || true)
+    if grep -Fq "/swarmdeck_adapter_${robot_id}" <<<"${camera_graph}" && \
+       grep -Fq "/swarmdeck_media_${robot_id}" <<<"${camera_graph}"; then
+      docker start swarmdeck-adapter swarmdeck-media >/dev/null
+      echo "SwarmDeck detector/adapter/media: already connected"
+    else
+      # rospy processes do not reliably restore their subscriptions after the
+      # ROS master disappears. A container can therefore be running while the
+      # UI receives no video or telemetry.
+      docker restart swarmdeck-adapter swarmdeck-media >/dev/null
+      echo "SwarmDeck detector started; adapter/media restarted to reconnect to ROS"
+    fi
+  elif docker compose version >/dev/null 2>&1; then
+    docker compose -f docker-compose.robot-ros1.yml up -d
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose -f docker-compose.robot-ros1.yml up -d
+  else
+    echo "Adapter/media containers are missing and Docker Compose is not installed" >&2
+    exit 1
+  fi
+)
+
+require_topic /os_cloud_node/points "Ouster point cloud"
+require_topic /odometry/filtered "Filtered odometry"
+require_topic "${camera_topic}" "RealSense camera"
+require_subscriber \
+  "${camera_topic}" "/swarmdeck_adapter_${robot_id}" "SwarmDeck adapter"
+require_subscriber \
+  "${camera_topic}" "/swarmdeck_media_${robot_id}" "SwarmDeck media"
+
+echo "${robot_id}: ready"
+REMOTE_SCRIPT

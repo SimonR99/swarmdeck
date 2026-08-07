@@ -172,6 +172,30 @@ def test_stale_depth_is_not_attached_to_a_new_detection(mod):
     assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
 
 
+def test_detection_batch_survives_concurrent_collection(mod):
+    """The websocket may collect a batch while the ROS callback builds it."""
+    bridge = _bridge(mod)
+    bridge._detections = None
+    bridge._depth_map_position = MagicMock(return_value=None)
+
+    class Detection:
+        bbox = (0, 0, 1, 1)
+
+        def as_protocol(self, detection_id):
+            return {"id": detection_id}
+
+    class Detector:
+        def detect_bgr(self, _frame):
+            yield Detection()
+            bridge.take_detections()
+            yield Detection()
+
+    bridge._detector = Detector()
+    bridge._detect_bgr(MagicMock(), due_checked=True)
+
+    assert [item["id"] for item in bridge.take_detections()] == ["duck_0", "duck_1"]
+
+
 def test_battery_normalisation_handles_percent_and_nan(mod):
     """Drivers disagree about 0..1 vs 0..100, and NaN means 'unknown'."""
     bridge = _bridge(mod)

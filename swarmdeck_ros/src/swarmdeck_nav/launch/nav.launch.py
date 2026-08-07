@@ -12,9 +12,14 @@ from nav2_common.launch import ReplaceString, RewrittenYaml
 def generate_launch_description() -> LaunchDescription:
     namespace = LaunchConfiguration("namespace")
     use_sim_time = LaunchConfiguration("use_sim_time")
-    source_params = PathJoinSubstitution(
+    default_params = PathJoinSubstitution(
         [FindPackageShare("swarmdeck_nav"), "config", "nav2_params.yaml"]
     )
+    source_params = LaunchConfiguration("params_file")
+    tf_topic = LaunchConfiguration("tf_topic")
+    tf_static_topic = LaunchConfiguration("tf_static_topic")
+    controller_cmd_vel_topic = LaunchConfiguration("controller_cmd_vel_topic")
+    output_cmd_vel_topic = LaunchConfiguration("output_cmd_vel_topic")
 
     # TF frame IDs are strings and are not affected by a ROS namespace. Replace
     # the marker before putting the otherwise standard Nav2 YAML under the
@@ -36,14 +41,18 @@ def generate_launch_description() -> LaunchDescription:
         "namespace": namespace,
         "output": "screen",
         "parameters": [configured_params, {"use_sim_time": use_sim_time}],
-        "remappings": [("/tf", "tf"), ("/tf_static", "tf_static")],
+        "remappings": [("/tf", tf_topic), ("/tf_static", tf_static_topic)],
     }
 
     controller = Node(
         package="nav2_controller",
         executable="controller_server",
         name="controller_server",
-        **{**common, "remappings": common["remappings"] + [("cmd_vel", "cmd_vel_nav")]},
+        **{
+            **common,
+            "remappings": common["remappings"]
+            + [("cmd_vel", controller_cmd_vel_topic)],
+        },
     )
     planner = Node(
         package="nav2_planner",
@@ -55,7 +64,11 @@ def generate_launch_description() -> LaunchDescription:
         package="nav2_behaviors",
         executable="behavior_server",
         name="behavior_server",
-        **{**common, "remappings": common["remappings"] + [("cmd_vel", "cmd_vel_nav")]},
+        **{
+            **common,
+            "remappings": common["remappings"]
+            + [("cmd_vel", controller_cmd_vel_topic)],
+        },
     )
     navigator = Node(
         package="nav2_bt_navigator",
@@ -70,7 +83,10 @@ def generate_launch_description() -> LaunchDescription:
         **{
             **common,
             "remappings": common["remappings"]
-            + [("cmd_vel", "cmd_vel_nav"), ("cmd_vel_smoothed", "cmd_vel")],
+            + [
+                ("cmd_vel", controller_cmd_vel_topic),
+                ("cmd_vel_smoothed", output_cmd_vel_topic),
+            ],
         },
     )
     lifecycle = Node(
@@ -99,6 +115,18 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("namespace", default_value="robot_0"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
+            DeclareLaunchArgument("params_file", default_value=default_params),
+            # Simulation keeps TF namespaced. Hardware can opt into the
+            # machine-wide TF graph without duplicating this Nav2 bring-up.
+            DeclareLaunchArgument("tf_topic", default_value="tf"),
+            DeclareLaunchArgument("tf_static_topic", default_value="tf_static"),
+            # Keep the controller -> smoother -> driver chain configurable so
+            # hardware can put the final velocity behind an external safety
+            # arbiter. The simulation defaults remain unchanged.
+            DeclareLaunchArgument(
+                "controller_cmd_vel_topic", default_value="cmd_vel_nav"
+            ),
+            DeclareLaunchArgument("output_cmd_vel_topic", default_value="cmd_vel"),
             controller,
             planner,
             behaviors,

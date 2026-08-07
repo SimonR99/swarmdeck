@@ -1,13 +1,11 @@
-# SwarmDeck session config for tars alone, over adapter_ros1 — NOT a simulated
-# fleet, so `fleet`/`video` below are unused defaults kept only because the
-# config loader expects the keys to exist.
+# SwarmDeck session config for the mixed real-hardware fleet (tars over ROS 1,
+# botman over ROS 2) — NOT a simulated fleet, so `fleet`/`video` below are unused
+# defaults kept only because the config loader expects the keys to exist.
 #
-# `merge_mode: static` rather than `auto`: with exactly one real robot
-# connected, there is nothing to register against, and `auto` mode's
-# reference defaults to whichever of `start_poses` gets configured first —
-# which, in the shared 4robot.yaml, is a mock `robot_0` that never uploads a
-# grid. `static` just accepts tars_0's own frame as the map, which is exactly
-# correct with one robot: there is no other frame to disagree with it.
+# Both SLAM systems choose independent origins, so an implicit identity transform
+# is never valid once both robots are connected.  Auto mode correlates their
+# server-built grids and uses the registered XYZ scans as an independently
+# validated proposal when the floor projection is ambiguous.
 name: hardware_tars
 seed: 20260801
 
@@ -18,10 +16,10 @@ fleet:
     profile: generic_2d
 
 map:
-  merge_mode: static
+  merge_mode: auto
   size_m: 40.0               # matches adapter_ros1's map_cloud scan-grid window (MAP_CLOUD default 40 m)
   resolution: 0.05
-  start_poses: {}             # none needed: static mode defaults an unconfigured robot to identity
+  start_poses: {}             # starts are unknown; registration must earn the shared frame
 
 alerts:
   unattended_threshold_s: 45

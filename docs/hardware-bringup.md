@@ -87,9 +87,10 @@ cannot be joined safely to an image bounding box. The depth frame must connect t
 `map_frame` through TF. Stale, sparse, out-of-range, or untransformable samples leave
 `map_position` empty instead of inventing a coordinate.
 
-For ROS 1 robots, the production path runs in two containers on the robot: the adapter
-does detection and sends only boxes/state to the backend, while the media process encodes
-independently and pushes RTSP. From the repository checkout on the robot:
+For ROS 1 robots, the production path runs in three containers on the robot: the adapter
+owns ROS camera/depth and sends only boxes/state to the backend, the YOLOE sidecar runs
+GPU inference, and the media process independently pushes RTSP. From the repository
+checkout on the robot:
 
 ```bash
 export ROBOT_IP=192.168.1.24 ROBOT_ID=tars_0
@@ -98,6 +99,10 @@ export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
 export CAMERA_TOPIC=/d400_arm/color/image_raw/compressed
 docker compose -f docker-compose.robot-ros1.yml up -d --build
 ```
+
+The first detector start downloads the official YOLOE-26n and MobileCLIP assets into the
+named `duck_detector_models` volume. Scout/Xavier defaults to the JetPack 5 image;
+Botman and Aslan select JetPack 6 in their robot-specific Compose files.
 
 On the operator host, set `MEDIAMTX_WEBRTC_HOSTS` to its LAN address before starting the
 main Compose stack. TCP 8554 must be reachable from robots and UDP 8189 from browsers.

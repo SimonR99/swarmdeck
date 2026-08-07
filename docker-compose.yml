@@ -81,6 +81,8 @@ services:
     depends_on:
       server:
         condition: service_healthy
+      duck_detector:
+        condition: service_healthy
     environment:
       BACKEND_HOST: server
       BACKEND_PORT: "8080"
@@ -97,10 +99,28 @@ services:
       EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
+      SWARMDECK_DUCK_DETECTOR_URL: http://duck_detector:8091
     volumes:
       - ./sessions:/app/sessions
       - ./study:/app/study:ro
     shm_size: "2gb"
+    restart: unless-stopped
+
+  # Shared AI perception for every simulated robot. The adapter still owns
+  # camera transport and protocol publication; this sidecar only maps pixels
+  # to YOLOE boxes. Hardware compose files use the matching JetPack image.
+  duck_detector:
+    profiles: ["gazebo"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.duck-detector
+      args:
+        ULTRALYTICS_IMAGE: "${ULTRALYTICS_IMAGE:-ultralytics/ultralytics:8.4.14-cpu}"
+    image: swarmdeck-duck-detector:cpu
+    environment:
+      SWARMDECK_YOLO_DEVICE: cpu
+    volumes:
+      - duck_detector_models:/models
     restart: unless-stopped
 
   # Synthetic fleet (no Gazebo / ROS)
@@ -125,3 +145,6 @@ services:
     healthcheck:
       disable: true
     restart: unless-stopped
+
+volumes:
+  duck_detector_models:

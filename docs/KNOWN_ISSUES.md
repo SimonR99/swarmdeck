@@ -33,16 +33,17 @@ registration. On a 4-robot run with the odometry and startup problems below fixe
 five minutes of exploration reaches support 0.87-0.98 and all three non-reference robots
 register.
 
-### 3. Duck detector is a portable classical baseline, not a trained neural model
+### 3. Zero-shot duck detection needs broader field validation
 
-The shipped detector already produces live RGB bounding boxes in Gazebo and accepts
-the same BGR frames from a physical camera, but it currently uses colour/shape evidence.
-A publicly available fine-tuned YOLO duck model was not embedded because its own model
-card warns that the training data has unresolved licensing. The detector API is kept
-model-shaped (`detect_bgr` in, normalized boxes out), so a licensed ONNX model can
-replace the baseline without changing ROS, the adapter protocol, backend, or UI. A
-production model still needs licensed real-camera training/validation data covering the
-actual lighting and duck variants.
+The classical colour/shape detector has been replaced by prompted YOLOE-26n. It found
+both Botman ducks without the former person false-positive across four live frames, but
+that is a narrow validation set from one camera, room and lighting condition. Prompt
+wording also mattered: `yellow duck toy` was reliable in those frames while the literal
+`rubber duck` prompt fell below the normal confidence threshold for one duck.
+
+Treat detection as an operator aid until it has been measured across every robot camera,
+expected range, motion blur, exposure and duck variant. The Ultralytics detector image
+also carries AGPL-3.0 or Enterprise licensing obligations that deployments must satisfy.
 
 ### 4. The merged map is a stitcher, not multi-robot SLAM
 

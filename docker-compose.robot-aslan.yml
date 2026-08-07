@@ -1,0 +1,107 @@
+# Aslan bring-up owned by SwarmDeck. MIST's ROS 2 workspace is mounted
+# read-only; generated ROS artifacts live under /ssd/swarmdeck/.aslan_ros.
+services:
+  robot_stack:
+    image: bunker:dev
+    container_name: swarmdeck-aslan-stack
+    network_mode: host
+    ipc: host
+    privileged: true
+    runtime: nvidia
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws_ros2:/workspace:ro
+      - /ssd/swarmdeck:/app/swarmdeck:ro
+      - /ssd/swarmdeck/.aslan_ros/install:/aslan_overlay:ro
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-49}"
+    command:
+      - bash
+      - -c
+      - >-
+        . /aslan_overlay/setup.bash &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
+        start_base:=${ASLAN_START_BASE:-true}
+        start_lidar:=${ASLAN_START_LIDAR:-true}
+        start_slam:=${ASLAN_START_SLAM:-true}
+        can_interface:=${ASLAN_CAN_INTERFACE:-can2}
+    restart: unless-stopped
+
+  nav2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-nav2
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-aslan-nav2
+    depends_on:
+      - robot_stack
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-49}"
+    command: ["ros2", "launch", "swarmdeck_nav", "aslan.launch.py"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /nav_ws/install/setup.sh &&
+          ros2 action list | grep -qx '/aslan_0/navigate_to_pose' &&
+          ros2 lifecycle get /aslan_0/bt_navigator | grep -q '^active'
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  adapter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-aslan-adapter
+    depends_on:
+      robot_stack:
+        condition: service_started
+      nav2:
+        condition: service_healthy
+      duck_detector:
+        condition: service_healthy
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-49}"
+      SWARMDECK_DUCK_DETECTOR_URL: http://127.0.0.1:8091
+    command:
+      - python3
+      - /app/adapters/adapter_ros2/adapter_ros2.py
+      - --robot-id
+      - aslan_0
+      - --config
+      - /app/adapters/adapter_ros2/config/aslan_bunker.yaml
+      - --host
+      - "${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}"
+      - --port
+      - "${BACKEND_PORT:-8080}"
+    restart: unless-stopped
+
+  duck_detector:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.duck-detector
+      args:
+        ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
+    image: swarmdeck-duck-detector:jetpack6
+    container_name: swarmdeck-aslan-duck-detector
+    network_mode: host
+    ipc: host
+    runtime: nvidia
+    volumes:
+      - duck_detector_models:/models
+    restart: unless-stopped
+
+volumes:
+  duck_detector_models:

@@ -1,0 +1,22 @@
+# Low-bandwidth RGB pipeline for Botman's OAK-D Pro.  The DepthAI driver and
+# firmware live in the existing read-only MIST workspace/image; this file is
+# SwarmDeck-owned and only selects the streams needed by the operator UI.
+/oak:
+  ros__parameters:
+    camera:
+      i_enable_imu: false
+      i_enable_ir: false
+      i_nn_type: none
+      i_pipeline_type: RGB
+    rgb:
+      # The UI preview is uploaded at 5 Hz.  Fifteen source frames per second
+      # leaves enough temporal resolution for detection without wasting USB,
+      # DDS, or CPU bandwidth.
+      i_fps: 15.0
+      # Encode JPEG on the OAK rather than transporting raw BGR frames between
+      # containers. Profile 4 is MJPEG in depthai_ros_driver.
+      i_low_bandwidth: true
+      i_low_bandwidth_profile: 4
+      i_low_bandwidth_frame_freq: 15
+      i_low_bandwidth_quality: 70
+      i_publish_compressed: true

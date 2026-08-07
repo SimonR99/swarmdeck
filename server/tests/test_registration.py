@@ -239,6 +239,87 @@ def test_merge_occupied_beats_free():
     assert svc.merged.min() == -1
 
 
+def test_static_mode_does_not_overlay_unconfigured_robots_at_identity():
+    """Only the reference has an implicit identity transform.
+
+    A second hardware robot owns an unrelated SLAM frame.  Treating a missing
+    transform as identity used to put both its occupancy grid and XYZ cloud into
+    the global map at the wrong place.
+    """
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("static")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[20:80, 20:80] = 0
+    cells[20:80, 20] = 100
+
+    svc.ingest("reference", meta, cells)
+    svc.ingest("unconfigured", meta, cells)
+    assert svc.global_members() == {"reference"}
+    assert svc.status()["view_by_robot"]["unconfigured"] == "local"
+
+    svc.set_transform("unconfigured", 2.0, 0.0, 0.0)
+    assert svc.global_members() == {"reference", "unconfigured"}
+
+
+def test_cloud_proposal_is_applied_only_after_grid_validation(monkeypatch):
+    """Vertical structure proposes geometry; occupancy supplies independent support."""
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    ambiguous = Registration(
+        dx=4.0,
+        dy=4.0,
+        dyaw=math.pi,
+        score=0.1,
+        overlap=20,
+        ratio=0.95,
+        yaw_ratio=0.95,
+        support=0.2,
+    )
+    cloud_proposal = Registration(
+        dx=0.0,
+        dy=0.0,
+        dyaw=0.0,
+        score=0.4,
+        overlap=120,
+        ratio=0.3,
+        yaw_ratio=0.3,
+        support=0.2,
+    )
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
+    monkeypatch.setattr(
+        service_module, "register_3d", lambda *args, **kwargs: cloud_proposal
+    )
+
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.zeros((n, n), dtype=np.int8)
+    cells[10:90, 15:18] = 100
+    cells[60:63, 15:75] = 100
+    cloud = np.column_stack(
+        [
+            np.linspace(-2.0, 2.0, 100),
+            np.zeros(100),
+            np.full(100, 0.3),
+        ]
+    ).astype(np.float32)
+
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells.copy())
+    assert svc.global_members() == set(), "the ambiguous grid alone must be refused"
+
+    svc.set_cloud("r0", cloud)
+    svc.set_cloud("r1", cloud.copy())
+    status = svc.status()
+    assert status["global_members"] == ["r0", "r1"]
+    assert status["registrations"]["r1"]["source"] == "pointcloud+grid"
+    assert svc.transforms["r1"] == pytest.approx((0.0, 0.0, 0.0))
+
+
 def test_registration_cannot_override_configured_prior(monkeypatch):
     """A symmetric-map false positive must fail closed to the known start pose."""
     from swarmdeck_server.mapsvc.registration import Registration
