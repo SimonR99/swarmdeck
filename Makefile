@@ -1,4 +1,4 @@
-.PHONY: help install ui ui-build server mock sim test clean up-scout \
+.PHONY: help install ui ui-build server mock sim test clean up-scout tunnel \
         build-server up-server down-server \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
@@ -26,6 +26,7 @@ help:
 	@echo "  make docker-test     run backend tests inside Docker"
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
 	@echo "  make sim             launch Gazebo simulation (host ROS)"
+	@echo "  make tunnel          publish the running stack on a public URL"
 	@echo "  make test            run all tests (local venv)"
 
 install:
@@ -54,6 +55,11 @@ demo:
 
 sim:
 	cd swarmdeck_ros && . install/setup.bash && ros2 launch swarmdeck_bringup session.launch.py
+
+# One tunnel to port 5173 publishes the whole app: nginx there serves the UI and
+# proxies /api and /ws. The URL has no authentication — see the script.
+tunnel:
+	./scripts/tunnel.sh
 
 test:
 	cd server && $(CLEANENV) .venv/bin/python -m pytest tests -q

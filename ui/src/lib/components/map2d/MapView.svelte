@@ -423,7 +423,11 @@
       // Optional sensor/footprint layer: useful for checking heading, camera
       // coverage and whether a proposed route has reasonable wall clearance.
       if (showSensors && info) {
-        const footprintPx = (0.3 / info.resolution) * view.scale;
+        // The robot's own declared radius, not a constant: the fleet is mixed
+        // (0.42 m Scout Mini to 0.64 m Bunker) and drawing them all at one size
+        // makes the footprint overlay useless for judging clearance. Falls back
+        // to the smallest platform for an adapter that declares nothing.
+        const footprintPx = ((r.footprint_radius ?? 0.42) / info.resolution) * view.scale;
         const sensorPx = (2.0 / info.resolution) * view.scale;
         ctx.save();
         ctx.translate(sx, sy);

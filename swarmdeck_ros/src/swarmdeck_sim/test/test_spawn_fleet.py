@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from pathlib import Path
@@ -11,10 +12,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scenario"))
 
 from spawn_fleet import (  # noqa: E402
+    CHASSIS_SECTIONS,
     LIDAR_PROFILES,
+    PROXIMITY_SCAN_HEIGHT,
+    ROBOT_PROFILES,
     LidarSpec,
+    chassis_sections,
     lidar_spec,
     render,
+    robot_spec,
+    robot_types,
 )
 
 
@@ -135,3 +142,151 @@ def test_imu_is_noisy():
             for part in block.split("<stddev>")[1:]
         ]
         assert all(s > 0.0 for s in stddevs), f"{channel}: zero stddev is no noise"
+
+
+# ------------------------------------------------------------- mixed platforms
+
+
+def _model(sdf: str):
+    import xml.etree.ElementTree as ET
+
+    return ET.fromstring(sdf).find("model")
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_every_platform_renders_valid_sdf_with_the_full_sensor_suite(platform):
+    """The shell owns the sensors, so no platform may be missing one."""
+    sdf = render("robot_0", "0.2 0.7 0.9", LidarSpec(), robot_spec(platform))
+    model = _model(sdf)
+    base = model.find("link")
+    assert base.get("name") == "base_link", "the adapter's TF chain keys off this name"
+    sensors = {s.get("name") for s in base.findall("sensor")}
+    assert sensors == {"lidar", "proximity_lidar", "imu", "camera"}
+    # Both plugins: without DiffDrive nothing moves; without OdometryPublisher
+    # there is no ground truth to score map merging against.
+    assert len(model.findall("plugin")) == 2
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_no_placeholder_survives_rendering(platform):
+    """An unreplaced {{LIDAR_Z}} parses as 0 and mounts the lidar in the chassis."""
+    sdf = render("robot_0", "0.2 0.7 0.9", LidarSpec(), robot_spec(platform))
+    assert "{{" not in sdf and "}}" not in sdf
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_drive_joints_exist_for_the_joints_the_plugin_names(platform):
+    """A DiffDrive naming a joint that does not exist fails silently: the model
+    spawns, publishes odometry of zeros, and simply never moves."""
+    sdf = render("robot_0", "0.2 0.7 0.9", LidarSpec(), robot_spec(platform))
+    model = _model(sdf)
+    joints = {j.get("name") for j in model.findall("joint")}
+    plugin = next(
+        p for p in model.findall("plugin") if p.get("name").endswith("DiffDrive")
+    )
+    named = {e.text for e in plugin if e.tag in ("left_joint", "right_joint")}
+    assert named, "DiffDrive names no joints"
+    assert named <= joints, f"DiffDrive names joints that do not exist: {named - joints}"
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_every_robot_scans_for_neighbours_at_the_same_absolute_height(platform):
+    """The one thing that lets a tall robot and a short one see each other.
+
+    A Scout Mini is 0.245 m tall overall; a Spot's body floats at 0.40-0.60 m.
+    Each platform's bumper scan is therefore offset from ITS base_link so that
+    all of them end up at the same height above the floor.
+    """
+    spec = robot_spec(platform)
+    assert spec.base_height + spec.prox_z == pytest.approx(PROXIMITY_SCAN_HEIGHT)
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_the_bumper_scan_starts_outside_the_chassis(platform):
+    """Inside it, every scan returns the robot's own body at zero range."""
+    spec = robot_spec(platform)
+    assert spec.prox_x >= spec.length / 2.0
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_footprint_circumscribes_rather_than_inscribes(platform):
+    """Nav2 plans with a circle; an inscribed radius lets a corner clip a wall."""
+    spec = robot_spec(platform)
+    assert spec.footprint_radius >= max(spec.length, spec.width) / 2.0
+
+
+def test_platforms_are_actually_different_sizes():
+    """Guards against every entry silently collapsing onto one default."""
+    radii = {name: robot_spec(name).footprint_radius for name in ROBOT_PROFILES}
+    assert len(set(round(r, 3) for r in radii.values())) == len(radii), radii
+
+
+def test_mixed_fleet_resolves_per_robot_overrides():
+    cfg = {"robot_type": "bunker", "robot_types": {"robot_2": "scout_mini",
+                                                   "robot_3": "spot"}}
+    assert robot_types(cfg, 4, "robot_") == ["bunker", "bunker", "scout_mini", "spot"]
+
+
+def test_a_typo_in_robot_types_is_refused_rather_than_ignored():
+    """Silently ignoring `robot_9` would spawn a fleet the operator did not ask
+    for, and nothing downstream would say so."""
+    with pytest.raises(ValueError, match="not in this fleet"):
+        robot_types({"robot_types": {"robot_9": "spot"}}, 4, "robot_")
+
+
+def test_an_unknown_platform_is_refused():
+    with pytest.raises(ValueError, match="unknown robot profile"):
+        robot_spec("wall_e")
+
+
+def test_spawn_height_clears_the_floor_for_every_platform():
+    """EntityFactory's pose REPLACES the model's own, so this is the height the
+    robot is actually created at. Below base_height it spawns inside the floor."""
+    for name in ROBOT_PROFILES:
+        spec = robot_spec(name)
+        assert spec.spawn_z > spec.base_height
+
+
+def test_chassis_fragments_declare_every_required_section():
+    for name in ROBOT_PROFILES:
+        sections = chassis_sections(robot_spec(name).chassis)
+        assert set(sections) == set(CHASSIS_SECTIONS)
+        assert all(body.strip() for body in sections.values()), name
+
+
+# ------------------------------------------------------- footprint vs a circle
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_footprint_polygon_is_the_chassis_rectangle(platform):
+    spec = robot_spec(platform)
+    pts = json.loads(spec.footprint)
+    assert len(pts) == 4
+    xs = sorted({round(abs(x), 3) for x, _ in pts})
+    ys = sorted({round(abs(y), 3) for _, y in pts})
+    assert xs == [round(spec.length / 2, 3)]
+    assert ys == [round(spec.width / 2, 3)]
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_the_polygon_inscribes_tighter_than_the_circle(platform):
+    """The whole reason for passing a footprint to Nav2.
+
+    Cells within the INSCRIBED radius of an obstacle are lethal. A circle has to
+    circumscribe, so it inscribes at the circumscribed radius too — a 0.778 m
+    wide Bunker becomes lethal within 0.643 m of a wall instead of 0.389 m, and
+    the planner refuses gaps the robot fits through.
+    """
+    spec = robot_spec(platform)
+    inscribed = min(spec.length, spec.width) / 2.0
+    assert inscribed < spec.footprint_radius
+    # And the rectangle must still cover the chassis, not undercut it.
+    assert inscribed == pytest.approx(min(spec.length, spec.width) / 2.0)
+
+
+def test_every_platform_fits_a_door_once_modelled_as_a_rectangle():
+    """DOOR is a HALF-width in generate_world.py, so the opening is 2.2 m."""
+    opening = 2 * 1.1
+    for name in ROBOT_PROFILES:
+        spec = robot_spec(name)
+        assert spec.width < opening, f"{name} is wider than a door"

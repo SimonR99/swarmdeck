@@ -5,6 +5,19 @@ seed: 20260801
 fleet:
   robot_count: 4
   robot_prefix: robot_
+  # Platform per robot. `robot_type` is the fleet default; `robot_types` overrides
+  # it per robot id. Both name entries in spawn_fleet.py's ROBOT_PROFILES.
+  #
+  # This mirrors the real deployment: two Bunkers, one Scout Mini, one Spot. The
+  # mix is the point rather than decoration — the three platforms differ in
+  # footprint (0.42 m to 0.64 m circumscribed radius) and in mapping-lidar height
+  # (0.245 m to 0.500 m above the floor), so the merged map is built from robots
+  # that see the building at different heights. A fleet of four identical robots
+  # hides every problem that causes.
+  robot_type: bunker
+  robot_types:
+    robot_2: scout_mini
+    robot_3: spot
   # Mapping lidar. `profile` names an entry in spawn_fleet.py's LIDAR_PROFILES;
   # any individual field may be overridden beneath it.
   #

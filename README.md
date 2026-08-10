@@ -60,6 +60,65 @@ make docker-logs        # follow logs
 make docker-test        # backend pytest in the server image
 ```
 
+### Resetting the simulation
+
+**Reset sim** in the top bar returns the fleet to its start state: every robot back at its
+spawn pose, every map discarded, goals cancelled, costmaps and odometry filters cleared.
+It takes a couple of seconds and nothing restarts. The button asks for a second click,
+because there is no undo.
+
+It is gated on the `reset` adapter capability, which only `adapter_sim` advertises — so it
+does not appear on a dashboard driving real robots, where "teleport to spawn and forget the
+map" is not something that can happen. `curl -X POST localhost:8080/api/sim/reset` does the
+same thing and returns which robots confirmed.
+
+The backend clears its merged map only after the adapters report `reset_done`, never when
+it sends the command: it holds each robot's last uploaded grid, and an upload already in
+flight would otherwise restore the map a moment after it was cleared. If an adapter does not
+confirm, the map is cleared anyway and that robot is named in a warning — its old map will
+come back within a couple of seconds, and the reason needs to be visible.
+
+Two things are worth expecting rather than debugging:
+
+- **In `auto` merge mode the merged map does not come straight back, and may take a long
+  time.** Registration has to re-earn its transforms against maps that are small again,
+  and until it does it correctly reports `ambiguous occupancy match` and holds robots out.
+  Measured after a real reset, with the fleet still exploring: over four minutes
+  `global_members` oscillated between two robots and none, and never returned to the full
+  fleet it had before the reset — the merged view flickers on and off for as long as that
+  lasts. It is the four rejection tests doing their job on small maps, not a fault, but it
+  does mean the merged map is not a good thing to watch right after a reset. Per-robot maps
+  are correct immediately (`view_by_robot` in `GET /api/map/status`, which also names which
+  test is refusing), and `static` mode has no such gap because its transforms are
+  configured rather than estimated.
+- **A reset does not restart the exploration bootstrap.** If `explore_seconds` has already
+  elapsed the fleet comes back stationary and waits for goals.
+
+Measured on the four-robot Gazebo stack: reset acknowledged by all four in 3.8 s, robots
+returned from up to 13 m away to their spawn poses, 181,467 mapped cells cleared to 0, and
+the simulation clock ran 87 s -> 99 s across the reset — forwards, which is the point of
+resetting model poses rather than the world.
+
+### Sharing the running sim over the web
+
+```bash
+make tunnel             # or: ./scripts/tunnel.sh --tool ngrok
+```
+
+One tunnel to port 5173 publishes the whole app — the `ui` container's nginx serves the
+frontend and proxies `/api` and `/ws`, so the map, telemetry and controls all work through
+it. Do not also tunnel 8080; it is the same backend without the frontend.
+
+The script prefers ngrok when it is installed **and** has an authtoken (`ngrok config
+add-authtoken <token>`), because ngrok v3 will not open a tunnel without one. Otherwise it
+falls back to a cloudflared quick tunnel, which needs no account but mints a new hostname
+every restart.
+
+> **The URL has no authentication.** Anyone who has it can drive the robots, set goals and
+> issue STOP ALL. That is acceptable for a simulator you are watching, and is not
+> acceptable in front of a stack running `adapter_ros2` against real hardware — put an
+> authenticating proxy there first.
+
 The map supports pan/zoom, fleet and selection centring, click-to-select markers, a
 metric grid, trails, labels, sensor/footprint overlays, map revision metadata, and live
 registration diagnostics from `GET /api/map/status`.
@@ -121,6 +180,7 @@ where appropriate, so lidar mapping and camera perception see the same environme
 | `study/` | Session configs (`1robot.yaml`, `2robot.yaml`, `4robot.yaml`) |
 | `sessions/` | Recorded output, one directory per session |
 | `docker/` | Server, UI, and Gazebo/ROS images; compose file at repo root |
+| `scripts/` | Operator helpers — `tunnel.sh` publishes the running stack on a public URL |
 
 ## Map merging
 

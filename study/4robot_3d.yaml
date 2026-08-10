@@ -19,6 +19,14 @@ seed: 20260801
 fleet:
   robot_count: 4
   robot_prefix: robot_
+  # The SAME platform mix as 4robot.yaml, deliberately. This config exists to
+  # isolate one variable — where odometry comes from — so the fleet, the world
+  # and the seed must not differ. Changing the robots too would make the
+  # comparison against the 2D run meaningless.
+  robot_type: bunker
+  robot_types:
+    robot_2: scout_mini
+    robot_3: spot
   lidar:
     profile: generic_32
 

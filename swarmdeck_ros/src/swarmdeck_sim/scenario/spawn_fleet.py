@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,19 @@ COLORS = [
 ]
 
 HERE = Path(__file__).resolve().parent
-TEMPLATE = HERE.parent.parent / "swarmdeck_description" / "urdf" / "robot.sdf.jinja"
+DESCRIPTION = HERE.parent.parent / "swarmdeck_description" / "urdf"
+TEMPLATE = DESCRIPTION / "robot.sdf.jinja"
+CHASSIS_DIR = DESCRIPTION / "chassis"
+
+# Height above the floor at which every robot's bumper scan is taken, metres.
+#
+# One number for the whole fleet, and it has to clear the SHORTEST robot's roof
+# from the TALLEST robot's point of view. A Scout Mini is 0.245 m tall overall;
+# a Spot's body floats at 0.40-0.60 m. Put the scan at Spot's body height and it
+# misses the Scout entirely; put it at 0.05 m and it grazes the floor on a ramp.
+# 0.15 m sits inside every platform's collision volume (Spot's via the leg
+# envelope in chassis/spot.xml) with margin on both sides.
+PROXIMITY_SCAN_HEIGHT = 0.15
 
 # +/- 22.5 deg, the vertical spread of a typical 32-beam scanning lidar.
 LIDAR_VFOV_DEFAULT = 0.3927
@@ -142,6 +155,189 @@ LIDAR_PROFILES: dict[str, LidarSpec] = {
 
 DEFAULT_LIDAR_PROFILE = "generic_2d"
 
+
+@dataclass(frozen=True)
+class RobotSpec:
+    """One platform's physical facts, in the form the SDF and Nav2 both need.
+
+    Everything here is a nominal datasheet figure or a mount choice, NOT a
+    calibration. On hardware these come from the unit's URDF; the numbers below
+    describe the simulated stand-in and nothing more.
+
+    `base_height` is what ties the file together: it is how far base_link floats
+    above the floor, set by the drive geometry in the chassis fragment. The
+    proximity sensor's z is derived from it so that every robot scans at the
+    same absolute height (PROXIMITY_SCAN_HEIGHT) no matter how tall it is —
+    which is the only way a tall robot and a short one can see each other.
+    """
+
+    chassis: str                # chassis/<name>.xml
+    robot_type: str             # reported to the backend at `hello`
+    length: float               # metres, for the record and for footprint maths
+    width: float
+    base_height: float          # base_link height above the floor
+    lidar_x: float              # mapping lidar mount, relative to base_link
+    lidar_z: float
+    camera_x: float
+    camera_z: float
+    prox_x: float               # bumper scan, forward of base_link
+    prox_range_max: float = 6.0
+    prox_samples: int = 181
+    prox_fov: float = math.pi   # total horizontal sweep, radians
+
+    @property
+    def footprint_radius(self) -> float:
+        """Circumscribed radius of the chassis rectangle.
+
+        Nav2 is configured with a circular footprint, so this must circumscribe
+        rather than inscribe: an inscribed radius lets a corner of a 1.02 m
+        Bunker clip a wall the planner believed was clear.
+        """
+        return math.hypot(self.length, self.width) / 2.0
+
+    @property
+    def prox_z(self) -> float:
+        return PROXIMITY_SCAN_HEIGHT - self.base_height
+
+    @property
+    def footprint(self) -> str:
+        """The chassis rectangle, as Nav2's `footprint` polygon parameter.
+
+        Nav2 accepts either `robot_radius` (a circle) or `footprint` (a polygon),
+        and the difference decides whether these robots can plan through a door.
+        A circle has to circumscribe, so an AgileX Bunker that is 0.778 m wide
+        becomes a 1.285 m disc, and every cell within 0.643 m of a wall is
+        lethal. Given the polygon, Nav2 computes an inscribed radius of 0.389 m
+        — the actual half-width — and the same door is passable.
+
+        Rectangles rather than the true silhouette on purpose: the inscribed and
+        circumscribed radii are what the costmap actually uses, and a rectangle
+        gets both right without paying for a polygon collision check per cell.
+        """
+        half_l, half_w = self.length / 2.0, self.width / 2.0
+        corners = (
+            (half_l, half_w), (half_l, -half_w),
+            (-half_l, -half_w), (-half_l, half_w),
+        )
+        return "[" + ",".join(f"[{x:.3f},{y:.3f}]" for x, y in corners) + "]"
+
+    @property
+    def spawn_z(self) -> float:
+        """Height to create the model at, with clearance to settle rather than
+        interpenetrate the floor on the first physics step."""
+        return self.base_height + 0.03
+
+    def fields(self) -> dict[str, str]:
+        half = self.prox_fov / 2.0
+        return {
+            "SPAWN_Z": f"{self.base_height:.4f}",
+            "LIDAR_X": f"{self.lidar_x:.4f}",
+            "LIDAR_Z": f"{self.lidar_z:.4f}",
+            "CAM_X": f"{self.camera_x:.4f}",
+            "CAM_Z": f"{self.camera_z:.4f}",
+            "PROX_X": f"{self.prox_x:.4f}",
+            "PROX_Z": f"{self.prox_z:.4f}",
+            "PROX_RANGE_MAX": f"{self.prox_range_max:g}",
+            "PROX_SAMPLES": str(self.prox_samples),
+            "PROX_MIN_ANGLE": f"{-half:.5f}",
+            "PROX_MAX_ANGLE": f"{half:.5f}",
+        }
+
+
+# The simulated fleet's platforms. Adding one means adding a chassis fragment
+# and a row here; nothing else in the stack needs to know.
+#
+# base_height is DERIVED from each fragment's drive geometry and must match it:
+#   bunker  track wheel centre -0.100, radius 0.100 -> 0.200
+#   scout   wheel centre       -0.035, radius 0.0875 -> 0.1225
+#   spot    hidden wheel       -0.340, radius 0.160 -> 0.500
+# Get it wrong and the robot spawns inside the floor or drops on start.
+ROBOT_PROFILES: dict[str, RobotSpec] = {
+    "bunker": RobotSpec(
+        chassis="bunker",
+        robot_type="agilex_bunker",
+        length=1.023, width=0.778, base_height=0.200,
+        lidar_x=-0.150, lidar_z=0.425,
+        camera_x=0.515, camera_z=0.100,
+        prox_x=0.530, prox_range_max=8.0,
+    ),
+    "scout_mini": RobotSpec(
+        chassis="scout_mini",
+        robot_type="agilex_scout_mini",
+        length=0.612, width=0.580, base_height=0.1225,
+        lidar_x=-0.080, lidar_z=0.245,
+        camera_x=0.322, camera_z=0.090,
+        prox_x=0.320, prox_range_max=6.0,
+    ),
+    "spot": RobotSpec(
+        chassis="spot",
+        robot_type="boston_dynamics_spot",
+        length=1.100, width=0.500, base_height=0.500,
+        lidar_x=-0.180, lidar_z=0.210,
+        camera_x=0.598, camera_z=0.020,
+        prox_x=0.580, prox_range_max=8.0,
+    ),
+}
+
+DEFAULT_ROBOT_PROFILE = "scout_mini"
+
+# The three sections a chassis fragment is split into, in file order.
+CHASSIS_SECTIONS = ("CHASSIS", "LINKS", "DRIVE")
+
+
+def robot_spec(name: str) -> RobotSpec:
+    if name not in ROBOT_PROFILES:
+        raise ValueError(
+            f"unknown robot profile {name!r}; available: {sorted(ROBOT_PROFILES)}"
+        )
+    return ROBOT_PROFILES[name]
+
+
+def robot_types(fleet_cfg: Mapping[str, Any] | None, count: int, prefix: str) -> list[str]:
+    """Resolve which platform each robot is.
+
+    ```yaml
+    fleet:
+      robot_type: scout_mini        # fleet-wide default
+      robot_types:                  # per-robot override, by id
+        robot_0: bunker
+        robot_3: spot
+    ```
+
+    A mixed fleet is the point — the real deployment is two Bunkers, a Scout
+    Mini and a Spot, and a merged map built from robots with different lidar
+    heights and footprints is a different problem than one built from four
+    identical ones.
+    """
+    fleet_cfg = fleet_cfg or {}
+    default = fleet_cfg.get("robot_type", DEFAULT_ROBOT_PROFILE)
+    per_robot = fleet_cfg.get("robot_types") or {}
+    unknown = set(per_robot) - {f"{prefix}{i}" for i in range(count)}
+    if unknown:
+        raise ValueError(
+            f"fleet.robot_types names robots that are not in this fleet: "
+            f"{sorted(unknown)}"
+        )
+    return [per_robot.get(f"{prefix}{i}", default) for i in range(count)]
+
+
+def chassis_sections(name: str) -> dict[str, str]:
+    """Split a chassis fragment on its @SECTION markers."""
+    path = CHASSIS_DIR / f"{name}.xml"
+    if not path.exists():
+        raise FileNotFoundError(f"no chassis fragment for {name!r}: {path}")
+    text = path.read_text()
+    out: dict[str, str] = {}
+    for section in CHASSIS_SECTIONS:
+        marker = f"<!-- @{section} -->"
+        if marker not in text:
+            raise ValueError(f"{path.name} is missing the {marker} marker")
+        body = text.split(marker, 1)[1]
+        for other in CHASSIS_SECTIONS:
+            body = body.split(f"<!-- @{other} -->", 1)[0]
+        out[section] = body.rstrip()
+    return out
+
 _INT_FIELDS = {"h_samples", "rings"}
 _SPEC_FIELDS = {f.name for f in fields(LidarSpec)}
 
@@ -201,10 +397,31 @@ def lidar_spec(
     return replace(spec, **block)
 
 
-def render(name: str, color: str, spec: LidarSpec | None = None) -> str:
-    sdf = TEMPLATE.read_text().replace("{{NAME}}", name).replace("{{COLOR}}", color)
-    for key, value in (spec or LidarSpec()).fields().items():
+def render(
+    name: str,
+    color: str,
+    spec: LidarSpec | None = None,
+    robot: RobotSpec | None = None,
+) -> str:
+    """Assemble one robot's SDF from the shared shell plus its chassis fragment."""
+    robot = robot or robot_spec(DEFAULT_ROBOT_PROFILE)
+    sections = chassis_sections(robot.chassis)
+    sdf = TEMPLATE.read_text()
+    sdf = sdf.replace("{{CHASSIS}}", sections["CHASSIS"])
+    sdf = sdf.replace("{{EXTRA_LINKS}}", sections["LINKS"])
+    sdf = sdf.replace("{{DRIVE_PLUGIN}}", sections["DRIVE"])
+    for key, value in {**robot.fields(), **(spec or LidarSpec()).fields()}.items():
         sdf = sdf.replace("{{" + key + "}}", value)
+    # NAME and COLOR last: the chassis fragments use them too, and they are only
+    # in the document after the sections above have been spliced in.
+    sdf = sdf.replace("{{NAME}}", name).replace("{{COLOR}}", color)
+
+    leftover = sorted(set(re.findall(r"\{\{([A-Z_]+)\}\}", sdf)))
+    if leftover:
+        # An unreplaced placeholder is not a cosmetic problem: Gazebo will
+        # refuse the SDF, or worse parse `{{LIDAR_Z}}` as 0 and mount the
+        # mapping lidar inside the chassis.
+        raise ValueError(f"{name}: unfilled SDF placeholders {leftover}")
     return sdf
 
 
@@ -213,7 +430,16 @@ def yaw_quaternion(yaw: float) -> tuple[float, float]:
     return math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
 
-def spawn(world: str, name: str, sdf: str, x: float, y: float, yaw: float) -> bool:
+def spawn(
+    world: str, name: str, sdf: str, x: float, y: float, yaw: float, z: float
+) -> bool:
+    """Create the model in a running world.
+
+    `z` is per platform and must be supplied. EntityFactory's pose REPLACES the
+    model's own `<pose>`, so the SPAWN_Z baked into the SDF does not apply here
+    — a single hardcoded height buries a Spot's hidden drive wheels below the
+    floor while leaving a Scout Mini hanging in the air.
+    """
     with tempfile.NamedTemporaryFile("w", suffix=".sdf", delete=False) as fh:
         fh.write(sdf)
         path = fh.name
@@ -225,7 +451,7 @@ def spawn(world: str, name: str, sdf: str, x: float, y: float, yaw: float) -> bo
         "--timeout", "5000",
         "--req",
         f'sdf_filename: "{path}", name: "{name}", '
-        f'pose: {{position: {{x: {x}, y: {y}, z: 0.15}}, '
+        f'pose: {{position: {{x: {x}, y: {y}, z: {z}}}, '
         f'orientation: {{z: {qz:.9f}, w: {qw:.9f}}}}}',
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -258,12 +484,19 @@ def main() -> int:
         f"[spawn] lidar {spec.h_samples} samples/rev ({spec.h_step_deg:.3f} deg), "
         f"{spec.rings} ring(s), {spec.range_max:g} m, {spec.rate:g} Hz"
     )
+    types = robot_types(fleet_cfg, min(count, 5), prefix)
 
     ok = True
     for i in range(min(count, 5)):
         name = f"{prefix}{i}"
+        robot = robot_spec(types[i])
         pose = starts.get(name, {"x": i * 3.0, "y": 0.0, "yaw": 0.0})
-        sdf = render(name, COLORS[i % len(COLORS)], spec)
+        sdf = render(name, COLORS[i % len(COLORS)], spec, robot)
+        print(
+            f"[spawn] {name}: {types[i]} "
+            f"({robot.length:.2f}x{robot.width:.2f} m, r={robot.footprint_radius:.2f} m, "
+            f"lidar z={robot.lidar_z:.3f})"
+        )
 
         if args.outdir:
             out = Path(args.outdir) / f"{name}.sdf"
@@ -272,7 +505,11 @@ def main() -> int:
             print(f"[render] {out}")
 
         if not args.dry_run:
-            ok &= spawn(args.world, name, sdf, pose["x"], pose["y"], pose.get("yaw", 0.0))
+            ok &= spawn(
+                args.world, name, sdf,
+                pose["x"], pose["y"], pose.get("yaw", 0.0),
+                z=robot.spawn_z,
+            )
 
     return 0 if ok else 1
 

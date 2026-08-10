@@ -49,6 +49,10 @@ BRINGUP_DELAY = 20.0
 ROBOT_STAGGER = 6.0
 # Exploration starts after the last robot's stack is up, plus lifecycle settling.
 EXPLORE_LEAD_IN = 25.0
+# Costmap inflation beyond the chassis radius, metres. This is the knob that
+# decides how far robots stay off walls AND off each other, since the bumper
+# scan writes neighbours into the local costmap as ordinary obstacles.
+INFLATION_MARGIN = 0.25
 
 
 def bridge_args(ns: str, lidar_rings: int = 1, fuse_imu: bool = True) -> list[str]:
@@ -117,9 +121,13 @@ def setup(context, *args, **kwargs):
     # test_session_launch.py imports this module for `bridge_args` alone and
     # should not need the sim package on its path.
     sys.path.insert(0, str(scenario))
-    from spawn_fleet import lidar_spec  # noqa: E402  (path set immediately above)
+    # noqa: E402 — path set immediately above. Resolved through the spawner's own
+    # code so the geometry this file configures SLAM and Nav2 with is the same
+    # geometry Gazebo was handed; two tables would drift.
+    from spawn_fleet import lidar_spec, robot_spec, robot_types  # noqa: E402
 
     spec = lidar_spec(cfg.get("fleet", {}))
+    types = robot_types(cfg.get("fleet", {}), min(count, 5), prefix)
     lidar_rings = spec.rings
 
     # RTAB-Map registers against the cloud's vertical structure, which a
@@ -187,12 +195,23 @@ def setup(context, *args, **kwargs):
     # subscribers, so that robot produces no map and nothing else complains.
     for i in range(min(count, 5)):
         ns = f"{prefix}{i}"
+        # The platform this robot actually is. Its lidar mount has to reach SLAM,
+        # because slam.launch.py publishes base_link -> lidar from these numbers
+        # and the fleet is no longer uniform: a Scout Mini carries its lidar at
+        # 0.245 m and a Spot at 0.500 m. Leaving the old single default in place
+        # would put every Spot scan a quarter of a metre below where it was
+        # taken, which is exactly the wrong-extrinsic failure adapter_ros2's
+        # notes warn about — it tilts and offsets every scan and SLAM cannot
+        # recover from it.
+        robot = robot_spec(types[i])
         if slam_backend == "rtabmap":
             slam_args = {
                 "namespace": ns,
                 "use_sim_time": "true",
                 "range_max": str(spec.range_max),
                 "grid_3d": str(grid_3d).lower(),
+                "lidar_x": f"{robot.lidar_x:.4f}",
+                "lidar_z": f"{robot.lidar_z:.4f}",
             }
             slam_launch = "/launch/slam_rtabmap.launch.py"
         else:
@@ -203,6 +222,8 @@ def setup(context, *args, **kwargs):
                 "fuse_imu": str(fuse_imu).lower(),
                 "fuse_covariance": str(fuse_cov).lower(),
                 "range_max": str(spec.range_max),
+                "lidar_x": f"{robot.lidar_x:.4f}",
+                "lidar_z": f"{robot.lidar_z:.4f}",
             }
             slam_launch = "/launch/slam.launch.py"
 
@@ -238,6 +259,24 @@ def setup(context, *args, **kwargs):
                         launch_arguments={
                             "namespace": ns,
                             "use_sim_time": "true",
+                            # Nav2 plans with a circular footprint, so this is
+                            # the circumscribed radius of the chassis — an
+                            # inscribed one lets a 1.02 m Bunker's corner clip a
+                            # wall the planner believed was clear. It also sets
+                            # how far robots keep off EACH OTHER, since the
+                            # bumper scan writes them into the local costmap.
+                            "robot_radius": f"{robot.footprint_radius:.3f}",
+                            # The real chassis rectangle. Without it Nav2 models
+                            # a 0.778 m wide Bunker as a 1.285 m disc and refuses
+                            # gaps it fits through comfortably.
+                            "footprint": robot.footprint,
+                            # Clearance beyond the chassis before cost starts
+                            # decaying. Constant margin rather than a scale
+                            # factor: what it buys is room to manoeuvre next to
+                            # an obstacle, and that is set by the corridor, not
+                            # by how big the robot is. INFLATION_MARGIN is where
+                            # inter-robot spacing is actually tuned.
+                            "inflation_radius": f"{robot.footprint_radius + INFLATION_MARGIN:.3f}",
                         }.items(),
                     ),
                 ],
@@ -269,7 +308,18 @@ def setup(context, *args, **kwargs):
                              # inter-robot encounters stay a matter of luck.
                              "--start-poses", json.dumps(
                                  cfg.get("map", {}).get("start_poses", {})
-                             )],
+                             ),
+                             # Per-robot chassis size. The explorer's clearances
+                             # were absolute constants tuned on a 0.27 m
+                             # Duckiebot; on a fleet whose largest member is
+                             # 0.64 m they let a Bunker drive to within 0.9 m of
+                             # a neighbour and then rotate into it.
+                             "--radii", json.dumps({
+                                 f"{prefix}{i}": round(
+                                     robot_spec(types[i]).footprint_radius, 3
+                                 )
+                                 for i in range(min(count, 5))
+                             })],
                         output="screen",
                     )
                 ],

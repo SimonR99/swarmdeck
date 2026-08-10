@@ -63,6 +63,29 @@ _camera_frames: dict[str, tuple[bytes, float, int]] = {}
 _detections: dict[str, dict[str, Any]] = {}
 _camera_seq = 0
 
+# How long to wait for adapters to report `reset_done` before clearing anyway. A
+# reset restarts SLAM and re-zeroes an odometry filter on every robot; measured
+# on the four-robot Gazebo stack the slow step is the Gazebo world reset itself.
+# Generous, because the failure mode of waiting too little (clearing the map
+# while adapters still hold the old one) is worse than the failure mode of
+# waiting too long (a spinner stays up).
+RESET_TIMEOUT_S = 25.0
+
+# Robots that have been sent `reset` and have not yet answered. Mutated from the
+# adapter socket, awaited by reset_fleet(); _reset_done fires when it empties.
+_reset_pending: set[str] = set()
+# robot_id → the `steps` map from a reset_done that reported ok: false. Held
+# until reset_fleet() has finished clearing, so the alert survives that clear.
+_reset_failures: dict[str, dict[str, Any]] = {}
+# Created per reset, not at import. An asyncio.Event binds to the first loop
+# that awaits it and then refuses every other one, so a module-level Event
+# survives exactly one event loop — which is one more than a test suite gets,
+# and a landmine for anything that ever runs this app under a second loop.
+# `_reset_running` is a plain bool for the same reason: an asyncio.Lock would
+# reintroduce the binding this avoids.
+_reset_done: asyncio.Event | None = None
+_reset_running = False
+
 
 # ----------------------------------------------------------------- config
 
@@ -243,6 +266,114 @@ def detection_position(robot_id: str, position: Any) -> dict[str, float] | None:
     return map_service.robot_to_world(robot_id, normalized)
 
 
+# ----------------------------------------------------------------- reset
+
+
+async def reset_fleet() -> dict[str, Any]:
+    """Put the simulation back to its start state.
+
+    Two halves that must happen in this order. The adapters reset the things only
+    they can reach — the simulator's model poses, each robot's SLAM map, its
+    odometry filter, its costmaps — and report `reset_done`. Only then does the
+    backend drop what it derived from those robots. Clearing first would race: the
+    server holds each robot's last uploaded grid, and an upload already in flight
+    would restore the map a moment after it was cleared.
+
+    Backend state is cleared even when an adapter never answers. A stuck adapter
+    must not leave the operator staring at a map with a spinner over it forever;
+    the robots that failed to confirm are named in the result instead, because a
+    robot whose SLAM did not actually reset will push its old map back within a
+    couple of seconds and the operator needs to know why.
+    """
+    global _reset_done, _reset_running
+
+    if _reset_running:
+        return {"ok": False, "error": "a reset is already running"}
+    _reset_running = True
+    _reset_done = asyncio.Event()
+    try:
+        # Capability-gated, and this is a safety boundary rather than a
+        # nicety: `reset` means "teleport to spawn and forget the map", which a
+        # physical robot cannot do and must never be asked to do. adapter_ros2
+        # does not advertise it. See adapters/protocol/README.md.
+        targets = {rid for rid, r in registry.robots.items() if "reset" in r.capabilities}
+        skipped = sorted(set(registry.robots) - targets)
+
+        events.log("reset_start", {"robots": sorted(targets), "skipped": skipped})
+        await broadcast(
+            {"type": "sim_reset", "phase": "start",
+             "robots": sorted(targets), "skipped": skipped}
+        )
+
+        _reset_pending.clear()
+        _reset_failures.clear()
+        _reset_done.clear()
+        # Wait only on robots the command actually reached. A robot whose socket
+        # died between the capability check and the send would otherwise hold the
+        # whole reset until the timeout.
+        for rid in sorted(targets):
+            if await registry.send(rid, {"type": "reset", **stamps()}):
+                _reset_pending.add(rid)
+        unreachable = sorted(targets - _reset_pending)
+        if not _reset_pending:
+            _reset_done.set()
+
+        timed_out = False
+        try:
+            await asyncio.wait_for(_reset_done.wait(), RESET_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            timed_out = True
+        silent = sorted(_reset_pending)
+        _reset_pending.clear()
+
+        map_service.reset()
+        _detections.clear()
+        _camera_frames.clear()
+        # Alerts describe a world that no longer exists — an `unattended` warning
+        # for a robot now back at its spawn pose is stale by construction. The
+        # suppression window goes too, so a condition that genuinely returns
+        # after the reset is reported again rather than swallowed.
+        for alert_id in list(_alerts):
+            await clear_alert(alert_id)
+        _alert_suppress_until.clear()
+        for robot in registry.robots.values():
+            robot.goal = None
+            robot.planned_path = []
+            robot.nav_status = "idle"
+            robot.mode = "idle"
+
+        # Three distinct ways to not be reset, kept apart because they mean
+        # different things to an operator: the command never arrived, it arrived
+        # and was never answered, or it was answered with a failure.
+        partial = dict(_reset_failures)
+        _reset_failures.clear()
+        failed = sorted(set(silent) | set(unreachable) | set(partial))
+        result = {
+            "type": "sim_reset",
+            "phase": "done",
+            "ok": not failed,
+            "reset": sorted(targets - set(failed)),
+            "skipped": skipped,
+            "unreachable": unreachable,
+            "no_response": silent,
+            "partial": {rid: steps for rid, steps in partial.items()},
+            "failed": failed,
+            "timed_out": timed_out,
+        }
+        events.log("reset_done", {k: v for k, v in result.items() if k != "type"})
+        await broadcast(result)
+        await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
+        if failed:
+            await raise_alert(
+                "reset_incomplete", "warn", "fault",
+                f"Reset not confirmed by {', '.join(failed)} — their map may return",
+            )
+        return result
+    finally:
+        _reset_running = False
+        _reset_done = None
+
+
 def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | None:
     """Find a duplicate goal after normalizing every robot to the shared frame."""
     for rid, robot in registry.robots.items():
@@ -321,6 +452,17 @@ async def stop_session() -> dict[str, Any]:
     SESSION.update(running=False, recording=False)
     await broadcast(session_state())
     return session_state()
+
+
+@app.post("/api/sim/reset")
+async def post_sim_reset() -> dict[str, Any]:
+    """Same reset the GUI button issues, awaited rather than broadcast.
+
+    Exists so the reset can be exercised from a shell or a test without driving a
+    browser — `curl -X POST .../api/sim/reset` returns the outcome, including
+    which robots failed to confirm, instead of only announcing it on a socket.
+    """
+    return await reset_fleet()
 
 
 @app.get("/api/map")
@@ -704,6 +846,13 @@ async def handle_gui_message(msg: dict[str, Any]) -> None:
             await registry.send(robot_id, {"type": "stop", **stamps()})
         await raise_alert("stop_all", "critical", "fault", "STOP ALL issued by operator")
 
+    elif kind == "reset_sim":
+        # Fire-and-forget: reset_fleet() waits on every adapter, and awaiting it
+        # here would stall this socket's receive loop for as long as that takes,
+        # so the operator's own GUI would stop updating during the one operation
+        # they most want to watch. Progress reaches every client by broadcast.
+        asyncio.create_task(reset_fleet())
+
     elif kind == "acknowledge_alert":
         aid = msg.get("id", "")
         if aid in _alerts:
@@ -769,6 +918,22 @@ async def adapter_socket(ws: WebSocket) -> None:
 
             elif kind == "map_meta":
                 pass  # metadata accompanies the HTTP upload
+
+            elif kind == "reset_done":
+                # The adapter has finished resetting and has dropped its cached
+                # grid, so the backend may now clear without the old map coming
+                # straight back. See reset_fleet().
+                #
+                # A partial failure is recorded rather than alerted on here:
+                # reset_fleet() clears every alert once the fleet has answered,
+                # which would wipe an alert raised from inside this branch.
+                rid = msg.get("robot_id", "")
+                if rid in _reset_pending:
+                    if not msg.get("ok", True):
+                        _reset_failures[rid] = msg.get("steps") or {}
+                    _reset_pending.discard(rid)
+                    if not _reset_pending and _reset_done is not None:
+                        _reset_done.set()
 
             elif kind == "slam_graph":
                 # Optional (protocol 2). A robot running a collaborative back end

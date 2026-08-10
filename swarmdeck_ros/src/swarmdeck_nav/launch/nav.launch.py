@@ -32,7 +32,26 @@ def generate_launch_description() -> LaunchDescription:
         RewrittenYaml(
             source_file=namespaced_params,
             root_key=namespace,
-            param_rewrites={},
+            # The fleet is no longer uniform, so footprint cannot live in the
+            # shared YAML: a Scout Mini is 0.42 m circumscribed and a Bunker
+            # 0.64 m. RewrittenYaml rewrites a bare key wherever it appears,
+            # which reaches both the global and local costmap copies.
+            #
+            # Inflation is passed alongside rather than derived here, because a
+            # launch substitution cannot do arithmetic — session.launch.py owns
+            # the relationship between the two.
+            param_rewrites={
+                # `footprint` wins over `robot_radius` wherever it parses to a
+                # valid polygon, and that is the point: a circle has to
+                # circumscribe, which makes a 0.778 m wide Bunker into a 1.285 m
+                # disc and every cell within 0.643 m of a wall lethal. The
+                # rectangle gives Nav2 the real 0.389 m inscribed radius.
+                # robot_radius is still passed as the fallback for anything that
+                # cannot parse the polygon.
+                "footprint": LaunchConfiguration("footprint"),
+                "robot_radius": LaunchConfiguration("robot_radius"),
+                "inflation_radius": LaunchConfiguration("inflation_radius"),
+            },
             convert_types=True,
         ),
         allow_substs=True,
@@ -116,6 +135,15 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("namespace", default_value="robot_0"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("params_file", default_value=default_params),
+            # Circumscribed chassis radius, and the inflation built on it. The
+            # defaults are the smallest platform in the fleet, so a caller that
+            # forgets to pass them gets a robot that plans too tightly rather
+            # than one that refuses to plan at all.
+            DeclareLaunchArgument("robot_radius", default_value="0.422"),
+            DeclareLaunchArgument("inflation_radius", default_value="0.70"),
+            # Chassis rectangle. Empty means "fall back to robot_radius", which
+            # is what a hardware stack passing neither will get.
+            DeclareLaunchArgument("footprint", default_value="[]"),
             # Simulation keeps TF namespaced. Hardware can opt into the
             # machine-wide TF graph without duplicating this Nav2 bring-up.
             DeclareLaunchArgument("tf_topic", default_value="tf"),

@@ -5,7 +5,12 @@
 
 export const PROTOCOL_VERSION = 1;
 
-export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop';
+/**
+ * `reset` is simulation-only: it means "teleport to spawn and forget the map",
+ * which no physical robot can honour. The reset control is gated on some robot
+ * advertising it, which is what keeps it off a hardware dashboard.
+ */
+export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop' | 'reset';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop';
 export type AlertLevel = 'info' | 'warn' | 'critical';
@@ -40,6 +45,8 @@ export interface RobotState extends Stamps {
   capabilities: Capability[];
   unattended_s: number;
   online: boolean;
+  /** Circumscribed chassis radius, metres, as declared by the adapter at `hello`. */
+  footprint_radius?: number;
 }
 
 export interface Detection {
@@ -174,6 +181,30 @@ export interface SessionState {
   recording: boolean;
 }
 
+/**
+ * Progress of a simulation reset, broadcast to every client rather than returned
+ * to the one that asked — a reset changes what everyone is looking at.
+ *
+ * `phase: 'done'` distinguishes three ways a robot can fail to reset, because
+ * they need different responses: `unreachable` never got the command,
+ * `no_response` got it and went quiet, and `partial` answered with the steps
+ * that failed. Any robot in `failed` will push its old map back within seconds.
+ */
+export interface SimReset {
+  type: 'sim_reset';
+  phase: 'start' | 'done';
+  skipped: string[];
+  /** Robots the reset was addressed to. Present on `start`. */
+  robots?: string[];
+  ok?: boolean;
+  reset?: string[];
+  unreachable?: string[];
+  no_response?: string[];
+  partial?: Record<string, Record<string, boolean>>;
+  failed?: string[];
+  timed_out?: boolean;
+}
+
 /* ---------- server → GUI ---------- */
 
 export type ServerMessage =
@@ -186,6 +217,7 @@ export type ServerMessage =
   | { type: 'alert_clear'; id: string }
   | { type: 'settings_state'; settings: AppSettings }
   | { type: 'slam_graph'; robot_id: string; graph: SlamGraph }
+  | SimReset
   | { type: 'map_info'; info: MapInfo };
 
 /* ---------- GUI → server ---------- */
@@ -198,6 +230,7 @@ export type ClientMessage =
   | { type: 'switch_camera'; robot_id: string }
   | { type: 'acknowledge_alert'; id: string }
   | { type: 'report_target'; robot_id: string; payload: Point }
-  | { type: 'stop_all' };
+  | { type: 'stop_all' }
+  | { type: 'reset_sim' };
 
 export type ClientAction = ClientMessage['type'];

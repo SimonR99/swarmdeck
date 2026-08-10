@@ -1,0 +1,232 @@
+<!--
+  Boston Dynamics Spot — quadruped, modelled as a body driven by cmd_vel.
+
+  Nominal datasheet figures: body 1100 x 500 x 191 mm, ~0.61 m standing height,
+  32.5 kg, up to 1.6 m/s. Confirm per unit.
+
+  WHY THE LEGS ARE VISUALS AND NOT ACTUATED
+  Spot's external control interface IS a velocity command: you send a body
+  twist, and an on-board controller nobody outside Boston Dynamics touches
+  works out the gait. SwarmDeck talks to that interface and nothing below it —
+  the adapter sends linear.x / angular.z and reads a pose back. Simulating 12
+  actuated joints and writing a gait controller would change nothing SwarmDeck
+  can observe, so this models the interface, not the mechanism.
+
+  WHY IT STILL HAS (HIDDEN) WHEELS
+  The tempting shortcut is gz VelocityControl plus an OdometryPublisher on
+  base_link. That publishes the simulator's exact pose as odometry — which is
+  ground truth wearing a disguise. Every drift number this project reports
+  would become meaningless for this robot, and worse, the EKF would look
+  brilliant (see ekf.yaml on why "borrowing ground truth" is the trap that
+  keeps reappearing here).
+
+  So Spot rolls on two hidden drive wheels tucked inside the leg envelope, and
+  its odometry is integrated from actuated joints like every other platform's:
+  imperfect, and imperfect for physical reasons. Note the honest limitation —
+  a real Spot derives odometry from leg kinematics plus IMU, which drifts with
+  a different character than wheel slip does. The sim gets drift of the wrong
+  flavour rather than no drift at all, and that is the better of the two errors.
+
+  This file is read by spawn_fleet.py, which splits it on the @SECTION markers.
+-->
+
+<!-- @CHASSIS -->
+      <inertial>
+        <mass>32.5</mass>
+        <inertia><ixx>0.95</ixx><iyy>3.40</iyy><izz>3.70</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+      </inertial>
+
+      <!--
+        Collision is the BODY only, at standing height. The legs sweep a larger
+        envelope than this, so Nav2's footprint (robot_radius in ROBOT_PROFILES)
+        is what actually keeps other robots out of the leg volume; the collision
+        box exists so the body cannot pass through a wall.
+      -->
+      <collision name="collision">
+        <geometry><box><size>1.100 0.500 0.191</size></box></geometry>
+      </collision>
+      <!--
+        The leg envelope, and it is load bearing for inter-robot avoidance.
+
+        Spot's body sits 0.40-0.60 m above the floor. A Scout Mini is 0.245 m
+        tall in total, so its bumper scan passes clean UNDER Spot's body and
+        reports empty space where a 32 kg robot is standing. The legs are
+        visuals with no collision, so without this box the sim would let a
+        Scout drive straight through Spot and Nav2 would never object.
+
+        Spans z -0.42..-0.02 relative to base_link (0.08..0.48 above the floor),
+        stopping short of the ground so it never drags. Slightly narrower than
+        the leg track so it does not catch on doorframes the real robot clears.
+      -->
+      <collision name="leg_envelope">
+        <pose>0 0 -0.220 0 0 0</pose>
+        <geometry><box><size>0.700 0.440 0.400</size></box></geometry>
+      </collision>
+
+      <visual name="body">
+        <geometry><box><size>1.100 0.500 0.191</size></box></geometry>
+        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
+      </visual>
+      <visual name="body_top">
+        <pose>0 0 0.105 0 0 0</pose>
+        <geometry><box><size>0.900 0.440 0.030</size></box></geometry>
+        <material><ambient>0.10 0.11 0.13 1</ambient><diffuse>0.16 0.17 0.20 1</diffuse></material>
+      </visual>
+      <visual name="head">
+        <pose>0.560 0 0.020 0 0 0</pose>
+        <geometry><box><size>0.070 0.360 0.140</size></box></geometry>
+        <material><ambient>0.05 0.05 0.06 1</ambient><diffuse>0.09 0.09 0.11 1</diffuse></material>
+      </visual>
+      <visual name="lidar_body">
+        <pose>-0.180 0 0.210 0 0 0</pose>
+        <geometry><cylinder><radius>0.050</radius><length>0.058</length></cylinder></geometry>
+        <material><ambient>0.06 0.07 0.09 1</ambient><diffuse>0.10 0.12 0.15 1</diffuse></material>
+      </visual>
+
+      <!-- Legs: visual only. See the header. Hips at +/-0.29 x, +/-0.21 y. -->
+      <visual name="leg_fl_upper">
+        <pose>0.290 0.230 -0.130 0.25 0 0</pose>
+        <geometry><box><size>0.075 0.055 0.230</size></box></geometry>
+        <material><ambient>0.13 0.13 0.15 1</ambient><diffuse>0.20 0.20 0.23 1</diffuse></material>
+      </visual>
+      <visual name="leg_fl_lower">
+        <pose>0.290 0.268 -0.330 -0.30 0 0</pose>
+        <geometry><box><size>0.050 0.040 0.220</size></box></geometry>
+        <material><ambient>0.07 0.07 0.08 1</ambient><diffuse>0.12 0.12 0.14 1</diffuse></material>
+      </visual>
+      <visual name="leg_fr_upper">
+        <pose>0.290 -0.230 -0.130 -0.25 0 0</pose>
+        <geometry><box><size>0.075 0.055 0.230</size></box></geometry>
+        <material><ambient>0.13 0.13 0.15 1</ambient><diffuse>0.20 0.20 0.23 1</diffuse></material>
+      </visual>
+      <visual name="leg_fr_lower">
+        <pose>0.290 -0.268 -0.330 0.30 0 0</pose>
+        <geometry><box><size>0.050 0.040 0.220</size></box></geometry>
+        <material><ambient>0.07 0.07 0.08 1</ambient><diffuse>0.12 0.12 0.14 1</diffuse></material>
+      </visual>
+      <visual name="leg_rl_upper">
+        <pose>-0.290 0.230 -0.130 0.25 0 0</pose>
+        <geometry><box><size>0.075 0.055 0.230</size></box></geometry>
+        <material><ambient>0.13 0.13 0.15 1</ambient><diffuse>0.20 0.20 0.23 1</diffuse></material>
+      </visual>
+      <visual name="leg_rl_lower">
+        <pose>-0.290 0.268 -0.330 -0.30 0 0</pose>
+        <geometry><box><size>0.050 0.040 0.220</size></box></geometry>
+        <material><ambient>0.07 0.07 0.08 1</ambient><diffuse>0.12 0.12 0.14 1</diffuse></material>
+      </visual>
+      <visual name="leg_rr_upper">
+        <pose>-0.290 -0.230 -0.130 -0.25 0 0</pose>
+        <geometry><box><size>0.075 0.055 0.230</size></box></geometry>
+        <material><ambient>0.13 0.13 0.15 1</ambient><diffuse>0.20 0.20 0.23 1</diffuse></material>
+      </visual>
+      <visual name="leg_rr_lower">
+        <pose>-0.290 -0.268 -0.330 0.30 0 0</pose>
+        <geometry><box><size>0.050 0.040 0.220</size></box></geometry>
+        <material><ambient>0.07 0.07 0.08 1</ambient><diffuse>0.12 0.12 0.14 1</diffuse></material>
+      </visual>
+
+<!-- @LINKS -->
+    <!--
+      Hidden drive wheels, inside the leg envelope so they are never seen.
+      Their radius sets the body's ride height: centre at -0.34, radius 0.16,
+      so the body floats 0.50 m above the floor — Spot's standing posture.
+
+      Friction is near-isotropic and high, unlike the skid-steer platforms: a
+      legged robot turning in place does not scrub, it picks its feet up and
+      puts them down. Low mu2 here would invent a slip channel the real machine
+      does not have.
+    -->
+    <link name="drive_left">
+      <pose>0 0.150 -0.340 -1.5708 0 0</pose>
+      <inertial><mass>2.0</mass>
+        <inertia><ixx>0.02</ixx><iyy>0.02</iyy><izz>0.03</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.160</radius><length>0.070</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.6</mu><mu2>1.4</mu2></ode></friction></surface>
+      </collision>
+    </link>
+
+    <link name="drive_right">
+      <pose>0 -0.150 -0.340 -1.5708 0 0</pose>
+      <inertial><mass>2.0</mass>
+        <inertia><ixx>0.02</ixx><iyy>0.02</iyy><izz>0.03</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.160</radius><length>0.070</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.6</mu><mu2>1.4</mu2></ode></friction></surface>
+      </collision>
+    </link>
+
+    <!--
+      Pitch supports, fore and aft. Measured before they existed: Spot settled
+      at pitch 0.237 rad (13.6 deg) and rocked, because two driven wheels on one
+      axle at the body centre is an inverted pendulum with nothing to stop it
+      tipping. A real quadruped is statically stable on four feet; this restores
+      that without adding a gait.
+
+      Spheres, and nearly frictionless, so they carry weight without resisting
+      rotation — the alternative (four driven wheels, as on the Scout Mini)
+      would make Spot skid-steer, inventing the scrub the header explains a
+      legged robot does not have.
+
+      Radius 0.060 with centre at -0.440 puts the contact point at -0.500,
+      exactly the drive wheels' ride height, so all four points share the load.
+    -->
+    <link name="support_front">
+      <pose>0.420 0 -0.440 0 0 0</pose>
+      <inertial><mass>0.3</mass>
+        <inertia><ixx>4e-4</ixx><iyy>4e-4</iyy><izz>4e-4</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision">
+        <geometry><sphere><radius>0.060</radius></sphere></geometry>
+        <surface><friction><ode><mu>0.02</mu><mu2>0.02</mu2></ode></friction></surface>
+      </collision>
+    </link>
+
+    <link name="support_rear">
+      <pose>-0.420 0 -0.440 0 0 0</pose>
+      <inertial><mass>0.3</mass>
+        <inertia><ixx>4e-4</ixx><iyy>4e-4</iyy><izz>4e-4</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision">
+        <geometry><sphere><radius>0.060</radius></sphere></geometry>
+        <surface><friction><ode><mu>0.02</mu><mu2>0.02</mu2></ode></friction></surface>
+      </collision>
+    </link>
+
+    <joint name="joint_left" type="revolute">
+      <parent>base_link</parent><child>drive_left</child>
+      <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+    </joint>
+    <joint name="joint_right" type="revolute">
+      <parent>base_link</parent><child>drive_right</child>
+      <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+    </joint>
+    <joint name="joint_support_front" type="ball">
+      <parent>base_link</parent><child>support_front</child>
+    </joint>
+    <joint name="joint_support_rear" type="ball">
+      <parent>base_link</parent><child>support_rear</child>
+    </joint>
+
+<!-- @DRIVE -->
+    <!--
+      wheel_separation is the hidden wheels' spacing, not the leg track: it is
+      the turn geometry of the thing that actually moves. A legged robot turns
+      about its body centre, which 0.30 m of separation approximates closely.
+    -->
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <left_joint>joint_left</left_joint>
+      <right_joint>joint_right</right_joint>
+      <wheel_separation>0.300</wheel_separation>
+      <wheel_radius>0.160</wheel_radius>
+      <max_linear_acceleration>1.6</max_linear_acceleration>
+      <topic>{{NAME}}/cmd_vel</topic>
+      <odom_topic>{{NAME}}/odom</odom_topic>
+      <tf_topic>{{NAME}}/tf</tf_topic>
+      <frame_id>{{NAME}}/odom</frame_id>
+      <child_frame_id>{{NAME}}/base_link</child_frame_id>
+      <odom_publish_frequency>30</odom_publish_frequency>
+    </plugin>

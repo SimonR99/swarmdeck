@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import math
+import subprocess
 import sys
 import threading
 import time
@@ -29,6 +31,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import (
@@ -37,13 +40,28 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
+from robot_localization.srv import SetPose
 from sensor_msgs.msg import Image, PointCloud2
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 # Keep perception reusable by real adapters without packaging it into ROS.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
 from adapters.perception.duck_detector import RubberDuckDetector
+
+# The platform table, imported from the spawner rather than restated here.
+#
+# This adapter has to know its own footprint (it reports it at `hello`, and the
+# GUI draws robots at that size) and its spawn height (the reset teleports it
+# back there). Both are facts about the model Gazebo was handed, and a second
+# copy of them would be wrong the first time a chassis changed — the same
+# argument session.launch.py already makes by importing lidar_spec from here
+# instead of re-reading the YAML.
+sys.path.insert(
+    0, str(REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario")
+)
+from spawn_fleet import DEFAULT_ROBOT_PROFILE, robot_spec, robot_types  # noqa: E402
 
 
 # Voxel edge for downsampling the 3D map before upload, metres. Coarser than the
@@ -122,14 +140,150 @@ def yaw_of(q) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
 
 
+# ------------------------------------------------------------------- reset
+#
+# A reset is fleet-wide in Gazebo and per-robot in ROS, while the protocol
+# addresses one robot at a time. The world reset is therefore coalesced here.
+
+# Seconds within which a second robot's reset reuses the first one's world reset.
+# Longer than a fleet-wide reset takes to fan out, shorter than any interval an
+# operator could press the button twice deliberately.
+WORLD_RESET_COALESCE_S = 5.0
+# Spawn height is per platform and comes from ROBOT_PROFILES via RobotBridge —
+# a Spot's hidden drive wheels sit 0.50 m below its body, so the single constant
+# that used to live here would bury it in the floor on reset.
+# Let the teleport's velocity transient pass before re-zeroing the filters.
+WORLD_SETTLE_S = 0.5
+SERVICE_TIMEOUT_S = 8.0
+
+_WORLD_RESET_LOCK = threading.Lock()
+_world_reset_at = 0.0
+_world_name: str | None = None
+
+# The SLAM back ends this stack can run, newest request first. Discovered rather
+# than assumed, because `slam_backend:=rtabmap` swaps the SLAM node out entirely
+# and a call to a service that is not there is indistinguishable from a call to
+# one that is merely slow.
+SLAM_RESET_SERVICES = (
+    ("slam_toolbox/reset", "slam_toolbox.srv", "Reset"),
+    ("rtabmap/reset", "std_srvs.srv", "Empty"),
+)
+
+
+def _srv_type(module: str, name: str):
+    try:
+        return getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError):
+        return None
+
+
+def _gz_world_name(logger) -> str | None:
+    """Find the running world's name instead of hardcoding it.
+
+    generate_world.py writes the world, so its name is a property of the
+    scenario rather than of this adapter, and a stale hardcoded name fails as a
+    service timeout that looks exactly like a busy simulator.
+    """
+    global _world_name
+    if _world_name:
+        return _world_name
+    try:
+        listing = subprocess.run(
+            ["gz", "service", "-l"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warn(f"[adapter_sim] cannot list gz services: {exc}")
+        return None
+    for line in listing.splitlines():
+        line = line.strip()
+        # Exactly /world/<name>/control. /world/<name>/playback/control also ends
+        # in /control and controls log playback, not the world.
+        if line.startswith("/world/") and line.endswith("/control"):
+            name = line[len("/world/") : -len("/control")]
+            if name and "/" not in name:
+                _world_name = name
+                return name
+    logger.warn("[adapter_sim] no /world/<name>/control service found")
+    return None
+
+
+def reset_world(logger) -> bool:
+    """Put the *scenery* back where it started. Once per fleet-wide reset.
+
+    This restores the chairs, tables, plants and rubber ducks that make up the
+    generated world, which robots push around as they drive.
+
+    It does NOT move the robots, and that is not a bug to be fixed here — it is
+    a property of Gazebo. A world reset restores entities declared in the world
+    SDF, and the fleet is spawned into a running world by spawn_fleet.py through
+    `/world/<name>/create`. Measured against the live stack: the service answers
+    `data: true` and robot_0 stays exactly where it was. `RobotBridge._reset_pose`
+    puts the robots back, one explicit `set_pose` each.
+
+    `model_only`, and deliberately not `all`: `all` also sets the simulation
+    clock back to zero, and every node in this stack runs on `use_sim_time`. A
+    /clock that jumps backwards invalidates the tf2 buffers, the Nav2 lifecycle
+    timers and SLAM's scan queue at the same instant, which is a far larger
+    change than the one being asked for.
+
+    The lock coalesces the per-robot resets into one world reset, and orders
+    them: the scene is restored before any robot starts mapping it again.
+    """
+    global _world_reset_at
+    with _WORLD_RESET_LOCK:
+        if time.monotonic() - _world_reset_at < WORLD_RESET_COALESCE_S:
+            return True
+        world = _gz_world_name(logger)
+        if world is None:
+            return False
+        try:
+            done = subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/control",
+                 "--reqtype", "gz.msgs.WorldControl",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "5000",
+                 "--req", "reset: {model_only: true}"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warn(f"[adapter_sim] world reset failed: {exc}")
+            return False
+        # gz exits 0 whether the world answered or the call timed out, so the
+        # reply body is the only evidence that anything happened.
+        if "true" not in done.stdout.lower():
+            logger.warn(
+                f"[adapter_sim] world reset rejected: "
+                f"{done.stdout.strip()} {done.stderr.strip()}"
+            )
+            return False
+        _world_reset_at = time.monotonic()
+        # The collaborative back end's merged grid describes the world that was
+        # just reset. Holding it would re-upload the old map to the backend
+        # moments after the backend cleared it.
+        CSLAM_GRID.clear()
+        SLAM_GRAPHS.clear()
+        return True
+
+
 class RobotBridge:
     """Per-robot ROS subscriptions and command publisher."""
 
-    def __init__(self, node: Node, robot_id: str, http_url: str) -> None:
+    def __init__(
+        self, node: Node, robot_id: str, http_url: str, platform: str | None = None
+    ) -> None:
         self.node = node
         self.id = robot_id
         self.http_url = http_url
         self.t0 = time.monotonic()
+        # What this robot IS. `footprint_radius` is not decoration: the GUI draws
+        # the robot at that size and the operator judges clearances by it, so a
+        # 1.02 m Bunker reporting the old hardcoded 0.3 m would be drawn at less
+        # than half its width.
+        self.platform = platform or DEFAULT_ROBOT_PROFILE
+        spec = robot_spec(self.platform)
+        self.robot_type = spec.robot_type
+        self.footprint_radius = round(spec.footprint_radius, 3)
+        self.spawn_z = spec.spawn_z
 
         # Two links of the same TF chain: map_frame -> odom -> base_link. Both
         # come off the robot's namespaced /tf, which is the only place they are
@@ -155,6 +309,14 @@ class RobotBridge:
         self._goal_handle = None
         self._goal_generation = 0
         self._last_drive_at = 0.0
+        # Held for the whole of reset(), and tried without blocking by every
+        # upload. That ordering is what stops a grid captured before the reset
+        # reaching the backend after it: an upload already running finishes
+        # first, and one that starts during the reset is skipped.
+        self._upload_lock = threading.Lock()
+        self._service_clients: dict = {}
+        self._reset_report: dict | None = None
+        self._start_pose: dict | None = None
 
         node.create_subscription(Odometry, f"/{robot_id}/odom", self._on_odom, 10)
         node.create_subscription(TFMessage, f"/{robot_id}/tf", self._on_tf, 20)
@@ -327,6 +489,16 @@ class RobotBridge:
         """
         if not self._cloud_dirty or self._cloud is None:
             return
+        if not self._upload_lock.acquire(blocking=False):
+            return  # a reset is running; see upload_map
+        try:
+            self._upload_cloud_locked()
+        finally:
+            self._upload_lock.release()
+
+    def _upload_cloud_locked(self) -> None:
+        if not self._cloud_dirty or self._cloud is None:
+            return
         self._cloud_dirty = False
         points = self._cloud_xyz(self._cloud)
         if not len(points):
@@ -376,11 +548,13 @@ class RobotBridge:
             # Swarm-SLAM is running and graph_reporter is publishing.
             "protocol": 2,
             "robot_id": self.id,
-            "robot_type": "duckiebot_db21",
+            "robot_type": self.robot_type,
             "adapter": "adapter_sim/0.1.0",
             "ros": "jazzy",
-            "capabilities": ["navigate", "map", "camera", "battery", "estop"],
-            "footprint_radius": 0.3,
+            # `reset` is simulation-only and must stay that way — it means
+            # teleport to spawn and forget the map. See the protocol README.
+            "capabilities": ["navigate", "map", "camera", "battery", "estop", "reset"],
+            "footprint_radius": self.footprint_radius,
         }
 
     def state(self) -> dict:
@@ -512,7 +686,243 @@ class RobotBridge:
         self.planned_path = []
         self.nav_status, self.mode = "cancelled", "idle"
 
+    # -- reset ---------------------------------------------------------
+
+    def _call(self, name: str, srv_type, request, timeout_s: float = SERVICE_TIMEOUT_S) -> bool:
+        """Call a ROS service from a worker thread and say whether it answered.
+
+        Polls the future instead of using spin_until_future_complete: rclpy.spin()
+        already owns this node on the ROS thread, and adding a second executor
+        over the same node is how a service call becomes a permanent hang. The
+        spin thread completes the future; this one only watches for it.
+        """
+        client = self._service_clients.get(name)
+        if client is None:
+            client = self.node.create_client(srv_type, name)
+            self._service_clients[name] = client
+        if not client.wait_for_service(timeout_sec=timeout_s):
+            self.node.get_logger().warn(f"[{self.id}] service unavailable: {name}")
+            return False
+
+        future = client.call_async(request)
+        deadline = time.monotonic() + timeout_s
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            future.cancel()
+            self.node.get_logger().warn(f"[{self.id}] service timed out: {name}")
+            return False
+        error = future.exception()
+        if error is not None:
+            self.node.get_logger().warn(f"[{self.id}] service failed: {name}: {error}")
+            return False
+        return True
+
+    def _configured_start_pose(self) -> dict | None:
+        """Where this robot was spawned, according to the backend's config.
+
+        Read from `/api/config` rather than from the study YAML on disk, so the
+        pose a reset returns the robot to and the prior the backend registers it
+        against cannot drift apart — they are then the same number from the same
+        file, which is the argument docker-compose.yml already makes for handing
+        the backend the same config the fleet runs.
+
+        Cached after the first success: the config does not change under a
+        running stack, and a reset should not depend on an HTTP round trip
+        succeeding at exactly the wrong moment.
+        """
+        if self._start_pose is not None:
+            return self._start_pose
+        try:
+            with urllib.request.urlopen(
+                f"{self.http_url}/api/config", timeout=5
+            ) as response:
+                config = json.loads(response.read()).get("config", {})
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] cannot read start pose: {exc}")
+            return None
+        pose = ((config.get("map") or {}).get("start_poses") or {}).get(self.id)
+        if not isinstance(pose, dict):
+            self.node.get_logger().warn(
+                f"[{self.id}] no start pose configured; leaving it where it stands "
+                f"rather than guessing one"
+            )
+            return None
+        self._start_pose = pose
+        return pose
+
+    def _reset_pose(self) -> bool:
+        """Teleport this robot back to its spawn pose.
+
+        Explicit, because a Gazebo world reset does not do it: the fleet is
+        created in a running world, and a reset only restores what the world SDF
+        declared. See reset_world().
+        """
+        pose = self._configured_start_pose()
+        if pose is None:
+            return False
+        world = _gz_world_name(self.node.get_logger())
+        if world is None:
+            return False
+        yaw = float(pose.get("yaw", 0.0))
+        qz, qw = math.sin(yaw / 2), math.cos(yaw / 2)
+        request = (
+            f'name: "{self.id}", '
+            f'position: {{x: {float(pose["x"])}, y: {float(pose["y"])}, z: {self.spawn_z}}}, '
+            f"orientation: {{z: {qz:.9f}, w: {qw:.9f}}}"
+        )
+        try:
+            done = subprocess.run(
+                ["gz", "service", "-s", f"/world/{world}/set_pose",
+                 "--reqtype", "gz.msgs.Pose",
+                 "--reptype", "gz.msgs.Boolean",
+                 "--timeout", "5000",
+                 "--req", request],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.node.get_logger().warn(f"[{self.id}] set_pose failed: {exc}")
+            return False
+        if "true" not in done.stdout.lower():
+            self.node.get_logger().warn(
+                f"[{self.id}] set_pose rejected: "
+                f"{done.stdout.strip()} {done.stderr.strip()}"
+            )
+            return False
+        return True
+
+    def _reset_odometry(self) -> bool:
+        """Re-zero the EKF's integrated pose.
+
+        Blunt, and safe to be blunt about, because of what ekf.yaml actually
+        fuses: linear velocity from the wheels and yaw RATE from the gyro, never
+        an absolute pose. Nothing will answer the new origin by re-asserting the
+        old one, and Gazebo returning the model to spawn injects no pose
+        measurement for the filter to argue with. Called after the world reset
+        has settled so the teleport's velocity transient is not what gets
+        integrated into the fresh estimate.
+        """
+        request = SetPose.Request()
+        request.pose.header.frame_id = f"{self.id}/odom"
+        request.pose.header.stamp = self.node.get_clock().now().to_msg()
+        request.pose.pose.pose.orientation.w = 1.0
+        return self._call(f"/{self.id}/set_pose", SetPose, request)
+
+    def _reset_slam(self) -> bool:
+        """Drop the pose graph and the map, whichever back end is running."""
+        available = dict(self.node.get_service_names_and_types())
+        for suffix, module, name in SLAM_RESET_SERVICES:
+            service = f"/{self.id}/{suffix}"
+            if service not in available:
+                continue
+            srv_type = _srv_type(module, name)
+            if srv_type is None:
+                self.node.get_logger().warn(
+                    f"[{self.id}] {service} exists but {module}.{name} is not installed"
+                )
+                continue
+            return self._call(service, srv_type, srv_type.Request())
+        self.node.get_logger().warn(
+            f"[{self.id}] no SLAM reset service; tried "
+            f"{[s for s, _, _ in SLAM_RESET_SERVICES]}"
+        )
+        return False
+
+    def _clear_costmaps(self) -> bool:
+        """Forget obstacles recorded against a map that no longer exists."""
+        ok = True
+        for layer in (
+            "global_costmap/clear_entirely_global_costmap",
+            "local_costmap/clear_entirely_local_costmap",
+        ):
+            ok = self._call(
+                f"/{self.id}/{layer}", ClearEntireCostmap, ClearEntireCostmap.Request()
+            ) and ok
+        return ok
+
+    def reset(self) -> dict[str, bool]:
+        """Return this robot to its start state. Runs on a worker thread.
+
+        Ordering is the whole design. Stop the robot before moving it; move it
+        before re-zeroing the filter that measures its movement; re-zero the
+        filter before restarting the SLAM that uses it as a motion prior; and
+        only drop the cached uploads once all of it has happened, so that what
+        the backend clears afterwards stays cleared.
+
+        Note what a reset does NOT do: restart the exploration bootstrap. If
+        `explore_seconds` has elapsed the fleet comes back stationary, waiting
+        for goals, which is the same state it would have been left in.
+
+        Returns a step-by-step verdict rather than a single boolean, because a
+        reset where the world moved but SLAM did not is a specific and
+        recognisable failure — the operator sees robots back at the start
+        drawing their old map — and naming it beats reporting `false`.
+        """
+        steps: dict[str, bool] = {}
+        with self._upload_lock:
+            self._cancel_nav()
+            self.pub_cmd.publish(Twist())
+            self.goal = None
+            self.planned_path = []
+            self.nav_status, self.mode = "idle", "idle"
+            self._last_drive_at = 0.0
+
+            # Scenery first, then this robot. Two calls because a world reset
+            # restores only what the world SDF declared, and the fleet was
+            # spawned into a world that was already running.
+            steps["world"] = reset_world(self.node.get_logger())
+            steps["pose"] = self._reset_pose()
+            time.sleep(WORLD_SETTLE_S)
+            steps["odometry"] = self._reset_odometry()
+            steps["slam"] = self._reset_slam()
+            steps["costmaps"] = self._clear_costmaps()
+
+            # Last, and inside the lock: anything still cached here describes the
+            # world before the reset, and uploading it after the backend clears
+            # would put the old map straight back.
+            self.grid = None
+            self._grid_dirty = False
+            self._cloud = None
+            self._cloud_dirty = False
+            self._camera_frame = None
+            self._camera_dirty = False
+            self._detections = None
+
+        self._reset_report = {
+            "type": "reset_done",
+            "robot_id": self.id,
+            "t_mono": round(time.monotonic() - self.t0, 4),
+            "ok": all(steps.values()),
+            "steps": steps,
+        }
+        return steps
+
+    def take_reset_report(self) -> dict | None:
+        """Hand the reset verdict to the tx loop, which owns the socket.
+
+        Sending it from the reset's own thread would mean two coroutines writing
+        to one websocket concurrently. The tx loop already runs at 5 Hz, so this
+        costs at most 200 ms.
+        """
+        report = self._reset_report
+        self._reset_report = None
+        return report
+
     def upload_map(self) -> None:
+        if not self._grid_dirty or self.grid is None:
+            return
+        # Skip rather than wait. reset() holds this lock for several seconds, and
+        # blocking here would stall the tx loop behind it — the 5 Hz state stream
+        # would stop, and the backend reads four seconds of silence as the robot
+        # going offline. A skipped upload costs one 2 s cycle.
+        if not self._upload_lock.acquire(blocking=False):
+            return
+        try:
+            self._upload_map_locked()
+        finally:
+            self._upload_lock.release()
+
+    def _upload_map_locked(self) -> None:
         if not self._grid_dirty or self.grid is None:
             return
         self._grid_dirty = False
@@ -536,6 +946,16 @@ class RobotBridge:
 
     def upload_camera(self) -> None:
         """Encode the newest ROS image as a compact JPEG preview."""
+        if not self._camera_dirty or self._camera_frame is None:
+            return
+        if not self._upload_lock.acquire(blocking=False):
+            return  # a reset is running; see upload_map
+        try:
+            self._upload_camera_locked()
+        finally:
+            self._upload_lock.release()
+
+    def _upload_camera_locked(self) -> None:
         if not self._camera_dirty or self._camera_frame is None:
             return
         self._camera_dirty = False
@@ -618,6 +1038,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                 print(f"[adapter_sim] {bridge.id} connected")
 
                 async def rx() -> None:
+                    loop = asyncio.get_running_loop()
                     async for raw in ws:
                         msg = json.loads(raw)
                         t = msg.get("type")
@@ -629,6 +1050,12 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif t == "drive":
                             bridge.drive(msg.get("linear", 0.0), msg.get("angular", 0.0))
+                        elif t == "reset":
+                            # Several seconds of blocking service calls. Run it
+                            # off the loop and do not await it here, or this
+                            # socket stops reading — including the `stop` an
+                            # operator might send while it runs.
+                            loop.run_in_executor(None, bridge.reset)
 
                 async def tx() -> None:
                     last_map = 0.0
@@ -640,6 +1067,9 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                     loop = asyncio.get_running_loop()
                     while True:
                         await ws.send(json.dumps(bridge.state()))
+                        report = bridge.take_reset_report()
+                        if report is not None:
+                            await ws.send(json.dumps(report))
                         now = time.monotonic()
                         bridge.drive_watchdog()
                         if now - last_map > 2.0:
@@ -741,9 +1171,29 @@ def main() -> None:
         QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
     )
+    # Which platform each robot is, from the SAME config the fleet was spawned
+    # from. Read through the backend rather than off disk so the adapter cannot
+    # end up describing a different fleet than the one Gazebo built.
+    try:
+        with urllib.request.urlopen(f"{http_url}/api/config", timeout=5) as response:
+            fleet_cfg = (json.loads(response.read()).get("config") or {}).get("fleet", {})
+        platforms = robot_types(fleet_cfg, robot_count, args.prefix)
+    except Exception as exc:
+        print(
+            f"[adapter_sim] fleet config unavailable ({exc}); "
+            f"assuming every robot is a {DEFAULT_ROBOT_PROFILE}"
+        )
+        platforms = [DEFAULT_ROBOT_PROFILE] * robot_count
+
     bridges = [
-        RobotBridge(node, f"{args.prefix}{i}", http_url) for i in range(robot_count)
+        RobotBridge(node, f"{args.prefix}{i}", http_url, platforms[i])
+        for i in range(robot_count)
     ]
+    for bridge in bridges:
+        print(
+            f"[adapter_sim] {bridge.id}: {bridge.platform} "
+            f"({bridge.robot_type}, r={bridge.footprint_radius} m)"
+        )
 
     # ROS spins in its own thread; asyncio owns the protocol side.
     threading.Thread(target=lambda: rclpy.spin(node), daemon=True).start()

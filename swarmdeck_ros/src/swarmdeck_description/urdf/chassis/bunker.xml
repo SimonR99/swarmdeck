@@ -1,0 +1,120 @@
+<!--
+  AgileX Bunker — tracked skid-steer UGV.
+
+  Nominal datasheet figures: 1023 x 778 x 400 mm, 130 kg, 1.5 m/s, 0.68 m track
+  centre spacing. Confirm against the specific unit before trusting any of it
+  for hardware work; a datasheet is not a calibration.
+
+  Tracks are modelled as two large driven wheels at the track centres. A real
+  tracked vehicle skid-steers, which slips far more than a differential drive
+  and is exactly the channel wheel odometry cannot observe — the EKF fusing gyro
+  yaw rate rather than wheel-derived heading (ekf.yaml) matters MORE here than
+  it did on the Duckiebot, not less.
+
+  This file is read by spawn_fleet.py, which splits it on the @SECTION markers.
+-->
+
+<!-- @CHASSIS -->
+      <inertial>
+        <mass>130.0</mass>
+        <!-- Solid-box approximation about the centre of mass: 1/12 m (b^2+c^2). -->
+        <inertia><ixx>8.3</ixx><iyy>12.5</iyy><izz>17.9</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+      </inertial>
+
+      <collision name="collision">
+        <geometry><box><size>1.023 0.778 0.400</size></box></geometry>
+      </collision>
+
+      <visual name="body">
+        <geometry><box><size>1.023 0.778 0.300</size></box></geometry>
+        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
+      </visual>
+      <visual name="deck">
+        <pose>0 0 0.165 0 0 0</pose>
+        <geometry><box><size>0.900 0.700 0.030</size></box></geometry>
+        <material><ambient>0.10 0.11 0.13 1</ambient><diffuse>0.16 0.17 0.20 1</diffuse></material>
+      </visual>
+      <visual name="bumper_front">
+        <pose>0.520 0 -0.060 0 0 0</pose>
+        <geometry><box><size>0.030 0.700 0.180</size></box></geometry>
+        <material><ambient>0.05 0.05 0.06 1</ambient><diffuse>0.09 0.09 0.11 1</diffuse></material>
+      </visual>
+      <visual name="mast">
+        <pose>-0.150 0 0.290 0 0 0</pose>
+        <geometry><cylinder><radius>0.030</radius><length>0.220</length></cylinder></geometry>
+        <material><ambient>0.30 0.32 0.35 1</ambient><diffuse>0.45 0.47 0.50 1</diffuse></material>
+      </visual>
+      <visual name="lidar_body">
+        <pose>-0.150 0 0.425 0 0 0</pose>
+        <geometry><cylinder><radius>0.052</radius><length>0.060</length></cylinder></geometry>
+        <material><ambient>0.06 0.07 0.09 1</ambient><diffuse>0.10 0.12 0.15 1</diffuse></material>
+      </visual>
+      <visual name="camera_housing">
+        <pose>0.500 0 0.100 0 0 0</pose>
+        <geometry><box><size>0.060 0.140 0.070</size></box></geometry>
+        <material><ambient>0.02 0.03 0.04 1</ambient><diffuse>0.05 0.06 0.08 1</diffuse></material>
+      </visual>
+
+<!-- @LINKS -->
+    <!--
+      Each track is one long driven cylinder at the track centre. mu2 (lateral)
+      is well below mu (longitudinal) because that asymmetry IS skid steering:
+      a track grips along its length and scrubs sideways when the vehicle turns.
+      Equal friction would make turning either impossible or free, and free is
+      the one that quietly flatters wheel odometry.
+    -->
+    <link name="track_left">
+      <pose>0 0.340 -0.100 -1.5708 0 0</pose>
+      <inertial><mass>12.0</mass>
+        <inertia><ixx>0.15</ixx><iyy>0.15</iyy><izz>0.25</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.100</radius><length>0.150</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.4</mu><mu2>0.35</mu2></ode></friction></surface>
+      </collision>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.100</radius><length>0.150</length></cylinder></geometry>
+        <material><ambient>0.04 0.04 0.05 1</ambient><diffuse>0.07 0.07 0.08 1</diffuse></material>
+      </visual>
+    </link>
+
+    <link name="track_right">
+      <pose>0 -0.340 -0.100 -1.5708 0 0</pose>
+      <inertial><mass>12.0</mass>
+        <inertia><ixx>0.15</ixx><iyy>0.15</iyy><izz>0.25</izz>
+                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.100</radius><length>0.150</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.4</mu><mu2>0.35</mu2></ode></friction></surface>
+      </collision>
+      <visual name="visual">
+        <geometry><cylinder><radius>0.100</radius><length>0.150</length></cylinder></geometry>
+        <material><ambient>0.04 0.04 0.05 1</ambient><diffuse>0.07 0.07 0.08 1</diffuse></material>
+      </visual>
+    </link>
+
+    <joint name="joint_left" type="revolute">
+      <parent>base_link</parent><child>track_left</child>
+      <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+    </joint>
+    <joint name="joint_right" type="revolute">
+      <parent>base_link</parent><child>track_right</child>
+      <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+    </joint>
+
+<!-- @DRIVE -->
+    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+      <left_joint>joint_left</left_joint>
+      <right_joint>joint_right</right_joint>
+      <wheel_separation>0.680</wheel_separation>
+      <wheel_radius>0.100</wheel_radius>
+      <!-- 130 kg does not change direction quickly. -->
+      <max_linear_acceleration>0.8</max_linear_acceleration>
+      <topic>{{NAME}}/cmd_vel</topic>
+      <odom_topic>{{NAME}}/odom</odom_topic>
+      <tf_topic>{{NAME}}/tf</tf_topic>
+      <frame_id>{{NAME}}/odom</frame_id>
+      <child_frame_id>{{NAME}}/base_link</child_frame_id>
+      <odom_publish_frequency>30</odom_publish_frequency>
+    </plugin>

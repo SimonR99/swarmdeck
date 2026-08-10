@@ -55,6 +55,11 @@ class Robot:
             "goal": self.goal,
             "planned_path": self.planned_path,
             "capabilities": self.capabilities,
+            # Forwarded to the GUI because the fleet is mixed: an AgileX Bunker
+            # is 0.64 m circumscribed and a Scout Mini 0.42 m, and an operator
+            # judging whether a robot fits through a gap needs it drawn at the
+            # size it actually is. The adapter declares this at `hello`.
+            "footprint_radius": self.footprint_radius,
             "unattended_s": round(self.unattended_s, 2),
             "online": self.online,
             **stamps(),

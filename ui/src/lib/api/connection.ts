@@ -58,6 +58,9 @@ function dispatch(msg: ServerMessage) {
     case 'slam_graph':
       mapStore.applySlamGraph(msg.robot_id, msg.graph);
       break;
+    case 'sim_reset':
+      session.applySimReset(msg);
+      break;
   }
 }
 
@@ -164,6 +167,14 @@ export const actions = {
   },
   stopAll() {
     sendAction({ type: 'stop_all' });
+  },
+  /**
+   * Simulation only. The map clears through the ordinary patch path once the
+   * adapters confirm, so nothing is cleared optimistically here — a reset that
+   * fails must leave the map it failed to clear on screen.
+   */
+  resetSim() {
+    sendAction({ type: 'reset_sim' });
   }
 };
 

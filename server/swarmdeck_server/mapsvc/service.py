@@ -192,6 +192,48 @@ class MapService:
     def set_mode(self, mode: str) -> None:
         self.merge_mode = mode if mode in self.MODES else "static"
 
+    def reset(self) -> None:
+        """Forget every map, keeping the configuration that shapes them.
+
+        Everything *derived from robots* goes: their grids, clouds, pose graphs,
+        registrations and the merged result. Everything *chosen by the operator*
+        stays — resolution, extent, merge mode, and the configured start poses.
+        That split is the whole point: a reset puts the fleet back at the start of
+        the same run, and re-reading the config would make it a different one.
+
+        `transforms` is rebuilt from `transform_priors` rather than cleared,
+        because in `static` mode the priors ARE the transforms and dropping them
+        would silently move every robot to the origin. In `auto` and `cslam` the
+        priors are only a search prior, and the estimate that refined them is
+        gone with the maps it was computed from — which is correct: it described
+        a map that no longer exists.
+
+        `_prev` is deliberately NOT reset alongside `merged`. take_patch() diffs
+        the two, so leaving the old grid in `_prev` makes the next patch describe
+        exactly the cells that just went back to unknown, and the browser clears
+        itself through the same path it draws through. Clearing both would leave
+        the GUI showing a map the server no longer has.
+
+        `reference` also stays. It names which robot defines the shared frame,
+        which is a property of the fleet and not of any map — and when it came
+        from config it is the reference the operator chose. If it was instead
+        picked by whichever grid arrived first, keeping it merely keeps the same
+        robot in the role across the reset.
+        """
+        self.merged = np.full_like(self.merged, UNKNOWN)
+        self.robot_grids.clear()
+        self.robot_revisions.clear()
+        self.robot_clouds.clear()
+        self.registrations.clear()
+        self.registration_rejections.clear()
+        self.locked_dyaw.clear()
+        self.slam_graphs.clear()
+        self.cslam_disagreement.clear()
+        self.common_poses.clear()
+        self.cslam_frames.clear()
+        self.global_grid = None
+        self.transforms = dict(self.transform_priors)
+
     def set_cloud(self, robot_id: str, points: np.ndarray) -> None:
         """Store a cloud and refresh cloud-assisted registration when applicable."""
         self.robot_clouds[robot_id] = points

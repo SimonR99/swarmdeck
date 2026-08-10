@@ -65,8 +65,24 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
-STOP_DIST = 0.9       # metres: rotate in place below this ahead
-CLEAR_DIST = 1.6      # metres: considered open
+# Clearances are measured from the CHASSIS, not from base_link, because the
+# fleet is no longer one size. These are the margins added to a robot's
+# circumscribed radius; the absolute thresholds fall out per platform.
+#
+# Calibrated against the constants these replaced: the Duckiebot this file was
+# tuned on had a circumscribed radius of 0.27 m, and 0.27 + 0.63 = 0.90 m and
+# 0.27 + 1.33 = 1.60 m reproduce the old STOP_DIST and CLEAR_DIST exactly. So a
+# fleet of Duckiebots behaves identically, and an AgileX Bunker (r = 0.64 m)
+# now stops at 1.27 m instead of driving to 0.90 m and wedging its nose.
+STOP_CLEARANCE = 0.63    # metres beyond the chassis: rotate in place below this
+OPEN_CLEARANCE = 1.33    # metres beyond the chassis: considered open
+# A robot rotating in place sweeps its circumscribed radius in every direction.
+# Committing to a turn without this much room to the side is how two robots that
+# have already stopped for each other grind together instead of backing off —
+# measured with an AgileX Bunker and a Spot 1.44 m apart, combined radii 1.25 m.
+TURN_CLEARANCE = 0.25
+# Fallback radius for a robot whose platform was not supplied.
+DEFAULT_RADIUS = 0.27
 MAX_LIN = 0.45
 MAX_ANG = 0.8
 
@@ -111,9 +127,14 @@ class Explorer(Node):
         seed: int = 0,
         loop_period: float = 90.0,
         starts: dict[str, tuple[float, float, float]] | None = None,
+        radii: dict[str, float] | None = None,
     ) -> None:
         super().__init__("swarmdeck_explorer")
         self.rng = random.Random(seed)
+        # Circumscribed radius per robot. Everything this class treats as a
+        # distance threshold is derived from it, so a mixed fleet stops at the
+        # right range for each platform rather than at one Duckiebot's range.
+        self.radius = {rid: (radii or {}).get(rid, DEFAULT_RADIUS) for rid in robot_ids}
         self.scan: dict[str, LaserScan] = {}
         self.pubs: dict[str, object] = {}
         self.turn_dir: dict[str, float] = {}
@@ -428,12 +449,19 @@ class Explorer(Node):
             left = self._nearest(rid, 55, 30)
             right = self._nearest(rid, -55, 30)
 
+            # Per platform, from its own chassis. A Bunker needs to begin
+            # turning a third of a metre earlier than a Scout Mini does.
+            radius = self.radius.get(rid, DEFAULT_RADIUS)
+            stop_dist = radius + STOP_CLEARANCE
+            clear_dist = radius + OPEN_CLEARANCE
+            turn_dist = radius + TURN_CLEARANCE
+
             cmd = Twist()
-            if front > CLEAR_DIST:
+            if front > clear_dist:
                 # Open ahead: run, with a gentle bias away from the nearer side.
                 cmd.linear.x = MAX_LIN
                 bias = 0.0
-                if min(left, right) < CLEAR_DIST:
+                if min(left, right) < clear_dist:
                     bias = -0.5 if left < right else 0.5
                 cmd.angular.z = bias + self.rng.uniform(-0.06, 0.06)
                 self.stuck_since[rid] = 0.0
@@ -455,7 +483,7 @@ class Explorer(Node):
                     )
                     if abs(bearing) > 0.8:
                         cmd.linear.x = 0.2
-            elif front > STOP_DIST:
+            elif front > stop_dist:
                 cmd.linear.x = 0.18
                 cmd.angular.z = MAX_ANG * (1.0 if left > right else -1.0)
             else:
@@ -465,8 +493,19 @@ class Explorer(Node):
                 if self.stuck_since[rid] == 0.0:
                     self.stuck_since[rid] = now
                     self.turn_dir[rid] = 1.0 if left > right else -1.0
-                cmd.linear.x = -0.12 if now - self.stuck_since[rid] > 4.0 else 0.0
-                cmd.angular.z = MAX_ANG * self.turn_dir[rid]
+
+                # But only if there is room to sweep into. Rotating in place
+                # carves out the circumscribed radius on BOTH sides, so a robot
+                # boxed in laterally that turns anyway drives its own corner
+                # into whatever stopped it — which is how two robots that had
+                # each correctly stopped for the other ended up grinding
+                # together. With no room, reverse out first and turn after.
+                if max(left, right) < turn_dist:
+                    cmd.linear.x = -0.15
+                    cmd.angular.z = 0.0
+                else:
+                    cmd.linear.x = -0.12 if now - self.stuck_since[rid] > 4.0 else 0.0
+                    cmd.angular.z = MAX_ANG * self.turn_dir[rid]
             pub.publish(cmd)
 
     def halt(self) -> None:
@@ -492,7 +531,19 @@ def main() -> None:
                          "poses. Enables scheduled pair rendezvous, which is "
                          "what makes INTER-robot loop closure reliable rather "
                          "than incidental. Without it only homing runs.")
+    ap.add_argument("--radii", default="",
+                    help="JSON {robot_id: circumscribed_radius_m}. Every "
+                         "clearance this node uses is measured from the "
+                         "chassis, so a mixed fleet needs one per robot. "
+                         "Omitted robots fall back to the Duckiebot's 0.27 m.")
     args = ap.parse_args()
+
+    radii: dict[str, float] = {}
+    if args.radii:
+        try:
+            radii = {rid: float(r) for rid, r in json.loads(args.radii).items()}
+        except (ValueError, TypeError, AttributeError):
+            radii = {}
 
     starts: dict[str, tuple[float, float, float]] = {}
     if args.start_poses:
@@ -510,7 +561,8 @@ def main() -> None:
     ids = [f"{args.prefix}{i}" for i in range(args.robots)]
     starts = {rid: pose for rid, pose in starts.items() if rid in ids}
     node = Explorer(
-        ids, seed=args.seed, loop_period=args.loop_period, starts=starts
+        ids, seed=args.seed, loop_period=args.loop_period, starts=starts,
+        radii={rid: r for rid, r in radii.items() if rid in ids},
     )
     node._set_rendezvous(node.cycle)
     node.set_parameters([rclpy.parameter.Parameter("use_sim_time", value=True)])

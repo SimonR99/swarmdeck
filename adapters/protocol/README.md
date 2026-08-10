@@ -9,8 +9,8 @@ Implement it in any language, on any OS, against any ROS version (or none).
 
 | Direction | Channel | Purpose |
 |---|---|---|
-| adapter → backend | `WS /adapter` | `hello`, `robot_state`, `nav_status`, `detections`, `map_meta` |
-| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode` |
+| adapter → backend | `WS /adapter` | `hello`, `robot_state`, `nav_status`, `detections`, `map_meta`, `reset_done` |
+| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode`, `reset` |
 | adapter → backend | `POST /api/adapter/map` | occupancy grid, throttled ≤ 1 Hz |
 | adapter → backend | `POST /api/adapter/camera` | optional JPEG preview fallback, ≤ 5 Hz |
 | adapter → MediaMTX | `RTSP push :8554/<robot_id>` | H.264 camera |
@@ -42,6 +42,19 @@ without `map` contributes no grid. **Never assume a capability.**
 | `camera` | streams to MediaMTX under its `robot_id` |
 | `battery` | reports `battery` in `robot_state` |
 | `estop` | accepts `stop` |
+| `reset` | accepts `reset` — **simulation only**, see below |
+
+### `reset` is for simulated robots only
+
+A `reset` returns a robot to the state it started in: back at its spawn pose, with
+its map and its odometry filter forgotten. Only a simulator can honour that — a
+physical robot cannot teleport, and clearing the SLAM map of a machine that is
+standing in a real building leaves it navigating against nothing.
+
+**A hardware adapter must never advertise `reset`** (rule 4). `adapter_ros2` does
+not, and its capability list is derived from configured topics, so it cannot start
+doing so by accident. The GUI hides the reset control unless some robot advertises
+the capability, which is what keeps the button off a hardware dashboard.
 
 ## Adapter → backend
 
@@ -64,7 +77,26 @@ without `map` contributes no grid. **Never assume a capability.**
 { "type": "map_meta", "robot_id": "robot_0", "t_mono": 18260.0,
   "resolution": 0.05, "width": 1000, "height": 1000,
   "origin": {"x": -25.0, "y": -25.0} }
+
+// reset_done — after a `reset` command has been carried out
+{ "type": "reset_done", "robot_id": "robot_0", "t_mono": 18299.1,
+  "ok": true, "steps": {"world": true, "pose": true, "odometry": true,
+                        "slam": true, "costmaps": true} }
 ```
+
+`steps` names what the adapter did, and each is reported separately because the
+half-failures are the interesting ones: a reset where `pose` succeeded but `slam`
+did not leaves the fleet back at the start drawing the map it had before, which
+is a specific and recognisable symptom rather than a generic failure.
+
+`reset_done` is what lets the backend clear its merged map without racing the
+adapter. The backend holds the last grid every robot uploaded; if it cleared them
+the moment it sent `reset`, an upload already in flight — or one taken from a
+cache the adapter had not yet dropped — would put the old map straight back. So
+the adapter finishes the reset, drops its cached grid and cloud, and only then
+reports `reset_done`; the backend clears on receipt. `ok: false` still gets sent,
+with `steps` naming what failed, because a reset that half-worked is something the
+operator has to be told about rather than left to infer from a stale map.
 
 `nav_status` ∈ `idle` | `active` | `succeeded` | `failed` | `cancelled`
 `mode` ∈ `idle` | `nav` | `teleop` | `estop`
@@ -85,6 +117,7 @@ fresh, valid depth/TF result send `null` and the GUI shows only the video box.
 { "type": "drive",       "seq": 43, "linear": 0.28, "angular": 0.0 }
 { "type": "stop",        "seq": 44 }
 { "type": "set_mode",    "seq": 45, "mode": "teleop" }
+{ "type": "reset",       "seq": 46 }
 ```
 
 **Commands are planner-agnostic.** The adapter maps `navigate_to` to Nav2, `move_base`,

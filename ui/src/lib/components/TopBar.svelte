@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Circle, Maximize2, Minimize2, Octagon, Settings2 } from 'lucide-svelte';
+  import { Circle, Maximize2, Minimize2, Octagon, RotateCcw, Settings2 } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
   import StatusDot from './ui/StatusDot.svelte';
@@ -65,6 +65,34 @@
   const connTone = $derived(
     session.connection === 'live' ? 'ok' : session.connection === 'mock' ? 'warn' : 'danger'
   );
+
+  // Capability-gated, not build-gated: this same GUI drives adapter_ros2 on real
+  // hardware, where "teleport to spawn and forget the map" is not a thing that
+  // can happen. No robot advertising `reset` means no button at all.
+  const canReset = $derived(fleet.robots.some((r) => r.capabilities?.includes('reset')));
+
+  // Two clicks, because a reset throws away every map the fleet has built and
+  // there is no undo. The armed state lapses on its own so a stray first click
+  // cannot leave the button primed indefinitely.
+  let armed = $state(false);
+  let armedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function disarm() {
+    armed = false;
+    if (armedTimer) clearTimeout(armedTimer);
+    armedTimer = null;
+  }
+
+  function onReset() {
+    if (session.resetting) return;
+    if (!armed) {
+      armed = true;
+      armedTimer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    actions.resetSim();
+  }
 </script>
 
 <header class="flex h-12 shrink-0 items-center gap-2.5 border-b border-border bg-surface px-3">
@@ -116,6 +144,18 @@
     <Button variant="outline" size="sm" onclick={() => fleet.selectAll()}>
       {fleet.selected.length === fleet.count && fleet.count > 0 ? 'Deselect' : 'Select all'}
     </Button>
+    {#if canReset}
+      <Button
+        variant={armed ? 'danger' : 'outline'}
+        size="sm"
+        disabled={session.resetting}
+        title="Return the simulation to its start state: robots back at their spawn poses, every map discarded"
+        onclick={onReset}
+      >
+        <RotateCcw class="h-3.5 w-3.5 {session.resetting ? 'animate-spin' : ''}" />
+        {session.resetting ? 'Resetting…' : armed ? 'Discard maps?' : 'Reset sim'}
+      </Button>
+    {/if}
     <Button variant="danger" size="sm" onclick={() => actions.stopAll()}>
       <Octagon class="h-3.5 w-3.5" /> Stop all
     </Button>

@@ -792,3 +792,201 @@ def test_register_3d_degrades_gracefully_without_points():
     empty = np.zeros((0, 3), dtype=np.float32)
     result = register_3d(empty, empty, 0.05, (40, 40, -1.0, -1.0))
     assert not result.confident
+
+
+# --------------------------------------------------------------------- reset
+
+
+def test_map_reset_drops_maps_but_keeps_the_operator_s_configuration():
+    """A reset restarts the run; it does not reconfigure it."""
+    # `static` rather than `auto`: in auto mode a lone reference robot has no
+    # accepted registration, so global_members() is empty and nothing merges —
+    # there would be no map for the reset to clear.
+    svc = MapService(resolution=0.5, size_m=10.0)
+    svc.set_mode("static")
+    svc.set_transform("r0", 1.0, 2.0, 0.0)
+    svc.set_transform("r1", -1.0, 0.0, 0.5)
+    meta = GridMeta(0.5, 20, 20, -5.0, -5.0)
+    cells = np.zeros((20, 20), dtype=np.int8)
+    cells[5:9, 5:9] = 100
+    svc.ingest("r0", meta, cells)
+    svc.robot_clouds["r0"] = np.zeros((4, 3), dtype=np.float32)
+    svc.slam_graphs["r0"] = {"keyframes": 12}
+    assert (svc.merged != -1).any(), "precondition: something was mapped"
+
+    svc.reset()
+
+    assert (svc.merged == -1).all(), "every cell back to unknown"
+    assert svc.robot_grids == {}
+    assert svc.robot_clouds == {}
+    assert svc.slam_graphs == {}
+    assert svc.registrations == {}
+    # Configuration survives: resolution, extent and the start poses the operator
+    # set. Dropping the transforms would move every robot to the origin.
+    assert svc.meta.resolution == 0.5
+    assert svc.transforms == {"r0": (1.0, 2.0, 0.0), "r1": (-1.0, 0.0, 0.5)}
+
+    # And the merge mode, checked against a non-default value so the assertion
+    # cannot pass by accident.
+    other = MapService(resolution=0.05, size_m=30.0)
+    other.set_mode("cslam")
+    other.reset()
+    assert other.merge_mode == "cslam"
+
+
+def test_map_reset_emits_a_patch_that_clears_the_browser():
+    """The GUI must clear through the same path it draws through."""
+    svc = MapService(resolution=0.5, size_m=10.0)
+    meta = GridMeta(0.5, 20, 20, -5.0, -5.0)
+    cells = np.zeros((20, 20), dtype=np.int8)
+    cells[5:9, 5:9] = 100
+    svc.ingest("r0", meta, cells)
+    svc.take_patch()  # browser is now up to date with the mapped grid
+
+    svc.reset()
+    patch = svc.take_patch()
+
+    assert patch is not None, "a reset that emits no patch leaves a stale map on screen"
+    decoded = np.frombuffer(
+        zlib.decompress(base64.b64decode(patch["data"])), dtype=np.int8
+    )
+    assert (decoded == -1).all()
+
+
+def _reset_sink(app_module):
+    class Sink:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    return Sink()
+
+
+def test_reset_waits_for_adapters_before_clearing_the_map():
+    """The ordering that stops a cleared map coming straight back.
+
+    The backend holds each robot's last uploaded grid. If it cleared them when it
+    SENT `reset`, an upload already in flight would restore the old map a moment
+    later. So it clears on `reset_done`, and this pins that: while the adapter is
+    still working, the map is untouched.
+    """
+    from swarmdeck_server.api import app as app_module
+
+    sink = _reset_sink(app_module)
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        app_registry.hello(
+            {"robot_id": "r0", "capabilities": ["map", "reset"]}, sink=sink
+        )
+        meta = GridMeta(0.05, 40, 40, -1.0, -1.0)
+        cells = np.full((40, 40), 100, dtype=np.int8)
+        map_service.ingest("r0", meta, cells)
+        assert "r0" in map_service.robot_grids
+
+        async def scenario():
+            task = asyncio.create_task(app_module.reset_fleet())
+            # Let reset_fleet dispatch the command and start waiting.
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if app_module._reset_pending:
+                    break
+            assert app_module._reset_pending == {"r0"}
+            assert any(m["type"] == "reset" for m in sink.messages)
+            assert "r0" in map_service.robot_grids, (
+                "map cleared before the adapter confirmed — this is the race"
+            )
+
+            # Now the adapter reports in, exactly as adapter_sim does.
+            app_module._reset_pending.discard("r0")
+            app_module._reset_done.set()
+            return await task
+
+        result = asyncio.run(scenario())
+
+        assert result["ok"] is True
+        assert result["reset"] == ["r0"]
+        assert result["failed"] == []
+        assert map_service.robot_grids == {}
+        assert (map_service.merged == -1).all()
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+        app_module._reset_pending.clear()
+        map_service.reset()
+
+
+def test_reset_is_never_sent_to_a_robot_without_the_capability():
+    """The safety gate. `reset` on real hardware is not a thing that can happen."""
+    from swarmdeck_server.api import app as app_module
+
+    sim = _reset_sink(app_module)
+    hardware = _reset_sink(app_module)
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        app_registry.hello(
+            {"robot_id": "sim_0", "capabilities": ["map", "reset"]}, sink=sim
+        )
+        # Exactly what adapter_ros2 advertises: no `reset`, ever.
+        app_registry.hello(
+            {"robot_id": "duckie_0", "capabilities": ["navigate", "map", "battery"]},
+            sink=hardware,
+        )
+
+        async def scenario():
+            task = asyncio.create_task(app_module.reset_fleet())
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if app_module._reset_pending:
+                    break
+            app_module._reset_pending.clear()
+            app_module._reset_done.set()
+            return await task
+
+        result = asyncio.run(scenario())
+
+        assert [m["type"] for m in hardware.messages] == [], (
+            "a hardware adapter was sent a reset"
+        )
+        assert any(m["type"] == "reset" for m in sim.messages)
+        assert result["skipped"] == ["duckie_0"]
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+        app_module._reset_pending.clear()
+        map_service.reset()
+
+
+def test_reset_clears_and_reports_when_an_adapter_never_answers():
+    """A stuck adapter must not leave a spinner up forever — but must be named."""
+    from swarmdeck_server.api import app as app_module
+
+    sink = _reset_sink(app_module)
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    original_timeout = app_module.RESET_TIMEOUT_S
+    app_module.RESET_TIMEOUT_S = 0.05
+    try:
+        app_registry.hello(
+            {"robot_id": "r0", "capabilities": ["map", "reset"]}, sink=sink
+        )
+        meta = GridMeta(0.05, 40, 40, -1.0, -1.0)
+        map_service.ingest("r0", meta, np.full((40, 40), 100, dtype=np.int8))
+
+        result = asyncio.run(app_module.reset_fleet())
+
+        assert result["timed_out"] is True
+        assert result["ok"] is False
+        assert result["no_response"] == ["r0"]
+        assert result["failed"] == ["r0"]
+        # Cleared anyway: a map nobody can clear is worse than one that returns.
+        assert map_service.robot_grids == {}
+    finally:
+        app_module.RESET_TIMEOUT_S = original_timeout
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+        app_module._reset_pending.clear()
+        map_service.reset()

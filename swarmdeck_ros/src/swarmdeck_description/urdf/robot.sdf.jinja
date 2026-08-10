@@ -1,150 +1,36 @@
 <?xml version="1.0" ?>
 <!--
-  SwarmDeck Duckiebot-style research platform.
+  SwarmDeck simulated robot: the parts that are the SAME for every platform.
 
-  The layered chassis, exposed electronics, camera mast, two driven wheels and
-  rear omni-wheel follow the recognisable DB21 layout.  The top-mounted 2D
-  lidar is an intentional mapping payload: a stock Duckiebot is camera/ToF
-  based, while SwarmDeck's requirements call for lidar SLAM.
+  This file owns the sensor suite, the noise models, the drive/odometry plugins
+  and the topic names. The chassis — geometry, mass, wheels, joints, looks —
+  comes from `chassis/<type>.xml`, whose three marked sections spawn_fleet.py
+  splices into the placeholders below.
 
-  Placeholders {{NAME}} and {{COLOR}} are filled by spawn_fleet.py.  Collision,
-  inertia and drive geometry stay deliberately simple and stable; the detailed
-  parts below are visuals, so a richer model does not make navigation brittle.
+  It is split that way on purpose. The IMU noise figures, the lidar ring
+  constraint and the 200 Hz inertial rate below are load-bearing physics with
+  silent failure modes, and three copies of them would drift apart the first
+  time one robot was tuned. A platform differs from another in how big it is and
+  how it drives, not in what a MEMS gyro does.
+
+  Placeholders are filled by spawn_fleet.py from ROBOT_PROFILES / LidarSpec.
 -->
 <sdf version="1.9">
   <model name="{{NAME}}">
-    <pose>0 0 0.12 0 0 0</pose>
+    <pose>0 0 {{SPAWN_Z}} 0 0 0</pose>
 
     <link name="base_link">
-      <inertial>
-        <mass>8.0</mass>
-        <inertia><ixx>0.12</ixx><iyy>0.12</iyy><izz>0.2</izz>
-                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
-      </inertial>
-
-      <collision name="collision">
-        <geometry><box><size>0.44 0.32 0.18</size></box></geometry>
-      </collision>
-      <!-- DB21-style three-deck chassis. -->
-      <visual name="bottom_deck">
-        <pose>0 0 -0.055 0 0 0</pose>
-        <geometry><box><size>0.43 0.30 0.025</size></box></geometry>
-        <material><ambient>0.035 0.05 0.075 1</ambient><diffuse>0.055 0.08 0.12 1</diffuse></material>
-      </visual>
-      <visual name="middle_deck">
-        <pose>-0.015 0 0.035 0 0 0</pose>
-        <geometry><box><size>0.36 0.28 0.022</size></box></geometry>
-        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
-      </visual>
-      <visual name="top_deck">
-        <pose>-0.035 0 0.145 0 0 0</pose>
-        <geometry><box><size>0.31 0.27 0.018</size></box></geometry>
-        <material><ambient>0.035 0.05 0.075 1</ambient><diffuse>0.055 0.08 0.12 1</diffuse></material>
-      </visual>
-
-      <!-- Battery, Jetson and heatsink are visible between the decks. -->
-      <visual name="duckiebattery">
-        <pose>-0.075 0 -0.005 0 0 0</pose>
-        <geometry><box><size>0.18 0.15 0.065</size></box></geometry>
-        <material><ambient>0.9 0.66 0.04 1</ambient><diffuse>1.0 0.76 0.06 1</diffuse></material>
-      </visual>
-      <visual name="jetson">
-        <pose>-0.035 0 0.090 0 0 0</pose>
-        <geometry><box><size>0.15 0.12 0.045</size></box></geometry>
-        <material><ambient>0.08 0.10 0.12 1</ambient><diffuse>0.12 0.15 0.18 1</diffuse></material>
-      </visual>
-      <visual name="heatsink_0">
-        <pose>-0.035 -0.043 0.119 0 0 0</pose>
-        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
-        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
-      </visual>
-      <visual name="heatsink_1">
-        <pose>-0.035 -0.014 0.119 0 0 0</pose>
-        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
-        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
-      </visual>
-      <visual name="heatsink_2">
-        <pose>-0.035 0.014 0.119 0 0 0</pose>
-        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
-        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
-      </visual>
-      <visual name="heatsink_3">
-        <pose>-0.035 0.043 0.119 0 0 0</pose>
-        <geometry><box><size>0.12 0.009 0.018</size></box></geometry>
-        <material><ambient>0.35 0.38 0.42 1</ambient><diffuse>0.48 0.51 0.55 1</diffuse></material>
-      </visual>
-
-      <!-- Six standoffs make the silhouette read as a physical kit robot. -->
-      <visual name="post_front_left">
-        <pose>0.105 0.115 0.082 0 0 0</pose>
-        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
-        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
-      </visual>
-      <visual name="post_front_right">
-        <pose>0.105 -0.115 0.082 0 0 0</pose>
-        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
-        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
-      </visual>
-      <visual name="post_rear_left">
-        <pose>-0.165 0.115 0.082 0 0 0</pose>
-        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
-        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
-      </visual>
-      <visual name="post_rear_right">
-        <pose>-0.165 -0.115 0.082 0 0 0</pose>
-        <geometry><cylinder><radius>0.007</radius><length>0.105</length></cylinder></geometry>
-        <material><ambient>0.62 0.64 0.66 1</ambient><diffuse>0.75 0.77 0.79 1</diffuse></material>
-      </visual>
-
-      <!-- Camera tower and front bumper / ToF board. -->
-      <visual name="camera_mast_left">
-        <pose>0.105 0.085 0.225 0 0 0</pose>
-        <geometry><box><size>0.018 0.018 0.16</size></box></geometry>
-        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
-      </visual>
-      <visual name="camera_mast_right">
-        <pose>0.105 -0.085 0.225 0 0 0</pose>
-        <geometry><box><size>0.018 0.018 0.16</size></box></geometry>
-        <material><ambient>{{COLOR}} 1</ambient><diffuse>{{COLOR}} 1</diffuse></material>
-      </visual>
-      <visual name="camera_housing">
-        <pose>0.125 0 0.292 0 0 0</pose>
-        <geometry><box><size>0.055 0.12 0.07</size></box></geometry>
-        <material><ambient>0.025 0.03 0.04 1</ambient><diffuse>0.05 0.06 0.08 1</diffuse></material>
-      </visual>
-      <visual name="camera_lens">
-        <pose>0.157 0 0.292 0 1.5708 0</pose>
-        <geometry><cylinder><radius>0.024</radius><length>0.014</length></cylinder></geometry>
-        <material><ambient>0.02 0.06 0.11 1</ambient><diffuse>0.04 0.11 0.20 1</diffuse>
-          <specular>0.8 0.9 1.0 1</specular></material>
-      </visual>
-      <visual name="front_bumper">
-        <pose>0.225 0 -0.015 0 0 0</pose>
-        <geometry><box><size>0.025 0.25 0.075</size></box></geometry>
-        <material><ambient>0.04 0.12 0.15 1</ambient><diffuse>0.06 0.22 0.26 1</diffuse></material>
-      </visual>
-      <visual name="tof_window">
-        <pose>0.239 0 0 0 0 0</pose>
-        <geometry><box><size>0.008 0.055 0.028</size></box></geometry>
-        <material><ambient>0.02 0.02 0.025 1</ambient><diffuse>0.04 0.04 0.05 1</diffuse></material>
-      </visual>
-
-      <!-- Mapping lidar: not stock DB21 hardware, but a real simulated sensor. -->
-      <visual name="lidar_base">
-        <pose>-0.07 0 0.375 0 0 0</pose>
-        <geometry><cylinder><radius>0.045</radius><length>0.045</length></cylinder></geometry>
-        <material><ambient>0.06 0.07 0.09 1</ambient><diffuse>0.10 0.12 0.15 1</diffuse></material>
-      </visual>
-      <visual name="lidar_ring">
-        <pose>-0.07 0 0.402 0 0 0</pose>
-        <geometry><cylinder><radius>0.038</radius><length>0.012</length></cylinder></geometry>
-        <material><ambient>0.55 0.03 0.03 1</ambient><diffuse>0.85 0.05 0.05 1</diffuse></material>
-      </visual>
+{{CHASSIS}}
 
       <sensor name="lidar" type="gpu_lidar">
-        <!-- Above the camera tower so the 360-degree scan cannot see the
-             robot's own mast/housing and poison SLAM/Nav2 around the origin. -->
-        <pose>-0.07 0 0.402 0 0 0</pose>
+        <!--
+          Mount height comes from the platform profile, not from this file. It
+          must agree with the `lidar_x`/`lidar_z` arguments session.launch.py
+          passes to slam.launch.py, which publish the base_link -> lidar static
+          transform. A disagreement is not a small error: it tilts and offsets
+          every scan, and SLAM cannot recover from a wrong extrinsic.
+        -->
+        <pose>{{LIDAR_X}} 0 {{LIDAR_Z}} 0 0 0</pose>
         <topic>{{NAME}}/scan</topic>
         <update_rate>{{LIDAR_RATE}}</update_rate>
         <always_on>1</always_on>
@@ -154,22 +40,21 @@
             <!--
               Samples per revolution comes from the fleet config
               (`fleet.lidar`), because it is the single biggest lever on map
-              quality. Adjacent rays land `range * 2pi/samples` apart, so the
-              360 samples this model originally hardcoded (1.003 deg) put them
-              one 5 cm cell apart at 2.9 m and three cells apart at 8.6 m —
-              which is why distant walls came out dotted rather than continuous,
-              and why both scan matching and grid registration (each of which
-              counts occupied cells) were working from thin evidence. Real units
-              are 0.1-0.4 deg. See spawn_fleet.py's LIDAR_PROFILES.
+              quality. Adjacent rays land `range * 2pi/samples` apart, so 360
+              samples/rev (1.003 deg) put them one 5 cm cell apart at 2.9 m and
+              three cells apart at 8.6 m — which is why distant walls came out
+              dotted rather than continuous, and why both scan matching and grid
+              registration (each of which counts occupied cells) were working
+              from thin evidence. Real units are 0.1-0.4 deg. See
+              spawn_fleet.py's LIDAR_PROFILES.
             -->
             <horizontal><samples>{{LIDAR_HSAMPLES}}</samples><resolution>1</resolution>
               <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal>
             <!--
               Ring count is set by the fleet config (`fleet.lidar`, or the older
               `fleet.lidar_rings`) and defaults to 1, which is the 2D-only
-              configuration: Gazebo then
-              publishes a usable gz.msgs.LaserScan directly and
-              pointcloud_to_laserscan drops out of the pipeline.
+              configuration: Gazebo then publishes a usable gz.msgs.LaserScan
+              directly and pointcloud_to_laserscan drops out of the pipeline.
 
               If you raise it, RAISE IT TO AN ODD NUMBER. Gazebo spreads N
               samples evenly across [min_angle, max_angle] inclusive, so an even
@@ -193,27 +78,33 @@
       </sensor>
 
       <!--
-        Bumper-height obstacle lidar for Nav2's rolling costmap. The mapping
-        lidar is intentionally above the camera mast and therefore passes over
-        another Duckiebot's 0.21 m collision body. This forward scan starts
-        just outside the chassis, sees robots and low furniture, and is never
-        fed to SLAM. On hardware this observation source maps naturally to the
-        front ToF / proximity safety sensors.
+        Bumper-height obstacle lidar for Nav2's rolling costmap, and the sensor
+        that makes robots see EACH OTHER. The mapping lidar sits high enough to
+        clear the fleet's own bodies (deliberately — it must not write other
+        robots into the SLAM map as walls), so without this scan a robot is
+        blind to its neighbours and plans straight through them.
+
+        Height and forward offset come from the platform profile: it has to
+        start outside that chassis and still fall below the shortest robot in
+        the fleet, or the tallest robot cannot see the shortest one.
+
+        Never fed to SLAM. On hardware this maps to the front ToF / proximity
+        safety sensors.
       -->
       <sensor name="proximity_lidar" type="gpu_lidar">
-        <pose>0.24 0 0.05 0 0 0</pose>
+        <pose>{{PROX_X}} 0 {{PROX_Z}} 0 0 0</pose>
         <topic>{{NAME}}/proximity_scan</topic>
         <update_rate>15</update_rate>
         <always_on>1</always_on>
         <visualize>false</visualize>
         <lidar>
           <scan>
-            <horizontal><samples>181</samples><resolution>1</resolution>
-              <min_angle>-1.5708</min_angle><max_angle>1.5708</max_angle></horizontal>
+            <horizontal><samples>{{PROX_SAMPLES}}</samples><resolution>1</resolution>
+              <min_angle>{{PROX_MIN_ANGLE}}</min_angle><max_angle>{{PROX_MAX_ANGLE}}</max_angle></horizontal>
             <vertical><samples>1</samples><resolution>1</resolution>
               <min_angle>0</min_angle><max_angle>0</max_angle></vertical>
           </scan>
-          <range><min>0.05</min><max>4.0</max><resolution>0.01</resolution></range>
+          <range><min>0.05</min><max>{{PROX_RANGE_MAX}}</max><resolution>0.01</resolution></range>
           <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
         </lidar>
       </sensor>
@@ -262,7 +153,7 @@
       </sensor>
 
       <sensor name="camera" type="camera">
-        <pose>0.162 0 0.292 0 0 0</pose>
+        <pose>{{CAM_X}} 0 {{CAM_Z}} 0 0 0</pose>
         <topic>{{NAME}}/camera/image_raw</topic>
         <update_rate>15</update_rate>
         <always_on>1</always_on>
@@ -274,84 +165,9 @@
       </sensor>
     </link>
 
-    <link name="wheel_left">
-      <pose>0 0.19 -0.02 -1.5708 0 0</pose>
-      <inertial><mass>0.6</mass>
-        <inertia><ixx>0.002</ixx><iyy>0.002</iyy><izz>0.003</izz>
-                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-      <collision name="collision">
-        <geometry><cylinder><radius>0.11</radius><length>0.05</length></cylinder></geometry>
-        <surface><friction><ode><mu>1.2</mu><mu2>1.2</mu2></ode></friction></surface>
-      </collision>
-      <visual name="visual">
-        <geometry><cylinder><radius>0.11</radius><length>0.05</length></cylinder></geometry>
-        <material><ambient>0.92 0.66 0.03 1</ambient><diffuse>1.0 0.76 0.04 1</diffuse></material>
-      </visual>
-      <visual name="tire">
-        <geometry><cylinder><radius>0.11</radius><length>0.032</length></cylinder></geometry>
-        <material><ambient>0.045 0.045 0.05 1</ambient><diffuse>0.075 0.075 0.085 1</diffuse></material>
-      </visual>
-    </link>
+{{EXTRA_LINKS}}
 
-    <link name="wheel_right">
-      <pose>0 -0.19 -0.02 -1.5708 0 0</pose>
-      <inertial><mass>0.6</mass>
-        <inertia><ixx>0.002</ixx><iyy>0.002</iyy><izz>0.003</izz>
-                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-      <collision name="collision">
-        <geometry><cylinder><radius>0.11</radius><length>0.05</length></cylinder></geometry>
-        <surface><friction><ode><mu>1.2</mu><mu2>1.2</mu2></ode></friction></surface>
-      </collision>
-      <visual name="visual">
-        <geometry><cylinder><radius>0.11</radius><length>0.05</length></cylinder></geometry>
-        <material><ambient>0.92 0.66 0.03 1</ambient><diffuse>1.0 0.76 0.04 1</diffuse></material>
-      </visual>
-      <visual name="tire">
-        <geometry><cylinder><radius>0.11</radius><length>0.032</length></cylinder></geometry>
-        <material><ambient>0.045 0.045 0.05 1</ambient><diffuse>0.075 0.075 0.085 1</diffuse></material>
-      </visual>
-    </link>
-
-    <link name="caster">
-      <pose>-0.17 0 -0.06 0 0 0</pose>
-      <inertial><mass>0.2</mass>
-        <inertia><ixx>1e-4</ixx><iyy>1e-4</iyy><izz>1e-4</izz>
-                 <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-      <collision name="collision">
-        <geometry><sphere><radius>0.055</radius></sphere></geometry>
-        <surface><friction><ode><mu>0.02</mu><mu2>0.02</mu2></ode></friction></surface>
-      </collision>
-      <visual name="visual">
-        <geometry><sphere><radius>0.055</radius></sphere></geometry>
-        <material><ambient>0.1 0.1 0.12 1</ambient><diffuse>0.15 0.15 0.18 1</diffuse></material>
-      </visual>
-    </link>
-
-    <joint name="joint_left" type="revolute">
-      <parent>base_link</parent><child>wheel_left</child>
-      <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
-    </joint>
-    <joint name="joint_right" type="revolute">
-      <parent>base_link</parent><child>wheel_right</child>
-      <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
-    </joint>
-    <joint name="joint_caster" type="ball">
-      <parent>base_link</parent><child>caster</child>
-    </joint>
-
-    <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
-      <left_joint>joint_left</left_joint>
-      <right_joint>joint_right</right_joint>
-      <wheel_separation>0.38</wheel_separation>
-      <wheel_radius>0.11</wheel_radius>
-      <max_linear_acceleration>1.5</max_linear_acceleration>
-      <topic>{{NAME}}/cmd_vel</topic>
-      <odom_topic>{{NAME}}/odom</odom_topic>
-      <tf_topic>{{NAME}}/tf</tf_topic>
-      <frame_id>{{NAME}}/odom</frame_id>
-      <child_frame_id>{{NAME}}/base_link</child_frame_id>
-      <odom_publish_frequency>30</odom_publish_frequency>
-    </plugin>
+{{DRIVE_PLUGIN}}
 
     <!-- Ground truth pose, used to score map-merge accuracy (FR-M6). -->
     <plugin filename="gz-sim-odometry-publisher-system"

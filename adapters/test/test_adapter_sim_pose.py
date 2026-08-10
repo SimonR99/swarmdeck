@@ -24,34 +24,11 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
-_STUBBED = [
-    "cv2", "websockets", "rclpy", "rclpy.action", "rclpy.node", "rclpy.qos",
-    "action_msgs", "action_msgs.msg", "geometry_msgs", "geometry_msgs.msg",
-    "nav_msgs", "nav_msgs.msg", "nav2_msgs", "nav2_msgs.action",
-    "sensor_msgs", "sensor_msgs.msg", "tf2_msgs", "tf2_msgs.msg",
-    "std_msgs", "std_msgs.msg",
-]
-
-
 @pytest.fixture(scope="module")
-def bridge_cls():
-    saved = {name: sys.modules.get(name) for name in _STUBBED}
-    for name in _STUBBED:
-        sys.modules[name] = MagicMock()
-    sys.path.insert(0, str(REPO / "adapters" / "adapter_sim"))
-    try:
-        import importlib
-
-        module = importlib.import_module("adapter_sim")
-        yield module.RobotBridge
-    finally:
-        sys.path.remove(str(REPO / "adapters" / "adapter_sim"))
-        sys.modules.pop("adapter_sim", None)
-        for name, value in saved.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
+def bridge_cls(sim_module):
+    # The stub list lives in conftest.py: adapter_sim's ROS imports are a shared
+    # hazard across every test module that has to fake them.
+    return sim_module.RobotBridge
 
 
 def make_bridge(bridge_cls):
