@@ -92,6 +92,14 @@ services:
       HEADLESS: "true"
       ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
       SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
+      # Keep RTAB-Map's occupancy in 3D, so `cloud_map` carries real structure
+      # and the GUI's 3D view shows a building rather than a flat tracing of the
+      # 2D map. Off by default because it halves the real-time factor
+      # (0.54 -> 0.25 measured) and the 2D map is unaffected either way — but it
+      # belongs here rather than only in the entrypoint, because "why is the 3D
+      # view flat" is otherwise a question with no discoverable answer.
+      #   GRID_3D=true SLAM_BACKEND=rtabmap make docker-up-gpu
+      GRID_3D: "${GRID_3D:-false}"
       FUSE_IMU: "${FUSE_IMU:-true}"
       # Bootstrap the maps by exploring, then stop and hand the fleet to the
       # operator. Without this nothing drives, and goals issued against an empty

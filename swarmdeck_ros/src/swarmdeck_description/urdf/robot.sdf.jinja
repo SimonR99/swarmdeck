@@ -152,9 +152,34 @@
         </imu>
       </sensor>
 
-      <sensor name="camera" type="camera">
+      <!--
+        RGB *and* depth from one sensor, because the two have to be pixel
+        aligned. A rubber duck detected at box (x, y, w, h) becomes a marker on
+        the operator's map only if some depth pixel inside that box belongs to
+        the same duck; two independently posed cameras would agree near the
+        optical axis and disagree at the edges, which is where a detection
+        usually is. `rgbd_camera` renders both from one pose with one set of
+        intrinsics, so the alignment is exact by construction rather than by
+        calibration — the simulated equivalent of the RealSense's
+        `aligned_depth_to_color` stream that the ROS 1 adapter consumes.
+
+        Gazebo appends the stream name to this base topic:
+
+          {{NAME}}/camera/image         RGB, what the operator sees
+          {{NAME}}/camera/depth_image   32FC1 metres, same grid as the RGB
+          {{NAME}}/camera/camera_info   intrinsics, needed to deproject
+          {{NAME}}/camera/points        organised cloud — NOT bridged
+
+        The cloud carries no geometry the depth image lacks and costs about
+        70 MB/s per robot at this resolution; session.launch.py bridges the
+        first three only. The depth image keeps the same clip planes as the
+        colour image: adapters/perception/depth_projection.py applies its own
+        min/max range, so a second, tighter limit here would only add a way for
+        the two to disagree.
+      -->
+      <sensor name="camera" type="rgbd_camera">
         <pose>{{CAM_X}} 0 {{CAM_Z}} 0 0 0</pose>
-        <topic>{{NAME}}/camera/image_raw</topic>
+        <topic>{{NAME}}/camera</topic>
         <update_rate>15</update_rate>
         <always_on>1</always_on>
         <camera>

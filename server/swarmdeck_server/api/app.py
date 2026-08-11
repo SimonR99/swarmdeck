@@ -102,6 +102,10 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         size_m=float(mcfg.get("size_m", 30.0)),
     )
     new_service.set_mode(mcfg.get("merge_mode", "static"))
+    # How members disagreeing about a cell is resolved. Default `majority`
+    # so a stale obstacle one robot recorded is erased once others have
+    # driven through it; `occupied` restores the old any-vote-wins rule.
+    new_service.set_conflict_mode(mcfg.get("merge_conflict", "majority"))
     for rid, pose in (mcfg.get("start_poses") or {}).items():
         new_service.set_transform(rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0))
 

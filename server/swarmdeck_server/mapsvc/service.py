@@ -22,6 +22,19 @@ from .registration import Registration, register, register_3d, score_transform
 from .scan_grid import ScanGridAccumulator
 
 UNKNOWN = -1
+FREE = 0
+OCCUPIED = 100
+# Cell value at or above which a grid is asserting "something is here". Matches
+# registration.py, so the merge and the registration agree on what a wall is.
+OCCUPIED_MIN = 50
+
+# How a cell is resolved when members disagree about it.
+#   majority  a cell is occupied unless strictly more members have OBSERVED it
+#             free than occupied; unknown abstains. Clears stale ghosts.
+#   occupied  any single occupied observation wins, forever. The pre-vote
+#             behaviour, kept because a fleet of two cannot outvote anything and
+#             some deployments would rather over-report obstacles.
+MERGE_CONFLICT_MODES = ("majority", "occupied")
 
 # Yaw search window around a prior, degrees. The wide window is for a configured
 # start pose, which is only approximate; the narrow one is for a robot already
@@ -83,6 +96,8 @@ class MapService:
         # across them would be meaningless.
         self.cslam_frames: dict[str, str] = {}
         self.merge_mode = "static"
+        # See MERGE_CONFLICT_MODES and _remerge.
+        self.merge_conflict = "majority"
         self.reference: str | None = None
         self.seq = 0
         # Serialises ingests when they are offloaded off the event loop, so two
@@ -191,6 +206,9 @@ class MapService:
 
     def set_mode(self, mode: str) -> None:
         self.merge_mode = mode if mode in self.MODES else "static"
+
+    def set_conflict_mode(self, mode: str) -> None:
+        self.merge_conflict = mode if mode in MERGE_CONFLICT_MODES else "majority"
 
     def reset(self) -> None:
         """Forget every map, keeping the configuration that shapes them.
@@ -801,10 +819,29 @@ class MapService:
         return out
 
     def _remerge(self) -> None:
-        """Occupied wins over free; free wins over unknown.
+        """Combine every member's grid, resolving disagreements by vote.
 
         Unless a collaborative back end has supplied a finished grid, in which
         case that IS the map — see set_global_grid.
+
+        The old rule was `maximum`: occupied beat free unconditionally. That is
+        the safe reading of one robot's map, and the wrong reading of four,
+        because it makes a stale cell immortal. A robot that once drove past
+        another robot records it as a wall; every other robot afterwards drives
+        straight through that spot and reports free space; and the ghost outvotes
+        all of them forever because it is the larger number.
+
+        `majority` counts only ACTUAL observations — unknown cells abstain, they
+        do not vote for free. A cell is occupied unless strictly more members
+        have seen it empty than have seen it filled. So a real obstacle one robot
+        alone has seen is kept (1 vs 0), and a ghost is erased once two robots
+        have driven through it (1 vs 2).
+
+        Ties go to occupied, deliberately: with two robots disagreeing there is
+        no majority to be had, and telling an operator a space is clear when one
+        robot says otherwise is the worse error. The limitation is real and worth
+        stating — on a two-robot fleet a ghost from one of them can never be
+        outvoted.
         """
         if self.merge_mode == "cslam" and self.global_grid is not None:
             # Same offset as the poses: the back end's grid is in its common
@@ -812,15 +849,37 @@ class MapService:
             meta, cells = self.global_grid
             self.merged = self._warp(meta, cells, self._common_to_world())
             return
-        out = np.full_like(self.merged, UNKNOWN)
+
         members = self.global_members()
-        for rid, (meta, cells) in self.robot_grids.items():
-            if rid not in members:
-                continue
-            tf = self.transforms.get(rid, (0.0, 0.0, 0.0))
-            warped = self._warp(meta, cells, tf)
+        warped_grids = [
+            self._warp(meta, cells, self.transforms.get(rid, (0.0, 0.0, 0.0)))
+            for rid, (meta, cells) in self.robot_grids.items()
+            if rid in members
+        ]
+        if not warped_grids:
+            self.merged = np.full_like(self.merged, UNKNOWN)
+            return
+
+        if self.merge_conflict == "occupied":
+            out = np.full_like(self.merged, UNKNOWN)
+            for warped in warped_grids:
+                known = warped != UNKNOWN
+                out[known] = np.maximum(out[known], warped[known])
+            self.merged = out
+            return
+
+        occupied_votes = np.zeros(self.merged.shape, dtype=np.int16)
+        free_votes = np.zeros(self.merged.shape, dtype=np.int16)
+        for warped in warped_grids:
             known = warped != UNKNOWN
-            out[known] = np.maximum(out[known], warped[known])
+            occupied_votes += (known & (warped >= OCCUPIED_MIN)).astype(np.int16)
+            free_votes += (known & (warped < OCCUPIED_MIN)).astype(np.int16)
+
+        out = np.full_like(self.merged, UNKNOWN)
+        observed = (occupied_votes + free_votes) > 0
+        out[observed] = np.where(
+            occupied_votes[observed] >= free_votes[observed], OCCUPIED, FREE
+        )
         self.merged = out
 
     # --------------------------------------------------------------- output
@@ -894,6 +953,7 @@ class MapService:
         members = self.global_members()
         return {
             "mode": self.merge_mode,
+            "merge_conflict": self.merge_conflict,
             "reference": self.reference,
             "transforms": {
                 k: {"x": round(v[0], 3), "y": round(v[1], 3), "yaw": round(v[2], 4)}

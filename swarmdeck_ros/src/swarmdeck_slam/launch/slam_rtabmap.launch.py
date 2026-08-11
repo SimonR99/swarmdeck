@@ -193,7 +193,20 @@ def generate_launch_description() -> LaunchDescription:
         "Grid/MaxObstacleHeight": "1.80",
         "Grid/NormalsSegmentation": "false",  # plain height split; the robot is planar
         "GridGlobal/MinSize": "30.0",
-        "GridGlobal/Eroded": "false",
+        # Erode obstacle cells that no longer have obstacle neighbours when the
+        # global grid is reassembled. This is what removes the ghost a robot
+        # leaves behind after another robot drives past it: RTAB-Map assembles
+        # the map from per-keyframe local grids and never edits an old
+        # keyframe, so a robot recorded once stays recorded, as a small blob
+        # sitting in open floor.
+        #
+        # Safe for structure and not for clutter, which is the trade being made:
+        # a wall is a connected run of occupied cells and survives erosion, while
+        # an isolated cell or two does not. A genuinely thin, isolated obstacle
+        # -- a chair leg seen from one angle -- can be eroded with the ghosts.
+        # Ray tracing above already clears free space along each beam; this
+        # handles what ray tracing cannot, namely cells no beam has revisited.
+        "GridGlobal/Eroded": "true",
         **icp,
     }
 

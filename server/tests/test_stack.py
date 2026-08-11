@@ -990,3 +990,96 @@ def test_reset_clears_and_reports_when_an_adapter_never_answers():
         app_registry._sinks.clear()
         app_module._reset_pending.clear()
         map_service.reset()
+
+
+# ------------------------------------------------------- merge conflict voting
+
+
+def _three_robot_service(conflict: str) -> MapService:
+    svc = MapService(resolution=0.5, size_m=10.0)
+    svc.set_mode("static")
+    svc.set_conflict_mode(conflict)
+    for rid in ("r0", "r1", "r2"):
+        svc.set_transform(rid, 0.0, 0.0, 0.0)
+    return svc
+
+
+def _uniform_grid(fill: int) -> tuple[GridMeta, np.ndarray]:
+    meta = GridMeta(0.5, 20, 20, -5.0, -5.0)
+    return meta, np.full((20, 20), fill, dtype=np.int8)
+
+
+def test_a_ghost_is_erased_once_two_robots_have_driven_through_it():
+    """The artefact this exists to remove.
+
+    One robot recorded another robot as a wall and drove on. Everyone else has
+    since driven through that spot and reports free space. Under the old
+    `maximum` rule the single stale cell outvoted all of them forever, because
+    100 > 0.
+    """
+    svc = _three_robot_service("majority")
+    meta, ghost = _uniform_grid(0)
+    ghost[10, 10] = 100  # r0 saw something here, once
+    svc.ingest("r0", meta, ghost)
+    svc.ingest("r1", *_uniform_grid(0))
+    svc.ingest("r2", *_uniform_grid(0))
+
+    assert svc.merged[10, 10] == 0, "ghost survived two contradicting observations"
+
+
+def test_an_obstacle_only_one_robot_has_seen_is_kept():
+    """The other half: unknown must abstain, not vote for free.
+
+    r1 and r2 have never observed this cell at all. If absence counted as a
+    vote for free, a real wall seen by one robot would be erased by two robots
+    that never looked at it.
+    """
+    svc = _three_robot_service("majority")
+    meta, seen = _uniform_grid(0)
+    seen[10, 10] = 100
+    svc.ingest("r0", meta, seen)
+    meta_u, unknown = _uniform_grid(-1)
+    svc.ingest("r1", meta_u, unknown)
+    svc.ingest("r2", meta_u, unknown)
+
+    assert svc.merged[10, 10] == 100
+
+
+def test_a_tie_stays_occupied():
+    """With two robots disagreeing there is no majority, and reporting a space
+    clear when a robot says otherwise is the worse error."""
+    svc = _three_robot_service("majority")
+    meta, seen = _uniform_grid(0)
+    seen[10, 10] = 100
+    svc.ingest("r0", meta, seen)
+    svc.ingest("r1", *_uniform_grid(0))
+
+    assert svc.merged[10, 10] == 100
+
+
+def test_occupied_mode_restores_the_old_any_vote_wins_rule():
+    svc = _three_robot_service("occupied")
+    meta, ghost = _uniform_grid(0)
+    ghost[10, 10] = 100
+    svc.ingest("r0", meta, ghost)
+    svc.ingest("r1", *_uniform_grid(0))
+    svc.ingest("r2", *_uniform_grid(0))
+
+    assert svc.merged[10, 10] == 100
+
+
+def test_unobserved_cells_stay_unknown_in_both_modes():
+    for mode in ("majority", "occupied"):
+        svc = _three_robot_service(mode)
+        meta, unknown = _uniform_grid(-1)
+        svc.ingest("r0", meta, unknown)
+        assert (svc.merged == -1).all(), mode
+
+
+def test_conflict_mode_comes_from_config_and_is_reported():
+    svc = MapService(resolution=0.5, size_m=10.0)
+    svc.set_conflict_mode("occupied")
+    assert svc.status()["merge_conflict"] == "occupied"
+    # An unknown value must not silently disable voting.
+    svc.set_conflict_mode("consensus-please")
+    assert svc.merge_conflict == "majority"
