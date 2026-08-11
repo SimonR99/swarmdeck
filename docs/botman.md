@@ -20,6 +20,7 @@ fed by the Ouster lidar and IMU:
 | SLAM TF | `map -> os_lidar` (intended, absent live) | `ImuPreintegration/imuPreintegration.cpp` |
 | Base command | `/cmd_vel` | `bunker_base/include/bunker_base/bunker_messenger.hpp` |
 | Camera | OAK-D Pro RGB, `/oak/rgb/image_raw/compressed` | SwarmDeck-owned `oak_camera` service using MIST's read-only DepthAI install |
+| Depth (opt-in) | `/oak/stereo/image_raw` + `/oak/stereo/camera_info`, RGB-aligned | `adapters/media/config/botman_oak_rgbd.yaml`, **not yet run on the robot** |
 
 There is no `OccupancyGrid`. The ROS 2 adapter therefore height-filters
 `/registered_scan` and uploads XY returns for server-side raytracing, while a
@@ -198,6 +199,33 @@ and pushes RTSP/TCP to MediaMTX path `botman_0`. An independent RTSP probe read
 that exact profile. A Chrome WHEP probe then received HTTP 201, established its
 peer connection, exposed a live video track and decoded frames. The adapter's
 5 Hz `/api/camera/botman_0` JPEG upload remains active as automatic fallback.
+
+**Duck detections can become map markers, once two things are supplied.** The
+OAK-D Pro is a stereo depth camera, so nothing new has to be fitted; what is
+missing is a pipeline and a measurement.
+
+1. `BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml` starts the stereo pair alongside RGB
+   and publishes depth aligned to the colour camera. It is not the default
+   because it costs USB bandwidth and Jetson CPU on a video path that was tuned
+   measurement by measurement, and because the parameter names in that file were
+   written against depthai_ros_driver's documentation rather than against the
+   copy installed in `/ssd/mist_ws`. Check them with `ros2 param list /oak`.
+2. The mount. A range is not a position: the adapter still has to know where the
+   camera is on the robot, and the live TF tree has no calibrated edge onto it —
+   the same gap that keeps the Nav2 footprint centred on `os_lidar`. Measure
+   `os_lidar` -> the OAK's base frame and pass it to the `oak-depth` Compose
+   profile:
+
+   ```bash
+   BOTMAN_OAK_X=... BOTMAN_OAK_Y=... BOTMAN_OAK_Z=... \
+   BOTMAN_OAK_ROLL=0 BOTMAN_OAK_PITCH=0 BOTMAN_OAK_YAW=0 \
+   BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml \
+   docker compose -f docker-compose.robot-botman.yml --profile oak-depth up -d
+   ```
+
+Until both are done the adapter reports detections with no `map_position` and
+logs the failed transform every 10 s, which is intended: a marker drawn from a
+guessed mount is indistinguishable on screen from a correct one.
 
 **The Nav2 addition in this repository has not been deployed or motion-tested
 on Botman.** Its inputs were verified read-only on the live graph and its local

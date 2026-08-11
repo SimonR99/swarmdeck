@@ -320,3 +320,41 @@ def test_deck_geometry_is_declared_so_the_clearance_can_be_checked(platform):
     above vacuously."""
     spec = robot_spec(platform)
     assert spec.deck_top > 0.0 and spec.deck_half_length > 0.0
+
+
+# --------------------------------------------------- the camera must see depth
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_the_camera_is_an_rgbd_sensor_on_the_topic_the_bridge_expects(platform):
+    """Colour and depth must come from one sensor, on Gazebo's own topic names.
+
+    `rgbd_camera` renders both from a single pose and set of intrinsics, which
+    is what lets the adapter read a range straight out of a detection box. Two
+    separate sensors would need calibrating to agree, and would agree worst at
+    the edges of frame, where a detection usually is.
+
+    The base topic is load-bearing: Gazebo appends `/image`, `/depth_image`,
+    `/camera_info` and `/points` to it, and those are the names
+    session.launch.py bridges and adapter_sim subscribes to. A bridge for a
+    topic Gazebo does not publish is silent — it presents as a camera that
+    never appears, not as an error.
+    """
+    sdf = render("robot_0", "0.2 0.7 0.9", LidarSpec(), robot_spec(platform))
+    camera = _model(sdf).find("link").find("sensor[@name='camera']")
+    assert camera.get("type") == "rgbd_camera"
+    assert camera.find("topic").text == "robot_0/camera"
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_the_camera_sits_where_the_adapter_believes_it_does(platform):
+    """adapter_sim composes optical -> base_link with this mount, from the same
+    profile table. The SDF and RobotBridge.camera_x/z must stay one number."""
+    spec = robot_spec(platform)
+    sdf = render("robot_0", "0.2 0.7 0.9", LidarSpec(), robot_spec(platform))
+    camera = _model(sdf).find("link").find("sensor[@name='camera']")
+    x, y, z, roll, pitch, yaw = (float(v) for v in camera.find("pose").text.split())
+    assert (x, z) == (pytest.approx(spec.camera_x), pytest.approx(spec.camera_z))
+    # Straight ahead and level: the adapter's optical -> base_link step is a
+    # fixed axis relabel with no rotation of its own to apply.
+    assert (y, roll, pitch, yaw) == (0.0, 0.0, 0.0, 0.0)

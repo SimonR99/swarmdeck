@@ -33,16 +33,73 @@ services:
     volumes:
       - /dev:/dev
       - /ssd/mist_ws:/workspace:ro
-      - ./adapters/media/config/botman_oak_rgb.yaml:/app/swarmdeck/botman_oak_rgb.yaml:ro
+      # RGB only by default. `BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml` starts the
+      # stereo pair as well, which is what lets duck detections become map
+      # markers; see that file for the bandwidth it costs and what remains
+      # unverified about it.
+      - ./adapters/media/config/${BOTMAN_OAK_PARAMS:-botman_oak_rgb.yaml}:/app/swarmdeck/botman_oak.yaml:ro
     command:
       - ros2
       - launch
       - depthai_ros_driver
       - camera.launch.py
       - name:=oak
-      - params_file:=/app/swarmdeck/botman_oak_rgb.yaml
+      - params_file:=/app/swarmdeck/botman_oak.yaml
       - rectify_rgb:=false
       - use_rviz:=false
+    restart: unless-stopped
+
+  # Where the OAK-D Pro is bolted, relative to the frame Botman's pose is
+  # reported in. Depth gives a detection a range; only this gives it a place.
+  #
+  # OPT-IN AND UNMEASURED, deliberately. `--profile oak-depth` starts it, and
+  # the numbers must come from a tape measure on the actual robot: the live TF
+  # tree contains no calibrated edge onto the camera, and this project has
+  # already paid for one hand-guessed extrinsic (0.47 m of pose error nobody
+  # noticed for weeks). Left unset, the node refuses to parse its arguments and
+  # says so in its log, rather than silently claiming the camera is the lidar.
+  #
+  #   BOTMAN_OAK_X=<measured> BOTMAN_OAK_Y=<measured> BOTMAN_OAK_Z=<measured> \
+  #   BOTMAN_OAK_ROLL=<measured> BOTMAN_OAK_PITCH=<measured> BOTMAN_OAK_YAW=<measured> \
+  #   BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml \
+  #   docker compose -f docker-compose.robot-botman.yml --profile oak-depth up -d
+  #
+  # x forward / y left / z up from `os_lidar` to the DepthAI driver's own base
+  # frame; the driver publishes the rest of the chain to the optical frames its
+  # images are stamped with. Verify the child frame name against
+  # `ros2 run tf2_tools view_frames` — it is the driver's, not ours.
+  oak_mount_tf:
+    profiles: ["oak-depth"]
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-oak-tf
+    depends_on:
+      oak_camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    command:
+      - ros2
+      - run
+      - tf2_ros
+      - static_transform_publisher
+      - --x
+      - "${BOTMAN_OAK_X:-unset-measure-the-oak-mount}"
+      - --y
+      - "${BOTMAN_OAK_Y:-unset-measure-the-oak-mount}"
+      - --z
+      - "${BOTMAN_OAK_Z:-unset-measure-the-oak-mount}"
+      - --roll
+      - "${BOTMAN_OAK_ROLL:-unset-measure-the-oak-mount}"
+      - --pitch
+      - "${BOTMAN_OAK_PITCH:-unset-measure-the-oak-mount}"
+      - --yaw
+      - "${BOTMAN_OAK_YAW:-unset-measure-the-oak-mount}"
+      - --frame-id
+      - os_lidar
+      - --child-frame-id
+      - oak-d-base-frame
     restart: unless-stopped
 
   adapter:

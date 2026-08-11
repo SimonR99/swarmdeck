@@ -41,13 +41,14 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from robot_localization.srv import SetPose
-from sensor_msgs.msg import Image, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
 # Keep perception reusable by real adapters without packaging it into ROS.
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+from adapters.perception.depth_projection import point_for_depth_image
 from adapters.perception.duck_detector import RubberDuckDetector
 
 # The platform table, imported from the spawner rather than restated here.
@@ -63,6 +64,18 @@ sys.path.insert(
 )
 from spawn_fleet import DEFAULT_ROBOT_PROFILE, robot_spec, robot_types  # noqa: E402
 
+
+# Depth acceptance band for placing a detection on the map, metres. The same
+# figures the hardware adapters default to (`perception.depth_min_m` /
+# `depth_max_m`): below the near limit the depth camera sees the robot's own
+# body, and beyond the far one a box a few pixels wide covers metres of room.
+DEPTH_MIN_M = 0.15
+DEPTH_MAX_M = 8.0
+# How far apart the colour frame and the depth frame may be stamped before the
+# pair is refused, seconds. Both come from one `rgbd_camera` at one rate, so
+# this is not a synchronisation tolerance — it is what stops a frozen depth
+# stream projecting a live detection onto stale geometry.
+DEPTH_MAX_AGE_S = 0.35
 
 # Voxel edge for downsampling the 3D map before upload, metres. Coarser than the
 # 5 cm occupancy grid on purpose: this feeds a view whose points are one pixel.
@@ -138,6 +151,58 @@ def upload_cslam_grid(http_url: str) -> None:
 
 def yaw_of(q) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
+
+
+def stamp_seconds(header) -> float | None:
+    """Seconds from a ROS header stamp, or None if it carries no usable time."""
+    stamp = getattr(header, "stamp", None)
+    if stamp is None:
+        return None
+    try:
+        value = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if value > 0.0 and math.isfinite(value) else None
+
+
+def camera_point_to_map(
+    point, pose: dict[str, float], camera_x: float, camera_z: float
+) -> dict[str, float] | None:
+    """Place one camera-frame XYZ sample in the robot's map frame.
+
+    Two rigid steps, composed here rather than looked up through tf2, for the
+    same reason `map_pose()` composes its own chain: this adapter is reading a
+    tree we built. The camera mount comes from the ROBOT_PROFILES entry that
+    generated the model's SDF, so the geometry used here and the geometry
+    Gazebo rendered from cannot drift apart the way a hand-copied extrinsic
+    would. On a real robot both steps are a tf2 lookup instead — see
+    adapter_ros2._depth_map_position, and the warning in its map_pose().
+
+    1. Optical -> base_link. `point_for_depth_image` returns the ROS camera
+       optical convention (x right, y down, z forward along the boresight); the
+       robot's own frame is x forward, y left, z up, and the camera is bolted to
+       it looking straight ahead from `(camera_x, 0, camera_z)`.
+    2. base_link -> map, by the robot's SE(2) pose.
+
+    Height is then dropped, because the protocol's `map_position` is a point on
+    a 2D map. It is deliberately not used to filter: a duck on a table is still
+    a duck at that (x, y), and this is not the place to decide what a detection
+    is allowed to be sitting on.
+    """
+    try:
+        right, down, forward = (float(value) for value in point)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (right, down, forward)):
+        return None
+
+    base_x = camera_x + forward
+    base_y = -right
+    cos_yaw, sin_yaw = math.cos(pose["yaw"]), math.sin(pose["yaw"])
+    return {
+        "x": round(pose["x"] + base_x * cos_yaw - base_y * sin_yaw, 3),
+        "y": round(pose["y"] + base_x * sin_yaw + base_y * cos_yaw, 3),
+    }
 
 
 # ------------------------------------------------------------------- reset
@@ -284,6 +349,11 @@ class RobotBridge:
         self.robot_type = spec.robot_type
         self.footprint_radius = round(spec.footprint_radius, 3)
         self.spawn_z = spec.spawn_z
+        # Where this platform's RGBD camera is bolted, from the same table the
+        # SDF was rendered from. Turning a duck detection into a map marker is
+        # the only thing that reads it. See camera_point_to_map().
+        self.camera_x = spec.camera_x
+        self.camera_z = spec.camera_z
 
         # Two links of the same TF chain: map_frame -> odom -> base_link. Both
         # come off the robot's namespaced /tf, which is the only place they are
@@ -303,6 +373,12 @@ class RobotBridge:
         self._camera_frame: Image | None = None
         self._camera_dirty = False
         self._camera_encoding_warned = False
+        # The depth half of the same sensor, plus its intrinsics. Kept as the
+        # newest message rather than queued: detection runs off the colour frame
+        # and only ever wants the depth taken with it.
+        self._camera_depth: Image | None = None
+        self._camera_info: CameraInfo | None = None
+        self._last_depth_warning_at = 0.0
         self._detector = RubberDuckDetector()
         self._detection_enabled = True
         self._detections: list[dict] | None = None
@@ -337,10 +413,27 @@ class RobotBridge:
             PointCloud2, f"/{robot_id}/cloud_map", self._on_cloud, latched
         )
         node.create_subscription(NavPath, f"/{robot_id}/plan", self._on_plan, 10)
+        # Three streams off one `rgbd_camera`, bridged by session.launch.py. The
+        # colour frame is what the operator sees and what the detector runs on;
+        # the depth image and the intrinsics are what turn a detection box into a
+        # point on the map. A robot whose depth is missing still detects and
+        # still streams video — it just reports no `map_position`.
         node.create_subscription(
             Image,
-            f"/{robot_id}/camera/image_raw",
+            f"/{robot_id}/camera/image",
             self._on_camera,
+            qos_profile_sensor_data,
+        )
+        node.create_subscription(
+            Image,
+            f"/{robot_id}/camera/depth_image",
+            self._on_camera_depth,
+            qos_profile_sensor_data,
+        )
+        node.create_subscription(
+            CameraInfo,
+            f"/{robot_id}/camera/camera_info",
+            self._on_camera_info,
             qos_profile_sensor_data,
         )
 
@@ -523,6 +616,58 @@ class RobotBridge:
     def _on_camera(self, msg: Image) -> None:
         self._camera_frame = msg
         self._camera_dirty = True
+
+    def _on_camera_depth(self, msg: Image) -> None:
+        self._camera_depth = msg
+
+    def _on_camera_info(self, msg: CameraInfo) -> None:
+        self._camera_info = msg
+
+    def _depth_map_position(self, bbox, image_header=None) -> dict[str, float] | None:
+        """Where a detection box is in this robot's map frame — or nothing.
+
+        Fail-closed at every step. An absent `map_position` costs a marker on
+        the map; an invented one puts a duck where there is none, and the
+        operator has no way to tell those two apart. The hardware adapters make
+        the same choice — see adapters/adapter_ros2/adapter_ros2.py.
+        """
+        depth, info = self._camera_depth, self._camera_info
+        if depth is None or info is None:
+            self._warn_depth("no depth image or intrinsics yet")
+            return None
+
+        # Both streams come off one sensor, so a gap here means one of them has
+        # stopped rather than that the two need aligning.
+        image_time = stamp_seconds(image_header)
+        depth_time = stamp_seconds(getattr(depth, "header", None))
+        if (
+            image_time is not None
+            and depth_time is not None
+            and abs(image_time - depth_time) > DEPTH_MAX_AGE_S
+        ):
+            self._warn_depth(
+                f"depth is {abs(image_time - depth_time):.2f}s from the colour frame"
+            )
+            return None
+
+        camera_point = point_for_depth_image(
+            depth, info, bbox, min_range_m=DEPTH_MIN_M, max_range_m=DEPTH_MAX_M
+        )
+        if camera_point is None:
+            return None
+        return camera_point_to_map(
+            camera_point, self.map_pose(), self.camera_x, self.camera_z
+        )
+
+    def _warn_depth(self, reason: str) -> None:
+        """Say why detections are not reaching the map, at most every 10 s."""
+        now = time.monotonic()
+        if now - self._last_depth_warning_at < 10.0:
+            return
+        self._last_depth_warning_at = now
+        self.node.get_logger().warn(
+            f"[{self.id}] detections cannot be placed on the map: {reason}"
+        )
 
     def _on_plan(self, msg: NavPath) -> None:
         """Keep a bounded representation of Nav2's latest global plan."""
@@ -886,6 +1031,10 @@ class RobotBridge:
             self._cloud_dirty = False
             self._camera_frame = None
             self._camera_dirty = False
+            # Not `_camera_info`: intrinsics are a fact about the lens, not about
+            # the world that was just reset, and dropping them would only delay
+            # the first detection that can be placed on the new map.
+            self._camera_depth = None
             self._detections = None
 
         self._reset_report = {
@@ -985,14 +1134,17 @@ class RobotBridge:
                     self._camera_encoding_warned = True
                 return
 
-            self._detections = (
-                [
-                    detection.as_protocol(f"duck_{index}")
-                    for index, detection in enumerate(self._detector.detect_bgr(image))
-                ]
-                if self._detection_enabled
-                else []
-            )
+            detections = []
+            if self._detection_enabled:
+                for index, detection in enumerate(self._detector.detect_bgr(image)):
+                    item = detection.as_protocol(f"duck_{index}")
+                    # The detector is RGB-only; the depth half of the same frame
+                    # is what makes the box a place rather than a rectangle.
+                    item["map_position"] = self._depth_map_position(
+                        detection.bbox, msg.header
+                    )
+                    detections.append(item)
+            self._detections = detections
 
             ok, encoded = cv2.imencode(
                 ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 78]

@@ -348,7 +348,7 @@ def generate_launch_description() -> LaunchDescription:
                     ("scan_cloud", "scan/points"),
                     # The lidar odometry, NOT the wheel topic on <ns>/odom.
                     ("odom", "odom_icp"),
-                    ("rgb/image", "camera/image_raw"),
+                    ("rgb/image", "camera/image"),
                     ("rgb/camera_info", "camera/camera_info"),
                     # The whole point: downstream keeps consuming <ns>/map.
                     ("grid_map", "map"),

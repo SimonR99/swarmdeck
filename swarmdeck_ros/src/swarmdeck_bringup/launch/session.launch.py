@@ -74,7 +74,15 @@ def bridge_args(ns: str, lidar_rings: int = 1, fuse_imu: bool = True) -> list[st
         f"/{ns}/proximity_scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
         f"/{ns}/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
         f"/{ns}/imu@sensor_msgs/msg/Imu[gz.msgs.IMU",
-        f"/{ns}/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image",
+        # Three of the four streams an `rgbd_camera` publishes. The colour image
+        # is the operator's video and the detector's input; the depth image and
+        # the intrinsics are what let the adapter turn a duck detection into a
+        # point on the map (adapter_sim._depth_map_position). The fourth,
+        # `<ns>/camera/points`, is the same geometry as an organised cloud at
+        # about 70 MB/s per robot and is deliberately left inside Gazebo.
+        f"/{ns}/camera/image@sensor_msgs/msg/Image[gz.msgs.Image",
+        f"/{ns}/camera/depth_image@sensor_msgs/msg/Image[gz.msgs.Image",
+        f"/{ns}/camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
         f"/{ns}/ground_truth@nav_msgs/msg/Odometry[gz.msgs.Odometry",
         f"/{ns}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
     ]

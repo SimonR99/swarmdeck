@@ -19,6 +19,13 @@ topics:
   # Prefer compressed on a real network. Leave `camera` empty when this is set.
   camera_compressed: camera/image_raw/compressed
   camera: ""
+  # Depth, if this unit carries a depth camera: `camera_depth` must be RGB
+  # ALIGNED (the deprojection indexes it with a box measured on the colour
+  # image) and `camera_info` must describe that depth image. Left empty rather
+  # than guessed — detections stay bbox-only until the real topic names are read
+  # off the robot with `ros2 topic list`. See config/generic.yaml.
+  camera_depth: ""
+  camera_info: ""
 
 actions:
   navigate_to_pose: navigate_to_pose

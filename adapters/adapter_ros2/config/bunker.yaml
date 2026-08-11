@@ -50,7 +50,26 @@ topics:
   # `oak_camera` Compose service launches the existing depthai_ros_driver from
   # the read-only MIST image and encodes MJPEG on-device at this topic.
   camera_compressed: /oak/rgb/image_raw/compressed
-  camera_info: /oak/rgb/camera_info
+  # Depth, for placing a duck detection on the map rather than only in the video
+  # frame. The OAK-D Pro is a stereo depth camera, so this needs no new hardware
+  # — only the RGBD pipeline, which is opt-in because it costs USB bandwidth on
+  # a robot whose video path was tuned measurement by measurement. Live only
+  # when the `oak_camera` service runs botman_oak_rgbd.yaml; otherwise these
+  # topics simply never publish and detections stay bbox-only.
+  #
+  # `camera_info` is the STEREO one deliberately. With `i_align_depth: true` it
+  # describes the depth image the adapter deprojects — the colour intrinsics at
+  # the depth image's own size. The rgb topic would be right only for as long as
+  # the two happened to share a resolution.
+  camera_depth: /oak/stereo/image_raw
+  camera_info: /oak/stereo/camera_info
+  # A marker also needs `map` -> the OAK's optical frame, and the live TF tree
+  # has no calibrated edge onto the camera (the same missing calibration that
+  # keeps the Nav2 footprint centred on os_lidar — see docs/botman.md). Measure
+  # the mount and give it to the `oak-depth` Compose profile. Until then the
+  # adapter logs the failed lookup and reports no position, which is the
+  # intended behaviour: an invented coordinate is worse than none.
+
   # Nav2 is namespaced, but its sensor/driver inputs stay on Botman's existing
   # global topics. Its smoothed velocity is deliberately isolated from the
   # real driver: HardwareBridge relays it to /cmd_vel only for an active goal,

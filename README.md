@@ -135,7 +135,10 @@ machines; robots push H.264 to port 8554. The simulation and hardware adapters r
 A portable RGB-only YOLOE-26n detector publishes normalized boxes over the same adapter
 contract and the camera panel draws them without using Gazebo entity IDs. Inference runs
 in a local sidecar: the CPU image serves all simulated robots, while the ROS 1 and ROS 2
-hardware Compose files select the matching JetPack GPU image.
+hardware Compose files select the matching JetPack GPU image. Every robot carries a depth
+camera — an `rgbd_camera` in Gazebo, an aligned depth stream on hardware — so each box is
+also deprojected to a point and drawn on the map. A robot whose depth is missing or stale
+keeps detecting and streaming and simply reports no position, rather than guessing one.
 
 ## Quick start — local (no Docker)
 

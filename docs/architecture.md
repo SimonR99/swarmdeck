@@ -325,7 +325,7 @@ number rather than on a screenshot.
 ## 6. Video pipeline
 
 ```
-camera → /robot_N/camera/image_raw
+camera → /robot_N/camera/image
    → swarmdeck_media node (cv_bridge → GStreamer appsrc)
    → x264enc  tune=zerolatency speed-preset=ultrafast key-int-max=30
    → rtspclientsink → MediaMTX :8554
@@ -368,12 +368,20 @@ onboard NVIDIA computer. If inference is unavailable, the client returns an empt
 camera upload, telemetry and control continue, and the inaccurate colour detector is not
 silently restored.
 
-Hardware adapters join each RGB box to either an aligned depth image plus CameraInfo or
-an organised RGB-aligned PointCloud2. They select a coherent foreground depth band,
-deproject it to camera XYZ, and use tf2 to express the result in the robot's map frame.
-The protocol, backend, and 2D map already treat that optional `map_position` as a
-persistent marker. Invalid or stale depth is bbox-only; it is never replaced by a guessed
-range.
+Every adapter joins each RGB box to depth: an aligned depth image plus CameraInfo, or an
+organised RGB-aligned PointCloud2. They select a coherent foreground depth band and
+deproject it to camera XYZ, which the protocol, backend and 2D map carry as the optional
+`map_position` of a persistent marker. Invalid or stale depth is bbox-only; it is never
+replaced by a guessed range.
+
+Only the last step differs by adapter. Hardware asks tf2, because a real robot's TF tree
+has links this project did not build and composing a chain through them by name is how an
+adapter reports a pose that is subtly wrong. The simulated fleet composes the two rigid
+steps itself — optical to `base_link` through the camera mount in
+`spawn_fleet.ROBOT_PROFILES`, then `base_link` to map through the SLAM pose it already
+tracks — because that is the same table the robot's SDF was rendered from, so the two
+cannot drift apart. Simulated robots carry a Gazebo `rgbd_camera`, whose colour and depth
+images share one pose and one set of intrinsics.
 
 The detector image is based on Ultralytics and is therefore subject to Ultralytics'
 AGPL-3.0 or Enterprise licensing terms. Its zero-shot model still needs validation across

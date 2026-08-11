@@ -44,10 +44,14 @@ sleep 10
 
 echo "== 4. sensors publish =="
 TOPICS="$(timeout 10 gz topic -l 2>/dev/null)"
-for t in scan/points proximity_scan odom imu camera/image_raw ground_truth; do
+# camera/depth_image and camera/camera_info are the other half of the RGBD
+# sensor. Without them a duck detection is a box on a video frame and nothing
+# on the map, which is a silent loss: video and detection both keep working.
+for t in scan/points proximity_scan odom imu ground_truth \
+         camera/image camera/depth_image camera/camera_info; do
   echo "$TOPICS" | grep -q "/robot_0/$t" || fail "missing topic /robot_0/$t"
 done
-echo "   ok: lidar, odom, imu, camera, ground truth"
+echo "   ok: lidar, odom, imu, ground truth, colour + depth camera"
 
 echo "== 5. lidar produces data =="
 W=$(timeout 12 gz topic -e -n 1 -t /robot_0/scan/points 2>/dev/null | grep -m1 '^width' | awk '{print $2}')
@@ -58,7 +62,20 @@ H=$(timeout 12 gz topic -e -n 1 -t /robot_0/scan/points 2>/dev/null | grep -m1 '
 [[ "${H:-0}" == "1" ]] || fail "lidar must be single-ring for 2D SLAM, got height=$H"
 echo "   ok: $W beams, $H ring"
 
-echo "== 6. robot drives =="
+echo "== 6. depth camera measures range =="
+# adapters/perception/depth_projection.py reads this buffer directly, so its
+# shape is an interface: 32-bit floats in metres, one per colour pixel. A driver
+# that switched to 16UC1 millimetres would still publish, and every duck marker
+# would land 1000x too far away.
+DEPTH="$(timeout 12 gz topic -e -n 1 -t /robot_0/camera/depth_image 2>/dev/null \
+         | grep -a -E '^(width|height|step|pixel_format_type)')"
+DW=$(echo "$DEPTH" | grep -m1 '^width' | awk '{print $2}')
+DSTEP=$(echo "$DEPTH" | grep -m1 '^step' | awk '{print $2}')
+echo "$DEPTH" | grep -q 'R_FLOAT32' || fail "depth is not R_FLOAT32 metres: $DEPTH"
+[[ "${DSTEP:-0}" -eq $(( ${DW:-0} * 4 )) ]] || fail "depth row is $DSTEP bytes for $DW px"
+echo "   ok: ${DW}px rows of float32 metres"
+
+echo "== 7. robot drives =="
 BEFORE=$(timeout 8 gz topic -e -n 1 -t /robot_0/odom 2>/dev/null | grep -A2 position | grep 'x:' | awk '{print $2}')
 timeout 5 gz topic -t /robot_0/cmd_vel -m gz.msgs.Twist -p 'linear: {x: 0.6}' >/dev/null 2>&1 &
 sleep 4

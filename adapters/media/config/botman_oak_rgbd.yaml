@@ -1,0 +1,54 @@
+# Botman's OAK-D Pro with depth, for placing duck detections on the map.
+#
+# The RGB-only profile in botman_oak_rgb.yaml stays the default: this one starts
+# the stereo pair as well, which costs USB bandwidth and Jetson CPU on a robot
+# whose video path was tuned measurement by measurement (docs/fleet-status.md).
+# Select it deliberately:
+#
+#     BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml docker compose \
+#       -f docker-compose.robot-botman.yml --profile oak-depth up -d
+#
+# UNVERIFIED ON THE ROBOT. Written against depthai_ros_driver's documented
+# parameters, not against the copy installed in /ssd/mist_ws. Confirm the names
+# with `ros2 param list /oak` and the streams with `ros2 topic hz
+# /oak/stereo/image_raw` before trusting a marker this produces.
+/oak:
+  ros__parameters:
+    camera:
+      i_enable_imu: false
+      i_enable_ir: false
+      i_nn_type: none
+      # RGBD rather than RGB: this is the whole difference. It brings up the
+      # mono pair and the stereo node behind /oak/stereo.
+      i_pipeline_type: RGBD
+    rgb:
+      # Unchanged from the RGB-only profile. The operator's video and the
+      # detector's input must not shift because depth was switched on.
+      i_fps: 15.0
+      i_low_bandwidth: true
+      i_low_bandwidth_profile: 4
+      i_low_bandwidth_frame_freq: 15
+      i_low_bandwidth_quality: 70
+      i_publish_compressed: true
+    stereo:
+      # THE LOAD-BEARING SETTING. adapters/perception/depth_projection.py
+      # indexes the depth image with a box measured on the RGB image, so the
+      # two must share a viewpoint and a grid. Aligned to the RGB socket, the
+      # depth image and /oak/stereo/camera_info both describe the colour
+      # camera; unaligned, every marker is offset by the stereo baseline and
+      # nothing in the pipeline can tell.
+      i_align_depth: true
+      i_output_disparity: false
+      # Half the colour rate. Detection runs at 5 Hz and only ever wants the
+      # depth taken with the frame it ran on; the rest is USB bandwidth spent
+      # for nothing.
+      i_fps: 10.0
+      i_subpixel: true
+      i_lr_check: true
+    # The rectified mono images are inputs to the stereo node, not outputs
+    # anyone here consumes. Publishing them doubles the USB cost of enabling
+    # depth for no reader.
+    left:
+      i_publish_topic: false
+    right:
+      i_publish_topic: false

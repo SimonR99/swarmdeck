@@ -26,8 +26,14 @@ topics:
   plan: ""
   cmd_vel: /cmd_vel
   battery: ""
+  # No camera is live on this unit yet. When one is fitted, an RGB-aligned
+  # `camera_depth` plus the matching `camera_info` is what turns a duck
+  # detection into a map marker rather than only a box on the video; a mount
+  # transform onto the SLAM frame is needed too. See docs/botman.md, which has
+  # the same two prerequisites written out.
   camera: ""
   camera_compressed: ""
+  camera_depth: ""
   camera_info: ""
   # Nav2 never publishes to the physical driver. The adapter relays this
   # isolated output only while its own NavigateToPose goal is active.

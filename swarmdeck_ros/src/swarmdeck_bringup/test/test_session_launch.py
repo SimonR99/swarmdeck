@@ -59,3 +59,25 @@ def test_imu_and_odom_are_always_bridged(rings, fuse):
     joined = "\n".join(args)
     assert "/robot_0/imu@sensor_msgs/msg/Imu" in joined
     assert "/robot_0/odom@nav_msgs/msg/Odometry" in joined
+
+
+@pytest.mark.parametrize("rings", [1, 9])
+@pytest.mark.parametrize("fuse", [True, False])
+def test_the_whole_rgbd_camera_reaches_ros(rings, fuse):
+    """Colour alone makes a duck a box on a video frame and nothing on the map.
+
+    The names are Gazebo's: an `rgbd_camera` on base topic `<ns>/camera`
+    publishes `image`, `depth_image`, `camera_info` and `points`. They must
+    match robot.sdf.jinja exactly — a bridge for a topic Gazebo does not
+    publish is silent, and presents as a camera that never appears.
+    """
+    joined = "\n".join(bridge_args("robot_0", lidar_rings=rings, fuse_imu=fuse))
+    assert "/robot_0/camera/image@sensor_msgs/msg/Image" in joined
+    assert "/robot_0/camera/depth_image@sensor_msgs/msg/Image" in joined
+    assert "/robot_0/camera/camera_info@sensor_msgs/msg/CameraInfo" in joined
+
+
+def test_the_organised_cloud_stays_inside_gazebo():
+    """`<ns>/camera/points` is the depth image again at about 70 MB/s per robot,
+    and nothing downstream reads it. See adapter_sim._depth_map_position."""
+    assert "/robot_0/camera/points" not in "\n".join(bridge_args("robot_0"))

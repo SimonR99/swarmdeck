@@ -45,6 +45,13 @@ topics:
   battery: /robot_battery
   camera: ""              # rover_agx.launch has its T265/realsense include commented out — no camera live today
   camera_compressed: ""
+  # The D435i this unit carries does produce aligned depth; the ROS 1 config for
+  # the same robot already consumes it (config/scout_mini.yaml over there, which
+  # is the profile actually running on tars). Left empty here because this ROS 2
+  # stack starts no camera at all — filling it in before the driver is launched
+  # would describe topics that do not exist.
+  camera_depth: ""
+  camera_info: ""
 
 actions:
   # No move_base or Nav2 action server exists in this stack. tars drives via gbplanner +
