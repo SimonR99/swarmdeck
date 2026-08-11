@@ -21,6 +21,7 @@
   import { session } from '$lib/stores/session.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
+  import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { MapRegistration } from '$lib/types/protocol';
@@ -353,16 +354,19 @@
       const g = mapStore.worldToGrid(d.map_position.x, d.map_position.y);
       if (!g) continue;
       const { sx, sy } = screenOf(g.gx, g.gy);
+      const color = detectionCatalog.colorOf(d.class);
       ctx.beginPath();
       ctx.arc(sx, sy, 7, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(251,191,36,0.22)';
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = color;
       ctx.fill();
+      ctx.globalAlpha = 1;
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = '#fbbf24';
+      ctx.strokeStyle = color;
       ctx.stroke();
       ctx.beginPath();
       ctx.arc(sx, sy, 2, 0, Math.PI * 2);
-      ctx.fillStyle = '#fbbf24';
+      ctx.fillStyle = color;
       ctx.fill();
     }
 

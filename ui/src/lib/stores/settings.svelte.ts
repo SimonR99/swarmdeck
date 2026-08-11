@@ -17,6 +17,15 @@ const fallback: AppSettings = {
   robot_count: 4,
   detection_enabled: true,
   detection_sensitivity: 0.55,
+  // Overwritten by the backend's own catalog on first load; this is only what
+  // the dialog shows in the moment before that arrives.
+  detection_classes: [
+    'rubber_duck',
+    'wooden_block',
+    'disc_cone',
+    'filament_spool',
+    'pool_noodle'
+  ],
   robots: Array.from({ length: 4 }, (_, index) => ({
     id: `robot_${index}`,
     enabled: true,

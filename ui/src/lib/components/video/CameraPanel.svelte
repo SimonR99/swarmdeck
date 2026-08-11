@@ -4,6 +4,7 @@
   import Badge from '../ui/Badge.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { session } from '$lib/stores/session.svelte';
+  import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
 
@@ -268,18 +269,42 @@
 
     <!-- detection overlay, sized to the video element (never an iframe) -->
     <div class="pointer-events-none absolute inset-0 z-30">
+      <!-- Outlines first, in one normalized-coordinate SVG that stretches with
+           the frame, so a mask always lines up with its own box. -->
+      <svg
+        class="absolute inset-0 h-full w-full"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        {#each boxes as d (d.id)}
+          {#if d.polygon && d.polygon.length > 2}
+            <polygon
+              points={d.polygon.map(([x, y]) => `${x},${y}`).join(' ')}
+              fill={detectionCatalog.colorOf(d.class)}
+              fill-opacity="0.22"
+              stroke={detectionCatalog.colorOf(d.class)}
+              stroke-opacity="0.9"
+              stroke-width="0.004"
+              vector-effect="non-scaling-stroke"
+            />
+          {/if}
+        {/each}
+      </svg>
       {#each boxes as d (d.id)}
         {#if d.bbox}
           <div
-            class="absolute rounded border-2 border-warn"
+            class="absolute rounded border-2"
             style="left:{d.bbox[0] * 100}%; top:{d.bbox[1] * 100}%;
-                   width:{d.bbox[2] * 100}%; height:{d.bbox[3] * 100}%"
+                   width:{d.bbox[2] * 100}%; height:{d.bbox[3] * 100}%;
+                   border-color:{detectionCatalog.colorOf(d.class)}"
           >
             <span
-              class="absolute -top-5 left-0 whitespace-nowrap rounded bg-warn px-1.5 py-0.5
+              class="absolute -top-5 left-0 whitespace-nowrap rounded px-1.5 py-0.5
                      text-[10px] font-bold text-black"
+              style="background:{detectionCatalog.colorOf(d.class)}"
             >
-              {d.class}
+              {detectionCatalog.labelOf(d.class)}
               {Math.round(d.score * 100)}%
             </span>
           </div>

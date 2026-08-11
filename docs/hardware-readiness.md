@@ -57,9 +57,10 @@ Worth stating, because they are the parts that are usually wrong in a sim-first 
 
 - **Video latency is not instrumented.** The WHEP path is working on Scout, but the <300 ms
   target still needs a capture/display timestamp measurement (KNOWN_ISSUES #1).
-- **YOLOE duck detection has only narrow field validation.** It is a real neural model and
-  worked on Botman, but every camera/range/lighting combination still needs measurement
-  and the Ultralytics license must fit the deployment (KNOWN_ISSUES #3).
+- **YOLOE object detection has only narrow field validation.** It is a real neural model,
+  worked on Botman, and its five classes are pinned against reference photographs, but
+  every camera/range/lighting combination still needs measurement and the Ultralytics
+  license must fit the deployment (KNOWN_ISSUES #3, [perception.md](perception.md)).
 - **Collaborative SLAM produces a partial map.** With verification strict enough to be
   accurate, only some robots merge (KNOWN_ISSUES #5). The grid-registration path (`auto`)
   is the accurate one and is what the default stack uses.

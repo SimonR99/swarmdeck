@@ -180,6 +180,8 @@ def test_detection_batch_survives_concurrent_collection(mod):
 
     class Detection:
         bbox = (0, 0, 1, 1)
+        polygon = ()
+        label = "rubber_duck"
 
         def as_protocol(self, detection_id):
             return {"id": detection_id}
@@ -193,7 +195,7 @@ def test_detection_batch_survives_concurrent_collection(mod):
     bridge._detector = Detector()
     bridge._detect_bgr(MagicMock(), due_checked=True)
 
-    assert [item["id"] for item in bridge.take_detections()] == ["duck_0", "duck_1"]
+    assert [item["id"] for item in bridge.take_detections()] == ["rubber_duck_0", "rubber_duck_1"]
 
 
 def test_battery_normalisation_handles_percent_and_nan(mod):

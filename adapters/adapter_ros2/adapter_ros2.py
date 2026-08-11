@@ -85,6 +85,17 @@ MAP_CLOUD_SCALE = 0.01
 MAP_CLOUD_VOXEL = 0.05
 MAP_CLOUD_3D_VOXEL = 0.10
 
+# The detector needs OpenCV and the inference sidecar's client; a robot image
+# built without them still runs, just without perception.
+try:
+    from adapters.perception.object_detector import ObjectDetector, track_ids
+except ImportError as exc:  # pragma: no cover - depends on the robot's install
+    ObjectDetector = None
+    track_ids = None
+    OBJECT_DETECTOR_IMPORT_ERROR = exc
+else:
+    OBJECT_DETECTOR_IMPORT_ERROR = None
+
 # Nav2 is the common case but not the only one; see `navigate_to` below.
 try:
     from nav2_msgs.action import NavigateToPose
@@ -135,7 +146,11 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "period_s": 0.2,
         "sensitivity": 0.55,
-        # Empty uses SWARMDECK_DUCK_DETECTOR_URL, then localhost:8091.
+        # Catalog classes this robot looks for (adapters/perception/catalog.py).
+        # Empty means all of them; the dashboard's own selection overrides this
+        # on the next settings refresh either way.
+        "classes": [],
+        # Empty uses SWARMDECK_DETECTOR_URL, then localhost:8091.
         "detector_url": "",
         "depth_min_m": 0.15,
         "depth_max_m": 8.0,
@@ -203,16 +218,18 @@ class HardwareBridge:
         self._detector = None
         self._detection_enabled = bool(perception.get("enabled", True))
         if self._detection_enabled and (topics.get("camera") or topics.get("camera_compressed")):
-            try:
-                from adapters.perception.duck_detector import RubberDuckDetector
-
-                self._detector = RubberDuckDetector(
+            if ObjectDetector is None:
+                self._detection_enabled = False
+                node.get_logger().warn(
+                    f"[{self.id}] camera detection disabled: "
+                    f"{OBJECT_DETECTOR_IMPORT_ERROR}"
+                )
+            else:
+                self._detector = ObjectDetector(
                     perception.get("sensitivity", 0.55),
                     perception.get("detector_url") or None,
+                    classes=perception.get("classes"),
                 )
-            except ImportError as exc:
-                self._detection_enabled = False
-                node.get_logger().warn(f"[{self.id}] camera detection disabled: {exc}")
         self._detection_period_s = max(0.05, float(perception.get("period_s", 0.2)))
         self._last_detection_at = 0.0
         self._detections: list[dict] | None = None
@@ -457,7 +474,9 @@ class HardwareBridge:
             return None
         return value if value > 0.0 and math.isfinite(value) else None
 
-    def _depth_map_position(self, bbox, image_header=None) -> dict[str, float] | None:
+    def _depth_map_position(
+        self, bbox, image_header=None, polygon=None
+    ) -> dict[str, float] | None:
         perception = self.cfg.get("perception", {})
         image_time = self._stamp_seconds(image_header)
         max_age = float(perception.get("depth_max_age_s", 0.35))
@@ -477,6 +496,7 @@ class HardwareBridge:
                     depth_image,
                     camera_info,
                     bbox,
+                    polygon=polygon,
                     min_range_m=min_range,
                     max_range_m=max_range,
                     depth_scale=None if configured_scale is None else float(configured_scale),
@@ -489,7 +509,11 @@ class HardwareBridge:
             cloud_time = self._stamp_seconds(cloud_header)
             if image_time is None or cloud_time is None or abs(image_time - cloud_time) <= max_age:
                 camera_point = point_for_bbox(
-                    cloud, bbox, min_range_m=min_range, max_range_m=max_range
+                    cloud,
+                    bbox,
+                    polygon=polygon,
+                    min_range_m=min_range,
+                    max_range_m=max_range,
                 )
                 source_header = cloud_header
         if camera_point is None or source_header is None:
@@ -535,10 +559,10 @@ class HardwareBridge:
         # directly to self._detections allowed that thread to replace the list
         # with None between iterations and kill the ROS executor.
         detections = []
-        for index, detection in enumerate(self._detector.detect_bgr(frame)):
-            item = detection.as_protocol(f"duck_{index}")
+        for detection, track_id in track_ids(self._detector.detect_bgr(frame)):
+            item = detection.as_protocol(track_id)
             item["map_position"] = self._depth_map_position(
-                detection.bbox, image_header
+                detection.bbox, image_header, detection.polygon
             )
             detections.append(item)
         self._detections = detections
@@ -562,6 +586,10 @@ class HardwareBridge:
                     0.1,
                     min(1.0, float(settings.get("detection_sensitivity", 0.55))),
                 )
+                # Classes an operator switched off must stop appearing at once,
+                # not at the next restart: the batch is rebuilt every frame, so
+                # a narrowed list clears their boxes on the following one.
+                self._detector.classes = settings.get("detection_classes")
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 

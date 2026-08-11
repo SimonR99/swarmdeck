@@ -7,10 +7,12 @@ ARG ULTRALYTICS_CLIP_REF=488e81a6711eea7346872b46ea928b367da8889d
 RUN python3 -m pip install --no-cache-dir \
       "git+https://github.com/ultralytics/CLIP.git@${ULTRALYTICS_CLIP_REF}"
 
+# Prompts are no longer an image setting: the classes, their wording and their
+# score floors live together in adapters/perception/catalog.py, so that one
+# table stays the single description of what this detector recognises.
 ENV PYTHONUNBUFFERED=1 \
     YOLO_CONFIG_DIR=/models/config \
-    SWARMDECK_YOLOE_MODEL=yoloe-26n-seg.pt \
-    SWARMDECK_YOLOE_PROMPT="yellow duck toy"
+    SWARMDECK_YOLOE_MODEL=yoloe-26n-seg.pt
 
 WORKDIR /app
 COPY adapters /app/adapters

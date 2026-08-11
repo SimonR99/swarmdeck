@@ -47,6 +47,17 @@ def test_config_endpoint():
         assert 1 in r.json()["supported_protocols"]
 
 
+def test_detection_classes_endpoint_describes_the_catalog():
+    """The dashboard's class toggles are built from this, not from a UI copy."""
+    with TestClient(app) as c:
+        r = c.get("/api/detection/classes")
+        assert r.status_code == 200
+        classes = r.json()["classes"]
+
+    assert {"name": "disc_cone", "label": "Disc cone"} in classes
+    assert all({"name", "label"} == set(item) for item in classes)
+
+
 def test_map_png_roundtrip():
     with TestClient(app) as c:
         r = c.get("/api/map")

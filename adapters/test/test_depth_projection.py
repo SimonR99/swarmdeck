@@ -89,12 +89,9 @@ def test_transform_point_applies_rotation_and_translation():
     assert result.tolist() == pytest.approx([10.0, -1.0, 0.5])
 
 
-def test_aligned_depth_image_deprojects_foreground_with_camera_intrinsics():
-    width = height = 8
-    values = np.full((height, width), 4000, dtype="<u2")
-    values[2:6, 2:6] = 2000
-    values[3, 3] = 100  # invalid under min_range, not a false foreground
-    image = type(
+def depth_image(values: np.ndarray):
+    height, width = values.shape
+    return type(
         "Image",
         (),
         {
@@ -106,13 +103,92 @@ def test_aligned_depth_image_deprojects_foreground_with_camera_intrinsics():
             "data": values.tobytes(),
         },
     )()
-    info = type(
+
+
+def camera_info(width: int, height: int):
+    centre = (width - 1) / 2.0
+    return type(
         "Info",
         (),
-        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+        {"K": [4.0, 0.0, centre, 0.0, 4.0, (height - 1) / 2.0, 0.0, 0.0, 1.0]},
     )()
 
-    point = point_for_depth_image(image, info, (0.20, 0.20, 0.60, 0.60), inset=0.0)
+
+def test_aligned_depth_image_deprojects_foreground_with_camera_intrinsics():
+    width = height = 8
+    values = np.full((height, width), 4000, dtype="<u2")
+    values[2:6, 2:6] = 2000
+    values[3, 3] = 100  # invalid under min_range, not a false foreground
+    image = depth_image(values)
+
+    point = point_for_depth_image(
+        image, camera_info(width, height), (0.20, 0.20, 0.60, 0.60), inset=0.0
+    )
 
     assert point is not None
     assert point.tolist() == pytest.approx([0.0, 0.0, 2.0], abs=0.26)
+
+
+def test_outline_reads_the_object_where_the_box_reads_the_wall_behind_it():
+    """The reason detections carry a segmentation mask at all.
+
+    A diagonal object -- the pool noodle is the real case -- occupies a
+    minority of its own bounding box.  Here the object is a 2 m diagonal band
+    across a 6 m wall, so a box-shaped reading is dominated by the wall and
+    lands metres past the thing it is supposed to have found.
+    """
+    width = height = 16
+    values = np.full((height, width), 6000, dtype="<u2")
+    diagonal = [(index, index) for index in range(2, 14)]
+    for y, x in diagonal:
+        values[y, x - 1 : x + 2] = 2000
+    image = depth_image(values)
+    info = camera_info(width, height)
+    bbox = (1 / 16, 1 / 16, 14 / 16, 14 / 16)
+    # A band three pixels wide down the diagonal of its own box.
+    polygon = ((1 / 16, 3 / 16), (3 / 16, 1 / 16), (15 / 16, 13 / 16), (13 / 16, 15 / 16))
+
+    with_outline = point_for_depth_image(image, info, bbox, polygon=polygon, inset=0.0)
+    box_only = point_for_depth_image(image, info, bbox, inset=0.0)
+
+    assert with_outline is not None and box_only is not None
+    assert with_outline[2] == pytest.approx(2.0, abs=0.05)
+    assert box_only[2] == pytest.approx(6.0, abs=0.05)
+
+
+def test_an_unusable_outline_falls_back_to_the_inset_box():
+    """Fail soft: a bad polygon costs precision, never the whole detection."""
+    width = height = 8
+    values = np.full((height, width), 4000, dtype="<u2")
+    values[2:6, 2:6] = 2000
+    image = depth_image(values)
+    info = camera_info(width, height)
+    bbox = (0.20, 0.20, 0.60, 0.60)
+    baseline = point_for_depth_image(image, info, bbox, inset=0.0)
+
+    for unusable in (
+        (),                                        # no outline at all
+        ((0.1, 0.1), (0.2, 0.2)),                  # too few points to be an area
+        ((0.4, 0.4), (0.41, 0.4), (0.41, 0.41)),   # a sliver covering no pixels
+        "not a polygon",
+    ):
+        assert point_for_depth_image(
+            image, info, bbox, polygon=unusable, inset=0.0
+        ).tolist() == pytest.approx(baseline.tolist())
+
+
+def test_point_cloud_path_honours_the_same_outline():
+    background = (0.0, 0.0, 5.0)
+    rows = [[background for _ in range(8)] for _ in range(8)]
+    for index in range(1, 7):
+        rows[index][index] = (0.1 * index, 0.1 * index, 2.0)
+    cloud = organised_cloud(rows)
+    bbox = (0.0, 0.0, 1.0, 1.0)
+    polygon = ((0.0, 0.125), (0.125, 0.0), (1.0, 0.875), (0.875, 1.0))
+
+    with_outline = point_for_bbox(cloud, bbox, polygon=polygon, inset=0.0)
+    box_only = point_for_bbox(cloud, bbox, inset=0.0)
+
+    assert with_outline is not None and box_only is not None
+    assert with_outline[2] == pytest.approx(2.0, abs=0.05)
+    assert box_only[2] == pytest.approx(5.0, abs=0.05)

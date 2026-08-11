@@ -124,7 +124,7 @@ services:
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-      SWARMDECK_DUCK_DETECTOR_URL: http://127.0.0.1:8091
+      SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
       - /app/adapters/adapter_ros2/adapter_ros2.py

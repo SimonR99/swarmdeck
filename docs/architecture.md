@@ -353,14 +353,26 @@ Latency budget (target < 300 ms):
 
 Measured with a timestamp burned into the frame and read back from a screen capture.
 
-### 6.1 Portable rubber-duck perception
+### 6.1 Portable open-vocabulary perception
 
-`adapters/perception/duck_detector.py` accepts an ordinary OpenCV BGR frame and returns
-normalized adapter-protocol boxes. It imports neither ROS nor Gazebo and never reads
+`adapters/perception/object_detector.py` accepts an ordinary OpenCV BGR frame and returns
+normalized adapter-protocol detections. It imports neither ROS nor Gazebo and never reads
 simulation entity names, positions, segmentation buffers, or ground truth. It sends the
-throttled JPEG to the local `yoloe_server.py` sidecar, which runs YOLOE-26n with the
-validated text prompt `yellow duck toy`. Confidence follows the existing sensitivity
+throttled JPEG to the local `yoloe_server.py` sidecar, which runs YOLOE-26n-seg over the
+prompts in `adapters/perception/catalog.py`. Confidence follows the existing sensitivity
 setting and overlapping proposals are suppressed before publication.
+
+The catalog is the single description of what the fleet can recognise — five classes
+today (rubber duck, wooden block, disc cone, filament spool, pool noodle), each with the
+prompt wording and score floor measured against the reference photographs in `images/`.
+Operators pick a subset from the dashboard; the choice rides on the detect request, so
+narrowing it takes effect on the next frame without restarting the sidecar. See
+[perception.md](perception.md) for the calibration and how to add a class.
+
+Because the model segments rather than merely boxes, each detection also carries an
+outline. That outline is what makes the depth reading below trustworthy: a pool noodle
+lying diagonally fills about a quarter of its own bounding box, so a box-shaped depth
+sample is mostly the floor behind it.
 
 The sidecar boundary keeps PyTorch and CUDA out of ROS images: simulation uses one CPU
 sidecar for the fleet, and every physical robot uses the JetPack image matching its
@@ -368,11 +380,12 @@ onboard NVIDIA computer. If inference is unavailable, the client returns an empt
 camera upload, telemetry and control continue, and the inaccurate colour detector is not
 silently restored.
 
-Every adapter joins each RGB box to depth: an aligned depth image plus CameraInfo, or an
-organised RGB-aligned PointCloud2. They select a coherent foreground depth band and
-deproject it to camera XYZ, which the protocol, backend and 2D map carry as the optional
-`map_position` of a persistent marker. Invalid or stale depth is bbox-only; it is never
-replaced by a guessed range.
+Every adapter joins each RGB detection to depth: an aligned depth image plus CameraInfo,
+or an organised RGB-aligned PointCloud2. Pixels are taken from inside the segmentation
+outline when there is one and from a central inset of the box when there is not; from
+those, a coherent foreground depth band is selected and deprojected to camera XYZ, which
+the protocol, backend and 2D map carry as the optional `map_position` of a persistent
+marker. Invalid or stale depth is bbox-only; it is never replaced by a guessed range.
 
 Only the last step differs by adapter. Hardware asks tf2, because a real robot's TF tree
 has links this project did not build and composing a chain through them by name is how an
@@ -385,7 +398,7 @@ images share one pose and one set of intrinsics.
 
 The detector image is based on Ultralytics and is therefore subject to Ultralytics'
 AGPL-3.0 or Enterprise licensing terms. Its zero-shot model still needs validation across
-more rooms, ranges, lighting conditions and duck variants before safety-critical use.
+more rooms, ranges, lighting conditions and object variants before safety-critical use.
 
 ## 7. Frontend
 

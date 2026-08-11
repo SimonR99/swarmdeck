@@ -107,7 +107,7 @@ services:
       EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
-      SWARMDECK_DUCK_DETECTOR_URL: http://duck_detector:8091
+      SWARMDECK_DETECTOR_URL: http://duck_detector:8091
     volumes:
       - ./sessions:/app/sessions
       - ./study:/app/study:ro

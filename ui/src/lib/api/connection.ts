@@ -3,6 +3,7 @@ import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
 import { session } from '$lib/stores/session.svelte';
 import { settings } from '$lib/stores/settings.svelte';
+import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { MockFleet } from './mock';
 
 /**
@@ -181,6 +182,9 @@ export const actions = {
 export function startConnection() {
   if (started) return;
   started = true;
+  // Static for the life of the backend, so it is fetched once rather than
+  // pushed: the websocket carries what changes, not what a class is called.
+  void detectionCatalog.load();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
 }

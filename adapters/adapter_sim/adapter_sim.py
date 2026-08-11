@@ -49,7 +49,7 @@ from tf2_msgs.msg import TFMessage
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from adapters.perception.depth_projection import point_for_depth_image
-from adapters.perception.duck_detector import RubberDuckDetector
+from adapters.perception.object_detector import ObjectDetector, track_ids
 
 # The platform table, imported from the spawner rather than restated here.
 #
@@ -379,7 +379,7 @@ class RobotBridge:
         self._camera_depth: Image | None = None
         self._camera_info: CameraInfo | None = None
         self._last_depth_warning_at = 0.0
-        self._detector = RubberDuckDetector()
+        self._detector = ObjectDetector()
         self._detection_enabled = True
         self._detections: list[dict] | None = None
         self._goal_handle = None
@@ -623,7 +623,9 @@ class RobotBridge:
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._camera_info = msg
 
-    def _depth_map_position(self, bbox, image_header=None) -> dict[str, float] | None:
+    def _depth_map_position(
+        self, bbox, image_header=None, polygon=None
+    ) -> dict[str, float] | None:
         """Where a detection box is in this robot's map frame — or nothing.
 
         Fail-closed at every step. An absent `map_position` costs a marker on
@@ -651,7 +653,12 @@ class RobotBridge:
             return None
 
         camera_point = point_for_depth_image(
-            depth, info, bbox, min_range_m=DEPTH_MIN_M, max_range_m=DEPTH_MAX_M
+            depth,
+            info,
+            bbox,
+            polygon=polygon,
+            min_range_m=DEPTH_MIN_M,
+            max_range_m=DEPTH_MAX_M,
         )
         if camera_point is None:
             return None
@@ -1136,12 +1143,12 @@ class RobotBridge:
 
             detections = []
             if self._detection_enabled:
-                for index, detection in enumerate(self._detector.detect_bgr(image)):
-                    item = detection.as_protocol(f"duck_{index}")
+                for detection, track_id in track_ids(self._detector.detect_bgr(image)):
+                    item = detection.as_protocol(track_id)
                     # The detector is RGB-only; the depth half of the same frame
                     # is what makes the box a place rather than a rectangle.
                     item["map_position"] = self._depth_map_position(
-                        detection.bbox, msg.header
+                        detection.bbox, msg.header, detection.polygon
                     )
                     detections.append(item)
             self._detections = detections
@@ -1178,6 +1185,7 @@ class RobotBridge:
             self._detector.sensitivity = max(
                 0.1, min(1.0, float(value.get("detection_sensitivity", 0.55)))
             )
+            self._detector.classes = value.get("detection_classes")
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 

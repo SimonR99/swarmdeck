@@ -56,10 +56,18 @@ export interface Detection {
   robot_id: string;
   camera: string;
   bbox: [number, number, number, number] | null;
+  /** Normalized segmentation outline, when the detector produced a mask. */
+  polygon: [number, number][] | null;
   map_position: Point | null;
   first_seen: number;
   last_seen: number;
   observations: number;
+}
+
+/** One entry of the detector's class catalog, from `/api/detection/classes`. */
+export interface DetectionClass {
+  name: string;
+  label: string;
 }
 
 export interface MapInfo {
@@ -159,6 +167,8 @@ export interface AppSettings {
   robot_count: number;
   detection_enabled: boolean;
   detection_sensitivity: number;
+  /** Catalog class names the detector should look for. */
+  detection_classes: string[];
   robots: RobotConnectionSettings[];
 }
 

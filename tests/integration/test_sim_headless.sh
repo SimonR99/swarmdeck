@@ -45,7 +45,7 @@ sleep 10
 echo "== 4. sensors publish =="
 TOPICS="$(timeout 10 gz topic -l 2>/dev/null)"
 # camera/depth_image and camera/camera_info are the other half of the RGBD
-# sensor. Without them a duck detection is a box on a video frame and nothing
+# sensor. Without them a detection is a box on a video frame and nothing
 # on the map, which is a silent loss: video and detection both keep working.
 for t in scan/points proximity_scan odom imu ground_truth \
          camera/image camera/depth_image camera/camera_info; do
@@ -65,7 +65,7 @@ echo "   ok: $W beams, $H ring"
 echo "== 6. depth camera measures range =="
 # adapters/perception/depth_projection.py reads this buffer directly, so its
 # shape is an interface: 32-bit floats in metres, one per colour pixel. A driver
-# that switched to 16UC1 millimetres would still publish, and every duck marker
+# that switched to 16UC1 millimetres would still publish, and every detection marker
 # would land 1000x too far away.
 DEPTH="$(timeout 12 gz topic -e -n 1 -t /robot_0/camera/depth_image 2>/dev/null \
          | grep -a -E '^(width|height|step|pixel_format_type)')"

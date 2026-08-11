@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from ..bus import bus, mark_session_start, session_elapsed, stamps
+from ..config.detection import DETECTION_CLASSES
 from ..config.settings import SettingsStore
 from ..events.logger import events
 from ..fleet.registry import registry
@@ -409,6 +410,12 @@ async def get_config() -> dict[str, Any]:
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
     return {"type": "settings_state", "settings": settings_store.value}
+
+
+@app.get("/api/detection/classes")
+async def get_detection_classes() -> dict[str, Any]:
+    """What the detector can be asked to look for, for the settings dialog."""
+    return {"classes": DETECTION_CLASSES}
 
 
 @app.put("/api/settings")
@@ -910,6 +917,7 @@ async def adapter_socket(ws: WebSocket) -> None:
                         "robot_id": msg["robot_id"],
                         "camera": msg.get("camera", "front"),
                         "bbox": item.get("bbox"),
+                        "polygon": item.get("polygon"),
                         "map_position": detection_position(
                             msg["robot_id"], item.get("map_position")
                         ),

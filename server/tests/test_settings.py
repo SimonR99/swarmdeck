@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from swarmdeck_server.config.detection import DETECTION_CLASS_NAMES
 from swarmdeck_server.config.settings import SettingsStore
 
 
@@ -41,6 +42,29 @@ def test_invalid_settings_fall_back_without_throwing(tmp_path):
     assert loaded["robot_count"] == 4
     assert loaded["detection_enabled"] is True
     assert len(loaded["robots"]) == 4
+
+
+def test_detection_classes_are_filtered_to_the_catalog(tmp_path):
+    saved = SettingsStore(tmp_path / "settings.json").save({
+        "detection_classes": ["pool_noodle", "not_a_class", "rubber_duck"],
+    })
+
+    # Catalog order, not the order they were sent in: the adapters and the
+    # dashboard both render this list, and neither should reorder on a save.
+    assert saved["detection_classes"] == ["rubber_duck", "pool_noodle"]
+
+
+def test_an_empty_class_selection_means_every_class(tmp_path):
+    """Detection is switched off with detection_enabled, not by emptying this.
+
+    An empty list surviving to the adapters would be a second off switch that
+    nothing in the dashboard displays.
+    """
+    store = SettingsStore(tmp_path / "settings.json")
+
+    assert store.save({"detection_classes": []})["detection_classes"] == DETECTION_CLASS_NAMES
+    assert store.save({"detection_classes": "duck"})["detection_classes"] == DETECTION_CLASS_NAMES
+    assert store.save({})["detection_classes"] == DETECTION_CLASS_NAMES
 
 
 def test_settings_accept_seven_robots_for_mixed_hardware_fleet(tmp_path):

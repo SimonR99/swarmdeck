@@ -49,6 +49,15 @@ function buildTruth(): Int8Array {
   return t;
 }
 
+/** Mirrors the backend catalog; the mock never reaches `/api/detection/classes`. */
+const MOCK_DETECTION_CLASSES = [
+  'rubber_duck',
+  'wooden_block',
+  'disc_cone',
+  'filament_spool',
+  'pool_noodle'
+];
+
 export class MockFleet {
   private truth = buildTruth();
   private known = new Int8Array(W * H).fill(-1);
@@ -260,15 +269,33 @@ export class MockFleet {
     if (!this.robots.length || Math.random() > 0.55) return;
     const r = this.robots[Math.floor(Math.random() * this.robots.length)];
     const now = Date.now() / 1000;
+    const cls = MOCK_DETECTION_CLASSES[
+      Math.floor(Math.random() * MOCK_DETECTION_CLASSES.length)
+    ];
+    const [bx, by, bw, bh] = [
+      0.18 + Math.random() * 0.5,
+      0.22 + Math.random() * 0.4,
+      0.16,
+      0.22
+    ] as [number, number, number, number];
     this.emit({
       type: 'detection',
       detection: {
-        id: `duck_${++this.detectionSeq}`,
-        class: 'duck',
+        id: `${cls}_${++this.detectionSeq}`,
+        class: cls,
         score: 0.72 + Math.random() * 0.26,
         robot_id: r.id,
         camera: 'front',
-        bbox: [0.18 + Math.random() * 0.5, 0.22 + Math.random() * 0.4, 0.16, 0.22],
+        bbox: [bx, by, bw, bh],
+        // A lozenge rather than the box itself, so the overlay's mask path is
+        // exercised by `?mock=1` instead of only against real hardware.
+        polygon: [
+          [bx + bw * 0.5, by],
+          [bx + bw, by + bh * 0.35],
+          [bx + bw * 0.72, by + bh],
+          [bx + bw * 0.28, by + bh],
+          [bx, by + bh * 0.35]
+        ],
         map_position: { x: r.x + (Math.random() - 0.5) * 3, y: r.y + (Math.random() - 0.5) * 3 },
         first_seen: now,
         last_seen: now,

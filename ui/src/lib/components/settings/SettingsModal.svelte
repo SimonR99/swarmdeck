@@ -2,12 +2,23 @@
   import { Settings, X } from 'lucide-svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import { settings, DEFAULT_ROBOT_COLORS } from '$lib/stores/settings.svelte';
+  import { detectionCatalog } from '$lib/stores/detection.svelte';
   import type { AppSettings } from '$lib/types/protocol';
 
   let { open, onclose }: { open: boolean; onclose: () => void } = $props();
   let draft = $state<AppSettings>(structuredClone($state.snapshot(settings.value)));
   let error = $state('');
   let wasOpen = false;
+
+  function toggleClass(name: string) {
+    const next = draft.detection_classes.includes(name)
+      ? draft.detection_classes.filter((item) => item !== name)
+      : [...draft.detection_classes, name];
+    // The backend reads an empty list as "everything", so clearing the last
+    // class would silently turn every class back on. Refuse instead.
+    if (!next.length) return;
+    draft.detection_classes = next;
+  }
 
   function resizeRobots(count: number) {
     const bounded = Math.max(1, Math.min(8, Math.round(count)));
@@ -122,7 +133,7 @@
         <div class="my-4 border-t border-border"></div>
         <div class="flex items-center justify-between gap-4">
           <div>
-            <div class="text-[11px] font-semibold text-fg">Rubber-duck detection</div>
+            <div class="text-[11px] font-semibold text-fg">Object detection</div>
             <div class="mt-0.5 text-[10px] text-fg-dim">Runs on RGB frames and is independent of Gazebo.</div>
           </div>
           <button
@@ -145,6 +156,33 @@
             class="mt-2 w-full accent-[var(--color-accent)] disabled:opacity-40"
           />
         </label>
+
+        {#if detectionCatalog.classes.length}
+          <div class="mt-3 text-[10px] font-medium text-fg-muted">Look for</div>
+          <div class="mt-1.5 flex flex-wrap gap-1.5">
+            {#each detectionCatalog.classes as target (target.name)}
+              {@const on = draft.detection_classes.includes(target.name)}
+              <button
+                class="flex h-7 items-center gap-1.5 rounded-[4px] border px-2 text-[10px] font-medium
+                       disabled:opacity-40
+                       {on ? 'border-border-strong bg-surface-2 text-fg' : 'border-border text-fg-dim'}"
+                disabled={!draft.detection_enabled}
+                aria-pressed={on}
+                onclick={() => toggleClass(target.name)}
+              >
+                <span
+                  class="h-2 w-2 rounded-full"
+                  style="background:{on ? detectionCatalog.colorOf(target.name) : 'currentColor'}"
+                ></span>
+                {target.label}
+              </button>
+            {/each}
+          </div>
+          <p class="mt-2 text-[10px] text-fg-dim">
+            Turning every class off would hide detections with the switch above still reading ON,
+            so the last one stays selected.
+          </p>
+        {/if}
 
         <div class="my-4 border-t border-border"></div>
         <div class="mb-2 flex items-end justify-between">

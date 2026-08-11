@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .detection import DETECTION_CLASS_NAMES, validate_classes
+
 
 MAX_ROBOTS = 8
 DEFAULT_COLORS = [
@@ -21,6 +23,7 @@ def defaults() -> dict[str, Any]:
         "robot_count": 4,
         "detection_enabled": True,
         "detection_sensitivity": 0.55,
+        "detection_classes": list(DETECTION_CLASS_NAMES),
         "robots": [
             {
                 "id": f"robot_{index}",
@@ -75,6 +78,7 @@ class SettingsStore:
             )
         except (TypeError, ValueError):
             pass
+        base["detection_classes"] = validate_classes(source.get("detection_classes"))
 
         robots = source.get("robots")
         if isinstance(robots, list):

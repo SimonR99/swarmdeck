@@ -31,6 +31,55 @@ def _bbox_pixels(
     return x0, y0, x1, y1
 
 
+def _polygon_interior(
+    polygon: Sequence[Sequence[float]],
+    width: int,
+    height: int,
+    bounds: tuple[int, int, int, int],
+) -> np.ndarray | None:
+    """Rasterize a normalized outline over one crop, or return ``None``.
+
+    Even-odd crossing test, vectorized over pixels and looped over the handful
+    of polygon edges.  Kept in numpy on purpose: this module is pure geometry
+    and unit-testable without OpenCV or ROS.
+
+    ``None`` means "no usable outline" and asks the caller to fall back to the
+    box.  A mask that survives here but covers almost nothing is the dangerous
+    case -- a few stray pixels would give a confident median in mid-air -- so
+    too-small interiors are rejected rather than trusted.
+    """
+    if not isinstance(polygon, (list, tuple)) or len(polygon) < 3:
+        return None
+    try:
+        points = np.array(
+            [[float(x) * width, float(y) * height] for x, y in polygon],
+            dtype=np.float64,
+        )
+    except (TypeError, ValueError):
+        return None
+    if points.shape[0] < 3 or not np.isfinite(points).all():
+        return None
+
+    x0, y0, x1, y1 = bounds
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    # Pixel centres, so a polygon edge lying on a pixel boundary is unambiguous.
+    xs = xx.astype(np.float64) + 0.5
+    ys = yy.astype(np.float64) + 0.5
+
+    inside = np.zeros(xs.shape, dtype=bool)
+    following = np.roll(points, -1, axis=0)
+    for (ax, ay), (bx, by) in zip(points, following):
+        if ay == by:
+            continue  # horizontal edge: contributes no crossing
+        straddles = (ay > ys) != (by > ys)
+        crossing_x = ax + (ys - ay) * (bx - ax) / (by - ay)
+        inside ^= straddles & (xs < crossing_x)
+
+    if int(np.count_nonzero(inside)) < 12:
+        return None
+    return inside
+
+
 def _foreground_mask(ranges: np.ndarray) -> np.ndarray | None:
     if len(ranges) < 3:
         return None
@@ -44,11 +93,36 @@ def _foreground_mask(ranges: np.ndarray) -> np.ndarray | None:
     return selected
 
 
+def _sample_region(
+    bbox: Sequence[float],
+    polygon: Sequence[Sequence[float]] | None,
+    width: int,
+    height: int,
+    inset: float,
+) -> tuple[tuple[int, int, int, int], np.ndarray | None] | None:
+    """Choose which pixels of a detection to read depth from.
+
+    With a segmentation outline we take the object's own pixels and the whole
+    box; without one we fall back to a central inset of the box, which is the
+    best a rectangle can do.  The difference is not cosmetic: a pool noodle
+    lying diagonally measured 27% mask-to-box, so nearly three quarters of the
+    "object" a box-only reading averages over is the floor behind it.
+    """
+    full = _bbox_pixels(bbox, width, height, 0.0)
+    if full is not None and polygon:
+        interior = _polygon_interior(polygon, width, height, full)
+        if interior is not None:
+            return full, interior
+    inset_box = _bbox_pixels(bbox, width, height, inset)
+    return None if inset_box is None else (inset_box, None)
+
+
 def point_for_depth_image(
     image,
     camera_info,
     bbox: Sequence[float],
     *,
+    polygon: Sequence[Sequence[float]] | None = None,
     min_range_m: float = 0.15,
     max_range_m: float = 8.0,
     depth_scale: float | None = None,
@@ -64,10 +138,10 @@ def point_for_depth_image(
     height = int(getattr(image, "height", 0))
     if width < 2 or height < 2:
         return None
-    pixels = _bbox_pixels(bbox, width, height, inset)
-    if pixels is None:
+    region = _sample_region(bbox, polygon, width, height, inset)
+    if region is None:
         return None
-    x0, y0, x1, y1 = pixels
+    (x0, y0, x1, y1), interior = region
 
     encoding = str(getattr(image, "encoding", "")).upper()
     if encoding in ("16UC1", "MONO16"):
@@ -107,6 +181,8 @@ def point_for_depth_image(
 
     yy, xx = np.mgrid[y0:y1, x0:x1]
     valid = np.isfinite(depth) & (depth >= min_range_m) & (depth <= max_range_m)
+    if interior is not None:
+        valid &= interior
     z = depth[valid]
     if len(z) < 3:
         return None
@@ -124,6 +200,7 @@ def point_for_bbox(
     cloud,
     bbox: Sequence[float],
     *,
+    polygon: Sequence[Sequence[float]] | None = None,
     min_range_m: float = 0.15,
     max_range_m: float = 8.0,
     inset: float = 0.18,
@@ -131,10 +208,11 @@ def point_for_bbox(
     """Return a robust foreground XYZ sample for a normalised RGB box.
 
     ``cloud`` must be organised (height > 1) and pixel-aligned with the RGB
-    image.  A central inset avoids box edges, where background depth dominates.
-    From that crop we select the nearest coherent depth band rather than the
-    absolute nearest point, which rejects isolated flying pixels while keeping
-    a small object in front of a wall.
+    image.  Given a segmentation outline we read the object's own pixels;
+    otherwise a central inset avoids box edges, where background depth
+    dominates.  From that crop we select the nearest coherent depth band rather
+    than the absolute nearest point, which rejects isolated flying pixels while
+    keeping a small object in front of a wall.
     """
     width = int(getattr(cloud, "width", 0))
     height = int(getattr(cloud, "height", 0))
@@ -151,10 +229,10 @@ def point_for_bbox(
     if len(offsets) != 3 or any(offset + 4 > point_step for offset in offsets.values()):
         return None
 
-    pixels = _bbox_pixels(bbox, width, height, inset)
-    if pixels is None:
+    region = _sample_region(bbox, polygon, width, height, inset)
+    if region is None:
         return None
-    x0, y0, x1, y1 = pixels
+    (x0, y0, x1, y1), interior = region
 
     endian = ">" if bool(getattr(cloud, "is_bigendian", False)) else "<"
     dtype = np.dtype(f"{endian}f4")
@@ -181,6 +259,8 @@ def point_for_bbox(
         & (ranges >= float(min_range_m))
         & (ranges <= float(max_range_m))
     )
+    if interior is not None:
+        valid &= interior.reshape(-1)
     points = points[valid]
     ranges = ranges[valid]
     selected = _foreground_mask(ranges)

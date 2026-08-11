@@ -14,7 +14,7 @@ services:
     environment:
       ROS_MASTER_URI: http://127.0.0.1:11311
       ROS_IP: "${ROBOT_IP:?set ROBOT_IP to this robot's LAN address}"
-      SWARMDECK_DUCK_DETECTOR_URL: http://127.0.0.1:8091
+      SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
       - /app/adapters/adapter_ros1/adapter_ros1.py

@@ -33,17 +33,25 @@ registration. On a 4-robot run with the odometry and startup problems below fixe
 five minutes of exploration reaches support 0.87-0.98 and all three non-reference robots
 register.
 
-### 3. Zero-shot duck detection needs broader field validation
+### 3. Zero-shot detection needs broader field validation
 
-The classical colour/shape detector has been replaced by prompted YOLOE-26n. It found
-both Botman ducks without the former person false-positive across four live frames, but
-that is a narrow validation set from one camera, room and lighting condition. Prompt
-wording also mattered: `yellow duck toy` was reliable in those frames while the literal
-`rubber duck` prompt fell below the normal confidence threshold for one duck.
+The classical colour/shape detector has been replaced by prompted YOLOE-26n-seg, now
+carrying five classes (see [perception.md](perception.md)). It found both Botman ducks
+without the former person false-positive across four live frames, and all five classes
+are pinned by `tests/perception/test_catalog_recall.py` against reference photographs —
+but both are narrow validation sets, from one camera or from hand-held close-ups rather
+than a robot's view across a room.
 
-Treat detection as an operator aid until it has been measured across every robot camera,
-expected range, motion blur, exposure and duck variant. The Ultralytics detector image
-also carries AGPL-3.0 or Enterprise licensing obligations that deployments must satisfy.
+Prompt wording matters more than it should. `yellow duck toy` was reliable on Botman
+where the literal `rubber duck` fell below threshold for one duck; on the sports saucer,
+every prompt containing "cone" scores zero while `orange plastic saucer` reaches 0.69.
+Assume a new object needs its wording measured, not guessed.
+
+Known false positives at default sensitivity: a plush unicorn reads as `rubber_duck` at
+0.53, and a small desk object as `filament_spool` at 0.29. Treat detection as an operator
+aid until it has been measured across every robot camera, expected range, motion blur and
+exposure. The Ultralytics detector image also carries AGPL-3.0 or Enterprise licensing
+obligations that deployments must satisfy.
 
 ### 4. The merged map is a stitcher, not multi-robot SLAM
 

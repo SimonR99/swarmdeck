@@ -67,10 +67,15 @@ the capability, which is what keeps the button off a hardware dashboard.
   "planned_path": [{"x": 1.2, "y": -3.4}, {"x": 2.1, "y": -2.7}] }
 
 // detections — on detection
+// `class` is one of the catalog names in adapters/perception/catalog.py;
+// `id` is `<class>_<slot>`, numbered within that class. `polygon` is the
+// segmentation outline in the same normalized frame as `bbox`, and is null
+// when the model returned no mask — consumers must handle both.
 { "type": "detections", "robot_id": "robot_2", "t_mono": 18251.7,
   "camera": "front",
-  "items": [{"id": "duck_0", "class": "rubber_duck", "score": 0.91,
+  "items": [{"id": "disc_cone_0", "class": "disc_cone", "score": 0.91,
              "bbox": [0.41, 0.33, 0.12, 0.18],
+             "polygon": [[0.47, 0.33], [0.53, 0.44], [0.41, 0.51]],
              "map_position": {"x": 7.1, "y": -2.2}}] }
 
 // map_meta — after POST /api/adapter/map
