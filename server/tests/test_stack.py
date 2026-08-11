@@ -208,6 +208,45 @@ def test_registry_capabilities_and_neglect():
     assert reg.robots["mock"].coordinate_frame == "merged"
 
 
+def test_a_reconnect_does_not_unbind_the_new_socket():
+    """The failure this prevents is a robot that looks online and cannot be stopped.
+
+    `robot_id` is stable across reconnects (protocol rule 5), so a robot whose
+    link drops and returns has two sockets alive until the server notices the
+    first one died — and the dead one's cleanup runs LAST. Popping the sink
+    unconditionally therefore retired the live socket, leaving `robot_state`
+    flowing in (so the dashboard drew the robot as online) while every command
+    out, `stop` included, silently went nowhere.
+    """
+    import asyncio
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, message: dict) -> None:
+            self.sent.append(message)
+
+    async def scenario() -> None:
+        reg = Registry()
+        original, replacement = FakeSocket(), FakeSocket()
+        reg.hello({"robot_id": "r0"}, sink=original)
+        reg.hello({"robot_id": "r0"}, sink=replacement)
+
+        # The original socket's cleanup, arriving after the reconnect.
+        reg.disconnect("r0", original)
+        assert await reg.send("r0", {"type": "stop"}) is True
+        assert replacement.sent == [{"type": "stop"}]
+        assert original.sent == []
+
+        # ...and the live socket leaving still retires the robot properly.
+        reg.disconnect("r0", replacement)
+        assert await reg.send("r0", {"type": "stop"}) is False
+        assert not reg.has_sink("r0")
+
+    asyncio.run(scenario())
+
+
 def test_detection_position_is_normalized_into_the_merged_map():
     app_registry.robots.clear()
     try:

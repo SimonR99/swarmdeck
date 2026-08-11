@@ -111,15 +111,27 @@ services:
     depends_on:
       robot_stack:
         condition: service_started
+      # `service_started`, NOT `service_healthy`, for both of these.
+      #
+      # Gating on health meant a subsystem that could degrade on its own instead
+      # took the whole robot off the dashboard: no telemetry, no map, no camera,
+      # and — the part that matters — no teleop. A detector that cannot reach
+      # Ultralytics to fetch its weights on a site with no internet never
+      # reports healthy, and a bt_navigator that will not reach `active` never
+      # does either. "Nav2 won't come up, drive it manually" is exactly the
+      # fallback that gate foreclosed.
+      #
+      # Nothing is lost by starting anyway. `capabilities()` is derived from what
+      # actually resolves at runtime, so navigation is still not advertised until
+      # the action server exists; and `ObjectDetector.detect_bgr` is fail-closed,
+      # returning an empty batch and recording `last_error`. Both already degrade
+      # correctly — the dependency was the only thing making them fatal.
       nav2:
-        # Do not advertise navigation before the lifecycle-managed action
-        # server is active. This also prevents goals being accepted when no
-        # controller is available to execute them.
-        condition: service_healthy
+        condition: service_started
       oak_camera:
         condition: service_started
       duck_detector:
-        condition: service_healthy
+        condition: service_started
     network_mode: host
     ipc: host
     environment:

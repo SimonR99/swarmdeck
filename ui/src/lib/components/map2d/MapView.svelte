@@ -948,15 +948,20 @@
                   : item.rejection?.startsWith('outside')
                     ? 'text-warn'
                     : 'text-fg-muted'}"
-                title={item.rejection ??
-                  `score ${item.score} · shared area ${(item.support * 100).toFixed(0)}%` +
-                    ` · rival rotation ${(item.yaw_ratio * 100).toFixed(0)}%`}
+                title={item.accepted && item.misses > 0
+                  ? `${item.misses} ambiguous frame(s) since the last accepted match; ` +
+                    'still merging on the transform from that match'
+                  : (item.rejection ??
+                      `score ${item.score} · shared area ${(item.support * 100).toFixed(0)}%` +
+                        ` · rival rotation ${(item.yaw_ratio * 100).toFixed(0)}%`)}
               >
-                {item.accepted
-                  ? `Matched · ${(item.score * 100).toFixed(0)}%`
-                  : item.rejection?.startsWith('outside')
-                    ? 'Configured prior held'
-                    : registrationBlocker(item)}
+                {item.accepted && item.misses > 0
+                  ? 'Holding last match'
+                  : item.accepted
+                    ? `Matched · ${(item.score * 100).toFixed(0)}%`
+                    : item.rejection?.startsWith('outside')
+                      ? 'Configured prior held'
+                      : registrationBlocker(item)}
               </span>
             </div>
           {/each}

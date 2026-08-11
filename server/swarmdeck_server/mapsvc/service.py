@@ -42,6 +42,17 @@ MERGE_CONFLICT_MODES = ("majority", "occupied")
 PRIOR_WINDOW_DEG = 40.0
 LOCKED_WINDOW_DEG = 8.0
 
+# Consecutive ambiguous results before a registered robot is dropped from the
+# merged map. One marginal frame is not evidence that a transform accepted
+# seconds earlier has gone wrong, and treating it as such made membership
+# oscillate at the map upload rate: the narrow search a lock enables can land on
+# a slightly different yaw whose translation correlation is a near-tie, which
+# unlocked the robot, which widened the next search, which accepted it again.
+# The escalation from narrow back to wide search is still immediate — only the
+# eviction waits, so a robot that genuinely stops matching still leaves after
+# this many uploads rather than being held on a stale transform indefinitely.
+REGISTRATION_MISS_LIMIT = 3
+
 # Shared known area, as a fraction of the smaller map, below which the
 # independent cslam cross-check has nothing to compare and stays silent.
 CHECK_MIN_SUPPORT = 0.35
@@ -64,6 +75,15 @@ class MapService:
         self.cloud_registrations: dict[str, Registration] = {}
         self.registration_sources: dict[str, str] = {}
         self.registration_rejections: dict[str, str] = {}
+        # Robots whose transform came from an accepted registration and is still
+        # trusted. Deliberately NOT the same thing as `locked_dyaw`: the lock is
+        # only a hint that narrows the next yaw search, and one ambiguous frame
+        # should widen that search without also evicting the robot from the map.
+        # Conflating the two is what made the merged map flicker — see
+        # REGISTRATION_MISS_LIMIT.
+        self.registered: set[str] = set()
+        # Consecutive ambiguous results per robot since its last decisive one.
+        self.registration_misses: dict[str, int] = {}
         self.locked_dyaw: dict[str, float] = {}
         # Latest `slam_graph` per robot: keyframe count, inter-robot loop
         # closures, optimisation residual, and whether the collaborative back end
@@ -141,6 +161,8 @@ class MapService:
             self.cloud_registrations.clear()
             self.registration_sources.clear()
             self.registration_rejections.clear()
+            self.registered.clear()
+            self.registration_misses.clear()
             self.locked_dyaw.clear()
             self.slam_graphs.clear()
             self.cslam_disagreement.clear()
@@ -171,6 +193,8 @@ class MapService:
         self.cloud_registrations.pop(robot_id, None)
         self.registration_sources.pop(robot_id, None)
         self.registration_rejections.pop(robot_id, None)
+        self.registered.discard(robot_id)
+        self.registration_misses.pop(robot_id, None)
         self.locked_dyaw.pop(robot_id, None)
         self.slam_graphs.pop(robot_id, None)
         self.cslam_disagreement.pop(robot_id, None)
@@ -192,6 +216,8 @@ class MapService:
             self.cloud_registrations.clear()
             self.registration_sources.clear()
             self.registration_rejections.clear()
+            self.registered.clear()
+            self.registration_misses.clear()
             self.locked_dyaw.clear()
 
         self._remerge()
@@ -244,6 +270,8 @@ class MapService:
         self.robot_clouds.clear()
         self.registrations.clear()
         self.registration_rejections.clear()
+        self.registered.clear()
+        self.registration_misses.clear()
         self.locked_dyaw.clear()
         self.slam_graphs.clear()
         self.cslam_disagreement.clear()
@@ -251,6 +279,18 @@ class MapService:
         self.cslam_frames.clear()
         self.global_grid = None
         self.transforms = dict(self.transform_priors)
+        # A scan-fed robot has no grid of its own to drop — `_scan_grids` IS its
+        # map, accumulated here. Leaving it means the whole pre-reset map is
+        # re-ingested by the next scan that arrives, which is exactly the "old
+        # map comes straight back" failure the reset ordering exists to prevent.
+        # It costs nothing in the simulator, where nothing uses this path, and
+        # makes the reset a no-op for every robot mapping from `map_cloud`.
+        self._scan_grids.clear()
+        # All of these describe registrations against grids that no longer exist.
+        self.cloud_registrations.clear()
+        self.registration_sources.clear()
+        self.registered.clear()
+        self.registration_misses.clear()
 
     def set_cloud(self, robot_id: str, points: np.ndarray) -> None:
         """Store a cloud and refresh cloud-assisted registration when applicable."""
@@ -489,7 +529,17 @@ class MapService:
         """
         acc = self._scan_grids.get(robot_id)
         if acc is None:
-            acc = ScanGridAccumulator(origin_x, origin_y, resolution=self.meta.resolution)
+            # Size the window from the configured merged extent rather than the
+            # accumulator's own default. They are the same number today only by
+            # coincidence — raise `map.size_m` for a larger building and a
+            # hardcoded 40 m window would silently drop everything beyond it,
+            # with nothing anywhere to say a robot had driven off its own map.
+            acc = ScanGridAccumulator(
+                origin_x,
+                origin_y,
+                resolution=self.meta.resolution,
+                size_m=self.meta.width * self.meta.resolution,
+            )
             self._scan_grids[robot_id] = acc
         acc.integrate(origin_x, origin_y, points_xy)
         self.ingest(robot_id, acc.meta, acc.cells)
@@ -579,14 +629,23 @@ class MapService:
         self.registrations[robot_id] = result
         self.registration_sources[robot_id] = source
         if not result.confident:
+            # A locked robot that stops matching has to go back to searching
+            # widely, or a bad lock is self-perpetuating.
+            self.locked_dyaw.pop(robot_id, None)
+            misses = self.registration_misses.get(robot_id, 0) + 1
+            self.registration_misses[robot_id] = misses
+            if robot_id in self.registered and misses < REGISTRATION_MISS_LIMIT:
+                # Hold: keep the last accepted transform and stay in the merged
+                # map. The wider search the dropped lock just enabled gets a
+                # chance to confirm the robot before it is evicted, which is what
+                # stops one marginal frame from blanking the operator's map.
+                return
             self.registration_rejections[robot_id] = (
                 "ambiguous grid and point-cloud match"
                 if cloud is not None
                 else "ambiguous occupancy match"
             )
-            # A locked robot that stops matching has to go back to searching
-            # widely, or a bad lock is self-perpetuating.
-            self.locked_dyaw.pop(robot_id, None)
+            self.registered.discard(robot_id)
             return
         c, s = math.cos(ryaw), math.sin(ryaw)
         wx = rx + result.dx * c - result.dy * s
@@ -608,11 +667,19 @@ class MapService:
                 )
                 self.transforms[robot_id] = prior
                 self.locked_dyaw.pop(robot_id, None)
+                # No hysteresis here, unlike the ambiguous case above: this is a
+                # confident match that contradicts known deployment geometry, so
+                # it is positive evidence against whatever transform was held —
+                # not the absence of evidence for it.
+                self.registered.discard(robot_id)
+                self.registration_misses[robot_id] = 0
                 return
 
         self.registration_rejections.pop(robot_id, None)
         self.transforms[robot_id] = (wx, wy, candidate_yaw)
         self.locked_dyaw[robot_id] = result.dyaw
+        self.registered.add(robot_id)
+        self.registration_misses[robot_id] = 0
 
     def _update_cloud_registration(self, robot_id: str) -> None:
         """Estimate ``T_reference_robot`` from corresponding 3D height slices."""
@@ -787,10 +854,13 @@ class MapService:
                 if self.in_common_frame(rid)
                 and (majority is None or self.cslam_frames.get(rid) == majority)
             }
+        # `registered`, not the latest result's `confident` flag: a robot that has
+        # been accepted keeps its place through a few ambiguous frames, and the
+        # merged map it contributes to must not blink out under it meanwhile.
         accepted = {
             rid
-            for rid, result in self.registrations.items()
-            if result.confident and rid not in self.registration_rejections
+            for rid in self.registered
+            if rid not in self.registration_rejections
         }
         if not accepted or self.reference is None:
             return set()
@@ -967,7 +1037,13 @@ class MapService:
                     "yaw_ratio": round(r.yaw_ratio, 3),
                     "support": round(r.support, 3),
                     "confident": r.confident,
-                    "accepted": r.confident and k not in self.registration_rejections,
+                    # Whether this robot is in the merged map right now, which
+                    # during a hold is deliberately not the same as whether its
+                    # newest result was confident. `misses` is what shows the
+                    # difference: non-zero means the map is being held together
+                    # on an older transform.
+                    "accepted": k in members,
+                    "misses": self.registration_misses.get(k, 0),
                     "rejection": self.registration_rejections.get(k),
                     "dyaw_deg": round(math.degrees(r.dyaw), 2),
                     "locked": k in self.locked_dyaw,

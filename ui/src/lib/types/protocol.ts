@@ -101,7 +101,13 @@ export interface MapRegistration {
   /** Fraction of the smaller map's known area shared with the reference. */
   support: number;
   confident: boolean;
+  /** Whether this robot is contributing to the merged map right now. */
   accepted: boolean;
+  /**
+   * Consecutive ambiguous results since the last decisive one. Non-zero with
+   * `accepted` still true means the merge is being held on an older transform.
+   */
+  misses: number;
   rejection: string | null;
   dyaw_deg: number;
   /** True once accepted, when the search refines instead of sweeping all rotations. */

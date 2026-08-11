@@ -233,7 +233,133 @@ moved far enough to score. The direction of the result is consistent with deskew
 disabled, but treat the exact figures as indicative, not as a benchmark. Re-run
 `odomcompare.py` over several windows before quoting them anywhere.
 
+### 7. The scan-grid raytracer is pure Python, and only hardware uses it
+
+`mapsvc/scan_grid.py`'s `integrate()` loops in Python over every scan point and runs a
+Python-level Bresenham walk per point, allocating two arrays each time. **Nothing in
+simulation exercises it** — every simulated robot publishes its own `OccupancyGrid`. It is
+the *only* map path for botman, aslan and tars, all of which set `map: ""` and feed
+`map_cloud: /registered_scan`.
+
+One Ouster scan, height-filtered and deduplicated at 5 cm, is plausibly 5-20k unique cells,
+and each ray crosses a few hundred cells of an 800x800 grid — millions of interpreter
+iterations per scan, at `map_period_s: 2.0`, inside `asyncio.to_thread` while holding
+`_ingest_lock`, so it also serialises against every other robot's upload. This has never
+run against a real lidar.
+
+Vectorising it is straightforward — a fixed-step DDA over all rays at once (sample each ray
+at N interpolated points, `np.floor` to cells, `np.unique`, scatter) replaces the whole
+loop with a handful of array operations. **Benchmark it against a recorded
+`/registered_scan` bag before a deployment**, which needs no hardware.
+
+### 8. A scan-built grid never forgets an obstacle, and real buildings contain people
+
+`ScanGridAccumulator.integrate` never downgrades an occupied cell — "occupied always wins",
+by design. The merge layer's `majority` vote handles stale obstacles *between* robots, but
+it cannot repair a cell inside one robot's own accumulator. A person walking past a Bunker
+paints a permanent trail of walls into that robot's grid, and on the single-robot hardware
+sessions (`hardware_botman.yaml`, `hardware_aslan.yaml`) there is nobody to outvote them.
+The simulated world has no moving people, so this cost is invisible in every measurement
+taken so far.
+
+The standard fix is log-odds cells rather than a tri-state: a ray passing through
+decrements, a return increments, and a transient obstacle decays out after a few passes.
+That would also remove much of issue 7's cost. Related and already documented in
+`_remerge`: with `merge_conflict: majority`, ties go to occupied, so a two-robot fleet can
+never outvote a ghost either.
+
+### 9. Detection ids are per-frame slots, not tracked objects
+
+`object_detector.track_ids()` assigns `f"{label}_{index}"` by position in a batch sorted by
+descending score. There is no association across frames — despite the name, nothing is
+tracked. The backend then keys its detection table on `f"{robot_id}:{item['id']}"` and
+treats that as a stable object identity, carrying `first_seen` and an `observations` count
+against it.
+
+With two ducks in view, whichever scores higher this frame is `rubber_duck_0`; a score
+fluctuation swaps their identities and therefore their `map_position`s. When one leaves the
+frame the other inherits its slot and its accumulated history. The number of markers is
+capped at the maximum simultaneously-visible count per class per robot, and their positions
+overwrite each other. Either associate detections across frames (by IoU or by projected map
+position) and mint a stable id on first sighting, or stop presenting `map_position` as a
+persistent marker. The current middle ground reports object permanence it has not earned.
+
+### 10. Teleop is gated on the `navigate` capability
+
+The backend refuses `drive` unless `registry.can(rid, "navigate")` (`app.py`), and the UI's
+`canDrive` checks the same. But adapters only advertise `navigate` when a Nav2 action or
+`nav_goal` topic resolves, so a robot brought up with a working `cmd_vel` and no navigation
+stack advertises `["map", "estop"]` and cannot be driven at all — which is exactly the
+configuration you fall back to when autonomy will not start. The protocol table already
+separates `estop` ("accepts `stop`") from `navigate`; a `teleop` capability alongside them,
+derived from the same `pub_cmd`, is the honest split. Changing it touches the protocol
+README, both hardware adapters, `adapter_sim`, the backend gate and `DrivePanel`.
+
 ## Resolved
+
+### Four adapter-layer faults found by audit, three of them safety
+
+**RESOLVED**, 2026-08-11. None had been observed, because none of them can be: they live in
+the adapter and transport layer, which is the one part of the stack that cannot be
+exercised without a robot. All four now have regression tests.
+
+* **A reconnecting adapter silently unbound its own command channel.**
+  `Registry.disconnect()` popped `_sinks[robot_id]` unconditionally. `robot_id` is stable
+  across reconnects (protocol rule 5), so a robot whose link dropped and returned had two
+  sockets alive until the server noticed the first had died — and the dead one's cleanup
+  ran last, retiring the live socket. `robot_state` kept arriving over the new socket, so
+  the dashboard drew the robot as online with fresh telemetry, while every command out
+  silently failed. `stop_all` discarded `registry.send()`'s return value, so STOP ALL
+  reported nothing. `disconnect` now takes the socket and is a no-op unless it still owns
+  the entry; `stop_all` names any robot it could not reach in a critical alert.
+
+* **The teleop deadman stopped ticking when the link wedged** — the one case it exists for.
+  `drive_watchdog()` ran only inside the websocket `tx()` loop, so a TCP connection that
+  stopped delivering without resetting (the normal shape of Wi-Fi at the edge of coverage)
+  blocked `await ws.send()` and took the watchdog with it, for up to `ping_interval +
+  ping_timeout` ≈ 40 s of the robot executing its last commanded velocity. It now runs on a
+  ROS timer in both hardware adapters, off the robot's own clock.
+
+* **A failed detector or Nav2 took the whole robot off the dashboard.** The robot compose
+  files gated the `adapter` service on `duck_detector: service_healthy` and `nav2:
+  service_healthy`. A detector that cannot reach Ultralytics for its weights on a site with
+  no internet never reports healthy, and neither does a `bt_navigator` that will not go
+  `active` — so the adapter never started, and the robot had no telemetry, no map, no
+  camera and no teleop. Both are `service_started` now: capabilities are already derived
+  from what resolves at runtime, and `detect_bgr` is already fail-closed, so both degrade
+  correctly on their own. The dependency was the only thing making them fatal.
+
+* **On ROS 1, teleop did not preempt `move_base`.** The `nav_status`/`goal` reset in
+  `drive()` was nested inside the `pub_nav_stop` branch, and `nav_stop` is a
+  `local_planner` concept that is empty on every move_base robot including
+  `config/generic.yaml`. The operator grabbed the joystick, the actionlib goal stayed live,
+  and move_base kept publishing straight to the real `cmd_vel`. `drive()` now cancels
+  unconditionally, as `adapter_ros2` always did.
+
+### Five more found in the same pass
+
+**RESOLVED**, 2026-08-11.
+
+* **A fleet reset left a scan-fed robot's entire map behind.** `MapService.reset()` cleared
+  every other map product but not `_scan_grids`, which IS the map on that path, so the next
+  scan re-ingested the whole pre-reset grid. `reset_robot(None)` three methods above had
+  always cleared it.
+* **Detector inference ran inside the ROS callback thread** in both hardware adapters — a
+  blocking HTTP round trip plus a tf2 lookup per detection, stalling odometry, the map and
+  TF several times a second on a single-threaded executor. `adapter_sim` had always run it
+  off-thread; both ports now do the same via `run_detection()`.
+* **Raw camera images were reshaped without `step`.** ROS images may pad rows and several
+  real drivers do; the reshape then either raised — and the bare `except` dropped every
+  frame, so the camera looked dead with nothing in the log — or silently produced a skewed
+  image. Both adapters now use `adapter_sim`'s `step`-aware decode and warn once on an
+  encoding they cannot handle.
+* **Scans were raytraced from the pose at upload time**, up to `map_period_s` after
+  capture: at 0.5 m/s that is a metre of error in the origin every ray is traced from,
+  carving free space through geometry the beam never crossed — and corrupting exactly the
+  free/occupied contrast `registration.py` uses to break rotational symmetry. The capture
+  pose is now carried with the points.
+* **`/api/adapter/map` returned 500 on a malformed upload** where its sibling
+  `/api/adapter/global_map` returned 400, and neither bounded `zlib.decompress`.
 
 ### Swarm-SLAM: real inter-robot loop closures, and five silent traps
 

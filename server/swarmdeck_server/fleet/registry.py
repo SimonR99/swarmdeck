@@ -116,7 +116,28 @@ class Registry:
         r = self.robots.get(robot_id)
         return bool(r and cap in r.capabilities)
 
-    def disconnect(self, robot_id: str) -> None:
+    def has_sink(self, robot_id: str) -> bool:
+        """Is there currently a socket commands for this robot would reach?"""
+        return robot_id in self._sinks
+
+    def disconnect(self, robot_id: str, sink: Any = None) -> None:
+        """Retire a socket, but only if it is still the one commands go to.
+
+        `robot_id` is stable across reconnects (protocol rule 5), so a robot
+        whose link drops and comes back has TWO sockets alive for as long as it
+        takes the server to notice the first one died — and the old socket's
+        cleanup runs last. Popping unconditionally therefore unbinds the NEW
+        socket, and the robot goes on reporting state over it while every
+        command silently goes nowhere: `send` returns False and the dashboard
+        still draws the robot as online, because `last_seen` keeps advancing.
+        That includes `stop`.
+
+        Passing the socket makes cleanup idempotent per-connection. `None` keeps
+        the old unconditional behaviour for callers that genuinely mean "this
+        robot is gone".
+        """
+        if sink is not None and self._sinks.get(robot_id) is not sink:
+            return
         self._sinks.pop(robot_id, None)
 
     async def send(self, robot_id: str, msg: dict[str, Any]) -> bool:

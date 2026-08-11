@@ -65,10 +65,14 @@ services:
     depends_on:
       robot_stack:
         condition: service_started
+      # `service_started`, not `service_healthy` — see the long note on the same
+      # dependencies in docker-compose.robot-botman.yml. A detector that cannot
+      # fetch its weights, or a bt_navigator that will not go `active`, must not
+      # be able to take telemetry, video and teleop down with it.
       nav2:
-        condition: service_healthy
+        condition: service_started
       duck_detector:
-        condition: service_healthy
+        condition: service_started
     network_mode: host
     ipc: host
     environment:

@@ -87,3 +87,45 @@ def test_a_second_scan_from_the_same_robot_accumulates_not_replaces():
 
     _, cells = svc.robot_grids["r0"]
     assert (cells == OCCUPIED).sum() == 2, "both scans' hits must still be present"
+
+
+def test_reset_forgets_the_accumulated_scan_grid():
+    """A fleet reset must not leave a scan-fed robot's whole map behind.
+
+    `_scan_grids` IS the map for a robot with no OccupancyGrid of its own — the
+    hardware path for both Bunkers and for tars. `MapService.reset()` cleared
+    every OTHER map product but left the accumulator standing, so the next scan
+    to arrive re-ingested the entire pre-reset grid: the "old map comes straight
+    back" failure the reset ordering exists to prevent, arriving by a route the
+    ordering could not cover. Invisible in simulation, where nothing uses this
+    path at all.
+    """
+    from swarmdeck_server.mapsvc.service import MapService
+
+    service = MapService(resolution=0.05, size_m=40.0)
+    service.set_mode("static")
+    service.ingest_scan(
+        "botman_0", 0.0, 0.0,
+        np.array([[1.0, 0.0], [1.0, 0.1], [1.0, 0.2]], dtype=np.float32),
+    )
+    assert int((service.merged >= 50).sum()) == 3
+
+    service.reset()
+    assert (service.merged == -1).all()
+    assert "botman_0" not in service._scan_grids
+
+    # One new return must produce exactly one occupied cell, not four.
+    service.ingest_scan(
+        "botman_0", 0.0, 0.0, np.array([[2.0, 0.0]], dtype=np.float32)
+    )
+    assert int((service.merged >= 50).sum()) == 1
+
+
+def test_scan_window_follows_the_configured_map_extent():
+    """The per-robot window must not silently stay at its own 40 m default."""
+    from swarmdeck_server.mapsvc.service import MapService
+
+    service = MapService(resolution=0.05, size_m=80.0)
+    service.ingest_scan("r0", 0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
+    accumulator = service._scan_grids["r0"]
+    assert accumulator.meta.width * accumulator.meta.resolution == 80.0

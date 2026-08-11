@@ -197,6 +197,8 @@ class HardwareBridge:
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
         self._scan_points: np.ndarray | None = None
+        # Sensor pose when `_scan_points` was captured; see _on_map_cloud.
+        self._scan_origin: dict[str, float] | None = None
         self._scan_dirty = False
         self._cloud_points: np.ndarray | None = None
         self._cloud_dirty = False
@@ -211,6 +213,10 @@ class HardwareBridge:
         self._last_drive_at = 0.0
         self._camera_jpeg: bytes | None = None
         self._camera_dirty = False
+        self._camera_encoding_warned = False
+        # Newest frame awaiting detection, as (jpeg, header). The ROS callback
+        # only ever assigns it; run_detection() consumes it from a worker thread.
+        self._detect_pending: tuple[bytes, Any] | None = None
         self._camera_depth_image: Image | None = None
         self._camera_info: CameraInfo | None = None
         self._camera_depth_cloud: PointCloud2 | None = None
@@ -309,6 +315,17 @@ class HardwareBridge:
         if action_name and NavigateToPose is not None:
             self.nav_client = ActionClient(node, NavigateToPose, action_name)
 
+        # The deadman runs off the ROBOT's clock, not the operator link.
+        #
+        # It used to be called from the websocket tx loop, which is the one place
+        # it cannot be trusted: a wedged TCP connection — the normal shape of a
+        # Wi-Fi link at the edge of coverage, where it stops delivering without
+        # ever resetting — blocks `await ws.send()` on the write buffer, and the
+        # watchdog stopped with it. websockets only gives up after
+        # ping_interval + ping_timeout, so the robot would keep executing its
+        # last commanded velocity for up to ~40 s with nobody watching.
+        self._watchdog_timer = node.create_timer(0.1, self.drive_watchdog)
+
     # ------------------------------------------------------------- capabilities
 
     def capabilities(self) -> list[str]:
@@ -388,6 +405,14 @@ class HardwareBridge:
         keys = np.round(xy / MAP_CLOUD_VOXEL).astype(np.int32)
         _, keep = np.unique(keys, axis=0, return_index=True)
         self._scan_points = xy[keep]
+        # Pair the points with the pose they were captured AT. upload_scan used
+        # to read the pose at upload time, up to map_period_s later, and the
+        # backend raytraces free space from that origin — so at 0.5 m/s with a
+        # 2 s period every ray was traced from a point up to a metre from where
+        # the beam actually left the sensor, carving free space through geometry
+        # it never crossed. That corrupts precisely the free/occupied contrast
+        # registration.py relies on to break rotational symmetry.
+        self._scan_origin = self.map_pose()
         self._scan_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
@@ -410,7 +435,48 @@ class HardwareBridge:
             return
         self._camera_jpeg = bytes(msg.data)
         self._camera_dirty = True
-        self._detect_jpeg(self._camera_jpeg, getattr(msg, "header", None))
+        # Queue for detection; do NOT run inference here. See run_detection().
+        self._detect_pending = (self._camera_jpeg, getattr(msg, "header", None))
+
+    @staticmethod
+    def _image_to_bgr(msg: Image):
+        """Decode a sensor_msgs/Image, honouring `step`, or None.
+
+        `step` is not decoration: ROS images may pad each row for alignment and
+        several real drivers do. Reshaping to (height, width, -1) assumes
+        `step == width * channels`, which on a padded stream either raises — and
+        the caller's `except` then silently drops every frame, so the camera
+        appears dead with nothing in the log — or, worse, silently succeeds and
+        yields a skewed image. `adapter_sim` has always done this correctly;
+        this is that decode.
+        """
+        try:
+            import cv2
+        except ImportError:
+            return None
+        encoding = str(getattr(msg, "encoding", "")).lower()
+        channels = {
+            "rgb8": 3, "8uc3": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1
+        }.get(encoding)
+        if channels is None:
+            return None
+        try:
+            step = int(getattr(msg, "step", 0)) or msg.width * channels
+            rows = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, step)
+            frame = rows[:, : msg.width * channels].reshape(
+                msg.height, msg.width, channels
+            )
+        except (ValueError, TypeError):
+            return None
+        if encoding in ("rgb8", "8uc3"):
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if encoding == "rgba8":
+            return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        if encoding == "bgra8":
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        if encoding == "mono8":
+            return frame.reshape(msg.height, msg.width)
+        return frame
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Encoding here rather than shipping raw: the protocol's preview channel
@@ -419,23 +485,38 @@ class HardwareBridge:
             import cv2
         except ImportError:
             return
-        try:
-            frame = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-                msg.height, msg.width, -1
-            )
-            if msg.encoding in ("rgb8", "rgba8"):
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            if ok:
-                self._camera_jpeg = buf.tobytes()
-                self._camera_dirty = True
-                self._detect_bgr(frame, image_header=getattr(msg, "header", None))
-        except (ValueError, TypeError):
+        frame = self._image_to_bgr(msg)
+        if frame is None:
+            if not self._camera_encoding_warned:
+                self._camera_encoding_warned = True
+                self.node.get_logger().warn(
+                    f"[{self.id}] cannot decode camera encoding "
+                    f"{getattr(msg, 'encoding', '?')!r}; no preview will be sent"
+                )
             return
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if not ok:
+            return
+        self._camera_jpeg = buf.tobytes()
+        self._camera_dirty = True
+        self._detect_pending = (self._camera_jpeg, getattr(msg, "header", None))
 
-    def _detect_jpeg(self, jpeg: bytes, image_header=None) -> None:
-        if not self._detection_due():
+    def run_detection(self) -> None:
+        """Detect on the newest queued frame. Runs OFF the ROS executor thread.
+
+        Inference is a blocking HTTP round trip to the sidecar (up to
+        `timeout_s`), and `_depth_map_position` adds a tf2 lookup per detection.
+        Called from a subscription callback, as it used to be, all of that ran
+        inside the single-threaded executor and stalled every other callback on
+        the node — odometry, the map, and the very TF the pose report depends
+        on — several times a second. `adapter_sim` has always run detection off
+        the ROS thread; this is the same arrangement.
+        """
+        pending = self._detect_pending
+        self._detect_pending = None
+        if pending is None or not self._detection_due():
             return
+        jpeg, image_header = pending
         try:
             import cv2
 
@@ -702,7 +783,14 @@ class HardwareBridge:
     def navigate_to(self, goal: dict[str, float]) -> None:
         if self.nav_client is None:
             return
-        if not self.nav_client.wait_for_server(timeout_sec=2.0):
+        # Non-blocking. `wait_for_server(2.0)` was called straight from the rx
+        # coroutine, so for those two seconds the tx loop could not run: no 5 Hz
+        # state, no reset report. Four seconds of silence is what the backend
+        # reads as the robot going offline (OFFLINE_AFTER_S), so a slow action
+        # server put the robot halfway to being declared dead on every goal.
+        # The server is either up by now or the goal is refused — which is the
+        # same answer two seconds of waiting would have produced.
+        if not self.nav_client.server_is_ready():
             self.node.get_logger().warn(
                 f"[{self.id}] navigation action server not available; goal dropped"
             )
@@ -830,7 +918,8 @@ class HardwareBridge:
         self._scan_dirty = False
         if not len(self._scan_points):
             return
-        origin = self.map_pose()
+        # The pose these points were captured at, not the pose now. See _on_map_cloud.
+        origin = self._scan_origin or self.map_pose()
         points = self._scan_points
         # A deck-mounted 3D lidar can see the chassis beneath and behind it.
         # Those returns are already in the map frame, so remove the robot's
@@ -943,7 +1032,12 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             continue
                         kind = msg.get("type")
                         if kind == "navigate_to":
-                            bridge.navigate_to(msg.get("goal", {}))
+                            # Off-thread: sending a goal talks to an action
+                            # server that may be slow or absent, and blocking
+                            # this coroutine stalls the tx loop with it.
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, bridge.navigate_to, msg.get("goal", {})
+                            )
                         elif kind == "cancel_goal":
                             bridge.cancel_goal()
                         elif kind == "drive":
@@ -966,7 +1060,8 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     last_settings = 0.0
                     while True:
                         await ws.send(json.dumps(bridge.state()))
-                        bridge.drive_watchdog()
+                        # No drive_watchdog() here: it runs on a ROS timer so it
+                        # keeps ticking when this loop cannot. See __init__.
                         now = time.monotonic()
                         if now - last_map > float(rates["map_period_s"]):
                             last_map = now
@@ -980,6 +1075,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         if now - last_cam > float(rates["camera_period_s"]):
                             last_cam = now
                             await loop.run_in_executor(None, bridge.upload_camera)
+                            await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
                             if detections is not None:
                                 await ws.send(json.dumps({

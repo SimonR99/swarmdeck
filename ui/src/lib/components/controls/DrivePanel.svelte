@@ -284,10 +284,16 @@
           </span>
           <output class="tabular text-[10px] font-semibold text-fg">{maxSpeed.toFixed(2)}</output>
         </div>
+        <!--
+          Max matches the backend's own clamp on `drive` (app.py), deliberately.
+          The slider used to go to 0.60 while the server clamped to 0.45, so the
+          top quarter of its travel did nothing and the number under the operator's
+          thumb was not the speed the robot was given.
+        -->
         <input
           type="range"
           min="0.1"
-          max="0.6"
+          max="0.45"
           step="0.05"
           value={maxSpeed}
           disabled={!canDrive}
@@ -296,7 +302,7 @@
           oninput={changeMaxSpeed}
         />
         <div class="mt-0.5 flex justify-between text-[8px] text-fg-dim">
-          <span>0.10</span><span>m/s</span><span>0.60</span>
+          <span>0.10</span><span>m/s</span><span>0.45</span>
         </div>
 
         <div class="mb-2 mt-3 border-t border-border pt-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">

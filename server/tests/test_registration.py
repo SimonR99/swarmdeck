@@ -394,3 +394,78 @@ def test_auto_mode_exposes_global_map_after_accepted_match(monkeypatch):
     status = svc.status()
     assert status["global_members"] == ["r0", "r1"]
     assert status["view_by_robot"] == {"r0": "global", "r1": "global"}
+
+
+def test_a_marginal_frame_does_not_evict_a_registered_robot(monkeypatch):
+    """The merged map must not blink out because one upload matched ambiguously.
+
+    Reproduces the live oscillation: on the running fleet the wide search always
+    accepted robot_1 (ratio 0.679) and the narrow search the resulting lock
+    enabled always refused it (ratio 0.895) on bit-identical grids, so
+    membership alternated between 2/4 and 0/4 at the map upload rate.
+    """
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    wide = Registration(dx=0, dy=0, dyaw=0, score=0.33, overlap=138, ratio=0.679,
+                        yaw_ratio=0.073, support=0.402)
+    narrow = Registration(dx=0, dy=0, dyaw=0, score=0.29, overlap=126, ratio=0.895,
+                          yaw_ratio=0.0, support=0.402)
+    monkeypatch.setattr(
+        service_module,
+        "register",
+        lambda *args, **kwargs: narrow if kwargs.get("yaw_prior") is not None else wide,
+    )
+
+    svc = MapService(resolution=0.1, size_m=20.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -10, -10)
+    cells = np.zeros((n, n), np.int8)
+    cells[80:90, 80:90] = 100
+    svc.ingest("r0", meta, cells)
+
+    seen = []
+    for _ in range(8):
+        svc.ingest("r1", meta, cells)
+        seen.append(tuple(svc.status()["global_members"]))
+
+    assert set(seen) == {("r0", "r1")}, f"membership oscillated: {seen}"
+    # The lock still drops on an ambiguous frame — that escalation back to a wide
+    # search is what lets the next upload confirm the robot instead of repeating
+    # the same narrow failure.
+    assert svc.status()["registrations"]["r1"]["misses"] in (0, 1)
+
+
+def test_a_robot_that_keeps_matching_ambiguously_is_dropped(monkeypatch):
+    """Hysteresis delays eviction; it must not prevent it."""
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    accepted = Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200, ratio=0.2,
+                            yaw_ratio=0.2, support=0.9)
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: accepted)
+
+    svc = MapService(resolution=0.1, size_m=20.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -10, -10)
+    cells = np.zeros((n, n), np.int8)
+    cells[80:90, 80:90] = 100
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells)
+    assert svc.status()["global_members"] == ["r0", "r1"]
+
+    ambiguous = Registration(dx=0, dy=0, dyaw=0, score=0.1, overlap=20, ratio=0.95,
+                             yaw_ratio=0.95, support=0.2)
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
+
+    for _ in range(service_module.REGISTRATION_MISS_LIMIT - 1):
+        svc.ingest("r1", meta, cells)
+        assert svc.status()["registrations"]["r1"]["accepted"] is True, "held, not dropped"
+
+    svc.ingest("r1", meta, cells)
+    status = svc.status()
+    assert status["global_members"] == []
+    assert status["registrations"]["r1"]["accepted"] is False
+    assert status["registrations"]["r1"]["rejection"] == "ambiguous occupancy match"

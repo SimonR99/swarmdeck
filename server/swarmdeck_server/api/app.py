@@ -583,24 +583,57 @@ async def get_local_map_info(robot_id: str) -> Response:
     return JSONResponse(info)
 
 
+# Ceiling on a decompressed adapter upload. A 100 m map at 5 cm is 4 M cells, so
+# this is generous for anything the fleet can legitimately send while keeping a
+# malformed or hostile body from expanding without bound inside the event loop.
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
+def _inflate(body: bytes) -> bytes:
+    """zlib-decompress an upload, refusing anything past MAX_UPLOAD_BYTES."""
+    import zlib
+
+    decompressor = zlib.decompressobj()
+    raw = decompressor.decompress(body, MAX_UPLOAD_BYTES)
+    if decompressor.unconsumed_tail:
+        raise ValueError("upload exceeds the maximum decompressed size")
+    return raw
+
+
 @app.post("/api/adapter/map")
-async def post_map(request: Request) -> dict[str, Any]:
-    """Adapter uploads its occupancy grid (zlib int8, row-major)."""
+async def post_map(request: Request) -> Any:
+    """Adapter uploads its occupancy grid (zlib int8, row-major).
+
+    Validated the same way `/api/adapter/global_map` is. This is the endpoint
+    every robot with an `OccupancyGrid` uses, and an unvalidated reshape turns a
+    truncated upload into a 500 with a traceback instead of a 400 an adapter can
+    log and retry against.
+    """
     import zlib
 
     rid = request.query_params.get("robot_id", "")
     if not rid:
         return JSONResponse({"error": "robot_id required"}, status_code=400)
-    meta = GridMeta(
-        resolution=float(request.query_params.get("resolution", 0.05)),
-        width=int(request.query_params.get("width", 0)),
-        height=int(request.query_params.get("height", 0)),
-        origin_x=float(request.query_params.get("origin_x", 0.0)),
-        origin_y=float(request.query_params.get("origin_y", 0.0)),
-    )
-    raw = zlib.decompress(await request.body())
-    cells = np.frombuffer(raw, dtype=np.int8).reshape(meta.height, meta.width)
-    await map_service.ingest_async(rid, meta, cells)
+    try:
+        meta = GridMeta(
+            resolution=float(request.query_params.get("resolution", 0.05)),
+            width=int(request.query_params.get("width", 0)),
+            height=int(request.query_params.get("height", 0)),
+            origin_x=float(request.query_params.get("origin_x", 0.0)),
+            origin_y=float(request.query_params.get("origin_y", 0.0)),
+        )
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "malformed grid metadata"}, status_code=400)
+    if meta.width <= 0 or meta.height <= 0:
+        return JSONResponse({"error": "width and height required"}, status_code=400)
+    try:
+        raw = _inflate(await request.body())
+        cells = np.frombuffer(raw, dtype=np.int8)
+    except (zlib.error, ValueError) as exc:
+        return JSONResponse({"error": f"malformed grid: {exc}"}, status_code=400)
+    if cells.size != meta.width * meta.height:
+        return JSONResponse({"error": "size mismatch"}, status_code=400)
+    await map_service.ingest_async(rid, meta, cells.reshape(meta.height, meta.width))
     return {"ok": True, "cells": int(cells.size)}
 
 
@@ -632,7 +665,7 @@ async def post_global_map(request: Request) -> Any:
     if meta.width <= 0 or meta.height <= 0:
         return JSONResponse({"error": "width and height required"}, status_code=400)
     try:
-        raw = zlib.decompress(await request.body())
+        raw = _inflate(await request.body())
         cells = np.frombuffer(raw, dtype=np.int8)
     except (zlib.error, ValueError):
         return JSONResponse({"error": "malformed grid"}, status_code=400)
@@ -657,7 +690,7 @@ async def post_cloud(request: Request) -> Any:
         return JSONResponse({"error": "robot_id required"}, status_code=400)
     scale = float(request.query_params.get("scale", CLOUD_SCALE))
     try:
-        raw = zlib.decompress(await request.body())
+        raw = _inflate(await request.body())
         quantised = np.frombuffer(raw, dtype=np.int16)
     except (zlib.error, ValueError):
         return JSONResponse({"error": "malformed cloud"}, status_code=400)
@@ -691,7 +724,7 @@ async def post_scan(request: Request) -> Any:
         return JSONResponse({"error": "origin_x/origin_y required"}, status_code=400)
     scale = float(request.query_params.get("scale", CLOUD_SCALE))
     try:
-        raw = zlib.decompress(await request.body())
+        raw = _inflate(await request.body())
         quantised = np.frombuffer(raw, dtype=np.int16)
     except (zlib.error, ValueError):
         return JSONResponse({"error": "malformed scan"}, status_code=400)
@@ -784,8 +817,15 @@ async def gui_socket(ws: WebSocket) -> None:
             await ws.send_json({"type": "alert", "alert": a})
 
         while True:
-            msg = json.loads(await ws.receive_text())
-            await handle_gui_message(msg)
+            raw = await ws.receive_text()
+            # Per message, so one malformed frame costs that frame and not the
+            # connection. Only a transport failure should end the loop.
+            try:
+                await handle_gui_message(json.loads(raw))
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                print(f"[gui] dropped a malformed message: {exc}")
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -853,9 +893,22 @@ async def handle_gui_message(msg: dict[str, Any]) -> None:
             registry.robots[rid].goal = None
 
     elif kind == "stop_all":
-        for robot_id in list(registry.robots):
-            await registry.send(robot_id, {"type": "stop", **stamps()})
+        # Whether each robot was actually REACHED, not merely addressed. A stop
+        # that went nowhere is the one command an operator must never be allowed
+        # to believe succeeded, so the robots it failed to reach are named.
+        undelivered = [
+            robot_id
+            for robot_id in list(registry.robots)
+            if not await registry.send(robot_id, {"type": "stop", **stamps()})
+        ]
         await raise_alert("stop_all", "critical", "fault", "STOP ALL issued by operator")
+        if undelivered:
+            events.log("stop_all_undelivered", {"robots": sorted(undelivered)})
+            await raise_alert(
+                "stop_all_undelivered", "critical", "fault",
+                f"STOP did not reach {', '.join(sorted(undelivered))} — "
+                f"they may still be moving",
+            )
 
     elif kind == "reset_sim":
         # Fire-and-forget: reset_fleet() waits on every adapter, and awaiting it
@@ -884,141 +937,182 @@ async def adapter_socket(ws: WebSocket) -> None:
     robot_id: str | None = None
     try:
         while True:
-            msg = json.loads(await ws.receive_text())
-            kind = msg.get("type", "")
-
-            if kind == "hello":
-                # 2 adds the optional `slam_graph` message and nothing else, so a
-                # protocol-1 adapter stays valid forever. Rejecting it would
-                # break exactly the mixed-fleet property the contract exists for.
-                if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
-                    await ws.close(code=4400)
-                    return
-                r = registry.hello(msg, ws)
-                robot_id = r.robot_id
-                if r.coordinate_frame == "merged":
-                    map_service.set_transform(robot_id, 0.0, 0.0, 0.0)
-                await ws.send_json({"type": "hello_ack", "robot_id": robot_id})
-                await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
-                events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
-
-            elif kind == "robot_state":
-                registry.update_state(msg)
-
-            elif kind == "detections":
-                rid = msg["robot_id"]
-                camera = msg.get("camera", "front")
-                visible: set[str] = set()
-                for item in msg.get("items", []):
-                    detection_id = f"{rid}:{item.get('id', item.get('class', 'object'))}"
-                    visible.add(detection_id)
-                    previous = _detections.get(detection_id)
-                    now = time.time()
-                    det = {
-                        "id": detection_id,
-                        "class": item.get("class", "object"),
-                        "score": item.get("score", 0.0),
-                        "robot_id": rid,
-                        "camera": camera,
-                        "bbox": item.get("bbox"),
-                        "polygon": item.get("polygon"),
-                        "map_position": detection_position(
-                            rid, item.get("map_position")
-                        ),
-                        "first_seen": previous["first_seen"] if previous else now,
-                        "last_seen": now,
-                        "observations": (previous["observations"] + 1) if previous else 1,
-                    }
-                    _detections[detection_id] = det
-                    await broadcast({"type": "detection", "detection": det})
-
-                # An object that has left the frame is reported by its ABSENCE
-                # from the batch; the protocol carries no per-object "lost"
-                # message. So the batch itself has to retract what it no longer
-                # contains, or the operator keeps a stale rectangle painted over
-                # live video for as long as the adapter stays connected.
-                #
-                # Only the box is retracted. `map_position` is somewhere we went
-                # and found something, not something we can currently see, so it
-                # outlives the sighting and stays on the map.
-                retracted = [
-                    key
-                    for key, det in _detections.items()
-                    if det["robot_id"] == rid
-                    and det["camera"] == camera
-                    and key not in visible
-                    and det["bbox"] is not None
-                ]
-                for key in retracted:
-                    # Re-read: the broadcast below yields, so another adapter's
-                    # batch can land between building this list and using it.
-                    current = _detections.get(key)
-                    if current is None or current["bbox"] is None:
-                        continue
-                    det = {**current, "bbox": None, "polygon": None}
-                    _detections[key] = det
-                    await broadcast({"type": "detection", "detection": det})
-
-            elif kind == "map_meta":
-                pass  # metadata accompanies the HTTP upload
-
-            elif kind == "reset_done":
-                # The adapter has finished resetting and has dropped its cached
-                # grid, so the backend may now clear without the old map coming
-                # straight back. See reset_fleet().
-                #
-                # A partial failure is recorded rather than alerted on here:
-                # reset_fleet() clears every alert once the fleet has answered,
-                # which would wipe an alert raised from inside this branch.
-                rid = msg.get("robot_id", "")
-                if rid in _reset_pending:
-                    if not msg.get("ok", True):
-                        _reset_failures[rid] = msg.get("steps") or {}
-                    _reset_pending.discard(rid)
-                    if not _reset_pending and _reset_done is not None:
-                        _reset_done.set()
-
-            elif kind == "slam_graph":
-                # Optional (protocol 2). A robot running a collaborative back end
-                # reports its own view of the shared pose graph; adapters that do
-                # not run one simply never send this and nothing downstream
-                # changes.
-                rid = msg.get("robot_id")
-                if rid:
-                    graph = {
-                        "keyframes": int(msg.get("keyframes", 0)),
-                        "in_common_frame": bool(msg.get("in_common_frame", False)),
-                        "residual": msg.get("residual"),
-                        "inter_robot": msg.get("inter_robot", []),
-                        "t_mono": msg.get("t_mono"),
-                    }
-                    map_service.set_slam_graph(rid, graph)
-                    # `origin` is this robot's SLAM frame expressed in the
-                    # collaborative back end's common frame. In `cslam` mode it
-                    # REPLACES grid registration as the source of the merge
-                    # transform, which is the whole point of running a joint
-                    # pose graph: the transform falls out of the loop closures
-                    # instead of being re-estimated from finished maps.
-                    common_pose = msg.get("common_pose")
-                    if isinstance(common_pose, dict):
-                        map_service.set_common_pose(rid, common_pose)
-                    origin = msg.get("origin")
-                    if isinstance(origin, dict):
-                        map_service.set_cslam_origin(
-                            rid,
-                            float(origin.get("x", 0.0)),
-                            float(origin.get("y", 0.0)),
-                            float(origin.get("yaw", 0.0)),
-                            str(origin.get("frame") or ""),
-                        )
-                    await broadcast({"type": "slam_graph", "robot_id": rid, "graph": graph})
-
-            # Unknown types are ignored, not fatal (protocol rule 3).
+            raw = await ws.receive_text()
+            # Rule 3 makes an unknown message type non-fatal. A MALFORMED one
+            # deserves the same: a truncated frame, a `detections` batch with no
+            # `robot_id`, a `hello` whose `footprint_radius` will not parse —
+            # each of those used to raise out of this loop and disconnect the
+            # robot, which on hardware means losing telemetry and control over a
+            # single bad packet.
+            try:
+                msg = json.loads(raw)
+            except ValueError as exc:
+                print(f"[adapter] dropped an unparseable message: {exc}")
+                continue
+            try:
+                closed = await handle_adapter_message(msg, ws)
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                print(f"[adapter] dropped a malformed {msg.get('type', '?')}: {exc}")
+                continue
+            if closed:
+                return
+            if robot_id is None and msg.get("type") == "hello":
+                robot_id = registry_id_of(msg)
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         print(f"[adapter] socket error: {exc}")
     finally:
         if robot_id:
-            registry.disconnect(robot_id)
+            # Pass the socket: a robot that reconnected while this one was dying
+            # already owns the entry, and unbinding it here would leave the robot
+            # visibly online with no way to reach it. See Registry.disconnect.
+            registry.disconnect(robot_id, ws)
             events.log("adapter_disconnect", {"robot_id": robot_id})
+            # Drop the stale preview, but only if nothing took this robot's
+            # place: `GET /api/camera/<id>` otherwise serves a departed robot's
+            # last frame indefinitely, with only X-Frame-Age-Ms to say so.
+            if not registry.has_sink(robot_id):
+                _camera_frames.pop(robot_id, None)
+
+
+def registry_id_of(hello: dict[str, Any]) -> str | None:
+    """The robot_id a `hello` claimed, once the registry has accepted it."""
+    rid = hello.get("robot_id")
+    return rid if isinstance(rid, str) and rid in registry.robots else None
+
+
+async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
+    """Dispatch one adapter message. Returns True if the socket was closed."""
+    kind = msg.get("type", "")
+
+    if kind == "hello":
+        # 2 adds the optional `slam_graph` message and nothing else, so a
+        # protocol-1 adapter stays valid forever. Rejecting it would
+        # break exactly the mixed-fleet property the contract exists for.
+        if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
+            await ws.close(code=4400)
+            return True
+        r = registry.hello(msg, ws)
+        robot_id = r.robot_id
+        if r.coordinate_frame == "merged":
+            map_service.set_transform(robot_id, 0.0, 0.0, 0.0)
+        await ws.send_json({"type": "hello_ack", "robot_id": robot_id})
+        await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
+        events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
+
+    elif kind == "robot_state":
+        registry.update_state(msg)
+
+    elif kind == "detections":
+        rid = msg["robot_id"]
+        camera = msg.get("camera", "front")
+        visible: set[str] = set()
+        for item in msg.get("items", []):
+            detection_id = f"{rid}:{item.get('id', item.get('class', 'object'))}"
+            visible.add(detection_id)
+            previous = _detections.get(detection_id)
+            now = time.time()
+            det = {
+                "id": detection_id,
+                "class": item.get("class", "object"),
+                "score": item.get("score", 0.0),
+                "robot_id": rid,
+                "camera": camera,
+                "bbox": item.get("bbox"),
+                "polygon": item.get("polygon"),
+                "map_position": detection_position(
+                    rid, item.get("map_position")
+                ),
+                "first_seen": previous["first_seen"] if previous else now,
+                "last_seen": now,
+                "observations": (previous["observations"] + 1) if previous else 1,
+            }
+            _detections[detection_id] = det
+            await broadcast({"type": "detection", "detection": det})
+
+        # An object that has left the frame is reported by its ABSENCE
+        # from the batch; the protocol carries no per-object "lost"
+        # message. So the batch itself has to retract what it no longer
+        # contains, or the operator keeps a stale rectangle painted over
+        # live video for as long as the adapter stays connected.
+        #
+        # Only the box is retracted. `map_position` is somewhere we went
+        # and found something, not something we can currently see, so it
+        # outlives the sighting and stays on the map.
+        retracted = [
+            key
+            for key, det in _detections.items()
+            if det["robot_id"] == rid
+            and det["camera"] == camera
+            and key not in visible
+            and det["bbox"] is not None
+        ]
+        for key in retracted:
+            # Re-read: the broadcast below yields, so another adapter's
+            # batch can land between building this list and using it.
+            current = _detections.get(key)
+            if current is None or current["bbox"] is None:
+                continue
+            det = {**current, "bbox": None, "polygon": None}
+            _detections[key] = det
+            await broadcast({"type": "detection", "detection": det})
+
+    elif kind == "map_meta":
+        pass  # metadata accompanies the HTTP upload
+
+    elif kind == "reset_done":
+        # The adapter has finished resetting and has dropped its cached
+        # grid, so the backend may now clear without the old map coming
+        # straight back. See reset_fleet().
+        #
+        # A partial failure is recorded rather than alerted on here:
+        # reset_fleet() clears every alert once the fleet has answered,
+        # which would wipe an alert raised from inside this branch.
+        rid = msg.get("robot_id", "")
+        if rid in _reset_pending:
+            if not msg.get("ok", True):
+                _reset_failures[rid] = msg.get("steps") or {}
+            _reset_pending.discard(rid)
+            if not _reset_pending and _reset_done is not None:
+                _reset_done.set()
+
+    elif kind == "slam_graph":
+        # Optional (protocol 2). A robot running a collaborative back end
+        # reports its own view of the shared pose graph; adapters that do
+        # not run one simply never send this and nothing downstream
+        # changes.
+        rid = msg.get("robot_id")
+        if rid:
+            graph = {
+                "keyframes": int(msg.get("keyframes", 0)),
+                "in_common_frame": bool(msg.get("in_common_frame", False)),
+                "residual": msg.get("residual"),
+                "inter_robot": msg.get("inter_robot", []),
+                "t_mono": msg.get("t_mono"),
+            }
+            map_service.set_slam_graph(rid, graph)
+            # `origin` is this robot's SLAM frame expressed in the
+            # collaborative back end's common frame. In `cslam` mode it
+            # REPLACES grid registration as the source of the merge
+            # transform, which is the whole point of running a joint
+            # pose graph: the transform falls out of the loop closures
+            # instead of being re-estimated from finished maps.
+            common_pose = msg.get("common_pose")
+            if isinstance(common_pose, dict):
+                map_service.set_common_pose(rid, common_pose)
+            origin = msg.get("origin")
+            if isinstance(origin, dict):
+                map_service.set_cslam_origin(
+                    rid,
+                    float(origin.get("x", 0.0)),
+                    float(origin.get("y", 0.0)),
+                    float(origin.get("yaw", 0.0)),
+                    str(origin.get("frame") or ""),
+                )
+            await broadcast({"type": "slam_graph", "robot_id": rid, "graph": graph})
+
+    # Unknown types are ignored, not fatal (protocol rule 3).
+    return False

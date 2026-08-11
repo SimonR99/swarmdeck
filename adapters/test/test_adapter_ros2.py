@@ -72,6 +72,8 @@ def _bridge(mod, cfg_override=None):
     bridge._goal_handle = None
     bridge._last_drive_at = 0.0
     bridge._scan_points = None
+    # Mirrors __init__: the pose the scan points were captured at.
+    bridge._scan_origin = None
     bridge._scan_dirty = False
     bridge._cloud_points = None
     bridge._cloud_dirty = False

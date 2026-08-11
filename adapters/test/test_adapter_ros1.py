@@ -84,6 +84,10 @@ def _bridge(mod, cfg_override=None):
     bridge._camera_depth_image = None
     bridge._camera_info = None
     bridge._camera_depth_cloud = None
+    bridge._scan_points = None
+    # Mirrors __init__: the pose the scan points were captured at.
+    bridge._scan_origin = None
+    bridge._scan_dirty = False
     return bridge
 
 
@@ -583,3 +587,37 @@ def test_upload_cloud_uses_the_shared_xyz_transport(mod, monkeypatch):
     decoded = mod.np.frombuffer(mod.zlib.decompress(request.data), dtype=mod.np.int16)
     assert decoded.reshape(-1, 3).tolist() == [[125, -250, 75], [300, 400, 500]]
     assert bridge._cloud_dirty is False
+
+
+def test_teleop_preempts_move_base_without_a_nav_stop_topic(mod):
+    """Operator motion must cancel autonomy on EVERY ROS 1 nav stack.
+
+    The `nav_status`/`goal` reset used to live inside the `pub_nav_stop` branch,
+    but `nav_stop` is a `local_planner` concept and is empty on every move_base
+    robot — including `config/generic.yaml`. So on a stock ROS 1 robot the
+    operator grabbed the joystick, the actionlib goal stayed live, and move_base
+    (which publishes straight to the real cmd_vel) went on fighting teleop for
+    the topic. `adapter_ros2.drive` has always cancelled unconditionally.
+    """
+    bridge = _bridge(mod, {"topics": {"cmd_vel": "cmd_vel", "nav_stop": ""},
+                           "actions": {"navigate_to_pose": "move_base"}})
+    assert bridge.pub_nav_stop is None, "this is the configuration that regressed"
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 4.0, "y": 1.0}
+
+    bridge.drive(0.25, 0.0)
+
+    assert bridge.mode == "teleop"
+    assert bridge.goal is None
+    assert bridge.nav_status == "cancelled"
+    bridge.nav_client.cancel_goal.assert_called_once()
+
+
+def test_teleop_does_not_cancel_when_nothing_is_navigating(mod):
+    """Driving an idle robot must not emit a spurious cancellation."""
+    bridge = _bridge(mod, {"topics": {"cmd_vel": "cmd_vel"},
+                           "actions": {"navigate_to_pose": "move_base"}})
+    bridge.drive(0.25, 0.0)
+
+    assert bridge.mode == "teleop"
+    bridge.nav_client.cancel_goal.assert_not_called()

@@ -8,8 +8,11 @@ services:
     image: swarmdeck-robot-ros1:local
     container_name: swarmdeck-adapter
     depends_on:
+      # `service_started`, not `service_healthy` — see the long note on the same
+      # dependency in docker-compose.robot-botman.yml. A detector that cannot
+      # fetch its weights must not take telemetry, video and teleop down with it.
       duck_detector:
-        condition: service_healthy
+        condition: service_started
     network_mode: host
     environment:
       ROS_MASTER_URI: http://127.0.0.1:11311
