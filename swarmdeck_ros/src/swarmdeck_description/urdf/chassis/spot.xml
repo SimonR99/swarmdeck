@@ -79,7 +79,7 @@
         <material><ambient>0.05 0.05 0.06 1</ambient><diffuse>0.09 0.09 0.11 1</diffuse></material>
       </visual>
       <visual name="lidar_body">
-        <pose>-0.180 0 0.210 0 0 0</pose>
+        <pose>-0.180 0 0.470 0 0 0</pose>
         <geometry><cylinder><radius>0.050</radius><length>0.058</length></cylinder></geometry>
         <material><ambient>0.06 0.07 0.09 1</ambient><diffuse>0.10 0.12 0.15 1</diffuse></material>
       </visual>

@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { Circle, Maximize2, Minimize2, Octagon, RotateCcw, Settings2 } from 'lucide-svelte';
+  import { Circle, Globe, Maximize2, Minimize2, Octagon, RotateCcw, Settings2 } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
   import StatusDot from './ui/StatusDot.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
+  import { mapStore } from '$lib/stores/mapstore.svelte';
   import { session } from '$lib/stores/session.svelte';
+  import { robotDisplayName } from '$lib/robotDisplayName';
   import { actions } from '$lib/api/connection';
 
   let { onsettings = () => {} }: { onsettings?: () => void } = $props();
@@ -71,6 +73,25 @@
   // can happen. No robot advertising `reset` means no button at all.
   const canReset = $derived(fleet.robots.some((r) => r.capabilities?.includes('reset')));
 
+  // Which map the canvas is showing. This used to be a single button that
+  // cycled, labelled with the mode it was ALREADY in — so it read as a status
+  // line and gave no hint that the other view existed. Two explicit segments
+  // show both options and which one is active.
+  const selected = $derived(fleet.selected[0] ?? null);
+  const isLocal = $derived(mapStore.viewMode === 'local');
+  const members = $derived(mapStore.status?.global_members?.length ?? 0);
+  // A robot the merge has not accepted has no place on the shared map, so its
+  // own map is the only honest thing to draw. Say so rather than letting the
+  // operator wonder why Global looks empty for it.
+  const inGlobal = $derived(!selected || (mapStore.status?.global_members ?? []).includes(selected));
+
+  function showGlobal() {
+    void mapStore.setViewPreference('global', selected);
+  }
+  function showLocal() {
+    if (selected) void mapStore.setViewPreference('local', selected);
+  }
+
   // Two clicks, because a reset throws away every map the fleet has built and
   // there is no undo. The armed state lapses on its own so a stray first click
   // cannot leave the button primed indefinitely.
@@ -111,6 +132,55 @@
   </div>
 
   <Badge tone="neutral">{fleet.online} of {fleet.count} online</Badge>
+
+  <div class="mx-1 h-5 w-px bg-border"></div>
+
+  <!--
+    Which map is on screen. Both options are always visible, so the view is a
+    choice the operator can see rather than a mode they have to discover.
+  -->
+  <div
+    class="flex items-center rounded-[4px] border border-border bg-surface-2 p-0.5"
+    role="group"
+    aria-label="Map view"
+  >
+    <button
+      class="flex items-center gap-1.5 rounded-[3px] px-2 py-1 text-[10px] font-medium
+             transition-colors {!isLocal
+        ? 'bg-surface text-fg shadow-sm'
+        : 'text-fg-dim hover:text-fg-muted'}"
+      aria-pressed={!isLocal}
+      title="The merged fleet map — every registered robot's grid in one frame"
+      onclick={showGlobal}
+    >
+      <Globe class="h-3 w-3" />
+      Global
+      <span class="tabular opacity-60">{members}/{fleet.count}</span>
+    </button>
+    <button
+      class="flex items-center gap-1.5 rounded-[3px] px-2 py-1 text-[10px] font-medium
+             transition-colors disabled:opacity-40 {isLocal
+        ? 'bg-surface text-fg shadow-sm'
+        : 'text-fg-dim hover:text-fg-muted'}"
+      aria-pressed={isLocal}
+      disabled={!selected}
+      title={selected
+        ? "This robot's own SLAM map, in its own frame — how you tell a bad merge from a bad map"
+        : 'Select a robot to view its own map'}
+      onclick={showLocal}
+    >
+      Local
+      {#if selected}
+        <span class="opacity-60">{robotDisplayName(selected)}</span>
+      {/if}
+    </button>
+  </div>
+
+  {#if selected && !inGlobal}
+    <!-- Not a fault: the merge refused this robot, so the shared map has no
+         place to draw it and its own map is the only truthful view. -->
+    <Badge tone="warn">{robotDisplayName(selected)} not merged</Badge>
+  {/if}
 
   {#if session.recording}
     <Badge tone="danger">

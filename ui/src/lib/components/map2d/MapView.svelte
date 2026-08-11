@@ -772,26 +772,19 @@
       a bad merge is the registration or the underlying map, and a robot joining
       the global map used to take that choice away silently.
     -->
-    <button
+    <!--
+      Status only. Choosing the view moved to the top bar, where both options
+      are visible side by side; a control here that cycled and was labelled with
+      the mode it was already in read as a status line anyway.
+    -->
+    <div
       class="flex items-center gap-2 rounded-[4px] border border-border bg-surface/88 px-2.5 py-1
-             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl
-             transition-colors hover:bg-surface-2 disabled:hover:bg-surface/88"
-      title={fleet.selected[0]
-        ? "Switch between the merged map and this robot's own SLAM map"
-        : 'Select a robot to view its own map'}
-      disabled={!fleet.selected[0]}
-      onclick={() =>
-        mapStore.setViewPreference(
-          mapStore.viewMode === 'local' ? 'global' : 'local',
-          fleet.selected[0] ?? null
-        )}
+             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl"
+      title="Which map is drawn. Change it in the top bar."
     >
       <span class="h-1.5 w-1.5 rounded-full {mapStore.ready ? 'bg-ok' : 'bg-warn'}"></span>
       {mapStore.ready ? mapStore.viewLabel : 'Connecting'}
-      {#if fleet.selected[0]}
-        <Layers3 class="h-3 w-3 opacity-50" />
-      {/if}
-    </button>
+    </div>
     {#if mapStore.status}
       <div
         class="rounded-[4px] border border-border bg-surface/88 px-2.5 py-1 text-[10px]

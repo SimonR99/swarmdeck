@@ -181,6 +181,12 @@ class RobotSpec:
     camera_x: float
     camera_z: float
     prox_x: float               # bumper scan, forward of base_link
+    # The highest thing on the robot's own back that the mapping lidar has to
+    # see OVER, and how far it reaches from base_link. A multi-ring lidar sweeps
+    # downwards as well as outwards, so a mount that clears the deck at zero
+    # range still buries the lower rings in it further out.
+    deck_top: float = 0.0
+    deck_half_length: float = 0.0
     prox_range_max: float = 6.0
     prox_samples: int = 181
     prox_fov: float = math.pi   # total horizontal sweep, radians
@@ -198,6 +204,26 @@ class RobotSpec:
     @property
     def prox_z(self) -> float:
         return PROXIMITY_SCAN_HEIGHT - self.base_height
+
+    def min_lidar_z(self, vfov: float) -> float:
+        """Lowest mount height at which no ring lands on the robot's own deck.
+
+        Gazebo's `gpu_lidar` raytraces the RENDER scene, so it hits visuals —
+        the decks, masts and (on Spot) legs, none of which are collision
+        geometry. The steepest downward ring falls `tan(vfov)` per metre of
+        range, so it meets deck height at `(lidar_z - deck_top)/tan(vfov)`; the
+        mount has to be high enough that this happens beyond the deck's far
+        edge.
+
+        Getting this wrong does not look like a sensor fault. The robot simply
+        reports a ring of obstacles at its own radius, every direction is
+        blocked, and it sits still having "found nowhere to go" — which is what
+        a Spot with its lidar 0.17 m too low actually did.
+        """
+        if not self.deck_top or vfov <= 0.0:
+            return 0.0
+        reach = self.deck_half_length + abs(self.lidar_x)
+        return self.deck_top + math.tan(vfov) * reach
 
     @property
     def footprint(self) -> str:
@@ -253,29 +279,36 @@ class RobotSpec:
 #   spot    hidden wheel       -0.340, radius 0.160 -> 0.500
 # Get it wrong and the robot spawns inside the floor or drops on start.
 ROBOT_PROFILES: dict[str, RobotSpec] = {
+    # lidar_z on every platform clears min_lidar_z(0.3927) — the steepest ring
+    # of the generic_32 profile — with roughly 0.09 m to spare. They were all
+    # originally set just below it, which cost a Spot every direction it could
+    # have driven in.
     "bunker": RobotSpec(
         chassis="bunker",
         robot_type="agilex_bunker",
         length=1.023, width=0.778, base_height=0.200,
-        lidar_x=-0.150, lidar_z=0.425,
+        lidar_x=-0.150, lidar_z=0.520,
         camera_x=0.515, camera_z=0.100,
         prox_x=0.530, prox_range_max=8.0,
+        deck_top=0.180, deck_half_length=0.450,
     ),
     "scout_mini": RobotSpec(
         chassis="scout_mini",
         robot_type="agilex_scout_mini",
         length=0.612, width=0.580, base_height=0.1225,
-        lidar_x=-0.080, lidar_z=0.245,
+        lidar_x=-0.080, lidar_z=0.330,
         camera_x=0.322, camera_z=0.090,
         prox_x=0.320, prox_range_max=6.0,
+        deck_top=0.121, deck_half_length=0.250,
     ),
     "spot": RobotSpec(
         chassis="spot",
         robot_type="boston_dynamics_spot",
         length=1.100, width=0.500, base_height=0.500,
-        lidar_x=-0.180, lidar_z=0.210,
+        lidar_x=-0.180, lidar_z=0.470,
         camera_x=0.598, camera_z=0.020,
         prox_x=0.580, prox_range_max=8.0,
+        deck_top=0.120, deck_half_length=0.450,
     ),
 }
 

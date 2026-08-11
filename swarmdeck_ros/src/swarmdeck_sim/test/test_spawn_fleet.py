@@ -290,3 +290,33 @@ def test_every_platform_fits_a_door_once_modelled_as_a_rectangle():
     for name in ROBOT_PROFILES:
         spec = robot_spec(name)
         assert spec.width < opening, f"{name} is wider than a door"
+
+
+# ------------------------------------------------- the lidar must not see itself
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_the_mapping_lidar_clears_the_robots_own_deck(platform):
+    """A multi-ring lidar sweeps DOWN as well as out.
+
+    Gazebo's gpu_lidar raytraces the render scene, so it hits visuals — decks,
+    masts, and on Spot the legs, none of which are collision geometry. Mounted
+    too low, the steepest downward ring lands on the robot's own back and the
+    robot reports a ring of obstacles at its own radius: every heading blocked,
+    nowhere to go, no error anywhere. Observed on Spot, whose mount was 0.171 m
+    below what the 33-ring profile needs.
+    """
+    spec = robot_spec(platform)
+    widest = max(p.vfov for p in LIDAR_PROFILES.values())
+    assert spec.lidar_z > spec.min_lidar_z(widest), (
+        f"{platform}: lidar at {spec.lidar_z:.3f} m is below the "
+        f"{spec.min_lidar_z(widest):.3f} m needed to clear its own deck"
+    )
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_deck_geometry_is_declared_so_the_clearance_can_be_checked(platform):
+    """min_lidar_z returns 0 for an undeclared deck, which would pass the test
+    above vacuously."""
+    spec = robot_spec(platform)
+    assert spec.deck_top > 0.0 and spec.deck_half_length > 0.0
