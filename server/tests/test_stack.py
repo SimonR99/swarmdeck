@@ -223,6 +223,120 @@ def test_detection_position_is_normalized_into_the_merged_map():
         app_registry.robots.clear()
 
 
+def _drain_for(ws, kind: str, limit: int = 20) -> dict:
+    """Read the socket until a message of `kind` arrives."""
+    for _ in range(limit):
+        msg = ws.receive_json()
+        if msg.get("type") == kind:
+            return msg
+    raise AssertionError(f"no {kind!r} message in {limit} frames")
+
+
+def test_a_batch_retracts_the_boxes_it_no_longer_contains():
+    """An object leaving frame is reported only by its absence from the batch.
+
+    The camera overlay is drawn from `bbox`, so a sighting that is never
+    superseded stays painted over live video. The map marker is deliberately
+    NOT retracted: it records somewhere we went and found something.
+    """
+    app_registry.robots.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                ad.send_json(
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "rubber_duck_0",
+                                "class": "rubber_duck",
+                                "score": 0.34,
+                                "bbox": [0.1, 0.2, 0.3, 0.4],
+                                "polygon": [[0.1, 0.2], [0.4, 0.2], [0.4, 0.6]],
+                                "map_position": {"x": 2.0, "y": 1.0},
+                            }
+                        ],
+                    }
+                )
+                seen = _drain_for(gui, "detection")["detection"]
+                assert seen["id"] == "r0:rubber_duck_0"
+                assert seen["bbox"] == [0.1, 0.2, 0.3, 0.4]
+
+                # The duck leaves the frame: same camera, empty batch.
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [],
+                    }
+                )
+                gone = _drain_for(gui, "detection")["detection"]
+                assert gone["id"] == "r0:rubber_duck_0"
+                assert gone["bbox"] is None
+                assert gone["polygon"] is None
+                assert gone["map_position"] == pytest.approx({"x": 2.0, "y": 1.0})
+    finally:
+        app_registry.robots.clear()
+
+
+def test_retraction_is_scoped_to_the_camera_that_reported_it():
+    """A quiet rear camera must not retract what the front camera can see."""
+    app_registry.robots.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                ad.send_json(
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                for camera in ("front", "rear"):
+                    ad.send_json(
+                        {
+                            "type": "detections",
+                            "robot_id": "r0",
+                            "camera": camera,
+                            "items": [
+                                {
+                                    "id": f"duck_{camera}",
+                                    "class": "rubber_duck",
+                                    "score": 0.5,
+                                    "bbox": [0.1, 0.1, 0.2, 0.2],
+                                }
+                            ],
+                        }
+                    )
+                    assert _drain_for(gui, "detection")["detection"]["bbox"] is not None
+
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "rear",
+                        "items": [],
+                    }
+                )
+                retracted = _drain_for(gui, "detection")["detection"]
+                assert retracted["id"] == "r0:duck_rear"
+                assert retracted["bbox"] is None
+    finally:
+        app_registry.robots.clear()
+
+
 def test_duplicate_goal_rejected():
     reg = Registry()
     reg.hello({"robot_id": "r0", "capabilities": ["navigate"]}, sink=None)

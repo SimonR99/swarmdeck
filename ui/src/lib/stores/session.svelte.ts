@@ -2,6 +2,16 @@ import type { Alert, Detection, SimReset } from '$lib/types/protocol';
 
 type ConnState = 'connecting' | 'live' | 'mock' | 'lost';
 
+/**
+ * A detection plus the browser-clock instant it arrived.
+ *
+ * Freshness is judged against this rather than the protocol's `last_seen`,
+ * which is stamped from the SERVER's clock. An operator watching a remote fleet
+ * shares no clock with it, and a few seconds of skew either hides every box or
+ * makes them all immortal.
+ */
+type TrackedDetection = Detection & { received_at: number };
+
 const state = $state({
   connection: 'connecting' as ConnState,
   running: false,
@@ -9,7 +19,10 @@ const state = $state({
   elapsed_s: 0,
   recording: false,
   alerts: [] as Alert[],
-  detections: [] as Detection[],
+  detections: [] as TrackedDetection[],
+  // Browser clock, republished once a second so that time-windowed reads
+  // (`bboxesFor`) have something that changes to depend on.
+  now: Date.now() / 1000,
   // True between a reset's `start` and `done` broadcasts. Driven by the server
   // rather than set optimistically on click, so every operator watching the same
   // fleet sees the reset, not just the one who pressed the button.
@@ -80,6 +93,9 @@ export const session = {
   },
 
   tick(dt: number) {
+    // Unconditional, unlike the session timer below: detection boxes have to
+    // expire whether or not a run is in progress.
+    state.now = Date.now() / 1000;
     if (state.running) state.elapsed_s += dt;
   },
 
@@ -99,16 +115,25 @@ export const session = {
   },
 
   addDetection(d: Detection) {
+    const tracked: TrackedDetection = { ...d, received_at: Date.now() / 1000 };
     const i = state.detections.findIndex((x) => x.id === d.id);
-    if (i >= 0) state.detections[i] = d;
-    else state.detections = [...state.detections, d];
+    if (i >= 0) state.detections[i] = tracked;
+    else state.detections = [...state.detections, tracked];
   },
 
-  /** Detections currently visible in a given robot's camera frame. */
+  /**
+   * Detections currently visible in a given robot's camera frame.
+   *
+   * The server retracts a box the moment its camera stops reporting the object,
+   * so this window is the backstop for the case it cannot cover: an adapter
+   * that went silent, whose last batch is therefore never superseded. Reading
+   * `state.now` is what makes that backstop work — a `$derived` built on this
+   * has nothing else to invalidate it once the messages stop, and would hold
+   * the last rectangle on screen indefinitely.
+   */
   bboxesFor(robotId: string, withinMs = 2000): Detection[] {
-    const now = Date.now() / 1000;
     return state.detections.filter(
-      (d) => d.robot_id === robotId && d.bbox && now - d.last_seen < withinMs / 1000
+      (d) => d.robot_id === robotId && d.bbox && state.now - d.received_at < withinMs / 1000
     );
   },
 

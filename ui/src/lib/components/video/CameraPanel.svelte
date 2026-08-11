@@ -20,7 +20,10 @@
   let imageB = $state<HTMLImageElement | null>(null);
   let pc: RTCPeerConnection | null = null;
   let fallbackTimer: number | null = null;
+  let fallbackFailures = 0;
   let whepRetryTimer: number | null = null;
+  let whepProbeTimer: number | null = null;
+  let whepFailures = 0;
   let objectA: string | null = null;
   let objectB: string | null = null;
   let activeFrame = $state<0 | 1>(0);
@@ -28,6 +31,21 @@
   let streamSource = $state<'webrtc' | 'jpeg' | null>(null);
   let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
   let mediaAspect = $state(16 / 9);
+
+  // Back off between WHEP attempts. Not every robot publishes RTSP -- the
+  // simulator never does -- so for those the retry is permanent, and a fixed
+  // ten-second period means a full ICE gathering and an SDP round trip every
+  // ten seconds for the life of the session, over whatever link the operator
+  // happens to be on.
+  const WHEP_RETRY_MIN_MS = 10_000;
+  const WHEP_RETRY_MAX_MS = 160_000;
+  // A negotiation that neither connects nor fails is the ordinary outcome when
+  // ICE cannot reach the media server -- the state machine simply sits in
+  // `connecting`. Nothing but a deadline ends it.
+  const WHEP_PROBE_TIMEOUT_MS = 12_000;
+  // Consecutive failed JPEG fetches before the panel admits it. One dropped
+  // frame is normal on a remote link; a run of them is not a live picture.
+  const FALLBACK_FAILURES_BEFORE_UNAVAILABLE = 3;
 
   const activeId = $derived(fleet.activeCamera);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
@@ -56,9 +74,21 @@
     });
   }
 
-  async function connectWhep(robotId: string) {
-    teardown();
-    streamState = 'connecting';
+  /**
+   * Negotiate WHEP, optionally as a background probe.
+   *
+   * A background probe must leave whatever is already on screen alone until it
+   * has media of its own to replace it with. An earlier version tore the JPEG
+   * loop down before every attempt, which turned a permanently unavailable
+   * stream into a black "Connecting…" panel every ten seconds, forever.
+   */
+  async function connectWhep(robotId: string, background = false) {
+    closePeer();
+    if (!background) {
+      stopFallback();
+      streamSource = null;
+      streamState = 'connecting';
+    }
     let connection: RTCPeerConnection | null = null;
     try {
       const candidate = new RTCPeerConnection({ iceServers: [] });
@@ -73,17 +103,27 @@
       };
       if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
       candidate.ontrack = (e) => {
-        if (video) video.srcObject = e.streams[0];
-        streamSource = 'webrtc';
-        streamState = 'live';
+        // Attach the track but do not promote the panel yet: the video element
+        // stays hidden until the connection reports itself connected, so a
+        // probe that negotiates and then dies never blanks a working preview.
+        if (pc === candidate && video) video.srcObject = e.streams[0];
       };
       candidate.onconnectionstatechange = () => {
-        if (
-          pc === candidate &&
-          (candidate.connectionState === 'failed' || candidate.connectionState === 'disconnected')
+        if (pc !== candidate) return;
+        if (candidate.connectionState === 'connected') {
+          // Media is flowing; only now is it safe to drop the JPEG preview.
+          if (whepProbeTimer) clearTimeout(whepProbeTimer);
+          whepProbeTimer = null;
+          stopFallback();
+          whepFailures = 0;
+          streamSource = 'webrtc';
+          streamState = 'live';
+        } else if (
+          candidate.connectionState === 'failed' ||
+          candidate.connectionState === 'disconnected'
         ) {
-          teardown();
-          startJpegFallback(robotId);
+          closePeer();
+          handleWhepFailure(robotId);
         }
       };
       const offer = await candidate.createOffer();
@@ -103,14 +143,46 @@
       const answer = await res.text();
       if (pc !== candidate) return;
       await candidate.setRemoteDescription({ type: 'answer', sdp: answer });
+
+      // Answered is not connected. Without a deadline, a negotiation that
+      // stalls in `connecting` -- the usual shape of a blocked UDP path, which
+      // is what an operator behind an HTTP tunnel always has -- would neither
+      // promote to WebRTC nor ever schedule another attempt.
+      //
+      // Both this arming and the callback re-check `connectionState`, because a
+      // fast local connection reaches `connected` before this line runs: the
+      // handler above would then clear a timer that does not exist yet, and an
+      // unguarded deadline would later tear down a working stream.
+      if (pc !== candidate || candidate.connectionState === 'connected') return;
+      whepProbeTimer = window.setTimeout(() => {
+        whepProbeTimer = null;
+        if (pc !== candidate || candidate.connectionState === 'connected') return;
+        closePeer();
+        handleWhepFailure(robotId);
+      }, WHEP_PROBE_TIMEOUT_MS);
     } catch {
       if (pc !== connection) return;
-      teardown();
-      startJpegFallback(robotId);
+      closePeer();
+      handleWhepFailure(robotId);
     }
   }
 
+  /** Hold the JPEG preview and keep probing WHEP, with a widening gap. */
+  function handleWhepFailure(robotId: string) {
+    whepFailures += 1;
+    if (streamSource !== 'jpeg') startJpegFallback(robotId);
+    if (whepRetryTimer) clearTimeout(whepRetryTimer);
+    whepRetryTimer = window.setTimeout(
+      () => {
+        whepRetryTimer = null;
+        void connectWhep(robotId, true);
+      },
+      Math.min(WHEP_RETRY_MAX_MS, WHEP_RETRY_MIN_MS * 2 ** Math.min(whepFailures - 1, 4))
+    );
+  }
+
   function startJpegFallback(robotId: string) {
+    stopFallback();
     streamSource = 'jpeg';
     streamState = 'connecting';
     const generation = ++fallbackGeneration;
@@ -151,9 +223,16 @@
           return;
         }
         activeFrame = nextFrame;
+        fallbackFailures = 0;
         streamState = 'live';
       } catch {
-        if (streamState !== 'live') streamState = 'unavailable';
+        // Report a stall even once the panel has gone live. Leaving the badge
+        // on "Live" because it was live a moment ago is the one thing a camera
+        // panel must never do.
+        fallbackFailures += 1;
+        if (fallbackFailures >= FALLBACK_FAILURES_BEFORE_UNAVAILABLE) {
+          streamState = 'unavailable';
+        }
       } finally {
         if (generation === fallbackGeneration) {
           fallbackTimer = window.setTimeout(refresh, 200);
@@ -161,20 +240,24 @@
       }
     };
     void refresh();
-    // Keep the JPEG path useful during a media-server restart, but return to
-    // low-latency video automatically once WHEP is available again.
-    whepRetryTimer = window.setTimeout(() => connectWhep(robotId), 10_000);
   }
 
-  function teardown() {
-    fallbackGeneration++;
+  /** Close the peer connection, leaving any JPEG preview running. */
+  function closePeer() {
+    if (whepProbeTimer) clearTimeout(whepProbeTimer);
+    whepProbeTimer = null;
     const closing = pc;
     pc = null;
     closing?.close();
+    if (video) video.srcObject = null;
+  }
+
+  /** Stop the JPEG loop and release its buffers, leaving WHEP state alone. */
+  function stopFallback() {
+    fallbackGeneration++;
+    fallbackFailures = 0;
     if (fallbackTimer) clearTimeout(fallbackTimer);
     fallbackTimer = null;
-    if (whepRetryTimer) clearTimeout(whepRetryTimer);
-    whepRetryTimer = null;
     imageA?.removeAttribute('src');
     imageB?.removeAttribute('src');
     if (objectA) URL.revokeObjectURL(objectA);
@@ -182,9 +265,16 @@
     objectA = null;
     objectB = null;
     activeFrame = 0;
+  }
+
+  function teardown() {
+    closePeer();
+    stopFallback();
+    if (whepRetryTimer) clearTimeout(whepRetryTimer);
+    whepRetryTimer = null;
+    whepFailures = 0;
     streamSource = null;
     mediaAspect = 16 / 9;
-    if (video) video.srcObject = null;
   }
 
   $effect(() => {

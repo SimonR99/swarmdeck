@@ -906,26 +906,57 @@ async def adapter_socket(ws: WebSocket) -> None:
                 registry.update_state(msg)
 
             elif kind == "detections":
+                rid = msg["robot_id"]
+                camera = msg.get("camera", "front")
+                visible: set[str] = set()
                 for item in msg.get("items", []):
-                    detection_id = f"{msg['robot_id']}:{item.get('id', item.get('class', 'object'))}"
+                    detection_id = f"{rid}:{item.get('id', item.get('class', 'object'))}"
+                    visible.add(detection_id)
                     previous = _detections.get(detection_id)
                     now = time.time()
                     det = {
                         "id": detection_id,
                         "class": item.get("class", "object"),
                         "score": item.get("score", 0.0),
-                        "robot_id": msg["robot_id"],
-                        "camera": msg.get("camera", "front"),
+                        "robot_id": rid,
+                        "camera": camera,
                         "bbox": item.get("bbox"),
                         "polygon": item.get("polygon"),
                         "map_position": detection_position(
-                            msg["robot_id"], item.get("map_position")
+                            rid, item.get("map_position")
                         ),
                         "first_seen": previous["first_seen"] if previous else now,
                         "last_seen": now,
                         "observations": (previous["observations"] + 1) if previous else 1,
                     }
                     _detections[detection_id] = det
+                    await broadcast({"type": "detection", "detection": det})
+
+                # An object that has left the frame is reported by its ABSENCE
+                # from the batch; the protocol carries no per-object "lost"
+                # message. So the batch itself has to retract what it no longer
+                # contains, or the operator keeps a stale rectangle painted over
+                # live video for as long as the adapter stays connected.
+                #
+                # Only the box is retracted. `map_position` is somewhere we went
+                # and found something, not something we can currently see, so it
+                # outlives the sighting and stays on the map.
+                retracted = [
+                    key
+                    for key, det in _detections.items()
+                    if det["robot_id"] == rid
+                    and det["camera"] == camera
+                    and key not in visible
+                    and det["bbox"] is not None
+                ]
+                for key in retracted:
+                    # Re-read: the broadcast below yields, so another adapter's
+                    # batch can land between building this list and using it.
+                    current = _detections.get(key)
+                    if current is None or current["bbox"] is None:
+                        continue
+                    det = {**current, "bbox": None, "polygon": None}
+                    _detections[key] = det
                     await broadcast({"type": "detection", "detection": det})
 
             elif kind == "map_meta":
