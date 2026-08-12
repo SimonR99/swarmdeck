@@ -1,4 +1,5 @@
 import type { AppSettings } from '$lib/types/protocol';
+import { session } from '$lib/stores/session.svelte';
 
 export const DEFAULT_ROBOT_COLORS = [
   '#007aff',
@@ -50,6 +51,7 @@ export const settings = {
 
   apply(value: AppSettings) {
     state.value = structuredClone(value);
+    session.applyDetectionSettings(value.detection_enabled, value.detection_classes);
     state.loaded = true;
   },
 

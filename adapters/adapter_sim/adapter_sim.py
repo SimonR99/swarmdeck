@@ -31,7 +31,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action import NavigateToPose
-from nav2_msgs.srv import ClearEntireCostmap
+from nav2_msgs.srv import ClearEntireCostmap, ManageLifecycleNodes
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -247,6 +247,37 @@ ESCAPE_TIMEOUT_S = 15.0
 ESCAPE_STALL_S = 2.5
 ESCAPE_STALL_DISTANCE = 0.05
 
+# ------------------------------------------------------- Nav2 bringup recovery
+#
+# Nav2's lifecycle manager brings its nodes up in order and ABORTS THE WHOLE
+# SEQUENCE if any one of them fails to answer. The confirmation call has a
+# 2 s timeout compiled into `nav2_util::ServiceClient` — there is no parameter
+# for it — and starting four Nav2 stacks, four SLAM instances, Gazebo and the
+# detector at once is enough to miss it. Measured on robot_2:
+#
+#   Configuring planner_server
+#   ERROR  Failed to change state for node: planner_server. Exception:
+#          planner_server/get_state service client: async_send_request failed.
+#   ERROR  Failed to bring up all requested nodes. Aborting bringup.
+#
+# 2.07 s after the configure began. The transition itself had SUCCEEDED —
+# planner_server sat at `inactive` — only the manager's confirmation timed out,
+# and it then abandoned a robot that was fine. Everything after it in the list
+# stayed `unconfigured`, including `bt_navigator`, so the NavigateToPose action
+# server never existed and every goal failed instantly with "Nav2 action server
+# is not ready" until someone re-ran the bringup by hand.
+#
+# Which robot loses the race is down to scheduling, so this cannot be fixed by
+# ordering or by waiting longer at launch. Re-issuing STARTUP is idempotent and
+# is exactly what recovered robot_2 live, so the adapter does it itself.
+
+# Long enough that a healthy stack finishes its own bringup untouched — measured
+# at 8-12 s from process start on this machine — with margin for a loaded one.
+NAV_READY_GRACE_S = 30.0
+# A re-bringup that did not take is nearly always a node still starting, so
+# leave real time between attempts rather than hammering the service.
+NAV_RECOVER_INTERVAL_S = 30.0
+
 # ------------------------------------------------------------------- reset
 #
 # A reset is fleet-wide in Gazebo and per-robot in ROS, while the protocol
@@ -432,6 +463,9 @@ class RobotBridge:
         self._escape_from: tuple[float, float] | None = None
         self._escape_started_at = 0.0
         self._escape_progress_at = 0.0
+        # Nav2 bringup recovery — see NAV_READY_GRACE_S.
+        self._nav_down_since = 0.0
+        self._nav_recovered_at = 0.0
         # Held for the whole of reset(), and tried without blocking by every
         # upload. That ordering is what stops a grid captured before the reset
         # reaching the backend after it: an upload already running finishes
@@ -847,6 +881,68 @@ class RobotBridge:
         self.nav_status, self.mode = status, "idle"
         if status == "failed":
             self._arm_escape()
+
+    # -- Nav2 bringup recovery ------------------------------------------
+
+    def recover_nav_if_down(self) -> bool:
+        """Re-run Nav2's bringup if its action server never appeared.
+
+        Runs on a worker thread — `_call` polls a future that only the spin
+        thread can complete. Returns whether a bringup was issued, not whether
+        Nav2 came up: the manager reports success as soon as it has walked the
+        list, and the next cycle's readiness check is the real verdict.
+
+        Deliberately driven by the action server's absence rather than by
+        querying lifecycle states. That is the thing the adapter actually needs
+        in order to navigate, it costs nothing to check, and it stays true if a
+        future Nav2 reorganises which nodes exist.
+        """
+        now = time.monotonic()
+        if self.nav_client.server_is_ready():
+            self._nav_down_since = 0.0
+            return False
+        if self._nav_down_since == 0.0:
+            # First cycle that noticed. Start the clock rather than acting: at
+            # this point a perfectly healthy stack is simply still starting.
+            self._nav_down_since = now
+            return False
+        if now - self._nav_down_since < NAV_READY_GRACE_S:
+            return False
+        if self._nav_recovered_at and now - self._nav_recovered_at < NAV_RECOVER_INTERVAL_S:
+            return False
+
+        self._nav_recovered_at = now
+        self.node.get_logger().warn(
+            f"[{self.id}] Nav2 action server absent for "
+            f"{now - self._nav_down_since:.0f} s; re-running lifecycle bringup"
+        )
+        # STARTUP, and only STARTUP. It walks the node list issuing CONFIGURE
+        # then ACTIVATE, which is exactly right for the state the race leaves —
+        # a prefix the manager got to before it aborted, and an unconfigured
+        # suffix it never reached. Verified live on robot_2: five nodes went to
+        # `active` and it drove its next goal.
+        #
+        # RESET first was tried and removed. Nav2's manager is all-or-nothing in
+        # BOTH directions — RESET deactivates in reverse and aborts on the first
+        # node already below `inactive`, just as STARTUP aborts on the first
+        # already above it — so a stack in mixed state (one node down among
+        # healthy ones) cannot be repaired through this service at all, and
+        # adding the call bought nothing for the state that can. A robot in that
+        # condition needs its launch restarted, and the repeated warning below is
+        # how an operator finds out.
+        request = ManageLifecycleNodes.Request()
+        request.command = ManageLifecycleNodes.Request.STARTUP
+        answered = self._call(
+            f"/{self.id}/lifecycle_manager_navigation/manage_nodes",
+            ManageLifecycleNodes,
+            request,
+        )
+        if not answered:
+            self.node.get_logger().error(
+                f"[{self.id}] lifecycle bringup did not answer; "
+                f"navigation stays unavailable"
+            )
+        return answered
 
     # -- wedge escape --------------------------------------------------
 
@@ -1333,6 +1429,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                     last_cslam_grid = 0.0
                     last_camera = 0.0
                     last_settings = 0.0
+                    last_nav_health = 0.0
                     loop = asyncio.get_running_loop()
                     while True:
                         await ws.send(json.dumps(bridge.state()))
@@ -1401,6 +1498,13 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         if now - last_settings > 5.0:
                             last_settings = now
                             await loop.run_in_executor(None, bridge.refresh_settings)
+                        # Proactive, not on demand: an operator should not have
+                        # to issue a doomed goal to discover that this robot's
+                        # Nav2 lost the startup race, and the recovery takes
+                        # seconds during which nothing else needs to happen.
+                        if now - last_nav_health > 5.0:
+                            last_nav_health = now
+                            await loop.run_in_executor(None, bridge.recover_nav_if_down)
                         await asyncio.sleep(0.2)
 
                 await asyncio.gather(rx(), tx())

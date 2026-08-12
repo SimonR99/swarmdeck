@@ -14,12 +14,14 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from swarmdeck_server.api.app import (
+    _detections,
     app,
     detection_position,
     handle_gui_message,
     load_config,
     map_service,
     robot_state,
+    settings_store,
 )
 from swarmdeck_server.fleet.registry import Registry
 from swarmdeck_server.fleet.registry import registry as app_registry
@@ -374,6 +376,103 @@ def test_retraction_is_scoped_to_the_camera_that_reported_it():
                 assert retracted["bbox"] is None
     finally:
         app_registry.robots.clear()
+
+
+def test_saving_detection_categories_deletes_old_map_entities_and_rejects_late_batches(
+    tmp_path, monkeypatch
+):
+    """A deselected category is gone permanently, not just hidden in one UI.
+
+    Adapters poll settings every few seconds, so the batch after the save may
+    still have been inferred with the previous class list.  The backend must
+    reject that stale proposal as well as deleting its cached map position.
+    """
+    monkeypatch.setattr(settings_store, "path", tmp_path / "settings.json")
+    monkeypatch.setattr(settings_store, "value", settings_store.validate({}))
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                ad.send_json(
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "duck_0",
+                                "class": "rubber_duck",
+                                "score": 0.8,
+                                "bbox": [0.1, 0.1, 0.2, 0.2],
+                                "map_position": {"x": 1.0, "y": 2.0},
+                            },
+                            {
+                                "id": "block_0",
+                                "class": "wooden_block",
+                                "score": 0.8,
+                                "bbox": [0.3, 0.3, 0.2, 0.2],
+                                "map_position": {"x": 3.0, "y": 4.0},
+                            },
+                        ],
+                    }
+                )
+                observed = {
+                    _drain_for(gui, "detection")["detection"]["class"],
+                    _drain_for(gui, "detection")["detection"]["class"],
+                }
+                assert observed == {"rubber_duck", "wooden_block"}
+
+                payload = c.get("/api/settings").json()["settings"]
+                payload["detection_classes"] = ["wooden_block"]
+                response = c.put("/api/settings", json=payload)
+
+                assert response.status_code == 200
+                saved = _drain_for(gui, "settings_state")["settings"]
+                assert saved["detection_classes"] == ["wooden_block"]
+                assert set(_detections) == {"r0:block_0"}
+
+                # This batch was already in flight when settings changed.  Its
+                # duck must not recreate the deleted marker; the selected block
+                # gives us a broadcast to prove the whole batch was processed.
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "duck_late",
+                                "class": "rubber_duck",
+                                "score": 0.9,
+                                "bbox": [0.1, 0.1, 0.2, 0.2],
+                                "map_position": {"x": 5.0, "y": 6.0},
+                            },
+                            {
+                                "id": "block_0",
+                                "class": "wooden_block",
+                                "score": 0.9,
+                                "bbox": [0.3, 0.3, 0.2, 0.2],
+                                "map_position": {"x": 3.0, "y": 4.0},
+                            },
+                        ],
+                    }
+                )
+                accepted = _drain_for(gui, "detection")["detection"]
+                assert accepted["class"] == "wooden_block"
+                assert set(_detections) == {"r0:block_0"}
+    finally:
+        _detections.clear()
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
 
 
 def test_duplicate_goal_rejected():

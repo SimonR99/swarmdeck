@@ -12,6 +12,13 @@ type ConnState = 'connecting' | 'live' | 'mock' | 'lost';
  */
 type TrackedDetection = Detection & { received_at: number };
 
+// Kept outside the reactive state because these values gate writes; rendering
+// only depends on the filtered `detections` array. `null` is the compatibility
+// mode used when the backend has no detector catalog and therefore accepts the
+// adapter's own class list.
+let detectionEnabled = true;
+let selectedDetectionClasses: Set<string> | null = null;
+
 const state = $state({
   connection: 'connecting' as ConnState,
   running: false,
@@ -115,10 +122,37 @@ export const session = {
   },
 
   addDetection(d: Detection) {
+    // A detection broadcast that was already in flight can arrive just after
+    // the settings broadcast which removed its category. Do not let that old
+    // message recreate the entity the settings reconciliation just deleted.
+    if (!detectionEnabled || (selectedDetectionClasses && !selectedDetectionClasses.has(d.class))) {
+      return;
+    }
     const tracked: TrackedDetection = { ...d, received_at: Date.now() / 1000 };
     const i = state.detections.findIndex((x) => x.id === d.id);
     if (i >= 0) state.detections[i] = tracked;
     else state.detections = [...state.detections, tracked];
+  },
+
+  /**
+   * Reconcile persistent map entities with the operator's detector selection.
+   *
+   * Camera boxes naturally expire, but map positions deliberately do not. A
+   * settings save therefore has to delete entities in categories that are no
+   * longer selected; merely hiding them would make the old positions reappear
+   * if that category were enabled again later.
+   */
+  applyDetectionSettings(enabled: boolean, classes: string[]) {
+    detectionEnabled = enabled;
+    selectedDetectionClasses = classes.length ? new Set(classes) : null;
+    if (!enabled) {
+      state.detections = [];
+      return;
+    }
+    // An empty list is the backend's compatibility mode when no class catalog
+    // is available. In that case the adapter owns the allowed class set.
+    if (!classes.length) return;
+    state.detections = state.detections.filter((d) => selectedDetectionClasses!.has(d.class));
   },
 
   /**

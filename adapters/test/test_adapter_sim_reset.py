@@ -651,3 +651,140 @@ def test_the_escape_does_nothing_when_it_was_never_armed(sim, twist):
     bridge.escape_tick()
 
     assert sent == []
+
+
+# ------------------------------------------------------- Nav2 bringup recovery
+#
+# Nav2's lifecycle manager aborts the WHOLE bringup sequence when one node fails
+# to confirm a transition, and the confirmation has a 2 s timeout compiled into
+# nav2_util with no parameter to raise. Measured on robot_2: planner_server
+# reached `inactive` but answered late, the manager aborted, and everything
+# after it — including bt_navigator — stayed `unconfigured`, so NavigateToPose
+# never existed and every goal failed instantly. Which robot loses the race is
+# down to scheduling, so the adapter re-issues STARTUP itself.
+
+
+@pytest.fixture
+def lifecycle_srv(sim, monkeypatch):
+    """A real ManageLifecycleNodes, for the same reason `twist` exists.
+
+    The stubbed MagicMock hands back ONE shared Request from every call, so the
+    RESET and the STARTUP would be the same object and the second assignment
+    would silently rewrite the first.
+    """
+
+    class Request:
+        STARTUP, PAUSE, RESUME, RESET, SHUTDOWN = 0, 1, 2, 3, 4
+
+        def __init__(self):
+            self.command = None
+
+    class Srv:
+        pass
+
+    Srv.Request = Request
+    monkeypatch.setattr(sim, "ManageLifecycleNodes", Srv)
+    return Srv
+
+
+def nav_bridge(sim, ready):
+    bridge = make_bridge(sim)
+    bridge.nav_client = MagicMock()
+    bridge.nav_client.server_is_ready.return_value = ready
+    bridge._nav_down_since = 0.0
+    bridge._nav_recovered_at = 0.0
+    bridge._call = MagicMock(return_value=True)
+    return bridge
+
+
+def test_a_healthy_nav2_is_left_alone(sim):
+    bridge = nav_bridge(sim, ready=True)
+
+    for _ in range(5):
+        assert bridge.recover_nav_if_down() is False
+
+    bridge._call.assert_not_called()
+    assert bridge._nav_down_since == 0.0
+
+
+def test_a_stack_that_is_merely_still_starting_is_given_time(sim, monkeypatch):
+    """Acting immediately would fight a bringup that is simply not finished."""
+    bridge = nav_bridge(sim, ready=False)
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+
+    assert bridge.recover_nav_if_down() is False, "first sighting only starts the clock"
+    clock[0] += sim.NAV_READY_GRACE_S - 1
+    assert bridge.recover_nav_if_down() is False
+    bridge._call.assert_not_called()
+
+
+def test_a_nav2_that_never_came_up_is_brought_up(sim, lifecycle_srv, monkeypatch):
+    bridge = nav_bridge(sim, ready=False)
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+
+    bridge.recover_nav_if_down()
+    clock[0] += sim.NAV_READY_GRACE_S + 1
+    assert bridge.recover_nav_if_down() is True
+
+    service, srv_type, request = bridge._call.call_args[0]
+    assert service == "/robot_0/lifecycle_manager_navigation/manage_nodes"
+    assert srv_type is sim.ManageLifecycleNodes
+    assert request.command == sim.ManageLifecycleNodes.Request.STARTUP
+    assert bridge._call.call_count == 1, "STARTUP alone; see recover_nav_if_down"
+    bridge.node.get_logger.return_value.warn.assert_called()
+
+
+def test_recovery_is_not_hammered(sim, monkeypatch):
+    """A bringup that did not take is usually a node still starting."""
+    bridge = nav_bridge(sim, ready=False)
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+
+    bridge.recover_nav_if_down()
+    clock[0] += sim.NAV_READY_GRACE_S + 1
+    assert bridge.recover_nav_if_down() is True
+    assert bridge._call.call_count == 1
+
+    clock[0] += sim.NAV_RECOVER_INTERVAL_S - 1
+    assert bridge.recover_nav_if_down() is False
+    assert bridge._call.call_count == 1, "re-issued before the interval elapsed"
+
+    clock[0] += 2
+    assert bridge.recover_nav_if_down() is True
+    assert bridge._call.call_count == 2
+
+
+def test_recovery_rearms_after_nav2_comes_back_and_falls_over_again(sim, monkeypatch):
+    bridge = nav_bridge(sim, ready=False)
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+
+    bridge.recover_nav_if_down()
+    clock[0] += sim.NAV_READY_GRACE_S + 1
+    bridge.recover_nav_if_down()
+
+    bridge.nav_client.server_is_ready.return_value = True
+    assert bridge.recover_nav_if_down() is False
+    assert bridge._nav_down_since == 0.0, "the outage clock must reset on recovery"
+
+    # A later, separate outage waits out the grace period afresh.
+    bridge.nav_client.server_is_ready.return_value = False
+    clock[0] += sim.NAV_RECOVER_INTERVAL_S + 1
+    assert bridge.recover_nav_if_down() is False
+    clock[0] += sim.NAV_READY_GRACE_S + 1
+    assert bridge.recover_nav_if_down() is True
+
+
+def test_a_lifecycle_manager_that_does_not_answer_is_reported(sim, monkeypatch):
+    """Silence here would leave a robot that cannot navigate and cannot say why."""
+    bridge = nav_bridge(sim, ready=False)
+    bridge._call.return_value = False
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+
+    bridge.recover_nav_if_down()
+    clock[0] += sim.NAV_READY_GRACE_S + 1
+    assert bridge.recover_nav_if_down() is False
+    bridge.node.get_logger.return_value.error.assert_called()

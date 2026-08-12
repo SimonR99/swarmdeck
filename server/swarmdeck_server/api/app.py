@@ -130,6 +130,37 @@ async def broadcast(msg: dict[str, Any]) -> None:
         _gui_clients.discard(ws)
 
 
+def detection_class_enabled(class_name: Any, settings: dict[str, Any] | None = None) -> bool:
+    """Whether a detection class belongs in the current operator view.
+
+    Adapters poll settings, so one can still submit a batch made with the old
+    class selection for a few seconds after a save.  Enforcing the selection at
+    the backend closes that window and keeps a removed map entity from being
+    recreated immediately after it was cleared.
+
+    An empty class list means the detector catalog was unavailable when the
+    settings were validated.  In that compatibility mode the adapter owns the
+    class list, so enabled detection continues to accept its classes.
+    """
+    value = settings if settings is not None else settings_store.value
+    if not value.get("detection_enabled", True):
+        return False
+    selected = value.get("detection_classes")
+    return not selected or class_name in selected
+
+
+def discard_disabled_detections(settings: dict[str, Any]) -> list[str]:
+    """Delete cached entities whose classes were removed by a settings save."""
+    stale = [
+        detection_id
+        for detection_id, detection in _detections.items()
+        if not detection_class_enabled(detection.get("class"), settings)
+    ]
+    for detection_id in stale:
+        _detections.pop(detection_id, None)
+    return stale
+
+
 async def raise_alert(
     alert_id: str, level: str, kind: str, message: str, robot_id: str | None = None
 ) -> None:
@@ -425,6 +456,10 @@ async def put_settings(request: Request) -> dict[str, Any]:
     except Exception:
         return JSONResponse({"error": "JSON body required"}, status_code=400)
     settings = settings_store.save(payload)
+    # Map detections intentionally outlive their camera boxes.  That persistence
+    # must not outlive the operator removing their category (or switching
+    # detection off), otherwise saving the dialog leaves old objects behind.
+    discard_disabled_detections(settings)
     events.log("settings_update", {"settings": settings})
     message = {"type": "settings_state", "settings": settings}
     await broadcast(message)
@@ -1011,6 +1046,11 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         camera = msg.get("camera", "front")
         visible: set[str] = set()
         for item in msg.get("items", []):
+            # Adapters refresh settings every few seconds.  Ignore proposals
+            # from an in-flight batch built with the previous class selection,
+            # so a just-deleted map marker cannot flash back into existence.
+            if not detection_class_enabled(item.get("class", "object")):
+                continue
             detection_id = f"{rid}:{item.get('id', item.get('class', 'object'))}"
             visible.add(detection_id)
             previous = _detections.get(detection_id)
