@@ -261,6 +261,45 @@ def _wrap(yaw: float) -> float:
     return (yaw + math.pi) % (2 * math.pi) - math.pi
 
 
+def _coarse_candidates(yaw_prior: float | None, window_deg: float) -> np.ndarray:
+    """Coarse yaw candidates, always on the same global COARSE_STEP lattice.
+
+    Anchoring the sweep to the prior instead — `arange(-w, w, step) + prior` —
+    makes the sampled yaws a function of the prior, and every later stage
+    inherits that offset because each refines within +/- the previous step. So
+    two searches over windows that BOTH contain the true peak could descend into
+    different local optima and return different answers.
+
+    That is not hypothetical: it is the measured cause of the merged map
+    flickering. On the live fleet the wide search (prior 0 deg, +/-40) returned
+    -0.375 deg with a rival-translation ratio of 0.679, and the narrow search its
+    own answer enabled (prior -0.38 deg, +/-8) returned +0.620 deg at 0.895 —
+    one either side of the 0.80 ambiguity threshold, on bit-identical grids. The
+    robot was accepted, locked, refused, unlocked, accepted, at the map upload
+    rate, and the GUI swapped between the merged map and that robot's own map
+    every two seconds.
+
+    On a shared lattice a narrower window is a strict subset of a wider one, so
+    the winner of the wide sweep is still the winner of the narrow sweep whenever
+    it lies inside it. Narrowing the search can then only cost coverage, never
+    move the answer — which is all a lock was ever meant to do.
+
+    The prior itself is no longer necessarily sampled, but it is within half a
+    step of a candidate that is, and the coarse stage is dilated to tolerate
+    exactly that (see `register`).
+    """
+    if yaw_prior is None:
+        return np.deg2rad(np.arange(-180.0, 180.0, COARSE_STEP))
+    centre = math.degrees(_wrap(yaw_prior))
+    lo = math.ceil((centre - window_deg) / COARSE_STEP) * COARSE_STEP
+    hi = math.floor((centre + window_deg) / COARSE_STEP) * COARSE_STEP
+    if hi < lo:
+        # Window narrower than one lattice step: keep the nearest point, so a
+        # small window degrades to a single candidate rather than to none.
+        return np.deg2rad(np.array([round(centre / COARSE_STEP) * COARSE_STEP]))
+    return np.deg2rad(np.arange(lo, hi + 1e-9, COARSE_STEP))
+
+
 def _cell_keys(pts: np.ndarray, lo: np.ndarray, res: float, span: int) -> np.ndarray:
     """Points -> sorted unique flat cell indices, for set arithmetic on grids."""
     if len(pts) == 0:
@@ -398,12 +437,7 @@ def register(
     medium = _Stage(ref_occ_c, ref_free_c, MEDIUM_RES, radius)
     fine = _Stage(ref_occ_c, ref_free_c, FINE_RES, radius)
 
-    if yaw_prior is None:
-        candidates = np.deg2rad(np.arange(-180.0, 180.0, COARSE_STEP))
-    else:
-        candidates = np.deg2rad(
-            np.arange(-yaw_window_deg, yaw_window_deg + 1e-9, COARSE_STEP)
-        ) + _wrap(yaw_prior)
+    candidates = _coarse_candidates(yaw_prior, yaw_window_deg)
 
     coarse_results = _sweep(coarse, mov_occ_c, candidates)
     coarse_results.sort(key=lambda r: -r[3])

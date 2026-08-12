@@ -29,14 +29,18 @@
             : 'idle'
   );
 
+  // `recover` outranks the nav_status it follows: the goal has already failed,
+  // and what the operator needs to see is that the robot is moving right now.
   const modeLabel = $derived(
     robot.mode === 'estop'
       ? 'E-STOP'
-      : robot.nav_status === 'active'
-        ? 'NAVIGATING'
-        : robot.nav_status === 'failed'
-          ? 'NAV FAILED'
-          : robot.mode.toUpperCase()
+      : robot.mode === 'recover'
+        ? 'BACKING OFF'
+        : robot.nav_status === 'active'
+          ? 'NAVIGATING'
+          : robot.nav_status === 'failed'
+            ? 'NAV FAILED'
+            : robot.mode.toUpperCase()
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));
@@ -83,11 +87,13 @@
     <Badge
       tone={robot.mode === 'estop'
         ? 'danger'
-        : robot.nav_status === 'active'
-          ? 'accent'
-          : robot.nav_status === 'failed'
-            ? 'warn'
-            : 'neutral'}
+        : robot.mode === 'recover'
+          ? 'warn'
+          : robot.nav_status === 'active'
+            ? 'accent'
+            : robot.nav_status === 'failed'
+              ? 'warn'
+              : 'neutral'}
     >
       {modeLabel}
     </Badge>

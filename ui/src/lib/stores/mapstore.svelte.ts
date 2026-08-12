@@ -51,6 +51,50 @@ let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
 
 /**
+ * How long the backend has to keep recommending the other view before `auto`
+ * acts on it, in milliseconds.
+ *
+ * Registration is a live estimate against maps the fleet is still building, so
+ * a robot can legitimately enter and leave the merged map several times a
+ * minute — most visibly in the minutes after a sim reset, when every transform
+ * has to be re-earned against small maps. Following that signal sample by
+ * sample made the operator's map unusable: each swap refetches a full grid,
+ * clears the trails and resets pan and zoom, so the map lurched between the
+ * merged view and one robot's own view every few seconds.
+ *
+ * A dwell longer than the status poll means a recommendation has to survive
+ * several consecutive samples to be believed. Anything flapping faster than
+ * this leaves the view exactly where it is, which is the right answer: with
+ * membership genuinely in doubt, either view is defensible and neither is worth
+ * throwing the operator's zoom away for. An explicit Global/Local choice is
+ * never subject to it.
+ */
+const AUTO_SWITCH_DWELL_MS = 12000;
+
+// The auto decision currently on screen, and the recommendation arguing against
+// it. `robot` is part of the latch because selecting a different robot is a new
+// question rather than a change of mind about the old one.
+let autoView: { robot: string | null; local: boolean } | null = null;
+let autoPending: { local: boolean; since: number } | null = null;
+
+/** Resolve `auto` into a concrete local/global choice, with dwell hysteresis. */
+function autoWantsLocal(robotId: string | null, recommended: boolean): boolean {
+  const now = Date.now();
+  if (!autoView || autoView.robot !== robotId) {
+    autoView = { robot: robotId, local: recommended };
+    autoPending = null;
+  } else if (recommended === autoView.local) {
+    autoPending = null;
+  } else if (!autoPending) {
+    autoPending = { local: recommended, since: now };
+  } else if (now - autoPending.since >= AUTO_SWITCH_DWELL_MS) {
+    autoView = { robot: robotId, local: recommended };
+    autoPending = null;
+  }
+  return autoView.local;
+}
+
+/**
  * Occupancy mask pyramid, and why it exists.
  *
  * The grid canvas is one pixel per cell, and `MapView` blits it scaled to fit.
@@ -390,15 +434,20 @@ export const mapStore = {
     robotId: string | null
   ) {
     state.viewPreference = preference;
+    // An explicit choice answers the question outright, and switching back to
+    // `auto` asks it afresh — neither should wait out a dwell that is there to
+    // absorb the backend changing its mind.
+    autoView = null;
+    autoPending = null;
     await this.selectRobotView(robotId);
   },
 
   async selectRobotView(robotId: string | null) {
-    const recommended = robotId && state.status?.view_by_robot?.[robotId] === 'local';
+    const recommended = state.status?.view_by_robot?.[robotId ?? ''] === 'local';
     const desiredLocal = Boolean(
       robotId &&
         (state.viewPreference === 'local' ||
-          (state.viewPreference === 'auto' && recommended))
+          (state.viewPreference === 'auto' && autoWantsLocal(robotId, recommended)))
     );
     const desiredMode = desiredLocal ? 'local' : 'global';
     const desiredRobot = desiredLocal ? robotId : null;
@@ -524,6 +573,8 @@ export const mapStore = {
     state.statusUpdatedAt = 0;
     state.viewMode = 'global';
     state.viewRobot = null;
+    autoView = null;
+    autoPending = null;
     globalInfo = null;
     loadGeneration++;
     canvas = null;

@@ -12,7 +12,10 @@ export const PROTOCOL_VERSION = 1;
  */
 export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop' | 'reset';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
-export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop';
+// `recover` is the adapter reversing a robot out of a pose Nav2 could not plan
+// from. It moves on its own, briefly and without an operator command, so it has
+// to be a mode the GUI can name rather than an unexplained lurch.
+export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover';
 export type AlertLevel = 'info' | 'warn' | 'critical';
 
 export interface Pose {

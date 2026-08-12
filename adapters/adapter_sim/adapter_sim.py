@@ -34,6 +34,7 @@ from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     QoSDurabilityPolicy,
     QoSProfile,
@@ -204,6 +205,47 @@ def camera_point_to_map(
         "y": round(pose["y"] + base_x * sin_yaw + base_y * cos_yaw, 3),
     }
 
+
+# --------------------------------------------------------------- wedge escape
+#
+# Nav2 cannot plan out of a pose whose footprint overlaps a mapped obstacle, and
+# it cannot recover from one either. Measured on the Scout Mini at a corridor
+# doorway: its own map placed the door jamb 0.255 m from its centre, inside the
+# 0.290 m inscribed radius derived from its 0.580 m width, so
+#
+#   planner_server   "Failed to create plan with tolerance of: 0.500000"
+#   behavior_server  "Collision Ahead - Exiting DriveOnHeading" / "backup failed"
+#
+# repeated forever. The robot was NOT actually touching anything — ground truth
+# put the jamb 0.379 m away, 0.089 m clear — it was ~0.26 m of SLAM drift, which
+# the wider Bunkers (0.389 m inscribed) absorb and the Scout does not. Clearing
+# the costmap does not help: the obstacle comes from the static layer, which
+# slam_toolbox repopulates every `map_update_interval`.
+#
+# So the escape lives here, outside Nav2. It reverses, and ONLY reverses,
+# because the ground immediately behind is the ground the robot just drove over
+# — the one direction known to be clear without trusting the map that is wrong.
+# Rotating in place would not do: turning sweeps the footprint out to the
+# circumscribed radius (0.422 m on the Scout), which is further than the jamb it
+# is trying to escape.
+#
+# Deliberately bounded and deliberately not a retry loop. It backs off once per
+# failed goal, and the goal still reports `failed` to the operator — recovering
+# the robot's ability to accept the NEXT command is the whole objective, not
+# quietly re-attempting a command that already failed.
+
+ESCAPE_SPEED = -0.15        # m/s, reverse. Slow: this runs without a costmap.
+ESCAPE_DISTANCE = 0.45      # m of retreat before the escape is considered done
+# Wall-clock, and the retreat happens in simulation time, so this has to allow
+# for the real-time factor as well as for a robot that creeps. Measured on the
+# Scout Mini: 0.15 m/s commanded came out as ~0.046 m/s of ground covered, so 8 s
+# ended the escape on the timeout at 0.376 m instead of on the distance it was
+# asked for. The timeout is meant to be the backstop, not the usual exit.
+ESCAPE_TIMEOUT_S = 15.0
+# Below this the robot is not moving despite being commanded, so it is pinned on
+# real geometry rather than on a mapping error, and reversing is not the answer.
+ESCAPE_STALL_S = 2.5
+ESCAPE_STALL_DISTANCE = 0.05
 
 # ------------------------------------------------------------------- reset
 #
@@ -385,6 +427,11 @@ class RobotBridge:
         self._goal_handle = None
         self._goal_generation = 0
         self._last_drive_at = 0.0
+        # Wedge escape — see ESCAPE_SPEED. `_escape_from` is the pose the failed
+        # goal ended at, which is what the retreat is measured against.
+        self._escape_from: tuple[float, float] | None = None
+        self._escape_started_at = 0.0
+        self._escape_progress_at = 0.0
         # Held for the whole of reset(), and tried without blocking by every
         # upload. That ordering is what stops a grid captured before the reset
         # reaching the backend after it: an upload already running finishes
@@ -798,12 +845,74 @@ class RobotBridge:
         self.goal = None
         self.planned_path = []
         self.nav_status, self.mode = status, "idle"
+        if status == "failed":
+            self._arm_escape()
+
+    # -- wedge escape --------------------------------------------------
+
+    def _arm_escape(self) -> None:
+        """Begin reversing out of a pose Nav2 could not plan from.
+
+        Armed on any aborted goal rather than on a costmap test, because the
+        adapter deliberately holds no costmap: Nav2 owns that, and duplicating
+        its inflation maths here to second-guess it would be a second source of
+        truth to keep in step. Reversing 0.45 m is harmless for the failures
+        this does not apply to, and it is the only thing that helps for the one
+        it does.
+        """
+        pose = self.map_pose()
+        self._escape_from = (pose["x"], pose["y"])
+        self._escape_started_at = self._escape_progress_at = time.monotonic()
+        self.mode = "recover"
+
+    def _clear_escape(self) -> None:
+        if self._escape_from is not None:
+            self._escape_from = None
+            self.pub_cmd.publish(Twist())
+            if self.mode == "recover":
+                self.mode = "idle"
+
+    def escape_tick(self) -> None:
+        """Drive one cycle of the escape. Called from the adapter's main loop.
+
+        Ends on any of: enough retreat, the timeout, or the robot failing to
+        make progress — the last meaning it is pinned on real geometry, where
+        reversing harder is the wrong answer and an operator needs to see a
+        stopped robot rather than one grinding against a wall.
+        """
+        if self._escape_from is None:
+            return
+        pose = self.map_pose()
+        moved = math.hypot(pose["x"] - self._escape_from[0], pose["y"] - self._escape_from[1])
+        now = time.monotonic()
+
+        if moved >= ESCAPE_DISTANCE or now - self._escape_started_at > ESCAPE_TIMEOUT_S:
+            self._clear_escape()
+            return
+        if moved > ESCAPE_STALL_DISTANCE:
+            self._escape_progress_at = now
+        elif now - self._escape_progress_at > ESCAPE_STALL_S:
+            self.node.get_logger().warn(
+                f"[{self.id}] wedge escape made no progress in "
+                f"{ESCAPE_STALL_S:.1f} s; the robot is against real geometry"
+            )
+            self._clear_escape()
+            return
+
+        command = Twist()
+        command.linear.x = ESCAPE_SPEED
+        self.pub_cmd.publish(command)
 
     def _cancel_nav(self) -> None:
         self._goal_generation += 1  # Ignore callbacks from the superseded goal.
         if self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
         self._goal_handle = None
+        # Every operator command that supersedes what the robot is doing comes
+        # through here — navigate_to, drive, stop, cancel and reset — so this is
+        # the one place that guarantees an escape can never drive a robot the
+        # operator has just taken control of.
+        self._clear_escape()
 
     def stop(self) -> None:
         self._cancel_nav()
@@ -1232,6 +1341,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             await ws.send(json.dumps(report))
                         now = time.monotonic()
                         bridge.drive_watchdog()
+                        bridge.escape_tick()
                         if now - last_map > 2.0:
                             last_map = now
                             await loop.run_in_executor(None, bridge.upload_map)
@@ -1303,6 +1413,30 @@ async def main_async(bridges: list[RobotBridge], ws_url: str) -> None:
     await asyncio.gather(*(run_robot(b, ws_url) for b in bridges))
 
 
+def create_adapter_node():
+    """The adapter's ROS node, on sim time like every other node in this stack.
+
+    `use_sim_time` is not a formality here. This node stamps exactly two
+    outgoing messages, and both are read by nodes living in simulation time: the
+    `set_pose` that re-zeroes each EKF during a reset, and the goal handed to
+    Nav2.
+
+    On the default wall clock a reset stamped its `set_pose` about 1.78e9
+    seconds after every measurement that filter would ever see again.
+    `robot_localization` keeps the reset stamp as the filter's last measurement
+    time and discards anything older, so each EKF stopped integrating at the
+    instant of the first reset and published `odom -> base_link` as identity
+    from then on. That transform is half of the pose the GUI draws, so all four
+    robots sat frozen on their spawn points while driving around the building —
+    and slam_toolbox, which uses the same TF as its motion prior, lost its
+    odometry at the same moment.
+    """
+    return rclpy.create_node(
+        "swarmdeck_adapter_sim",
+        parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--robots", type=int, default=None,
@@ -1313,7 +1447,7 @@ def main() -> None:
     args = ap.parse_args()
 
     rclpy.init()
-    node = rclpy.create_node("swarmdeck_adapter_sim")
+    node = create_adapter_node()
     http_url = f"http://{args.host}:{args.port}"
     robot_count = args.robots
     if robot_count is None:

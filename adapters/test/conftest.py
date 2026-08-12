@@ -23,7 +23,8 @@ REPO = Path(__file__).resolve().parents[2]
 # Submodules must be listed individually: `from nav2_msgs.srv import X` imports
 # `nav2_msgs.srv`, and a MagicMock parent does not make its children importable.
 STUBBED_ROS_MODULES = [
-    "cv2", "websockets", "rclpy", "rclpy.action", "rclpy.node", "rclpy.qos",
+    "cv2", "websockets", "rclpy", "rclpy.action", "rclpy.node", "rclpy.parameter",
+    "rclpy.qos",
     "action_msgs", "action_msgs.msg", "geometry_msgs", "geometry_msgs.msg",
     "nav_msgs", "nav_msgs.msg", "nav2_msgs", "nav2_msgs.action", "nav2_msgs.srv",
     "robot_localization", "robot_localization.srv",

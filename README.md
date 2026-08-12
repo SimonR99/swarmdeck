@@ -80,17 +80,25 @@ come back within a couple of seconds, and the reason needs to be visible.
 
 Two things are worth expecting rather than debugging:
 
-- **In `auto` merge mode the merged map does not come straight back, and may take a long
-  time.** Registration has to re-earn its transforms against maps that are small again,
-  and until it does it correctly reports `ambiguous occupancy match` and holds robots out.
-  Measured after a real reset, with the fleet still exploring: over four minutes
-  `global_members` oscillated between two robots and none, and never returned to the full
-  fleet it had before the reset — the merged view flickers on and off for as long as that
-  lasts. It is the four rejection tests doing their job on small maps, not a fault, but it
-  does mean the merged map is not a good thing to watch right after a reset. Per-robot maps
-  are correct immediately (`view_by_robot` in `GET /api/map/status`, which also names which
-  test is refusing), and `static` mode has no such gap because its transforms are
-  configured rather than estimated.
+- **In `auto` merge mode the merged map does not come straight back with the whole fleet.**
+  Registration has to re-earn its transforms against maps that are small again, and until
+  it does it correctly reports `ambiguous occupancy match` or `outside configured prior`
+  and holds robots out. Measured after a real reset, with the fleet still exploring:
+  `global_members` settled on two of the four robots and stayed there without a single
+  change, the other two refused because the alignment their maps supported sat 3.1 m and
+  4.6 m from the configured start pose — past the 2 m gate, and confidently so (rival
+  ratios 0.13 and 0.18 against a 0.80 threshold), which is drift to read rather than noise
+  to wait out. That is the rejection tests doing their job, not a fault. Per-robot maps are correct immediately
+  (`view_by_robot` in `GET /api/map/status`, which also names which test is refusing), and
+  `static` mode has no such gap because its transforms are configured rather than
+  estimated.
+
+  Membership used to *oscillate* here rather than settle — two robots, then none, at the
+  map upload rate, flickering the merged view on and off for minutes. That was a bug, not
+  small maps: the yaw sweep was anchored to the prior it was given, so the narrowed search
+  a successful registration enabled sampled different yaws than the wide search that
+  produced it, found a rival answer a degree away, and refused the robot it had just
+  accepted. The sweep now runs on a fixed lattice, so narrowing it cannot move the answer.
 - **A reset does not restart the exploration bootstrap.** If `explore_seconds` has already
   elapsed the fleet comes back stationary and waits for goals.
 

@@ -646,6 +646,14 @@ class MapService:
                 else "ambiguous occupancy match"
             )
             self.registered.discard(robot_id)
+            # The count means "consecutive ambiguous frames while still being
+            # held in the merged map on an older transform", and `status()`
+            # offers it to an operator as evidence of exactly that. A robot that
+            # is out is not being held on anything, so leaving the counter
+            # running reports a hold that is not happening — and on a robot the
+            # merge never accepted it simply climbs with uptime, which was
+            # measured into the hundreds on the live fleet.
+            self.registration_misses[robot_id] = 0
             return
         c, s = math.cos(ryaw), math.sin(ryaw)
         wx = rx + result.dx * c - result.dy * s

@@ -7,7 +7,11 @@ import math
 import numpy as np
 import pytest
 
-from swarmdeck_server.mapsvc.registration import COARSE_STEP, register
+from swarmdeck_server.mapsvc.registration import (
+    COARSE_STEP,
+    _coarse_candidates,
+    register,
+)
 from swarmdeck_server.mapsvc.service import GridMeta, MapService
 
 RES, N, OX, OY = 0.05, 400, -10.0, -10.0
@@ -177,6 +181,63 @@ def test_yaw_prior_restricts_the_search():
     )
     assert abs((math.degrees(blind.dyaw) - 37.0 + 180) % 360 - 180) > 5.0
     assert not blind.confident
+
+
+def test_the_answer_does_not_depend_on_the_prior_it_was_given():
+    """Narrowing the search must not be able to move the answer.
+
+    The prior exists to make the sweep cheaper and to keep a symmetric alias out
+    of the candidate set. It is not evidence, so two windows that both contain
+    the true peak have to agree — and when the prior anchored the sweep they did
+    not, because every stage refines within +/- the previous step and so
+    inherited the prior's sub-step offset.
+
+    That is the measured cause of the merged map flickering: on the live fleet
+    the wide search returned -0.375 deg at a rival-translation ratio of 0.679 and
+    the narrow search its own answer enabled returned +0.620 deg at 0.895 — one
+    either side of the 0.80 ambiguity threshold, on bit-identical grids — so the
+    fleet's registration alternated between accepted and refused at the map
+    upload rate and the GUI swapped between the merged map and the robot's own
+    map with it.
+    """
+    ref = build_plan()
+    mov = reframe(ref, 1.1, -0.6, math.radians(2.0))
+
+    # Deliberately including priors that are not multiples of the coarse step:
+    # the lock is a previous answer, refined to a fraction of a degree, so a
+    # sweep anchored to it lands nowhere near the sweep that produced it.
+    distinct = {
+        (round(r.dyaw, 9), round(r.dx, 9), round(r.dy, 9), round(r.ratio, 9), r.confident)
+        for r in (
+            register(
+                ref, (RES, OX, OY), mov, (RES, OX, OY),
+                yaw_prior=math.radians(prior_deg), yaw_window_deg=8.0,
+            )
+            for prior_deg in (0.0, -0.38, 0.62, 1.7, -2.4, 3.9)
+        )
+    }
+    assert len(distinct) == 1, f"the prior moved the answer: {sorted(distinct)}"
+
+
+@pytest.mark.parametrize("prior_deg", [0.0, -0.38, 12.5, -47.3, 179.6])
+@pytest.mark.parametrize("window_deg", [8.0, 40.0])
+def test_yaw_sweep_stays_on_one_lattice(prior_deg, window_deg):
+    """Every window is a subset of the same global lattice of candidates.
+
+    This is what makes the result above prior-independent: the winner of a wide
+    sweep is still the winner of a narrower one whenever it lies inside it, so
+    narrowing can cost coverage but cannot select a different peak.
+    """
+    candidates = np.degrees(_coarse_candidates(math.radians(prior_deg), window_deg))
+    assert candidates.size, "a window must always offer at least one candidate"
+
+    off_lattice = candidates - np.round(candidates / COARSE_STEP) * COARSE_STEP
+    assert np.allclose(off_lattice, 0.0, atol=1e-9), f"off-lattice yaws: {candidates}"
+    assert np.all(np.abs(candidates - prior_deg) <= window_deg + 1e-9)
+    # Nothing inside the window is skipped, so the lattice never costs coverage
+    # beyond the half step the coarse stage is dilated to absorb.
+    assert candidates.max() > prior_deg + window_deg - COARSE_STEP
+    assert candidates.min() < prior_deg - window_deg + COARSE_STEP
 
 
 def test_register_rejects_when_no_overlap():
@@ -469,3 +530,10 @@ def test_a_robot_that_keeps_matching_ambiguously_is_dropped(monkeypatch):
     assert status["global_members"] == []
     assert status["registrations"]["r1"]["accepted"] is False
     assert status["registrations"]["r1"]["rejection"] == "ambiguous occupancy match"
+
+    # `misses` is offered to the operator as evidence that the map is being held
+    # together on an older transform. Once the robot is out nothing is being
+    # held, so the count must stop rather than climb with uptime.
+    for _ in range(5):
+        svc.ingest("r1", meta, cells)
+        assert svc.status()["registrations"]["r1"]["misses"] == 0

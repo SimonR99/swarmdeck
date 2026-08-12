@@ -168,6 +168,9 @@ def make_bridge(sim):
     bridge._camera_frame = object()
     bridge._camera_dirty = True
     bridge._detections = [{"id": "duck_0"}]
+    bridge._escape_from = None
+    bridge._escape_started_at = 0.0
+    bridge._escape_progress_at = 0.0
     return bridge
 
 
@@ -440,3 +443,211 @@ def test_odometry_reset_targets_the_robot_s_own_odom_frame(sim):
     assert bridge._reset_odometry() is True
     assert recorded["name"] == "/robot_0/set_pose"
     assert recorded["frame"] == "robot_0/odom"
+
+
+def test_the_adapter_node_runs_on_sim_time(sim):
+    """Every stamp this node writes is read by a node living in sim time.
+
+    On the wall clock the reset stamped its `set_pose` ~1.78e9 seconds ahead of
+    every measurement the EKF would see afterwards. robot_localization keeps
+    that stamp as the filter's last measurement time and drops anything older,
+    so the filter froze at the reset pose and published `odom -> base_link` as
+    identity — which is half of `map_pose()`, so the GUI drew every robot parked
+    on its spawn point while it drove around the building.
+    """
+    sim.rclpy.create_node.reset_mock()
+    sim.Parameter.reset_mock()
+    sim.create_adapter_node()
+
+    args, kwargs = sim.rclpy.create_node.call_args
+    assert args == ("swarmdeck_adapter_sim",)
+    sim.Parameter.assert_called_once_with("use_sim_time", sim.Parameter.Type.BOOL, True)
+    assert kwargs["parameter_overrides"] == [sim.Parameter.return_value]
+
+
+# ------------------------------------------------------------- wedge escape
+#
+# Nav2 cannot plan out of a pose whose footprint overlaps a mapped obstacle, nor
+# recover from one: the planner reports "Failed to create plan", BackUp reports
+# "Collision Ahead", and clearing the costmap does nothing because the obstacle
+# comes from the static layer that slam_toolbox repopulates every second. So the
+# robot stays wedged forever. Measured on the Scout Mini at a corridor doorway,
+# 0.26 m of SLAM drift putting a jamb 0.255 m from its centre against a 0.290 m
+# inscribed radius, while ground truth had it 0.379 m clear.
+
+
+@pytest.fixture
+def twist(sim, monkeypatch):
+    """A real Twist message for the escape tests.
+
+    `Twist` is stubbed as a MagicMock, and a MagicMock returns the SAME instance
+    from every call — so a zero stop command and a reverse command would be one
+    shared object, and no test could tell them apart.
+    """
+
+    class Vec:
+        def __init__(self):
+            self.x = self.y = self.z = 0.0
+
+    class T:
+        def __init__(self):
+            self.linear, self.angular = Vec(), Vec()
+
+    monkeypatch.setattr(sim, "Twist", T)
+    return T
+
+
+def sent_linear(bridge):
+    """Record the linear.x of every command published from now on."""
+    sent: list[float] = []
+    bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg.linear.x)
+    return sent
+
+
+def escaping(sim, bridge, poses):
+    """Run escape_tick over a scripted sequence of poses, one per cycle."""
+    seen = iter(poses)
+    bridge.map_pose = lambda: dict(next(seen))
+    commands = []
+    bridge.pub_cmd.publish.side_effect = lambda msg: commands.append(msg.linear.x)
+    for _ in poses:
+        bridge.escape_tick()
+    return commands
+
+
+def test_a_failed_goal_arms_the_escape(sim):
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 1.0, "y": 2.0, "yaw": 0.0}
+
+    bridge._finish_goal("failed", bridge._goal_generation)
+
+    assert bridge._escape_from == (1.0, 2.0)
+    assert bridge.mode == "recover", "the operator must see the robot is moving"
+    assert bridge.nav_status == "failed", "the goal still failed; that is not hidden"
+
+
+@pytest.mark.parametrize("status", ["succeeded", "cancelled"])
+def test_only_a_failed_goal_arms_the_escape(sim, status):
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 1.0, "y": 2.0, "yaw": 0.0}
+
+    bridge._finish_goal(status, bridge._goal_generation)
+
+    assert bridge._escape_from is None
+    assert bridge.mode == "idle"
+
+
+def test_the_escape_reverses_and_only_reverses(sim, twist):
+    """Turning would sweep the footprint out to the circumscribed radius."""
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge._finish_goal("failed", bridge._goal_generation)
+
+    sent = []
+    bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg)
+    bridge.escape_tick()
+
+    assert sent[-1].linear.x == sim.ESCAPE_SPEED < 0
+    assert sent[-1].angular.z == 0.0
+
+
+def test_the_escape_stops_once_the_robot_has_retreated_far_enough(sim, twist):
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge._finish_goal("failed", bridge._goal_generation)
+
+    step = sim.ESCAPE_DISTANCE / 2
+    poses = [{"x": -step, "y": 0.0}, {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
+             {"x": -sim.ESCAPE_DISTANCE, "y": 0.0}]
+    commands = escaping(sim, bridge, poses)
+
+    assert commands == [sim.ESCAPE_SPEED, 0.0], "must stop, and stay stopped"
+    assert bridge._escape_from is None
+    assert bridge.mode == "idle"
+
+
+def test_a_pinned_robot_stops_instead_of_grinding(sim, twist, monkeypatch):
+    """No progress means real geometry, where reversing harder is wrong."""
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+    bridge._finish_goal("failed", bridge._goal_generation)
+
+    bridge.escape_tick()                       # commanded, no movement yet
+    clock[0] += sim.ESCAPE_STALL_S + 0.1
+    sent = []
+    bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg.linear.x)
+    bridge.escape_tick()
+
+    assert sent == [0.0], "a pinned robot is stopped, not driven harder"
+    assert bridge._escape_from is None
+    assert bridge.mode == "idle"
+    bridge.node.get_logger.return_value.warn.assert_called()
+
+
+def test_the_escape_gives_up_rather_than_reversing_forever(sim, monkeypatch):
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+    clock = [1000.0]
+    monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
+    bridge._finish_goal("failed", bridge._goal_generation)
+
+    # Moving, but never far enough to satisfy ESCAPE_DISTANCE.
+    creep = sim.ESCAPE_STALL_DISTANCE * 2
+    bridge.map_pose = lambda: {"x": -creep, "y": 0.0, "yaw": 0.0}
+    bridge.escape_tick()
+    assert bridge._escape_from is not None, "still trying while it makes progress"
+
+    clock[0] += sim.ESCAPE_TIMEOUT_S + 0.1
+    bridge.escape_tick()
+    assert bridge._escape_from is None
+    assert bridge.mode == "idle"
+
+
+def test_an_operator_command_always_wins_over_the_escape(sim, twist):
+    """A robot the operator has taken control of must never drive itself."""
+    for command, expect_mode in (
+        (lambda b: b.drive(0.2, 0.0), "teleop"),
+        (lambda b: b.stop(), "estop"),
+        (lambda b: b.cancel(), "idle"),
+    ):
+        bridge = make_bridge(sim)
+        bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        bridge._finish_goal("failed", bridge._goal_generation)
+        assert bridge._escape_from is not None
+
+        command(bridge)
+
+        assert bridge._escape_from is None, "the escape outlived an operator command"
+        assert bridge.mode == expect_mode
+        # And a later tick must not resurrect it.
+        sent = []
+        bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg)
+        bridge.escape_tick()
+        assert sent == []
+
+
+def test_a_new_goal_cancels_the_escape(sim):
+    bridge = make_bridge(sim)
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge._finish_goal("failed", bridge._goal_generation)
+
+    bridge.nav_client = MagicMock()
+    bridge.nav_client.server_is_ready.return_value = True
+    bridge.navigate_to({"x": 2.0, "y": 0.0})
+
+    assert bridge._escape_from is None
+    assert bridge.mode == "nav"
+
+
+def test_the_escape_does_nothing_when_it_was_never_armed(sim, twist):
+    bridge = make_bridge(sim)
+    sent = []
+    bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg)
+
+    bridge.escape_tick()
+
+    assert sent == []
