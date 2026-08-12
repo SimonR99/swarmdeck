@@ -1,0 +1,22 @@
+# Intel RealSense D435i on the Orin payload (serial 948123050252).
+# Color is USB interface 1.3 → /dev/video4 after the 2026-08-12 replug.
+# Depth is Z16 on video0; usb_cam cannot publish that as a GUI stream, so
+# this file is color-only. spot:dev has no realsense2_camera package.
+/**:
+  ros__parameters:
+    video_device: "/dev/v4l/by-path/platform-3610000.usb-usb-0:3.2:1.3-video-index0"
+    framerate: 15.0
+    io_method: "mmap"
+    frame_id: "d435_color"
+    pixel_format: "yuyv2rgb"
+    image_width: 640
+    image_height: 480
+    camera_name: "d435_color"
+    brightness: -1
+    contrast: -1
+    saturation: -1
+    sharpness: -1
+    gain: -1
+    auto_white_balance: true
+    autoexposure: true
+    autofocus: false

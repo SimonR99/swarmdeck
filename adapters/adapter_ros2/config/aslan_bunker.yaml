@@ -28,13 +28,11 @@ topics:
   plan: ""
   cmd_vel: /cmd_vel
   battery: ""
-  # No camera is live on this unit yet. When one is fitted, an RGB-aligned
-  # `camera_depth` plus the matching `camera_info` is what turns a duck
-  # detection into a map marker rather than only a box on the video; a mount
-  # transform onto the SLAM frame is needed too. See docs/botman.md, which has
-  # the same two prerequisites written out.
+  # OAK-D on USB (03e7:2485). RGB MJPEG from the SwarmDeck oak_camera service.
+  # Depth/map markers need the RGBD profile plus a measured mount TF, same as
+  # Botman; until then detections stay bbox-only.
   camera: ""
-  camera_compressed: ""
+  camera_compressed: /oak/rgb/image_raw/compressed
   camera_depth: ""
   camera_info: ""
   # Nav2 never publishes to the physical driver. The adapter relays this

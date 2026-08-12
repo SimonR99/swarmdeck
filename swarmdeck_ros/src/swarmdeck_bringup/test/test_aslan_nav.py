@@ -55,3 +55,12 @@ def test_aslan_nav_namespace_and_tf_bridge_are_distinct():
     assert '"namespace": "aslan_0"' in source
     assert 'name="aslan_odom_to_tf"' in source
     assert '"use_receive_time": True' in source
+
+
+def test_aslan_slam_defaults_to_lidar_only():
+    source = ROBOT_LAUNCH.read_text()
+
+    assert 'DeclareLaunchArgument("start_imu", default_value="false")' in source
+    assert 'DeclareLaunchArgument("imu_topic", default_value="/aslan/imu_disabled")' in source
+    assert "imu_preintegration_node" in source
+    assert "launch/os1_128.launch.py" not in source

@@ -10,7 +10,7 @@ maintained spec, and two of these four machines are shared with other people's w
 | tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM, map, camera, teleop and `navigate_to` all verified working |
 | botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (Docker only) | no | yes, `/ssd/swarmdeck` | **live**: SuperOdometry pose, 2D raytraced map and 3D cloud verified; e-stop interface available |
 | aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | **no** (dropped off LAN during build) | no (Docker only) | no | yes, `/ssd/swarmdeck` | config + ROS overlay built; live stack blocked by hardware/network |
-| spot | `spot` | Boston Dynamics Spot + Orin payload | body **on**, payload **no** | unknown | unknown | not attempted | config written; blocked on `orin.local` |
+| spot | `spot` | Boston Dynamics Spot + Orin payload | **yes** (`orin.local` / `192.168.1.192`) | no (Docker `spot:dev`) | no | `/home/indro/swarmdeck` | LIO-SAM config; lidar+slam+adapter, driver gated |
 
 `rclpy` works natively on tars (correcting this doc's own earlier claim — see the tars
 section). It's still the wrong tool for tars specifically, since tars's actual autonomy
@@ -435,27 +435,24 @@ below had to work around.
 
 ## spot (`ssh spot` → `orin.local`, user `indro`)
 
-**Body on, payload off the lab LAN (re-checked 2026-08-12).** The robot itself is
-powered: its AP `spot-BD-03210008` is visible at high signal. `orin.local` still
-does not resolve from mistmesh, Scout, or Botman, and `192.168.50.0/24` (Spot's
-payload ethernet, SDK address `192.168.50.3`) is not routed here. No extra NVIDIA
-MAC appeared on `192.168.1.0/24`. See `docs/spot.md`.
+**Reachable 2026-08-12** at `192.168.1.192` (JetPack R36.2, Ubuntu 22.04) after
+a payload power issue. Spot body `192.168.50.3` and Ouster `192.168.50.165`
+ping from the Orin. Native ROS: none. Humble + `lio_sam` / `ouster_ros` /
+`spot_driver` / `vectornav` live in `spot:dev` with `/home/indro/mist_ws_ros2`
+mounted at `/workspace`.
 
-The stack, read from MIST's `rover_launch` copies on Botman/Aslan and from prior
-editor sessions on `indro@orin.local`:
+**SLAM is LIO-SAM**, not SuperOdometry (that package is `COLCON_IGNORE`'d).
+Pose `/lio_sam/mapping/odometry`, cloud `/lio_sam/mapping/cloud_registered`,
+frames `map` → `odom_link` → `lidar_link`. See `docs/spot.md`.
 
-- ROS 2 Humble on the Orin (`/home/indro/mist_ws_ros2`), not the old ROS 1
-  LVI-SAM launch that still lives in Scout's `/ssd/mist_ws`.
-- **SuperOdometry** (`localization_mode: false`) on `/ouster/points` +
-  `/ouster/imu`, publishing `/laser_odometry` and `/registered_scan` — same
-  SLAM as the Bunkers.
-- Body via Clearpath `spot_driver` (`/cmd_vel`, lease to `192.168.50.3`).
-- DinoNav is separate visual nav, not a Nav2 action.
-
-SwarmDeck files are in place (`adapters/adapter_ros2/config/spot.yaml`,
-`launch/spot.launch.py`, `docker-compose.robot-spot.yml`). They cannot be
-started until the payload has a lab-facing address. Do not run `--profile
-driver` without an operator at the e-stop.
+SwarmDeck files: `adapters/adapter_ros2/config/spot.yaml`,
+`launch/spot.launch.py`, `docker-compose.robot-spot.yml`. Default compose
+starts lidar + LIO-SAM + adapter + `spot_driver`. Claim / Stand are GUI
+buttons (`auto_claim` is off; software estop is on so claim works without
+a tablet). Point nav sends Clearpath `/trajectory` (map → `body`).
+Navigation stacks people actually launch are TARE +
+`spot_high_level_controller` in the LIO-SAM full stack, or DinoNav /
+visualnav for image goals — not Nav2.
 
 ---
 

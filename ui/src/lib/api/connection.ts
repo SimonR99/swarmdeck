@@ -169,6 +169,9 @@ export const actions = {
   stopAll() {
     sendAction({ type: 'stop_all' });
   },
+  bodyCommand(robotId: string, action: 'claim' | 'release' | 'sit' | 'stand') {
+    sendAction({ type: 'body_command', robot_id: robotId, action });
+  },
   /**
    * Simulation only. The map clears through the ordinary patch path once the
    * adapters confirm, so nothing is cleared optimistically here — a reset that

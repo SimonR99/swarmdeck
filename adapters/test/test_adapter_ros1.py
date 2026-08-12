@@ -488,7 +488,7 @@ def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):
         cfg = mod.deep_merge(mod.DEFAULTS, yaml.safe_load(path.read_text()))
         assert cfg["map_frame"] and cfg["base_frame"], f"{name} needs both frames"
         assert cfg["rates"]["state_hz"] > 0
-        # The preview cap in the protocol is 5 Hz; never configure faster.
+        # Detection poll; never faster than the old 5 Hz preview cap.
         assert cfg["rates"]["camera_period_s"] >= 0.2, f"{name} exceeds the 5 Hz cap"
 
 
@@ -815,3 +815,144 @@ def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
     assert bridge.nav_status == "cancelled"
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
+
+
+# --------------------------------------------------------------- link plumbing
+
+
+def test_a_blocking_upload_does_not_stall_state_or_nav_joy(mod, monkeypatch):
+    """The four-robot regression, in its ROS 1 form.
+
+    `upload_map` blocks for up to its 5 s timeout, and it blocks for that long
+    precisely when the fleet is large — every robot's map queues behind one lock
+    on the server. While state and uploads shared a coroutine, that stalled the
+    5 Hz pump, and the backend declares a robot offline after 4 s
+    (OFFLINE_AFTER_S) while `link_watchdog` cancels its active goal after 1.5 s.
+
+    `_pump_nav_joy` makes it worse here than on ROS 2: pathFollower reads its
+    speed and localPlanner its steering direction from that message, so a
+    stalled loop did not merely stop REPORTING the robot, it stopped STEERING a
+    robot that was mid-goal.
+    """
+    import asyncio
+    import json
+    import threading
+
+    class _FakeWs:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, raw):
+            self.sent.append(json.loads(raw))
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(3600)  # the operator sends nothing here
+            raise StopAsyncIteration
+
+    ws = _FakeWs()
+
+    class _Conn:
+        async def __aenter__(self):
+            return ws
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(mod.websockets, "connect", lambda *a, **k: _Conn())
+
+    started = threading.Event()
+    release = threading.Event()
+    joy_pumps = []
+
+    class _Bridge:
+        cfg = mod.deep_merge(
+            mod.DEFAULTS,
+            # A fast pump and an always-due map upload, so the scenario reaches
+            # the blocking call immediately instead of waiting out a real period.
+            {"rates": {"state_hz": 50.0, "map_period_s": 0.0,
+                       "camera_period_s": 3600.0}},
+        )
+        id = "r0"
+        t0 = 0.0
+
+        def __init__(self):
+            self.node = MagicMock()
+
+        def state(self):
+            return {"type": "robot_state", "robot_id": "r0"}
+
+        def capabilities(self):
+            return []
+
+        def note_link_activity(self):
+            pass
+
+        def _check_topic_nav_progress(self):
+            pass
+
+        def _pump_nav_joy(self):
+            joy_pumps.append(1)
+
+        def upload_map(self):
+            started.set()
+            release.wait(5.0)  # stands in for the real 5 s urllib timeout
+            return None
+
+        def upload_scan(self):
+            pass
+
+        def upload_cloud(self):
+            pass
+
+        def run_detection(self):
+            pass
+
+        def take_detections(self):
+            return None
+
+        def refresh_settings(self):
+            pass
+
+        def cancel_goal(self):
+            pass
+
+        def drive(self, *_args):
+            pass
+
+    bridge = _Bridge()
+
+    def count_states():
+        return sum(1 for m in ws.sent if m.get("type") == "robot_state")
+
+    async def scenario():
+        task = asyncio.ensure_future(mod.run_robot(bridge, "ws://test"))
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, started.wait, 5.0)
+        before, joy_before = count_states(), len(joy_pumps)
+        await asyncio.sleep(0.4)
+        during, joy_during = count_states(), len(joy_pumps)
+        release.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return before, during, joy_before, joy_during
+
+    before, during, joy_before, joy_during = asyncio.run(
+        asyncio.wait_for(scenario(), 15)
+    )
+
+    assert started.is_set(), "the scenario never reached the blocking upload"
+    # 0.4 s at 50 Hz is ~20 iterations; a handful is already proof the loop ran.
+    assert during - before >= 5, (
+        f"state stopped while an upload was in flight ({during - before} frames "
+        "sent during a 0.4 s block) — uploads are gating telemetry again"
+    )
+    assert joy_during - joy_before >= 5, (
+        f"nav joy stopped while an upload was in flight ({joy_during - joy_before} "
+        "pumps during a 0.4 s block) — an upload can steer the robot again"
+    )

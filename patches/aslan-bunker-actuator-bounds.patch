@@ -1,0 +1,18 @@
+--- a/include/ugv_sdk/details/robot_base/bunker_base.hpp
++++ b/include/ugv_sdk/details/robot_base/bunker_base.hpp
+@@ -53,10 +53,13 @@
+     auto actuator = AgilexBase<ParserType>::GetActuatorStateMsgGroup();
+ 
+     BunkerActuatorState bunker_actuator;
+     bunker_actuator.time_stamp = actuator.time_stamp;
+     for (int i = 0; i < 3; ++i) {
+       bunker_actuator.actuator_hs_state[i] = actuator.actuator_hs_state[i];
+       bunker_actuator.actuator_ls_state[i] = actuator.actuator_ls_state[i];
+-      bunker_actuator.actuator_state[i] = actuator.actuator_state[i];
++    }
++    // actuator_state is sized [2] (V1 only); the loop above is [3] for hs/ls.
++    for (int i = 0; i < 2; ++i) {
++      bunker_actuator.actuator_state[i] = actuator.actuator_state[i];
+     }
+     return bunker_actuator;
+   }

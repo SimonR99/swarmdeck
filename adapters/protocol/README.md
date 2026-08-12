@@ -10,7 +10,7 @@ Implement it in any language, on any OS, against any ROS version (or none).
 | Direction | Channel | Purpose |
 |---|---|---|
 | adapter → backend | `WS /adapter` | `hello`, `robot_state`, `nav_status`, `detections`, `map_meta`, `reset_done` |
-| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode`, `reset` |
+| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode`, `reset`, `body_command` |
 | adapter → backend | `POST /api/adapter/map` | occupancy grid, throttled ≤ 1 Hz |
 | adapter → backend | `POST /api/adapter/camera` | optional JPEG preview fallback, ≤ 5 Hz |
 | adapter → MediaMTX | `RTSP push :8554/<robot_id>` | H.264 camera |
@@ -42,6 +42,7 @@ without `map` contributes no grid. **Never assume a capability.**
 | `camera` | streams to MediaMTX under its `robot_id` |
 | `battery` | reports `battery` in `robot_state` |
 | `estop` | accepts `stop` |
+| `body` | accepts `body_command` (`claim` / `release` / `sit` / `stand`) |
 | `reset` | accepts `reset` — **simulation only**, see below |
 
 ### `reset` is for simulated robots only
@@ -123,10 +124,16 @@ fresh, valid depth/TF result send `null` and the GUI shows only the video box.
 { "type": "stop",        "seq": 44 }
 { "type": "set_mode",    "seq": 45, "mode": "teleop" }
 { "type": "reset",       "seq": 46 }
+{ "type": "body_command","seq": 47, "action": "stand" }
 ```
 
-**Commands are planner-agnostic.** The adapter maps `navigate_to` to Nav2, `move_base`,
-or a vendor SDK. The GUI must never send planner-specific fields.
+`body_command.action` is one of `claim`, `release`, `sit`, `stand`. A robot
+without the `body` capability ignores it. On Spot these map onto Clearpath
+`spot_driver` Trigger services; `stand` may power the motors first.
+
+**Commands are planner-agnostic.** The adapter maps `navigate_to` to Nav2,
+`move_base`, or a vendor action (Spot: Clearpath `/trajectory` in `body`).
+The GUI must never send planner-specific fields.
 
 For the default `local` frame, `navigate_to.goal` is expressed in that robot's local
 navigation map. The backend converts between it and the shared merged-map frame, using

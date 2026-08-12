@@ -10,7 +10,7 @@ export const PROTOCOL_VERSION = 1;
  * which no physical robot can honour. The reset control is gated on some robot
  * advertising it, which is what keeps it off a hardware dashboard.
  */
-export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop' | 'reset';
+export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop' | 'reset' | 'body';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 // `recover` is the adapter reversing a robot out of a pose Nav2 could not plan
 // from. It moves on its own, briefly and without an operator command, so it has
@@ -254,6 +254,7 @@ export type ClientMessage =
   | { type: 'acknowledge_alert'; id: string }
   | { type: 'report_target'; robot_id: string; payload: Point }
   | { type: 'stop_all' }
-  | { type: 'reset_sim' };
+  | { type: 'reset_sim' }
+  | { type: 'body_command'; robot_id: string; action: 'claim' | 'release' | 'sit' | 'stand' };
 
 export type ClientAction = ClientMessage['type'];

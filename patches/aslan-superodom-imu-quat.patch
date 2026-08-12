@@ -1,0 +1,35 @@
+diff --git a/include/super_odometry/LaserMapping/laserMapping.h b/include/super_odometry/LaserMapping/laserMapping.h
+--- a/include/super_odometry/LaserMapping/laserMapping.h
++++ b/include/super_odometry/LaserMapping/laserMapping.h
+@@ -220,6 +220,6 @@
+         int frameCount = 0;
+         int waiting_takeoff_timeout = 300;
+-        int startupCount = 10;
++        int startupCount = 0;
+         int localizationCount = 0;
+         int laserCloudValidInd[125];
+         int laserCloudSurroundInd[125];
+diff --git a/src/LaserMapping/laserMapping.cpp b/src/LaserMapping/laserMapping.cpp
+--- a/src/LaserMapping/laserMapping.cpp
++++ b/src/LaserMapping/laserMapping.cpp
+@@ -320,16 +320,14 @@
+ void laserMapping::initializeWithIMU(){
+     if(sensorMeas.imuPrediction.w()!=0){  //Have IMU data
+     //Use IMU Orientation directly during startup for seconds 
+-    tf2::Quaternion curr_imu(sensorMeas.imuPrediction.w(), sensorMeas.imuPrediction.x(),
+-                             sensorMeas.imuPrediction.y(), sensorMeas.imuPrediction.z());
+-    
+     //Keep position from last frame 
+     t_w_curr=last_T_w_lidar.pos;
+     T_w_lidar.pos=t_w_curr;
+ 
+-    //Update rotation 
+-    q_w_curr=Eigen::Quaterniond(curr_imu.w(), curr_imu.x(), curr_imu.y(), curr_imu.z());
+-    T_w_lidar.rot=q_w_curr;
++    // tf2::Quaternion is (x, y, z, w). Passing Eigen (w, x, y, z) into it
++    // swapped the components and rolled the map ~180 deg on lidar-only init.
++    q_w_curr = sensorMeas.imuPrediction.normalized();
++    T_w_lidar.rot = q_w_curr;
+ 
+ 
+     }else

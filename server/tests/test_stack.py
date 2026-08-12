@@ -716,6 +716,44 @@ def test_drive_routing_is_bounded():
         app_registry._sinks.clear()
 
 
+def test_body_command_requires_the_body_capability():
+    class Sink:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    sink = Sink()
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        app_registry.hello({"robot_id": "r0", "capabilities": ["map"]}, sink=sink)
+        asyncio.run(
+            handle_gui_message(
+                {"type": "body_command", "robot_id": "r0", "action": "stand"}
+            )
+        )
+        assert sink.messages == []
+        app_registry.hello({"robot_id": "r0", "capabilities": ["body"]}, sink=sink)
+        asyncio.run(
+            handle_gui_message(
+                {"type": "body_command", "robot_id": "r0", "action": "stand"}
+            )
+        )
+        assert sink.messages[0]["type"] == "body_command"
+        assert sink.messages[0]["action"] == "stand"
+        asyncio.run(
+            handle_gui_message(
+                {"type": "body_command", "robot_id": "r0", "action": "leap"}
+            )
+        )
+        assert len(sink.messages) == 1
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
 # --------------------------------------------------------------- cslam mode
 
 

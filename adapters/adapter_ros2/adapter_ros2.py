@@ -103,6 +103,22 @@ try:
 except ImportError:  # pragma: no cover - depends on the robot's install
     NavigateToPose = None
 
+try:
+    from std_srvs.srv import Trigger
+except ImportError:  # pragma: no cover - depends on the robot's install
+    Trigger = None
+
+try:
+    from spot_msgs.action import Trajectory
+except ImportError:  # pragma: no cover - depends on the robot's install
+    Trajectory = None
+
+# Spot (and similar) body services. `stand` may also call `power_on` first.
+BODY_ACTIONS = ("claim", "release", "sit", "stand")
+# Trigger names that are not GUI body actions: motors, and the SDK stop used
+# because Clearpath's ROS 2 Trajectory server does not honour cancel/preempt.
+BODY_SERVICE_NAMES = (*BODY_ACTIONS, "power_on", "stop")
+
 DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
     "ros_distro": "jazzy",
@@ -141,12 +157,34 @@ DEFAULTS: dict[str, Any] = {
         "nav_cmd_vel": "",
     },
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
-    "actions": {"navigate_to_pose": "navigate_to_pose"},
+    "actions": {
+        "navigate_to_pose": "navigate_to_pose",
+        # Spot: Clearpath `spot_msgs/Trajectory`. Empty on every other robot.
+        "trajectory": "",
+    },
+    # Spot Trajectory goals are in `body`. duration_s must be > 0 or the
+    # driver aborts. The high-level controller uses 30 s.
+    "trajectory": {
+        "frame": "body",
+        "duration_s": 30.0,
+        "precise_positioning": True,
+        "disable_obstacle_avoidance": False,
+    },
+    # Empty disables the `body` capability. Spot's Clearpath driver exposes
+    # these as std_srvs/Trigger; a robot without them leaves them blank.
+    "services": {
+        "claim": "",
+        "release": "",
+        "sit": "",
+        "stand": "",
+        "power_on": "",
+        "stop": "",
+    },
     "rates": {
         "state_hz": 5.0,
         "map_period_s": 2.0,
         "cloud_period_s": 4.0,
-        "camera_period_s": 0.2,   # 5 Hz, per the protocol's preview cap
+        "camera_period_s": 0.2,   # detection poll; hardware video is WebRTC
     },
     "perception": {
         "enabled": True,
@@ -175,7 +213,7 @@ DEFAULTS: dict[str, Any] = {
     # on 2026-08-12: the link dropped mid-goal and the robot kept driving and
     # rotating until it was powered down by hand.
     #
-    # Freshness is "either direction heard from": the tx loop sends state at
+    # Freshness is "either direction heard from": `tx_state` sends state at
     # `state_hz`, and any received command also counts. A wedged TCP connection
     # blocks `await ws.send()` on a full write buffer, so this stops advancing
     # long before websockets gives up at ping_interval + ping_timeout (~40 s).
@@ -237,12 +275,12 @@ class HardwareBridge:
         self._goal_handle = None
         self._goal_generation = 0
         self._last_drive_at = 0.0
-        self._camera_jpeg: bytes | None = None
-        self._camera_dirty = False
         self._camera_encoding_warned = False
         # Newest frame awaiting detection, as (jpeg, header). The ROS callback
         # only ever assigns it; run_detection() consumes it from a worker thread.
         self._detect_pending: tuple[bytes, Any] | None = None
+        # Separate from detection so a sidecar outage cannot starve the UI preview.
+        self._camera_jpeg: bytes | None = None
         self._camera_depth_image: Image | None = None
         self._camera_info: CameraInfo | None = None
         self._camera_color_info: CameraInfo | None = None
@@ -281,7 +319,13 @@ class HardwareBridge:
         )
 
         if topics.get("odom"):
-            node.create_subscription(Odometry, topics["odom"], self._on_odom, 10)
+            # Sensor-data QoS (BEST_EFFORT). LIO-SAM and several lidar odometry
+            # publishers use it; a RELIABLE subscriber never sees those samples.
+            # A BEST_EFFORT subscriber still matches a RELIABLE publisher, so
+            # this does not break SuperOdometry on the Bunkers.
+            node.create_subscription(
+                Odometry, topics["odom"], self._on_odom, qos_profile_sensor_data
+            )
         if topics.get("map"):
             node.create_subscription(OccupancyGrid, topics["map"], self._on_map, latched)
         if topics.get("map_cloud"):
@@ -296,8 +340,8 @@ class HardwareBridge:
                 BatteryState, topics["battery"], self._on_battery, qos_profile_sensor_data
             )
         # Prefer compressed: a raw camera stream at full rate is the single most
-        # expensive thing an adapter can subscribe to over a robot's network, and
-        # the preview is throttled to 5 Hz anyway.
+        # expensive thing an adapter can subscribe to over a robot's network.
+        # Frames stay on-robot for detection; the operator picture is WebRTC.
         if topics.get("camera_compressed"):
             node.create_subscription(
                 CompressedImage, topics["camera_compressed"],
@@ -349,6 +393,17 @@ class HardwareBridge:
         if action_name and NavigateToPose is not None:
             self.nav_client = ActionClient(node, NavigateToPose, action_name)
 
+        traj_name = cfg.get("actions", {}).get("trajectory")
+        self.traj_client = None
+        if traj_name and Trajectory is not None:
+            self.traj_client = ActionClient(node, Trajectory, traj_name)
+
+        self._body_clients: dict[str, Any] = {}
+        if Trigger is not None:
+            for name, topic in (cfg.get("services") or {}).items():
+                if name in BODY_SERVICE_NAMES and topic:
+                    self._body_clients[name] = node.create_client(Trigger, topic)
+
         # The deadman runs off the ROBOT's clock, not the operator link.
         #
         # It used to be called from the websocket tx loop, which is the one place
@@ -370,7 +425,7 @@ class HardwareBridge:
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""
         caps: list[str] = []
-        if self.nav_client is not None:
+        if self.nav_client is not None or self.traj_client is not None:
             caps.append("navigate")
         if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
             caps.append("map")
@@ -380,6 +435,9 @@ class HardwareBridge:
             caps.append("battery")
         if self.pub_cmd is not None:
             caps.append("estop")
+        services = self.cfg.get("services") or {}
+        if any(services.get(name) for name in BODY_ACTIONS):
+            caps.append("body")
         return caps
 
     # ------------------------------------------------------------- ROS inputs
@@ -472,10 +530,10 @@ class HardwareBridge:
     def _on_camera_compressed(self, msg: CompressedImage) -> None:
         if msg.format and "jpeg" not in msg.format.lower():
             return
-        self._camera_jpeg = bytes(msg.data)
-        self._camera_dirty = True
+        jpeg = bytes(msg.data)
+        self._camera_jpeg = jpeg
         # Queue for detection; do NOT run inference here. See run_detection().
-        self._detect_pending = (self._camera_jpeg, getattr(msg, "header", None))
+        self._detect_pending = (jpeg, getattr(msg, "header", None))
 
     @staticmethod
     def _image_to_bgr(msg: Image):
@@ -518,8 +576,10 @@ class HardwareBridge:
         return frame
 
     def _on_camera_raw(self, msg: Image) -> None:
-        # Encoding here rather than shipping raw: the protocol's preview channel
-        # is JPEG. Imported lazily so a robot with no camera needs no OpenCV.
+        # Detection takes JPEG (the sidecar posts it). Imported lazily so a
+        # robot with no camera needs no OpenCV. Also fills the 5 Hz GUI
+        # fallback: a raw-only driver (usb_cam yuyv2rgb) never publishes
+        # CompressedImage unless image_transport's jpeg plugin is loaded.
         try:
             import cv2
         except ImportError:
@@ -530,15 +590,15 @@ class HardwareBridge:
                 self._camera_encoding_warned = True
                 self.node.get_logger().warn(
                     f"[{self.id}] cannot decode camera encoding "
-                    f"{getattr(msg, 'encoding', '?')!r}; no preview will be sent"
+                    f"{getattr(msg, 'encoding', '?')!r}; detection has no frames"
                 )
             return
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if not ok:
             return
-        self._camera_jpeg = buf.tobytes()
-        self._camera_dirty = True
-        self._detect_pending = (self._camera_jpeg, getattr(msg, "header", None))
+        jpeg = buf.tobytes()
+        self._camera_jpeg = jpeg
+        self._detect_pending = (jpeg, getattr(msg, "header", None))
 
     def run_detection(self) -> None:
         """Detect on the newest queued frame. Runs OFF the ROS executor thread.
@@ -904,6 +964,62 @@ class HardwareBridge:
         self.cancel_goal()
         self.mode = "estop"
 
+    def body_command(self, action: str) -> None:
+        """Claim/release the body lease, or sit/stand.
+
+        `stand` powers the motors first when `services.power_on` is set —
+        Clearpath's `/stand` fails if the robot is still sitting unpowered.
+        Each call is a Trigger; failures are logged and not retried here.
+        """
+        action = str(action or "")
+        if action not in BODY_ACTIONS:
+            return
+        if action == "stand":
+            self._call_trigger("power_on")
+        self._call_trigger(action)
+
+    def _call_trigger(self, name: str) -> bool:
+        client = self._body_clients.get(name)
+        if client is None or Trigger is None:
+            if name != "power_on":
+                self.node.get_logger().warn(
+                    f"[{self.id}] body command {name!r} has no service configured"
+                )
+            return False
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.node.get_logger().warn(
+                f"[{self.id}] body service {name!r} is not up "
+                "(is spot_driver running?)"
+            )
+            return False
+        future = client.call_async(Trigger.Request())
+        deadline = time.monotonic() + 20.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not future.done():
+            self.node.get_logger().warn(
+                f"[{self.id}] body service {name!r} timed out"
+            )
+            return False
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] body service {name!r} failed: {exc}"
+            )
+            return False
+        ok = bool(getattr(resp, "success", True))
+        message = str(getattr(resp, "message", "") or "")
+        if ok:
+            self.node.get_logger().info(
+                f"[{self.id}] body {name}: ok" + (f" ({message})" if message else "")
+            )
+        else:
+            self.node.get_logger().warn(
+                f"[{self.id}] body {name}: refused" + (f" ({message})" if message else "")
+            )
+        return ok
+
     def stop_for_exit(self) -> None:
         """Leave the robot stationary as this process dies.
 
@@ -925,6 +1041,9 @@ class HardwareBridge:
             time.sleep(0.05)
 
     def navigate_to(self, goal: dict[str, float]) -> None:
+        if self.traj_client is not None:
+            self._navigate_trajectory(goal)
+            return
         if self.nav_client is None:
             return
         # Non-blocking. `wait_for_server(2.0)` was called straight from the rx
@@ -952,14 +1071,89 @@ class HardwareBridge:
         msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
-        self.goal = {"x": float(goal["x"]), "y": float(goal["y"])}
-        self.nav_status = "active"
-        self.mode = "nav"
-
+        self._arm_goal(goal)
         future = self.nav_client.send_goal_async(msg)
         future.add_done_callback(
             lambda f, g=generation: self._on_goal_response(f, g)
         )
+
+    def _navigate_trajectory(self, goal: dict[str, float]) -> None:
+        """Spot click-to-pose: map-frame goal -> body-frame Trajectory.
+
+        Same path as `spot_high_level_controller`: TF `map` into `body`, then
+        Clearpath `/trajectory`. The driver rejects any other frame_id.
+        """
+        if Trajectory is None or not self.traj_client.server_is_ready():
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot trajectory action not available; goal dropped"
+            )
+            self.nav_status = "failed"
+            return
+        pose = self._goal_in_body(goal)
+        if pose is None:
+            self.nav_status = "failed"
+            return
+        self._goal_generation += 1
+        generation = self._goal_generation
+        tcfg = self.cfg.get("trajectory") or {}
+        dur_s = max(1.0, float(tcfg.get("duration_s", 30.0)))
+        msg = Trajectory.Goal()
+        msg.target_pose = pose
+        msg.duration.sec = int(dur_s)
+        msg.duration.nanosec = int((dur_s - int(dur_s)) * 1e9)
+        msg.precise_positioning = bool(tcfg.get("precise_positioning", True))
+        msg.disable_obstacle_avoidance = bool(
+            tcfg.get("disable_obstacle_avoidance", False)
+        )
+        self._arm_goal(goal)
+        future = self.traj_client.send_goal_async(msg)
+        future.add_done_callback(
+            lambda f, g=generation: self._on_goal_response(f, g)
+        )
+
+    def _arm_goal(self, goal: dict[str, float]) -> None:
+        self.goal = {"x": float(goal["x"]), "y": float(goal["y"])}
+        self.nav_status = "active"
+        self.mode = "nav"
+
+    def _goal_in_body(self, goal: dict[str, float]) -> PoseStamped | None:
+        frame = str((self.cfg.get("trajectory") or {}).get("frame") or "body")
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                frame, self.map_frame, rclpy.time.Time()
+            )
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] {self.map_frame} -> {frame} TF failed; goal dropped: {exc}"
+            )
+            return None
+        xyz = transform_point(
+            (float(goal["x"]), float(goal["y"]), 0.0), tf.transform
+        )
+        if xyz is None:
+            return None
+        yaw = float(goal.get("yaw", 0.0))
+        heading = transform_point(
+            (math.cos(yaw), math.sin(yaw), 0.0),
+            type("T", (), {
+                "rotation": tf.transform.rotation,
+                "translation": type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})(),
+            })(),
+        )
+        if heading is None:
+            return None
+        body_yaw = math.atan2(float(heading[1]), float(heading[0]))
+        pose = PoseStamped()
+        pose.header.frame_id = frame
+        pose.header.stamp = self.node.get_clock().now().to_msg()
+        pose.pose.position.x = float(xyz[0])
+        pose.pose.position.y = float(xyz[1])
+        pose.pose.position.z = float(xyz[2])
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = math.sin(body_yaw / 2.0)
+        pose.pose.orientation.w = math.cos(body_yaw / 2.0)
+        return pose
 
     def _on_goal_response(self, future, generation: int) -> None:
         try:
@@ -1012,6 +1206,11 @@ class HardwareBridge:
             except Exception:
                 pass
             self._goal_handle = None
+        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
+        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
+        # The SDK `/stop` Trigger is what actually halts the body.
+        if self.traj_client is not None:
+            self._call_trigger("stop")
         self.goal = None
         self.nav_status = "cancelled"
         self.mode = "idle"
@@ -1122,20 +1321,43 @@ class HardwareBridge:
             self.node.get_logger().warn(f"[{self.id}] 3D cloud upload failed: {exc}")
 
     def upload_camera(self) -> None:
-        if not self._camera_dirty or self._camera_jpeg is None:
+        """Push the newest device-encoded JPEG as the /api/camera fallback."""
+        jpeg = self._camera_jpeg
+        if not jpeg or not jpeg.startswith(b"\xff\xd8"):
             return
-        self._camera_dirty = False
+        url = f"{self.http_url}/api/adapter/camera?robot_id={self.id}"
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
-                    f"{self.http_url}/api/adapter/camera?robot_id={self.id}",
-                    data=self._camera_jpeg,
-                    headers={"Content-Type": "image/jpeg"},
+                    url, data=jpeg, headers={"Content-Type": "image/jpeg"},
                 ),
-                timeout=5,
+                timeout=2,
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] camera upload failed: {exc}")
+
+
+async def run_until_first_failure(*coros: Any) -> None:
+    """Run coroutines together; the first to fail cancels the rest and raises.
+
+    The link's coroutines share one socket, so any one of them dying makes the
+    others meaningless — they would go on writing to a closing connection, and
+    their exceptions would surface much later as "Task exception was never
+    retrieved" rather than as the reconnect this is supposed to trigger.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in done:
+            task.result()  # re-raise into run_robot's reconnect handler
+    finally:
+        for task in tasks:
+            task.cancel()
+        # Cancelling a task blocked in run_in_executor does not stop the worker
+        # thread; the in-flight urllib call still runs to its own timeout. It
+        # writes nothing but the upload it was already making, so letting it
+        # finish unobserved is safe.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
@@ -1180,7 +1402,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         if kind == "navigate_to":
                             # Off-thread: sending a goal talks to an action
                             # server that may be slow or absent, and blocking
-                            # this coroutine stalls the tx loop with it.
+                            # this coroutine stalls every other one on this link.
                             await asyncio.get_running_loop().run_in_executor(
                                 None, bridge.navigate_to, msg.get("goal", {})
                             )
@@ -1194,18 +1416,43 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif kind == "set_mode":
                             bridge.mode = msg.get("mode", bridge.mode)
+                        elif kind == "body_command":
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, bridge.body_command, msg.get("action", "")
+                            )
                         # Rule 3: unknown types are ignored, not fatal.
 
-                async def tx() -> None:
-                    rates = bridge.cfg["rates"]
-                    period = 1.0 / float(rates["state_hz"])
-                    loop = asyncio.get_running_loop()
-                    last_map = 0.0
-                    last_cloud = 0.0
-                    last_cam = 0.0
-                    last_settings = 0.0
+                # Telemetry and the bulk uploads run as separate coroutines, so
+                # one socket now has several writers. `websockets` does not
+                # serialise overlapping `send()` calls, and two coroutines
+                # writing at once can interleave frames on the wire.
+                send_lock = asyncio.Lock()
+
+                async def send(payload: dict[str, Any]) -> None:
+                    async with send_lock:
+                        await ws.send(json.dumps(payload))
+
+                async def tx_state() -> None:
+                    """The telemetry heartbeat. Nothing slow may run in here.
+
+                    This used to share one loop with the uploads below, which
+                    tied liveness to backend latency: `upload_map` blocks for up
+                    to its 5 s timeout, and no state frame went out while it did.
+                    The server calls a robot offline after 4 s (OFFLINE_AFTER_S)
+                    and `link_watchdog` cancels an active goal after
+                    `link_timeout_s` (1.5 s), so a single slow upload took the
+                    robot off the dashboard AND stopped its mission.
+
+                    That made the failure a property of FLEET SIZE rather than of
+                    this robot: every map upload queues behind one lock on the
+                    server, so a fourth robot connecting is what makes the first
+                    one drop out. Uploading is best-effort and may lag; being
+                    reachable is not. Keeping them in separate coroutines is what
+                    makes a slow backend cost only map freshness.
+                    """
+                    period = 1.0 / float(bridge.cfg["rates"]["state_hz"])
                     while True:
-                        await ws.send(json.dumps(bridge.state()))
+                        await send(bridge.state())
                         # A completed send means the frame reached the socket,
                         # which is the freshness signal the autonomy deadman
                         # reads. On a wedged link this is exactly where it stops
@@ -1213,35 +1460,76 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         bridge.note_link_activity()
                         # No drive_watchdog() here: it runs on a ROS timer so it
                         # keeps ticking when this loop cannot. See __init__.
+                        await asyncio.sleep(period)
+
+                async def tx_maps() -> None:
+                    """Occupancy, scans and clouds — the backend-bound path."""
+                    rates = bridge.cfg["rates"]
+                    tick = 1.0 / float(rates["state_hz"])
+                    loop = asyncio.get_running_loop()
+                    last_map = 0.0
+                    last_cloud = 0.0
+                    last_settings = 0.0
+                    while True:
                         now = time.monotonic()
                         if now - last_map > float(rates["map_period_s"]):
-                            last_map = now
                             meta = await loop.run_in_executor(None, bridge.upload_map)
                             if meta:
-                                await ws.send(json.dumps(meta))
+                                await send(meta)
                             await loop.run_in_executor(None, bridge.upload_scan)
+                            # Measured from COMPLETION, not from the start of the
+                            # attempt. Against a backend slow enough that an
+                            # upload outlasts its own period — which is the state
+                            # a four-robot fleet puts the server in — starting the
+                            # clock at the top means the next upload is already
+                            # due the moment this one returns, and the adapter
+                            # spins, piling work onto a server that is already
+                            # behind. Maps now arrive as fast as the backend can
+                            # accept them and no faster.
+                            last_map = time.monotonic()
                         if now - last_cloud > float(rates["cloud_period_s"]):
-                            last_cloud = now
                             await loop.run_in_executor(None, bridge.upload_cloud)
+                            last_cloud = time.monotonic()
+                        if now - last_settings > 5.0:
+                            last_settings = now
+                            await loop.run_in_executor(None, bridge.refresh_settings)
+                        await asyncio.sleep(tick)
+
+                async def tx_camera() -> None:
+                    """Camera and detections, on their own clock.
+
+                    Separate from `tx_maps` because the two block for very
+                    different reasons: a map upload waits on the server's
+                    registration lock for seconds at a time, and sharing a loop
+                    with it froze the operator's video for exactly as long.
+                    """
+                    rates = bridge.cfg["rates"]
+                    tick = 1.0 / float(rates["state_hz"])
+                    loop = asyncio.get_running_loop()
+                    last_cam = 0.0
+                    while True:
+                        now = time.monotonic()
                         if now - last_cam > float(rates["camera_period_s"]):
-                            last_cam = now
                             await loop.run_in_executor(None, bridge.upload_camera)
                             await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
                             if detections is not None:
-                                await ws.send(json.dumps({
+                                await send({
                                     "type": "detections",
                                     "robot_id": bridge.id,
                                     "t_mono": round(now - bridge.t0, 4),
                                     "camera": "front",
                                     "items": detections,
-                                }))
-                        if now - last_settings > 5.0:
-                            last_settings = now
-                            await loop.run_in_executor(None, bridge.refresh_settings)
-                        await asyncio.sleep(period)
+                                })
+                            last_cam = time.monotonic()
+                        await asyncio.sleep(tick)
 
-                await asyncio.gather(rx(), tx())
+                # Not `gather`: it leaves the siblings of a failed coroutine
+                # running against a socket that is already closing, and their
+                # exceptions surface later as "never retrieved". The first one to
+                # fail is the reconnect trigger, and the rest must be torn down
+                # with it.
+                await run_until_first_failure(rx(), tx_state(), tx_maps(), tx_camera())
         except Exception as exc:
             bridge.node.get_logger().warn(
                 f"[{bridge.id}] disconnected ({exc}); retrying in {backoff:.0f}s"

@@ -197,7 +197,7 @@ DEFAULTS: dict[str, Any] = {
         "state_hz": 5.0,
         "map_period_s": 2.0,
         "cloud_period_s": 4.0,
-        "camera_period_s": 0.2,   # 5 Hz, per the protocol's preview cap
+        "camera_period_s": 0.2,   # detection poll; hardware video is WebRTC
     },
     "perception": {
         "enabled": True,
@@ -279,8 +279,6 @@ class HardwareBridge:
         self.goal: dict[str, float] | None = None
         self._goal_generation = 0
         self._last_drive_at = 0.0
-        self._camera_jpeg: bytes | None = None
-        self._camera_dirty = False
         self._camera_encoding_warned = False
         # Newest frame awaiting detection, as (jpeg, header). The ROS callback
         # only ever assigns it; run_detection() consumes it from a worker thread.
@@ -329,8 +327,8 @@ class HardwareBridge:
         if topics.get("battery"):
             rospy.Subscriber(topics["battery"], BatteryState, self._on_battery, queue_size=10)
         # Prefer compressed: a raw camera stream at full rate is the single most
-        # expensive thing an adapter can subscribe to over a robot's network, and
-        # the preview is throttled to 5 Hz anyway.
+        # expensive thing an adapter can subscribe to over a robot's network.
+        # Frames stay on-robot for detection; the operator picture is WebRTC.
         if topics.get("camera_compressed"):
             rospy.Subscriber(
                 topics["camera_compressed"], CompressedImage,
@@ -393,9 +391,9 @@ class HardwareBridge:
 
         # The deadman runs off the ROBOT's clock, not the operator link — see
         # the identical timer in `adapter_ros2.HardwareBridge.__init__` for why
-        # driving it from the websocket tx loop cannot be trusted: the one
-        # failure it exists to cover (a wedged link) is the one that stops the
-        # tx loop from running it.
+        # driving it from a websocket send loop cannot be trusted: the one
+        # failure it exists to cover (a wedged link) is the one that stops that
+        # loop from running it.
         self._last_link_at = time.monotonic()
         self._watchdog_timer = rospy.Timer(
             rospy.Duration(0.1), lambda _event: self._watchdogs()
@@ -578,10 +576,8 @@ class HardwareBridge:
     def _on_camera_compressed(self, msg: CompressedImage) -> None:
         if msg.format and "jpeg" not in msg.format.lower():
             return
-        self._camera_jpeg = bytes(msg.data)
-        self._camera_dirty = True
         # Queue for detection; do NOT run inference here. See run_detection().
-        self._detect_pending = (self._camera_jpeg, getattr(msg, "header", None))
+        self._detect_pending = (bytes(msg.data), getattr(msg, "header", None))
 
     @staticmethod
     def _image_to_bgr(msg: Image):
@@ -623,8 +619,9 @@ class HardwareBridge:
         return frame
 
     def _on_camera_raw(self, msg: Image) -> None:
-        # Encoding here rather than shipping raw: the protocol's preview channel
-        # is JPEG. Imported lazily so a robot with no camera needs no OpenCV.
+        # Detection takes JPEG (the sidecar posts it). Imported lazily so a
+        # robot with no camera needs no OpenCV. This does not go to the backend;
+        # hardware video is WebRTC.
         try:
             import cv2
         except ImportError:
@@ -635,15 +632,13 @@ class HardwareBridge:
                 self._camera_encoding_warned = True
                 rospy.logwarn(
                     f"[{self.id}] cannot decode camera encoding "
-                    f"{getattr(msg, 'encoding', '?')!r}; no preview will be sent"
+                    f"{getattr(msg, 'encoding', '?')!r}; detection has no frames"
                 )
             return
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if not ok:
             return
-        self._camera_jpeg = buf.tobytes()
-        self._camera_dirty = True
-        self._detect_pending = (self._camera_jpeg, getattr(msg, "header", None))
+        self._detect_pending = (buf.tobytes(), getattr(msg, "header", None))
 
     def run_detection(self) -> None:
         """Detect on the newest queued frame. Runs OFF rospy's callback threads.
@@ -654,7 +649,7 @@ class HardwareBridge:
         occupied a rospy dispatch thread several times a second and, on a
         single-threaded subscriber queue, delayed everything behind it.
         `adapter_sim` has always run detection off the ROS thread; this is the
-        same arrangement, driven from the tx loop's executor.
+        same arrangement, driven from `tx_camera`'s executor.
         """
         pending = self._detect_pending
         self._detect_pending = None
@@ -1271,21 +1266,28 @@ class HardwareBridge:
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] 3D cloud upload failed: {exc}")
 
-    def upload_camera(self) -> None:
-        if not self._camera_dirty or self._camera_jpeg is None:
-            return
-        self._camera_dirty = False
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    f"{self.http_url}/api/adapter/camera?robot_id={self.id}",
-                    data=self._camera_jpeg,
-                    headers={"Content-Type": "image/jpeg"},
-                ),
-                timeout=5,
-            ).read()
-        except Exception as exc:
-            rospy.logwarn(f"[{self.id}] camera upload failed: {exc}")
+
+async def run_until_first_failure(*coros: Any) -> None:
+    """Run coroutines together; the first to fail cancels the rest and raises.
+
+    The link's coroutines share one socket, so any one of them dying makes the
+    others meaningless — they would go on writing to a closing connection, and
+    their exceptions would surface much later as "Task exception was never
+    retrieved" rather than as the reconnect this is supposed to trigger.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in done:
+            task.result()  # re-raise into run_robot's reconnect handler
+    finally:
+        for task in tasks:
+            task.cancel()
+        # Cancelling a task blocked in run_in_executor does not stop the worker
+        # thread; the in-flight urllib call still runs to its own timeout. It
+        # writes nothing but the upload it was already making, so letting it
+        # finish unobserved is safe.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
@@ -1330,7 +1332,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         if kind == "navigate_to":
                             # Off-thread: sending a goal talks to an action
                             # server that may be slow or absent, and blocking
-                            # this coroutine stalls the tx loop with it.
+                            # this coroutine stalls every other one on this link.
                             await asyncio.get_running_loop().run_in_executor(
                                 None, bridge.navigate_to, msg.get("goal", {})
                             )
@@ -1346,16 +1348,38 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             bridge.mode = msg.get("mode", bridge.mode)
                         # Rule 3: unknown types are ignored, not fatal.
 
-                async def tx() -> None:
-                    rates = bridge.cfg["rates"]
-                    period = 1.0 / float(rates["state_hz"])
-                    loop = asyncio.get_running_loop()
-                    last_map = 0.0
-                    last_cloud = 0.0
-                    last_cam = 0.0
-                    last_settings = 0.0
+                # Telemetry and the bulk uploads run as separate coroutines, so
+                # one socket now has several writers. `websockets` does not
+                # serialise overlapping `send()` calls, and two coroutines
+                # writing at once can interleave frames on the wire.
+                send_lock = asyncio.Lock()
+
+                async def send(payload: dict[str, Any]) -> None:
+                    async with send_lock:
+                        await ws.send(json.dumps(payload))
+
+                async def tx_state() -> None:
+                    """Telemetry and nav upkeep. Nothing slow may run in here.
+
+                    This used to share one loop with the uploads below, which
+                    tied liveness to backend latency: `upload_map` blocks for up
+                    to its 5 s timeout, and no state frame went out while it did.
+                    The server calls a robot offline after 4 s (OFFLINE_AFTER_S)
+                    and `link_watchdog` cancels an active goal after
+                    `link_timeout_s`, so a single slow upload took the robot off
+                    the dashboard AND stopped its mission. Worse here than on
+                    ROS 2: `_pump_nav_joy` is what feeds pathFollower its speed
+                    and localPlanner its direction, so a stalled loop did not
+                    merely stop REPORTING the robot, it stopped STEERING it.
+
+                    That made the failure a property of FLEET SIZE rather than of
+                    this robot: every map upload queues behind one lock on the
+                    server, so a fourth robot connecting is what makes the first
+                    one drop out.
+                    """
+                    period = 1.0 / float(bridge.cfg["rates"]["state_hz"])
                     while True:
-                        await ws.send(json.dumps(bridge.state()))
+                        await send(bridge.state())
                         # A completed send is the autonomy deadman's freshness
                         # signal; on a wedged link this is where it stops
                         # completing, which is the point.
@@ -1364,35 +1388,75 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         # keeps ticking when this loop cannot. See __init__.
                         bridge._check_topic_nav_progress()
                         bridge._pump_nav_joy()
+                        await asyncio.sleep(period)
+
+                async def tx_maps() -> None:
+                    """Occupancy, scans and clouds — the backend-bound path."""
+                    rates = bridge.cfg["rates"]
+                    tick = 1.0 / float(rates["state_hz"])
+                    loop = asyncio.get_running_loop()
+                    last_map = 0.0
+                    last_cloud = 0.0
+                    last_settings = 0.0
+                    while True:
                         now = time.monotonic()
                         if now - last_map > float(rates["map_period_s"]):
-                            last_map = now
                             meta = await loop.run_in_executor(None, bridge.upload_map)
                             if meta:
-                                await ws.send(json.dumps(meta))
+                                await send(meta)
                             await loop.run_in_executor(None, bridge.upload_scan)
+                            # Measured from COMPLETION, not from the start of the
+                            # attempt. Against a backend slow enough that an
+                            # upload outlasts its own period — which is the state
+                            # a four-robot fleet puts the server in — starting the
+                            # clock at the top means the next upload is already
+                            # due the moment this one returns, and the adapter
+                            # spins, piling work onto a server that is already
+                            # behind. Maps now arrive as fast as the backend can
+                            # accept them and no faster.
+                            last_map = time.monotonic()
                         if now - last_cloud > float(rates["cloud_period_s"]):
-                            last_cloud = now
                             await loop.run_in_executor(None, bridge.upload_cloud)
+                            last_cloud = time.monotonic()
+                        if now - last_settings > 5.0:
+                            last_settings = now
+                            await loop.run_in_executor(None, bridge.refresh_settings)
+                        await asyncio.sleep(tick)
+
+                async def tx_camera() -> None:
+                    """Detections, on their own clock.
+
+                    Separate from `tx_maps` because the two block for very
+                    different reasons: a map upload waits on the server's
+                    registration lock for seconds at a time, and sharing a loop
+                    with it stalled detection for exactly as long.
+                    """
+                    rates = bridge.cfg["rates"]
+                    tick = 1.0 / float(rates["state_hz"])
+                    loop = asyncio.get_running_loop()
+                    last_cam = 0.0
+                    while True:
+                        now = time.monotonic()
                         if now - last_cam > float(rates["camera_period_s"]):
-                            last_cam = now
-                            await loop.run_in_executor(None, bridge.upload_camera)
                             await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
                             if detections is not None:
-                                await ws.send(json.dumps({
+                                await send({
                                     "type": "detections",
                                     "robot_id": bridge.id,
                                     "t_mono": round(now - bridge.t0, 4),
                                     "camera": "front",
                                     "items": detections,
-                                }))
-                        if now - last_settings > 5.0:
-                            last_settings = now
-                            await loop.run_in_executor(None, bridge.refresh_settings)
-                        await asyncio.sleep(period)
+                                })
+                            last_cam = time.monotonic()
+                        await asyncio.sleep(tick)
 
-                await asyncio.gather(rx(), tx())
+                # Not `gather`: it leaves the siblings of a failed coroutine
+                # running against a socket that is already closing, and their
+                # exceptions surface later as "never retrieved". The first one to
+                # fail is the reconnect trigger, and the rest must be torn down
+                # with it.
+                await run_until_first_failure(rx(), tx_state(), tx_maps(), tx_camera())
         except Exception as exc:
             rospy.logwarn(f"[{bridge.id}] disconnected ({exc}); retrying in {backoff:.0f}s")
             # Stop the robot on link loss. A robot that keeps driving after

@@ -28,6 +28,8 @@ _STUBBED = [
     "sensor_msgs", "sensor_msgs.msg",
     "action_msgs", "action_msgs.msg",
     "tf2_ros", "websockets", "cv2",
+    "std_srvs", "std_srvs.srv",
+    "spot_msgs", "spot_msgs.action",
 ]
 
 
@@ -65,6 +67,12 @@ def _bridge(mod, cfg_override=None):
         if cfg.get("actions", {}).get("navigate_to_pose")
         else None
     )
+    bridge.traj_client = (
+        MagicMock()
+        if cfg.get("actions", {}).get("trajectory")
+        else None
+    )
+    bridge.tf_buffer = MagicMock()
     bridge.mode = "idle"
     bridge.nav_status = "idle"
     bridge.goal = None
@@ -81,6 +89,7 @@ def _bridge(mod, cfg_override=None):
     bridge._cloud_points = None
     bridge._cloud_dirty = False
     bridge._last_cloud_prepare_at = 0.0
+    bridge._body_clients = {}
     return bridge
 
 
@@ -109,6 +118,123 @@ def test_capabilities_reflect_configuration_only(mod):
         "actions": {"navigate_to_pose": ""},
     })
     assert bare.capabilities() == []
+
+
+def test_body_capability_needs_configured_services(mod):
+    """Empty Trigger names must not advertise Claim/Stand the GUI cannot honour."""
+    none = _bridge(mod)
+    assert "body" not in none.capabilities()
+    spot = _bridge(mod, {"services": {
+        "claim": "/claim", "release": "/release",
+        "sit": "/sit", "stand": "/stand", "power_on": "/power_on",
+    }})
+    assert "body" in spot.capabilities()
+
+
+def _trigger_client(order, name):
+    client = MagicMock()
+    client.wait_for_service.return_value = True
+
+    def call_async(_req):
+        order.append(name)
+        future = MagicMock()
+        future.done.return_value = True
+        resp = MagicMock()
+        resp.success = True
+        resp.message = ""
+        future.result.return_value = resp
+        return future
+
+    client.call_async.side_effect = call_async
+    return client
+
+
+def test_body_command_stand_powers_on_first(mod):
+    """Clearpath /stand fails if the motors are still off."""
+    bridge = _bridge(mod, {"services": {
+        "claim": "/claim", "release": "/release",
+        "sit": "/sit", "stand": "/stand", "power_on": "/power_on",
+    }})
+    order: list[str] = []
+    bridge._body_clients = {
+        name: _trigger_client(order, name)
+        for name in ("claim", "release", "sit", "stand", "power_on")
+    }
+    bridge.body_command("stand")
+    assert order == ["power_on", "stand"]
+    bridge.body_command("claim")
+    assert order[-1] == "claim"
+    bridge.body_command("not-a-thing")
+    assert order[-1] == "claim"
+
+
+def _identity_tf():
+    rot = type("Q", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})()
+    trans = type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})()
+    transform = type("X", (), {"rotation": rot, "translation": trans})()
+    return type("TF", (), {"transform": transform})()
+
+
+def test_trajectory_action_advertises_navigate(mod):
+    """Spot has no Nav2 server; /trajectory is what click-to-pose talks to."""
+    none = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": ""}})
+    assert "navigate" not in none.capabilities()
+    spot = _bridge(mod, {
+        "topics": {"cmd_vel": ""},
+        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+    })
+    assert "navigate" in spot.capabilities()
+    assert "estop" not in spot.capabilities()
+
+
+def test_trajectory_goal_is_transformed_into_body(mod):
+    """spot_driver rejects any Trajectory frame_id other than body."""
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}})
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge.traj_client.server_is_ready.return_value = True
+
+    bridge.navigate_to({"x": 1.5, "y": -2.0, "yaw": 0.0})
+
+    bridge.traj_client.send_goal_async.assert_called_once()
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.header.frame_id == "body"
+    assert msg.target_pose.pose.position.x == pytest.approx(1.5)
+    assert msg.target_pose.pose.position.y == pytest.approx(-2.0)
+    assert msg.duration.sec >= 1
+    assert bridge.nav_status == "active"
+    assert bridge.goal == {"x": 1.5, "y": -2.0}
+
+
+def test_trajectory_goal_without_tf_is_dropped(mod):
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}})
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
+    bridge.traj_client.server_is_ready.return_value = True
+
+    bridge.navigate_to({"x": 1.0, "y": 1.0})
+
+    bridge.traj_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "failed"
+
+
+def test_cancel_trajectory_calls_spot_stop(mod):
+    """Clearpath's ROS 2 Trajectory server does not honour cancel/preempt."""
+    bridge = _bridge(mod, {
+        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+        "services": {"stop": "/stop"},
+    })
+    order: list[str] = []
+    bridge._body_clients = {"stop": _trigger_client(order, "stop")}
+    handle = MagicMock()
+    bridge._goal_handle = handle
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 2.0, "y": 2.0}
+
+    bridge.cancel_goal()
+
+    handle.cancel_goal_async.assert_called_once_with()
+    assert order == ["stop"]
+    assert bridge.nav_status == "cancelled"
+    assert bridge.goal is None
 
 
 def test_camera_capability_needs_a_real_topic(mod):
@@ -188,7 +314,7 @@ def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):
         cfg = mod.deep_merge(mod.DEFAULTS, yaml.safe_load(path.read_text()))
         assert cfg["map_frame"] and cfg["base_frame"], f"{name} needs both frames"
         assert cfg["rates"]["state_hz"] > 0
-        # The preview cap in the protocol is 5 Hz; never configure faster.
+        # Detection poll; never faster than the old 5 Hz preview cap.
         assert cfg["rates"]["camera_period_s"] >= 0.2, f"{name} exceeds the 5 Hz cap"
 
 
@@ -464,3 +590,146 @@ def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
     assert bridge.nav_status == "cancelled"
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
+
+
+# --------------------------------------------------------------- link plumbing
+
+
+class _FakeWs:
+    """A socket that records what was written and never delivers anything."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, raw: str) -> None:
+        import json
+
+        self.sent.append(json.loads(raw))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        import asyncio
+
+        await asyncio.sleep(3600)  # the operator sends nothing in this scenario
+        raise StopAsyncIteration
+
+
+def _link_bridge(mod, hooks):
+    """A bridge that is nothing but the surface `run_robot` drives."""
+
+    class _Bridge:
+        cfg = mod.deep_merge(
+            mod.DEFAULTS,
+            # A fast pump and an always-due map upload, so the scenario reaches
+            # the blocking call immediately instead of waiting out a real period.
+            {"rates": {"state_hz": 50.0, "map_period_s": 0.0, "camera_period_s": 3600.0}},
+        )
+        id = "r0"
+        t0 = 0.0
+
+        def __init__(self):
+            self.node = MagicMock()
+
+        def state(self):
+            return {"type": "robot_state", "robot_id": "r0"}
+
+        def capabilities(self):
+            return []
+
+        def note_link_activity(self):
+            pass
+
+        def upload_map(self):
+            return hooks["upload_map"]()
+
+        def upload_scan(self):
+            pass
+
+        def upload_cloud(self):
+            pass
+
+        def upload_camera(self):
+            pass
+
+        def run_detection(self):
+            pass
+
+        def take_detections(self):
+            return None
+
+        def refresh_settings(self):
+            pass
+
+        def cancel_goal(self):
+            pass
+
+        def drive(self, *_args):
+            pass
+
+    return _Bridge()
+
+
+def test_a_blocking_upload_does_not_stall_the_state_pump(mod, monkeypatch):
+    """The four-robot regression: uploads must never gate telemetry.
+
+    `upload_map` blocks for up to its 5 s timeout, and it blocks for that long
+    precisely when the fleet is large — every robot's map queues behind one lock
+    on the server. While state and uploads shared a coroutine, that stalled the
+    5 Hz pump too, and the backend declares a robot offline after 4 s
+    (OFFLINE_AFTER_S) while `link_watchdog` cancels its active goal after 1.5 s.
+    So a fourth robot connecting took control of the first one away.
+    """
+    import asyncio
+    import json
+    import threading
+
+    ws = _FakeWs()
+
+    class _Conn:
+        async def __aenter__(self):
+            return ws
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(mod.websockets, "connect", lambda *a, **k: _Conn())
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_upload():
+        started.set()
+        release.wait(5.0)  # stands in for the real 5 s urllib timeout
+        return None
+
+    bridge = _link_bridge(mod, {"upload_map": blocking_upload})
+
+    def count_states():
+        return sum(1 for m in ws.sent if m.get("type") == "robot_state")
+
+    async def scenario():
+        task = asyncio.ensure_future(mod.run_robot(bridge, "ws://test"))
+        loop = asyncio.get_running_loop()
+        # Wait for the upload to actually be in flight before measuring.
+        await loop.run_in_executor(None, started.wait, 5.0)
+        before = count_states()
+        await asyncio.sleep(0.4)
+        during = count_states()
+        release.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return before, during
+
+    before, during = asyncio.run(asyncio.wait_for(scenario(), 15))
+
+    assert started.is_set(), "the scenario never reached the blocking upload"
+    # 0.4 s at 50 Hz is ~20 frames; anything above a handful proves the pump ran.
+    assert during - before >= 5, (
+        f"state stopped while an upload was in flight ({during - before} frames "
+        "sent during a 0.4 s block) — uploads are gating telemetry again"
+    )

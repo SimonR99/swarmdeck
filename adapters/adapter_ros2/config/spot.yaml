@@ -1,17 +1,17 @@
 # Boston Dynamics Spot + Orin payload (SSH alias `spot` → `orin.local`,
-# user `indro`). Values below come from the robot's MIST ROS 2 source, read
-# 2026-08-12 from the copies on Botman/Aslan while the payload itself was
-# off the lab LAN:
+# user `indro`, 192.168.1.192). Confirmed live 2026-08-12 after the payload
+# came back on the lab LAN.
 #
-#   src/control/rover_launch/launch/spot.launch.py
-#   src/control/rover_launch/launch/spot_gnm.launch.py
+#   src/control/rover_launch/launch/full_stack/spot_lio_sam.launch.py
+#   src/control/rover_launch/launch/auxilary/lio_sam.launch.py
+#   src/control/rover_launch/config/lio_sam/lio_sam.yaml
+#   src/control/rover_launch/config/drivers/driver_ouster.yaml
 #   src/control/rover_launch/config/spot.yaml
-#   src/control/rover_launch/config/superodom/os1_128.yaml
 #
-# SLAM is SuperOdometry in mapping mode, same package as the Bunkers, fed by
-# the payload Ouster. The body is driven by Clearpath `spot_driver` talking
-# to Spot at 192.168.50.3 on the payload ethernet. Do not start that driver
-# without a person at the e-stop — see docs/spot.md.
+# SuperOdom is in the tree but COLCON_IGNORE'd. The built, launched stack is
+# LIO-SAM on the payload Ouster (192.168.50.165) plus VectorNav
+# (/dev/vectornav → ttyUSB0). Body control is Clearpath spot_driver to
+# 192.168.50.3 — do not start that without a person at the e-stop.
 robot_type: boston_dynamics_spot
 ros_distro: humble
 
@@ -20,44 +20,54 @@ ros_distro: humble
 # path also reuses this to reject lidar returns from the body/legs.
 footprint_radius: 0.61
 
-# SuperOdometry's /laser_odometry carries map -> os_lidar. spot_driver
-# separately publishes odom -> body. Same unjoined trees as Botman; the
-# honest SLAM pose is the lidar's.
+# LIO-SAM publishes map -> odom_link (identity static TF) and odom_link ->
+# lidar_link. /lio_sam/mapping/odometry itself is odom_link -> odom_mapping;
+# the adapter pose is the TF lookup, not that message.
 map_frame: map
-base_frame: os_lidar
+base_frame: lidar_link
 
-# SuperOdometry starts the map at the lidar pose. Spot's payload lidar sits
-# near body height (~0.5 m); this band is the Bunker first-guess and must be
-# checked against the first live cloud.
+# LIO-SAM starts the map at the first lidar pose. Payload lidar sits near
+# body height (~0.5 m); this band is a first guess and must be checked
+# against the first live cloud.
 map_cloud_height_band:
   min_z: -0.3
   max_z: 0.5
 
 topics:
-  odom: /laser_odometry
-  map: ""                 # SuperOdometry publishes no OccupancyGrid
-  map_cloud: /registered_scan
-  plan: ""
-  # spot_driver's Twist subscription when spot_name is empty. The driver also
-  # applies its own cmd_duration (0.25 s in rover_launch/config/spot.yaml), so
-  # a dropped operator still stops the gait even if the adapter deadman is
-  # late. Leave this empty until that driver is actually running.
+  odom: /lio_sam/mapping/odometry
+  map: ""                 # LIO-SAM publishes no OccupancyGrid
+  map_cloud: /lio_sam/mapping/cloud_registered
+  plan: /lio_sam/mapping/path
+  # Point nav uses /trajectory (not Nav2). Joystick uses /cmd_vel. Both need
+  # the driver, a claimed lease, and a standing robot.
   cmd_vel: /cmd_vel
-  # Battery lives in spot_msgs status, not sensor_msgs/BatteryState.
   battery: ""
-  camera: ""
-  camera_compressed: ""
+  camera: /d435/color/image_raw
+  # D435i color (YUYV). Compressed comes from image_transport if the plugin
+  # is loaded; the adapter also JPEG-encodes the raw topic as fallback.
+  camera_compressed: /d435/color/image_raw/compressed
   camera_depth: ""
   camera_info: ""
   camera_color_info: ""
   camera_depth_points: ""
   nav_cmd_vel: ""
 
-# DinoNav and GraphNav are the robot's own autonomy; neither is a Nav2
-# NavigateToPose server. Do not advertise `navigate` until one of those is
-# mapped, or SwarmDeck Nav2 is brought up on this unit the way Botman was.
+# Click-to-pose is Clearpath /trajectory, the same action
+# spot_high_level_controller uses. Goals are TF'd map -> body.
 actions:
   navigate_to_pose: ""
+  trajectory: /trajectory
+
+# Clearpath spot_driver Trigger services. MIST's spot.yaml leaves
+# `spot_name` empty, so these are un-namespaced. Advertising `body`
+# shows Claim/Release and Sit/Stand; they no-op until --profile driver.
+services:
+  claim: /claim
+  release: /release
+  sit: /sit
+  stand: /stand
+  power_on: /power_on
+  stop: /stop
 
 rates:
   state_hz: 5.0

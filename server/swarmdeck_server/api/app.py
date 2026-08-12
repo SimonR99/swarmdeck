@@ -927,6 +927,16 @@ async def handle_gui_message(msg: dict[str, Any]) -> None:
         if sent:
             registry.robots[rid].goal = None
 
+    elif kind == "body_command":
+        action = str(msg.get("action") or "")
+        if action not in ("claim", "release", "sit", "stand"):
+            return
+        if not registry.can(rid, "body"):
+            return
+        await registry.send(
+            rid, {"type": "body_command", "action": action, **stamps()}
+        )
+
     elif kind == "stop_all":
         # Whether each robot was actually REACHED, not merely addressed. A stop
         # that went nowhere is the one command an operator must never be allowed

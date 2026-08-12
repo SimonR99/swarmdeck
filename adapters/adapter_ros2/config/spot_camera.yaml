@@ -1,0 +1,14 @@
+# Overlay on MIST rover_launch/config/spot.yaml for the image publisher
+# only. Credentials stay in that file.
+#
+# MIST sets rgb_cameras: True. This Spot rejects PIXEL_FORMAT_RGB_U8
+# (STATUS_UNSUPPORTED_PIXEL_FORMAT_REQUESTED) — body cameras are greyscale.
+# Depth is left off: one failed source in the GetImage batch fails them all.
+/**:
+  ros__parameters:
+    cameras_used: ["frontleft"]
+    rgb_cameras: false
+    publish_compressed_images: true
+    uncompress_images: false
+    publish_depth: false
+    publish_depth_registered: false

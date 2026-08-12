@@ -1,101 +1,111 @@
 # Spot bring-up
 
-Spot is a Boston Dynamics quadruped with an InDro Orin payload. SwarmDeck
-talks to the payload's ROS 2 graph, not to Spot's internal computer. The
-payload was not on the lab LAN when this was written (2026-08-12); the
-files here are wired from the MIST launch copies on Botman/Aslan and from
-a live look at the robot's own Wi-Fi.
+Spot is a Boston Dynamics quadruped with an InDro Orin payload (hostname
+`orin`, user `indro`, `192.168.1.192` on mistmesh and `192.168.50.192` on
+the payload ethernet). SwarmDeck talks to that payload's ROS 2 graph, not
+to Spot's internal computer.
 
-## What is on, and what is not
+## Live audit (2026-08-12)
 
-| Thing | Status on 2026-08-12 |
+| Thing | Status |
 |---|---|
-| Spot body | **on** — AP `spot-BD-03210008` at ~84% from the operator laptop |
-| Spot SDK address | `192.168.50.3` on the payload ethernet (from `rover_launch/config/spot.yaml`) |
-| Payload SSH | `ssh spot` → `indro@orin.local` — **does not resolve** on mistmesh |
-| Payload on `192.168.1.0/24` | no extra NVIDIA MAC besides scout/botman/aslan |
-| `192.168.50.0/24` from lab robots | unreachable (not routed) |
+| Payload SSH | `ssh spot` → `indro@orin.local` (`192.168.1.192`), JetPack R36.2 |
+| Spot body | `192.168.50.3` pings from the Orin |
+| Ouster | `192.168.50.165` pings; `driver_ouster.yaml` matches |
+| VectorNav | `/dev/vectornav` → `ttyUSB0` |
+| Native ROS | none — Humble lives in `spot:dev` |
+| Workspace | `/home/indro/mist_ws_ros2` (no `/ssd`) |
 
-Previous editor sessions on this laptop opened `/home/indro/mist_ws_ros2`,
-`/home/indro/dino/DinoNav` and `/home/indro/vision_astronaut` over that SSH
-alias, so the payload is an Ubuntu user `indro` with the same MIST ROS 2
-workspace layout as Aslan. It is just not on this SSID right now.
-
-Until `orin.local` answers, do not start `spot_driver`. Claiming a lease
-from the wrong machine, or with nobody at the e-stop, is how this robot
-walks.
+`spot:dev`'s `/tmp/setup.sh` exports `RMW_IMPLEMENTATION=rmw_zenoh_cpp`.
+SwarmDeck compose replaces that entrypoint and pins Fast-RTPS so the
+adapter can see the same graph.
 
 ## What supplies SLAM
 
-The ROS 2 stack on the payload is **SuperOdometry** in mapping mode
-(`localization_mode: false`), same package as the Bunkers, plus Clearpath
-`spot_driver` for the body:
+**LIO-SAM**, not SuperOdometry. SuperOdom is in the tree but
+`COLCON_IGNORE`'d and is not in the install space. The launch that is
+actually built is `rover_launch/launch/full_stack/spot_lio_sam.launch.py`.
 
 | Interface | Spot value | Source |
 |---|---|---|
-| Full robot launch | `ros2 launch rover_launch spot.launch.py` | `mist_ws_ros2` / `mist_ws` `rover_launch` |
-| SLAM package | `super_odometry` / `os1_128.launch.py` | `src/localization/SuperOdom/` |
-| Lidar / IMU input | `/ouster/points`, `/ouster/imu` | `config/superodom/os1_128.yaml` |
-| SLAM odometry | `/laser_odometry` (`map` → `os_lidar`) | SuperOdometry LaserMapping |
-| Registered scan | `/registered_scan` in `map` | SuperOdometry LaserMapping |
-| Body command | `/cmd_vel` | `spot_driver`, `cmd_duration` 0.25 s |
-| Spot computer | `192.168.50.3` | `rover_launch/config/spot.yaml` |
-| Camera (optional) | `usb_cam` `/usb_cam/image_raw` | `spot_gnm.launch.py` / `spot_vnm.launch.py` |
+| Lidar | `/ouster/points` from `192.168.50.165` | `config/drivers/driver_ouster.yaml` |
+| IMU | `/vectornav/imu` | `config/drivers/driver_imu.yaml` |
+| SLAM pose | `/lio_sam/mapping/odometry`; TF `map` → `odom_link` → `lidar_link` | LIO-SAM `mapOptimization` |
+| Registered scan | `/lio_sam/mapping/cloud_registered` | LIO-SAM `mapOptimization` |
+| Body command | `/cmd_vel` | `spot_driver` to `192.168.50.3` |
 
-There is no `OccupancyGrid`. The ROS 2 adapter therefore height-filters
-`/registered_scan` and uploads XY returns for server-side raytracing, as
-on Botman.
+There is no `OccupancyGrid`. The adapter height-filters the registered
+cloud for the server-side 2D map, same as Botman.
 
-An older ROS 1 stack still exists in Scout's `/ssd/mist_ws`: LVI-SAM
-(`params_lidar_vectornav_spot.launch`), `gbplanner`, ROS 1 `spot_driver`,
-and a RosBuzz adapter. The payload workspace that recent sessions actually
-opened is ROS 2 Humble (`mist_ws_ros2`). Use that.
+## What people actually launch for navigation
 
-DinoNav (`/home/indro/dino/DinoNav`, image `dinonav_ros2:dev` on Botman) is
-visual topological navigation toward a goal image. It is not a Nav2
-`NavigateToPose` server. SwarmDeck does not advertise `navigate` on this
-robot until that is mapped or Nav2 is brought up the way Botman was.
+There is no Nav2 `NavigateToPose` on this payload. History, tmux, and the
+full-stack launch show three stacks, none of which map onto SwarmDeck
+`navigate_to`:
+
+| Stack | Where | How it is used |
+|---|---|---|
+| **TARE planner** | `tare_planner`, `explore_spot.launch` | Included in `spot_lio_sam.launch.py` — the launch they actually run. Autonomous exploration, not click-to-pose. |
+| **spot_high_level_controller** | `rover_launch/spot_high_level_controller.py` | Same full stack. Modes AUTONOMY_A / WAYPOINT_B / TELEOP_C. Calls `/power_on`, `/stand`, `/sit`, and relays TARE `/way_point` onto Spot's `Trajectory` action. |
+| **DinoNav** | `/home/indro/dino/DinoNav`, image `dinonav_ros2:dev` | Visual topological nav via `tmux_vnm/spot_tmux_pipeline.sh`. Image-goal, not a map click. |
+| **SafeGNM / visualnav** | `visualnav:dev` | `docker_setup.sh` option 2, "Visual_Navigation_spot". |
+| **GraphNav** | `spot_msgs` services exist | Not seen launched in bash history. |
+
+SwarmDeck click-to-pose uses the same `/trajectory` action as
+`spot_high_level_controller`: the adapter transforms the map-frame goal
+into `body` (the only frame Clearpath accepts) and sends
+`spot_msgs/Trajectory`. Cancel also calls `/stop`, because that ROS 2
+action server does not honour preempt. Point nav and the joystick need
+`--profile driver`, a claimed lease, and a standing robot. TARE and
+DinoNav stay unwired — they are exploration / image-goal, not a map click.
 
 ## SwarmDeck-owned files
 
-- `adapters/adapter_ros2/config/spot.yaml`: topics, frames, rates.
-- `adapters/adapter_ros2/launch/spot.launch.py`: lidar / SLAM / driver split
-  so mapping can start without claiming a lease.
-- `docker-compose.robot-spot.yml`: lidar + slam + adapter by default;
-  `--profile driver` starts `spot_driver`.
-- `study/hardware_spot.yaml`: single-robot backend/map session.
+- `adapters/adapter_ros2/config/spot.yaml`
+- `adapters/adapter_ros2/launch/spot.launch.py` — lidar / LIO-SAM / driver split
+- `docker-compose.robot-spot.yml` — lidar + slam + adapter by default;
+  `--profile driver` starts `spot_driver`
+- `study/hardware_spot.yaml`
 
-## First SSH
+## Start
 
-The payload needs a lab-facing address. Either join it to mistmesh so
-`orin.local` resolves, or SSH through Spot's AP (`192.168.80.3` on
-`spot-BD-03210008`) and from there to the Orin on `192.168.50.0/24`. Then:
-
-1. Confirm hostname, `ip -4 addr`, Docker images, `ROS_DOMAIN_ID`.
-2. Clone this repo if missing (`~/swarmdeck` or `/ssd/swarmdeck`).
-3. Set `SPOT_IMAGE`, `SPOT_WORKSPACE`, `SPOT_ROS_DOMAIN_ID` from what is
-   actually there — the compose defaults are guesses from Aslan's layout.
-4. Bring up **lidar + slam + adapter only**. Check `/laser_odometry` and
-   `/registered_scan` before touching the driver.
+Backend (already the usual operator session, or):
 
 ```bash
 cd server
 .venv/bin/python -m swarmdeck_server --config ../study/hardware_spot.yaml
 ```
 
-On the payload, once the three compose variables are confirmed:
+On the payload, after a one-time `websockets` user install into
+`/home/indro/swarmdeck/.spot_pip`:
 
 ```bash
 BACKEND_HOST=192.168.1.223 \
-  docker compose -f docker-compose.robot-spot.yml up -d --build
+  docker compose -f docker-compose.robot-spot.yml up -d
 ```
 
-`--profile driver` is a later step. It needs an operator at the e-stop.
-`spot_driver` auto-claim / auto-stand are false in MIST's `spot.yaml`;
-leave them that way.
+Verified 2026-08-12 against the live operator session: `spot_0` is online
+with `map`, pose from `map` → `lidar_link`, and local-grid seq advancing.
+LIO-SAM runs in `spot_lio_sam:dev` (Debian GTSAM); lidar and the adapter
+use `spot:dev`. Mixing those for imuPreintegration dies on an undefined
+`ISAM2::update` symbol.
+
+`--profile driver` is no longer required: `spot_driver` starts with the
+rest of the stack. Claim / Stand stay GUI actions (`auto_claim` /
+`auto_stand` remain false). The launch overrides `start_estop` to true
+so claim works without a tablet holding motor-power authority.
 
 ## Check, in this order
 
-Same table as `docs/hardware-bringup.md` step 1–3: GUI appearance, pose
-not stuck at origin, map patches, then deadman on `cmd_vel` with a hand
-on the e-stop. Camera and `navigate_to` stay off until those pass.
+GUI appearance, pose not stuck at origin (`map` → `lidar_link`), map
+patches from `/lio_sam/mapping/cloud_registered`, then — only with the
+driver profile, a claimed lease, a standing robot, and a hand on the
+e-stop — Point nav (`/trajectory`) and deadman on `cmd_vel`. Camera is
+the payload Intel RealSense D435i color stream (`/d435/color/image_raw`),
+not Spot's body fisheyes. Depth is on the same device (Z16 `/dev/video0`)
+but `spot:dev` has no `realsense2_camera`, so the GUI shows color only.
+
+The YOLOE sidecar (`duck_detector` in compose, JetPack 6) is the same
+catalog as the rest of the fleet: rubber duck, wooden block, disc cone,
+filament spool, pool noodle. Boxes stay in the image until D435 depth is
+a ROS topic with TF to `map`.

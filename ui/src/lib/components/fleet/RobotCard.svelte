@@ -140,6 +140,58 @@
         <CircleSlash class="h-3.5 w-3.5" /> Cancel
       </button>
     </div>
+    {#if fleet.can(robot.robot_id, 'body')}
+      <div class="mt-1.5 grid grid-cols-2 gap-1.5">
+        <button
+          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
+                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={(e) => {
+            e.stopPropagation();
+            actions.bodyCommand(robot.robot_id, 'claim');
+          }}
+        >
+          Claim
+        </button>
+        <button
+          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
+                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={(e) => {
+            e.stopPropagation();
+            actions.bodyCommand(robot.robot_id, 'release');
+          }}
+        >
+          Release
+        </button>
+        <button
+          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
+                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={(e) => {
+            e.stopPropagation();
+            actions.bodyCommand(robot.robot_id, 'sit');
+          }}
+        >
+          Sit
+        </button>
+        <button
+          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
+                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={(e) => {
+            e.stopPropagation();
+            actions.bodyCommand(robot.robot_id, 'stand');
+          }}
+        >
+          Stand
+        </button>
+      </div>
+    {/if}
     {#if fleet.can(robot.robot_id, 'navigate')}
       <div class="mt-1.5 flex items-center gap-1.5 text-[10px] text-fg-dim">
         <Navigation class="h-3 w-3" /> Use Point nav to choose a destination
