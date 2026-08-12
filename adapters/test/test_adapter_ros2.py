@@ -71,6 +71,9 @@ def _bridge(mod, cfg_override=None):
     bridge._goal_generation = 0
     bridge._goal_handle = None
     bridge._last_drive_at = 0.0
+    # A connected robot, which is what every test that is not about the link
+    # itself means to model. The class default is deliberately stale.
+    bridge._last_link_at = __import__("time").monotonic()
     bridge._scan_points = None
     # Mirrors __init__: the pose the scan points were captured at.
     bridge._scan_origin = None
@@ -361,3 +364,103 @@ def test_upload_cloud_uses_shared_xyz_transport(mod, monkeypatch):
     assert request.full_url == "http://backend/api/adapter/cloud?robot_id=r0&scale=0.01"
     decoded = mod.np.frombuffer(mod.zlib.decompress(request.data), dtype=mod.np.int16)
     assert decoded.reshape(-1, 3).tolist() == [[125, -250, 75]]
+
+
+def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
+    """The Botman accident, 2026-08-12: a goal ran on after the link dropped.
+
+    `drive_timeout_s` cannot cover this. Held teleop repeats, so its silence is
+    detectable; an active goal sends nothing, and the relay is gated on
+    `nav_status` alone — which nothing revoked when the link wedged.
+    """
+    import time
+
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+
+    # Fresh link: autonomy is relayed as before.
+    bridge._on_nav_cmd_vel(MagicMock())
+    assert bridge.pub_cmd.publish.call_count == 1
+
+    time.sleep(0.08)
+    bridge.link_watchdog()
+
+    assert bridge.nav_status == "cancelled", (
+        "the goal must be cancelled, not merely overridden: the relay is gated "
+        "on nav_status, so leaving it active lets Nav2's next sample overwrite "
+        "the stop within milliseconds"
+    )
+    last = bridge.pub_cmd.publish.call_args[0][0]
+    assert last.linear.x == 0.0 and last.angular.z == 0.0
+
+
+def test_nav_relay_refuses_to_drive_while_the_link_is_stale(mod):
+    """Belt and braces: the invariant holds in the relay, not just in a timer."""
+    import time
+
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+    time.sleep(0.08)
+
+    bridge._on_nav_cmd_vel(MagicMock())
+    bridge.pub_cmd.publish.assert_not_called()
+
+
+def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
+    """A deadman that trips on a working link is worse than none."""
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 5.0},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+
+    bridge.link_watchdog()
+    assert bridge.nav_status == "active"
+
+    bridge._on_nav_cmd_vel(MagicMock())
+    assert bridge.pub_cmd.publish.call_count == 1
+
+
+def test_link_watchdog_ignores_a_robot_that_is_not_navigating(mod):
+    """No goal, nothing to cancel — teleop keeps its own separate deadman."""
+    import time
+
+    bridge = _bridge(mod, {"link_timeout_s": 0.05})
+    bridge.nav_status = "idle"
+    time.sleep(0.08)
+
+    bridge.link_watchdog()
+    assert bridge.nav_status == "idle"
+    bridge.pub_cmd.publish.assert_not_called()
+
+
+def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
+    """A restarted adapter must not leave a driving robot behind.
+
+    SIGTERM's default action kills the interpreter without running `finally`,
+    so `docker stop` and every Compose recreate used to end with the base still
+    executing its last velocity and no deadman left anywhere to countermand it.
+    """
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"},
+         "actions": {"navigate_to_pose": "navigate_to_pose"}},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+    bridge.drive(0.4, 0.2)
+
+    bridge.stop_for_exit()
+
+    assert bridge.nav_status == "cancelled"
+    last = bridge.pub_cmd.publish.call_args[0][0]
+    assert last.linear.x == 0.0 and last.angular.z == 0.0

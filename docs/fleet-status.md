@@ -10,7 +10,7 @@ maintained spec, and two of these four machines are shared with other people's w
 | tars | `scout` | AgileX **Scout Mini** (Jetson AGX, R35) | yes | yes (Foxy) | yes (Noetic) | yes, `/ssd/swarmdeck` | **live**: SLAM, map, camera, teleop and `navigate_to` all verified working |
 | botman | `botman` | AgileX Bunker (Jetson AGX Orin, R36) | yes | no (Docker only) | no | yes, `/ssd/swarmdeck` | **live**: SuperOdometry pose, 2D raytraced map and 3D cloud verified; e-stop interface available |
 | aslan | `aslan` | AgileX Bunker (Jetson AGX Orin, R36) | **no** (dropped off LAN during build) | no (Docker only) | no | yes, `/ssd/swarmdeck` | config + ROS overlay built; live stack blocked by hardware/network |
-| spot | `spot` | Boston Dynamics Spot + Orin payload | **no** | unknown | unknown | not attempted | not started |
+| spot | `spot` | Boston Dynamics Spot + Orin payload | body **on**, payload **no** | unknown | unknown | not attempted | config written; blocked on `orin.local` |
 
 `rclpy` works natively on tars (correcting this doc's own earlier claim — see the tars
 section). It's still the wrong tool for tars specifically, since tars's actual autonomy
@@ -435,21 +435,27 @@ below had to work around.
 
 ## spot (`ssh spot` → `orin.local`, user `indro`)
 
-**Unreachable — DNS resolution for `orin.local` fails from this network.** Nothing was
-inspected; this section only records what's configured, for when it's back:
+**Body on, payload off the lab LAN (re-checked 2026-08-12).** The robot itself is
+powered: its AP `spot-BD-03210008` is visible at high signal. `orin.local` still
+does not resolve from mistmesh, Scout, or Botman, and `192.168.50.0/24` (Spot's
+payload ethernet, SDK address `192.168.50.3`) is not routed here. No extra NVIDIA
+MAC appeared on `192.168.1.0/24`. See `docs/spot.md`.
 
-- SSH alias points at `orin.local` (mDNS), user `indro` — likely the payload compute
-  (an Orin) rather than Spot's own internal computer, matching the "InDro" naming.
-- No terrain was prepared. Once reachable, repeat the same three steps used on the other
-  robots: `git clone https://github.com/SimonR99/swarmdeck.git /ssd/swarmdeck`, then get
-  `websockets`/`pyyaml`/`numpy` importable, then check whether `rclpy` is already usable
-  natively (payload computers on Spot are more often a clean ROS 2 install than the
-  Jetsons above, but that's a guess, not a finding).
-- Spot needs its own adapter config (no `spot.yaml` exists yet under
-  `adapters/adapter_ros2/config/` — `generic.yaml` is the right starting point per
-  `docs/hardware-bringup.md` step 1, plus mapping the SwarmDeck protocol's
-  `navigate_to`/`stop` onto whatever Spot's own SDK or ROS driver exposes for the
-  deadman-critical `cmd_vel`/estop path).
+The stack, read from MIST's `rover_launch` copies on Botman/Aslan and from prior
+editor sessions on `indro@orin.local`:
+
+- ROS 2 Humble on the Orin (`/home/indro/mist_ws_ros2`), not the old ROS 1
+  LVI-SAM launch that still lives in Scout's `/ssd/mist_ws`.
+- **SuperOdometry** (`localization_mode: false`) on `/ouster/points` +
+  `/ouster/imu`, publishing `/laser_odometry` and `/registered_scan` — same
+  SLAM as the Bunkers.
+- Body via Clearpath `spot_driver` (`/cmd_vel`, lease to `192.168.50.3`).
+- DinoNav is separate visual nav, not a Nav2 action.
+
+SwarmDeck files are in place (`adapters/adapter_ros2/config/spot.yaml`,
+`launch/spot.launch.py`, `docker-compose.robot-spot.yml`). They cannot be
+started until the payload has a lab-facing address. Do not run `--profile
+driver` without an operator at the e-stop.
 
 ---
 

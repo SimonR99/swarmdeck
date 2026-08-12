@@ -42,6 +42,7 @@ import argparse
 import asyncio
 import json
 import math
+import signal
 import sys
 import threading
 import time
@@ -126,6 +127,11 @@ DEFAULTS: dict[str, Any] = {
         "camera_compressed": "",
         "camera_depth": "",
         "camera_info": "",
+        # Colour CameraInfo. Set this when depth is *not* RGB-aligned so a
+        # detection box in the operator image can be joined to a slower,
+        # independently-published depth stream. Leave empty when `camera_info`
+        # already describes aligned depth (the usual RGB-D case).
+        "camera_color_info": "",
         # Organised PointCloud2 aligned pixel-for-pixel with the RGB image.
         # Optional: bbox-only detection still works when it is absent.
         "camera_depth_points": "",
@@ -160,6 +166,20 @@ DEFAULTS: dict[str, Any] = {
     # only safe with a deadman: if the link drops mid-command the robot must not
     # keep executing the last velocity it heard.
     "drive_timeout_s": 0.45,
+    # The same deadman, for autonomy. `drive_timeout_s` protects teleop because
+    # the GUI repeats `drive` while a button is held, so silence is detectable.
+    # An active navigation goal sends nothing repeatedly — Nav2 drives the robot
+    # from on board, and `_on_nav_cmd_vel` relays it purely on nav_status, which
+    # nothing revokes when the operator link wedges. Without this an active goal
+    # runs to completion with nobody watching, which is what happened to Botman
+    # on 2026-08-12: the link dropped mid-goal and the robot kept driving and
+    # rotating until it was powered down by hand.
+    #
+    # Freshness is "either direction heard from": the tx loop sends state at
+    # `state_hz`, and any received command also counts. A wedged TCP connection
+    # blocks `await ws.send()` on a full write buffer, so this stops advancing
+    # long before websockets gives up at ping_interval + ping_timeout (~40 s).
+    "link_timeout_s": 1.5,
 }
 
 
@@ -179,6 +199,12 @@ def yaw_of(q) -> float:
 
 class HardwareBridge:
     """One real robot's ROS interface, expressed as the SwarmDeck protocol."""
+
+    # Deliberately stale: a link that has never been heard from is not a link
+    # that may drive the robot. Subscriptions exist before `__init__` finishes,
+    # so `_on_nav_cmd_vel` can fire against a half-built bridge — and the safe
+    # answer to "is the operator there?" before anyone has connected is no.
+    _last_link_at: float = 0.0
 
     def __init__(self, node: Node, robot_id: str, cfg: dict, http_url: str) -> None:
         self.node = node
@@ -219,6 +245,7 @@ class HardwareBridge:
         self._detect_pending: tuple[bytes, Any] | None = None
         self._camera_depth_image: Image | None = None
         self._camera_info: CameraInfo | None = None
+        self._camera_color_info: CameraInfo | None = None
         self._camera_depth_cloud: PointCloud2 | None = None
         perception = cfg.get("perception", {})
         self._detector = None
@@ -301,6 +328,13 @@ class HardwareBridge:
                 self._on_camera_info,
                 qos_profile_sensor_data,
             )
+        if topics.get("camera_color_info"):
+            node.create_subscription(
+                CameraInfo,
+                topics["camera_color_info"],
+                self._on_camera_color_info,
+                qos_profile_sensor_data,
+            )
         if topics.get("nav_cmd_vel"):
             node.create_subscription(
                 Twist, topics["nav_cmd_vel"], self._on_nav_cmd_vel, 10
@@ -324,7 +358,12 @@ class HardwareBridge:
         # watchdog stopped with it. websockets only gives up after
         # ping_interval + ping_timeout, so the robot would keep executing its
         # last commanded velocity for up to ~40 s with nobody watching.
-        self._watchdog_timer = node.create_timer(0.1, self.drive_watchdog)
+        #
+        # `link_watchdog` is that same deadman applied to autonomy, and it shares
+        # this timer because it depends on the same property: it runs off the
+        # robot's clock, not off the link it is watching.
+        self._last_link_at = time.monotonic()
+        self._watchdog_timer = node.create_timer(0.1, self._watchdogs)
 
     # ------------------------------------------------------------- capabilities
 
@@ -544,6 +583,9 @@ class HardwareBridge:
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._camera_info = msg
 
+    def _on_camera_color_info(self, msg: CameraInfo) -> None:
+        self._camera_color_info = msg
+
     @staticmethod
     def _stamp_seconds(header) -> float | None:
         stamp = getattr(header, "stamp", None)
@@ -554,6 +596,42 @@ class HardwareBridge:
         except (AttributeError, TypeError, ValueError):
             return None
         return value if value > 0.0 and math.isfinite(value) else None
+
+    def _depth_image_kwargs(self, depth_header) -> dict | None:
+        """Extra args for `point_for_depth_image`, or None to skip this frame.
+
+        `camera_color_info` means the operator image and the depth image are
+        not the same grid.  Sampling depth as if it were RGB-aligned would
+        put the marker in the wrong place, so a missing optical TF is a skip
+        rather than a fallback.
+        """
+        color_info = self._camera_color_info
+        if color_info is None:
+            return {}
+        color_frame = getattr(getattr(color_info, "header", None), "frame_id", "") or ""
+        depth_frame = getattr(depth_header, "frame_id", "") or ""
+        if not color_frame or not depth_frame or color_frame == depth_frame:
+            return {"color_camera_info": color_info}
+        try:
+            stamp_msg = getattr(depth_header, "stamp", None)
+            stamp = (
+                rclpy.time.Time.from_msg(stamp_msg)
+                if stamp_msg is not None
+                else rclpy.time.Time()
+            )
+            tf = self.tf_buffer.lookup_transform(color_frame, depth_frame, stamp)
+            return {
+                "color_camera_info": color_info,
+                "depth_to_color": tf.transform,
+            }
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._last_depth_warning_at >= 10.0:
+                self._last_depth_warning_at = now
+                self.node.get_logger().warn(
+                    f"[{self.id}] cannot join colour detection to depth: {exc}"
+                )
+            return None
 
     def _depth_map_position(
         self, bbox, image_header=None, polygon=None
@@ -572,17 +650,20 @@ class HardwareBridge:
             depth_header = getattr(depth_image, "header", None)
             depth_time = self._stamp_seconds(depth_header)
             if image_time is None or depth_time is None or abs(image_time - depth_time) <= max_age:
-                configured_scale = perception.get("depth_scale")
-                camera_point = point_for_depth_image(
-                    depth_image,
-                    camera_info,
-                    bbox,
-                    polygon=polygon,
-                    min_range_m=min_range,
-                    max_range_m=max_range,
-                    depth_scale=None if configured_scale is None else float(configured_scale),
-                )
-                source_header = depth_header
+                extra = self._depth_image_kwargs(depth_header)
+                if extra is not None:
+                    configured_scale = perception.get("depth_scale")
+                    camera_point = point_for_depth_image(
+                        depth_image,
+                        camera_info,
+                        bbox,
+                        polygon=polygon,
+                        min_range_m=min_range,
+                        max_range_m=max_range,
+                        depth_scale=None if configured_scale is None else float(configured_scale),
+                        **extra,
+                    )
+                    source_header = depth_header
 
         cloud = self._camera_depth_cloud
         if camera_point is None and cloud is not None:
@@ -671,6 +752,7 @@ class HardwareBridge:
                 # not at the next restart: the batch is rebuilt every frame, so
                 # a narrowed list clears their boxes on the following one.
                 self._detector.classes = settings.get("detection_classes")
+                self._detector.class_floors = settings.get("detection_class_floors")
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 
@@ -741,8 +823,14 @@ class HardwareBridge:
         `topics.nav_cmd_vel` is the isolated output of Nav2 or a topic-based
         controller. This adapter is the only publisher to the real driver
         topic, so teleop, cancellation and e-stop remain authoritative.
+
+        `link_ok()` is checked here as well as in `link_watchdog` so that the
+        invariant holds inside the relay itself rather than depending on a timer
+        having already run: no operator, no autonomous motion.
         """
         if self.nav_status == "active" and self.pub_cmd is not None:
+            if not self.link_ok():
+                return
             self.pub_cmd.publish(msg)
 
     def drive(self, linear: float, angular: float) -> None:
@@ -761,6 +849,11 @@ class HardwareBridge:
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
+    def _watchdogs(self) -> None:
+        """Both deadmen, on one 0.1 s timer driven by the robot's own clock."""
+        self.drive_watchdog()
+        self.link_watchdog()
+
     def drive_watchdog(self) -> None:
         """Stop if teleop commands stop arriving.
 
@@ -775,10 +868,61 @@ class HardwareBridge:
             self.mode = "idle"
             self._last_drive_at = 0.0
 
+    def link_ok(self) -> bool:
+        """Has the operator link been heard from recently enough to trust it?"""
+        return (
+            time.monotonic() - self._last_link_at
+            <= float(self.cfg["link_timeout_s"])
+        )
+
+    def note_link_activity(self) -> None:
+        """Record traffic in either direction — see `link_timeout_s`."""
+        self._last_link_at = time.monotonic()
+
+    def link_watchdog(self) -> None:
+        """Stop autonomy when the operator link goes stale.
+
+        `drive_watchdog` cannot cover this: an active goal produces no repeated
+        operator message whose absence is detectable, so the relay in
+        `_on_nav_cmd_vel` would keep passing Nav2's velocity through to the real
+        driver for as long as the goal ran. Cancelling first is what actually
+        stops the robot — the relay is gated on `nav_status`, so a zero Twist
+        published while the goal is still active is overwritten by the next
+        relayed sample milliseconds later.
+        """
+        if self.nav_status != "active" or self.link_ok():
+            return
+        self.node.get_logger().warn(
+            f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
+            "with a goal active; cancelling and stopping"
+        )
+        self.cancel_goal()
+        self.drive(0.0, 0.0)
+
     def stop(self) -> None:
         self.drive(0.0, 0.0)
         self.cancel_goal()
         self.mode = "estop"
+
+    def stop_for_exit(self) -> None:
+        """Leave the robot stationary as this process dies.
+
+        Every deadman in this file lives in THIS process, so the base must not
+        outlive it still moving. The Bunker executes its last commanded velocity
+        until countermanded, so an adapter that exits without zeroing hands a
+        driving robot to nobody — which is the shape of the 2026-08-12 incident,
+        where the adapter container was recreated while a command was in flight.
+
+        Repeated because a single publish immediately before exit can still be
+        sitting in the DDS write path when the process goes away.
+        """
+        for _ in range(3):
+            try:
+                self.cancel_goal()
+                self.drive(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.05)
 
     def navigate_to(self, goal: dict[str, float]) -> None:
         if self.nav_client is None:
@@ -1023,9 +1167,11 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     f"{bridge.capabilities()}"
                 )
                 backoff = 1.0
+                bridge.note_link_activity()
 
                 async def rx() -> None:
                     async for raw in ws:
+                        bridge.note_link_activity()
                         try:
                             msg = json.loads(raw)
                         except ValueError:
@@ -1060,6 +1206,11 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     last_settings = 0.0
                     while True:
                         await ws.send(json.dumps(bridge.state()))
+                        # A completed send means the frame reached the socket,
+                        # which is the freshness signal the autonomy deadman
+                        # reads. On a wedged link this is exactly where it stops
+                        # completing, which is the point.
+                        bridge.note_link_activity()
                         # No drive_watchdog() here: it runs on a ROS timer so it
                         # keeps ticking when this loop cannot. See __init__.
                         now = time.monotonic()
@@ -1097,7 +1248,13 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
             )
             # Stop the robot on link loss. A robot that keeps driving after
             # losing its operator is the failure that hurts someone.
+            #
+            # cancel_goal() FIRST, and not only drive(0, 0): while nav_status is
+            # still "active" the relay in `_on_nav_cmd_vel` overwrites a zero
+            # Twist with Nav2's next sample, so zeroing alone stops an
+            # autonomous robot for milliseconds and nothing more.
             try:
+                bridge.cancel_goal()
                 bridge.drive(0.0, 0.0)
             except Exception:
                 pass
@@ -1133,16 +1290,38 @@ def main() -> None:
 
     spin = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin.start()
+
+    # SIGTERM, not just Ctrl-C. `docker stop`, a Compose recreate and a systemd
+    # restart all send SIGTERM, whose DEFAULT action kills the interpreter
+    # outright: the `finally` below never runs, nothing zeroes the driver, and
+    # the robot keeps executing its last velocity with every deadman in this
+    # process now gone. Stop first, then unwind through the normal path.
+    def _on_signal(_signum: int, _frame: Any) -> None:
+        bridge.stop_for_exit()
+        raise KeyboardInterrupt
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, _on_signal)
+
     try:
         asyncio.run(run_robot(bridge, ws_url))
     except KeyboardInterrupt:
         pass
     finally:
         try:
-            bridge.drive(0.0, 0.0)
+            bridge.stop_for_exit()
         except Exception:
             pass
-        rclpy.shutdown()
+        # Shut the context down first so `rclpy.spin` returns, then join it.
+        # Tearing the node down under a still-spinning executor aborts in C++
+        # ("terminate called without an active exception", exit 133), which
+        # turns every ordinary restart into a crash and makes it impossible to
+        # tell from the outside whether the stop above was flushed.
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+        spin.join(timeout=2.0)
 
 
 if __name__ == "__main__":

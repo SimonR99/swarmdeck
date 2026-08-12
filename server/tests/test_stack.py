@@ -56,8 +56,9 @@ def test_detection_classes_endpoint_describes_the_catalog():
         assert r.status_code == 200
         classes = r.json()["classes"]
 
-    assert {"name": "disc_cone", "label": "Disc cone"} in classes
-    assert all({"name", "label"} == set(item) for item in classes)
+    assert {"name": "disc_cone", "label": "Disc cone", "min_score": 0.2} in classes
+    assert all({"name", "label", "min_score"} == set(item) for item in classes)
+    assert all(0.0 < item["min_score"] < 1.0 for item in classes)
 
 
 def test_map_png_roundtrip():

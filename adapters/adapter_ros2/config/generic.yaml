@@ -17,8 +17,10 @@ topics:
   camera: ""
   camera_compressed: ""
   # Preferred depth source: RGB-aligned depth image plus its intrinsics.
+  # Set `camera_color_info` as well when depth is *not* aligned to colour.
   camera_depth: ""
   camera_info: ""
+  camera_color_info: ""
   # Optional organised PointCloud2 aligned pixel-for-pixel with the RGB image.
   camera_depth_points: ""
 

@@ -33,6 +33,7 @@ camera_topic=$6
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
 slam_launch="${repo}/adapters/adapter_ros1/launch/scout_mini_slam.launch"
+camera_launch="${repo}/adapters/adapter_ros1/launch/scout_camera_low_latency.launch"
 
 # Catkin's generated setup hooks inspect variables before defining them, so nounset
 # must be disabled only while those trusted environment scripts are sourced.
@@ -113,11 +114,28 @@ start_detached \
 
 wait_for_master
 
+# Colour publishes immediately. Depth is a slower unsynced stream used only
+# to pin detections on the map. Do not fall back to rs_d400.launch: that
+# vendor profile holds colour until depth on this USB 2.1 camera.
+if pgrep -f "[r]oslaunch rover_launch rs_d400.launch" >/dev/null; then
+  echo "RealSense camera: vendor rs_d400.launch is already running." >&2
+  echo "That profile is why teleop video lags. Stop it and re-run make up-scout" >&2
+  echo "so scout_camera_low_latency.launch can own the D435i." >&2
+else
+  start_detached \
+    "RealSense camera" \
+    "[r]oslaunch .*${camera_launch}" \
+    "${camera_log}" \
+    roslaunch "${camera_launch}"
+fi
+
+# The low-latency launch already publishes this mount TF. Keep a copy for the
+# case where someone started the camera by hand without that launch file.
 start_detached \
-  "RealSense camera" \
-  "[r]oslaunch rover_launch rs_d400.launch" \
-  "${camera_log}" \
-  roslaunch rover_launch rs_d400.launch
+  "D400 mount TF" \
+  "[s]tatic_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link" \
+  /tmp/swarmdeck-d400-mount.log \
+  rosrun tf static_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link 100
 
 export ROBOT_IP="${robot_ip}"
 export BACKEND_HOST="${backend_host}"

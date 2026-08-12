@@ -79,10 +79,32 @@ topics:
 actions:
   navigate_to_pose: /botman_0/navigate_to_pose
 
+# map_period_s / cloud_period_s are slow here on purpose, and the reason is a
+# server cost rather than anything about this robot.
+#
+# In `merge_mode: auto` the backend re-runs grid registration on EVERY ingest
+# from a non-reference robot (mapsvc/service.py:503 for scans/grids, :314 for
+# clouds). Botman joins an existing session, so tars_0 is the reference and
+# Botman is always the moving robot: both of these uploads pay the full cost.
+# Measured 2026-08-12 against the two live 800x800 grids, one `register()` call
+# takes **2.44 s** — an order of magnitude above the "hundreds of milliseconds"
+# its own docstring assumes, and it grows as the map fills in.
+#
+# At the previous 2.0 s / 4.0 s this demanded 0.75 registrations/s at 2.44 s
+# each — roughly 183% of one core — so `_ingest_lock` never drained, every
+# upload blew the adapter's 5 s HTTP timeout, and BOTH robots flapped offline:
+# these uploads are synchronous, so a stalled upload stalls the same loop that
+# pumps telemetry. 8 s / 16 s puts the steady-state demand near 45% of a core,
+# which leaves headroom for that cost growing.
+#
+# This is a throughput workaround, not the fix. Throttling re-registration
+# server-side (it is a slowly-varying estimate between two drifting SLAM
+# frames, not something worth recomputing 0.75 times a second) would let these
+# go back to 2.0 / 4.0.
 rates:
   state_hz: 5.0
-  map_period_s: 2.0
-  cloud_period_s: 4.0
+  map_period_s: 8.0
+  cloud_period_s: 16.0
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45

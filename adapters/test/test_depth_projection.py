@@ -14,6 +14,7 @@ from adapters.perception.depth_projection import (
     point_for_bbox,
     point_for_depth_image,
     transform_point,
+    transform_points,
 )
 
 
@@ -89,6 +90,65 @@ def test_transform_point_applies_rotation_and_translation():
     assert result.tolist() == pytest.approx([10.0, -1.0, 0.5])
 
 
+def _rigid(x=0.0, y=0.0, z=0.0, qx=0.0, qy=0.0, qz=0.0, qw=1.0):
+    return type(
+        "Transform",
+        (),
+        {
+            "translation": type("V", (), {"x": x, "y": y, "z": z})(),
+            "rotation": type("Q", (), {"x": qx, "y": qy, "z": qz, "w": qw})(),
+        },
+    )()
+
+
+def test_unaligned_depth_follows_the_colour_box_across_a_stereo_baseline():
+    """Operator video and depth are allowed to disagree about pixels.
+
+    A 2 cm baseline at 1 m with fx=200 shifts the colour projection by 4 px.
+    Sampling the colour box on the depth image as if they were aligned would
+    read the 6 m wall; joining through the extrinsics should still find the
+    1 m object.
+    """
+    width = height = 20
+    values = np.full((height, width), 6000, dtype="<u2")
+    values[9:12, 9:12] = 1000
+    image = depth_image(values)
+    depth_k = camera_info(width, height, fx=200.0)
+    color_k = camera_info(width, height, fx=200.0)
+    baseline = _rigid(x=0.02)
+    # Colour u = fx * 0.02 / 1.0 + 9.5 = 13.5. Box around that column.
+    bbox = (12 / 20, 8 / 20, 4 / 20, 4 / 20)
+
+    joined = point_for_depth_image(
+        image,
+        depth_k,
+        bbox,
+        color_camera_info=color_k,
+        depth_to_color=baseline,
+        inset=0.0,
+        stride=1,
+    )
+    as_if_aligned = point_for_depth_image(image, depth_k, bbox, inset=0.0)
+
+    assert joined is not None and as_if_aligned is not None
+    assert joined[2] == pytest.approx(1.0, abs=0.05)
+    assert as_if_aligned[2] == pytest.approx(6.0, abs=0.05)
+
+
+def test_transform_points_matches_transform_point():
+    half = math.sqrt(0.5)
+    transform = _rigid(x=1.0, y=2.0, z=3.0, qz=half, qw=half)
+    points = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+
+    batched = transform_points(points, transform)
+    one = transform_point(points[0], transform)
+    two = transform_point(points[1], transform)
+
+    assert batched is not None and one is not None and two is not None
+    assert batched[0].tolist() == pytest.approx(one.tolist())
+    assert batched[1].tolist() == pytest.approx(two.tolist())
+
+
 def depth_image(values: np.ndarray):
     height, width = values.shape
     return type(
@@ -105,12 +165,18 @@ def depth_image(values: np.ndarray):
     )()
 
 
-def camera_info(width: int, height: int):
-    centre = (width - 1) / 2.0
+def camera_info(width: int, height: int, *, fx: float = 4.0, frame: str = ""):
+    centre_x = (width - 1) / 2.0
+    centre_y = (height - 1) / 2.0
     return type(
         "Info",
         (),
-        {"K": [4.0, 0.0, centre, 0.0, 4.0, (height - 1) / 2.0, 0.0, 0.0, 1.0]},
+        {
+            "width": width,
+            "height": height,
+            "header": type("Header", (), {"frame_id": frame})(),
+            "K": [fx, 0.0, centre_x, 0.0, fx, centre_y, 0.0, 0.0, 1.0],
+        },
     )()
 
 

@@ -20,6 +20,7 @@ from adapters.perception import catalog
 from adapters.perception.object_detector import (
     MAX_POLYGON_POINTS,
     Detection,
+    parse_class_floors,
     suppress_overlaps,
 )
 
@@ -93,17 +94,25 @@ class YoloeModel:
         self._model.set_classes(list(self.prompts))
 
     def detect(
-        self, image: np.ndarray, scale: float, classes: tuple[str, ...]
+        self,
+        image: np.ndarray,
+        scale: float,
+        classes: tuple[str, ...],
+        floors: dict[str, float] | None = None,
     ) -> list[Detection]:
         height, width = image.shape[:2]
         if width < 16 or height < 16 or not classes:
             return []
 
-        active = {
-            target.name: max(0.02, min(0.95, target.min_score * scale))
-            for target in catalog.CATALOG
-            if target.name in classes
-        }
+        active = {}
+        for target in catalog.CATALOG:
+            if target.name not in classes:
+                continue
+            if floors and target.name in floors:
+                floor = floors[target.name]
+            else:
+                floor = target.min_score * scale
+            active[target.name] = max(0.02, min(0.95, float(floor)))
         if not active:
             return []
 
@@ -193,11 +202,12 @@ class DetectorHandler(BaseHTTPRequestHandler):
                     None if requested is None else requested.split(",")
                 )
             )
+            floors = parse_class_floors(self.headers.get("X-SwarmDeck-Class-Floors"))
             encoded = np.frombuffer(self.rfile.read(length), dtype=np.uint8)
             image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError("request is not a decodable image")
-            detections = self.model.detect(image, scale, classes)
+            detections = self.model.detect(image, scale, classes, floors or None)
             self._json(
                 200,
                 {

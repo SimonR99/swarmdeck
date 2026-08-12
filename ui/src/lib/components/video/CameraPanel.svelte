@@ -395,7 +395,7 @@
               style="background:{detectionCatalog.colorOf(d.class)}"
             >
               {detectionCatalog.labelOf(d.class)}
-              {Math.round(d.score * 100)}%
+              {Math.round(d.score * 100)}% conf
             </span>
           </div>
         {/if}

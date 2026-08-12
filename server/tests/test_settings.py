@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from swarmdeck_server.config.detection import DETECTION_CLASS_NAMES
+from swarmdeck_server.config.detection import DETECTION_CLASS_FLOORS, DETECTION_CLASS_NAMES
 from swarmdeck_server.config.settings import SettingsStore
 
 
@@ -65,6 +65,28 @@ def test_an_empty_class_selection_means_every_class(tmp_path):
     assert store.save({"detection_classes": []})["detection_classes"] == DETECTION_CLASS_NAMES
     assert store.save({"detection_classes": "duck"})["detection_classes"] == DETECTION_CLASS_NAMES
     assert store.save({})["detection_classes"] == DETECTION_CLASS_NAMES
+
+
+def test_class_floors_default_to_the_catalog_and_clamp(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+
+    assert store.save({})["detection_class_floors"] == DETECTION_CLASS_FLOORS
+
+    saved = store.save({
+        "detection_class_floors": {
+            "rubber_duck": 0.40,
+            "wooden_block": 1.5,
+            "not_a_class": 0.90,
+            "disc_cone": "nope",
+        }
+    })
+    floors = saved["detection_class_floors"]
+
+    assert floors["rubber_duck"] == 0.40
+    assert floors["wooden_block"] == 0.95
+    assert floors["disc_cone"] == DETECTION_CLASS_FLOORS["disc_cone"]
+    assert "not_a_class" not in floors
+    assert set(floors) == set(DETECTION_CLASS_FLOORS)
 
 
 def test_settings_accept_seven_robots_for_mixed_hardware_fleet(tmp_path):

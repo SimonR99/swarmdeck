@@ -23,11 +23,31 @@ map_frame: odom_lidar
 base_frame: base_link_filtered
 
 # Ouster is mounted above base_link_filtered; LVI-SAM's frame origin is roughly
-# the sensor's own start pose (confirmed live: z ~0.26 m there). This band is a
-# starting guess at "obstacle height, not ground or ceiling" in that frame —
-# NOT calibrated against the real mount height. Check the actual map once it's
-# up: a mostly-empty grid means the band missed the room; a solid gray disc
-# means it's catching the floor.
+# the sensor's own start pose (confirmed live: z ~0.26 m there).
+#
+# MEASURED 2026-08-12, 50k accumulated points of cloud_registered, robust plane
+# fit to the returns below -0.35:
+#
+#   floor:  z = -0.0437*x + 0.0049*y - 0.575     tilt 2.52 deg
+#
+# The floor is 0.575 m below the frame origin and PITCHED 2.52 degrees, almost
+# purely in x — a lidar<->IMU extrinsic/gravity-alignment error, not a sloped
+# room, and the same defect docs/fleet-status.md flags as the reason not to
+# trust this robot's displayed pose.
+#
+# That tilt does put floor into this band, but far less than it looks like it
+# should: only 201 of ~50k points, all at 5.4-6.1 m range, in the -x direction
+# where the floor climbs. There is a real wall at x = -6.3 m (the cloud has no
+# returns whatsoever beyond it), so the floor never gets far enough away to rise
+# any higher. The tilt is a pose problem here, not a mapping one.
+#
+# min_z 0.0 was tried and REVERTED. It cut occupied cells 76% (6856 -> 1633) and
+# the map looked much cleaner, but classifying the removed z slice [-0.3, 0.0)
+# against the floor plane above showed only 5.0% of it was floor: 28.6% was real
+# obstacles 15-40 cm up and 64.2% was structure higher than that. It was not
+# cleaning the map, it was deleting the furniture — including everything at the
+# height a Scout Mini actually collides with. Do not raise min_z to make the map
+# look tidier; this lab is genuinely cluttered and the speckle is mostly real.
 map_cloud_height_band:
   min_z: -0.3
   max_z: 0.5
@@ -47,7 +67,14 @@ topics:
   # viewer. Nothing new runs on the robot for either path. cloud_registered_raw
   # (undownsampled) also exists if this one proves too sparse.
   map_cloud: /lvi_sam/lidar/mapping/cloud_registered
-  plan: ""
+  # localPlanner's selected local path — the route it actually intends to drive,
+  # ~100 poses at 10 Hz. Published in `chassis_link` (a VEHICLE frame, 0.476 m
+  # below os_sensor — the same offset as the planner's own sensorOffsetZ), not
+  # in map_frame, so _on_plan transforms it through TF before upload. Without
+  # this the dashboard drew no route at all for this robot and the only line on
+  # the map was the trail it had already driven, which makes "did the planner
+  # steer around that, or through it?" unanswerable from the GUI.
+  plan: /path
   # scout_messenger.cpp subscribes "/cmd_vel" with a leading slash, so it is the global
   # topic regardless of any namespace scout_base.launch wraps the node in.
   cmd_vel: /cmd_vel
@@ -55,17 +82,22 @@ topics:
   # from the driver's ScoutStatus message, not by scout_base_node itself.
   battery: /robot_battery
   camera: ""
-  # A RealSense D435i (rover_launch/launch/rs_d400.launch, namespace `d400_arm`,
-  # t265 group commented out) was connected and launched separately from the trimmed
-  # SLAM launch, 2026-08-06 — confirmed publishing at ~30 Hz. Prefer the compressed
-  # topic per the protocol's own guidance (raw at full rate is the most expensive
-  # thing an adapter can subscribe to over a robot's network).
+  # Colour is the operator's drive camera. Launch it through
+  # launch/scout_camera_low_latency.launch — NOT rover_launch/rs_d400.launch,
+  # which on this USB 2.1 D435i queues colour until it is too stale to drive.
+  # Prefer the compressed topic per the protocol's own guidance (raw at full
+  # rate is the most expensive thing an adapter can subscribe to over a
+  # robot's network).
   camera_compressed: /d400_arm/color/image_raw/compressed
-  # rs_d400.launch enables align_depth=true at the same 640x480 resolution as
-  # color. The adapter deprojects this image with the aligned CameraInfo, then
-  # transforms the camera-space XYZ into odom_lidar for the map marker.
-  camera_depth: /d400_arm/aligned_depth_to_color/image_raw
-  camera_info: /d400_arm/aligned_depth_to_color/camera_info
+  # Depth is a separate, unsynced, unaligned stream. 424x240 is not a valid
+  # mode on this USB 2.1 D435i, so both streams run 640x480 @ 15 Hz; colour
+  # still publishes immediately because enable_sync/align_depth are off.
+  # The adapter joins a colour detection box to it via `camera_color_info` and
+  # TF rather than making the driver hold colour frames for depth. Map markers
+  # therefore update at depth rate; the video does not wait.
+  camera_depth: /d400_arm/depth/image_rect_raw
+  camera_info: /d400_arm/depth/camera_info
+  camera_color_info: /d400_arm/color/camera_info
   # local_planner's localPlanner + pathFollower (mist_ws/.../local_planner_agx.launch,
   # launched separately from the trimmed SLAM launch, 2026-08-06) both subscribe
   # this — the standard RViz "2D Nav Goal" topic, not a custom one. Confirmed from
@@ -112,6 +144,13 @@ actions:
   # over this when both are configured). Left pointed at the ROS 1 convention
   # so this resolves automatically if move_base is ever added instead.
   navigate_to_pose: move_base
+
+# Depth is unsynced on this USB 2.1 camera, and the bus still gaps. The
+# adapter default of 0.35 s then drops the sample,
+# so the overlay has boxes and the map never gets a marker. 1.0 s covers a
+# missed depth frame; at Scout Mini speed that is a few centimetres of motion.
+perception:
+  depth_max_age_s: 1.0
 
 rates:
   state_hz: 5.0

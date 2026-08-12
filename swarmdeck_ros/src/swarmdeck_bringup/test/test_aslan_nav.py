@@ -23,23 +23,30 @@ def test_aslan_uses_isolated_navigation_output():
 def test_aslan_services_share_the_robot_ros_domain():
     compose = yaml.safe_load(COMPOSE.read_text())
 
-    for service in ("robot_stack", "nav2", "adapter"):
+    for service in ("robot_stack", "lidar", "slam", "nav2", "adapter"):
         assert "ROS_DOMAIN_ID" in compose["services"][service]["environment"]
-    assert (
-        compose["services"]["adapter"]["depends_on"]["nav2"]["condition"]
-        == "service_healthy"
-    )
+    adapter_dependencies = compose["services"]["adapter"]["depends_on"]
+    assert adapter_dependencies["lidar"]["condition"] == "service_started"
+    assert adapter_dependencies["slam"]["condition"] == "service_started"
+    assert "nav2" not in adapter_dependencies
+    assert "robot_stack" not in adapter_dependencies
 
 
 def test_aslan_launch_keeps_mist_workspace_read_only_and_can_explicit():
     compose = yaml.safe_load(COMPOSE.read_text())
     volumes = compose["services"]["robot_stack"]["volumes"]
+    command = compose["services"]["robot_stack"]["command"][2]
 
     assert "/ssd/mist_ws_ros2:/workspace:ro" in volumes
-    assert "${ASLAN_CAN_INTERFACE:-can2}" in compose["services"]["robot_stack"][
-        "command"
-    ][2]
+    assert "${ASLAN_CAN_INTERFACE:-can2}" in command
+    assert "start_base:=true" in command
+    assert "start_lidar:=false" in command
+    assert "start_slam:=false" in command
     assert 'default_value="can2"' in ROBOT_LAUNCH.read_text()
+    assert compose["services"]["robot_stack"]["profiles"] == ["base"]
+    assert "profiles" not in compose["services"]["lidar"]
+    assert "profiles" not in compose["services"]["slam"]
+    assert "profiles" not in compose["services"]["adapter"]
 
 
 def test_aslan_nav_namespace_and_tf_bridge_are_distinct():

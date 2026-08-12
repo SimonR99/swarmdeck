@@ -27,6 +27,13 @@ const fallback: AppSettings = {
     'filament_spool',
     'pool_noodle'
   ],
+  detection_class_floors: {
+    rubber_duck: 0.25,
+    wooden_block: 0.35,
+    disc_cone: 0.2,
+    filament_spool: 0.25,
+    pool_noodle: 0.25
+  },
   robots: Array.from({ length: 4 }, (_, index) => ({
     id: `robot_${index}`,
     enabled: true,

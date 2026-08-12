@@ -24,7 +24,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from adapters.perception.catalog import CALIBRATED_CONFIDENCE, CLASS_NAMES, resolve
+from adapters.perception.catalog import CALIBRATED_CONFIDENCE, CATALOG, CLASS_NAMES, resolve
 
 
 DEFAULT_DETECTOR_URL = "http://127.0.0.1:8091"
@@ -32,6 +32,40 @@ DEFAULT_DETECTOR_URL = "http://127.0.0.1:8091"
 #: Enough outline to be worth projecting through, few enough to stay cheap on
 #: the websocket at several frames a second.
 MAX_POLYGON_POINTS = 24
+
+#: Lowest / highest an operator floor is allowed to sit.  Below this the
+#: sidecar would accept noise; above it a class can never fire.
+FLOOR_MIN = 0.05
+FLOOR_MAX = 0.95
+
+
+def default_class_floors() -> dict[str, float]:
+    return {target.name: float(target.min_score) for target in CATALOG}
+
+
+def format_class_floors(floors: dict[str, float], classes: tuple[str, ...]) -> str:
+    return ",".join(
+        f"{name}:{floors[name]:.2f}" for name in classes if name in floors
+    )
+
+
+def parse_class_floors(header: str | None) -> dict[str, float]:
+    """Read ``name:0.40,...`` from the detector request header."""
+    if not header:
+        return {}
+    floors: dict[str, float] = {}
+    for part in header.split(","):
+        name, sep, raw = part.partition(":")
+        if not sep:
+            continue
+        key = name.strip()
+        if not key:
+            continue
+        try:
+            floors[key] = max(FLOOR_MIN, min(FLOOR_MAX, float(raw)))
+        except (TypeError, ValueError):
+            continue
+    return floors
 
 
 @dataclass(frozen=True)
@@ -142,6 +176,7 @@ class ObjectDetector:
         self.timeout_s = max(0.1, float(timeout_s))
         self.last_error: str | None = None
         self.classes = classes
+        self.class_floors = None
 
     @property
     def classes(self) -> tuple[str, ...]:
@@ -158,6 +193,30 @@ class ObjectDetector:
         itself would be a second off switch that nothing displays.
         """
         self._classes = tuple(target.name for target in resolve(names))
+
+    @property
+    def class_floors(self) -> dict[str, float]:
+        """Per-class score floors the sidecar will actually apply."""
+        return dict(self._class_floors)
+
+    @class_floors.setter
+    def class_floors(self, raw: object) -> None:
+        """Overlay operator floors on the catalog defaults.
+
+        Unknown names are ignored.  Missing keys keep the catalog floor so a
+        partial settings payload cannot silently drop a class.
+        """
+        floors = default_class_floors()
+        if isinstance(raw, dict):
+            for name, value in raw.items():
+                key = str(name).strip()
+                if key not in floors:
+                    continue
+                try:
+                    floors[key] = max(FLOOR_MIN, min(FLOOR_MAX, float(value)))
+                except (TypeError, ValueError):
+                    pass
+        self._class_floors = floors
 
     @property
     def confidence_threshold(self) -> float:
@@ -197,6 +256,9 @@ class ObjectDetector:
                 "Content-Type": "image/jpeg",
                 "X-SwarmDeck-Confidence": f"{self.confidence_threshold:.4f}",
                 "X-SwarmDeck-Classes": ",".join(self._classes),
+                "X-SwarmDeck-Class-Floors": format_class_floors(
+                    self._class_floors, self._classes
+                ),
             },
             method="POST",
         )

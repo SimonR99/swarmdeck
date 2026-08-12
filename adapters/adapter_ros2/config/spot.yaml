@@ -1,0 +1,68 @@
+# Boston Dynamics Spot + Orin payload (SSH alias `spot` → `orin.local`,
+# user `indro`). Values below come from the robot's MIST ROS 2 source, read
+# 2026-08-12 from the copies on Botman/Aslan while the payload itself was
+# off the lab LAN:
+#
+#   src/control/rover_launch/launch/spot.launch.py
+#   src/control/rover_launch/launch/spot_gnm.launch.py
+#   src/control/rover_launch/config/spot.yaml
+#   src/control/rover_launch/config/superodom/os1_128.yaml
+#
+# SLAM is SuperOdometry in mapping mode, same package as the Bunkers, fed by
+# the payload Ouster. The body is driven by Clearpath `spot_driver` talking
+# to Spot at 192.168.50.3 on the payload ethernet. Do not start that driver
+# without a person at the e-stop — see docs/spot.md.
+robot_type: boston_dynamics_spot
+ros_distro: humble
+
+# Body 1100 x 500 mm. Circumscribed radius is 0.604 m; round up so the UI
+# never draws a footprint smaller than the chassis. The registered-cloud map
+# path also reuses this to reject lidar returns from the body/legs.
+footprint_radius: 0.61
+
+# SuperOdometry's /laser_odometry carries map -> os_lidar. spot_driver
+# separately publishes odom -> body. Same unjoined trees as Botman; the
+# honest SLAM pose is the lidar's.
+map_frame: map
+base_frame: os_lidar
+
+# SuperOdometry starts the map at the lidar pose. Spot's payload lidar sits
+# near body height (~0.5 m); this band is the Bunker first-guess and must be
+# checked against the first live cloud.
+map_cloud_height_band:
+  min_z: -0.3
+  max_z: 0.5
+
+topics:
+  odom: /laser_odometry
+  map: ""                 # SuperOdometry publishes no OccupancyGrid
+  map_cloud: /registered_scan
+  plan: ""
+  # spot_driver's Twist subscription when spot_name is empty. The driver also
+  # applies its own cmd_duration (0.25 s in rover_launch/config/spot.yaml), so
+  # a dropped operator still stops the gait even if the adapter deadman is
+  # late. Leave this empty until that driver is actually running.
+  cmd_vel: /cmd_vel
+  # Battery lives in spot_msgs status, not sensor_msgs/BatteryState.
+  battery: ""
+  camera: ""
+  camera_compressed: ""
+  camera_depth: ""
+  camera_info: ""
+  camera_color_info: ""
+  camera_depth_points: ""
+  nav_cmd_vel: ""
+
+# DinoNav and GraphNav are the robot's own autonomy; neither is a Nav2
+# NavigateToPose server. Do not advertise `navigate` until one of those is
+# mapped, or SwarmDeck Nav2 is brought up on this unit the way Botman was.
+actions:
+  navigate_to_pose: ""
+
+rates:
+  state_hz: 5.0
+  map_period_s: 8.0
+  cloud_period_s: 16.0
+  camera_period_s: 0.2
+
+drive_timeout_s: 0.45

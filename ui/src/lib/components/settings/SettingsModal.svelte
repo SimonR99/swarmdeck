@@ -10,6 +10,22 @@
   let error = $state('');
   let wasOpen = false;
 
+  function catalogFloors(): Record<string, number> {
+    return Object.fromEntries(
+      detectionCatalog.classes.map((target) => [target.name, target.min_score ?? 0.25])
+    );
+  }
+
+  function withCatalogFloors(value: AppSettings): AppSettings {
+    return {
+      ...value,
+      detection_class_floors: {
+        ...catalogFloors(),
+        ...(value.detection_class_floors ?? {})
+      }
+    };
+  }
+
   function toggleClass(name: string) {
     const next = draft.detection_classes.includes(name)
       ? draft.detection_classes.filter((item) => item !== name)
@@ -18,6 +34,23 @@
     // class would silently turn every class back on. Refuse instead.
     if (!next.length) return;
     draft.detection_classes = next;
+  }
+
+  function setFloor(name: string, value: number) {
+    const bounded = Math.max(0.05, Math.min(0.95, value));
+    draft.detection_class_floors = {
+      ...draft.detection_class_floors,
+      [name]: bounded
+    };
+  }
+
+  function resetFloor(name: string) {
+    const catalog = detectionCatalog.classes.find((target) => target.name === name);
+    setFloor(name, catalog?.min_score ?? 0.25);
+  }
+
+  function floorOf(name: string): number {
+    return draft.detection_class_floors[name] ?? 0.25;
   }
 
   function resizeRobots(count: number) {
@@ -47,7 +80,7 @@
 
   $effect(() => {
     if (open && !wasOpen) {
-      draft = structuredClone($state.snapshot(settings.value));
+      draft = withCatalogFloors(structuredClone($state.snapshot(settings.value)));
       error = '';
     }
     wasOpen = open;
@@ -144,38 +177,63 @@
             {draft.detection_enabled ? 'ON' : 'OFF'}
           </button>
         </div>
-        <label class="mt-3 block text-[10px] font-medium text-fg-muted">
-          Sensitivity · {Math.round(draft.detection_sensitivity * 100)}%
-          <input
-            type="range"
-            min="0.1"
-            max="1"
-            step="0.05"
-            bind:value={draft.detection_sensitivity}
-            disabled={!draft.detection_enabled}
-            class="mt-2 w-full accent-[var(--color-accent)] disabled:opacity-40"
-          />
-        </label>
+        <p class="mt-2 text-[10px] text-fg-dim">
+          Raise a class until false positives disappear. The % on a camera box
+          is the model's confidence for that detection.
+        </p>
 
         {#if detectionCatalog.classes.length}
-          <div class="mt-3 text-[10px] font-medium text-fg-muted">Look for</div>
-          <div class="mt-1.5 flex flex-wrap gap-1.5">
+          <div class="mt-3 space-y-2">
             {#each detectionCatalog.classes as target (target.name)}
               {@const on = draft.detection_classes.includes(target.name)}
-              <button
-                class="flex h-7 items-center gap-1.5 rounded-[4px] border px-2 text-[10px] font-medium
-                       disabled:opacity-40
-                       {on ? 'border-border-strong bg-surface-2 text-fg' : 'border-border text-fg-dim'}"
-                disabled={!draft.detection_enabled}
-                aria-pressed={on}
-                onclick={() => toggleClass(target.name)}
+              {@const floor = floorOf(target.name)}
+              {@const catalogFloor = target.min_score ?? 0.25}
+              <div
+                class="rounded-[5px] border px-2.5 py-2
+                       {on ? 'border-border bg-bg/60' : 'border-border/70 opacity-60'}"
               >
-                <span
-                  class="h-2 w-2 rounded-full"
-                  style="background:{on ? detectionCatalog.colorOf(target.name) : 'currentColor'}"
-                ></span>
-                {target.label}
-              </button>
+                <div class="flex items-center justify-between gap-2">
+                  <button
+                    class="flex min-h-7 items-center gap-1.5 rounded-[4px] px-0.5 text-[10px] font-medium
+                           disabled:opacity-40
+                           {on ? 'text-fg' : 'text-fg-dim'}"
+                    disabled={!draft.detection_enabled}
+                    aria-pressed={on}
+                    onclick={() => toggleClass(target.name)}
+                  >
+                    <span
+                      class="h-2 w-2 rounded-full"
+                      style="background:{on ? detectionCatalog.colorOf(target.name) : 'currentColor'}"
+                    ></span>
+                    {target.label}
+                  </button>
+                  <div class="flex items-center gap-2">
+                    {#if Math.abs(floor - catalogFloor) > 0.005}
+                      <button
+                        class="text-[9px] text-fg-dim hover:text-fg"
+                        disabled={!draft.detection_enabled}
+                        onclick={() => resetFloor(target.name)}
+                      >
+                        reset {Math.round(catalogFloor * 100)}%
+                      </button>
+                    {/if}
+                    <span class="w-8 text-right text-[10px] tabular text-fg-muted">
+                      {Math.round(floor * 100)}%
+                    </span>
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="0.95"
+                  step="0.01"
+                  value={floor}
+                  disabled={!draft.detection_enabled || !on}
+                  aria-label="{target.label} minimum score"
+                  oninput={(event) => setFloor(target.name, Number(event.currentTarget.value))}
+                  class="mt-1.5 w-full accent-[var(--color-accent)] disabled:opacity-40"
+                />
+              </div>
             {/each}
           </div>
           <p class="mt-2 text-[10px] text-fg-dim">

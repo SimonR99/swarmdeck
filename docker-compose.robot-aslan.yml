@@ -1,20 +1,36 @@
 # Aslan bring-up owned by SwarmDeck. MIST's ROS 2 workspace is mounted
 # read-only; generated ROS artifacts live under /ssd/swarmdeck/.aslan_ros.
+#
+# ROS_DOMAIN_ID: bunker:dev's entrypoint (/tmp/setup.sh) exports
+# `ROS_DOMAIN_ID=49` and `OUSTER_HOST_NAME=192.168.2.118` unconditionally.
+# SwarmDeck's own images set no domain and therefore default to 0. Pin every
+# service to 49 so lidar, SuperOdometry and the adapter share one graph.
+x-ros-domain: &ros_domain "${ASLAN_ROS_DOMAIN_ID:-49}"
+
+x-aslan-stack: &aslan-stack
+  image: bunker:dev
+  network_mode: host
+  ipc: host
+  privileged: true
+  volumes:
+    - /dev:/dev
+    - /ssd/mist_ws_ros2:/workspace:ro
+    - /ssd/swarmdeck:/app/swarmdeck:ro
+    - /ssd/swarmdeck/.aslan_ros/install:/aslan_overlay:ro
+  environment:
+    ROS_DOMAIN_ID: *ros_domain
+  restart: unless-stopped
+
 services:
+  # Base only. Lidar and SuperOdometry are separate services, same split as
+  # Botman, so mapping can come up without opening the CAN driver. Default
+  # `docker compose up -d` therefore starts lidar + slam + adapter; pass
+  # `--profile base` when a person is at the e-stop and can2 is up.
   robot_stack:
-    image: bunker:dev
+    <<: *aslan-stack
+    profiles: ["base"]
     container_name: swarmdeck-aslan-stack
-    network_mode: host
-    ipc: host
-    privileged: true
     runtime: nvidia
-    volumes:
-      - /dev:/dev
-      - /ssd/mist_ws_ros2:/workspace:ro
-      - /ssd/swarmdeck:/app/swarmdeck:ro
-      - /ssd/swarmdeck/.aslan_ros/install:/aslan_overlay:ro
-    environment:
-      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-49}"
     command:
       - bash
       - -c
@@ -22,25 +38,58 @@ services:
         . /aslan_overlay/setup.bash &&
         ros2 launch
         /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
-        start_base:=${ASLAN_START_BASE:-true}
-        start_lidar:=${ASLAN_START_LIDAR:-true}
-        start_slam:=${ASLAN_START_SLAM:-true}
+        start_base:=true
+        start_lidar:=false
+        start_slam:=false
         can_interface:=${ASLAN_CAN_INTERFACE:-can2}
-    restart: unless-stopped
+
+  lidar:
+    <<: *aslan-stack
+    container_name: swarmdeck-aslan-lidar
+    command:
+      - bash
+      - -c
+      - >-
+        . /aslan_overlay/setup.bash &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
+        start_base:=false
+        start_lidar:=true
+        start_slam:=false
+
+  slam:
+    <<: *aslan-stack
+    container_name: swarmdeck-aslan-slam
+    runtime: nvidia
+    depends_on:
+      lidar:
+        condition: service_started
+    command:
+      - bash
+      - -c
+      - >-
+        . /aslan_overlay/setup.bash &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
+        start_base:=false
+        start_lidar:=false
+        start_slam:=true
 
   nav2:
+    profiles: ["nav"]
     build:
       context: .
       dockerfile: docker/Dockerfile.robot-nav2
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-aslan-nav2
     depends_on:
-      - robot_stack
+      - lidar
+      - slam
     network_mode: host
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-49}"
+      ROS_DOMAIN_ID: *ros_domain
     command: ["ros2", "launch", "swarmdeck_nav", "aslan.launch.py"]
     healthcheck:
       test:
@@ -56,28 +105,28 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # bunker:dev already has rclpy. websockets is a one-time --user install into
+  # /ssd/swarmdeck/.aslan_pip (the Jetson pip index does not carry it):
+  #   docker run --rm --entrypoint pip3 \
+  #     -v /ssd/swarmdeck/.aslan_pip:/root/.local bunker:dev \
+  #     install --user --index-url https://pypi.org/simple websockets==10.4
   adapter:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.robot-ros2
-    image: swarmdeck-robot-ros2:local
+    image: bunker:dev
     container_name: swarmdeck-aslan-adapter
     depends_on:
-      robot_stack:
+      lidar:
         condition: service_started
-      # `service_started`, not `service_healthy` — see the long note on the same
-      # dependencies in docker-compose.robot-botman.yml. A detector that cannot
-      # fetch its weights, or a bt_navigator that will not go `active`, must not
-      # be able to take telemetry, video and teleop down with it.
-      nav2:
-        condition: service_started
-      duck_detector:
+      slam:
         condition: service_started
     network_mode: host
     ipc: host
+    volumes:
+      - /ssd/mist_ws_ros2:/workspace:ro
+      - /ssd/swarmdeck:/app:ro
+      - /ssd/swarmdeck/.aslan_pip:/root/.local:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
-      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-49}"
+      ROS_DOMAIN_ID: *ros_domain
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
@@ -93,6 +142,7 @@ services:
     restart: unless-stopped
 
   duck_detector:
+    profiles: ["detect"]
     build:
       context: .
       dockerfile: docker/Dockerfile.duck-detector

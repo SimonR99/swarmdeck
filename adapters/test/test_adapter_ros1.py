@@ -80,9 +80,13 @@ def _bridge(mod, cfg_override=None):
     bridge.goal = None
     bridge._goal_generation = 0
     bridge._last_drive_at = 0.0
+    # A connected robot, which is what every test that is not about the
+    # link itself means to model. The class default is deliberately stale.
+    bridge._last_link_at = __import__("time").monotonic()
     bridge._last_cloud_prepare_at = 0.0
     bridge._camera_depth_image = None
     bridge._camera_info = None
+    bridge._camera_color_info = None
     bridge._camera_depth_cloud = None
     bridge._scan_points = None
     # Mirrors __init__: the pose the scan points were captured at.
@@ -172,6 +176,37 @@ def test_stale_depth_is_not_attached_to_a_new_detection(mod):
         {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
     )()
     image_header = type("Header", (), {"stamp": _stamp(10.5)})()
+
+    assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
+
+
+def test_unaligned_depth_without_optical_tf_is_not_treated_as_aligned(mod):
+    """A colour box on an unaligned depth image is the wrong pixels.
+
+    If the depth-to-colour TF is missing, skip the pin rather than sampling
+    the depth image as if it were RGB-aligned — that would look confident
+    and be in the wrong place.
+    """
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0, frame="depth_optical")
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    bridge._camera_color_info = type(
+        "CameraInfo",
+        (),
+        {
+            "header": type("Header", (), {"frame_id": "color_optical"})(),
+            "width": 8,
+            "height": 8,
+            "K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0],
+        },
+    )()
+    bridge.tf_buffer = MagicMock()
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
 
     assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
 
@@ -621,3 +656,162 @@ def test_teleop_does_not_cancel_when_nothing_is_navigating(mod):
 
     assert bridge.mode == "teleop"
     bridge.nav_client.cancel_goal.assert_not_called()
+
+
+def _plan_msg(frame, points, stamp=0.0):
+    """A nav_msgs/Path stand-in: header.frame_id plus (x, y, z) poses."""
+    msg = MagicMock()
+    msg.header.frame_id = frame
+    msg.header.stamp = stamp
+    msg.poses = []
+    for x, y, z in points:
+        pose = MagicMock()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = z
+        msg.poses.append(pose)
+    return msg
+
+
+def _plan_bridge(mod, frame="odom_lidar"):
+    bridge = _bridge(mod, {"map_frame": frame, "topics": {"plan": "/path"}})
+    bridge.planned_path = []
+    bridge._plan_frame_warned = False
+    bridge.tf_buffer = MagicMock()
+    return bridge
+
+
+def test_plan_in_map_frame_is_passed_through(mod):
+    """Nav2's global plan already arrives in map_frame and must not be moved."""
+    bridge = _plan_bridge(mod)
+    bridge._on_plan(_plan_msg("odom_lidar", [(1.0, 2.0, 0.0), (3.0, 4.0, 0.0)]))
+
+    assert bridge.planned_path == [{"x": 1.0, "y": 2.0}, {"x": 3.0, "y": 4.0}]
+    bridge.tf_buffer.lookup_transform.assert_not_called()
+
+
+def test_plan_in_a_vehicle_frame_is_transformed_into_map_frame(mod):
+    """TARS's local_planner publishes /path in chassis_link, not the map frame.
+
+    Copying those numbers through drew the route as though the robot were parked
+    at the map origin facing +x. Here the robot sits at (10, 5) yawed 90 degrees,
+    so a path 2 m straight ahead of the vehicle belongs at (10, 7) on the map.
+    """
+    bridge = _plan_bridge(mod)
+    transform = MagicMock()
+    transform.transform.rotation.x = 0.0
+    transform.transform.rotation.y = 0.0
+    transform.transform.rotation.z = math.sin(math.pi / 4)   # yaw = +90 deg
+    transform.transform.rotation.w = math.cos(math.pi / 4)
+    transform.transform.translation.x = 10.0
+    transform.transform.translation.y = 5.0
+    transform.transform.translation.z = 0.0
+    bridge.tf_buffer.lookup_transform.return_value = transform
+
+    bridge._on_plan(_plan_msg("chassis_link", [(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)]))
+
+    assert bridge.planned_path == [{"x": 10.0, "y": 6.0}, {"x": 10.0, "y": 7.0}]
+
+
+def test_plan_is_dropped_rather_than_drawn_in_the_wrong_frame(mod):
+    """No transform means no route — never the untransformed coordinates.
+
+    A route drawn confidently somewhere the robot is not is worse than no route:
+    the operator uses it to decide whether the planner is steering around an
+    obstacle or through it.
+    """
+    bridge = _plan_bridge(mod)
+    bridge.planned_path = [{"x": 9.0, "y": 9.0}]
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no such frame")
+
+    bridge._on_plan(_plan_msg("chassis_link", [(1.0, 0.0, 0.0)]))
+
+    assert bridge.planned_path == []
+
+
+def test_empty_plan_clears_the_route(mod):
+    """local_planner publishes an empty path when it finds no clear route."""
+    bridge = _plan_bridge(mod)
+    bridge.planned_path = [{"x": 1.0, "y": 1.0}]
+
+    bridge._on_plan(_plan_msg("chassis_link", []))
+
+    assert bridge.planned_path == []
+
+
+def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
+    """Same deadman as adapter_ros2, same reason — see the Botman accident.
+
+    pathFollower publishes continuously at ~27 Hz, so leaving `nav_status`
+    active while the operator is gone means the robot simply keeps going.
+    """
+    import time
+
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+
+    bridge._on_nav_cmd_vel(MagicMock())
+    assert bridge.pub_cmd.publish.call_count == 1
+
+    time.sleep(0.08)
+    bridge.link_watchdog()
+
+    assert bridge.nav_status == "cancelled"
+    last = bridge.pub_cmd.publish.call_args[0][0]
+    assert last.linear.x == 0.0 and last.angular.z == 0.0
+
+
+def test_nav_relay_refuses_to_drive_while_the_link_is_stale(mod):
+    import time
+
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+    time.sleep(0.08)
+
+    bridge._on_nav_cmd_vel(MagicMock())
+    bridge.pub_cmd.publish.assert_not_called()
+
+
+def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 5.0},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+
+    bridge.link_watchdog()
+    assert bridge.nav_status == "active"
+    bridge._on_nav_cmd_vel(MagicMock())
+    assert bridge.pub_cmd.publish.call_count == 1
+
+
+def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
+    """A restarted adapter must not leave a driving robot behind.
+
+    SIGTERM's default action kills the interpreter without running `finally`,
+    so `docker stop` and every Compose recreate used to end with the base still
+    executing its last velocity and no deadman left anywhere to countermand it.
+    """
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"},
+         "actions": {"navigate_to_pose": "navigate_to_pose"}},
+    )
+    bridge.nav_status = "active"
+    bridge.note_link_activity()
+    bridge.drive(0.4, 0.2)
+
+    bridge.stop_for_exit()
+
+    assert bridge.nav_status == "cancelled"
+    last = bridge.pub_cmd.publish.call_args[0][0]
+    assert last.linear.x == 0.0 and last.angular.z == 0.0

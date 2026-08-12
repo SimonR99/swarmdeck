@@ -71,6 +71,8 @@ export interface Detection {
 export interface DetectionClass {
   name: string;
   label: string;
+  /** Catalog default score floor. Operators can raise it per class in settings. */
+  min_score?: number;
 }
 
 export interface MapInfo {
@@ -178,6 +180,8 @@ export interface AppSettings {
   detection_sensitivity: number;
   /** Catalog class names the detector should look for. */
   detection_classes: string[];
+  /** Per-class minimum model score. Defaults to each class's catalog floor. */
+  detection_class_floors: Record<string, number>;
   robots: RobotConnectionSettings[];
 }
 

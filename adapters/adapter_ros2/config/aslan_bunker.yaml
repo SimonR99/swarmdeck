@@ -2,8 +2,10 @@
 # `bunker:dev` image with `/ssd/mist_ws_ros2` mounted at `/workspace`.
 #
 # The live sensor/SLAM interfaces are supplied by SuperOdometry and match the
-# other Bunker in the fleet. SwarmDeck keeps a distinct robot ID and Nav2
-# namespace so both machines can share the same backend safely.
+# other Bunker in the fleet. Aslan's Ouster is an OS-0-64 at 192.168.2.118 on
+# VLAN 2 (udp dest 192.168.2.2); bunker:dev pins ROS_DOMAIN_ID=49. SwarmDeck
+# keeps a distinct robot ID and Nav2 namespace so both machines can share the
+# same backend safely.
 robot_type: agilex_bunker
 ros_distro: humble
 
@@ -42,10 +44,13 @@ topics:
 actions:
   navigate_to_pose: /aslan_0/navigate_to_pose
 
+# Same 8 s / 16 s workaround as Botman: Aslan joins the live session as a
+# non-reference robot, so every map/cloud ingest re-runs grid registration.
+# See adapters/adapter_ros2/config/bunker.yaml.
 rates:
   state_hz: 5.0
-  map_period_s: 2.0
-  cloud_period_s: 4.0
+  map_period_s: 8.0
+  cloud_period_s: 16.0
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45

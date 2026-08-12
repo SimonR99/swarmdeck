@@ -24,7 +24,10 @@ from adapters.perception.catalog import CATALOG, CLASS_NAMES, prompt_bindings, r
 from adapters.perception.object_detector import (
     Detection,
     ObjectDetector,
+    default_class_floors,
+    format_class_floors,
     intersection_over_union,
+    parse_class_floors,
     suppress_overlaps,
     track_ids,
 )
@@ -72,6 +75,8 @@ def test_yoloe_client_posts_jpeg_and_suppresses_duplicate_boxes(monkeypatch):
         0.2475
     )
     assert captured["request"].headers["X-swarmdeck-classes"] == ",".join(CLASS_NAMES)
+    floors_header = captured["request"].headers["X-swarmdeck-class-floors"]
+    assert floors_header == format_class_floors(default_class_floors(), CLASS_NAMES)
     assert captured["timeout"] == 1.5
     assert detector.last_error is None
 
@@ -160,6 +165,32 @@ def test_class_selection_is_normalized_to_catalog_order():
 
     detector.classes = None
     assert detector.classes == CLASS_NAMES
+
+
+def test_class_floors_default_to_the_catalog_and_overlay_operator_values():
+    detector = ObjectDetector()
+    assert detector.class_floors == default_class_floors()
+
+    detector.class_floors = {
+        "rubber_duck": 0.40,
+        "wooden_block": 1.5,
+        "not_a_class": 0.90,
+        "disc_cone": "nope",
+    }
+    floors = detector.class_floors
+    assert floors["rubber_duck"] == pytest.approx(0.40)
+    assert floors["wooden_block"] == pytest.approx(0.95)
+    assert floors["disc_cone"] == pytest.approx(default_class_floors()["disc_cone"])
+    assert "not_a_class" not in floors
+
+
+def test_class_floors_header_round_trips():
+    floors = {"rubber_duck": 0.40, "wooden_block": 0.55}
+    header = format_class_floors(floors, ("rubber_duck", "wooden_block", "disc_cone"))
+    assert header == "rubber_duck:0.40,wooden_block:0.55"
+    assert parse_class_floors(header) == floors
+    assert parse_class_floors(None) == {}
+    assert parse_class_floors("rubber_duck:nope,disc_cone:0.2") == {"disc_cone": 0.2}
 
 
 @pytest.mark.parametrize("empty", [[], (), ["nothing_real"], None, "duck"])

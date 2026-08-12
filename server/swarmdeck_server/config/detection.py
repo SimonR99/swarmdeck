@@ -32,10 +32,18 @@ except ImportError:  # pragma: no cover
 
 
 DETECTION_CLASSES: list[dict[str, Any]] = [
-    {"name": target.name, "label": target.label} for target in _CATALOG
+    {
+        "name": target.name,
+        "label": target.label,
+        "min_score": target.min_score,
+    }
+    for target in _CATALOG
 ]
 
 DETECTION_CLASS_NAMES: list[str] = [target["name"] for target in DETECTION_CLASSES]
+DETECTION_CLASS_FLOORS: dict[str, float] = {
+    target["name"]: float(target["min_score"]) for target in DETECTION_CLASSES
+}
 
 
 def validate_classes(raw: Any) -> list[str]:
@@ -53,3 +61,36 @@ def validate_classes(raw: Any) -> list[str]:
     requested = {str(name).strip() for name in raw}
     selected = [name for name in DETECTION_CLASS_NAMES if name in requested]
     return selected or list(DETECTION_CLASS_NAMES)
+
+
+def validate_class_floors(raw: Any) -> dict[str, float]:
+    """Fill every catalog class with a clamped operator floor.
+
+    Missing keys keep the catalog default so a save never silently drops a
+    class the dashboard still shows a slider for.  Unknown names are ignored.
+    """
+    if not DETECTION_CLASS_FLOORS:
+        if not isinstance(raw, dict):
+            return {}
+        floors: dict[str, float] = {}
+        for name, value in list(raw.items())[:32]:
+            key = str(name).strip()[:48]
+            if not key:
+                continue
+            try:
+                floors[key] = round(max(0.05, min(0.95, float(value))), 2)
+            except (TypeError, ValueError):
+                continue
+        return floors
+    floors = dict(DETECTION_CLASS_FLOORS)
+    if not isinstance(raw, dict):
+        return floors
+    for name, value in raw.items():
+        key = str(name).strip()
+        if key not in floors:
+            continue
+        try:
+            floors[key] = round(max(0.05, min(0.95, float(value))), 2)
+        except (TypeError, ValueError):
+            pass
+    return floors

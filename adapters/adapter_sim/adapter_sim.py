@@ -1391,6 +1391,7 @@ class RobotBridge:
                 0.1, min(1.0, float(value.get("detection_sensitivity", 0.55)))
             )
             self._detector.classes = value.get("detection_classes")
+            self._detector.class_floors = value.get("detection_class_floors")
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 

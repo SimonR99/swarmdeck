@@ -1,0 +1,109 @@
+# Spot bring-up owned by SwarmDeck. The MIST workspace is mounted read-only
+# and invoked through packages already installed in SPOT_IMAGE; this file
+# never edits that workspace.
+#
+# The payload was not on the lab LAN when this was written (2026-08-12).
+# Confirm these three things on first SSH to orin.local before `up`:
+#   SPOT_IMAGE          docker image that has ouster_ros + super_odometry
+#   SPOT_WORKSPACE      path of mist_ws_ros2 on the payload
+#   SPOT_ROS_DOMAIN_ID  whatever that image's entrypoint exports
+#
+# Default `docker compose up -d` starts lidar + slam + adapter only.
+# Pass `--profile driver` when a person is at the e-stop; that claims a
+# Spot lease via spot_driver.
+x-ros-domain: &ros_domain "${SPOT_ROS_DOMAIN_ID:-0}"
+
+x-spot-stack: &spot-stack
+  image: ${SPOT_IMAGE:-bunker:dev}
+  network_mode: host
+  ipc: host
+  privileged: true
+  volumes:
+    - /dev:/dev
+    - ${SPOT_WORKSPACE:-/home/indro/mist_ws_ros2}:/workspace:ro
+    - ${SPOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
+  environment:
+    ROS_DOMAIN_ID: *ros_domain
+  restart: unless-stopped
+
+services:
+  robot_stack:
+    <<: *spot-stack
+    profiles: ["driver"]
+    container_name: swarmdeck-spot-stack
+    command:
+      - bash
+      - -c
+      - >-
+        . /opt/ros/humble/setup.bash &&
+        . /workspace/install/setup.bash &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py
+        start_driver:=true
+        start_lidar:=false
+        start_slam:=false
+
+  lidar:
+    <<: *spot-stack
+    container_name: swarmdeck-spot-lidar
+    command:
+      - bash
+      - -c
+      - >-
+        . /opt/ros/humble/setup.bash &&
+        . /workspace/install/setup.bash &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py
+        start_driver:=false
+        start_lidar:=true
+        start_slam:=false
+
+  slam:
+    <<: *spot-stack
+    container_name: swarmdeck-spot-slam
+    runtime: nvidia
+    depends_on:
+      lidar:
+        condition: service_started
+    command:
+      - bash
+      - -c
+      - >-
+        . /opt/ros/humble/setup.bash &&
+        . /workspace/install/setup.bash &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py
+        start_driver:=false
+        start_lidar:=false
+        start_slam:=true
+
+  adapter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-spot-adapter
+    depends_on:
+      lidar:
+        condition: service_started
+      slam:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    volumes:
+      - ${SPOT_REPO:-/home/indro/swarmdeck}/adapters:/app/adapters:ro
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - python3
+      - /app/adapters/adapter_ros2/adapter_ros2.py
+      - --robot-id
+      - spot_0
+      - --config
+      - /app/adapters/adapter_ros2/config/spot.yaml
+      - --host
+      - "${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}"
+      - --port
+      - "${BACKEND_PORT:-8080}"
+    restart: unless-stopped

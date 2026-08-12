@@ -1,0 +1,31 @@
+# Single-robot server session for Spot. Robot drivers and SuperOdometry are
+# started by docker-compose.robot-spot.yml; this file configures only the
+# ROS-free SwarmDeck backend.
+name: hardware_spot
+seed: 20260812
+
+fleet:
+  robot_count: 0
+  robot_prefix: robot_
+  lidar:
+    profile: generic_32
+
+map:
+  merge_mode: static
+  size_m: 40.0
+  resolution: 0.05
+  start_poses: {}
+
+alerts:
+  unattended_threshold_s: 45
+  nav_failure: true
+  adapter_disconnect: true
+
+video:
+  width: 640
+  height: 480
+  fps: 15
+
+recording:
+  enabled: true
+  output_dir: sessions

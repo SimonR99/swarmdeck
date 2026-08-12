@@ -1,6 +1,17 @@
 # Botman bring-up owned entirely by SwarmDeck. The MIST workspace is mounted
 # read-only and invoked through its installed rover_launch package; this file
 # never edits, rebuilds, or overlays anything in /ssd/mist_ws.
+#
+# ROS_DOMAIN_ID: the MIST image's own entrypoint (/tmp/setup.sh inside
+# bunker_super_odom:dev) exports `ROS_DOMAIN_ID=17` unconditionally, so every
+# service built on that image lands on domain 17 no matter what Compose sets.
+# SwarmDeck's own images set no domain and therefore default to 0. When the two
+# halves disagree, discovery does not fail loudly: each side sees a healthy ROS
+# graph containing only its own nodes, `ros2 topic list` still shows the
+# subscribed names, and the robot simply reports pose (0, 0, 0) with no map and
+# no camera. Keep this pinned to whatever that entrypoint exports.
+x-ros-domain: &ros_domain "${BOTMAN_ROS_DOMAIN_ID:-17}"
+
 services:
   robot_stack:
     image: bunker_super_odom:dev
@@ -16,6 +27,68 @@ services:
       - /dev:/dev
       - /ssd/mist_ws:/workspace:ro
     command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
+    restart: unless-stopped
+
+  # Ouster OS1-128 driver and SuperOdometry SLAM.
+  #
+  # These are the robot's own nodes, started here for the same reason
+  # `oak_camera` is: on 2026-08-07 `bunker_gnm.launch.py` in the read-only MIST
+  # workspace was reduced to `declare_args + [bunker_launch]`, with the lidar,
+  # SLAM, VectorNav, usb_cam and foxglove entries commented out on the line
+  # above. `robot_stack` therefore starts the Bunker base and nothing else, and
+  # SwarmDeck loses the two topics it depends on for pose and map —
+  # /laser_odometry and /registered_scan have no publisher at all.
+  #
+  # Both services invoke the launch files already installed in /ssd/mist_ws with
+  # that workspace's own configs, byte for byte the arguments the commented-out
+  # block passed. Nothing here overrides MIST's tuning or calibration.
+  #
+  # If MIST restores that launch line, DELETE these two services rather than
+  # leaving them: a second ouster driver cannot bind the same sensor, and two
+  # SuperOdometry instances would publish conflicting /laser_odometry.
+  lidar:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-lidar
+    network_mode: host
+    ipc: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+    command:
+      - ros2
+      - launch
+      - ouster_ros
+      - driver.launch.py
+      - params_file:=/workspace/install/rover_launch/share/rover_launch/config/drivers/driver_ouster.yaml
+      - ouster_ns:=ouster
+      - viz:=False
+      - os_driver_name:=os_driver
+      - throttle_rate:=0.1
+      - input_topic:=/ouster/points
+      - output_topic:=/ouster/points_throttled
+    restart: unless-stopped
+
+  slam:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-slam
+    network_mode: host
+    ipc: host
+    privileged: true
+    runtime: nvidia
+    depends_on:
+      lidar:
+        condition: service_started
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+    command:
+      - ros2
+      - launch
+      - super_odometry
+      - os1_128.launch.py
+      - config_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128.yaml
+      - calibration_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128_calibration.yaml
     restart: unless-stopped
 
   # Botman's physical camera is an OAK-D Pro, which is a DepthAI USB device
@@ -79,6 +152,7 @@ services:
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
     command:
       - ros2
       - run
@@ -111,6 +185,10 @@ services:
     depends_on:
       robot_stack:
         condition: service_started
+      lidar:
+        condition: service_started
+      slam:
+        condition: service_started
       # `service_started`, NOT `service_healthy`, for both of these.
       #
       # Gating on health meant a subsystem that could degrade on its own instead
@@ -136,6 +214,7 @@ services:
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
@@ -179,6 +258,7 @@ services:
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
     command:
       - python3
       - /app/adapters/media/ros2_rtsp.py
@@ -205,11 +285,16 @@ services:
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-botman-nav2
     depends_on:
+      # Nav2's pose comes from SLAM's /laser_odometry and its costmaps from the
+      # lidar's /ouster/scan; robot_stack alone supplies neither.
       - robot_stack
+      - lidar
+      - slam
     network_mode: host
     ipc: host
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
     healthcheck:
       test:
         - CMD-SHELL

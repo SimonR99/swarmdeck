@@ -2,12 +2,18 @@
   <!--
     Operator camera profile for the Scout Mini's RealSense D435i.
 
-    The camera is connected over USB 2.1 on tars, so the vendor launch's
-    simultaneous 640x480@30 color + depth + point-cloud pipeline produces stale
-    frames under load. Keep both streams at 640x480@15—the lowest profile this
-    driver/device pair negotiated live—and use depth solely for RGB-aligned
-    duck positioning. Point-cloud generation stays off; mapping still comes
-    from Ouster/LVI-SAM.
+    Colour and depth both run, but they are NOT synchronised. On tars the
+    camera is USB 2.1: the vendor 640x480@30 color+depth+point-cloud launch
+    queues frames until they are a second late, and `enable_sync`/`align_depth`
+    make colour wait for the slower depth stream. Teleop needs the colour
+    topic to publish as soon as a frame exists. Depth is sampled later, at
+    detector rate, by joining a colour bbox to this unaligned depth image
+    through TF (see scout_mini.yaml `camera_color_info`).
+
+    Depth stays enabled for map pins but is not aligned or synced, so colour
+    never waits for it. 424x240 is not a valid mode on this USB 2.1 D435i
+    (the driver falls back to 640x480@15); request that profile explicitly.
+    Point-cloud generation stays off; mapping still comes from Ouster/LVI-SAM.
   -->
   <arg name="camera" default="d400_arm"/>
   <arg name="color_width" default="640"/>
@@ -35,8 +41,8 @@
     <arg name="enable_gyro" value="false"/>
     <arg name="enable_accel" value="false"/>
     <arg name="enable_pointcloud" value="false"/>
-    <arg name="enable_sync" value="true"/>
-    <arg name="align_depth" value="true"/>
+    <arg name="enable_sync" value="false"/>
+    <arg name="align_depth" value="false"/>
     <arg name="filters" value=""/>
   </include>
 

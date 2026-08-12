@@ -38,6 +38,7 @@ import asyncio
 import json
 import math
 import sys
+import signal
 import threading
 import time
 import urllib.request
@@ -64,6 +65,7 @@ from adapters.perception.depth_projection import (
     point_for_bbox,
     point_for_depth_image,
     transform_point,
+    transform_points,
 )
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
@@ -127,6 +129,11 @@ DEFAULTS: dict[str, Any] = {
         # cloud because many depth drivers publish unordered clouds by default.
         "camera_depth": "",
         "camera_info": "",
+        # Colour CameraInfo. Set this when depth is *not* RGB-aligned so a
+        # detection box in the operator image can be joined to a slower,
+        # independently-published depth stream. Leave empty when `camera_info`
+        # already describes aligned depth (the usual RGB-D case).
+        "camera_color_info": "",
         # Organised PointCloud2 whose pixels are aligned with the RGB image.
         # When present, detections gain a map_position; otherwise bbox-only
         # detection continues unchanged.
@@ -210,6 +217,12 @@ DEFAULTS: dict[str, Any] = {
     # only safe with a deadman: if the link drops mid-command the robot must not
     # keep executing the last velocity it heard.
     "drive_timeout_s": 0.45,
+    # The same deadman for autonomy — see the matching note in adapter_ros2.py.
+    # `drive_timeout_s` works because held teleop repeats; an active goal does
+    # not, so `_on_nav_cmd_vel` would relay pathFollower's ~27 Hz stream for the
+    # whole goal with no operator attached. Cost of getting this wrong was
+    # demonstrated on Botman, 2026-08-12.
+    "link_timeout_s": 1.5,
 }
 
 
@@ -229,6 +242,10 @@ def yaw_of(q) -> float:
 
 class HardwareBridge:
     """One real robot's ROS interface, expressed as the SwarmDeck protocol."""
+
+    # Deliberately stale — see the matching default in adapter_ros2.py. A link
+    # nobody has been heard on is not a link that may drive the robot.
+    _last_link_at: float = 0.0
 
     def __init__(self, robot_id: str, cfg: dict, http_url: str) -> None:
         # No `Node` object in rospy — subscriptions/publishers/logging are all
@@ -270,6 +287,7 @@ class HardwareBridge:
         self._detect_pending: tuple[bytes, Any] | None = None
         self._camera_depth_image: Image | None = None
         self._camera_info: CameraInfo | None = None
+        self._camera_color_info: CameraInfo | None = None
         self._camera_depth_cloud: PointCloud2 | None = None
         perception = cfg.get("perception", {})
         self._detector = None
@@ -291,6 +309,7 @@ class HardwareBridge:
         self._last_detection_at = 0.0
         self._detections: list[dict] | None = None
         self._pose_warned = False
+        self._plan_frame_warned = False
 
         # ROS 1 has no subscriber-side durability setting: a latched publisher
         # (the ROS 1 equivalent of ROS 2's TRANSIENT_LOCAL) delivers its last
@@ -334,6 +353,13 @@ class HardwareBridge:
             rospy.Subscriber(
                 topics["camera_info"], CameraInfo, self._on_camera_info, queue_size=1
             )
+        if topics.get("camera_color_info"):
+            rospy.Subscriber(
+                topics["camera_color_info"],
+                CameraInfo,
+                self._on_camera_color_info,
+                queue_size=1,
+            )
         if topics.get("nav_cmd_vel"):
             rospy.Subscriber(
                 topics["nav_cmd_vel"], Twist, self._on_nav_cmd_vel, queue_size=10
@@ -370,8 +396,9 @@ class HardwareBridge:
         # driving it from the websocket tx loop cannot be trusted: the one
         # failure it exists to cover (a wedged link) is the one that stops the
         # tx loop from running it.
+        self._last_link_at = time.monotonic()
         self._watchdog_timer = rospy.Timer(
-            rospy.Duration(0.1), lambda _event: self.drive_watchdog()
+            rospy.Duration(0.1), lambda _event: self._watchdogs()
         )
 
     # ------------------------------------------------------------- capabilities
@@ -483,8 +510,59 @@ class HardwareBridge:
         self._scan_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
+        """Publish the planner's intended route, in `map_frame`.
+
+        The protocol says a planned path is in the robot's navigation-map frame,
+        and Nav2's global plan already is — which is why this used to copy the
+        poses straight through. A reactive local planner does not: TARS's
+        `local_planner` publishes `/path` in `chassis_link`, a vehicle frame, and
+        copying those numbers verbatim draws the route as though the robot were
+        parked at the map origin facing +x. It looks plausible exactly once, at
+        startup, and is wrong everywhere else.
+
+        Transform once per message rather than once per pose: a local path is
+        ~100 poses at 10 Hz, and they all share a frame and a stamp.
+        """
+        if not msg.poses:
+            self.planned_path = []
+            return
+
+        frame = msg.header.frame_id.lstrip("/")
+        if not frame or frame == self.map_frame:
+            self.planned_path = [
+                {"x": ps.pose.position.x, "y": ps.pose.position.y} for ps in msg.poses
+            ]
+            return
+
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.map_frame, frame, msg.header.stamp, rospy.Duration(0.1)
+            )
+        except Exception:
+            # Drop the path rather than draw it in the wrong frame: an operator
+            # reading a route that is confidently somewhere the robot is not is
+            # worse off than one reading no route at all.
+            if not self._plan_frame_warned:
+                self._plan_frame_warned = True
+                rospy.logwarn(
+                    f"[{self.id}] no {self.map_frame} -> {frame} transform for the "
+                    f"planned path; not publishing it. The plan topic is in a frame "
+                    f"this robot's TF tree does not connect to {self.map_frame}."
+                )
+            self.planned_path = []
+            return
+
+        points = np.array(
+            [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
+             for ps in msg.poses],
+            dtype=np.float64,
+        )
+        mapped = transform_points(points, tf.transform)
+        if mapped is None:
+            self.planned_path = []
+            return
         self.planned_path = [
-            {"x": ps.pose.position.x, "y": ps.pose.position.y} for ps in msg.poses
+            {"x": round(float(x), 3), "y": round(float(y), 3)} for x, y in mapped[:, :2]
         ]
 
     def _on_battery(self, msg: BatteryState) -> None:
@@ -612,6 +690,9 @@ class HardwareBridge:
     def _on_camera_info(self, msg: CameraInfo) -> None:
         self._camera_info = msg
 
+    def _on_camera_color_info(self, msg: CameraInfo) -> None:
+        self._camera_color_info = msg
+
     @staticmethod
     def _stamp_seconds(header) -> float | None:
         stamp = getattr(header, "stamp", None)
@@ -622,6 +703,37 @@ class HardwareBridge:
         except (AttributeError, TypeError, ValueError):
             return None
         return value if value > 0.0 and math.isfinite(value) else None
+
+    def _depth_image_kwargs(self, depth_header) -> dict | None:
+        """Extra args for `point_for_depth_image`, or None to skip this frame.
+
+        `camera_color_info` means the operator image and the depth image are
+        not the same grid.  Sampling depth as if it were RGB-aligned would
+        put the marker in the wrong place, so a missing optical TF is a skip
+        rather than a fallback.
+        """
+        color_info = self._camera_color_info
+        if color_info is None:
+            return {}
+        color_frame = getattr(getattr(color_info, "header", None), "frame_id", "") or ""
+        depth_frame = getattr(depth_header, "frame_id", "") or ""
+        if not color_frame or not depth_frame or color_frame == depth_frame:
+            return {"color_camera_info": color_info}
+        try:
+            stamp = getattr(depth_header, "stamp", rospy.Time(0))
+            tf = self.tf_buffer.lookup_transform(
+                color_frame, depth_frame, stamp, rospy.Duration(0.1)
+            )
+            return {
+                "color_camera_info": color_info,
+                "depth_to_color": tf.transform,
+            }
+        except Exception as exc:
+            rospy.logwarn_throttle(
+                10.0,
+                f"[{self.id}] cannot join colour detection to depth: {exc}",
+            )
+            return None
 
     def _depth_map_position(
         self, bbox, image_header=None, polygon=None
@@ -640,17 +752,20 @@ class HardwareBridge:
             depth_header = getattr(depth_image, "header", None)
             depth_time = self._stamp_seconds(depth_header)
             if image_time is None or depth_time is None or abs(image_time - depth_time) <= max_age:
-                configured_scale = perception.get("depth_scale")
-                camera_point = point_for_depth_image(
-                    depth_image,
-                    camera_info,
-                    bbox,
-                    polygon=polygon,
-                    min_range_m=min_range,
-                    max_range_m=max_range,
-                    depth_scale=None if configured_scale is None else float(configured_scale),
-                )
-                source_header = depth_header
+                extra = self._depth_image_kwargs(depth_header)
+                if extra is not None:
+                    configured_scale = perception.get("depth_scale")
+                    camera_point = point_for_depth_image(
+                        depth_image,
+                        camera_info,
+                        bbox,
+                        polygon=polygon,
+                        min_range_m=min_range,
+                        max_range_m=max_range,
+                        depth_scale=None if configured_scale is None else float(configured_scale),
+                        **extra,
+                    )
+                    source_header = depth_header
 
         cloud = self._camera_depth_cloud
         if camera_point is None and cloud is not None:
@@ -735,6 +850,7 @@ class HardwareBridge:
                 # not at the next restart: the batch is rebuilt every frame, so
                 # a narrowed list clears their boxes on the following one.
                 self._detector.classes = settings.get("detection_classes")
+                self._detector.class_floors = settings.get("detection_class_floors")
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] settings refresh failed: {exc}")
 
@@ -802,8 +918,14 @@ class HardwareBridge:
         its output away from the real cmd_vel so this adapter is the ONLY
         thing that ever publishes there — teleop direct, nav relayed through
         here, never both racing the same topic.
+
+        `link_ok()` is checked here as well as in `link_watchdog` so the
+        invariant lives in the relay rather than depending on a timer having
+        already run: no operator, no autonomous motion.
         """
         if self.nav_status == "active" and self.pub_cmd is not None:
+            if not self.link_ok():
+                return
             self.pub_cmd.publish(msg)
 
     def drive(self, linear: float, angular: float) -> None:
@@ -832,6 +954,11 @@ class HardwareBridge:
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
+    def _watchdogs(self) -> None:
+        """Both deadmen, on one 0.1 s timer driven by the robot's own clock."""
+        self.drive_watchdog()
+        self.link_watchdog()
+
     def drive_watchdog(self) -> None:
         """Stop if teleop commands stop arriving.
 
@@ -846,10 +973,53 @@ class HardwareBridge:
             self.mode = "idle"
             self._last_drive_at = 0.0
 
+    def link_ok(self) -> bool:
+        """Has the operator link been heard from recently enough to trust it?"""
+        return (
+            time.monotonic() - self._last_link_at
+            <= float(self.cfg["link_timeout_s"])
+        )
+
+    def note_link_activity(self) -> None:
+        """Record traffic in either direction — see `link_timeout_s`."""
+        self._last_link_at = time.monotonic()
+
+    def link_watchdog(self) -> None:
+        """Stop autonomy when the operator link goes stale.
+
+        Cancel before zeroing: pathFollower's stream is relayed on `nav_status`
+        alone, so a zero Twist published while the goal is still active is
+        overwritten within tens of milliseconds by the next relayed sample.
+        """
+        if self.nav_status != "active" or self.link_ok():
+            return
+        rospy.logwarn(
+            f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
+            "with a goal active; cancelling and stopping"
+        )
+        self.cancel_goal()
+        self.drive(0.0, 0.0)
+
     def stop(self) -> None:
         self.drive(0.0, 0.0)
         self.cancel_goal()
         self.mode = "estop"
+
+    def stop_for_exit(self) -> None:
+        """Leave the robot stationary as this process dies.
+
+        See the matching method in adapter_ros2.py: every deadman lives in this
+        process, so exiting without zeroing hands a moving robot to nobody.
+        Repeated because one publish immediately before exit can still be in the
+        transport when the process goes away.
+        """
+        for _ in range(3):
+            try:
+                self.cancel_goal()
+                self.drive(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.05)
 
     def navigate_to(self, goal: dict[str, float]) -> None:
         if self.pub_nav_goal is not None:
@@ -1147,9 +1317,11 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     f"{bridge.capabilities()}"
                 )
                 backoff = 1.0
+                bridge.note_link_activity()
 
                 async def rx() -> None:
                     async for raw in ws:
+                        bridge.note_link_activity()
                         try:
                             msg = json.loads(raw)
                         except ValueError:
@@ -1184,6 +1356,10 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     last_settings = 0.0
                     while True:
                         await ws.send(json.dumps(bridge.state()))
+                        # A completed send is the autonomy deadman's freshness
+                        # signal; on a wedged link this is where it stops
+                        # completing, which is the point.
+                        bridge.note_link_activity()
                         # No drive_watchdog() here: it runs on a ROS timer so it
                         # keeps ticking when this loop cannot. See __init__.
                         bridge._check_topic_nav_progress()
@@ -1221,7 +1397,12 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
             rospy.logwarn(f"[{bridge.id}] disconnected ({exc}); retrying in {backoff:.0f}s")
             # Stop the robot on link loss. A robot that keeps driving after
             # losing its operator is the failure that hurts someone.
+            #
+            # cancel_goal() FIRST: while nav_status is still "active" the relay
+            # in `_on_nav_cmd_vel` overwrites a zero Twist with pathFollower's
+            # next sample, so zeroing alone stops nothing.
             try:
+                bridge.cancel_goal()
                 bridge.drive(0.0, 0.0)
             except Exception:
                 pass
@@ -1262,13 +1443,24 @@ def main() -> None:
     # open on ROS's shutdown machinery, not to pump callbacks.
     spin = threading.Thread(target=rospy.spin, daemon=True)
     spin.start()
+
+    # SIGTERM, not just Ctrl-C — see the matching handler in adapter_ros2.py.
+    # Its default action kills the interpreter outright, so the `finally` below
+    # never runs and nothing zeroes the driver on a container restart.
+    def _on_signal(_signum, _frame):
+        bridge.stop_for_exit()
+        raise KeyboardInterrupt
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, _on_signal)
+
     try:
         asyncio.run(run_robot(bridge, ws_url))
     except KeyboardInterrupt:
         pass
     finally:
         try:
-            bridge.drive(0.0, 0.0)
+            bridge.stop_for_exit()
         except Exception:
             pass
         rospy.signal_shutdown("adapter exiting")
