@@ -43,6 +43,10 @@ async def lifespan(_: FastAPI):
         asyncio.create_task(state_loop()),
         asyncio.create_task(map_loop()),
         asyncio.create_task(session_loop()),
+        # Registration runs here rather than inside each upload — see
+        # MapService.registration_worker. Without this task the transforms in
+        # `auto` mode would never be recomputed at all.
+        asyncio.create_task(map_service.registration_worker()),
     ]
     yield
     for t in tasks:

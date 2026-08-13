@@ -537,3 +537,125 @@ def test_a_robot_that_keeps_matching_ambiguously_is_dropped(monkeypatch):
     for _ in range(5):
         svc.ingest("r1", meta, cells)
         assert svc.status()["registrations"]["r1"]["misses"] == 0
+
+
+# ------------------------------------------------- deferred registration
+
+
+def test_an_upload_does_not_wait_for_registration(monkeypatch):
+    """The four-robot map starvation: registration must not gate ingest.
+
+    Registration is ~2.4 s of FFT on live 800x800 grids. Running it inside the
+    upload that triggered it put that on the critical path of every scan, and on
+    the four-robot fleet total demand reached ~160% of one serialised core. A
+    queue whose arrival rate exceeds its service rate diverges, so every scan
+    upload hit its client timeout and was DISCARDED — and because the hardware
+    robots all run `topics.map: ""`, raytraced scans are the only source their
+    map has. The maps starved. Raising the client timeout cannot fix that; the
+    work has to leave the upload path.
+    """
+    import asyncio
+    import time
+
+    import swarmdeck_server.mapsvc.service as service_module
+    from swarmdeck_server.mapsvc.registration import Registration
+
+    accepted = Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200,
+                            ratio=0.2, yaw_ratio=0.2, support=0.9)
+
+    def slow_register(*_args, **_kwargs):
+        time.sleep(0.5)  # stands in for the real FFT
+        return accepted
+
+    monkeypatch.setattr(service_module, "register", slow_register)
+
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.zeros((n, n), np.int8)
+    cells[10:90, 15:18] = 100
+
+    async def scenario():
+        worker = asyncio.ensure_future(svc.registration_worker())
+        await svc.ingest_async("r0", meta, cells)  # reference: registers trivially
+        started = time.perf_counter()
+        await svc.ingest_async("r1", meta, cells.copy())
+        upload_s = time.perf_counter() - started
+        # The transform must still arrive — just not on the uploader's clock.
+        for _ in range(100):
+            if "r1" in svc.registered:
+                break
+            await asyncio.sleep(0.05)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        return upload_s
+
+    upload_s = asyncio.run(scenario())
+
+    assert upload_s < 0.3, (
+        f"ingest_async waited {upload_s:.2f}s — it is blocking on registration "
+        "again, which is what starved the maps"
+    )
+    assert "r1" in svc.registered, (
+        "the worker never performed the deferred registration; deferring it "
+        "must not mean dropping it"
+    )
+
+
+def test_a_burst_of_uploads_collapses_to_one_registration(monkeypatch):
+    """The queue is a set: it is a current estimate, not a backlog.
+
+    Ten uploads arriving while the worker is busy must leave ONE recomputation
+    against the newest grid, or the worker inherits exactly the divergence that
+    moving the work off the upload path was meant to escape.
+    """
+    import asyncio
+
+    import swarmdeck_server.mapsvc.service as service_module
+    from swarmdeck_server.mapsvc.registration import Registration
+
+    calls = []
+
+    def counting_register(*_args, **_kwargs):
+        calls.append(1)
+        return Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200,
+                            ratio=0.2, yaw_ratio=0.2, support=0.9)
+
+    monkeypatch.setattr(service_module, "register", counting_register)
+
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.zeros((n, n), np.int8)
+    cells[10:90, 15:18] = 100
+
+    async def scenario():
+        await svc.ingest_async("r0", meta, cells)
+        for _ in range(10):
+            await svc.ingest_async("r1", meta, cells.copy())
+        # Nothing has run yet: no worker is draining the queue.
+        assert not calls, "registration ran inside the upload path"
+        assert svc._registration_due == {"r0", "r1"}
+
+        worker = asyncio.ensure_future(svc.registration_worker())
+        for _ in range(100):
+            if "r1" in svc.registered:
+                break
+            await asyncio.sleep(0.02)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert len(calls) == 1, (
+        f"ten uploads produced {len(calls)} registrations; the set must coalesce "
+        "them into one recomputation on the newest grid"
+    )

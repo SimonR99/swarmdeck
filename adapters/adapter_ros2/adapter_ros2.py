@@ -218,6 +218,24 @@ DEFAULTS: dict[str, Any] = {
     # blocks `await ws.send()` on a full write buffer, so this stops advancing
     # long before websockets gives up at ping_interval + ping_timeout (~40 s).
     "link_timeout_s": 1.5,
+    # How long a map/scan/cloud upload may take before the adapter gives up.
+    #
+    # This was hardcoded at 5 s, chosen when the uploads shared a coroutine with
+    # the state pump: a longer wait there meant a longer telemetry blackout, so
+    # the timeout had to stay under the backend's 4 s OFFLINE_AFTER_S. Since
+    # `tx_maps` was split out, a slow upload costs nothing but its own latency,
+    # and the ceiling is free to reflect what the BACKEND actually needs.
+    #
+    # It needs much more than 5 s. Every robot's scan queues behind one
+    # registration lock on the server, so the wait scales with fleet size: on the
+    # live four-robot fleet essentially every scan upload was hitting the 5 s
+    # timeout and being DISCARDED. That is not a cosmetic loss — every robot here
+    # runs `topics.map: ""` (no OccupancyGrid publisher), so the scan endpoint is
+    # the ONLY source its map has, and the maps were starving.
+    #
+    # A discarded scan is worse than a late one: the points carry the pose they
+    # were captured at, so arriving late costs nothing but freshness.
+    "upload_timeout_s": 25.0,
 }
 
 
@@ -1237,7 +1255,7 @@ class HardwareBridge:
                 urllib.request.Request(
                     url, data=body, headers={"Content-Type": "application/octet-stream"}
                 ),
-                timeout=5,
+                timeout=float(self.cfg["upload_timeout_s"]),
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
@@ -1292,7 +1310,7 @@ class HardwareBridge:
                     url, data=zlib.compress(quantised.tobytes()),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
-                timeout=5,
+                timeout=float(self.cfg["upload_timeout_s"]),
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] scan upload failed: {exc}")
@@ -1315,7 +1333,7 @@ class HardwareBridge:
                     url, data=zlib.compress(quantised.tobytes(), 1),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
-                timeout=5,
+                timeout=float(self.cfg["upload_timeout_s"]),
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] 3D cloud upload failed: {exc}")

@@ -15,6 +15,14 @@ from swarmdeck_server.mapsvc.service import MapService
 
 
 def test_a_single_beam_marks_free_along_it_and_occupied_at_the_end():
+    """One beam clears its own path. Load-bearing, not cosmetic.
+
+    Withholding free space until a second observation was tried on the live
+    fleet and reverted: grid registration keys on known-free contradiction
+    (`docs/collaborative-slam.md` §2.2), and the delay collapsed pairwise
+    overlap from 1252 cells to 26 and emptied the merged map. See the gain
+    constants in scan_grid.py.
+    """
     acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)
     acc.integrate(0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
 
@@ -28,6 +36,43 @@ def test_a_single_beam_marks_free_along_it_and_occupied_at_the_end():
     # A cell nowhere near the beam stays unknown.
     fx, fy = acc._to_cell(-2.0, 3.0)
     assert acc.cells[fy, fx] == UNKNOWN
+
+
+def test_a_dense_scan_clears_its_neighbourhood_in_one_pass():
+    """Corroboration must not mean a real scan leaves the map unknown.
+
+    Every beam of a 360-degree scan crosses the cells near the sensor, so the
+    robot's own neighbourhood is confirmed free on the first scan. Only the
+    far tip of an isolated ray stays unconfirmed, which is the point.
+    """
+    acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)
+    angles = np.linspace(-np.pi, np.pi, 360, endpoint=False)
+    points = np.column_stack([3.0 * np.cos(angles), 3.0 * np.sin(angles)]).astype(np.float32)
+    acc.integrate(0.0, 0.0, points)
+
+    ox, oy = acc._to_cell(0.0, 0.0)
+    assert acc.cells[oy, ox] == FREE, "the sensor's own cell must read free"
+    assert int((acc.cells == FREE).sum()) > 500, "a dense scan must clear real area"
+
+
+def test_a_ghost_can_be_cleared_by_driving_through_it():
+    """Occupied must be revisable, or every passer-by is a permanent wall.
+
+    `MapService._remerge` calls this out as the failure its majority vote exists
+    to undo — but the vote can only erase a ghost another robot has seen through,
+    and the per-robot accumulator that feeds it used to make every ghost
+    immortal at source.
+    """
+    acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)
+    acc.integrate(0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
+    gx, gy = acc._to_cell(1.0, 0.0)
+    assert acc.cells[gy, gx] == OCCUPIED
+
+    # Whatever it was has moved on: beams now reach a wall beyond it.
+    for _ in range(10):
+        acc.integrate(0.0, 0.0, np.array([[2.0, 0.0]], dtype=np.float32))
+
+    assert acc.cells[gy, gx] == FREE, "a ghost must not outlive the evidence for it"
 
 
 def test_occupied_is_never_downgraded_by_a_later_free_ray():

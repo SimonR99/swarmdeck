@@ -123,6 +123,18 @@ class MapService:
         # Serialises ingests when they are offloaded off the event loop, so two
         # adapters uploading at once cannot interleave inside the shared grids.
         self._ingest_lock = asyncio.Lock()
+        # Robots whose transform wants recomputing, and the nudge that wakes the
+        # worker which does it. Registration used to run INSIDE the upload that
+        # triggered it, which put a ~2.4 s FFT and a ~0.5 s remerge on the
+        # critical path of every scan. Measured on the live four-robot fleet that
+        # is ~160% of one serialised core: the lock queue diverged, every scan
+        # upload hit its timeout and was DISCARDED, and since these robots have
+        # no OccupancyGrid publisher of their own the scan endpoint is the only
+        # source their map has — so the maps starved. Raising the client timeout
+        # cannot fix a queue whose arrival rate exceeds its service rate; the
+        # work has to leave the upload path. See `registration_worker`.
+        self._registration_due: set[str] = set()
+        self._registration_wake = asyncio.Event()
 
         # Precomputed world-cell centre coordinates, for the backward warp.
         cx = self.meta.origin_x + (np.arange(n) + 0.5) * resolution
@@ -155,6 +167,11 @@ class MapService:
                 | set(self._scan_grids)
                 | set(self.slam_graphs)
             )
+            # A registration queued before the reset describes grids that no
+            # longer exist. `_reregister` would bail on the missing grid anyway,
+            # but leaving it queued means the worker's first act after a reset is
+            # to recompute a robot the operator just cleared.
+            self._registration_due.clear()
             self.robot_grids.clear()
             self.robot_revisions.clear()
             self.registrations.clear()
@@ -202,6 +219,7 @@ class MapService:
         self._scan_grids.pop(robot_id, None)
         self.common_poses.pop(robot_id, None)
         self.cslam_frames.pop(robot_id, None)
+        self._registration_due.discard(robot_id)
 
         prior = self.transform_priors.get(robot_id)
         if prior is None:
@@ -292,32 +310,49 @@ class MapService:
         self.registered.clear()
         self.registration_misses.clear()
 
-    def set_cloud(self, robot_id: str, points: np.ndarray) -> None:
-        """Store a cloud and refresh cloud-assisted registration when applicable."""
-        self.robot_clouds[robot_id] = points
-        if self.merge_mode != "auto" or self.reference is None:
-            return
+    def cloud_targets(self, robot_id: str) -> list[str]:
+        """Which robots a new cloud from `robot_id` invalidates the pairing of.
 
-        # A new reference cloud changes every pair; a new moving cloud changes
-        # only its own pair.  Registration runs under the same ingest lock as map
-        # updates (see `set_cloud_async`), so these shared dictionaries cannot be
-        # observed half-updated by concurrent uploads.
-        targets = (
+        A new reference cloud changes every pair; a new moving cloud changes only
+        its own pair. This is why a reference upload was the worst case in the
+        old inline design — it re-registered all N-1 robots in ONE lock hold,
+        ~7.2 s on the four-robot fleet, longer than the uploaders' entire timeout.
+        """
+        if self.merge_mode != "auto" or self.reference is None:
+            return []
+        candidates = (
             [rid for rid in self.robot_clouds if rid != self.reference]
             if robot_id == self.reference
             else [robot_id]
         )
+        return [rid for rid in candidates if rid in self.robot_grids]
+
+    def set_cloud(self, robot_id: str, points: np.ndarray, *, register: bool = True) -> None:
+        """Store a cloud and refresh cloud-assisted registration when applicable."""
+        self.robot_clouds[robot_id] = points
+        targets = self.cloud_targets(robot_id)
+        if not targets:
+            return
         for rid in targets:
-            if rid not in self.robot_grids:
-                continue
-            self._update_cloud_registration(rid)
-            self._reregister(rid)
-        self._remerge()
+            # Drop the cached pairing rather than recomputing it here: with
+            # `register` deferred, `_reregister` refreshes it lazily on the
+            # worker, so invalidation is all this path owes the new cloud.
+            self.cloud_registrations.pop(rid, None)
+            if register:
+                self._update_cloud_registration(rid)
+                self._reregister(rid)
+        if register:
+            self._remerge()
 
     async def set_cloud_async(self, robot_id: str, points: np.ndarray) -> None:
-        """Cloud storage/registration off the event loop, like grid ingestion."""
+        """Cloud storage off the event loop; the pairing catches up in the worker."""
         async with self._ingest_lock:
-            await asyncio.to_thread(self.set_cloud, robot_id, points)
+            await asyncio.to_thread(self.set_cloud, robot_id, points, register=False)
+            # Cheap dict work, and it must be read under the same lock that just
+            # stored the cloud so a concurrent reset cannot empty it in between.
+            targets = self.cloud_targets(robot_id)
+        for rid in targets:
+            self._mark_registration_due(rid)
 
     def merged_cloud(self) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Every member robot's cloud, rotated into the merged frame.
@@ -494,11 +529,22 @@ class MapService:
 
     # ---------------------------------------------------------------- ingest
 
-    def ingest(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
+    def ingest(
+        self, robot_id: str, meta: GridMeta, cells: np.ndarray, *, register: bool = True
+    ) -> None:
+        """Store one robot's grid, and by default register and remerge inline.
+
+        `register=False` stores ONLY, leaving the transform and the merged
+        product to `registration_worker`. That is what the upload path uses; the
+        default keeps the synchronous contract every caller and test relies on,
+        where `ingest()` returning means the merge is up to date.
+        """
         self.robot_grids[robot_id] = (meta, cells)
         self.robot_revisions[robot_id] = self.robot_revisions.get(robot_id, 0) + 1
         if self.reference is None:
             self.reference = robot_id
+        if not register:
+            return
         if self.merge_mode == "auto":
             self._reregister(robot_id)
         elif self.merge_mode == "cslam":
@@ -506,17 +552,25 @@ class MapService:
         self._remerge()
 
     async def ingest_async(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
-        """Ingest without stalling the event loop.
+        """Ingest without stalling the event loop OR the uploading adapter.
 
-        Registration is hundreds of milliseconds of numpy. Called inline from an
-        async request handler it blocks every websocket on the server, so
-        telemetry visibly stutters each time a robot uploads a map.
+        Storing is cheap; registering is not. Doing both here made a robot's
+        upload wait on a ~2.4 s FFT that had nothing to do with accepting its
+        data, so the queue diverged and scans were dropped wholesale. The store
+        happens now, under the lock; the transform catches up in the background.
         """
         async with self._ingest_lock:
-            await asyncio.to_thread(self.ingest, robot_id, meta, cells)
+            await asyncio.to_thread(self.ingest, robot_id, meta, cells, register=False)
+        self._mark_registration_due(robot_id)
 
     def ingest_scan(
-        self, robot_id: str, origin_x: float, origin_y: float, points_xy: np.ndarray
+        self,
+        robot_id: str,
+        origin_x: float,
+        origin_y: float,
+        points_xy: np.ndarray,
+        *,
+        register: bool = True,
     ) -> None:
         """Accumulate one lidar scan into a raytraced grid, then ingest it.
 
@@ -542,16 +596,61 @@ class MapService:
             )
             self._scan_grids[robot_id] = acc
         acc.integrate(origin_x, origin_y, points_xy)
-        self.ingest(robot_id, acc.meta, acc.cells)
+        self.ingest(robot_id, acc.meta, acc.cells, register=register)
 
     async def ingest_scan_async(
         self, robot_id: str, origin_x: float, origin_y: float, points_xy: np.ndarray
     ) -> None:
-        """`ingest_scan`, off the event loop — see `ingest_async`."""
+        """`ingest_scan`, off the event loop — see `ingest_async`.
+
+        This is the path that matters most on hardware: every robot in the live
+        fleet runs `topics.map: ""`, so raytraced scans are the ONLY thing its
+        map is built from. An upload dropped here is map data lost outright.
+        """
         async with self._ingest_lock:
-            await asyncio.to_thread(self.ingest_scan, robot_id, origin_x, origin_y, points_xy)
+            await asyncio.to_thread(
+                self.ingest_scan, robot_id, origin_x, origin_y, points_xy, register=False
+            )
+        self._mark_registration_due(robot_id)
 
     # ------------------------------------------------------------ registration
+
+    def _mark_registration_due(self, robot_id: str) -> None:
+        """Queue a registration without blocking the upload that triggered it.
+
+        A SET, deliberately: registration is not a backlog to work through, it is
+        a current estimate to refresh. Ten uploads arriving while the worker is
+        busy leave one entry, and the recomputation that follows uses the newest
+        grid — so the worker self-throttles to whatever the machine can actually
+        deliver instead of queueing work it can never catch up on.
+        """
+        if self.merge_mode != "auto":
+            return
+        self._registration_due.add(robot_id)
+        self._registration_wake.set()
+
+    def _register_and_merge(self, robot_id: str) -> None:
+        """One deferred registration, plus the remerge that publishes it."""
+        self._reregister(robot_id)
+        self._remerge()
+
+    async def registration_worker(self) -> None:
+        """Recompute deferred transforms, one at a time, off the upload path.
+
+        Registration still runs against the latest grids and still writes the
+        same transforms — only WHEN it runs has changed. Under load it happens
+        less often than once per upload, which is the point: the old design
+        demanded ~160% of a core and so ran NONE of it to completion before the
+        uploaders gave up.
+        """
+        while True:
+            await self._registration_wake.wait()
+            self._registration_wake.clear()
+            while self._registration_due:
+                robot_id = next(iter(self._registration_due))
+                self._registration_due.discard(robot_id)
+                async with self._ingest_lock:
+                    await asyncio.to_thread(self._register_and_merge, robot_id)
 
     def _reregister(self, robot_id: str) -> None:
         """Estimate this robot's transform against the reference robot's grid."""
