@@ -13,11 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scenario"))
 
 from spawn_fleet import (  # noqa: E402
     CHASSIS_SECTIONS,
+    IDENTITY_COLORS,
     LIDAR_PROFILES,
     PROXIMITY_SCAN_HEIGHT,
     ROBOT_PROFILES,
     LidarSpec,
     chassis_sections,
+    color_for,
     lidar_spec,
     render,
     robot_spec,
@@ -225,6 +227,14 @@ def test_mixed_fleet_resolves_per_robot_overrides():
     cfg = {"robot_type": "bunker", "robot_types": {"robot_2": "scout_mini",
                                                    "robot_3": "spot"}}
     assert robot_types(cfg, 4, "robot_") == ["bunker", "bunker", "scout_mini", "spot"]
+
+
+def test_named_robots_and_spot_chassis_keep_identity_colours():
+    assert color_for("spot_0", 3) == IDENTITY_COLORS["spot"]
+    assert color_for("botman_0", 5) == IDENTITY_COLORS["botman"]
+    assert color_for("aslan_0", 6) == IDENTITY_COLORS["aslan"]
+    assert color_for("robot_3", 3, "spot") == IDENTITY_COLORS["spot"]
+    assert color_for("robot_0", 0, "bunker") != IDENTITY_COLORS["spot"]
 
 
 def test_a_typo_in_robot_types_is_refused_rather_than_ignored():

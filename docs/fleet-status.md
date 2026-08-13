@@ -443,7 +443,7 @@ mounted at `/workspace`.
 
 **SLAM is LIO-SAM**, not SuperOdometry (that package is `COLCON_IGNORE`'d).
 Pose `/lio_sam/mapping/odometry`, cloud `/lio_sam/mapping/cloud_registered`,
-frames `map` → `odom_link` → `lidar_link`. See `docs/spot.md`.
+frames `map` → `odom_link` → `lidar_link` → `body` (GUI pose is `body`; lidar is yawed 90°). See `docs/spot.md`.
 
 SwarmDeck files: `adapters/adapter_ros2/config/spot.yaml`,
 `launch/spot.launch.py`, `docker-compose.robot-spot.yml`. Default compose

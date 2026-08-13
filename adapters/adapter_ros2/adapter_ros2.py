@@ -115,9 +115,16 @@ except ImportError:  # pragma: no cover - depends on the robot's install
 
 # Spot (and similar) body services. `stand` may also call `power_on` first.
 BODY_ACTIONS = ("claim", "release", "sit", "stand")
-# Trigger names that are not GUI body actions: motors, and the SDK stop used
-# because Clearpath's ROS 2 Trajectory server does not honour cancel/preempt.
-BODY_SERVICE_NAMES = (*BODY_ACTIONS, "power_on", "stop")
+# Trigger names that are not GUI body actions: motors, software e-stop allow,
+# tablet keepalive clear, and the SDK stop used because Clearpath's ROS 2
+# Trajectory server does not honour cancel/preempt.
+BODY_SERVICE_NAMES = (
+    *BODY_ACTIONS, "power_on", "stop", "estop_release", "clear_keepalive",
+)
+# Missing these is normal on non-Spot robots; do not warn.
+OPTIONAL_BODY_SERVICES = frozenset(
+    {"power_on", "estop_release", "clear_keepalive"}
+)
 
 DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
@@ -179,6 +186,8 @@ DEFAULTS: dict[str, Any] = {
         "stand": "",
         "power_on": "",
         "stop": "",
+        "estop_release": "",
+        "clear_keepalive": "",
     },
     "rates": {
         "state_hz": 5.0,
@@ -987,19 +996,31 @@ class HardwareBridge:
 
         `stand` powers the motors first when `services.power_on` is set —
         Clearpath's `/stand` fails if the robot is still sitting unpowered.
-        Each call is a Trigger; failures are logged and not retried here.
+        `claim` also releases the software e-stop and drops a leftover tablet
+        keepalive; without that, `/power_on` returns KeepaliveMotorsOffError
+        and the GUI button looks like a no-op. Each call is a Trigger;
+        failures are logged and not retried here.
         """
         action = str(action or "")
         if action not in BODY_ACTIONS:
             return
+        if action == "claim":
+            self._call_trigger("claim")
+            self._call_trigger("estop_release")
+            self._call_trigger("clear_keepalive")
+            return
         if action == "stand":
+            self._call_trigger("estop_release")
+            self._call_trigger("clear_keepalive")
             self._call_trigger("power_on")
+            self._call_trigger("stand")
+            return
         self._call_trigger(action)
 
     def _call_trigger(self, name: str) -> bool:
         client = self._body_clients.get(name)
         if client is None or Trigger is None:
-            if name != "power_on":
+            if name not in OPTIONAL_BODY_SERVICES:
                 self.node.get_logger().warn(
                     f"[{self.id}] body command {name!r} has no service configured"
                 )

@@ -19,6 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
 )
@@ -37,6 +38,7 @@ def _spot_driver(context, *args, **kwargs):
     # MIST spot.yaml keeps start_estop: False (tablet holds the estop). With
     # nobody on a tablet, claim waits forever; the ROS driver must be the
     # estop endpoint for the GUI buttons to work.
+    keepalive = Path(__file__).resolve().parent.parent / "spot_clear_keepalive.py"
     return [
         Node(
             package="spot_driver",
@@ -47,7 +49,18 @@ def _spot_driver(context, *args, **kwargs):
                 str(mist_config / "spot.yaml"),
                 {"start_estop": True},
             ],
-        )
+        ),
+        # Drops the tablet's `tablet-stop` keepalive so Claim/Stand can power
+        # the motors. Credentials stay in MIST's spot.yaml, not this repo.
+        ExecuteProcess(
+            cmd=[
+                "python3",
+                str(keepalive),
+                "--params",
+                str(mist_config / "spot.yaml"),
+            ],
+            output="screen",
+        ),
     ]
 
 

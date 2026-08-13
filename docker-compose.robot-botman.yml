@@ -274,6 +274,38 @@ services:
       - "${VIDEO_FPS:-15}"
     restart: unless-stopped
 
+  # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
+  # Keep this independent of Nav2 so costmaps still get a pose if Nav2 restarts.
+  odom_tf:
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-botman-odom-tf
+    depends_on:
+      - slam
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - swarmdeck_nav
+      - odom_to_tf
+      - --ros-args
+      - -r
+      - __node:=botman_odom_to_tf_host
+      - -p
+      - odom_topic:=/laser_odometry
+      - -p
+      - parent_frame:=map
+      - -p
+      - child_frame:=os_lidar
+      - -p
+      - planar:=true
+      - -p
+      - use_receive_time:=true
+    restart: unless-stopped
+
   # Reuses swarmdeck_ros/src/swarmdeck_nav, with Botman-specific frames,
   # odometry and Ouster scan configuration. Nav2 writes only cmd_vel_nav;
   # the adapter remains the sole publisher to the real Bunker /cmd_vel and

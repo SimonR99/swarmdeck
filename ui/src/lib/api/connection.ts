@@ -136,12 +136,14 @@ export function sendAction(msg: ClientMessage) {
 
 export const actions = {
   setGoal(robotId: string, p: Point) {
+    if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'set_goal', robot_id: robotId, payload: p });
   },
   cancelGoal(robotId: string) {
     sendAction({ type: 'cancel_goal', robot_id: robotId });
   },
   drive(robotId: string, linear: number, angular: number) {
+    if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'drive', robot_id: robotId, payload: { linear, angular } });
   },
   selectRobots(ids: string[]) {
@@ -170,6 +172,7 @@ export const actions = {
     sendAction({ type: 'stop_all' });
   },
   bodyCommand(robotId: string, action: 'claim' | 'release' | 'sit' | 'stand') {
+    if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'body_command', robot_id: robotId, action });
   },
   /**

@@ -20,8 +20,8 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from ..bus import bus, mark_session_start, session_elapsed, stamps
-from ..config.detection import DETECTION_CLASSES
-from ..config.settings import SettingsStore
+from ..config.detection import DETECTION_CLASSES, floor_for
+from ..config.settings import SettingsStore, disabled_robot_ids, is_robot_enabled
 from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
@@ -39,6 +39,7 @@ async def lifespan(_: FastAPI):
     if not CONFIG:
         load_config()
     settings_store.load()
+    map_service.set_excluded(disabled_robot_ids(settings_store.value))
     tasks = [
         asyncio.create_task(state_loop()),
         asyncio.create_task(map_loop()),
@@ -163,6 +164,42 @@ def discard_disabled_detections(settings: dict[str, Any]) -> list[str]:
     for detection_id in stale:
         _detections.pop(detection_id, None)
     return stale
+
+
+def detection_hidden(detection: dict[str, Any], settings: dict[str, Any]) -> bool:
+    """Whether this stored entity currently sits below its operator floor.
+
+    Judged on `best_score`, not the newest one.  A model's confidence in a
+    stationary object wanders by a few points frame to frame, so filtering on
+    the live score makes a marker sitting near its floor blink on and off; the
+    best evidence we ever had for the object does not oscillate.
+    """
+    return float(detection.get("best_score", detection.get("score", 0.0))) < floor_for(
+        settings, detection.get("robot_id", ""), detection.get("class", "")
+    )
+
+
+def reapply_detection_floors(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Re-judge every stored entity against the floors that were just saved.
+
+    This is what makes an operator's threshold retroactive and immediate.  The
+    floor is a question about stored evidence -- "is this a real detection?" --
+    and stored evidence is right here, so answering it needs no robot, no round
+    trip, and no wait for the next frame.  Raising a floor buries markers that
+    are already on the map; lowering it back exhumes them, because the entity
+    was hidden rather than deleted.
+
+    Returns the entities whose visibility actually flipped, for broadcast.
+    """
+    changed: list[dict[str, Any]] = []
+    for detection_id, detection in _detections.items():
+        hidden = detection_hidden(detection, settings)
+        if hidden == bool(detection.get("hidden", False)):
+            continue
+        updated = {**detection, "hidden": hidden}
+        _detections[detection_id] = updated
+        changed.append(updated)
+    return changed
 
 
 async def raise_alert(
@@ -464,9 +501,29 @@ async def put_settings(request: Request) -> dict[str, Any]:
     # must not outlive the operator removing their category (or switching
     # detection off), otherwise saving the dialog leaves old objects behind.
     discard_disabled_detections(settings)
+    # Raising or lowering a floor, unlike removing a class, is reversible: the
+    # entity is hidden in place and re-judged here, so the dashboard reflects a
+    # new threshold on the save itself rather than whenever the robots next ask.
+    revised = reapply_detection_floors(settings)
+    await asyncio.to_thread(map_service.set_excluded, disabled_robot_ids(settings))
+    for rid in disabled_robot_ids(settings):
+        await registry.send(rid, {"type": "cancel_goal", **stamps()})
+        await registry.send(
+            rid, {"type": "drive", "linear": 0.0, "angular": 0.0, **stamps()}
+        )
+        robot = registry.robots.get(rid)
+        if robot is not None:
+            robot.goal = None
+            if robot.nav_status == "active":
+                robot.nav_status = "idle"
     events.log("settings_update", {"settings": settings})
     message = {"type": "settings_state", "settings": settings}
     await broadcast(message)
+    # After the settings broadcast, never before: the dashboard reconciles its
+    # own store against the new floors when that arrives, and a detection sent
+    # ahead of it would be judged against the floors it is meant to replace.
+    for detection in revised:
+        await broadcast({"type": "detection", "detection": detection})
     return message
 
 
@@ -882,6 +939,13 @@ async def handle_gui_message(msg: dict[str, Any]) -> None:
     if rid:
         registry.attend(rid)
 
+    if (
+        rid
+        and kind in {"set_goal", "drive", "body_command"}
+        and not is_robot_enabled(settings_store.value, rid)
+    ):
+        return
+
     if kind == "set_goal":
         goal = msg.get("payload") or {}
         if not registry.can(rid, "navigate"):
@@ -1069,10 +1133,15 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             visible.add(detection_id)
             previous = _detections.get(detection_id)
             now = time.time()
+            score = float(item.get("score", 0.0) or 0.0)
             det = {
                 "id": detection_id,
                 "class": item.get("class", "object"),
-                "score": item.get("score", 0.0),
+                "score": score,
+                # The strongest evidence this entity has ever produced, which is
+                # what the operator floor is judged against.  See
+                # detection_hidden().
+                "best_score": max(score, float(previous["best_score"])) if previous else score,
                 "robot_id": rid,
                 "camera": camera,
                 "bbox": item.get("bbox"),
@@ -1084,8 +1153,14 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                 "last_seen": now,
                 "observations": (previous["observations"] + 1) if previous else 1,
             }
+            det["hidden"] = detection_hidden(det, settings_store.value)
             _detections[detection_id] = det
-            await broadcast({"type": "detection", "detection": det})
+            # Robots capture below the operator's floor on purpose, so that
+            # lowering it later can be answered from this cache instead of from
+            # frames that no longer exist.  Until then the entity is stored and
+            # not sent: an operator who raised a floor should see no trace of it.
+            if not det["hidden"]:
+                await broadcast({"type": "detection", "detection": det})
 
         # An object that has left the frame is reported by its ABSENCE
         # from the batch; the protocol carries no per-object "lost"
@@ -1112,7 +1187,11 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                 continue
             det = {**current, "bbox": None, "polygon": None}
             _detections[key] = det
-            await broadcast({"type": "detection", "detection": det})
+            # A hidden entity was never sent, so there is no box out there to
+            # retract; the cache still has to drop it or un-hiding this entity
+            # later would restore a rectangle from an old frame.
+            if not det.get("hidden", False):
+                await broadcast({"type": "detection", "detection": det})
 
     elif kind == "map_meta":
         pass  # metadata accompanies the HTTP upload

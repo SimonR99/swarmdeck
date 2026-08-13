@@ -28,6 +28,25 @@ COLORS = [
     "0.98 0.57 0.18",
     "0.96 0.45 0.71",
 ]
+# Named hardware robots (and Spot's chassis) keep a stable Gazebo colour.
+IDENTITY_COLORS = {
+    "spot": "0.79 0.63 0.00",    # yellow
+    "botman": "0.00 0.48 1.00",  # blue
+    "aslan": "0.88 0.44 0.00",   # orange
+}
+TYPE_COLORS = {
+    "spot": IDENTITY_COLORS["spot"],
+}
+
+
+def color_for(name: str, index: int, profile: str | None = None) -> str:
+    """Gazebo body colour: named robots first, then chassis, then list order."""
+    stem = re.sub(r"_\d+$", "", name)
+    if stem in IDENTITY_COLORS:
+        return IDENTITY_COLORS[stem]
+    if profile in TYPE_COLORS:
+        return TYPE_COLORS[profile]
+    return COLORS[index % len(COLORS)]
 
 HERE = Path(__file__).resolve().parent
 DESCRIPTION = HERE.parent.parent / "swarmdeck_description" / "urdf"
@@ -524,7 +543,7 @@ def main() -> int:
         name = f"{prefix}{i}"
         robot = robot_spec(types[i])
         pose = starts.get(name, {"x": i * 3.0, "y": 0.0, "yaw": 0.0})
-        sdf = render(name, COLORS[i % len(COLORS)], spec, robot)
+        sdf = render(name, color_for(name, i, types[i]), spec, robot)
         print(
             f"[spawn] {name}: {types[i]} "
             f"({robot.length:.2f}x{robot.width:.2f} m, r={robot.footprint_radius:.2f} m, "

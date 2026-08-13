@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Settings, X } from 'lucide-svelte';
   import Button from '$lib/components/ui/Button.svelte';
-  import { settings, DEFAULT_ROBOT_COLORS } from '$lib/stores/settings.svelte';
+  import { settings, colorForRobot } from '$lib/stores/settings.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import type { AppSettings } from '$lib/types/protocol';
 
@@ -63,7 +63,7 @@
         enabled: true,
         type: 'ros2',
         endpoint: 'ws://localhost:8080/adapter',
-        color: DEFAULT_ROBOT_COLORS[index % DEFAULT_ROBOT_COLORS.length]
+        color: colorForRobot(`robot_${index}`, index)
       });
     }
   }
@@ -246,23 +246,23 @@
         <div class="mb-2 flex items-end justify-between">
           <div>
             <div class="text-[11px] font-semibold text-fg">Robot connections & map colors</div>
-            <div class="mt-0.5 text-[10px] text-fg-dim">Configure endpoints and robot visualization colors on the map.</div>
+            <div class="mt-0.5 text-[10px] text-fg-dim">OFF hides that robot from the map and controls after Save. Endpoints apply on next adapter start.</div>
           </div>
-          <span class="text-[9px] text-fg-dim">Applied on next simulation/adapter start</span>
+          <span class="text-[9px] text-fg-dim">Save to apply</span>
         </div>
 
         <div class="space-y-2">
           {#each draft.robots.slice(0, draft.robot_count) as robot, index (index)}
-            <div class="grid grid-cols-[28px_32px_1fr_90px] gap-2 rounded-[5px] border border-border bg-bg/60 p-2 sm:grid-cols-[28px_32px_1fr_90px_2fr]">
+            <div class="grid grid-cols-[32px_32px_1fr_90px] gap-2 rounded-[5px] border border-border bg-bg/60 p-2 sm:grid-cols-[32px_32px_1fr_90px_2fr]">
               <button
-                title="Enable robot"
-                class="mt-0.5 grid h-8 w-7 place-items-center rounded-[3px] border text-[9px] font-bold
+                title={robot.enabled ? 'Disable robot' : 'Enable robot'}
+                class="mt-0.5 grid h-8 w-8 place-items-center rounded-[3px] border text-[9px] font-bold
                        {robot.enabled ? 'border-ok/30 bg-ok/8 text-ok' : 'border-border text-fg-dim'}"
                 onclick={() => (robot.enabled = !robot.enabled)}
-              >{robot.enabled ? 'ON' : '—'}</button>
+              >{robot.enabled ? 'ON' : 'OFF'}</button>
               <input
                 type="color"
-                value={robot.color || DEFAULT_ROBOT_COLORS[index % DEFAULT_ROBOT_COLORS.length]}
+                value={colorForRobot(robot.id, index, robot.color)}
                 oninput={(e) => (robot.color = e.currentTarget.value)}
                 class="h-8 w-8 cursor-pointer rounded-[3px] border border-border bg-surface p-0.5"
                 title="Robot Map Color"

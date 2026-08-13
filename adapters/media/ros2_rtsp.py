@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""Push a ROS 2 JPEG camera topic to an RTSP server with low latency."""
+"""Push a ROS 2 camera topic to an RTSP server with low latency.
+
+`--topic` is a JPEG CompressedImage (OAK / RealSense). `--raw-topic` is a
+sensor_msgs/Image fallback for drivers such as usb_cam that may never publish
+compressed JPEG. Prefer the compressed topic when both are present.
+"""
 
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 import threading
 import time
+from pathlib import Path
 
 import gi
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jpeg_frame import image_to_jpeg  # noqa: E402
 
 
 class Ros2JpegRtspPublisher(Node):
@@ -28,6 +38,7 @@ class Ros2JpegRtspPublisher(Node):
         rtsp_url: str,
         bitrate_kbps: int,
         fps: int,
+        raw_topic: str = "",
     ) -> None:
         safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", robot_id)
         super().__init__(f"swarmdeck_media_{safe_id}")
@@ -61,10 +72,12 @@ class Ros2JpegRtspPublisher(Node):
         self.subscription = self.create_subscription(
             CompressedImage, topic, self._on_frame, qos_profile_sensor_data
         )
+        if raw_topic:
+            self.create_subscription(
+                Image, raw_topic, self._on_raw_frame, qos_profile_sensor_data
+            )
 
-    def _on_frame(self, msg: CompressedImage) -> None:
-        if self._failed.is_set() or (msg.format and "jpeg" not in msg.format.lower()):
-            return
+    def _push_jpeg(self, payload: bytes) -> None:
         now = time.monotonic()
         if now - self._last_frame_at < self._frame_period_s:
             return
@@ -73,12 +86,23 @@ class Ros2JpegRtspPublisher(Node):
         if self.source.get_property("current-level-bytes") > 0:
             return
         self._last_frame_at = now
-        payload = bytes(msg.data)
         buffer = Gst.Buffer.new_allocate(None, len(payload), None)
         buffer.fill(0, payload)
         flow = self.source.emit("push-buffer", buffer)
         if flow not in (Gst.FlowReturn.OK, Gst.FlowReturn.FLUSHING):
             self.get_logger().warning(f"camera encoder rejected a frame: {flow}")
+
+    def _on_frame(self, msg: CompressedImage) -> None:
+        if self._failed.is_set() or (msg.format and "jpeg" not in msg.format.lower()):
+            return
+        self._push_jpeg(bytes(msg.data))
+
+    def _on_raw_frame(self, msg: Image) -> None:
+        if self._failed.is_set():
+            return
+        payload = image_to_jpeg(msg)
+        if payload:
+            self._push_jpeg(payload)
 
     def _monitor_bus(self) -> None:
         while rclpy.ok() and not self._failed.is_set():
@@ -105,6 +129,11 @@ class Ros2JpegRtspPublisher(Node):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--topic", required=True)
+    parser.add_argument(
+        "--raw-topic",
+        default="",
+        help="sensor_msgs/Image fallback when --topic has no JPEG",
+    )
     parser.add_argument("--rtsp-url", required=True)
     parser.add_argument("--bitrate-kbps", type=int, default=1200)
     parser.add_argument("--fps", type=int, default=15)
@@ -118,8 +147,10 @@ def main() -> None:
         args.rtsp_url,
         args.bitrate_kbps,
         max(1, args.fps),
+        raw_topic=args.raw_topic,
     )
-    publisher.get_logger().info(f"streaming {args.topic} to {args.rtsp_url}")
+    source = args.topic + (f" or {args.raw_topic}" if args.raw_topic else "")
+    publisher.get_logger().info(f"streaming {source} to {args.rtsp_url}")
     try:
         rclpy.spin(publisher)
     finally:

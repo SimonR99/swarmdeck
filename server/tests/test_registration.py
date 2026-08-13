@@ -659,3 +659,79 @@ def test_a_burst_of_uploads_collapses_to_one_registration(monkeypatch):
         f"ten uploads produced {len(calls)} registrations; the set must coalesce "
         "them into one recomputation on the newest grid"
     )
+
+
+# ------------------------------------------- transform smoothing / z alignment
+
+
+def test_an_accepted_transform_is_eased_in_once_registered(monkeypatch):
+    """A parked fleet's map must not wobble.
+
+    Each registration is an independent estimate, so correlation noise used to
+    land in the merged map whole. Measured on the live fleet with every robot
+    stationary, accepted transforms moved up to 0.42 m and 5.8 deg between
+    consecutive one-second samples, with ZERO accept/reject flips — jitter in a
+    result the merge already trusted, not disagreement about trusting it.
+    """
+    import swarmdeck_server.mapsvc.service as service_module
+    from swarmdeck_server.mapsvc.registration import Registration
+    from swarmdeck_server.mapsvc.service import TRANSFORM_SMOOTHING
+
+    moved = {"dx": 0.0}
+
+    def shifting_register(*_args, **_kwargs):
+        return Registration(dx=moved["dx"], dy=0.0, dyaw=0.0, score=0.8,
+                            overlap=200, ratio=0.2, yaw_ratio=0.2, support=0.9)
+
+    monkeypatch.setattr(service_module, "register", shifting_register)
+
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.zeros((n, n), np.int8)
+    cells[10:90, 15:18] = 100
+
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells.copy())
+    # Acquisition takes the transform WHOLE: nothing should slow the first lock.
+    assert svc.transforms["r1"][0] == pytest.approx(0.0, abs=1e-6)
+    assert "r1" in svc.registered
+
+    # A one-off 1.0 m excursion now arrives damped, not in full.
+    moved["dx"] = 1.0
+    svc.ingest("r1", meta, cells.copy())
+    assert svc.transforms["r1"][0] == pytest.approx(TRANSFORM_SMOOTHING, abs=1e-6)
+
+    # ...but a PERSISTENT correction still converges, it is not rejected.
+    for _ in range(30):
+        svc.ingest("r1", meta, cells.copy())
+    assert svc.transforms["r1"][0] == pytest.approx(1.0, abs=0.01)
+
+
+def test_z_offset_recovers_a_known_vertical_shift():
+    """The SE(2) merge produces no dz, so the 3D view needs one estimated."""
+    from swarmdeck_server.mapsvc.service import estimate_z_offset
+
+    rng = np.random.default_rng(0)
+    # A floor band, a furniture band and a ceiling band — a real height signature.
+    ref = np.concatenate([
+        rng.normal(-0.6, 0.02, 4000),
+        rng.normal(0.5, 0.15, 3000),
+        rng.normal(2.0, 0.03, 3000),
+    ]).astype(np.float32)
+
+    for truth in (-0.25, 0.0, 0.4):
+        assert estimate_z_offset(ref, ref - truth) == pytest.approx(
+            truth, abs=0.06
+        ), f"failed to recover a {truth} m shift"
+
+
+def test_z_offset_declines_to_guess_from_too_few_points():
+    """A robot that has barely uploaded must not be shoved vertically."""
+    from swarmdeck_server.mapsvc.service import estimate_z_offset
+
+    rng = np.random.default_rng(1)
+    big = rng.normal(0.0, 0.5, 5000).astype(np.float32)
+    assert estimate_z_offset(big, rng.normal(3.0, 0.5, 5).astype(np.float32)) == 0.0
+    assert estimate_z_offset(np.zeros(0, np.float32), big) == 0.0

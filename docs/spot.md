@@ -30,7 +30,7 @@ actually built is `rover_launch/launch/full_stack/spot_lio_sam.launch.py`.
 |---|---|---|
 | Lidar | `/ouster/points` from `192.168.50.165` | `config/drivers/driver_ouster.yaml` |
 | IMU | `/vectornav/imu` | `config/drivers/driver_imu.yaml` |
-| SLAM pose | `/lio_sam/mapping/odometry`; TF `map` → `odom_link` → `lidar_link` | LIO-SAM `mapOptimization` |
+| SLAM pose | `/lio_sam/mapping/odometry`; TF `map` → `odom_link` → `lidar_link` → `body` | LIO-SAM `mapOptimization` + 90° lidar/body static TF |
 | Registered scan | `/lio_sam/mapping/cloud_registered` | LIO-SAM `mapOptimization` |
 | Body command | `/cmd_vel` | `spot_driver` to `192.168.50.3` |
 
@@ -63,8 +63,8 @@ DinoNav stay unwired — they are exploration / image-goal, not a map click.
 
 - `adapters/adapter_ros2/config/spot.yaml`
 - `adapters/adapter_ros2/launch/spot.launch.py` — lidar / LIO-SAM / driver split
-- `docker-compose.robot-spot.yml` — lidar + slam + adapter by default;
-  `--profile driver` starts `spot_driver`
+- `docker-compose.robot-spot.yml` — lidar + slam + camera + media + adapter
+  by default; Claim / Stand stay GUI actions
 - `study/hardware_spot.yaml`
 
 ## Start
@@ -81,11 +81,11 @@ On the payload, after a one-time `websockets` user install into
 
 ```bash
 BACKEND_HOST=192.168.1.223 \
-  docker compose -f docker-compose.robot-spot.yml up -d
+  docker compose -f docker-compose.robot-spot.yml up -d --build
 ```
 
 Verified 2026-08-12 against the live operator session: `spot_0` is online
-with `map`, pose from `map` → `lidar_link`, and local-grid seq advancing.
+with `map`, pose from `map` → `body` (lidar is 90° off the chassis), and local-grid seq advancing.
 LIO-SAM runs in `spot_lio_sam:dev` (Debian GTSAM); lidar and the adapter
 use `spot:dev`. Mixing those for imuPreintegration dies on an undefined
 `ISAM2::update` symbol.
@@ -94,18 +94,24 @@ use `spot:dev`. Mixing those for imuPreintegration dies on an undefined
 rest of the stack. Claim / Stand stay GUI actions (`auto_claim` /
 `auto_stand` remain false). The launch overrides `start_estop` to true
 so claim works without a tablet holding motor-power authority.
+Claim also releases `/estop/release` and drops a leftover tablet
+`tablet-stop` keepalive — without that, `/power_on` fails with
+`KeepaliveMotorsOffError` and the GUI buttons look dead. Close the
+Spot tablet app (or at least its Stop) before expecting motors on.
 
 ## Check, in this order
 
-GUI appearance, pose not stuck at origin (`map` → `lidar_link`), map
+GUI appearance, pose not stuck at origin (`map` → `body`), map
 patches from `/lio_sam/mapping/cloud_registered`, then — only with the
 driver profile, a claimed lease, a standing robot, and a hand on the
 e-stop — Point nav (`/trajectory`) and deadman on `cmd_vel`. Camera is
 the payload Intel RealSense D435i color stream (`/d435/color/image_raw`),
-not Spot's body fisheyes. Depth is on the same device (Z16 `/dev/video0`)
-but `spot:dev` has no `realsense2_camera`, so the GUI shows color only.
+not Spot's body fisheyes. `swarmdeck-spot-media` encodes that to H.264
+and pushes RTSP/TCP to MediaMTX path `spot_0`; the adapter's 5 Hz JPEG
+upload remains the fallback. Depth is on the same device (Z16 `/dev/video0`)
+but `spot:dev` has no `realsense2_camera`, so detections stay in the image
+until depth is a ROS topic with TF to `map`.
 
 The YOLOE sidecar (`duck_detector` in compose, JetPack 6) is the same
 catalog as the rest of the fleet: rubber duck, wooden block, disc cone,
-filament spool, pool noodle. Boxes stay in the image until D435 depth is
-a ROS topic with TF to `map`.
+filament spool, pool noodle.

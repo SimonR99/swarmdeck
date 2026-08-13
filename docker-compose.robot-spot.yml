@@ -11,6 +11,7 @@
 # Lidar + slam + adapter + spot_driver. auto_claim / auto_stand stay false
 # in MIST's spot.yaml; Claim / Stand are GUI buttons. start_estop is
 # overridden to true in spot.launch.py so claim works without a tablet.
+# Claim also drops a leftover tablet keepalive that holds motors off.
 x-ros-domain: &ros_domain "${SPOT_ROS_DOMAIN_ID:-0}"
 
 # Replace spot:dev's /tmp/setup.sh so it cannot pin rmw_zenoh_cpp over the
@@ -84,6 +85,40 @@ services:
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && python3 /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py --robot-id spot_0 --config /app/swarmdeck/adapters/adapter_ros2/config/spot.yaml --host ${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host} --port ${BACKEND_PORT:-8080}
+
+  # Production low-latency video. usb_cam may only publish raw rgb8, so
+  # --raw-topic JPEG-encodes /d435/color/image_raw when compressed is absent.
+  # The adapter keeps the 5 Hz JPEG fallback independently.
+  media:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-spot-media
+    depends_on:
+      camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - python3
+      - /app/adapters/media/ros2_rtsp.py
+      - --robot-id
+      - spot_0
+      - --topic
+      - /d435/color/image_raw/compressed
+      - --raw-topic
+      - /d435/color/image_raw
+      - --rtsp-url
+      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/spot_0"
+      - --bitrate-kbps
+      - "${VIDEO_BITRATE_KBPS:-1200}"
+      - --fps
+      - "${VIDEO_FPS:-15}"
+    restart: unless-stopped
 
   # Same YOLOE sidecar as Botman/Tars. The compose service is still called
   # duck_detector; the catalog is rubber_duck, wooden_block, disc_cone,

@@ -129,7 +129,8 @@ fresh, valid depth/TF result send `null` and the GUI shows only the video box.
 
 `body_command.action` is one of `claim`, `release`, `sit`, `stand`. A robot
 without the `body` capability ignores it. On Spot these map onto Clearpath
-`spot_driver` Trigger services; `stand` may power the motors first.
+`spot_driver` Trigger services; `stand` may power the motors first, and
+`claim` also releases the software e-stop and a leftover tablet keepalive.
 
 **Commands are planner-agnostic.** The adapter maps `navigate_to` to Nav2,
 `move_base`, or a vendor action (Spot: Clearpath `/trajectory` in `body`).

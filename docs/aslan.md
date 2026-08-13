@@ -13,6 +13,9 @@ were missing from the existing install are built into
 | lidar / IMU | `/ouster/points`, `/ouster/imu` |
 | SLAM pose | `/laser_odometry` (`map` -> `os_lidar`) |
 | registered 3D scan | `/registered_scan` |
+| camera | `/oak/rgb/image_raw/compressed` (OAK-D, `oak_camera` service) |
+| video | `swarmdeck-aslan-media` → RTSP `aslan_0` on MediaMTX |
+| detector | YOLOE sidecar (`duck_detector`), same catalog as Botman |
 | Nav2 action | `/aslan_0/navigate_to_pose` |
 | isolated Nav2 velocity | `/aslan_0/cmd_vel_nav` |
 | physical driver velocity | `/cmd_vel`, relayed only by the adapter |
@@ -29,7 +32,7 @@ From Aslan's SwarmDeck checkout:
 cd /ssd/swarmdeck
 ./scripts/aslan-build-overlay
 BACKEND_HOST=192.168.1.223 \
-  docker compose -f docker-compose.robot-aslan.yml build nav2 adapter
+  docker compose -f docker-compose.robot-aslan.yml build nav2 media duck_detector
 ```
 
 The overlay build was completed successfully on 2026-08-06: `bunker_base`,
@@ -71,9 +74,14 @@ have been restored.
 
 Once the lidar is reachable, test mapping first with
 `ASLAN_START_BASE=false`: verify `/laser_odometry`, `/registered_scan`, the 2D
-map, and the 3D cloud in the UI. Starting the base or sending the first goal
-requires a person beside Aslan with the physical e-stop available. Before that
-goal, confirm `/cmd_vel` has only the SwarmDeck adapter as publisher and use a
+map, and the 3D cloud in the UI. Default `docker compose up -d` also starts
+`oak_camera`, `swarmdeck-aslan-media` (H.264 to MediaMTX path `aslan_0`),
+the YOLOE `duck_detector` sidecar, and Nav2 (`/aslan_0/navigate_to_pose`).
+Camera needs `depthai_ros_driver` in `/ssd/mist_ws_ros2` and the OAK on USB;
+mapping, teleop and the planner still come up if the camera or detector
+container fails. Starting the base or sending the first goal requires a
+person beside Aslan with the physical e-stop available. Before that goal,
+confirm `/cmd_vel` has only the SwarmDeck adapter as publisher and use a
 small goal derived from the live pose.
 
 ## UI

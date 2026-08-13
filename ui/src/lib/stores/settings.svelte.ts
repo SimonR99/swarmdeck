@@ -12,6 +12,20 @@ export const DEFAULT_ROBOT_COLORS = [
   '#2d8a3f'
 ];
 
+/** Stable identity colours for named hardware robots (independent of join order). */
+export const ROBOT_IDENTITY_COLORS: Record<string, string> = {
+  spot: '#c9a000',
+  botman: '#007aff',
+  aslan: '#e07000'
+};
+
+export function colorForRobot(id: string, index = 0, configured?: string): string {
+  const stem = id.replace(/_\d+$/, '');
+  if (ROBOT_IDENTITY_COLORS[stem]) return ROBOT_IDENTITY_COLORS[stem];
+  if (configured) return configured;
+  return DEFAULT_ROBOT_COLORS[index % DEFAULT_ROBOT_COLORS.length];
+}
+
 const fallback: AppSettings = {
   unattended_threshold_s: 45,
   alert_suppress_s: 30,
@@ -39,7 +53,7 @@ const fallback: AppSettings = {
     enabled: true,
     type: 'ros2',
     endpoint: 'ws://localhost:8080/adapter',
-    color: DEFAULT_ROBOT_COLORS[index % DEFAULT_ROBOT_COLORS.length]
+    color: colorForRobot(`robot_${index}`, index)
   }))
 };
 

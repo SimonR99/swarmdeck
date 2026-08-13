@@ -30,8 +30,14 @@ from swarmdeck_server.mapsvc.scan_grid import ScanGridAccumulator
 
 
 @pytest.fixture(autouse=True)
-def _cfg():
+def _cfg(monkeypatch, tmp_path):
     load_config()
+    # Whether a detection is visible is judged against the operator's floors,
+    # which live in the repo's own sessions/settings.json. Without this pin a
+    # developer who raised a floor in the dashboard would watch these tests
+    # start failing on their machine and nowhere else.
+    monkeypatch.setattr(settings_store, "path", tmp_path / "settings.json")
+    monkeypatch.setattr(settings_store, "value", settings_store.validate({}))
 
 
 def test_backend_imports_no_ros():
@@ -686,6 +692,40 @@ def test_goal_routing_converts_shared_coordinates_to_robot_frame():
         app_registry._sinks.clear()
 
 
+def test_disabled_robots_cannot_be_driven_or_given_goals(monkeypatch):
+    class Sink:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    sink = Sink()
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    monkeypatch.setattr(
+        settings_store,
+        "value",
+        {"robots": [{"id": "r0", "enabled": False, "type": "ros2", "endpoint": "", "color": "#000"}]},
+    )
+    try:
+        app_registry.hello({"robot_id": "r0", "capabilities": ["navigate", "body"]}, sink=sink)
+        asyncio.run(
+            handle_gui_message(
+                {"type": "set_goal", "robot_id": "r0", "payload": {"x": 1.0, "y": 1.0}}
+            )
+        )
+        asyncio.run(
+            handle_gui_message(
+                {"type": "drive", "robot_id": "r0", "payload": {"linear": 0.2, "angular": 0.0}}
+            )
+        )
+        assert sink.messages == []
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
 def test_drive_routing_is_bounded():
     class Sink:
         def __init__(self):
@@ -898,6 +938,29 @@ def test_merged_cloud_excludes_unregistered_robots():
     # r1 has not joined the common frame, so only the reference contributes.
     _, _, names = svc.merged_cloud()
     assert names == ["r0"]
+
+
+def test_operator_disabled_robots_leave_the_merged_map_and_cloud():
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("static")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.full((n, n), -1, dtype=np.int8)
+    cells[10:20, 10:20] = 0
+    svc.set_transform("r0", 0.0, 0.0, 0.0)
+    svc.set_transform("r1", 1.0, 0.0, 0.0)
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells)
+    svc.set_cloud("r0", np.ones((3, 3), dtype=np.float32))
+    svc.set_cloud("r1", np.ones((3, 3), dtype=np.float32))
+
+    assert svc.global_members() == {"r0", "r1"}
+    svc.set_excluded({"r1"})
+    assert svc.global_members() == {"r0"}
+    _, _, names = svc.merged_cloud()
+    assert names == ["r0"]
+    svc.set_excluded(set())
+    assert "r1" in svc.global_members()
 
 
 def test_cloud_endpoints_roundtrip():

@@ -71,6 +71,7 @@
 
   function robotsOnMap() {
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
+      if (!fleet.isEnabled(mapStore.viewRobot)) return [];
       const robot = fleet.get(mapStore.viewRobot);
       return robot ? [robot] : [];
     }
@@ -349,6 +350,7 @@
 
     // detections
     for (const d of session.detections) {
+      if (!fleet.isEnabled(d.robot_id)) continue;
       if (mapStore.viewMode === 'local' && d.robot_id !== mapStore.viewRobot) continue;
       if (!d.map_position) continue;
       const g = mapStore.worldToGrid(d.map_position.x, d.map_position.y);
@@ -556,6 +558,12 @@
   }
 
   // Redraw whenever the map, fleet, settings, or view changes.
+  $effect(() => {
+    if (mapStore.viewMode === 'local' && mapStore.viewRobot && !fleet.isEnabled(mapStore.viewRobot)) {
+      void mapStore.setViewPreference('global', null);
+    }
+  });
+
   $effect(() => {
     void mapStore.revision;
     void fleet.robots;

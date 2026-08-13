@@ -168,6 +168,22 @@ def test_body_command_stand_powers_on_first(mod):
     assert order[-1] == "claim"
 
 
+def test_body_command_claim_clears_tablet_keepalive(mod):
+    """Tablet Stop leaves a keepalive that blocks /power_on after Claim."""
+    names = (
+        "claim", "release", "sit", "stand", "power_on",
+        "estop_release", "clear_keepalive",
+    )
+    bridge = _bridge(mod, {"services": {name: f"/{name}" for name in names}})
+    order: list[str] = []
+    bridge._body_clients = {name: _trigger_client(order, name) for name in names}
+    bridge.body_command("claim")
+    assert order == ["claim", "estop_release", "clear_keepalive"]
+    order.clear()
+    bridge.body_command("stand")
+    assert order == ["estop_release", "clear_keepalive", "power_on", "stand"]
+
+
 def _identity_tf():
     rot = type("Q", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})()
     trans = type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})()

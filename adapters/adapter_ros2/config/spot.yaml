@@ -20,11 +20,13 @@ ros_distro: humble
 # path also reuses this to reject lidar returns from the body/legs.
 footprint_radius: 0.61
 
-# LIO-SAM publishes map -> odom_link (identity static TF) and odom_link ->
-# lidar_link. /lio_sam/mapping/odometry itself is odom_link -> odom_mapping;
-# the adapter pose is the TF lookup, not that message.
+# LIO-SAM publishes map -> odom_link -> lidar_link. lidar_link is yawed 90°
+# from the chassis (static TF in spot.launch.py, copied from MIST). The GUI
+# triangle and footprint must follow body, not the lidar, or Spot looks a
+# quarter-turn off the map. /lio_sam/mapping/odometry is odom_link ->
+# odom_mapping; the adapter pose is the TF lookup, not that message.
 map_frame: map
-base_frame: lidar_link
+base_frame: body
 
 # LIO-SAM starts the map at the first lidar pose. Payload lidar sits near
 # body height (~0.5 m); this band is a first guess and must be checked
@@ -68,6 +70,10 @@ services:
   stand: /stand
   power_on: /power_on
   stop: /stop
+  # Software e-stop allow, plus drop a leftover tablet keepalive that holds
+  # motors off after Claim already took the lease.
+  estop_release: /estop/release
+  clear_keepalive: /clear_keepalive
 
 rates:
   state_hz: 5.0

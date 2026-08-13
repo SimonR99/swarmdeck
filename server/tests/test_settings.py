@@ -109,5 +109,37 @@ def test_settings_accept_seven_robots_for_mixed_hardware_fleet(tmp_path):
         "robot_0", "robot_1", "robot_2", "robot_3", "tars_0", "botman_0",
         "aslan_0",
     ]
-    assert saved["robots"][5]["color"] == "#b26a00"
-    assert saved["robots"][6]["color"] == "#5865f2"
+    assert saved["robots"][5]["color"] == "#007aff"
+    assert saved["robots"][6]["color"] == "#e07000"
+
+
+def test_named_hardware_robots_keep_identity_colors(tmp_path):
+    saved = SettingsStore(tmp_path / "settings.json").save({
+        "robot_count": 3,
+        "robots": [
+            {"id": "spot_0", "type": "spot", "endpoint": "ws://host/adapter", "color": "#ff0000"},
+            {"id": "botman_0", "type": "ros2", "endpoint": "ws://host/adapter"},
+            {"id": "aslan_0", "type": "ros2", "endpoint": "ws://host/adapter"},
+        ],
+    })
+
+    assert [robot["color"] for robot in saved["robots"]] == [
+        "#c9a000",
+        "#007aff",
+        "#e07000",
+    ]
+
+
+def test_named_robots_are_enabled_unless_explicitly_switched_off():
+    from swarmdeck_server.config.settings import disabled_robot_ids, is_robot_enabled
+
+    settings = {
+        "robots": [
+            {"id": "botman_0", "enabled": False},
+            {"id": "aslan_0", "enabled": True},
+        ]
+    }
+    assert is_robot_enabled(settings, "botman_0") is False
+    assert is_robot_enabled(settings, "aslan_0") is True
+    assert is_robot_enabled(settings, "spot_0") is True
+    assert disabled_robot_ids(settings) == {"botman_0"}

@@ -57,6 +57,72 @@ REGISTRATION_MISS_LIMIT = 3
 # independent cslam cross-check has nothing to compare and stays silent.
 CHECK_MIN_SUPPORT = 0.35
 
+# How much of an accepted transform to take, once a robot is already
+# registered. Each registration is an INDEPENDENT estimate, so correlation
+# noise used to land in the merged map whole: measured on the live fleet with
+# every robot parked, accepted transforms moved up to 0.42 m and 5.8 deg
+# between consecutive one-second samples, with zero accept/reject flips — so
+# this is jitter in a result the merge already trusts, not disagreement about
+# whether to trust it. A stationary fleet's map should not wobble.
+#
+# Applied only AFTER acceptance. A robot still acquiring takes its transform
+# whole, so nothing slows down the first lock, and the hard reset to a
+# configured prior stays unsmoothed because that path exists to fail closed.
+TRANSFORM_SMOOTHING = 0.3
+
+# Vertical alignment of the 3D merged cloud.
+#
+# The merge frame is SE(2), so registration produces no dz and `merged_cloud`
+# used to pass z through untouched. Robots do not agree about z: measured on the
+# live fleet, spot_0's cloud sat ~0.25 m below aslan_0 and tars_0 at BOTH floor
+# and ceiling, which is a rigid offset — different lidar mount heights, and SLAM
+# stacks that origin at the sensor rather than the floor.
+#
+# This is display-only and never feeds registration: the 2D merge is the thing
+# that decides where robots are, and it is deliberately left alone. The estimate
+# is published in `status()` rather than applied silently, because a robot that
+# needs a LARGE correction is reporting a pose bug, not a mount height, and
+# quietly shifting it would hide exactly that.
+Z_ALIGN_BIN_M = 0.05
+Z_ALIGN_MAX_SHIFT_M = 2.0
+Z_ALIGN_MIN_POINTS = 200
+
+
+def estimate_z_offset(
+    ref_z: np.ndarray,
+    mov_z: np.ndarray,
+    bin_m: float = Z_ALIGN_BIN_M,
+    max_shift_m: float = Z_ALIGN_MAX_SHIFT_M,
+) -> float:
+    """Vertical shift that best aligns two clouds' height distributions.
+
+    Correlating the whole height histogram rather than matching floor minima:
+    the lowest return is a single outlier (a reflection under a doorframe puts
+    it a metre low), while floor, furniture band and ceiling together are a
+    signature that survives one bad point.
+    """
+    if len(ref_z) < Z_ALIGN_MIN_POINTS or len(mov_z) < Z_ALIGN_MIN_POINTS:
+        return 0.0
+    lo = float(min(ref_z.min(), mov_z.min())) - max_shift_m
+    hi = float(max(ref_z.max(), mov_z.max())) + max_shift_m
+    if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
+        return 0.0
+    # The padding above is what makes np.roll safe: the wrapped region is empty,
+    # so a shift can never correlate the top of one cloud with the bottom of the other.
+    bins = np.arange(lo, hi + bin_m, bin_m)
+    ref_hist, _ = np.histogram(ref_z, bins=bins)
+    mov_hist, _ = np.histogram(mov_z, bins=bins)
+    ref_sum, mov_sum = ref_hist.sum(), mov_hist.sum()
+    if not ref_sum or not mov_sum:
+        return 0.0
+    # Normalised, so the denser cloud cannot win by weight of points alone.
+    a = ref_hist.astype(np.float64) / ref_sum
+    b = mov_hist.astype(np.float64) / mov_sum
+    steps = int(round(max_shift_m / bin_m))
+    shifts = np.arange(-steps, steps + 1)
+    scores = np.array([float(np.dot(a, np.roll(b, int(s)))) for s in shifts])
+    return float(shifts[int(np.argmax(scores))] * bin_m)
+
 
 class MapService:
     def __init__(self, resolution: float = 0.05, size_m: float = 30.0) -> None:
@@ -65,6 +131,9 @@ class MapService:
         self.merged = np.full((n, n), UNKNOWN, dtype=np.int8)
         self._prev = self.merged.copy()
         self.robot_grids: dict[str, tuple[GridMeta, np.ndarray]] = {}
+        # Operator-disabled robots stay in `robot_grids` so turning them back
+        # on restores their map, but they do not contribute to the merge.
+        self.excluded: set[str] = set()
         self.robot_revisions: dict[str, int] = {}
         self.transforms: dict[str, tuple[float, float, float]] = {}
         self.transform_priors: dict[str, tuple[float, float, float]] = {}
@@ -97,6 +166,9 @@ class MapService:
         # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
+        # Display-only vertical correction per robot, against the reference's
+        # cloud. See estimate_z_offset: the SE(2) merge cannot produce this.
+        self.cloud_z_offsets: dict[str, float] = {}
         # Per-robot raytraced grid, for robots whose SLAM stack has no
         # OccupancyGrid of its own — see scan_grid.py. Separate from
         # `robot_grids`, which `ingest_scan` feeds into via the same `ingest()`
@@ -176,6 +248,7 @@ class MapService:
             self.robot_revisions.clear()
             self.registrations.clear()
             self.cloud_registrations.clear()
+            self.cloud_z_offsets.clear()
             self.registration_sources.clear()
             self.registration_rejections.clear()
             self.registered.clear()
@@ -208,6 +281,7 @@ class MapService:
         self.robot_revisions.pop(robot_id, None)
         self.registrations.pop(robot_id, None)
         self.cloud_registrations.pop(robot_id, None)
+        self.cloud_z_offsets.pop(robot_id, None)
         self.registration_sources.pop(robot_id, None)
         self.registration_rejections.pop(robot_id, None)
         self.registered.discard(robot_id)
@@ -232,6 +306,7 @@ class MapService:
             # Every automatic registration was relative to the old reference.
             self.registrations.clear()
             self.cloud_registrations.clear()
+            self.cloud_z_offsets.clear()
             self.registration_sources.clear()
             self.registration_rejections.clear()
             self.registered.clear()
@@ -306,6 +381,7 @@ class MapService:
         self._scan_grids.clear()
         # All of these describe registrations against grids that no longer exist.
         self.cloud_registrations.clear()
+        self.cloud_z_offsets.clear()
         self.registration_sources.clear()
         self.registered.clear()
         self.registration_misses.clear()
@@ -376,10 +452,11 @@ class MapService:
             tx, ty, yaw = self.transforms.get(rid, (0.0, 0.0, 0.0))
             c, s = math.cos(yaw), math.sin(yaw)
             out = np.empty_like(points)
-            # Planar rotation only: the merge frame is SE(2), so z passes through.
+            # Planar rotation: the merge frame is SE(2), so registration gives
+            # no dz. `cloud_z_offsets` supplies one for display only.
             out[:, 0] = tx + points[:, 0] * c - points[:, 1] * s
             out[:, 1] = ty + points[:, 0] * s + points[:, 1] * c
-            out[:, 2] = points[:, 2]
+            out[:, 2] = points[:, 2] + self.cloud_z_offsets.get(rid, 0.0)
             chunks.append(out)
             indices.append(np.full(len(out), len(names), dtype=np.uint8))
             names.append(rid)
@@ -632,6 +709,7 @@ class MapService:
     def _register_and_merge(self, robot_id: str) -> None:
         """One deferred registration, plus the remerge that publishes it."""
         self._reregister(robot_id)
+        self._update_z_offset(robot_id)
         self._remerge()
 
     async def registration_worker(self) -> None:
@@ -651,6 +729,40 @@ class MapService:
                 self._registration_due.discard(robot_id)
                 async with self._ingest_lock:
                     await asyncio.to_thread(self._register_and_merge, robot_id)
+
+    def _blend_transform(
+        self, robot_id: str, candidate: tuple[float, float, float]
+    ) -> tuple[float, float, float]:
+        """Ease an accepted transform in, once this robot is already registered.
+
+        Exponential, so a persistent real correction still arrives in full — it
+        just takes a few updates instead of landing in one jump alongside the
+        noise. Yaw is blended on the wrapped difference; averaging raw angles
+        would swing a robot the long way round the circle near +/-pi.
+        """
+        previous = self.transforms.get(robot_id)
+        if previous is None or robot_id not in self.registered:
+            return candidate
+        a = TRANSFORM_SMOOTHING
+        px, py, pyaw = previous
+        cx, cy, cyaw = candidate
+        return (
+            px + a * (cx - px),
+            py + a * (cy - py),
+            self._wrap_yaw(pyaw + a * self._wrap_yaw(cyaw - pyaw)),
+        )
+
+    def _update_z_offset(self, robot_id: str) -> None:
+        """Refresh this robot's display-only vertical correction."""
+        reference = self.reference
+        if robot_id == reference or reference is None:
+            self.cloud_z_offsets.pop(robot_id, None)
+            return
+        ref = self.robot_clouds.get(reference)
+        mov = self.robot_clouds.get(robot_id)
+        if ref is None or mov is None or not len(ref) or not len(mov):
+            return
+        self.cloud_z_offsets[robot_id] = estimate_z_offset(ref[:, 2], mov[:, 2])
 
     def _reregister(self, robot_id: str) -> None:
         """Estimate this robot's transform against the reference robot's grid."""
@@ -783,7 +895,9 @@ class MapService:
                 return
 
         self.registration_rejections.pop(robot_id, None)
-        self.transforms[robot_id] = (wx, wy, candidate_yaw)
+        self.transforms[robot_id] = self._blend_transform(
+            robot_id, (wx, wy, candidate_yaw)
+        )
         self.locked_dyaw[robot_id] = result.dyaw
         self.registered.add(robot_id)
         self.registration_misses[robot_id] = 0
@@ -930,6 +1044,17 @@ class MapService:
 
     # --------------------------------------------------------------- merging
 
+    def set_excluded(self, robot_ids: set[str] | list[str]) -> None:
+        """Drop operator-disabled robots from the merged map, without deleting their grids."""
+        nxt = {str(rid) for rid in robot_ids if rid}
+        if nxt == self.excluded:
+            return
+        self.excluded = nxt
+        self._remerge()
+
+    def _without_excluded(self, members: set[str]) -> set[str]:
+        return members - self.excluded if self.excluded else members
+
     def global_members(self) -> set[str]:
         """Robots whose grids are genuinely in the shared map frame.
 
@@ -946,7 +1071,7 @@ class MapService:
             members = {rid for rid in self.robot_grids if rid in self.transforms}
             if self.reference in self.robot_grids:
                 members.add(self.reference)
-            return members
+            return self._without_excluded(members)
         if self.merge_mode == "cslam":
             # Membership is the collaborative back end's call, not a correlation
             # score: a robot is in the map once it has actually closed a loop
@@ -955,12 +1080,12 @@ class MapService:
             # has two unrelated frames, and overlaying them would place robots
             # confidently in the wrong building.
             majority = self.cslam_majority_frame()
-            return {
+            return self._without_excluded({
                 rid
                 for rid in self.robot_grids
                 if self.in_common_frame(rid)
                 and (majority is None or self.cslam_frames.get(rid) == majority)
-            }
+            })
         # `registered`, not the latest result's `confident` flag: a robot that has
         # been accepted keeps its place through a few ambiguous frames, and the
         # merged map it contributes to must not blink out under it meanwhile.
@@ -971,7 +1096,7 @@ class MapService:
         }
         if not accepted or self.reference is None:
             return set()
-        return accepted | {self.reference}
+        return self._without_excluded(accepted | {self.reference})
 
     def _warp(self, meta: GridMeta, cells: np.ndarray,
               tf: tuple[float, float, float]) -> np.ndarray:
@@ -1159,6 +1284,11 @@ class MapService:
                 for k, r in self.registrations.items()
             },
             "global_members": sorted(members),
+            # Display-only vertical corrections. Surfaced rather than applied
+            # silently: a large value here is a pose bug worth seeing.
+            "z_offsets": {
+                k: round(v, 3) for k, v in sorted(self.cloud_z_offsets.items())
+            },
             "view_by_robot": {
                 rid: "global" if rid in members else "local"
                 for rid in self.robot_grids

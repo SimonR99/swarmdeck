@@ -211,24 +211,32 @@
       const xyz = new Int16Array(raw.buffer, raw.byteOffset, total * 3);
       const owners = new Uint8Array(raw.buffer, raw.byteOffset + total * 6, total);
 
-      const positions = new Float32Array(total * 3);
-      for (let i = 0; i < total * 3; i++) positions[i] = xyz[i] * scale;
+      const keep = names.map((id) => fleet.isEnabled(id));
+      let kept = 0;
+      for (let i = 0; i < total; i++) if (keep[owners[i]]) kept++;
+      const positions = new Float32Array(kept * 3);
+      const colours = new Float32Array(kept * 3);
       const palette = names.map((id) => hexToRgb(fleet.colorOf(id)));
-      const colours = new Float32Array(total * 3);
+      let o = 0;
       for (let i = 0; i < total; i++) {
+        if (!keep[owners[i]]) continue;
+        positions[o * 3] = xyz[i * 3] * scale;
+        positions[o * 3 + 1] = xyz[i * 3 + 1] * scale;
+        positions[o * 3 + 2] = xyz[i * 3 + 2] * scale;
         const c = palette[owners[i]] ?? [0.4, 0.5, 0.6];
-        colours[i * 3] = c[0];
-        colours[i * 3 + 1] = c[1];
-        colours[i * 3 + 2] = c[2];
+        colours[o * 3] = c[0];
+        colours[o * 3 + 1] = c[1];
+        colours[o * 3 + 2] = c[2];
+        o++;
       }
 
       gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, colourBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, colours, gl.DYNAMIC_DRAW);
-      count = total;
-      points = total;
-      robots = names;
+      count = kept;
+      points = kept;
+      robots = names.filter((_, i) => keep[i]);
       error = null;
       // A cloud with no height is not a rendering fault, it is the backend
       // sending a ground projection — RTAB-Map's `cloud_map` is 2D unless
@@ -249,8 +257,8 @@
         if (positions[i + 2] < lo) lo = positions[i + 2];
         if (positions[i + 2] > hi) hi = positions[i + 2];
       }
-      flat = total > 0 && hi - lo < 0.05;
-      bounds = total > 0
+      flat = kept > 0 && hi - lo < 0.05;
+      bounds = kept > 0
         ? { minX, maxX, minY, maxY, minZ: lo, maxZ: hi }
         : null;
     } catch (e) {

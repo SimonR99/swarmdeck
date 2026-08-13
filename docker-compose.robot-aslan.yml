@@ -24,8 +24,10 @@ x-aslan-stack: &aslan-stack
 services:
   # Base only. Lidar and SuperOdometry are separate services, same split as
   # Botman, so mapping can come up without opening the CAN driver. Default
-  # `docker compose up -d` therefore starts lidar + slam + adapter; pass
-  # `--profile base` when a person is at the e-stop and can2 is up.
+  # `docker compose up -d` starts lidar + slam + oak_camera + media +
+  # duck_detector + nav2 + adapter. Pass `--profile base` when a person is at
+  # the e-stop and can2 is up. Nav2 writes only cmd_vel_nav; it does not
+  # command the base until a goal is active.
   robot_stack:
     <<: *aslan-stack
     profiles: ["base"]
@@ -75,8 +77,42 @@ services:
         start_lidar:=false
         start_slam:=true
 
+  # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
+  # Same host-side bridge Aslan already runs as swarmdeck-aslan-odom-tf.
+  odom_tf:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-nav2
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-aslan-odom-tf
+    depends_on:
+      - slam
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - swarmdeck_nav
+      - odom_to_tf
+      - --ros-args
+      - -r
+      - __node:=aslan_odom_to_tf_host
+      - -p
+      - odom_topic:=/laser_odometry
+      - -p
+      - parent_frame:=map
+      - -p
+      - child_frame:=os_lidar
+      - -p
+      - planar:=true
+      - -p
+      - use_receive_time:=true
+    restart: unless-stopped
+
   nav2:
-    profiles: ["nav"]
     build:
       context: .
       dockerfile: docker/Dockerfile.robot-nav2
@@ -118,6 +154,10 @@ services:
         condition: service_started
       slam:
         condition: service_started
+      nav2:
+        condition: service_started
+      duck_detector:
+        condition: service_started
     network_mode: host
     ipc: host
     volumes:
@@ -141,8 +181,56 @@ services:
       - "${BACKEND_PORT:-8080}"
     restart: unless-stopped
 
+  # Same OAK-D RGB MJPEG profile as Botman. depthai_ros_driver must be in the
+  # mounted workspace; this service does not install it. Mapping still starts
+  # if the camera is missing — adapter does not wait on oak_camera.
+  oak_camera:
+    <<: *aslan-stack
+    container_name: swarmdeck-aslan-oak
+    command:
+      - bash
+      - -c
+      - >-
+        . /opt/ros/humble/setup.bash &&
+        . /workspace/install/setup.bash &&
+        ros2 launch depthai_ros_driver camera.launch.py
+        name:=oak
+        params_file:=/app/swarmdeck/adapters/media/config/${ASLAN_OAK_PARAMS:-botman_oak_rgb.yaml}
+        rectify_rgb:=false
+        use_rviz:=false
+
+  # Production low-latency video. The adapter keeps the 5 Hz JPEG fallback;
+  # this process encodes H.264 and pushes RTSP/TCP to MediaMTX.
+  media:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-aslan-media
+    depends_on:
+      oak_camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - python3
+      - /app/adapters/media/ros2_rtsp.py
+      - --robot-id
+      - aslan_0
+      - --topic
+      - /oak/rgb/image_raw/compressed
+      - --rtsp-url
+      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/aslan_0"
+      - --bitrate-kbps
+      - "${VIDEO_BITRATE_KBPS:-1200}"
+      - --fps
+      - "${VIDEO_FPS:-15}"
+    restart: unless-stopped
+
   duck_detector:
-    profiles: ["detect"]
     build:
       context: .
       dockerfile: docker/Dockerfile.duck-detector

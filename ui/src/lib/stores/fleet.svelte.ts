@@ -1,7 +1,7 @@
 import type { RobotState, Capability } from '$lib/types/protocol';
-import { settings, DEFAULT_ROBOT_COLORS } from './settings.svelte';
+import { settings, DEFAULT_ROBOT_COLORS, colorForRobot } from './settings.svelte';
 
-/** Identity colour per robot, configured via settings or falling back to default theme colours. */
+/** Identity colour per robot. Named hardware robots keep a fixed colour; others use settings or the theme palette. */
 export const ROBOT_COLORS = DEFAULT_ROBOT_COLORS;
 
 const state = $state({
@@ -13,30 +13,36 @@ const state = $state({
 
 export const fleet = {
   get robots() {
-    return state.order.map((id) => state.robots[id]).filter(Boolean);
+    return state.order.map((id) => state.robots[id]).filter((robot) => robot && this.isEnabled(robot.robot_id));
   },
   get count() {
-    return state.order.length;
+    return this.robots.length;
   },
   get selected() {
-    return state.selected;
+    return state.selected.filter((id) => this.isEnabled(id));
   },
   get activeCamera() {
-    return state.activeCamera;
+    const cam = state.activeCamera;
+    if (cam && this.isEnabled(cam) && this.can(cam, 'camera')) return cam;
+    return this.robots.find((robot) => robot.capabilities?.includes('camera'))?.robot_id ?? null;
   },
   get online() {
-    return state.order.filter((id) => state.robots[id]?.online).length;
+    return this.robots.filter((robot) => robot.online).length;
   },
 
   get(id: string): RobotState | undefined {
     return state.robots[id];
   },
 
+  isEnabled(id: string): boolean {
+    const config = settings.value.robots.find((r) => r.id === id);
+    return config?.enabled !== false;
+  },
+
   colorOf(id: string): string {
     const config = settings.value.robots.find((r) => r.id === id);
-    if (config?.color) return config.color;
     const i = state.order.indexOf(id);
-    return ROBOT_COLORS[i < 0 ? 0 : i % ROBOT_COLORS.length];
+    return colorForRobot(id, i < 0 ? 0 : i, config?.color);
   },
 
   indexOf(id: string): number {
@@ -44,20 +50,25 @@ export const fleet = {
   },
 
   can(id: string, cap: Capability): boolean {
-    return state.robots[id]?.capabilities?.includes(cap) ?? false;
+    return this.isEnabled(id) && (state.robots[id]?.capabilities?.includes(cap) ?? false);
   },
 
   isSelected(id: string): boolean {
-    return state.selected.includes(id);
+    return this.selected.includes(id);
   },
 
   /** Upsert from a robot_state message. */
   apply(msg: RobotState) {
     if (!state.robots[msg.robot_id]) {
       state.order = [...state.order, msg.robot_id];
-      if (state.selected.length === 0) state.selected = [msg.robot_id];
-      // First robot to arrive becomes the default camera.
-      if (state.activeCamera === null && msg.capabilities?.includes('camera')) {
+      if (this.selected.length === 0 && this.isEnabled(msg.robot_id)) {
+        state.selected = [msg.robot_id];
+      }
+      if (
+        this.activeCamera === null &&
+        this.isEnabled(msg.robot_id) &&
+        msg.capabilities?.includes('camera')
+      ) {
         state.activeCamera = msg.robot_id;
       }
     }
@@ -74,6 +85,7 @@ export const fleet = {
   },
 
   select(id: string, additive = false) {
+    if (!this.isEnabled(id)) return;
     if (additive) {
       state.selected = state.selected.includes(id)
         ? state.selected.filter((r) => r !== id)
@@ -88,15 +100,18 @@ export const fleet = {
   },
 
   selectAll() {
-    state.selected = state.selected.length === state.order.length ? [] : [...state.order];
+    const ids = this.robots.map((robot) => robot.robot_id);
+    state.selected = this.selected.length === ids.length ? [] : ids;
   },
 
   setCamera(id: string) {
+    if (!this.isEnabled(id) || !this.can(id, 'camera')) return;
     state.activeCamera = id;
   },
 
   /** Make one robot the operator focus for camera, map, and navigation. */
   focus(id: string) {
+    if (!this.isEnabled(id)) return;
     state.selected = [id];
     if (this.can(id, 'camera')) state.activeCamera = id;
   },

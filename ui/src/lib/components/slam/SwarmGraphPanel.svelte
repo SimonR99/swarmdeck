@@ -18,7 +18,9 @@
   import { robotDisplayName } from '$lib/robotDisplayName';
 
   const rows = $derived(
-    Object.entries(mapStore.slamGraphs).sort(([a], [b]) => a.localeCompare(b))
+    Object.entries(mapStore.slamGraphs)
+      .filter(([id]) => fleet.isEnabled(id))
+      .sort(([a], [b]) => a.localeCompare(b))
   );
   const disagreement = $derived(mapStore.status?.cslam_disagreement ?? {});
   const closures = $derived(
