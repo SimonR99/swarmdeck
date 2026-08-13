@@ -59,6 +59,52 @@ OCCUPIED_AT = 2      # one hit (+3) is immediately occupied
 FREE_AT = -1         # one pass-through clears, as before — see above
 
 
+# A return standing far BEHIND its angular neighbours is almost always a stray:
+# a reflection, a mote, or a glimpse through a gap. Raytracing it carves a free
+# corridor from the sensor all the way out past whatever it passed through,
+# which is the long radial spike that has been decorating every live map.
+#
+# Neighbours are chosen by BEARING, not by distance, and that is the whole point.
+# A fixed metric neighbourhood cannot work: real returns thin out linearly with
+# range, so tuning one tight enough to catch strays at 15 m also deletes every
+# genuine far wall. Measured against live fleet scans, a 0.30 m metric radius
+# dropped 16% of tars_0's returns and capped its perception at 7.8 m; this test
+# drops 0.6-2.6% and leaves the farthest real return (17.9 m) untouched.
+#
+# Only FARTHER-than-neighbours counts. A return nearer than its neighbours is an
+# obstacle in front of a wall, which is exactly what must never be discarded.
+#
+# The cost is honest: a single-scan peek through a doorway has the same
+# signature and is dropped too. That geometry comes back properly the moment a
+# robot drives through the opening, whereas a stray never becomes correct.
+STRAY_NEIGHBOURS = 4
+STRAY_JUMP_M = 2.0
+
+
+def drop_range_outliers(
+    origin_x: float,
+    origin_y: float,
+    points_xy: np.ndarray,
+    k: int = STRAY_NEIGHBOURS,
+    jump_m: float = STRAY_JUMP_M,
+) -> np.ndarray:
+    """Drop returns standing more than `jump_m` behind their angular neighbours."""
+    if len(points_xy) < 2 * k + 1:
+        return points_xy
+    dx = points_xy[:, 0] - origin_x
+    dy = points_xy[:, 1] - origin_y
+    ranges = np.hypot(dx, dy)
+    order = np.argsort(np.arctan2(dy, dx))
+    sorted_ranges = ranges[order]
+    # Wraps at +/-pi via np.roll, so the scan is treated as the closed ring it is.
+    offsets = [*range(-k, 0), *range(1, k + 1)]
+    neighbours = np.stack([np.roll(sorted_ranges, s) for s in offsets])
+    stray_sorted = (sorted_ranges - np.median(neighbours, axis=0)) > jump_m
+    stray = np.zeros(len(points_xy), dtype=bool)
+    stray[order] = stray_sorted
+    return points_xy[~stray]
+
+
 def _bresenham(x0: int, y0: int, x1: int, y1: int) -> tuple[np.ndarray, np.ndarray]:
     """Grid cells on the line from (x0,y0) up to but EXCLUDING (x1,y1).
 

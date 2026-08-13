@@ -174,3 +174,47 @@ def test_scan_window_follows_the_configured_map_extent():
     service.ingest_scan("r0", 0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
     accumulator = service._scan_grids["r0"]
     assert accumulator.meta.width * accumulator.meta.resolution == 80.0
+
+
+def test_a_stray_return_is_dropped_but_a_sparse_far_wall_is_kept():
+    """The spike fix must not cost long-range perception.
+
+    A stray return raytraces a free corridor from the sensor out past whatever
+    it passed through — the long radial spikes on every live map. But real
+    returns thin out linearly with range, so the obvious fix (drop returns with
+    few nearby neighbours) deletes genuine far geometry: measured against live
+    fleet scans a 0.30 m metric radius dropped 16% of tars_0's returns and
+    capped its perception at 7.8 m. Comparing against ANGULAR neighbours instead
+    is range-independent.
+    """
+    from swarmdeck_server.mapsvc.scan_grid import drop_range_outliers
+
+    ang = np.linspace(-np.pi, np.pi, 360, endpoint=False)
+    # A sparsely-but-evenly sampled wall at 15 m: every point is far from every
+    # other in metres (0.26 m apart), yet none of them is a stray.
+    far = np.column_stack([15.0 * np.cos(ang), 15.0 * np.sin(ang)]).astype(np.float32)
+    assert len(drop_range_outliers(0.0, 0.0, far)) == len(far), (
+        "a sparse but coherent far wall must survive intact"
+    )
+
+    # Now push three returns 5 m out beyond their angular neighbours.
+    strays = far.copy()
+    for i in (10, 100, 250):
+        strays[i] = far[i] * (20.0 / 15.0)
+    kept = drop_range_outliers(0.0, 0.0, strays)
+    assert len(kept) == len(far) - 3, f"expected 3 strays dropped, got {len(far) - len(kept)}"
+
+    # A return NEARER than its neighbours is an obstacle in front of a wall and
+    # must never be discarded — that is the one error that could hide a hazard.
+    obstacles = far.copy()
+    for i in (30, 200):
+        obstacles[i] = far[i] * (3.0 / 15.0)
+    assert len(drop_range_outliers(0.0, 0.0, obstacles)) == len(far)
+
+
+def test_outlier_filter_is_a_noop_on_a_tiny_scan():
+    from swarmdeck_server.mapsvc.scan_grid import drop_range_outliers
+
+    tiny = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    assert len(drop_range_outliers(0.0, 0.0, tiny)) == 2
+    assert len(drop_range_outliers(0.0, 0.0, np.zeros((0, 2), np.float32))) == 0

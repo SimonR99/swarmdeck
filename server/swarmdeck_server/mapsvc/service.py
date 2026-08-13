@@ -19,7 +19,7 @@ import numpy as np
 
 from .grid_meta import GridMeta
 from .registration import Registration, register, register_3d, score_transform
-from .scan_grid import ScanGridAccumulator
+from .scan_grid import ScanGridAccumulator, drop_range_outliers
 
 UNKNOWN = -1
 FREE = 0
@@ -672,7 +672,10 @@ class MapService:
                 size_m=self.meta.width * self.meta.resolution,
             )
             self._scan_grids[robot_id] = acc
-        acc.integrate(origin_x, origin_y, points_xy)
+        # Strays first: raytracing one carves a free corridor out past whatever
+        # it passed through, and free space is what registration keys on.
+        acc.integrate(origin_x, origin_y,
+                      drop_range_outliers(origin_x, origin_y, points_xy))
         self.ingest(robot_id, acc.meta, acc.cells, register=register)
 
     async def ingest_scan_async(
