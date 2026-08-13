@@ -81,6 +81,10 @@ DEPTH_MAX_AGE_S = 0.35
 # Voxel edge for downsampling the 3D map before upload, metres. Coarser than the
 # 5 cm occupancy grid on purpose: this feeds a view whose points are one pixel.
 CLOUD_VOXEL = 0.10
+
+#: Camera period for a robot no dashboard is showing. Not zero, so selecting a
+#: robot paints a slightly stale frame at once rather than a black panel.
+IDLE_CAMERA_PERIOD_S = 2.0
 # Transport quantisation. 1 cm keeps a cloud well inside int16 and is far finer
 # than the voxel above, so it costs nothing in fidelity.
 CLOUD_SCALE = 0.01
@@ -455,6 +459,9 @@ class RobotBridge:
         self._detector = ObjectDetector()
         self._detection_enabled = True
         self._detections: list[dict] | None = None
+        # Lowered only by the backend's `camera_interest`; a backend that never
+        # sends it leaves this True and behaviour unchanged.
+        self.camera_watched = True
         self._goal_handle = None
         self._goal_generation = 0
         self._last_drive_at = 0.0
@@ -1305,18 +1312,23 @@ class RobotBridge:
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
 
-    def upload_camera(self) -> None:
-        """Encode the newest ROS image as a compact JPEG preview."""
+    def upload_camera(self, post_frame: bool = True) -> None:
+        """Detect on the newest ROS image, and optionally upload it.
+
+        `post_frame` is False for a robot no dashboard is showing. Detection
+        still runs — it is what puts markers on the shared map — but the JPEG,
+        which is three orders of magnitude larger, stays home.
+        """
         if not self._camera_dirty or self._camera_frame is None:
             return
         if not self._upload_lock.acquire(blocking=False):
             return  # a reset is running; see upload_map
         try:
-            self._upload_camera_locked()
+            self._upload_camera_locked(post_frame)
         finally:
             self._upload_lock.release()
 
-    def _upload_camera_locked(self) -> None:
+    def _upload_camera_locked(self, post_frame: bool = True) -> None:
         if not self._camera_dirty or self._camera_frame is None:
             return
         self._camera_dirty = False
@@ -1357,6 +1369,8 @@ class RobotBridge:
                     )
                     detections.append(item)
             self._detections = detections
+            if not post_frame:
+                return
 
             ok, encoded = cv2.imencode(
                 ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 78]
@@ -1391,7 +1405,13 @@ class RobotBridge:
                 0.1, min(1.0, float(value.get("detection_sensitivity", 0.55)))
             )
             self._detector.classes = value.get("detection_classes")
-            self._detector.class_floors = value.get("detection_class_floors")
+            # The CAPTURE floor, not the operator's display floor; the backend
+            # enforces the latter against stored detections. See
+            # capture_floors() in the server's config/detection.py. The
+            # fallback keeps a new adapter working against an old backend.
+            self._detector.class_floors = value.get(
+                "detection_capture_floors"
+            ) or value.get("detection_class_floors")
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 
@@ -1416,6 +1436,8 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif t == "drive":
                             bridge.drive(msg.get("linear", 0.0), msg.get("angular", 0.0))
+                        elif t == "camera_interest":
+                            bridge.camera_watched = bool(msg.get("watched", True))
                         elif t == "reset":
                             # Several seconds of blocking service calls. Run it
                             # off the loop and do not await it here, or this
@@ -1429,6 +1451,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                     last_graph = 0.0
                     last_cslam_grid = 0.0
                     last_camera = 0.0
+                    last_frame = 0.0
                     last_settings = 0.0
                     last_nav_health = 0.0
                     loop = asyncio.get_running_loop()
@@ -1485,9 +1508,20 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         if now - last_cloud > 4.0:
                             last_cloud = now
                             await loop.run_in_executor(None, bridge.upload_cloud)
-                        if now - last_camera > 0.2:
-                            last_camera = now
-                            await loop.run_in_executor(None, bridge.upload_camera)
+                        if now - last_frame > 0.2:
+                            last_frame = now
+                            # Detection runs on every frame regardless: map
+                            # markers belong to the fleet, not to whichever
+                            # camera is on screen. Only the JPEG POST waits on
+                            # someone actually watching, and even then an
+                            # unwatched robot still posts occasionally so
+                            # selecting it paints something at once.
+                            post = bridge.camera_watched or (
+                                now - last_camera > IDLE_CAMERA_PERIOD_S
+                            )
+                            if post:
+                                last_camera = now
+                            await loop.run_in_executor(None, bridge.upload_camera, post)
                             detections = bridge.take_detections()
                             if detections is not None:
                                 await ws.send(json.dumps({

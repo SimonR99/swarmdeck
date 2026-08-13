@@ -128,6 +128,14 @@ export const session = {
     if (!detectionEnabled || (selectedDetectionClasses && !selectedDetectionClasses.has(d.class))) {
       return;
     }
+    // The backend sends an entity with `hidden` set exactly when raising a
+    // floor pushed it out of view. It keeps its own copy — lowering the floor
+    // again re-sends it — so dropping it here is what makes a raised threshold
+    // clear markers that are already on the map.
+    if (d.hidden) {
+      state.detections = state.detections.filter((x) => x.id !== d.id);
+      return;
+    }
     const tracked: TrackedDetection = { ...d, received_at: Date.now() / 1000 };
     const i = state.detections.findIndex((x) => x.id === d.id);
     if (i >= 0) state.detections[i] = tracked;

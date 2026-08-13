@@ -67,3 +67,20 @@ def test_autonomous_velocity_can_only_reach_driver_through_adapter():
 def test_botman_tf_bridge_accounts_for_live_pipeline_latency():
     launch_source = BOTMAN_LAUNCH.read_text()
     assert '"use_receive_time": True' in launch_source
+
+
+def test_botman_passes_the_bunker_footprint_instead_of_the_scout_default():
+    """nav.launch.py rewrites robot_radius from launch args, default 0.422 m.
+
+    That is a Scout Mini. A Bunker launched without an override plans as a
+    42 cm disc around the lidar; the deck is then an obstacle and the only
+    recovery is reverse. The chassis rectangle has to be in the lidar frame.
+    """
+    source = BOTMAN_LAUNCH.read_text()
+    assert '"robot_radius": _BUNKER_RADIUS' in source
+    assert '"footprint": _BUNKER_FOOTPRINT' in source
+    assert "_LIDAR_X = -0.150" in source
+    # Front bumper must sit inside the polygon, not on a 0.65 m circle.
+    half_l, lidar_x = 1.023 / 2.0, -0.150
+    front = half_l - lidar_x
+    assert front > 0.65

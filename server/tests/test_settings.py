@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
-from swarmdeck_server.config.detection import DETECTION_CLASS_FLOORS, DETECTION_CLASS_NAMES
+from swarmdeck_server.config.detection import (
+    DETECTION_CLASS_FLOORS,
+    DETECTION_CLASS_NAMES,
+    floor_for,
+)
 from swarmdeck_server.config.settings import SettingsStore
 
 
@@ -143,3 +147,67 @@ def test_named_robots_are_enabled_unless_explicitly_switched_off():
     assert is_robot_enabled(settings, "aslan_0") is True
     assert is_robot_enabled(settings, "spot_0") is True
     assert disabled_robot_ids(settings) == {"botman_0"}
+
+
+def test_robot_floors_are_stored_sparsely(tmp_path):
+    """Only what the operator actually moved, for robots that exist as keys."""
+    saved = SettingsStore(tmp_path / "settings.json").save({
+        "detection_robot_floors": {
+            "spot_0": {"rubber_duck": 0.80, "not_a_class": 0.50, "disc_cone": "nope"},
+            # A robot the operator opened and changed nothing on.
+            "botman_0": {},
+            "": {"rubber_duck": 0.40},
+        }
+    })
+
+    assert saved["detection_robot_floors"] == {"spot_0": {"rubber_duck": 0.80}}
+
+
+def test_a_robot_without_an_override_keeps_following_the_fleet(tmp_path):
+    """Sparseness is the whole point of the per-robot table.
+
+    A dense copy would pin every robot to whatever the fleet read on the day
+    its row was written, so a later fleet-wide change would reach nothing.
+    """
+    store = SettingsStore(tmp_path / "settings.json")
+    saved = store.save({
+        "detection_class_floors": {"rubber_duck": 0.30},
+        "detection_robot_floors": {"spot_0": {"wooden_block": 0.90}},
+    })
+
+    assert floor_for(saved, "spot_0", "wooden_block") == 0.90
+    assert floor_for(saved, "spot_0", "rubber_duck") == 0.30
+    assert floor_for(saved, "aslan_0", "rubber_duck") == 0.30
+
+    raised = store.save({**saved, "detection_class_floors": {"rubber_duck": 0.55}})
+
+    assert floor_for(raised, "spot_0", "rubber_duck") == 0.55
+    assert floor_for(raised, "spot_0", "wooden_block") == 0.90
+
+
+def test_capture_floors_track_the_lowest_floor_anyone_asked_for(tmp_path):
+    saved = SettingsStore(tmp_path / "settings.json").save({
+        "detection_class_floors": {"rubber_duck": 0.70},
+        "detection_robot_floors": {"spot_0": {"rubber_duck": 0.10}},
+    })
+
+    # One robot wants ducks at 0.10, so the whole fleet has to capture there --
+    # a detector cannot be asked for evidence per consumer.
+    assert saved["detection_capture_floors"]["rubber_duck"] == 0.10
+    assert (
+        saved["detection_capture_floors"]["wooden_block"]
+        == DETECTION_CLASS_FLOORS["wooden_block"]
+    )
+
+
+def test_raising_every_floor_never_raises_what_is_captured(tmp_path):
+    """The band between capture and display is what makes a raise reversible.
+
+    If raising a display floor also raised the capture floor, lowering it again
+    could only be answered by frames that no longer exist.
+    """
+    saved = SettingsStore(tmp_path / "settings.json").save({
+        "detection_class_floors": {name: 0.95 for name in DETECTION_CLASS_NAMES},
+    })
+
+    assert saved["detection_capture_floors"] == DETECTION_CLASS_FLOORS

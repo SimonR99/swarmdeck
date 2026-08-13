@@ -261,3 +261,58 @@ def test_the_operator_is_told_why_markers_are_missing_but_not_flooded(bridge):
     for _ in range(20):
         bridge._depth_map_position((0.4, 0.4, 0.2, 0.2), header())
     assert bridge.node.get_logger().warn.call_count == 1
+
+
+def test_an_unwatched_camera_still_detects(sim_module, monkeypatch):
+    """Gating the upload must not gate perception.
+
+    Detection runs inside `_upload_camera_locked`, so the obvious way to make
+    camera uploads demand-driven also stops an unwatched robot contributing map
+    markers — which is the fleet's job, not the video panel's.
+    """
+    import threading
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.node = MagicMock()
+    bridge.id = "robot_0"
+    bridge.http_url = "http://backend:8080"
+    bridge._upload_lock = threading.Lock()
+    bridge._camera_dirty = True
+    bridge._detection_enabled = True
+    bridge._detections = None
+    bridge._camera_encoding_warned = False
+    bridge._depth_map_position = lambda *a, **k: {"x": 1.0, "y": 2.0}
+
+    frame = MagicMock()
+    frame.height, frame.width, frame.step = 4, 4, 12
+    frame.encoding = "bgr8"
+    frame.data = np.zeros(4 * 12, dtype=np.uint8).tobytes()
+    bridge._camera_frame = frame
+
+    class _Detection:
+        bbox = (0.0, 0.0, 1.0, 1.0)
+        polygon = ()
+        label = "rubber_duck"
+
+        def as_protocol(self, track_id):
+            return {"id": track_id, "class": "rubber_duck"}
+
+    bridge._detector = MagicMock()
+    bridge._detector.detect_bgr.return_value = [_Detection()]
+
+    posted = []
+    monkeypatch.setattr(
+        sim_module.urllib.request, "urlopen",
+        lambda *a, **k: posted.append(a) or MagicMock(),
+    )
+
+    bridge.upload_camera(post_frame=False)
+
+    assert posted == [], "an unwatched robot must not upload the JPEG"
+    detections = bridge.take_detections()
+    assert detections and detections[0]["class"] == "rubber_duck", (
+        "detection must still run for an unwatched camera"
+    )

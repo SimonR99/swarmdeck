@@ -10,9 +10,9 @@ Implement it in any language, on any OS, against any ROS version (or none).
 | Direction | Channel | Purpose |
 |---|---|---|
 | adapter → backend | `WS /adapter` | `hello`, `robot_state`, `nav_status`, `detections`, `map_meta`, `reset_done` |
-| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode`, `reset`, `body_command` |
+| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode`, `reset`, `body_command`, `camera_interest` |
 | adapter → backend | `POST /api/adapter/map` | occupancy grid, throttled ≤ 1 Hz |
-| adapter → backend | `POST /api/adapter/camera` | optional JPEG preview fallback, ≤ 5 Hz |
+| adapter → backend | `POST /api/adapter/camera` | optional JPEG preview fallback, ≤ 5 Hz, gated by `camera_interest` |
 | adapter → MediaMTX | `RTSP push :8554/<robot_id>` | H.264 camera |
 
 ## Handshake
@@ -72,6 +72,12 @@ the capability, which is what keeps the button off a hardware dashboard.
 // `id` is `<class>_<slot>`, numbered within that class. `polygon` is the
 // segmentation outline in the same normalized frame as `bbox`, and is null
 // when the model returned no mask — consumers must handle both.
+//
+// Report everything above `detection_capture_floors` from GET /api/settings —
+// NOT the operator's `detection_class_floors`. The backend applies the
+// operator's floor to its own stored entities, so an adapter that pre-filtered
+// to it would make raising a floor irreversible: the evidence needed to undo
+// the change would never have been sent. See docs/perception.md.
 { "type": "detections", "robot_id": "robot_2", "t_mono": 18251.7,
   "camera": "front",
   "items": [{"id": "disc_cone_0", "class": "disc_cone", "score": 0.91,
@@ -125,7 +131,21 @@ fresh, valid depth/TF result send `null` and the GUI shows only the video box.
 { "type": "set_mode",    "seq": 45, "mode": "teleop" }
 { "type": "reset",       "seq": 46 }
 { "type": "body_command","seq": 47, "action": "stand" }
+{ "type": "camera_interest", "watched": false }
 ```
+
+`camera_interest` is sent when the operator changes which camera is displayed,
+and once after every `hello`. Only the robot a dashboard is actually showing
+uploads at its configured `camera_period_s`; the rest fall back to roughly one
+frame every two seconds — enough that selecting a robot paints something at
+once, without four robots streaming video nobody is looking at. Measured at
+73–78 KB per frame against 0.4 KB of telemetry, that is most of a wireless
+link's budget.
+
+Two rules for implementers. **Default to watched**, so an adapter talking to a
+backend that never sends this keeps uploading — a lost message must cost
+bandwidth, never video. And **do not gate detection on it**: map markers are a
+property of the fleet, not of whichever camera happens to be on screen.
 
 `body_command.action` is one of `claim`, `release`, `sit`, `stand`. A robot
 without the `body` capability ignores it. On Spot these map onto Clearpath

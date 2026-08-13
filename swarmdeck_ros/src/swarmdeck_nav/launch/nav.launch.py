@@ -135,14 +135,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("namespace", default_value="robot_0"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("params_file", default_value=default_params),
-            # Circumscribed chassis radius, and the inflation built on it. The
-            # defaults are the smallest platform in the fleet, so a caller that
-            # forgets to pass them gets a robot that plans too tightly rather
-            # than one that refuses to plan at all.
+            # Circumscribed chassis radius, and the inflation built on it.
+            # RewrittenYaml always overwrites the YAML copies of these keys, so
+            # a caller that omits them does not "keep the YAML values" — it
+            # gets these defaults. They are the smallest platform (Scout Mini)
+            # so a forgotten override plans too tightly rather than refusing to
+            # plan. On a Bunker that is fatal in a different way: the lidar
+            # sees the deck as an obstacle and the only recovery is reverse.
+            # Hardware launches MUST pass robot_radius / footprint.
             DeclareLaunchArgument("robot_radius", default_value="0.422"),
             DeclareLaunchArgument("inflation_radius", default_value="0.70"),
-            # Chassis rectangle. Empty means "fall back to robot_radius", which
-            # is what a hardware stack passing neither will get.
+            # Chassis rectangle. Empty means "fall back to robot_radius".
             DeclareLaunchArgument("footprint", default_value="[]"),
             # Simulation keeps TF namespaced. Hardware can opt into the
             # machine-wide TF graph without duplicating this Nav2 bring-up.

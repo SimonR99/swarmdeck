@@ -278,12 +278,16 @@ export class MockFleet {
       0.16,
       0.22
     ] as [number, number, number, number];
+    const score = 0.72 + Math.random() * 0.26;
     this.emit({
       type: 'detection',
       detection: {
         id: `${cls}_${++this.detectionSeq}`,
         class: cls,
-        score: 0.72 + Math.random() * 0.26,
+        score,
+        // The mock emits each sighting once, so there is no earlier evidence
+        // for this to exceed.
+        best_score: score,
         robot_id: r.id,
         camera: 'front',
         bbox: [bx, by, bw, bh],

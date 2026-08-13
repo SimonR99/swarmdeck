@@ -359,8 +359,8 @@ Measured with a timestamp burned into the frame and read back from a screen capt
 normalized adapter-protocol detections. It imports neither ROS nor Gazebo and never reads
 simulation entity names, positions, segmentation buffers, or ground truth. It sends the
 throttled JPEG to the local `yoloe_server.py` sidecar, which runs YOLOE-26n-seg over the
-prompts in `adapters/perception/catalog.py`. Confidence follows the existing sensitivity
-setting and overlapping proposals are suppressed before publication.
+prompts in `adapters/perception/catalog.py`. Overlapping proposals are suppressed before
+publication.
 
 The catalog is the single description of what the fleet can recognise — five classes
 today (rubber duck, wooden block, disc cone, filament spool, pool noodle), each with the
@@ -368,6 +368,14 @@ prompt wording and score floor measured against the reference photographs in `im
 Operators pick a subset from the dashboard; the choice rides on the detect request, so
 narrowing it takes effect on the next frame without restarting the sidecar. See
 [perception.md](perception.md) for the calibration and how to add a class.
+
+Score thresholds split in two. The sidecar enforces only the *capture* floor — what the
+model may report at all. The operator's floor is a *display* floor, held in settings and
+enforced by the backend against its own stored detections, per class and optionally per
+robot. That is what makes a saved threshold immediate (no robot round trip), retroactive
+(markers already on the map are re-judged) and reversible (entities are hidden, not
+deleted, and robots keep capturing below the floor so the change can be undone from
+cache). See [perception.md](perception.md#capture-floor-vs-display-floor).
 
 Because the model segments rather than merely boxes, each detection also carries an
 outline. That outline is what makes the depth reading below trustworthy: a pool noodle

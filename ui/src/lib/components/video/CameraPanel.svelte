@@ -29,7 +29,9 @@
   let activeFrame = $state<0 | 1>(0);
   let fallbackGeneration = 0;
   let streamSource = $state<'webrtc' | 'jpeg' | null>(null);
-  let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
+  let streamState = $state<'idle' | 'connecting' | 'live' | 'stale' | 'unavailable'>('idle');
+  /** Age of the newest JPEG the backend holds, from `X-Frame-Age-Ms`. */
+  let frameAgeMs = $state(0);
   let mediaAspect = $state(16 / 9);
 
   // Back off between WHEP attempts. Not every robot publishes RTSP -- the
@@ -46,6 +48,15 @@
   // Consecutive failed JPEG fetches before the panel admits it. One dropped
   // frame is normal on a remote link; a run of them is not a live picture.
   const FALLBACK_FAILURES_BEFORE_UNAVAILABLE = 3;
+  /**
+   * Past this, the backend's newest frame stops being "live video".
+   *
+   * The poll succeeds no matter how old the frame behind it is, so without an
+   * age check a robot on a congested link shows a frozen picture under a green
+   * Live badge — measured at 15 s on botman_0 while the badge read Live. Two
+   * seconds is comfortably above the ~0.6 s p95 a healthy link produces.
+   */
+  const FRAME_STALE_MS = 2000;
 
   const activeId = $derived(fleet.activeCamera);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
@@ -197,6 +208,10 @@
           { cache: 'no-store' }
         );
         if (!response.ok) throw new Error(`camera ${response.status}`);
+        // The request succeeding says the backend answered, not that the robot
+        // is still sending. Only this header distinguishes live video from the
+        // last frame before a link went bad.
+        frameAgeMs = Number(response.headers.get('X-Frame-Age-Ms') ?? 0);
         const objectUrl = URL.createObjectURL(await response.blob());
         const nextFrame: 0 | 1 = activeFrame === 0 ? 1 : 0;
         await tick();
@@ -224,7 +239,7 @@
         }
         activeFrame = nextFrame;
         fallbackFailures = 0;
-        streamState = 'live';
+        streamState = frameAgeMs > FRAME_STALE_MS ? 'stale' : 'live';
       } catch {
         // Report a stall even once the panel has gone live. Leaving the badge
         // on "Live" because it was live a moment ago is the one thing a camera
@@ -285,8 +300,16 @@
     if (!id || !untrack(() => fleet.can(id, 'camera'))) {
       streamState = 'idle';
       teardown();
+      // Releases the previous robot so it drops back to its idle rate. Without
+      // this an operator who closes the panel leaves it uploading full-rate.
+      untrack(() => actions.switchCamera(''));
       return;
     }
+    // Announce interest on every change, not just on an explicit click: the
+    // panel also arrives here on first mount and whenever the fleet store picks
+    // a robot for us, and a robot nobody has told the backend about stays on
+    // its 2 s idle rate while it is being watched.
+    untrack(() => actions.switchCamera(id));
     untrack(() => connectWhep(id));
     return () => untrack(teardown);
   });
@@ -306,6 +329,10 @@
       <Badge tone="ok">Live {streamSource === 'jpeg' ? 'preview' : ''}</Badge>
     {:else if streamState === 'connecting'}
       <Badge tone="accent">…</Badge>
+    {:else if streamState === 'stale'}
+      <!-- The age, not just the word: 3 s of congestion and a robot that
+           stopped sending an hour ago look identical without it. -->
+      <Badge tone="warn">STALE {(frameAgeMs / 1000).toFixed(frameAgeMs < 10000 ? 1 : 0)}s</Badge>
     {:else if streamState === 'unavailable'}
       <Badge tone="warn">NO SIGNAL</Badge>
     {/if}
@@ -344,7 +371,20 @@
       />
     {/if}
 
-    {#if streamState !== 'live'}
+    {#if streamState === 'stale'}
+      <!-- Scrim, not a cover. The last frame is still the best picture of the
+           room we have and hiding it throws that away; what it must not do is
+           pass for live, so it is dimmed and captioned with its own age. -->
+      <div class="pointer-events-none absolute inset-0 z-40 grid place-items-center bg-black/45">
+        <div class="flex flex-col items-center gap-1.5 text-warn">
+          <VideoOff class="h-5 w-5" />
+          <span class="text-[10px] font-semibold">
+            Frozen {(frameAgeMs / 1000).toFixed(frameAgeMs < 10000 ? 1 : 0)}s ago
+          </span>
+          <span class="text-[9px] text-fg-dim">Link congested — not live</span>
+        </div>
+      </div>
+    {:else if streamState !== 'live'}
       <div class="absolute inset-0 z-40 grid place-items-center bg-surface-2">
         <div class="flex flex-col items-center gap-2 text-fg-dim">
           <div class="grid h-10 w-10 place-items-center rounded-[4px] border border-border bg-surface">

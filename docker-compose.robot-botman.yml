@@ -212,17 +212,26 @@ services:
         condition: service_started
     network_mode: host
     ipc: host
+    volumes:
+      # Adapter source comes off the mount, not out of the image. The image is
+      # still what supplies the DEPENDENCIES (rclpy, cv2, websockets); this only
+      # replaces our own Python, which is the same arrangement aslan and spot
+      # already use. Without it a one-line adapter change needs a multi-minute
+      # `up -d --build` on the robot, so botman -- the machine on the worst link
+      # and therefore the one most often needing a fix -- was always the slowest
+      # to update. `scripts/deploy botman` now rsyncs and restarts, ~10 s.
+      - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
-      - /app/adapters/adapter_ros2/adapter_ros2.py
+      - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py
       - --robot-id
       - botman_0
       - --config
-      - /app/adapters/adapter_ros2/config/bunker.yaml
+      - /app/swarmdeck/adapters/adapter_ros2/config/bunker.yaml
       - --host
       - "${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}"
       - --port
@@ -256,12 +265,16 @@ services:
         condition: service_started
     network_mode: host
     ipc: host
+    volumes:
+      # Same reasoning as the adapter above: our source off the mount, the
+      # image's job is the dependencies (ffmpeg, cv_bridge).
+      - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
     command:
       - python3
-      - /app/adapters/media/ros2_rtsp.py
+      - /app/swarmdeck/adapters/media/ros2_rtsp.py
       - --robot-id
       - botman_0
       - --topic

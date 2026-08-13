@@ -45,6 +45,10 @@
              IS computed correctly toward our goal this way, it just needs a
              speed source that isn't a joystick - see fleet-status.md. -->
         <arg name="autonomyMode" value="false"/>
+        <!-- MIST default is 0.9 x 0.9. 10% larger so door/jamb clearance
+             matches the physical Scout better than the URDF box. -->
+        <arg name="vehicleLength" value="0.99"/>
+        <arg name="vehicleWidth" value="0.99"/>
     </include>
 
     <include file="$(find loam_interface)/launch/loam_interface.launch">

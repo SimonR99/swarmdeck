@@ -70,12 +70,15 @@ services:
       - bash
       - -c
       - >-
+        . /workspace/install/setup.bash &&
         . /aslan_overlay/setup.bash &&
         ros2 launch
         /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
         start_base:=false
         start_lidar:=false
         start_slam:=true
+        start_imu:=true
+        imu_topic:=/vectornav/imu
 
   # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
   # Same host-side bridge Aslan already runs as swarmdeck-aslan-odom-tf.

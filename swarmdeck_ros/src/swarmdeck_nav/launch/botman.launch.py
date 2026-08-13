@@ -7,6 +7,28 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
+# Chassis in the *lidar* frame. robot_base_frame is os_lidar, and the live TF
+# tree has no os_lidar -> base_link edge, so a circle around the lidar is the
+# wrong shape: the Ouster sits on the rear deck (sim bunker lidar_x = -0.15 m)
+# and the front bumper is then 0.66 m ahead — outside the 0.65 m radius that
+# circumscribes the chassis *centre*. Those deck returns become obstacles,
+# DWB cannot go forward, and the BT's only remaining motion is BackUp.
+#
+# nav.launch.py's RewrittenYaml always overwrites robot_radius / footprint /
+# inflation_radius. Omitting them here silently installs the Scout-sized
+# 0.422 m default, which is how this stack ended up reverse-only.
+_BUNKER_HALF_L = 1.023 / 2.0
+_BUNKER_HALF_W = 0.778 / 2.0
+_LIDAR_X = -0.150
+_FRONT = _BUNKER_HALF_L - _LIDAR_X
+_REAR = -_BUNKER_HALF_L - _LIDAR_X
+_BUNKER_FOOTPRINT = (
+    f"[[{_FRONT:.3f},{_BUNKER_HALF_W:.3f}],[{_FRONT:.3f},{-_BUNKER_HALF_W:.3f}],"
+    f"[{_REAR:.3f},{-_BUNKER_HALF_W:.3f}],[{_REAR:.3f},{_BUNKER_HALF_W:.3f}]]"
+)
+# Circumscribed from the lidar, used only if the polygon fails to parse.
+_BUNKER_RADIUS = f"{(_FRONT ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+
 
 def generate_launch_description() -> LaunchDescription:
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -46,6 +68,9 @@ def generate_launch_description() -> LaunchDescription:
             # graph. The Nav2 nodes remain namespaced to avoid name collisions.
             "tf_topic": "/tf",
             "tf_static_topic": "/tf_static",
+            "robot_radius": _BUNKER_RADIUS,
+            "inflation_radius": "0.90",
+            "footprint": _BUNKER_FOOTPRINT,
             # Nav2 never writes the Bunker driver's /cmd_vel directly. The
             # hardware adapter relays this final output only for an active goal.
             "controller_cmd_vel_topic": "cmd_vel_nav_raw",

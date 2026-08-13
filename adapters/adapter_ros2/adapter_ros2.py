@@ -86,6 +86,11 @@ MAP_CLOUD_SCALE = 0.01
 MAP_CLOUD_VOXEL = 0.05
 MAP_CLOUD_3D_VOXEL = 0.10
 
+#: Camera period for a robot no dashboard is showing. Not zero: switching to a
+#: robot should paint something immediately, and one frame every two seconds is
+#: ~2% of the airtime the full rate costs (measured 73 KB/frame at 5 Hz).
+IDLE_CAMERA_PERIOD_S = 2.0
+
 # The detector needs OpenCV and the inference sidecar's client; a robot image
 # built without them still runs, just without perception.
 try:
@@ -328,6 +333,11 @@ class HardwareBridge:
                     perception.get("detector_url") or None,
                     classes=perception.get("classes"),
                 )
+        # Whether any dashboard currently shows this robot's camera. Defaults to
+        # True and is only ever lowered by the backend: an adapter talking to a
+        # backend that never sends `camera_interest` must keep uploading, so a
+        # lost or unsupported message costs bandwidth and never video.
+        self.camera_watched = True
         self._detection_period_s = max(0.05, float(perception.get("period_s", 0.2)))
         self._last_detection_at = 0.0
         self._detections: list[dict] | None = None
@@ -839,7 +849,16 @@ class HardwareBridge:
                 # not at the next restart: the batch is rebuilt every frame, so
                 # a narrowed list clears their boxes on the following one.
                 self._detector.classes = settings.get("detection_classes")
-                self._detector.class_floors = settings.get("detection_class_floors")
+                # The CAPTURE floor, not the operator's display floor. The
+                # backend hides what sits below the latter, so the band between
+                # the two keeps arriving and a floor the operator lowers again
+                # is answered from cache instead of from frames that no longer
+                # exist. See capture_floors() in server config/detection.py.
+                # The fallback keeps a new adapter working against an old
+                # backend, which serves display floors under the old key.
+                self._detector.class_floors = settings.get(
+                    "detection_capture_floors"
+                ) or settings.get("detection_class_floors")
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
 
@@ -1455,6 +1474,8 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif kind == "set_mode":
                             bridge.mode = msg.get("mode", bridge.mode)
+                        elif kind == "camera_interest":
+                            bridge.camera_watched = bool(msg.get("watched", True))
                         elif kind == "body_command":
                             await asyncio.get_running_loop().run_in_executor(
                                 None, bridge.body_command, msg.get("action", "")
@@ -1546,10 +1567,16 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     tick = 1.0 / float(rates["state_hz"])
                     loop = asyncio.get_running_loop()
                     last_cam = 0.0
+                    last_detect = 0.0
                     while True:
                         now = time.monotonic()
-                        if now - last_cam > float(rates["camera_period_s"]):
-                            await loop.run_in_executor(None, bridge.upload_camera)
+
+                        # Detection runs at the configured rate no matter who is
+                        # watching: map markers are a property of the fleet, not
+                        # of whichever camera happens to be on screen. It is the
+                        # 73 KB JPEG below that is worth withholding, not the
+                        # few hundred bytes of detections.
+                        if now - last_detect > float(rates["camera_period_s"]):
                             await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
                             if detections is not None:
@@ -1560,7 +1587,20 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                                     "camera": "front",
                                     "items": detections,
                                 })
+                            last_detect = time.monotonic()
+
+                        # Unwatched robots idle rather than stop, so selecting
+                        # one shows a slightly stale picture at once instead of
+                        # a black panel for a round trip.
+                        camera_period = (
+                            float(rates["camera_period_s"])
+                            if bridge.camera_watched
+                            else IDLE_CAMERA_PERIOD_S
+                        )
+                        if now - last_cam > camera_period:
+                            await loop.run_in_executor(None, bridge.upload_camera)
                             last_cam = time.monotonic()
+
                         await asyncio.sleep(tick)
 
                 # Not `gather`: it leaves the siblings of a failed coroutine

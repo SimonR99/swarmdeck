@@ -1,0 +1,32 @@
+%YAML:1.0
+
+# SuperOdom lidar <-> IMU extrinsics for Aslan's VN-100T-CR.
+# Unmeasured. Identity / zero is the honest default until someone records
+# os_lidar -> vectornav. Do NOT copy os1_128_calibration.yaml: that lever arm
+# is the Ouster's internal IMU, a centimetre-scale offset that does not apply
+# to a separately mounted VN-100. Wrong rotation is what used to reset
+# preintegration on "Large bias" every half second.
+
+# Rotation from laser frame to imu frame, imu^R_laser
+extrinsicRotation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [1., 0., 0.,
+        0., 1., 0.,
+        0., 0., 1.]
+
+# Translation from laser frame to imu frame, imu^T_laser
+extrinsicTranslation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+imu_laser_rotation_offset: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+yaw_ratio: 0.0

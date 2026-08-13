@@ -58,13 +58,48 @@ The five objects are not equally easy, and the spread is nearly 3x:
 
 A single global threshold set for blocks would never see a spool; one set for spools
 would flood the map with anything vaguely block-shaped. So each class carries the floor
-its own evidence supports. The dashboard's sensitivity slider scales all of them
-together, and 0.55 — the default — is the point where each class sits exactly on its
-calibrated floor, which is the behaviour the control had when there was only one class.
+its own evidence supports.
 
 `filament_spool` is the one real trade-off in the table. Its floor sits as low as it can
 without labelling every dark desk object a spool, and it is the class most likely to need
 revisiting from field frames.
+
+## Capture floor vs. display floor
+
+One number used to answer two unrelated questions, which is why an operator who raised a
+threshold went on seeing low-confidence detections. They are now separate:
+
+| | Capture floor | Display floor |
+|---|---|---|
+| Question | What may the model report at all? | What does the operator count as real? |
+| Lives in | `catalog.py`, sent to the sidecar per request | `settings.json`, enforced by the backend |
+| Changes when | prompts are re-measured | an operator drags a slider |
+| Scope | fleet-wide (one model, one answer) | fleet default, overridable per robot |
+
+The sidecar enforces only the capture floor. The backend enforces the display floor
+against its own stored detections, in `reapply_detection_floors()`, on every settings
+save. Three things follow, and all three were broken before the split:
+
+- **Immediate.** A saved floor is a pass over a dict on the backend. No robot is
+  involved, so there is no settings-poll delay and no way for one robot to be enforcing
+  last week's threshold while the rest of the fleet has moved on.
+- **Retroactive.** Raising a floor hides markers already on the map, rather than only
+  affecting objects detected from that moment on.
+- **Reversible.** Entities are hidden, not deleted, and robots deliberately keep
+  capturing below the display floor — so lowering a floor again is answered from cache.
+
+`capture_floors()` derives what the robots are actually asked for: the *lowest* floor
+anyone wants, per class. Raising a display floor therefore never changes it. Lowering one
+*below* the catalog floor does, and that is the single case that still has to reach the
+robots and still cannot be retroactive — those frames were never inferred on.
+
+Visibility is judged on `best_score`, the strongest score an entity ever produced, not
+its newest one. A model's confidence in a stationary object wanders by a few points frame
+to frame, and filtering on the live score makes a marker sitting near its floor blink.
+
+`detection_sensitivity` is vestigial. The sidecar ignores the `X-SwarmDeck-Confidence`
+header for any class that arrives with an explicit floor, and capture floors now cover
+every catalog class, so the setting is carried for compatibility and decides nothing.
 
 ## Segmentation, and why it is not cosmetic
 

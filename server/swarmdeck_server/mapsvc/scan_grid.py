@@ -57,6 +57,13 @@ MISS_GAIN = 1
 EVIDENCE_CLAMP = 12  # bounds how stubborn any cell can get, both ways
 OCCUPIED_AT = 2      # one hit (+3) is immediately occupied
 FREE_AT = -1         # one pass-through clears, as before — see above
+# Unobserved free space fades toward unknown. Occupied does not: walls are the
+# map, and a 360° lidar re-confirms every currently visible cell every scan, so
+# this only touches cells no current ray crossed — the offset white rectangle
+# a loop closure left behind, or a room painted before the pose jumped.
+# A fully clamped cell (-12) takes EVIDENCE_CLAMP / FREE_DECAY scans to vanish;
+# a cell that a sparse far beam only hits every other scan stays free.
+FREE_DECAY = 4
 
 
 # A return standing far BEHIND its angular neighbours is almost always a stray:
@@ -200,12 +207,23 @@ class ScanGridAccumulator:
 
         evidence = self._evidence
         n_cells = evidence.size
+        touched = np.zeros(n_cells, dtype=bool)
         if crossed:
-            misses = np.bincount(np.concatenate(crossed), minlength=n_cells)
+            crossed_idx = np.concatenate(crossed)
+            misses = np.bincount(crossed_idx, minlength=n_cells)
             evidence -= (misses * MISS_GAIN).reshape(evidence.shape).astype(np.int32)
-        struck = np.bincount(np.asarray(hits, dtype=np.int64), minlength=n_cells)
+            touched[crossed_idx] = True
+        hit_idx = np.asarray(hits, dtype=np.int64)
+        struck = np.bincount(hit_idx, minlength=n_cells)
         evidence += (struck * HIT_GAIN).reshape(evidence.shape).astype(np.int32)
+        touched[hit_idx] = True
         np.clip(evidence, -EVIDENCE_CLAMP, EVIDENCE_CLAMP, out=evidence)
+
+        # Free cells this scan did not observe decay toward unknown. See FREE_DECAY.
+        fading = (evidence.reshape(-1) < 0) & ~touched
+        if fading.any():
+            flat = evidence.reshape(-1)
+            flat[fading] = np.minimum(0, flat[fading] + FREE_DECAY)
 
         self.cells = np.where(
             evidence >= OCCUPIED_AT,

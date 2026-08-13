@@ -644,6 +644,10 @@ def _link_bridge(mod, hooks):
         )
         id = "r0"
         t0 = 0.0
+        # Part of the surface since camera uploads became demand-driven: an
+        # adapter defaults to "watched" so a backend that never sends
+        # `camera_interest` keeps uploading.
+        camera_watched = True
 
         def __init__(self):
             self.node = MagicMock()
@@ -749,3 +753,65 @@ def test_a_blocking_upload_does_not_stall_the_state_pump(mod, monkeypatch):
         f"state stopped while an upload was in flight ({during - before} frames "
         "sent during a 0.4 s block) — uploads are gating telemetry again"
     )
+
+
+def _settings_response(mod, monkeypatch, settings: dict):
+    """Serve one /api/settings body to refresh_settings()."""
+    import contextlib
+    import json
+
+    @contextlib.contextmanager
+    def urlopen(_url, timeout=None):
+        class Response:
+            def read(self):
+                return json.dumps({"settings": settings}).encode()
+
+        yield Response()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", urlopen)
+
+
+def test_refresh_settings_takes_the_capture_floor_not_the_display_floor(mod, monkeypatch):
+    """The sidecar must keep returning what the operator is currently hiding.
+
+    The backend enforces the display floor against stored detections, so the
+    robot has to go on capturing below it — that band is what lets an operator
+    lower a floor again and see the markers come back, instead of waiting for
+    the object to be driven past a second time.
+    """
+    bridge = _bridge(mod)
+    bridge.http_url = "http://backend:8080"
+    bridge._detection_enabled = True
+    bridge._detector = mod.ObjectDetector()
+    _settings_response(mod, monkeypatch, {
+        "detection_enabled": True,
+        "detection_classes": ["rubber_duck"],
+        "detection_class_floors": {"rubber_duck": 0.80},
+        # Deliberately not the catalog default: refresh_settings swallows its
+        # own errors, so a floor that matched the constructor's would let this
+        # pass without the request ever having succeeded.
+        "detection_capture_floors": {"rubber_duck": 0.15},
+    })
+
+    bridge.refresh_settings()
+
+    bridge.node.get_logger().warn.assert_not_called()
+    assert bridge._detector.class_floors["rubber_duck"] == 0.15
+
+
+def test_refresh_settings_falls_back_when_the_backend_is_older(mod, monkeypatch):
+    """A new adapter against a backend that only serves display floors."""
+    bridge = _bridge(mod)
+    bridge.http_url = "http://backend:8080"
+    bridge._detection_enabled = True
+    bridge._detector = mod.ObjectDetector()
+    _settings_response(mod, monkeypatch, {
+        "detection_enabled": True,
+        "detection_classes": ["rubber_duck"],
+        "detection_class_floors": {"rubber_duck": 0.80},
+    })
+
+    bridge.refresh_settings()
+
+    bridge.node.get_logger().warn.assert_not_called()
+    assert bridge._detector.class_floors["rubber_duck"] == 0.80

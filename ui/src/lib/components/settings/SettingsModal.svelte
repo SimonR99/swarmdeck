@@ -22,9 +22,16 @@
       detection_class_floors: {
         ...catalogFloors(),
         ...(value.detection_class_floors ?? {})
-      }
+      },
+      detection_robot_floors: { ...(value.detection_robot_floors ?? {}) }
     };
   }
+
+  // Which floors the sliders edit: '' is the fleet default, anything else is
+  // one robot's override of it. Overrides stay sparse on purpose — a robot
+  // that currently agrees with the fleet keeps following later fleet changes
+  // instead of being frozen at today's value.
+  let floorScope = $state('');
 
   function toggleClass(name: string) {
     const next = draft.detection_classes.includes(name)
@@ -38,19 +45,47 @@
 
   function setFloor(name: string, value: number) {
     const bounded = Math.max(0.05, Math.min(0.95, value));
-    draft.detection_class_floors = {
-      ...draft.detection_class_floors,
-      [name]: bounded
+    if (!floorScope) {
+      draft.detection_class_floors = {
+        ...draft.detection_class_floors,
+        [name]: bounded
+      };
+      return;
+    }
+    draft.detection_robot_floors = {
+      ...draft.detection_robot_floors,
+      [floorScope]: { ...(draft.detection_robot_floors[floorScope] ?? {}), [name]: bounded }
     };
   }
 
+  /**
+   * Fleet scope returns a class to its catalog floor; robot scope drops the
+   * override entirely so the robot rejoins the fleet value, rather than
+   * pinning it to whatever the fleet happens to read right now.
+   */
   function resetFloor(name: string) {
-    const catalog = detectionCatalog.classes.find((target) => target.name === name);
-    setFloor(name, catalog?.min_score ?? 0.25);
+    if (!floorScope) {
+      const catalog = detectionCatalog.classes.find((target) => target.name === name);
+      setFloor(name, catalog?.min_score ?? 0.25);
+      return;
+    }
+    const { [name]: _dropped, ...rest } = draft.detection_robot_floors[floorScope] ?? {};
+    const next = { ...draft.detection_robot_floors };
+    if (Object.keys(rest).length) next[floorScope] = rest;
+    else delete next[floorScope];
+    draft.detection_robot_floors = next;
+  }
+
+  function fleetFloorOf(name: string): number {
+    return draft.detection_class_floors[name] ?? 0.25;
+  }
+
+  function overrideOf(name: string): number | undefined {
+    return floorScope ? draft.detection_robot_floors[floorScope]?.[name] : undefined;
   }
 
   function floorOf(name: string): number {
-    return draft.detection_class_floors[name] ?? 0.25;
+    return overrideOf(name) ?? fleetFloorOf(name);
   }
 
   function resizeRobots(count: number) {
@@ -81,6 +116,7 @@
   $effect(() => {
     if (open && !wasOpen) {
       draft = withCatalogFloors(structuredClone($state.snapshot(settings.value)));
+      floorScope = '';
       error = '';
     }
     wasOpen = open;
@@ -179,8 +215,51 @@
         </div>
         <p class="mt-2 text-[10px] text-fg-dim">
           Raise a class until false positives disappear. The % on a camera box
-          is the model's confidence for that detection.
+          is the model's confidence for that detection. Changes apply the moment
+          you save, to markers already on the map as well as new ones.
         </p>
+
+        {#if detectionCatalog.classes.length}
+          <div class="mt-3 flex flex-wrap items-center gap-1.5">
+            <span class="mr-0.5 text-[9px] font-medium text-fg-muted">Applies to</span>
+            <button
+              class="h-6 rounded-full border px-2 text-[9px] font-semibold
+                     {floorScope === ''
+                       ? 'border-accent bg-accent/8 text-accent'
+                       : 'border-border text-fg-dim hover:text-fg'}"
+              disabled={!draft.detection_enabled}
+              onclick={() => (floorScope = '')}
+            >
+              All robots
+            </button>
+            {#each draft.robots.slice(0, draft.robot_count) as robot (robot.id)}
+              {@const overrides = Object.keys(draft.detection_robot_floors[robot.id] ?? {}).length}
+              <button
+                class="flex h-6 items-center gap-1 rounded-full border px-2 text-[9px] font-semibold
+                       {floorScope === robot.id
+                         ? 'border-accent bg-accent/8 text-accent'
+                         : 'border-border text-fg-dim hover:text-fg'}"
+                disabled={!draft.detection_enabled}
+                onclick={() => (floorScope = robot.id)}
+              >
+                <span
+                  class="h-1.5 w-1.5 rounded-full"
+                  style="background:{colorForRobot(robot.id, 0, robot.color)}"
+                ></span>
+                {robot.id}
+                {#if overrides}<span class="text-accent">{overrides}</span>{/if}
+              </button>
+            {/each}
+          </div>
+          <p class="mt-1.5 text-[10px] text-fg-dim">
+            {#if floorScope}
+              Sliders below override <span class="text-fg-muted">{floorScope}</span> only. Classes
+              you leave alone keep following the fleet value, including later changes to it.
+            {:else}
+              Sliders below set the fleet value. Robots with their own override are unaffected.
+            {/if}
+          </p>
+        {/if}
 
         {#if detectionCatalog.classes.length}
           <div class="mt-3 space-y-2">
@@ -208,16 +287,23 @@
                     {target.label}
                   </button>
                   <div class="flex items-center gap-2">
-                    {#if Math.abs(floor - catalogFloor) > 0.005}
+                    {#if floorScope ? overrideOf(target.name) !== undefined : Math.abs(floor - catalogFloor) > 0.005}
                       <button
                         class="text-[9px] text-fg-dim hover:text-fg"
                         disabled={!draft.detection_enabled}
                         onclick={() => resetFloor(target.name)}
                       >
-                        reset {Math.round(catalogFloor * 100)}%
+                        {#if floorScope}
+                          match fleet {Math.round(fleetFloorOf(target.name) * 100)}%
+                        {:else}
+                          reset {Math.round(catalogFloor * 100)}%
+                        {/if}
                       </button>
                     {/if}
-                    <span class="w-8 text-right text-[10px] tabular text-fg-muted">
+                    <span
+                      class="w-8 text-right text-[10px] tabular
+                             {overrideOf(target.name) !== undefined ? 'text-accent' : 'text-fg-muted'}"
+                    >
                       {Math.round(floor * 100)}%
                     </span>
                   </div>

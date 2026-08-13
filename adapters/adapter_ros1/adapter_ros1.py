@@ -863,7 +863,13 @@ class HardwareBridge:
                 # not at the next restart: the batch is rebuilt every frame, so
                 # a narrowed list clears their boxes on the following one.
                 self._detector.classes = settings.get("detection_classes")
-                self._detector.class_floors = settings.get("detection_class_floors")
+                # The CAPTURE floor, not the operator's display floor; the
+                # backend enforces the latter against stored detections. See
+                # capture_floors() in the server's config/detection.py. The
+                # fallback keeps a new adapter working against an old backend.
+                self._detector.class_floors = settings.get(
+                    "detection_capture_floors"
+                ) or settings.get("detection_class_floors")
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] settings refresh failed: {exc}")
 

@@ -7,6 +7,19 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
+# Keep in step with botman.launch.py — both Bunkers share this Nav2 YAML, and
+# nav.launch.py overwrites robot_radius/footprint unless these are passed.
+_BUNKER_HALF_L = 1.023 / 2.0
+_BUNKER_HALF_W = 0.778 / 2.0
+_LIDAR_X = -0.150
+_FRONT = _BUNKER_HALF_L - _LIDAR_X
+_REAR = -_BUNKER_HALF_L - _LIDAR_X
+_BUNKER_FOOTPRINT = (
+    f"[[{_FRONT:.3f},{_BUNKER_HALF_W:.3f}],[{_FRONT:.3f},{-_BUNKER_HALF_W:.3f}],"
+    f"[{_REAR:.3f},{-_BUNKER_HALF_W:.3f}],[{_REAR:.3f},{_BUNKER_HALF_W:.3f}]]"
+)
+_BUNKER_RADIUS = f"{(_FRONT ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+
 
 def generate_launch_description() -> LaunchDescription:
     use_sim_time = LaunchConfiguration("use_sim_time")
@@ -43,6 +56,9 @@ def generate_launch_description() -> LaunchDescription:
             ),
             "tf_topic": "/tf",
             "tf_static_topic": "/tf_static",
+            "robot_radius": _BUNKER_RADIUS,
+            "inflation_radius": "0.90",
+            "footprint": _BUNKER_FOOTPRINT,
             "controller_cmd_vel_topic": "cmd_vel_nav_raw",
             "output_cmd_vel_topic": "cmd_vel_nav",
         }.items(),

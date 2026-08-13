@@ -10,7 +10,8 @@ were missing from the existing install are built into
 
 | Purpose | Interface |
 |---|---|
-| lidar / IMU | `/ouster/points`, `/ouster/imu` |
+| lidar | `/ouster/points` |
+| IMU | `/vectornav/imu` (VN-100T-CR on `/dev/vectornav`) |
 | SLAM pose | `/laser_odometry` (`map` -> `os_lidar`) |
 | registered 3D scan | `/registered_scan` |
 | camera | `/oak/rgb/image_raw/compressed` (OAK-D, `oak_camera` service) |
@@ -19,6 +20,12 @@ were missing from the existing install are built into
 | Nav2 action | `/aslan_0/navigate_to_pose` |
 | isolated Nav2 velocity | `/aslan_0/cmd_vel_nav` |
 | physical driver velocity | `/cmd_vel`, relayed only by the adapter |
+
+SuperOdometry fuses the VN-100 at 100 Hz (`start_imu:=true`). The Ouster IMU
+on `/ouster/imu` is still published but is not the SuperOdom input: identity
+extrinsics against that sensor reset preintegration on "Large bias" and jumped
+the map. Lidar–VN extrinsics are unmeasured (`aslan_superodom_calibration.yaml`
+is identity); a real `os_lidar` → `vectornav` measurement should replace it.
 
 The adapter height-filters `/registered_scan` for the server-side 2D map and
 also uploads a reduced XYZ cloud for the 3D view. Nav2 uses live Ouster scans

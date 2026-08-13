@@ -56,6 +56,18 @@ export interface Detection {
   id: string;
   class: string;
   score: number;
+  /**
+   * Strongest score this entity has ever produced. The backend judges the
+   * operator's floor against this rather than `score`, so a marker sitting
+   * near its floor does not blink as the model's confidence wanders.
+   */
+  best_score: number;
+  /**
+   * Below the operator's floor for this robot and class. The backend only
+   * sends these on the transition, so that raising a floor can retract
+   * markers already on the map and lowering it can bring them back.
+   */
+  hidden?: boolean;
   robot_id: string;
   camera: string;
   bbox: [number, number, number, number] | null;
@@ -180,8 +192,24 @@ export interface AppSettings {
   detection_sensitivity: number;
   /** Catalog class names the detector should look for. */
   detection_classes: string[];
-  /** Per-class minimum model score. Defaults to each class's catalog floor. */
+  /**
+   * Fleet-wide per-class minimum model score, defaulting to each class's
+   * catalog floor. Enforced by the backend against stored detections, so a
+   * change here applies immediately and retroactively rather than waiting for
+   * the robots to notice.
+   */
   detection_class_floors: Record<string, number>;
+  /**
+   * Sparse per-robot overrides of the above, keyed by robot id then class.
+   * A robot with no entry follows the fleet value, including later changes
+   * to it — so only classes an operator actually moved are stored.
+   */
+  detection_robot_floors: Record<string, Record<string, number>>;
+  /**
+   * Derived by the backend, never set here: the lowest floor any robot needs,
+   * which is what the detectors actually capture at. Read-only for the UI.
+   */
+  detection_capture_floors: Record<string, number>;
   robots: RobotConnectionSettings[];
 }
 

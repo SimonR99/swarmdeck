@@ -10,7 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from swarmdeck_server.mapsvc.scan_grid import FREE, OCCUPIED, UNKNOWN, ScanGridAccumulator
+from swarmdeck_server.mapsvc.scan_grid import (
+    EVIDENCE_CLAMP,
+    FREE,
+    FREE_DECAY,
+    OCCUPIED,
+    UNKNOWN,
+    ScanGridAccumulator,
+)
 from swarmdeck_server.mapsvc.service import MapService
 
 
@@ -73,6 +80,42 @@ def test_a_ghost_can_be_cleared_by_driving_through_it():
         acc.integrate(0.0, 0.0, np.array([[2.0, 0.0]], dtype=np.float32))
 
     assert acc.cells[gy, gx] == FREE, "a ghost must not outlive the evidence for it"
+
+
+def test_unobserved_free_space_fades_and_occupied_does_not():
+    """Historical white must not outlive the pose that painted it.
+
+    The accumulator cannot move old rays when SuperOdom / LIO-SAM loop-closes,
+    so a room mapped before the jump stays as a white rectangle at the old
+    coordinates. Occupied cells are the map and stay; free cells that no
+    current beam crosses decay back to unknown.
+    """
+    acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)
+    # Paint a short beam at +x, then clamp its free evidence.
+    for _ in range(EVIDENCE_CLAMP):
+        acc.integrate(0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
+    mx, my = acc._to_cell(0.5, 0.0)
+    hx, hy = acc._to_cell(1.0, 0.0)
+    assert acc.cells[my, mx] == FREE
+    assert acc.cells[hy, hx] == OCCUPIED
+
+    scans_to_fade = int(np.ceil(EVIDENCE_CLAMP / FREE_DECAY))
+    for _ in range(scans_to_fade):
+        # Beams the other way: they do not cross the old +x cells.
+        acc.integrate(0.0, 0.0, np.array([[0.0, 1.0]], dtype=np.float32))
+
+    assert acc.cells[my, mx] == UNKNOWN, "unobserved free space must fade"
+    assert acc.cells[hy, hx] == OCCUPIED, "walls persist when nobody is looking"
+
+
+def test_observed_free_space_does_not_fade():
+    """A 360° lidar re-confirms visible free space; decay must not eat it."""
+    acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)
+    acc.integrate(0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
+    mx, my = acc._to_cell(0.5, 0.0)
+    for _ in range(EVIDENCE_CLAMP):
+        acc.integrate(0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
+    assert acc.cells[my, mx] == FREE
 
 
 def test_occupied_is_never_downgraded_by_a_later_free_ray():

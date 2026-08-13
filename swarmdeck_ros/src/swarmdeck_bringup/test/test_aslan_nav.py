@@ -55,12 +55,28 @@ def test_aslan_nav_namespace_and_tf_bridge_are_distinct():
     assert '"namespace": "aslan_0"' in source
     assert 'name="aslan_odom_to_tf"' in source
     assert '"use_receive_time": True' in source
+    assert '"robot_radius": _BUNKER_RADIUS' in source
+    assert '"footprint": _BUNKER_FOOTPRINT' in source
 
 
-def test_aslan_slam_defaults_to_lidar_only():
+def test_aslan_slam_uses_vectornav_imu():
     source = ROBOT_LAUNCH.read_text()
+    compose = yaml.safe_load(COMPOSE.read_text())
+    slam_command = compose["services"]["slam"]["command"][2]
+    vn = yaml.safe_load(
+        (REPO / "adapters/adapter_ros2/config/aslan_vectornav.yaml").read_text()
+    )
 
-    assert 'DeclareLaunchArgument("start_imu", default_value="false")' in source
-    assert 'DeclareLaunchArgument("imu_topic", default_value="/aslan/imu_disabled")' in source
+    assert 'DeclareLaunchArgument("start_imu", default_value="true")' in source
+    assert 'DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu")' in source
+    assert 'executable="vectornav"' in source
+    assert 'executable="vn_sensor_msgs"' in source
     assert "imu_preintegration_node" in source
     assert "launch/os1_128.launch.py" not in source
+    assert "aslan_superodom_calibration.yaml" in source
+    assert ". /workspace/install/setup.bash" in slam_command
+    assert "start_imu:=true" in slam_command
+    assert "imu_topic:=/vectornav/imu" in slam_command
+    assert vn["vectornav"]["ros__parameters"]["port"] == "/dev/vectornav"
+    assert vn["vectornav"]["ros__parameters"]["baud"] == 115200
+

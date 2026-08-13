@@ -1448,3 +1448,270 @@ def test_conflict_mode_comes_from_config_and_is_reported():
     # An unknown value must not silently disable voting.
     svc.set_conflict_mode("consensus-please")
     assert svc.merge_conflict == "majority"
+
+
+def _duck_batch(score: float, robot_id: str = "r0", slot: str = "duck_0") -> dict:
+    return {
+        "type": "detections",
+        "robot_id": robot_id,
+        "camera": "front",
+        "items": [
+            {
+                "id": slot,
+                "class": "rubber_duck",
+                "score": score,
+                "bbox": [0.1, 0.1, 0.2, 0.2],
+                "map_position": {"x": 1.0, "y": 2.0},
+            }
+        ],
+    }
+
+
+def _save_duck_floor(client, floor: float, robot_id: str | None = None):
+    """Put a new rubber_duck floor, fleet-wide or for one robot."""
+    payload = client.get("/api/settings").json()["settings"]
+    if robot_id is None:
+        payload["detection_class_floors"] = {
+            **payload["detection_class_floors"],
+            "rubber_duck": floor,
+        }
+    else:
+        payload["detection_robot_floors"] = {
+            **payload.get("detection_robot_floors", {}),
+            robot_id: {"rubber_duck": floor},
+        }
+    response = client.put("/api/settings", json=payload)
+    assert response.status_code == 200
+    return response
+
+
+def test_raising_a_floor_hides_existing_markers_and_lowering_it_brings_them_back():
+    """An operator threshold is a question about stored evidence.
+
+    The evidence is already on the backend, so the answer needs no robot, no
+    round trip and no wait for the next frame -- and because the entity is
+    hidden rather than deleted, the operator can change their mind.
+    """
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                ad.send_json(
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(_duck_batch(0.40))
+                assert _drain_for(gui, "detection")["detection"]["id"] == "r0:duck_0"
+
+                _save_duck_floor(c, 0.60)
+                _drain_for(gui, "settings_state")
+                hidden = _drain_for(gui, "detection")["detection"]
+
+                assert hidden["id"] == "r0:duck_0"
+                assert hidden["hidden"] is True
+                # Hidden, not discarded: this is what the next save reads.
+                assert "r0:duck_0" in _detections
+
+                _save_duck_floor(c, 0.30)
+                _drain_for(gui, "settings_state")
+                restored = _drain_for(gui, "detection")["detection"]
+
+                assert restored["id"] == "r0:duck_0"
+                assert restored["hidden"] is False
+                # The map position survived the round trip through hiding.
+                assert restored["map_position"] is not None
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_a_per_robot_floor_leaves_the_rest_of_the_fleet_alone():
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                for robot_id in ("r0", "r1"):
+                    ad.send_json(
+                        {
+                            "type": "hello",
+                            "protocol": 2,
+                            "robot_id": robot_id,
+                            "coordinate_frame": "merged",
+                        }
+                    )
+                    ad.send_json(_duck_batch(0.40, robot_id=robot_id))
+                    assert _drain_for(gui, "detection")["detection"]["hidden"] is False
+
+                _save_duck_floor(c, 0.60, robot_id="r0")
+                _drain_for(gui, "settings_state")
+
+                assert _detections["r0:duck_0"]["hidden"] is True
+                assert _detections["r1:duck_0"]["hidden"] is False
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_visibility_is_judged_on_best_score_not_the_latest_one():
+    """A model's confidence in a stationary object wanders frame to frame.
+
+    Judging the live score would make a marker sitting near its floor blink;
+    the best evidence we ever had for the object does not oscillate.
+    """
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                ad.send_json(
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(_duck_batch(0.80))
+                assert _drain_for(gui, "detection")["detection"]["best_score"] == 0.80
+
+                # The same duck, seen worse.
+                ad.send_json(_duck_batch(0.30))
+                wobbled = _drain_for(gui, "detection")["detection"]
+                assert wobbled["score"] == 0.30
+                assert wobbled["best_score"] == 0.80
+
+                _save_duck_floor(c, 0.50)
+                _drain_for(gui, "settings_state")
+
+                assert _detections["r0:duck_0"]["hidden"] is False
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_a_frozen_camera_is_reported_while_the_robot_is_still_online():
+    """A congested link starves camera POSTs long before it starves telemetry.
+
+    `GET /api/camera` answers 200 with the last frame however old it is, so
+    without this the operator watches a frozen picture with nothing anywhere
+    reporting a problem. Measured on hardware: 15 s behind, robot "online".
+    """
+    import time
+
+    from swarmdeck_server.api.app import CAMERA_STALE_S, _camera_frames, frozen_camera_message
+
+    app_registry.robots.clear()
+    _camera_frames.clear()
+    try:
+        app_registry.hello({"robot_id": "r0"}, sink=None)
+        robot = app_registry.robots["r0"]
+
+        # No camera configured at all: never an alert, however long it runs.
+        assert frozen_camera_message(robot) is None
+
+        _camera_frames["r0"] = (b"jpeg", time.monotonic(), 1)
+        assert frozen_camera_message(robot) is None
+
+        _camera_frames["r0"] = (b"jpeg", time.monotonic() - (CAMERA_STALE_S + 2.0), 2)
+        message = frozen_camera_message(robot)
+        assert message is not None
+        assert "r0" in message
+
+        # Offline is already reported as adapter_disconnect; not twice.
+        robot.last_seen = time.monotonic() - 60.0
+        assert not robot.online
+        assert frozen_camera_message(robot) is None
+    finally:
+        app_registry.robots.clear()
+        _camera_frames.clear()
+
+
+def test_camera_uploads_follow_whoever_is_watching():
+    """Camera frames are ~73 KB against 0.4 KB of telemetry, and at most one
+    robot is ever on screen. Robots are told when nobody is looking."""
+    from swarmdeck_server.api.app import (
+        _camera_watchers, camera_is_watched, handle_gui_message, set_camera_watch,
+    )
+
+    class Sink:
+        def __init__(self):
+            self.messages = []
+
+        async def send_json(self, message):
+            self.messages.append(message)
+
+    sinks = {rid: Sink() for rid in ("r0", "r1")}
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    _camera_watchers.clear()
+    gui = object()
+    try:
+        for rid, sink in sinks.items():
+            app_registry.hello({"robot_id": rid}, sink=sink)
+            sink.messages.clear()
+
+        # Watching r0 tells r0 it is watched. r1 is untouched so far.
+        asyncio.run(set_camera_watch(gui, "r0"))
+        assert camera_is_watched("r0") is True
+        assert sinks["r0"].messages[-1] == {
+            **sinks["r0"].messages[-1],
+            "type": "camera_interest",
+            "watched": True,
+        }
+
+        # Switching tells BOTH: r1 to start, r0 to stop.
+        asyncio.run(set_camera_watch(gui, "r1"))
+        assert camera_is_watched("r0") is False
+        assert camera_is_watched("r1") is True
+        assert sinks["r0"].messages[-1]["watched"] is False
+        assert sinks["r1"].messages[-1]["watched"] is True
+
+        # A second dashboard on r0 means r0 is watched again...
+        other = object()
+        asyncio.run(set_camera_watch(other, "r0"))
+        assert camera_is_watched("r0") is True
+        # ...and r1 keeps its own viewer when that second dashboard moves away.
+        asyncio.run(set_camera_watch(other, "r1"))
+        assert camera_is_watched("r1") is True
+        assert camera_is_watched("r0") is False
+
+        # switch_camera must actually reach this from the GUI socket.
+        asyncio.run(
+            handle_gui_message({"type": "switch_camera", "robot_id": "r0"}, source=gui)
+        )
+        assert camera_is_watched("r0") is True
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+        _camera_watchers.clear()
+
+
+def test_a_reconnecting_adapter_is_told_nobody_is_watching():
+    """Adapters come up assuming they are watched, so a mid-session reconnect
+    would otherwise resume full-rate video for a robot nobody has on screen."""
+    from swarmdeck_server.api.app import _camera_watchers
+
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    _camera_watchers.clear()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/adapter") as ad:
+                ad.send_json(
+                    {"type": "hello", "protocol": 2, "robot_id": "r0",
+                     "coordinate_frame": "merged"}
+                )
+                seen = [ad.receive_json() for _ in range(2)]
+                interest = [m for m in seen if m.get("type") == "camera_interest"]
+                assert interest, f"no camera_interest after hello, got {seen}"
+                assert interest[0]["watched"] is False
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+        _camera_watchers.clear()

@@ -1,9 +1,10 @@
 """Minimal Aslan hardware launch owned by SwarmDeck.
 
-The upstream full-stack launch imports camera and VectorNav packages that are
-not installed on Aslan and hardcodes the base interface. This launch starts
-only the interfaces SwarmDeck needs: Ouster, SuperOdometry, and the Bunker
-base. All MIST source/configuration remains mounted read-only.
+The upstream full-stack launch imports camera packages that are not installed
+on Aslan and hardcodes the base interface. This launch starts the interfaces
+SwarmDeck needs: Ouster, VectorNav VN-100, SuperOdometry, and the Bunker
+base. All MIST source remains mounted read-only; IMU driver and lidar-IMU
+calibration live in this package because the mist copies target /ouster/imu.
 """
 
 from pathlib import Path
@@ -17,10 +18,14 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
 
 
+_ADAPTER_CONFIG = Path(__file__).resolve().parents[1] / "config"
+
+
 def generate_launch_description() -> LaunchDescription:
     mist_config = Path("/workspace/src/control/rover_launch/config")
     superodom_config = str(mist_config / "superodom/os1_128.yaml")
-    superodom_calib = str(mist_config / "superodom/os1_128_calibration.yaml")
+    superodom_calib = str(_ADAPTER_CONFIG / "aslan_superodom_calibration.yaml")
+    vectornav_params = str(_ADAPTER_CONFIG / "aslan_vectornav.yaml")
 
     start_base = LaunchConfiguration("start_base")
     start_lidar = LaunchConfiguration("start_lidar")
@@ -46,13 +51,24 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(start_lidar),
     )
 
-    # SuperOdom's stock os1_128.launch.py always starts imu_preintegration and
-    # always subscribes to /ouster/imu. Aslan's Ouster IMU is 100 Hz but the
-    # lidar-IMU extrinsics are identity, preintegration resets on "Large bias"
-    # every ~0.5 s, and laser mapping then treats that failed predictor as a
-    # large motion — which re-runs a broken IMU init and makes the map pose
-    # jump. Launch the lidar nodes ourselves and keep IMU off until someone
-    # measures a real extrinsic.
+    # VN-100T-CR on /dev/vectornav. The Ouster IMU stays published but is not
+    # SuperOdom's imu_topic: identity lidar-IMU extrinsics against that sensor
+    # reset preintegration on "Large bias" every ~0.5 s and jumped the map.
+    vectornav = Node(
+        package="vectornav",
+        executable="vectornav",
+        output="screen",
+        parameters=[vectornav_params],
+        condition=IfCondition(start_imu),
+    )
+    vn_sensor_msgs = Node(
+        package="vectornav",
+        executable="vn_sensor_msgs",
+        output="screen",
+        parameters=[vectornav_params],
+        condition=IfCondition(start_imu),
+    )
+
     feature_extraction = Node(
         package="super_odometry",
         executable="feature_extraction_node",
@@ -97,6 +113,8 @@ def generate_launch_description() -> LaunchDescription:
     superodom = GroupAction(
         [
             SetParameter(name="use_sim_time", value=False),
+            vectornav,
+            vn_sensor_msgs,
             feature_extraction,
             laser_mapping,
             imu_preintegration,
@@ -120,10 +138,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("start_base", default_value="true"),
             DeclareLaunchArgument("start_lidar", default_value="true"),
             DeclareLaunchArgument("start_slam", default_value="true"),
-            DeclareLaunchArgument("start_imu", default_value="false"),
-            # Unpublished topic: feature extraction then runs lidar-only.
-            # Pass imu_topic:=/ouster/imu with start_imu:=true after calibration.
-            DeclareLaunchArgument("imu_topic", default_value="/aslan/imu_disabled"),
+            DeclareLaunchArgument("start_imu", default_value="true"),
+            DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu"),
             # Aslan's upstream launch expects a USB-CAN adapter named can2.
             # Keep it explicit and overridable rather than silently selecting
             # one of the Jetson's currently-down native CAN controllers.
