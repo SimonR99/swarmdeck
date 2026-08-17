@@ -32,8 +32,10 @@ camera_topic=$6
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
+planner_log=/tmp/swarmdeck-scout-planner.log
 slam_launch="${repo}/adapters/adapter_ros1/launch/scout_mini_slam.launch"
 camera_launch="${repo}/adapters/adapter_ros1/launch/scout_camera_low_latency.launch"
+planner_launch="${repo}/adapters/adapter_ros1/launch/local_planner_muxed.launch"
 
 # Catkin's generated setup hooks inspect variables before defining them, so nounset
 # must be disabled only while those trusted environment scripts are sourced.
@@ -137,6 +139,17 @@ start_detached \
   /tmp/swarmdeck-d400-mount.log \
   rosrun tf static_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link 100
 
+# localPlanner + pathFollower, muxed so pathFollower's continuous ~27 Hz
+# output lands on /cmd_vel_nav instead of the real /cmd_vel — see the launch
+# file's own header for why that remap (and autonomyMode:=false) matter.
+# Starting this does NOT move the robot by itself: the adapter only relays
+# /cmd_vel_nav onto the real /cmd_vel while a nav goal is active.
+start_detached \
+  "Local planner" \
+  "[l]ocal_planner_muxed.launch" \
+  "${planner_log}" \
+  roslaunch "${planner_launch}"
+
 export ROBOT_IP="${robot_ip}"
 export BACKEND_HOST="${backend_host}"
 export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
@@ -171,6 +184,7 @@ export CAMERA_TOPIC="${camera_topic}"
 require_topic /os_cloud_node/points "Ouster point cloud"
 require_topic /odometry/filtered "Filtered odometry"
 require_topic "${camera_topic}" "RealSense camera"
+require_topic /path "Local planner"
 require_subscriber \
   "${camera_topic}" "/swarmdeck_adapter_${robot_id}" "SwarmDeck adapter"
 require_subscriber \
