@@ -99,6 +99,23 @@ function connect() {
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
     session.setConnection('live');
+    // Re-announce what this dashboard is showing.
+    //
+    // The backend keys camera interest by the websocket, so the old socket
+    // dying took the record with it, and nothing else re-sends it: the camera
+    // panel only emits `switch_camera` when the SELECTED robot changes, which a
+    // reconnect does not do. The result was every robot left on its 2 s idle
+    // cadence while one was on screen, which the panel correctly reported as
+    // "Link congested — not live" for the rest of the session. Measured: frame
+    // age oscillating 200-2400 ms on all four robots, collapsing to 95-300 ms
+    // the moment this message was sent by hand.
+    if (fleet.activeCamera) {
+      sendAction({ type: 'switch_camera', robot_id: fleet.activeCamera });
+    }
+    // Selection is per-socket for the same reason.
+    if (fleet.selected.length) {
+      sendAction({ type: 'select_robots', robot_ids: [...fleet.selected] });
+    }
   };
 
   ws.onmessage = (e) => {
@@ -204,6 +221,9 @@ export const actions = {
   },
   forgetDetection(entityId: string) {
     sendAction({ type: 'detection_forget', entity_id: entityId });
+  },
+  forgetAllDetections() {
+    sendAction({ type: 'detection_forget_all' });
   },
   clearIgnoredDetections() {
     sendAction({ type: 'detection_unignore' });

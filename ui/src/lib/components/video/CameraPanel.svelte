@@ -57,6 +57,18 @@
    * seconds is comfortably above the ~0.6 s p95 a healthy link produces.
    */
   const FRAME_STALE_MS = 2000;
+  /**
+   * Grace period after switching robots, before staleness is believed.
+   *
+   * An unwatched robot uploads once every IDLE_CAMERA_PERIOD_S (2.0 s in both
+   * adapters), so the newest frame for a robot we have only just selected can
+   * legitimately be 2 s old — exactly FRAME_STALE_MS. Those two constants being
+   * equal meant selecting a robot reported congestion for the first poll or two
+   * every single time, on a link that was perfectly healthy. This waits for the
+   * robot to have had a chance to answer at full rate before judging it.
+   */
+  const SWITCH_GRACE_MS = 2600;
+  let watchingSince = 0;
 
   const activeId = $derived(fleet.activeCamera);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
@@ -239,7 +251,9 @@
         }
         activeFrame = nextFrame;
         fallbackFailures = 0;
-        streamState = frameAgeMs > FRAME_STALE_MS ? 'stale' : 'live';
+        const settling = Date.now() - watchingSince < SWITCH_GRACE_MS;
+        streamState =
+          frameAgeMs > FRAME_STALE_MS && !settling ? 'stale' : 'live';
       } catch {
         // Report a stall even once the panel has gone live. Leaving the badge
         // on "Live" because it was live a moment ago is the one thing a camera
@@ -309,6 +323,7 @@
     // panel also arrives here on first mount and whenever the fleet store picks
     // a robot for us, and a robot nobody has told the backend about stays on
     // its 2 s idle rate while it is being watched.
+    watchingSince = Date.now();
     untrack(() => actions.switchCamera(id));
     untrack(() => connectWhep(id));
     return () => untrack(teardown);

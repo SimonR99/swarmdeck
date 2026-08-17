@@ -147,7 +147,9 @@ Located detections are not placed on the map by the detector. They go to an oper
 review queue at the bottom-left of the map, where each is accepted, ignored, or merged
 into an object already there; an accepted object's position is the mean of every
 observation folded into it, and one already on the map stops asking. Confirmed objects
-draw solid, pending ones dashed. See [perception.md](docs/perception.md).
+draw solid, pending ones dashed, and the "N on map" pill lists what has been placed so
+individual objects can be deleted. All of it persists to `sessions/detections.json`, so a
+restart does not lose the operator's decisions. See [perception.md](docs/perception.md).
 
 Manual drive comes in two shapes, set by `drive_control_mode`. **Arrows** (the default) is
 a four-button pad, one direction per button, which is what a finger on a tablet can

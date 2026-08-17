@@ -107,6 +107,19 @@ local_costmap:
           data_type: "LaserScan"
           raytrace_max_range: 4.0
           obstacle_max_range: 3.8
+          # NOT optional, and its absence is silent. nav2 defaults a source's
+          # max_obstacle_height to 0.0, and ObservationBuffer keeps a hitpoint
+          # only while min < z < max — so an omitted value discards every
+          # return from this sensor while the layer still reports it as an
+          # enabled, marking source.
+          #
+          # This bumper scans at 0.15 m and is the ONLY sensor that sees the
+          # things the mapping lidar cannot: a rubber duck tops out at 0.33 m,
+          # and every chassis in the fleet has structure at 0.15 m while the
+          # 2D scan planes (0.45 / 0.72 / 0.97 m) sit above almost all of it.
+          # With this missing, robots drove through ducks and each other.
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -152,6 +165,19 @@ global_costmap:
           data_type: "LaserScan"
           raytrace_max_range: 4.0
           obstacle_max_range: 3.8
+          # NOT optional, and its absence is silent. nav2 defaults a source's
+          # max_obstacle_height to 0.0, and ObservationBuffer keeps a hitpoint
+          # only while min < z < max — so an omitted value discards every
+          # return from this sensor while the layer still reports it as an
+          # enabled, marking source.
+          #
+          # This bumper scans at 0.15 m and is the ONLY sensor that sees the
+          # things the mapping lidar cannot: a rubber duck tops out at 0.33 m,
+          # and every chassis in the fleet has structure at 0.15 m while the
+          # 2D scan planes (0.45 / 0.72 / 0.97 m) sit above almost all of it.
+          # With this missing, robots drove through ducks and each other.
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0

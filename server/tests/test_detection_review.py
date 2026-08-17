@@ -207,3 +207,169 @@ def test_snapshot_reports_what_the_dashboard_needs():
     assert snap["entities"][0]["position"] == {"x": 1.0, "y": 2.0}
     assert snap["entities"][0]["robot_ids"] == ["robot_0"]
     assert snap["radii"]["same"] == 0.5
+
+
+def test_a_parked_robot_cannot_own_an_objects_position():
+    """Frames are not independent measurements.
+
+    Measured on a live overnight run before this gate existed: one idling robot
+    contributed 176,563 sightings of one duck and dragged the marker from 0.17 m
+    of error out to 0.39 m. Averaging is supposed to buy accuracy.
+    """
+    s = store()
+    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    entity = s.accept(proposal.id)
+
+    # Same pose, 500 more frames, each with the same biased estimate.
+    for _ in range(500):
+        s.observe("robot_0", "rubber_duck", 0.40, 0.0, 0.9, observer=(2.0, 0.0))
+
+    assert entity.acc.sightings == 501, "every frame is still counted as a sighting"
+    assert entity.acc.count == 1, "but a stationary robot is one viewpoint"
+    assert math.isclose(entity.acc.x, 0.0, abs_tol=1e-9), "the centroid did not move"
+
+
+def test_moving_to_a_new_vantage_point_does_count():
+    s = store()
+    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    entity = s.accept(proposal.id)
+
+    # Drove around to the far side and saw it again.
+    s.observe("robot_0", "rubber_duck", 0.40, 0.0, 0.9, observer=(-2.0, 0.0))
+
+    assert entity.acc.count == 2
+    assert math.isclose(entity.acc.x, 0.2, abs_tol=1e-9)
+
+
+def test_a_second_robot_always_contributes_its_first_look():
+    """A different robot is a different viewpoint by definition."""
+    s = store()
+    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    entity = s.accept(proposal.id)
+
+    # robot_1 happens to be standing exactly where robot_0 is.
+    s.observe("robot_1", "rubber_duck", 0.40, 0.0, 0.9, observer=(2.0, 0.0))
+
+    assert entity.acc.count == 2
+    assert entity.acc.robots == {"robot_0", "robot_1"}
+
+
+def test_the_gate_is_per_object_not_global():
+    """Two ducks seen from one pose must both get that pose's evidence."""
+    s = store()
+    _, a = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(1.0, 0.0))
+    _, b = s.observe("robot_0", "rubber_duck", 6.0, 0.0, 0.9, observer=(1.0, 0.0))
+
+    assert a.acc.count == 1 and b.acc.count == 1
+    assert a.id != b.id
+
+
+def test_omitting_the_observer_keeps_averaging_every_frame():
+    """Callers without a pose must not silently lose all their evidence."""
+    s = store()
+    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    entity = s.accept(proposal.id)
+    for _ in range(4):
+        s.observe("robot_0", "rubber_duck", 0.5, 0.0, 0.9)
+
+    assert entity.acc.count == 5
+    assert math.isclose(entity.acc.x, 0.4, abs_tol=1e-9)
+
+
+def test_state_survives_a_round_trip_through_disk():
+    s = store()
+    _, first = s.observe("robot_0", "rubber_duck", 1.0, 2.0, 0.9, observer=(0.0, 0.0))
+    entity = s.accept(first.id)
+    s.observe("robot_1", "rubber_duck", 1.4, 2.0, 0.7, observer=(5.0, 0.0))
+    _, cone = s.observe("robot_0", "disc_cone", -6.0, 0.0, 0.5, observer=(0.0, 0.0))
+    s.ignore(cone.id)
+    _, pending = s.observe("robot_0", "pool_noodle", 9.0, 9.0, 0.4, observer=(0.0, 0.0))
+
+    revived = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0)
+    revived.load_dict(s.to_dict())
+
+    assert revived.snapshot()["entities"] == s.snapshot()["entities"]
+    assert revived.snapshot()["proposals"] == s.snapshot()["proposals"]
+    assert len(revived.ignored) == 1
+    assert pending.id in revived.proposals
+    assert entity.id in revived.entities
+
+
+def test_reload_keeps_the_centroids_weight_not_just_its_position():
+    """Restoring only the averaged point would restart every object at weight 1.
+
+    The next sighting after a restart would then yank a marker built from twenty
+    viewpoints halfway towards itself.
+    """
+    s = store()
+    _, first = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(0.0, 0.0))
+    entity = s.accept(first.id)
+    for i in range(9):
+        s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(float(i + 1), 0.0))
+    assert entity.acc.count == 10
+
+    revived = ReviewStore(same_radius=0.5, ask_radius=1.5)
+    revived.load_dict(s.to_dict())
+    survivor = revived.entities[entity.id]
+    assert survivor.acc.count == 10
+
+    # An eleventh viewpoint, badly wrong, must move it by a tenth of the error.
+    revived.observe("robot_0", "rubber_duck", 0.44, 0.0, 0.9, observer=(99.0, 0.0))
+    assert math.isclose(survivor.acc.x, 0.04, abs_tol=1e-9)
+
+
+def test_reload_remembers_where_each_robot_was_standing():
+    """Otherwise a robot that never moved reads as a fresh vantage point."""
+    s = store()
+    _, first = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    entity = s.accept(first.id)
+
+    revived = ReviewStore(same_radius=0.5, ask_radius=1.5)
+    revived.load_dict(s.to_dict())
+    revived.observe("robot_0", "rubber_duck", 0.4, 0.0, 0.9, observer=(2.0, 0.0))
+
+    survivor = revived.entities[entity.id]
+    assert survivor.acc.count == 1, "a parked robot got a second vote after reload"
+    assert survivor.acc.sightings == 2
+
+
+def test_reload_never_reuses_an_id():
+    """A stale dashboard must not be able to answer a different object."""
+    s = store()
+    _, first = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    s.accept(first.id)
+    _, pending = s.observe("robot_0", "rubber_duck", 8.0, 0.0, 0.9)
+
+    revived = ReviewStore()
+    # next_id deliberately corrupted backwards, as a hand-edited file might be.
+    payload = s.to_dict()
+    payload["next_id"] = 1
+    revived.load_dict(payload)
+
+    _, fresh = revived.observe("robot_0", "wooden_block", -8.0, 0.0, 0.9)
+    assert fresh.id not in {first.id, pending.id}
+
+
+def test_unreadable_state_does_not_take_the_store_with_it():
+    s = store()
+    for junk in (None, [], {"entities": "nope"}, {"entities": [{"no_id": 1}]},
+                 {"ignored": [{"class": "x"}]}, {"entities": [{"id": "e", "count": 0}]}):
+        s.load_dict(junk)
+    assert not s.entities and not s.proposals
+
+    # And a still-usable store afterwards.
+    outcome, _ = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    assert outcome == "proposed"
+
+
+def test_forget_all_clears_confirmed_but_not_the_ignore_zones():
+    s = store()
+    _, duck = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    s.accept(duck.id)
+    _, block = s.observe("robot_0", "wooden_block", 9.0, 9.0, 0.9)
+    s.ignore(block.id)
+
+    assert s.forget_all() == 1
+    assert not s.entities
+    assert len(s.ignored) == 1, "ignoring is a separate decision from placing"
+    assert s.forget_all() == 0

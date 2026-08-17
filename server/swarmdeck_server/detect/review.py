@@ -21,6 +21,14 @@ it from coordinates.
 monocular range estimate is worth little; twenty of them from two robots at
 different angles put the marker where the object is. Running sums keep this O(1)
 and mean the centroid covers every accepted observation, not a recent window.
+
+**But only a moved viewpoint counts as new evidence.** Frames are not
+independent measurements. A robot parked in front of a duck emits one every
+frame, all carrying that pose's depth bias, and folding each in equally let a
+stationary robot own the average: measured on a live run, one robot idling
+overnight contributed 176k samples and dragged a marker from 0.17 m of error out
+to 0.39 m. Averaging is supposed to buy accuracy, so a sighting only moves the
+centroid when the observer has actually changed where it is looking from.
 """
 
 from __future__ import annotations
@@ -36,6 +44,11 @@ from typing import Any, Literal
 DEFAULT_SAME_RADIUS_M = 0.5
 DEFAULT_ASK_RADIUS_M = 1.5
 DEFAULT_IGNORE_RADIUS_M = 1.0
+
+# How far an observer must move before its next sighting of the same object
+# counts as a fresh viewpoint. Below this it is the same measurement again and
+# only refreshes `last_seen` and `best_score`.
+MIN_VIEWPOINT_MOVE_M = 0.25
 
 # Pending proposals are capped so a mislabelling detector cannot bury the
 # operator. The weakest are dropped, never the strongest: a flood of junk must
@@ -74,32 +87,51 @@ class Accumulator:
     sum_x: float = 0.0
     sum_y: float = 0.0
     count: int = 0
+    #: Every frame this object was seen in, including ones too close to the
+    #: previous viewpoint to move the centroid. Reported, never averaged.
+    sightings: int = 0
     best_score: float = 0.0
     robots: set[str] = field(default_factory=set)
     samples: list[Sample] = field(default_factory=list)
+    #: Where each robot was standing when it last moved this centroid.
+    viewpoints: dict[str, tuple[float, float]] = field(default_factory=dict)
     first_seen: float = 0.0
     last_seen: float = 0.0
 
-    def add(self, sample: Sample) -> None:
-        if not self.count:
+    def add(self, sample: Sample, observer: tuple[float, float] | None = None) -> bool:
+        """Record a sighting. Returns whether it moved the centroid."""
+        if not self.sightings:
             self.first_seen = sample.t
+        self.sightings += 1
+        self.best_score = max(self.best_score, sample.score)
+        self.robots.add(sample.robot_id)
+        self.last_seen = sample.t
+
+        if observer is not None:
+            previous = self.viewpoints.get(sample.robot_id)
+            if previous is not None and math.hypot(
+                observer[0] - previous[0], observer[1] - previous[1]
+            ) < MIN_VIEWPOINT_MOVE_M:
+                return False
+            self.viewpoints[sample.robot_id] = observer
+
         self.sum_x += sample.x
         self.sum_y += sample.y
         self.count += 1
-        self.best_score = max(self.best_score, sample.score)
-        self.robots.add(sample.robot_id)
         self.samples.append(sample)
         if len(self.samples) > MAX_SAMPLES:
             del self.samples[0]
-        self.last_seen = sample.t
+        return True
 
     def absorb(self, other: "Accumulator") -> None:
         self.sum_x += other.sum_x
         self.sum_y += other.sum_y
         self.count += other.count
+        self.sightings += other.sightings
         self.best_score = max(self.best_score, other.best_score)
         self.robots |= other.robots
         self.samples = (self.samples + other.samples)[-MAX_SAMPLES:]
+        self.viewpoints.update(other.viewpoints)
         self.first_seen = min(self.first_seen or other.first_seen, other.first_seen)
         self.last_seen = max(self.last_seen, other.last_seen)
 
@@ -125,7 +157,10 @@ class Entity:
             "id": self.id,
             "class": self.cls,
             "position": {"x": round(self.acc.x, 3), "y": round(self.acc.y, 3)},
+            # Viewpoints that moved the centroid, and every frame it appeared
+            # in. The first is the number that means anything.
             "observations": self.acc.count,
+            "sightings": self.acc.sightings,
             "best_score": round(self.acc.best_score, 4),
             "robot_ids": sorted(self.acc.robots),
             "first_seen": self.acc.first_seen,
@@ -150,6 +185,7 @@ class Proposal:
             "class": self.cls,
             "position": {"x": round(self.acc.x, 3), "y": round(self.acc.y, 3)},
             "observations": self.acc.count,
+            "sightings": self.acc.sightings,
             "best_score": round(self.acc.best_score, 4),
             "robot_ids": sorted(self.acc.robots),
             "first_seen": self.acc.first_seen,
@@ -161,6 +197,55 @@ class Proposal:
                 else None
             ),
         }
+
+
+def _acc_to_dict(acc: Accumulator) -> dict[str, Any]:
+    return {
+        "sum_x": acc.sum_x,
+        "sum_y": acc.sum_y,
+        "count": acc.count,
+        "sightings": acc.sightings,
+        "best_score": acc.best_score,
+        "robots": sorted(acc.robots),
+        "viewpoints": {k: [v[0], v[1]] for k, v in acc.viewpoints.items()},
+        "samples": [s.as_dict() for s in acc.samples],
+        "first_seen": acc.first_seen,
+        "last_seen": acc.last_seen,
+    }
+
+
+def _acc_from_dict(raw: dict[str, Any]) -> Accumulator:
+    acc = Accumulator()
+    try:
+        acc.sum_x = float(raw.get("sum_x", 0.0))
+        acc.sum_y = float(raw.get("sum_y", 0.0))
+        acc.count = int(raw.get("count", 0))
+        acc.sightings = int(raw.get("sightings", acc.count))
+        acc.best_score = float(raw.get("best_score", 0.0))
+        acc.first_seen = float(raw.get("first_seen", 0.0))
+        acc.last_seen = float(raw.get("last_seen", 0.0))
+    except (TypeError, ValueError):
+        return Accumulator()
+    acc.robots = {str(r) for r in (raw.get("robots") or [])}
+    for robot, point in (raw.get("viewpoints") or {}).items():
+        try:
+            acc.viewpoints[str(robot)] = (float(point[0]), float(point[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+    for item in (raw.get("samples") or [])[-MAX_SAMPLES:]:
+        try:
+            acc.samples.append(Sample(
+                str(item["robot_id"]), float(item["x"]), float(item["y"]),
+                float(item.get("score", 0.0)), float(item.get("t", 0.0)),
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+    # A record claiming evidence it cannot show is not usable: the centroid
+    # divides by `count`, so a zero count with non-zero sums would read as the
+    # origin. Drop back to empty and let it be re-observed.
+    if acc.count <= 0:
+        return Accumulator()
+    return acc
 
 
 @dataclass
@@ -239,8 +324,14 @@ class ReviewStore:
         y: float,
         score: float,
         now: float | None = None,
+        observer: tuple[float, float] | None = None,
     ) -> tuple[Outcome, Entity | Proposal | None]:
-        """Route one located sighting to the map, the queue, or the bin."""
+        """Route one located sighting to the map, the queue, or the bin.
+
+        `observer` is where the reporting robot was standing. Passing it gates
+        the centroid on viewpoint change; omitting it averages every frame,
+        which is what let a parked robot own an object's position.
+        """
         now = time.time() if now is None else now
         sample = Sample(robot_id, float(x), float(y), float(score), now)
 
@@ -250,21 +341,21 @@ class ReviewStore:
 
         entity, distance = self._nearest_entity(cls, x, y)
         if entity is not None and distance <= self.same_radius:
-            entity.acc.add(sample)
+            entity.acc.add(sample, observer)
             return "folded", entity
 
         proposal, pdist = self._nearest_proposal(cls, x, y)
         if proposal is not None and pdist <= self.same_radius:
             # Repeat sightings strengthen one pending item rather than filling
             # the queue with near-duplicates of the same question.
-            proposal.acc.add(sample)
+            proposal.acc.add(sample, observer)
             if entity is not None and distance <= self.ask_radius:
                 proposal.suggested_entity_id = entity.id
                 proposal.suggested_distance = distance
             return "updated", proposal
 
         fresh = Proposal(id=self._mint("prop"), cls=cls, acc=Accumulator())
-        fresh.acc.add(sample)
+        fresh.acc.add(sample, observer)
         if entity is not None and distance <= self.ask_radius:
             fresh.suggested_entity_id = entity.id
             fresh.suggested_distance = distance
@@ -307,8 +398,19 @@ class ReviewStore:
         return True
 
     def forget(self, entity_id: str) -> bool:
-        """Remove a confirmed entity, e.g. one accepted by mistake."""
+        """Remove a confirmed entity, e.g. one accepted by mistake.
+
+        Deliberately NOT the same as ignoring it. A robot still looking at the
+        object will propose it again, which is correct: deleting says "that is
+        not on my map", not "never mention this again". `ignore` is the second
+        one and writes a suppression zone.
+        """
         return self.entities.pop(entity_id, None) is not None
+
+    def forget_all(self) -> int:
+        count = len(self.entities)
+        self.entities.clear()
+        return count
 
     def clear_ignored(self) -> int:
         count = len(self.ignored)
@@ -328,6 +430,98 @@ class ReviewStore:
             for key in [k for k, v in store.items() if v.cls not in allowed]:
                 store.pop(key, None)
         self.ignored = [z for z in self.ignored if z.cls in allowed]
+
+    # ----------------------------------------------------------- persistence
+
+    def to_dict(self) -> dict[str, Any]:
+        """Everything needed to resume, including the centroid's running sums.
+
+        The sums matter more than they look: reloading only the averaged
+        position would restart every object at weight one, so the first sighting
+        after a restart would yank a well-measured marker halfway to itself.
+        `viewpoints` is persisted for the same reason — without it a robot that
+        has not moved would be treated as a fresh vantage point.
+        """
+        return {
+            "version": 1,
+            "next_id": self._next_id,
+            "entities": [
+                {"id": e.id, "class": e.cls, **_acc_to_dict(e.acc)}
+                for e in self.entities.values()
+            ],
+            "proposals": [
+                {
+                    "id": p.id,
+                    "class": p.cls,
+                    "suggested_entity_id": p.suggested_entity_id,
+                    "suggested_distance": p.suggested_distance,
+                    **_acc_to_dict(p.acc),
+                }
+                for p in self.proposals.values()
+            ],
+            "ignored": [
+                {"class": z.cls, "x": z.x, "y": z.y, "radius": z.radius}
+                for z in self.ignored
+            ],
+        }
+
+    def load_dict(self, raw: Any) -> None:
+        """Replace state from `to_dict` output. Malformed input loses nothing
+        that was not already lost -- an unreadable file must not stop the
+        backend coming up."""
+        if not isinstance(raw, dict):
+            return
+        self.reset()
+        # A record with no surviving evidence is dropped rather than restored:
+        # the centroid divides by `count`, so a zero-count entity would come
+        # back as a phantom object sitting at the origin of the map.
+        for item in raw.get("entities") or []:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            acc = _acc_from_dict(item)
+            if not acc.count:
+                continue
+            self.entities[str(item["id"])] = Entity(
+                id=str(item["id"]),
+                cls=str(item.get("class", "object")),
+                acc=acc,
+            )
+        for item in raw.get("proposals") or []:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            acc = _acc_from_dict(item)
+            if not acc.count:
+                continue
+            distance = item.get("suggested_distance")
+            self.proposals[str(item["id"])] = Proposal(
+                id=str(item["id"]),
+                cls=str(item.get("class", "object")),
+                acc=acc,
+                suggested_entity_id=item.get("suggested_entity_id"),
+                suggested_distance=float(distance) if distance is not None else None,
+            )
+        for item in raw.get("ignored") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                self.ignored.append(IgnoreZone(
+                    str(item.get("class", "object")),
+                    float(item["x"]), float(item["y"]),
+                    float(item.get("radius", self.ignore_radius)),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # Never reuse an id: a stale dashboard holding an old proposal id must
+        # not be able to answer a different object.
+        highest = 0
+        for key in list(self.entities) + list(self.proposals):
+            tail = key.rsplit("_", 1)[-1]
+            if tail.isdigit():
+                highest = max(highest, int(tail))
+        try:
+            self._next_id = max(int(raw.get("next_id", 1)), highest + 1)
+        except (TypeError, ValueError):
+            self._next_id = highest + 1
 
     # --------------------------------------------------------------- reading
 

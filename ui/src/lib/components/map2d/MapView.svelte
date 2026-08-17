@@ -272,9 +272,24 @@
    * unreviewed object is still visible on the map — but the operator can tell
    * at a glance which markers the fleet merely guessed at.
    */
+  /**
+   * Whether a reviewed object belongs in the current view.
+   *
+   * Positions are in the merged frame, so a local view showing one robot's own
+   * grid must only draw objects that robot contributed to — anything else would
+   * be painted at merged-frame coordinates over a local-frame map.
+   */
+  function reviewVisible(robotIds: string[]): boolean {
+    const enabled = robotIds.filter((id) => fleet.isEnabled(id));
+    if (!enabled.length) return false;
+    if (mapStore.viewMode === 'local') return enabled.includes(mapStore.viewRobot ?? '');
+    return true;
+  }
+
   function drawReviewedObjects(ctx: CanvasRenderingContext2D) {
     ctx.save();
     for (const e of review.entities) {
+      if (!reviewVisible(e.robot_ids)) continue;
       const g = mapStore.worldToGrid(e.position.x, e.position.y);
       if (!g) continue;
       const { sx, sy } = screenOf(g.gx, g.gy);
@@ -295,6 +310,7 @@
 
     ctx.setLineDash([3, 3]);
     for (const p of review.proposals) {
+      if (!reviewVisible(p.robot_ids)) continue;
       const g = mapStore.worldToGrid(p.position.x, p.position.y);
       if (!g) continue;
       const { sx, sy } = screenOf(g.gx, g.gy);
@@ -400,30 +416,15 @@
     drawMetricGrid(ctx, w, h);
     drawLoopClosures(ctx);
 
-    // detections
-    for (const d of session.detections) {
-      if (!fleet.isEnabled(d.robot_id)) continue;
-      if (mapStore.viewMode === 'local' && d.robot_id !== mapStore.viewRobot) continue;
-      if (!d.map_position) continue;
-      const g = mapStore.worldToGrid(d.map_position.x, d.map_position.y);
-      if (!g) continue;
-      const { sx, sy } = screenOf(g.gx, g.gy);
-      const color = detectionCatalog.colorOf(d.class);
-      ctx.beginPath();
-      ctx.arc(sx, sy, 7, 0, Math.PI * 2);
-      ctx.globalAlpha = 0.22;
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = color;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(sx, sy, 2, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-    }
-
+    // Map markers come from the review store alone -- see drawReviewedObjects.
+    //
+    // `session.detections` deliberately does NOT draw its `map_position` here
+    // any more. Those are raw per-frame estimates, one per robot per track, so
+    // a single duck seen by two robots put two noisy dots on the map alongside
+    // the reviewed marker: three markers for one object, two of which moved
+    // every frame and none of which the operator had agreed to. The raw store's
+    // job on the map is finished at triage; its `bbox` still drives the camera
+    // overlay, which is a different question ("what can this camera see now").
     drawReviewedObjects(ctx);
 
     // per robot: trail, goal, body

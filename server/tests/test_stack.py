@@ -39,6 +39,14 @@ def _cfg(monkeypatch, tmp_path):
     # start failing on their machine and nowhere else.
     monkeypatch.setattr(settings_store, "path", tmp_path / "settings.json")
     monkeypatch.setattr(settings_store, "value", settings_store.validate({}))
+    # Same reasoning for validated detections, and now load-bearing: the app
+    # restores them on startup, so without this pin every TestClient would come
+    # up holding whatever objects a developer had accepted in the real
+    # dashboard, and these tests would pass or fail on that.
+    from swarmdeck_server.api import app as _app_module
+
+    monkeypatch.setattr(_app_module, "REVIEW_PATH", tmp_path / "detections.json")
+    review_store.reset()
 
 
 def test_backend_imports_no_ros():
@@ -1786,7 +1794,9 @@ def test_an_accepted_object_stops_asking_and_recentres_on_new_evidence():
                 gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
                 _drain_for(gui, "detection_review")
 
-                # A second robot sees the same duck 0.4 m off — inside `same`.
+                # Seen again from the SAME pose. Inside `same_radius`, so it is
+                # folded rather than queued — but it is the same measurement
+                # repeated, so it must not drag the centroid.
                 ad.send_json(
                     {"type": "detections", "robot_id": "r0", "camera": "rear",
                      "items": [{"id": "d9", "class": "rubber_duck", "score": 0.8,
@@ -1794,12 +1804,106 @@ def test_an_accepted_object_stops_asking_and_recentres_on_new_evidence():
                 )
                 _drain_for(gui, "detection")  # the raw track still flows
 
+                held = review_store.snapshot()["entities"][0]
+                assert held["position"] == {"x": 0.0, "y": 0.0}, "a parked robot moved it"
+                assert held["observations"] == 1 and held["sightings"] == 2
+
+                # Now the robot has driven somewhere else and looked again.
+                # That is a genuinely new viewpoint and does refine the position.
+                ad.send_json({"type": "robot_state", "robot_id": "r0",
+                              "pose": {"x": 3.0, "y": 0.0, "yaw": 0.0}})
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "front",
+                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.8,
+                                "map_position": {"x": 0.4, "y": 0.0}}]}
+                )
+                _drain_for(gui, "detection")
+
                 snapshot = review_store.snapshot()
                 assert not snapshot["proposals"], "an object on the map must not ask again"
                 assert len(snapshot["entities"]) == 1
-                # Mean of both accepted observations, not the latest frame.
+                # Mean of the two distinct viewpoints, not of every frame.
                 assert snapshot["entities"][0]["position"] == {"x": 0.2, "y": 0.0}
                 assert snapshot["entities"][0]["observations"] == 2
+                assert snapshot["entities"][0]["sightings"] == 3
+    finally:
+        app_registry.robots.clear()
+        _detections.clear()
+        review_store.reset()
+
+
+def test_confirmed_objects_survive_a_restart(tmp_path, monkeypatch):
+    """The one kind of state a dashboard must not quietly forget.
+
+    Accepting an object is an operator decision, not derived data. Before this
+    was persisted, a restart or a crash lost every confirmed object and every
+    ignore zone with no trace.
+    """
+    from swarmdeck_server.api import app as app_module
+
+    monkeypatch.setattr(app_module, "REVIEW_PATH", tmp_path / "detections.json")
+    app_registry.robots.clear()
+    review_store.reset()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                _drain_for(gui, "detection_review")
+                ad.send_json({"type": "hello", "protocol": 2, "robot_id": "r0",
+                              "coordinate_frame": "merged"})
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "front",
+                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.9,
+                                "map_position": {"x": 4.0, "y": -2.0}}]}
+                )
+                proposal = _drain_for(gui, "detection_review")["proposals"][0]
+                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                accepted = _drain_for(gui, "detection_review")["entities"][0]
+
+        assert (tmp_path / "detections.json").exists(), "accept did not persist"
+
+        # A brand new store, as a restarted process would have.
+        review_store.reset()
+        assert not review_store.entities
+        app_module.load_review()
+
+        revived = review_store.snapshot()["entities"]
+        assert len(revived) == 1
+        assert revived[0]["id"] == accepted["id"]
+        assert revived[0]["position"] == {"x": 4.0, "y": -2.0}
+    finally:
+        app_registry.robots.clear()
+        _detections.clear()
+        review_store.reset()
+
+
+def test_deleting_a_confirmed_object_is_persisted_immediately(tmp_path, monkeypatch):
+    """An operator who sees a deletion confirmed must not find it back."""
+    from swarmdeck_server.api import app as app_module
+
+    monkeypatch.setattr(app_module, "REVIEW_PATH", tmp_path / "detections.json")
+    app_registry.robots.clear()
+    review_store.reset()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                _drain_for(gui, "detection_review")
+                ad.send_json({"type": "hello", "protocol": 2, "robot_id": "r0",
+                              "coordinate_frame": "merged"})
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "front",
+                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.9,
+                                "map_position": {"x": 1.0, "y": 1.0}}]}
+                )
+                proposal = _drain_for(gui, "detection_review")["proposals"][0]
+                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                entity = _drain_for(gui, "detection_review")["entities"][0]
+
+                gui.send_json({"type": "detection_forget", "entity_id": entity["id"]})
+                assert _drain_for(gui, "detection_review")["entities"] == []
+
+        review_store.reset()
+        app_module.load_review()
+        assert review_store.snapshot()["entities"] == []
     finally:
         app_registry.robots.clear()
         _detections.clear()

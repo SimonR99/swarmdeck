@@ -100,7 +100,10 @@ export interface DetectionEntity {
   class: string;
   /** Mean of every accepted observation, not the most recent frame. */
   position: Point;
+  /** Distinct viewpoints folded into the centroid — the meaningful count. */
   observations: number;
+  /** Every frame the object appeared in, including repeats from one pose. */
+  sightings: number;
   best_score: number;
   robot_ids: string[];
   first_seen: number;
@@ -114,6 +117,7 @@ export interface DetectionProposal {
   class: string;
   position: Point;
   observations: number;
+  sightings: number;
   best_score: number;
   robot_ids: string[];
   first_seen: number;
@@ -357,6 +361,7 @@ export type ClientMessage =
   | { type: 'detection_ignore'; proposal_id: string }
   | { type: 'detection_merge'; proposal_id: string; entity_id: string }
   | { type: 'detection_forget'; entity_id: string }
+  | { type: 'detection_forget_all' }
   | { type: 'detection_unignore' };
 
 export type ClientAction = ClientMessage['type'];

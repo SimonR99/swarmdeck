@@ -193,7 +193,42 @@ little; twenty from two robots at different angles put the marker where the obje
 
 Nothing is hidden from the map while it waits. Confirmed objects draw as a solid disc with
 a ring, pending ones as a dashed hollow ring — so an unreviewed guess is visible but never
-mistakable for something a person accepted.
+mistakable for something a person accepted. Raw per-frame `map_position` markers are
+deliberately **not** drawn: one duck seen by two robots put two jittering dots on the map
+beside the reviewed marker, three markers for one object. The raw store's map job ends at
+triage; its `bbox` still drives the camera overlay.
+
+### Only a moved viewpoint counts
+
+Frames are not independent measurements. A robot parked in front of an object emits one
+every frame, all carrying that pose's depth bias. Folding each in equally let a stationary
+robot own the average: measured on an overnight run, one idling robot contributed 176,563
+sightings of a single duck and dragged its marker from 0.17 m of error out to **0.39 m** —
+averaging making the answer worse.
+
+So a sighting only moves a centroid when its observer has travelled at least
+`MIN_VIEWPOINT_MOVE_M` (0.25 m) since that robot's last contribution *to that object*. A
+different robot always counts. The queue reports **viewpoints**, with the raw frame count
+in lighter text, because the viewpoint number is the one that means anything.
+
+### It survives the process
+
+Validated objects are operator decisions, not derived data, so they persist to
+`sessions/detections.json`: confirmed objects, pending proposals and ignore zones. A crash
+or restart used to lose all of it with no trace.
+
+The running sums are persisted, not just the averaged point — restoring only the position
+would restart every object at weight one, so the first sighting after a restart would yank
+a marker built from twenty viewpoints halfway towards itself. `viewpoints` is persisted for
+the same reason: without it a robot that never moved would look like a fresh vantage point.
+
+Decisions are flushed immediately (an operator who watches a deletion confirm must not find
+the object back after a crash); ordinary centroid drift is coalesced onto a 5 s tick rather
+than written at frame rate.
+
+**Deleting is not ignoring.** Deleting a confirmed object says "that is not on my map", and
+a robot still looking at it will propose it again — which is correct. `ignore` is the one
+that writes a suppression zone and stops the asking.
 
 ## Known limits
 

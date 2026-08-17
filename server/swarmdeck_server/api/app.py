@@ -41,6 +41,7 @@ async def lifespan(_: FastAPI):
         load_config()
     settings_store.load()
     apply_review_radii(settings_store.value)
+    load_review()
     map_service.set_excluded(disabled_robot_ids(settings_store.value))
     tasks = [
         asyncio.create_task(state_loop()),
@@ -73,7 +74,14 @@ _detections: dict[str, dict[str, Any]] = {}
 # deliberately separate stores: a track is "what a camera can see right now",
 # an entity is "what the fleet agreed is there". See detect/review.py.
 review_store = ReviewStore()
+# Validated objects outlive the process. They are the operator's decisions, not
+# derived data: a restart or a crash used to lose every accepted object and
+# every ignore zone with no trace, which is the one kind of state a dashboard
+# must not quietly forget.
+REVIEW_PATH = REPO / "sessions" / "detections.json"
 _review_pushed_at = 0.0
+_review_dirty = False
+_review_saved_at = 0.0
 _camera_seq = 0
 
 # A robot still reporting telemetry can stop delivering frames entirely — a
@@ -137,6 +145,10 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     map_service.__dict__.update(new_service.__dict__)
     _camera_frames.clear()
     _detections.clear()
+    # Deliberately does NOT persist. This runs at startup, before load_review(),
+    # so writing here would truncate the saved objects on every boot and then
+    # read the file it had just emptied. Config selection clears the in-memory
+    # store; only an operator action or an explicit reset writes to disk.
     review_store.reset()
     return CONFIG
 
@@ -252,6 +264,40 @@ def frozen_camera_message(robot: Any) -> str | None:
 
 def review_state() -> dict[str, Any]:
     return {"type": "detection_review", **review_store.snapshot()}
+
+
+def load_review() -> None:
+    try:
+        review_store.load_dict(json.loads(REVIEW_PATH.read_text()))
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        if not isinstance(exc, FileNotFoundError):
+            print(f"[review] ignoring unreadable {REVIEW_PATH.name}: {exc}")
+        return
+    snap = review_store.snapshot()
+    print(
+        f"[review] restored {len(snap['entities'])} confirmed object(s), "
+        f"{len(snap['proposals'])} pending, {snap['ignored']} ignored zone(s)"
+    )
+
+
+def save_review(force: bool = False) -> None:
+    """Write validated objects out, atomically and not on the hot path.
+
+    Folding a sighting nudges a centroid at frame rate, so the flush is
+    coalesced: operator decisions force it, ordinary drift waits for the tick.
+    """
+    global _review_dirty, _review_saved_at
+    if not force and not _review_dirty:
+        return
+    _review_dirty = False
+    _review_saved_at = time.monotonic()
+    try:
+        REVIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary = REVIEW_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(review_store.to_dict(), indent=2) + "\n")
+        temporary.replace(REVIEW_PATH)
+    except OSError as exc:
+        print(f"[review] could not persist to {REVIEW_PATH.name}: {exc}")
 
 
 async def broadcast_review(urgency: str = "now") -> None:
@@ -389,9 +435,15 @@ async def map_loop() -> None:
 
 
 async def session_loop() -> None:
+    ticks = 0
     while True:
         await asyncio.sleep(1.0)
         await broadcast(session_state())
+        # Centroid drift is worth persisting, but not at frame rate. Operator
+        # decisions are written immediately and do not wait for this.
+        ticks += 1
+        if ticks % 5 == 0:
+            await asyncio.to_thread(save_review)
 
 
 def session_state() -> dict[str, Any]:
@@ -519,6 +571,7 @@ async def reset_fleet() -> dict[str, Any]:
         # would leave confirmed markers floating over a map that no longer has
         # the geometry they were placed against.
         review_store.reset()
+        save_review(force=True)
         _camera_frames.clear()
         # Alerts describe a world that no longer exists — an `unattended` warning
         # for a robot now back at its spawn pose is stale by construction. The
@@ -623,6 +676,7 @@ async def put_settings(request: Request) -> dict[str, Any]:
         else set()
     )
     apply_review_radii(settings)
+    save_review(force=True)
     # Raising or lowering a floor, unlike removing a class, is reversible: the
     # entity is hidden in place and re-judged here, so the dashboard reflects a
     # new threshold on the save itself rather than whenever the robots next ask.
@@ -1082,6 +1136,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         "detection_ignore",
         "detection_merge",
         "detection_forget",
+        "detection_forget_all",
         "detection_unignore",
     }:
         pid = str(msg.get("proposal_id", ""))
@@ -1093,12 +1148,18 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             changed = review_store.merge(pid, str(msg.get("entity_id", ""))) is not None
         elif kind == "detection_unignore":
             changed = review_store.clear_ignored() > 0
+        elif kind == "detection_forget_all":
+            changed = review_store.forget_all() > 0
         else:
             changed = review_store.forget(str(msg.get("entity_id", "")))
         # Silence on an unknown id is deliberate: two operators can answer the
         # same proposal, and the loser of that race must not get an error for
         # having agreed.
         if changed:
+            # Persist before broadcasting: an operator who sees the dashboard
+            # confirm a deletion and then loses the process must not find the
+            # object back on the map.
+            save_review(force=True)
             await broadcast_review()
         return
 
@@ -1257,6 +1318,7 @@ def registry_id_of(hello: dict[str, Any]) -> str | None:
 
 
 async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
+    global _review_dirty
     """Dispatch one adapter message. Returns True if the socket was closed."""
     kind = msg.get("type", "")
 
@@ -1326,12 +1388,22 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             # detection the operator has already decided is noise should not
             # come back as a question.
             if det["map_position"] and not det["hidden"]:
+                # Where the reporting robot is standing, so a sighting from a
+                # pose we have already averaged does not get averaged again.
+                # Without it a parked robot's depth bias becomes the object's
+                # position. See MIN_VIEWPOINT_MOVE_M in detect/review.py.
+                observer = registry.robots.get(rid)
                 outcome, _target = review_store.observe(
                     rid,
                     det["class"],
                     det["map_position"]["x"],
                     det["map_position"]["y"],
                     score,
+                    observer=(
+                        (observer.pose["x"], observer.pose["y"])
+                        if observer is not None
+                        else None
+                    ),
                 )
                 # A new question goes out at once — the operator is waiting on
                 # it. Folds and updates only shift a centroid, arrive at frame
@@ -1341,6 +1413,8 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                     review_push = "now"
                 elif outcome in ("folded", "updated") and review_push is None:
                     review_push = "soon"
+                if outcome in ("proposed", "folded", "updated"):
+                    _review_dirty = True
             # Robots capture below the operator's floor on purpose, so that
             # lowering it later can be answered from this cache instead of from
             # frames that no longer exist.  Until then the entity is stored and
