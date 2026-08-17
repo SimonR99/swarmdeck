@@ -39,11 +39,11 @@
          │ Adapter Protocol  (WebSocket + HTTP)              │
          │                                                   │
 ┌────────┴───────────┬──────────────────┬───────────────────┴─────────┐
-│ adapter_sim        │ adapter_ros2     │ adapter_ros1 / adapter_spot │
-│ (Gazebo fleet)     │ (rclpy, Jazzy)   │ (rospy or vendor SDK)       │
+│ adapter_sim        │ adapter_ros2     │ adapter_ros1                │
+│ (Gazebo fleet)     │ (rclpy, Jazzy)   │ (rospy, Noetic)             │
 ├────────────────────┼──────────────────┼─────────────────────────────┤
 │ Gazebo Harmonic    │ real ROS 2 robot │ ROS 1 robot, own container  │
-│ 4× robot, sensors  │                  │ (Noetic) or Spot SDK        │
+│ 4× robot, sensors  │                  │                             │
 │ SLAM Toolbox, Nav2 │                  │ move_base / vendor autonomy │
 └────────────────────┴──────────────────┴─────────────────────────────┘
 ```
@@ -136,15 +136,19 @@ Each runs in the robot's own environment. Shared contract, independent implement
 | `adapter_sim` | Sim host | Gazebo fleet via rclpy; one process for all simulated robots |
 | `adapter_ros2` | ROS 2 robot | rclpy — SLAM Toolbox, Nav2, camera |
 | `adapter_ros1` | ROS 1 robot, Noetic container | rospy — `gmapping`/`slam_toolbox` ROS 1, `move_base` |
-| `adapter_spot` | Spot or a companion machine | ROS 1 driver **or** the Boston Dynamics Python SDK directly |
 | `adapter_mock` | Anywhere | Nothing — synthetic robot for testing the backend without ROS |
 
 **Adapter responsibilities:** publish `robot_state` @ 5 Hz, push its occupancy grid,
 publish detections, accept `navigate_to`/`cancel_goal`/`stop`, report nav status,
 stream camera to RTSP.
 
-Because Spot's ROS version is uncertain, `adapter_spot` may bypass ROS entirely and use
-the vendor SDK. The contract does not care — that is the point of the seam.
+A dedicated `adapter_spot` was planned, on the assumption that Spot's ROS version was
+uncertain and the adapter might have to bypass ROS for the vendor SDK. It was never
+needed: Spot runs Clearpath's `spot_driver` on Humble, so it uses `adapter_ros2` with
+`adapters/adapter_ros2/config/spot.yaml`, and the vendor-specific parts (claim/release/
+sit/stand, the `/trajectory` action) are expressed as configured service and action
+names rather than as code. That is a better outcome than the seam being flexible — the
+seam did not have to bend at all.
 
 ### 4.2 ROS 2 packages (simulation and ROS 2 robots)
 
@@ -154,9 +158,13 @@ the vendor SDK. The contract does not care — that is the point of the seam.
 | `swarmdeck_sim` | Gazebo worlds, model spawning, seeded scenario generator, reactive explorer |
 | `swarmdeck_slam` | Per-namespace localisation and mapping: wheel/gyro EKF, sensor static TFs, SLAM Toolbox or RTAB-Map, plus cloud→scan slicing when the lidar has multiple rings |
 | `swarmdeck_nav` | Nav2 params and per-namespace bringup |
-| `adapters/perception` | Portable RGB perception with no ROS/Gazebo dependency |
-| `swarmdeck_media` | Camera → GStreamer → RTSP encoder node |
 | `swarmdeck_bringup` | Top-level launch, config resolution, one-command start |
+
+Two things that sound like ROS packages deliberately are not. `adapters/perception` is a
+plain-Python sidecar plus client, and `adapters/media` (`ros2_rtsp.py` / `ros1_rtsp.py`)
+is a plain script per ROS version. Both have to run identically under ROS 1, ROS 2 and
+Gazebo, and both are needed by robots whose ROS workspace we do not control, so neither
+could be a package in ours.
 
 No custom ROS messages. Everything crossing the seam uses the adapter protocol, so
 message definitions never need duplicating across ROS versions.
@@ -495,7 +503,8 @@ swarmdeck/
 │   ├── adapter_sim/
 │   ├── adapter_ros2/
 │   ├── adapter_ros1/              Noetic container, Dockerfile included
-│   ├── adapter_spot/              ROS 1 driver or BD SDK
+│   ├── media/                     ros2_rtsp.py / ros1_rtsp.py
+│   ├── perception/               YOLOE sidecar + portable client
 │   └── adapter_mock/
 ├── swarmdeck_ros/src/
 │   ├── swarmdeck_description/     urdf/ meshes/ config/

@@ -165,7 +165,10 @@ services:
     ipc: host
     volumes:
       - /ssd/mist_ws_ros2:/workspace:ro
-      - /ssd/swarmdeck:/app:ro
+      # `/app/swarmdeck`, matching every other robot and the `aslan-stack`
+      # anchor above. This service used to mount the repo at `/app` instead,
+      # which is why aslan alone needed different paths in its command.
+      - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
       - /ssd/swarmdeck/.aslan_pip:/root/.local:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
@@ -173,11 +176,11 @@ services:
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
-      - /app/adapters/adapter_ros2/adapter_ros2.py
+      - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py
       - --robot-id
       - aslan_0
       - --config
-      - /app/adapters/adapter_ros2/config/aslan_bunker.yaml
+      - /app/swarmdeck/adapters/adapter_ros2/config/aslan_bunker.yaml
       - --host
       - "${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}"
       - --port
@@ -215,12 +218,16 @@ services:
         condition: service_started
     network_mode: host
     ipc: host
+    volumes:
+      # Our source off the mount, dependencies out of the image — see the
+      # adapter service. Without this an `ros2_rtsp.py` fix needs a rebuild.
+      - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
     command:
       - python3
-      - /app/adapters/media/ros2_rtsp.py
+      - /app/swarmdeck/adapters/media/ros2_rtsp.py
       - --robot-id
       - aslan_0
       - --topic

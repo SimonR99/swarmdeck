@@ -228,10 +228,28 @@ DEFAULTS: dict[str, Any] = {
     # rotating until it was powered down by hand.
     #
     # Freshness is "either direction heard from": `tx_state` sends state at
-    # `state_hz`, and any received command also counts. A wedged TCP connection
-    # blocks `await ws.send()` on a full write buffer, so this stops advancing
-    # long before websockets gives up at ping_interval + ping_timeout (~40 s).
+    # `state_hz`, and any received command also counts.
+    #
+    # A completed `await ws.send()` is weaker evidence than it looks — it means
+    # the frame reached the kernel's write buffer, not the operator. State
+    # frames are ~400 B at 5 Hz, so filling a ~200 KB socket buffer after a hard
+    # cut takes on the order of a hundred seconds; backpressure is NOT the thing
+    # that catches this. What catches it is the websocket ping below closing the
+    # connection, after which sends raise and this stops advancing.
     "link_timeout_s": 1.5,
+    # Websocket keepalive. The library defaults (20 s interval, 20 s timeout)
+    # leave up to ~40 s between the network dying and the socket closing, and
+    # for all of it `link_ok()` reads true off our own completing sends — so an
+    # active goal keeps running with nobody watching. Detection now costs at
+    # most interval + timeout = 6 s, after which the `except` in `run_robot`
+    # cancels the goal and zeroes cmd_vel.
+    #
+    # Not tighter: a robot on a degraded-but-usable link (Botman measured 60%
+    # packet loss at 333 ms RTT) would drop the socket constantly, and each
+    # reconnect cancels the active goal. 4 s matches the backend's own
+    # OFFLINE_AFTER_S, so both ends give up at about the same point.
+    "ping_interval_s": 2.0,
+    "ping_timeout_s": 4.0,
     # How long a map/scan/cloud upload may take before the adapter gives up.
     #
     # This was hardcoded at 5 s, chosen when the uploads shared a coroutine with
@@ -455,7 +473,12 @@ class HardwareBridge:
         # this timer because it depends on the same property: it runs off the
         # robot's clock, not off the link it is watching.
         self._last_link_at = time.monotonic()
-        self._watchdog_timer = node.create_timer(0.1, self._watchdogs)
+        # Newest operator drive intent, applied by the timer rather than inline.
+        # See `note_drive_command`.
+        self._pending_drive: tuple[float, float] | None = None
+        # 20 Hz: fast enough that latching adds at most 50 ms to teleop response
+        # (the GUI only repeats every 120 ms), and finer than `drive_timeout_s`.
+        self._watchdog_timer = node.create_timer(0.05, self._watchdogs)
 
     # ------------------------------------------------------------- capabilities
 
@@ -955,8 +978,38 @@ class HardwareBridge:
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
+    def note_drive_command(self, linear: float, angular: float) -> None:
+        """Latch the operator's newest intent. The timer is what actuates it.
+
+        Executing inline replays a backlog. The GUI repeats `drive` every 120 ms
+        for as long as a key or the joystick is held, and neither the browser's
+        WebSocket nor TCP drops those when the link congests — they queue. On
+        recovery the adapter would run every stale "forward" in order, each one
+        refreshing `_last_drive_at` so `drive_watchdog` never fires, with the
+        `drive(0, 0)` that ended the press sitting at the BACK of the queue.
+        That is a robot that keeps driving after the operator let go.
+
+        Latching collapses any burst to whichever command was newest, which
+        after a release is the stop. In normal operation nothing changes: the
+        timer runs faster than the GUI repeats, so every command is applied.
+        """
+        self._pending_drive = (float(linear), float(angular))
+        # Freshness is when the operator was last HEARD FROM, which a late
+        # command still evidences. The newest intent wins regardless, so a
+        # backlog cannot use this to keep a stale velocity alive.
+        self._last_link_at = time.monotonic()
+
+    def apply_pending_drive(self) -> None:
+        pending = self._pending_drive
+        if pending is None:
+            return
+        self._pending_drive = None
+        self.drive(*pending)
+
     def _watchdogs(self) -> None:
-        """Both deadmen, on one 0.1 s timer driven by the robot's own clock."""
+        """Actuation and both deadmen, on one 20 Hz timer driven by the robot's
+        own clock — so they keep running when the link cannot."""
+        self.apply_pending_drive()
         self.drive_watchdog()
         self.link_watchdog()
 
@@ -1428,7 +1481,11 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
     backoff = 1.0
     while True:
         try:
-            async with websockets.connect(ws_url, ping_interval=20) as ws:
+            async with websockets.connect(
+                ws_url,
+                ping_interval=float(bridge.cfg["ping_interval_s"]),
+                ping_timeout=float(bridge.cfg["ping_timeout_s"]),
+            ) as ws:
                 await ws.send(json.dumps({
                     "type": "hello",
                     "protocol": 1,
@@ -1467,7 +1524,8 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         elif kind == "cancel_goal":
                             bridge.cancel_goal()
                         elif kind == "drive":
-                            bridge.drive(
+                            # Latched, not executed here — see note_drive_command.
+                            bridge.note_drive_command(
                                 msg.get("linear", 0.0), msg.get("angular", 0.0)
                             )
                         elif kind == "stop":

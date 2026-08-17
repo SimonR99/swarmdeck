@@ -9,6 +9,35 @@ where it can be without a robot, and the sim-only assumptions are now parameters
 than constants — but every timeout, QoS choice and topic name is a hypothesis until a robot
 proves it. Treat this as a test plan, not a deployment runbook.
 
+## Deploying code to a robot
+
+```bash
+scripts/deploy aslan              # one robot: rsync + restart, ~10 s
+scripts/deploy all                # every robot, continuing past failures
+scripts/deploy botman --dry-run   # show what would transfer, change nothing
+scripts/deploy scout --verify     # also warn if a container ignores the mount
+```
+
+Every robot bind-mounts this repo read-only at `/app/swarmdeck` and runs the `.py`
+straight off the mount, so a deploy is never an image build: the image supplies the
+dependencies, the mount supplies our source. The script compiles the adapters on the
+robot's own `python3` before restarting anything, and refuses `--delete` if it would
+remove a file the repo does not know about.
+
+**Use the script rather than a hand-written `rsync`.** The four robots previously had
+four different procedures — two baked our code into images and two mounted it, at three
+different paths — purely because the steps lived in people's heads instead of in the repo.
+A second way of deploying is how that happened.
+
+What is still genuinely per-robot, and always will be: ROS 1 vs ROS 2 (scout is noetic),
+the vendor base image (`bunker:dev`, `bunker_super_odom:dev`, `spot:dev` — MIST owns
+these), and `ROS_DOMAIN_ID`, which some vendor entrypoints force.
+
+> A container created **before** its bind-mount was added keeps executing the copy baked
+> into its image and silently ignores every rsync. Recreate it once with
+> `docker compose -f docker-compose.robot-<name>.yml up -d`; `--verify` tells you which
+> robots still need this.
+
 ## 0. Before touching a robot
 
 Confirm the stack works end to end with no ROS at all:

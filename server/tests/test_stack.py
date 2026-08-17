@@ -1908,3 +1908,45 @@ def test_deleting_a_confirmed_object_is_persisted_immediately(tmp_path, monkeypa
         app_registry.robots.clear()
         _detections.clear()
         review_store.reset()
+
+
+def test_broadcast_survives_a_dashboard_closing_mid_send():
+    """A GUI socket closing during a broadcast must not break the fleet.
+
+    `broadcast` yields on every send. Iterating the live `_gui_clients` set
+    meant a dashboard connecting or closing in that window raised RuntimeError
+    out of broadcast() into its caller — and one of those callers is the
+    adapter `hello` handler, which broadcasts `fleet_change`. The result was
+    "dropped a malformed hello" and robots unable to register at all, observed
+    fleet-wide on 2026-08-13 with the network perfectly healthy.
+    """
+    from swarmdeck_server.api.app import _gui_clients, broadcast
+
+    class Client:
+        def __init__(self, on_send=None):
+            self.sent = []
+            self._on_send = on_send
+
+        async def send_json(self, msg):
+            self.sent.append(msg)
+            if self._on_send:
+                self._on_send()
+
+    _gui_clients.clear()
+    try:
+        # This one closes another dashboard's socket while the loop is running,
+        # which is exactly what a reload does.
+        late = Client()
+
+        def close_another():
+            _gui_clients.discard(late)
+
+        first = Client(on_send=close_another)
+        _gui_clients.add(first)
+        _gui_clients.add(late)
+
+        asyncio.run(broadcast({"type": "fleet_change"}))
+
+        assert first.sent, "the surviving dashboard must still receive the message"
+    finally:
+        _gui_clients.clear()

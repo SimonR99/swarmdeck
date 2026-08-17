@@ -15,6 +15,7 @@
   import { onMount } from 'svelte';
   import { inflate } from 'pako';
   import { fleet } from '$lib/stores/fleet.svelte';
+  import { mapStore } from '$lib/stores/mapstore.svelte';
 
   let { active = false, follow = false }: { active?: boolean; follow?: boolean } = $props();
 
@@ -152,8 +153,16 @@
     return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
   }
 
+  function robotsOnMap() {
+    const members = mapStore.status?.global_members;
+    if (mapStore.status?.mode === 'auto' && members) {
+      return fleet.robots.filter((robot) => members.includes(robot.robot_id));
+    }
+    return fleet.robots;
+  }
+
   function centreRobots(ids?: Set<string>) {
-    const members = fleet.robots.filter((robot) => !ids || ids.has(robot.robot_id));
+    const members = robotsOnMap().filter((robot) => !ids || ids.has(robot.robot_id));
     if (!members.length) return false;
     target = [
       members.reduce((sum, robot) => sum + robot.pose.x, 0) / members.length,
@@ -278,7 +287,7 @@
 
   function drawRobotMarkers(dpr: number) {
     if (!gl || !program || !robotPositionBuffer || !robotColourBuffer) return;
-    const members = fleet.robots;
+    const members = robotsOnMap();
     if (!members.length) return;
     const positions = new Float32Array(members.length * 3);
     const colours = new Float32Array(members.length * 3);

@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# Ship this checkout's adapter code to a robot and restart what runs it.
+#
+# This file exists because the procedure used to live only in people's heads,
+# and four robots had drifted to four different procedures. One table, one
+# command. If a robot's deployment changes, change it HERE — a second way of
+# deploying is how the drift started.
+#
+#   scripts/deploy aslan            one robot
+#   scripts/deploy all              every robot, continuing past failures
+#   scripts/deploy botman --dry-run show what would transfer, change nothing
+#   scripts/deploy spot --no-restart  rsync only, leave containers alone
+#
+# Every robot bind-mounts this repo read-only and runs the .py straight off the
+# mount, so a deploy is rsync + `docker restart` (~10 s) and never an image
+# build. The image supplies dependencies; the mount supplies our source.
+#
+# NOTE: a robot still running a container created BEFORE the bind-mount was
+# added ignores the mount entirely and keeps executing code baked into its
+# image. `--verify` reports that; the fix is one `docker compose up -d` on the
+# robot, which recreates the container.
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# name | ssh host | repo path on robot | rsync extra flags | containers | compose file
+#
+# aslan takes NO --delete: /ssd/swarmdeck/adapters holds robot-local files this
+# repo does not carry, and a --delete sync proposes removing them. The others
+# are clean. (The stale nested adapters/adapters/ copy was removed 2026-08-13.)
+ROBOTS=(
+  "aslan|aslan@192.168.1.139|/ssd/swarmdeck||swarmdeck-aslan-adapter swarmdeck-aslan-media|docker-compose.robot-aslan.yml"
+  "spot|spot|/home/indro/swarmdeck|--delete|swarmdeck-spot-adapter swarmdeck-spot-media|docker-compose.robot-spot.yml"
+  "botman|botman@192.168.1.49|/ssd/swarmdeck|--delete|swarmdeck-botman-adapter swarmdeck-botman-media|docker-compose.robot-botman.yml"
+  "scout|scout|/ssd/swarmdeck|--delete|swarmdeck-adapter swarmdeck-media|docker-compose.robot-ros1.yml"
+)
+
+RSYNC_COMMON=(-a --exclude __pycache__ --exclude '*.pyc' --exclude '*.pre-duck-map-*')
+
+usage() {
+  echo "usage: scripts/deploy <aslan|spot|botman|scout|all> [--dry-run] [--no-restart] [--verify]" >&2
+  exit 2
+}
+
+row_for() {
+  local want="$1" row
+  for row in "${ROBOTS[@]}"; do
+    [[ "${row%%|*}" == "$want" ]] && { echo "$row"; return 0; }
+  done
+  return 1
+}
+
+deploy_one() {
+  local row="$1" dry="$2" restart="$3" verify="$4"
+  IFS='|' read -r name host path extra containers compose <<<"$row"
+
+  echo "──────── $name  ($host:$path)"
+
+  if ! timeout 20 ssh -o ConnectTimeout=8 -o BatchMode=yes "$host" true 2>/dev/null; then
+    echo "  UNREACHABLE — skipped" >&2
+    return 1
+  fi
+
+  local flags=("${RSYNC_COMMON[@]}")
+  [[ -n "$extra" ]] && flags+=("$extra")
+  [[ "$dry" == "yes" ]] && flags+=(-n -i)
+
+  # Guard the aslan trap generally rather than by name: if --delete would
+  # remove anything, that is a robot-local file this repo does not know about.
+  if [[ "$extra" == "--delete" && "$dry" != "yes" ]]; then
+    local doomed
+    doomed=$(rsync "${RSYNC_COMMON[@]}" --delete -n -i "$REPO/adapters/" "$host:$path/adapters/" 2>/dev/null | grep -c '^\*deleting')
+    if [[ "$doomed" -gt 0 ]]; then
+      echo "  REFUSING: --delete would remove $doomed path(s) on $name." >&2
+      echo "  Inspect them, then either keep them in the repo or drop --delete" >&2
+      echo "  for this robot in scripts/deploy." >&2
+      return 1
+    fi
+  fi
+
+  if ! rsync "${flags[@]}" "$REPO/adapters/" "$host:$path/adapters/"; then
+    echo "  rsync FAILED" >&2
+    return 1
+  fi
+  echo "  rsync ok"
+
+  # The compose file too, never --delete'd: it defines the mount that makes all
+  # of the above visible, so shipping code without it silently deploys nothing
+  # on a robot whose container has not been recreated yet.
+  local composeflags=(-a)
+  [[ "$dry" == "yes" ]] && composeflags+=(-n -i)
+  if ! rsync "${composeflags[@]}" "$REPO/$compose" "$host:$path/$compose"; then
+    echo "  compose rsync FAILED" >&2
+    return 1
+  fi
+
+  # Before the dry-run return: --verify is read-only, and "which robots would
+  # ignore this deploy" is precisely the question you want answered WITHOUT
+  # changing anything.
+  if [[ "$verify" == "yes" ]]; then
+    local c
+    for c in $containers; do
+      # Test the mount SOURCE, not its destination. A container that mounts the
+      # repo at the legacy `/app` instead of `/app/swarmdeck` is still reading
+      # the files rsync just wrote — checking the destination would report it as
+      # ignoring the deploy when it does not.
+      local pairs
+      pairs=$(timeout 25 ssh -o ConnectTimeout=8 -o BatchMode=yes "$host" \
+        "docker inspect $c --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}' 2>/dev/null" 2>/dev/null)
+      if [[ "$pairs" != *"$path:"* ]]; then
+        echo "  WARNING: $c does not mount $path — it runs code baked into its" >&2
+        echo "           image and will IGNORE this rsync. Recreate it with" >&2
+        echo "           docker compose -f docker-compose.robot-*.yml up -d" >&2
+      elif [[ "$pairs" != *"$path:/app/swarmdeck"* ]]; then
+        echo "  $c reads the mount (at the legacy path; recreate when convenient)"
+      else
+        echo "  $c reads the mount"
+      fi
+    done
+  fi
+
+  if [[ "$dry" == "yes" ]]; then
+    echo "  (dry run — nothing restarted)"
+    return 0
+  fi
+
+  # Compile on the robot's own interpreter. Shipping a file that does not parse
+  # turns a restart into an outage, and the robot's python is the one that
+  # decides.
+  if ! timeout 60 ssh -o ConnectTimeout=8 -o BatchMode=yes "$host" \
+        "python3 -m py_compile $path/adapters/adapter_ros1/adapter_ros1.py $path/adapters/adapter_ros2/adapter_ros2.py" 2>/dev/null; then
+    echo "  REFUSING to restart: adapter source does not compile on $name" >&2
+    return 1
+  fi
+  echo "  compiles on robot"
+
+  if [[ "$restart" != "yes" ]]; then
+    echo "  (--no-restart — code staged, not activated)"
+    return 0
+  fi
+
+  # Restart only what exists. Not every robot runs every service (spot has no
+  # media container), and naming a missing one makes `docker restart` fail the
+  # whole command — which would report a successful deploy as a failure.
+  local restarted
+  restarted=$(timeout 90 ssh -o ConnectTimeout=8 -o BatchMode=yes "$host" \
+    "present=\$(for c in $containers; do docker inspect -f '{{.Name}}' \$c >/dev/null 2>&1 && printf '%s ' \$c; done); \
+     [ -n \"\$present\" ] && docker restart \$present >/dev/null 2>&1 && echo \"\$present\"" 2>/dev/null)
+  if [[ -n "$restarted" ]]; then
+    echo "  restarted:$(echo " $restarted" | sed 's/ *$//')"
+  else
+    echo "  restart FAILED" >&2
+    return 1
+  fi
+}
+
+main() {
+  [[ $# -ge 1 ]] || usage
+  local target="$1"; shift
+  local dry=no restart=yes verify=no
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)    dry=yes ;;
+      --no-restart) restart=no ;;
+      --verify)     verify=yes ;;
+      *) usage ;;
+    esac
+    shift
+  done
+
+  local rows=() row failed=0
+  if [[ "$target" == "all" ]]; then
+    rows=("${ROBOTS[@]}")
+  else
+    row="$(row_for "$target")" || usage
+    rows=("$row")
+  fi
+
+  for row in "${rows[@]}"; do
+    # Deliberately not `set -e`: one unreachable robot must not stop the rest.
+    deploy_one "$row" "$dry" "$restart" "$verify" || failed=$((failed + 1))
+  done
+
+  echo
+  if [[ "$failed" -gt 0 ]]; then
+    echo "$failed robot(s) failed or were skipped." >&2
+    exit 1
+  fi
+  echo "done."
+}
+
+main "$@"

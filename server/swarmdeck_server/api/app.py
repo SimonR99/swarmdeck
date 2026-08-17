@@ -158,7 +158,14 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
 async def broadcast(msg: dict[str, Any]) -> None:
     dead = []
-    for ws in _gui_clients:
+    # Snapshot, never the live set. The send below yields, and a dashboard
+    # connecting or closing during that yield mutates `_gui_clients` while it is
+    # being iterated -- which raises RuntimeError out of broadcast() and into
+    # whichever caller was unlucky. Observed 2026-08-13 as a fleet-wide outage:
+    # the `hello` handler broadcasts `fleet_change`, so the exception surfaced
+    # as "dropped a malformed hello" and robots could not register AT ALL, on a
+    # network that was working. A GUI reload was enough to trigger it.
+    for ws in list(_gui_clients):
         try:
             await ws.send_json(msg)
         except Exception:

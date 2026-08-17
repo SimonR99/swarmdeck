@@ -18,7 +18,13 @@ from typing import Any
 import numpy as np
 
 from .grid_meta import GridMeta
-from .registration import Registration, register, register_3d, score_transform
+from .registration import (
+    MIN_SUPPORT,
+    Registration,
+    register,
+    register_3d,
+    score_transform,
+)
 from .scan_grid import ScanGridAccumulator, drop_range_outliers
 
 UNKNOWN = -1
@@ -41,6 +47,10 @@ MERGE_CONFLICT_MODES = ("majority", "occupied")
 # registered, where the answer is known and only drifts.
 PRIOR_WINDOW_DEG = 40.0
 LOCKED_WINDOW_DEG = 8.0
+# Grid vs height-band cloud: beyond this, they are rival hypotheses (the 180 deg
+# corridor alias), not jitter around one lock. No extra FFT — both results are
+# already in hand.
+CLOUD_YAW_AGREE_DEG = 45.0
 
 # Consecutive ambiguous results before a registered robot is dropped from the
 # merged map. One marginal frame is not evidence that a transform accepted
@@ -604,6 +614,10 @@ class MapService:
     def _wrap_yaw(yaw: float) -> float:
         return (yaw + math.pi) % (2 * math.pi) - math.pi
 
+    @classmethod
+    def _yaw_agrees(cls, a: float, b: float, deg: float = CLOUD_YAW_AGREE_DEG) -> bool:
+        return abs(cls._wrap_yaw(a - b)) <= math.radians(deg)
+
     # ---------------------------------------------------------------- ingest
 
     def ingest(
@@ -807,11 +821,17 @@ class MapService:
         )
         result = grid_result
         source = "grid"
+        use_cloud = False
+        cloud_unambiguous = False
+        cloud_vs_hold = False
 
-        # Prefer a geometrically unambiguous cloud proposal only after the 2D
-        # grids independently confirm its wall overlap and shared known area.
-        # The cloud contributes the rival-translation/yaw tests; the grids
-        # contribute score/overlap/support.  Neither can accept a transform alone.
+        # Height-band clouds already ran (or will, lazily). They exist to break
+        # the 180 deg floor-plan alias that 2D FFT cannot. Requiring the
+        # accumulated grids to also be `confident` at the cloud transform let
+        # that alias win: live scans of the current room overlap, but a long
+        # session's 2D grids often do not, so the cloud was discarded and a
+        # previous 180 deg lock was held. Bandwidth and CPU stay the same —
+        # this only changes which of the two already-computed answers is used.
         cloud = self.cloud_registrations.get(robot_id)
         if cloud is None and robot_id in self.robot_clouds:
             self._update_cloud_registration(robot_id)
@@ -836,26 +856,67 @@ class MapService:
                 yaw_ratio=cloud.yaw_ratio,
                 support=support,
             )
-            if cloud_validated.confident:
+            cloud_unambiguous = (
+                cloud.ratio <= 0.80
+                and cloud.yaw_ratio <= 0.80
+                and cloud.overlap >= 40
+            )
+            # 2D may veto only when it has seen enough of the same place to
+            # have an opinion. Low support means the accumulated grids are
+            # not about this room; they must not block a live-cloud lock.
+            grid_vetoes = support >= MIN_SUPPORT and (
+                overlap < 80 or score < 0.20
+            )
+            use_cloud = cloud_unambiguous and not grid_vetoes
+            if use_cloud:
                 result = cloud_validated
-                source = "pointcloud+grid"
+                source = (
+                    "pointcloud+grid" if support >= MIN_SUPPORT else "pointcloud"
+                )
 
         self.registrations[robot_id] = result
         self.registration_sources[robot_id] = source
-        if not result.confident:
+        grid_blocked = (
+            not use_cloud
+            and cloud is not None
+            and cloud_unambiguous
+            and grid_result.confident
+            and not self._yaw_agrees(grid_result.dyaw, cloud.dyaw)
+        )
+        accepted = use_cloud or (result.confident and not grid_blocked)
+        if not accepted:
             # A locked robot that stops matching has to go back to searching
             # widely, or a bad lock is self-perpetuating.
             self.locked_dyaw.pop(robot_id, None)
             misses = self.registration_misses.get(robot_id, 0) + 1
             self.registration_misses[robot_id] = misses
-            if robot_id in self.registered and misses < REGISTRATION_MISS_LIMIT:
+            held = self.transforms.get(robot_id)
+            if (
+                cloud is not None
+                and cloud_unambiguous
+                and held is not None
+            ):
+                cloud_world_yaw = self._wrap_yaw(ryaw + cloud.dyaw)
+                cloud_vs_hold = abs(
+                    self._wrap_yaw(cloud_world_yaw - held[2])
+                ) > math.radians(CLOUD_YAW_AGREE_DEG)
+            if (
+                robot_id in self.registered
+                and misses < REGISTRATION_MISS_LIMIT
+                and not cloud_vs_hold
+            ):
                 # Hold: keep the last accepted transform and stay in the merged
                 # map. The wider search the dropped lock just enabled gets a
                 # chance to confirm the robot before it is evicted, which is what
                 # stops one marginal frame from blanking the operator's map.
+                # Not when an unambiguous cloud disagrees with the hold: that is
+                # the 180 deg alias, and painting it for three more uploads is
+                # how the operator map filled with extra rooms.
                 return
             self.registration_rejections[robot_id] = (
-                "ambiguous grid and point-cloud match"
+                "grid/cloud yaw disagreement"
+                if grid_blocked or cloud_vs_hold
+                else "ambiguous grid and point-cloud match"
                 if cloud is not None
                 else "ambiguous occupancy match"
             )

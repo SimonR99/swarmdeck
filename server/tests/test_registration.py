@@ -381,6 +381,173 @@ def test_cloud_proposal_is_applied_only_after_grid_validation(monkeypatch):
     assert svc.transforms["r1"] == pytest.approx((0.0, 0.0, 0.0))
 
 
+def _two_robot_walls():
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("auto")
+    n = svc.meta.width
+    meta = GridMeta(0.1, n, n, -5.0, -5.0)
+    cells = np.zeros((n, n), dtype=np.int8)
+    cells[10:90, 15:18] = 100
+    cells[60:63, 15:75] = 100
+    cloud = np.column_stack(
+        [
+            np.linspace(-2.0, 2.0, 100),
+            np.zeros(100),
+            np.full(100, 0.3),
+        ]
+    ).astype(np.float32)
+    return svc, meta, cells, cloud
+
+
+def test_unambiguous_cloud_places_robot_when_accumulated_grids_barely_overlap(
+    monkeypatch,
+):
+    """Live scans of the current room must not wait on a 40 m 2D accumulator.
+
+    Scout's 180 deg hold was this: the height-band cloud had the right yaw, but
+    scoring it on stale occupancy failed `support`, so the grid alias stayed.
+    """
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    ambiguous = Registration(
+        dx=4.0, dy=4.0, dyaw=math.pi, score=0.1, overlap=20,
+        ratio=0.95, yaw_ratio=0.95, support=0.2,
+    )
+    cloud_proposal = Registration(
+        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
+        ratio=0.3, yaw_ratio=0.3, support=0.2,
+    )
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
+    monkeypatch.setattr(
+        service_module, "register_3d", lambda *args, **kwargs: cloud_proposal
+    )
+    monkeypatch.setattr(
+        service_module, "score_transform", lambda *args, **kwargs: (0.25, 90, 0.12)
+    )
+
+    svc, meta, cells, cloud = _two_robot_walls()
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells.copy())
+    svc.set_cloud("r0", cloud)
+    svc.set_cloud("r1", cloud.copy())
+
+    status = svc.status()
+    assert status["global_members"] == ["r0", "r1"]
+    assert status["registrations"]["r1"]["source"] == "pointcloud"
+    assert svc.transforms["r1"] == pytest.approx((0.0, 0.0, 0.0))
+
+
+def test_unambiguous_cloud_overrides_a_confident_grid_180_alias(monkeypatch):
+    """The measured live failure: 2D is sure about 180 deg, 3D is sure about 0."""
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    grid_alias = Registration(
+        dx=4.0, dy=4.0, dyaw=math.pi, score=0.5, overlap=300,
+        ratio=0.4, yaw_ratio=0.2, support=0.85,
+    )
+    cloud_proposal = Registration(
+        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
+        ratio=0.3, yaw_ratio=0.2, support=0.2,
+    )
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: grid_alias)
+    monkeypatch.setattr(
+        service_module, "register_3d", lambda *args, **kwargs: cloud_proposal
+    )
+    monkeypatch.setattr(
+        service_module, "score_transform", lambda *args, **kwargs: (0.30, 100, 0.18)
+    )
+
+    svc, meta, cells, cloud = _two_robot_walls()
+    svc.ingest("r0", meta, cells)
+    svc.set_cloud("r0", cloud)
+    svc.set_cloud("r1", cloud.copy())
+    svc.ingest("r1", meta, cells.copy())
+
+    status = svc.status()
+    assert status["global_members"] == ["r0", "r1"]
+    assert status["registrations"]["r1"]["source"] == "pointcloud"
+    assert abs(svc.transforms["r1"][2]) < 0.05
+
+
+def test_grid_alias_is_refused_when_cloud_disagrees_and_2d_vetoes(monkeypatch):
+    """If accumulated occupancy says the cloud transform drives walls through
+    known rooms, believe neither hypothesis rather than paint the 180 deg alias.
+    """
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    grid_alias = Registration(
+        dx=4.0, dy=4.0, dyaw=math.pi, score=0.5, overlap=300,
+        ratio=0.4, yaw_ratio=0.2, support=0.85,
+    )
+    cloud_proposal = Registration(
+        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
+        ratio=0.3, yaw_ratio=0.2, support=0.2,
+    )
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: grid_alias)
+    monkeypatch.setattr(
+        service_module, "register_3d", lambda *args, **kwargs: cloud_proposal
+    )
+    # High support, almost no wall overlap: 2D has an opinion, and it is no.
+    monkeypatch.setattr(
+        service_module, "score_transform", lambda *args, **kwargs: (0.05, 20, 0.90)
+    )
+
+    svc, meta, cells, cloud = _two_robot_walls()
+    svc.ingest("r0", meta, cells)
+    svc.set_cloud("r0", cloud)
+    svc.set_cloud("r1", cloud.copy())
+    svc.ingest("r1", meta, cells.copy())
+
+    status = svc.status()
+    assert "r1" not in status["global_members"]
+    assert status["registrations"]["r1"]["rejection"] == "grid/cloud yaw disagreement"
+
+
+def test_held_180_lock_is_dropped_when_cloud_points_the_other_way(monkeypatch):
+    """Hysteresis must not keep painting an alias once 3D disagrees with it."""
+    from swarmdeck_server.mapsvc.registration import Registration
+    import swarmdeck_server.mapsvc.service as service_module
+
+    accepted = Registration(
+        dx=4.0, dy=4.0, dyaw=math.pi, score=0.8, overlap=200,
+        ratio=0.2, yaw_ratio=0.2, support=0.9,
+    )
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: accepted)
+
+    svc, meta, cells, cloud = _two_robot_walls()
+    svc.ingest("r0", meta, cells)
+    svc.ingest("r1", meta, cells.copy())
+    assert "r1" in svc.global_members()
+    assert abs(abs(svc.transforms["r1"][2]) - math.pi) < 0.05
+
+    ambiguous = Registration(
+        dx=4.0, dy=4.0, dyaw=math.pi, score=0.17, overlap=90,
+        ratio=0.82, yaw_ratio=0.0, support=0.22,
+    )
+    cloud_proposal = Registration(
+        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
+        ratio=0.3, yaw_ratio=0.2, support=0.2,
+    )
+    monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
+    monkeypatch.setattr(
+        service_module, "register_3d", lambda *args, **kwargs: cloud_proposal
+    )
+    monkeypatch.setattr(
+        service_module, "score_transform", lambda *args, **kwargs: (0.05, 20, 0.90)
+    )
+
+    svc.set_cloud("r0", cloud)
+    svc.set_cloud("r1", cloud.copy())
+    svc.ingest("r1", meta, cells.copy())
+
+    status = svc.status()
+    assert "r1" not in status["global_members"], "180 deg hold must not survive a cloud veto"
+    assert status["registrations"]["r1"]["rejection"] == "grid/cloud yaw disagreement"
+
+
 def test_registration_cannot_override_configured_prior(monkeypatch):
     """A symmetric-map false positive must fail closed to the known start pose."""
     from swarmdeck_server.mapsvc.registration import Registration

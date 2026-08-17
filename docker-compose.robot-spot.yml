@@ -100,12 +100,16 @@ services:
         condition: service_started
     network_mode: host
     ipc: host
+    volumes:
+      # Our source off the mount, dependencies out of the image — see the
+      # adapter service. Without this an `ros2_rtsp.py` fix needs a rebuild.
+      - ${SPOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
     command:
       - python3
-      - /app/adapters/media/ros2_rtsp.py
+      - /app/swarmdeck/adapters/media/ros2_rtsp.py
       - --robot-id
       - spot_0
       - --topic

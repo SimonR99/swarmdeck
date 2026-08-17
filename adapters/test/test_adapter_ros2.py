@@ -815,3 +815,165 @@ def test_refresh_settings_falls_back_when_the_backend_is_older(mod, monkeypatch)
 
     bridge.node.get_logger().warn.assert_not_called()
     assert bridge._detector.class_floors["rubber_duck"] == 0.80
+
+
+def test_websocket_keepalive_is_tight_enough_to_matter(mod):
+    """The library defaults leave ~40 s of driving with nobody watching.
+
+    `link_ok()` is fed by `note_link_activity()` after every completed send, and
+    a completed send only proves the frame reached the kernel write buffer. At
+    ~400 B and 5 Hz a hard cut takes on the order of a hundred seconds to fill
+    a normal socket buffer, so backpressure does not catch this — the ping does,
+    and only once the socket actually closes does the `except` in `run_robot`
+    cancel the goal and zero cmd_vel.
+    """
+    cfg = mod.deep_merge(mod.DEFAULTS, {})
+
+    interval = float(cfg["ping_interval_s"])
+    timeout = float(cfg["ping_timeout_s"])
+
+    # Worst case is interval + timeout: a cut just after a successful pong.
+    assert interval + timeout <= 8.0, (
+        f"link loss would go undetected for up to {interval + timeout:.0f}s"
+    )
+    # But not so tight that a degraded link reconnects constantly — every
+    # reconnect cancels the active goal.
+    assert interval >= 1.0 and timeout >= 2.0
+
+
+def test_connect_actually_passes_the_keepalive_settings(mod, monkeypatch):
+    """A default that never reaches websockets.connect protects nothing."""
+    import asyncio
+
+    seen = {}
+
+    class _Conn:
+        async def __aenter__(self):
+            raise RuntimeError("stop here — the connect kwargs are the subject")
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    def fake_connect(url, **kwargs):
+        seen.update(kwargs)
+        return _Conn()
+
+    monkeypatch.setattr(mod.websockets, "connect", fake_connect)
+    bridge = _link_bridge(mod, {"upload_map": lambda: None})
+
+    async def scenario():
+        task = asyncio.ensure_future(mod.run_robot(bridge, "ws://test"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(scenario())
+
+    assert seen.get("ping_interval") == float(bridge.cfg["ping_interval_s"])
+    assert seen.get("ping_timeout") == float(bridge.cfg["ping_timeout_s"])
+
+
+def test_losing_the_socket_cancels_the_goal_before_zeroing_cmd_vel(mod, monkeypatch):
+    """A robot that keeps driving after losing its operator is the one that hurts
+    someone. Order matters: while nav_status is still "active" the relay in
+    `_on_nav_cmd_vel` overwrites a zero Twist with Nav2's next sample, so
+    zeroing without cancelling stops the robot for milliseconds and no more.
+    """
+    import asyncio
+
+    class _Conn:
+        async def __aenter__(self):
+            raise ConnectionResetError("network went away mid-goal")
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(mod.websockets, "connect", lambda *a, **k: _Conn())
+
+    bridge = _bridge(mod, {"topics": {"nav_cmd_vel": "cmd_vel_nav"}})
+    bridge.nav_status = "active"
+    order = []
+    real_cancel = bridge.cancel_goal
+
+    def traced_cancel():
+        order.append("cancel")
+        return real_cancel()
+
+    bridge.cancel_goal = traced_cancel
+    real_drive = bridge.drive
+
+    def traced_drive(lin, ang):
+        order.append(("drive", lin, ang))
+        return real_drive(lin, ang)
+
+    bridge.drive = traced_drive
+
+    async def scenario():
+        task = asyncio.ensure_future(mod.run_robot(bridge, "ws://test"))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert order, "link loss produced no stop at all"
+    assert order[0] == "cancel", f"cancel must precede the zero Twist, got {order}"
+    assert ("drive", 0.0, 0.0) in order, f"cmd_vel was never zeroed, got {order}"
+
+
+def test_a_backlog_of_drive_commands_does_not_replay_after_the_link_recovers(mod):
+    """The incident: the robot never stopped moving.
+
+    The GUI repeats `drive` every 120 ms while a key is held. Neither the
+    browser's WebSocket nor TCP drops those when the link congests — they
+    queue. So a stall while holding forward accumulates dozens of identical
+    commands, and the `drive(0, 0)` sent on release goes to the BACK of that
+    queue. Executing each one inline drives the robot forward through the whole
+    backlog, and because every one refreshes `_last_drive_at`, `drive_watchdog`
+    never fires either.
+    """
+    bridge = _bridge(mod)
+
+    # 30 s of held-forward at the GUI's 120 ms cadence, then the release.
+    for _ in range(250):
+        bridge.note_drive_command(0.4, 0.0)
+    bridge.note_drive_command(0.0, 0.0)
+
+    assert bridge.pub_cmd.publish.call_count == 0, (
+        "nothing may reach cmd_vel before the timer runs — that is what stops "
+        "a backlog being replayed"
+    )
+
+    bridge.apply_pending_drive()
+
+    assert bridge.pub_cmd.publish.call_count == 1, "only the newest intent is applied"
+    applied = bridge.pub_cmd.publish.call_args[0][0]
+    assert applied.linear.x == 0.0 and applied.angular.z == 0.0, (
+        "the operator released; the robot must be stopped, not driven forward "
+        "through 250 stale commands"
+    )
+
+
+def test_latching_still_delivers_normal_teleop(mod):
+    """The fix must not cost responsiveness: the timer runs at 20 Hz and the
+    GUI repeats at ~8 Hz, so every command an operator sends is still applied."""
+    bridge = _bridge(mod)
+
+    bridge.note_drive_command(0.3, -0.2)
+    bridge.apply_pending_drive()
+
+    assert bridge.pub_cmd.publish.call_count == 1
+    twist = bridge.pub_cmd.publish.call_args[0][0]
+    assert twist.linear.x == pytest.approx(0.3)
+    assert twist.angular.z == pytest.approx(-0.2)
+    assert bridge.mode == "teleop"
+
+    # An idle tick actuates nothing rather than re-publishing stale velocity.
+    bridge.apply_pending_drive()
+    assert bridge.pub_cmd.publish.call_count == 1

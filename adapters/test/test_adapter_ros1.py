@@ -956,3 +956,54 @@ def test_a_blocking_upload_does_not_stall_state_or_nav_joy(mod, monkeypatch):
         f"nav joy stopped while an upload was in flight ({joy_during - joy_before} "
         "pumps during a 0.4 s block) — an upload can steer the robot again"
     )
+
+
+def test_websocket_keepalive_is_tight_enough_to_matter(mod):
+    """See the matching test in test_adapter_ros2.py.
+
+    The library defaults (20 s interval, 20 s timeout) leave ~40 s in which
+    `link_ok()` reads true off our own completing sends, while pathFollower's
+    ~27 Hz stream is relayed to the driver with no operator attached.
+    """
+    cfg = mod.deep_merge(mod.DEFAULTS, {})
+
+    interval = float(cfg["ping_interval_s"])
+    timeout = float(cfg["ping_timeout_s"])
+
+    assert interval + timeout <= 8.0, (
+        f"link loss would go undetected for up to {interval + timeout:.0f}s"
+    )
+    assert interval >= 1.0 and timeout >= 2.0
+
+
+def test_connect_actually_passes_the_keepalive_settings(mod, monkeypatch):
+    """A default that never reaches websockets.connect protects nothing."""
+    import asyncio
+
+    seen = {}
+
+    class _Conn:
+        async def __aenter__(self):
+            raise RuntimeError("stop here — the connect kwargs are the subject")
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(mod.websockets, "connect",
+                        lambda url, **kw: (seen.update(kw), _Conn())[1])
+
+    bridge = _bridge(mod)
+
+    async def scenario():
+        task = asyncio.ensure_future(mod.run_robot(bridge, "ws://test"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(scenario())
+
+    assert seen.get("ping_interval") == float(bridge.cfg["ping_interval_s"])
+    assert seen.get("ping_timeout") == float(bridge.cfg["ping_timeout_s"])

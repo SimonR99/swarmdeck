@@ -223,6 +223,12 @@ DEFAULTS: dict[str, Any] = {
     # whole goal with no operator attached. Cost of getting this wrong was
     # demonstrated on Botman, 2026-08-12.
     "link_timeout_s": 1.5,
+    # Websocket keepalive — see the matching note in adapter_ros2.py. The
+    # library defaults (20 s / 20 s) leave ~40 s in which `link_ok()` reads true
+    # off our own completing sends while nothing reaches the operator, and an
+    # active goal keeps running for all of it.
+    "ping_interval_s": 2.0,
+    "ping_timeout_s": 4.0,
     # How long a map/scan/cloud upload may take before the adapter gives up.
     #
     # This was hardcoded at 5 s, chosen when the uploads shared a coroutine with
@@ -413,8 +419,11 @@ class HardwareBridge:
         # failure it exists to cover (a wedged link) is the one that stops that
         # loop from running it.
         self._last_link_at = time.monotonic()
+        # Newest operator drive intent, applied by the timer — see
+        # `note_drive_command`.
+        self._pending_drive: tuple[float, float] | None = None
         self._watchdog_timer = rospy.Timer(
-            rospy.Duration(0.1), lambda _event: self._watchdogs()
+            rospy.Duration(0.05), lambda _event: self._watchdogs()
         )
 
     # ------------------------------------------------------------- capabilities
@@ -973,8 +982,28 @@ class HardwareBridge:
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
+    def note_drive_command(self, linear: float, angular: float) -> None:
+        """Latch the operator's newest intent — see the twin in adapter_ros2.py.
+
+        Executing inline replays a backlog: the GUI repeats `drive` every 120 ms
+        while held, and a congested link queues those rather than dropping them,
+        so on recovery every stale "forward" runs in order with the stop that
+        ended the press at the back of the queue.
+        """
+        self._pending_drive = (float(linear), float(angular))
+        self._last_link_at = time.monotonic()
+
+    def apply_pending_drive(self) -> None:
+        pending = self._pending_drive
+        if pending is None:
+            return
+        self._pending_drive = None
+        self.drive(*pending)
+
     def _watchdogs(self) -> None:
-        """Both deadmen, on one 0.1 s timer driven by the robot's own clock."""
+        """Actuation and both deadmen, on one 20 Hz timer driven by the robot's
+        own clock — so they keep running when the link cannot."""
+        self.apply_pending_drive()
         self.drive_watchdog()
         self.link_watchdog()
 
@@ -1324,7 +1353,11 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
     backoff = 1.0
     while True:
         try:
-            async with websockets.connect(ws_url, ping_interval=20) as ws:
+            async with websockets.connect(
+                ws_url,
+                ping_interval=float(bridge.cfg["ping_interval_s"]),
+                ping_timeout=float(bridge.cfg["ping_timeout_s"]),
+            ) as ws:
                 await ws.send(json.dumps({
                     "type": "hello",
                     "protocol": 1,
@@ -1363,7 +1396,8 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         elif kind == "cancel_goal":
                             bridge.cancel_goal()
                         elif kind == "drive":
-                            bridge.drive(
+                            # Latched, not executed here — see note_drive_command.
+                            bridge.note_drive_command(
                                 msg.get("linear", 0.0), msg.get("angular", 0.0)
                             )
                         elif kind == "stop":
