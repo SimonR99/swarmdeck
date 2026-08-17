@@ -39,6 +39,21 @@ def test_settings_round_trip_and_validation(tmp_path):
     assert SettingsStore(path).load() == saved
 
 
+def test_drive_control_mode_defaults_to_arrows_and_rejects_unknown_modes(tmp_path):
+    """The pad is the default because the dashboard is driven from a tablet.
+
+    An unrecognised mode has to fall back rather than reach the dashboard: the
+    panel renders one control per known mode, so an unknown one would leave the
+    operator with no manual control at all.
+    """
+    store = SettingsStore(tmp_path / "settings.json")
+
+    assert store.save({})["drive_control_mode"] == "arrows"
+    assert store.save({"drive_control_mode": "joystick"})["drive_control_mode"] == "joystick"
+    assert store.save({"drive_control_mode": "gamepad"})["drive_control_mode"] == "arrows"
+    assert store.save({"drive_control_mode": None})["drive_control_mode"] == "arrows"
+
+
 def test_invalid_settings_fall_back_without_throwing(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text("not json")
@@ -117,11 +132,12 @@ def test_settings_accept_seven_robots_for_mixed_hardware_fleet(tmp_path):
     assert saved["robots"][6]["color"] == "#e07000"
 
 
-def test_named_hardware_robots_keep_identity_colors(tmp_path):
+def test_named_hardware_robots_default_to_identity_colors(tmp_path):
+    """No colour chosen: the named platforms get their stable identity hue."""
     saved = SettingsStore(tmp_path / "settings.json").save({
         "robot_count": 3,
         "robots": [
-            {"id": "spot_0", "type": "spot", "endpoint": "ws://host/adapter", "color": "#ff0000"},
+            {"id": "spot_0", "type": "spot", "endpoint": "ws://host/adapter"},
             {"id": "botman_0", "type": "ros2", "endpoint": "ws://host/adapter"},
             {"id": "aslan_0", "type": "ros2", "endpoint": "ws://host/adapter"},
         ],
@@ -131,6 +147,30 @@ def test_named_hardware_robots_keep_identity_colors(tmp_path):
         "#c9a000",
         "#007aff",
         "#e07000",
+    ]
+
+
+def test_a_chosen_colour_beats_the_identity_default(tmp_path):
+    """The identity table is a default, not an override.
+
+    Checking it first made the dialog's colour picker silently inert for
+    exactly the three robots the real fleet is made of: the operator picked a
+    colour, saved, and the swatch snapped back with nothing explaining why.
+    """
+    saved = SettingsStore(tmp_path / "settings.json").save({
+        "robot_count": 3,
+        "robots": [
+            {"id": "spot_0", "color": "#ff0000"},
+            {"id": "aslan_0", "color": "#00ff00"},
+            # Empty string is "unset", not a colour, and still falls back.
+            {"id": "botman_0", "color": "  "},
+        ],
+    })
+
+    assert [robot["color"] for robot in saved["robots"]] == [
+        "#ff0000",
+        "#00ff00",
+        "#007aff",
     ]
 
 

@@ -39,6 +39,11 @@ export interface RobotState extends Stamps {
   type: 'robot_state';
   robot_id: string;
   robot_type: string;
+  /** Adapter build and ROS distro, as declared at `hello`. */
+  adapter?: string;
+  ros?: string;
+  /** Host the adapter dialled in from — observed on the socket, not configured. */
+  peer?: string;
   pose: Pose;
   battery: number | null;
   mode: RobotMode;
@@ -80,6 +85,51 @@ export interface Detection {
 }
 
 /** One entry of the detector's class catalog, from `/api/detection/classes`. */
+/** One located sighting kept as evidence behind an entity or a proposal. */
+export interface DetectionSample {
+  robot_id: string;
+  x: number;
+  y: number;
+  score: number;
+  t: number;
+}
+
+/** An object the operator confirmed onto the map. */
+export interface DetectionEntity {
+  id: string;
+  class: string;
+  /** Mean of every accepted observation, not the most recent frame. */
+  position: Point;
+  observations: number;
+  best_score: number;
+  robot_ids: string[];
+  first_seen: number;
+  last_seen: number;
+  samples: DetectionSample[];
+}
+
+/** A sighting waiting on accept / ignore / merge. */
+export interface DetectionProposal {
+  id: string;
+  class: string;
+  position: Point;
+  observations: number;
+  best_score: number;
+  robot_ids: string[];
+  first_seen: number;
+  last_seen: number;
+  /** Set when an existing entity is close enough to be plausibly the same. */
+  suggested_entity_id: string | null;
+  suggested_distance: number | null;
+}
+
+export interface DetectionReview {
+  entities: DetectionEntity[];
+  proposals: DetectionProposal[];
+  ignored: number;
+  radii: { same: number; ask: number; ignore: number };
+}
+
 export interface DetectionClass {
   name: string;
   label: string;
@@ -175,19 +225,30 @@ export interface MapStatus {
   cslam_disagreement?: Record<string, CslamDisagreement>;
 }
 
+/**
+ * What an operator may decide about a robot. Deliberately short: the adapter
+ * declares what it is and where it came from at `hello`, so anything the robot
+ * can report is read from the robot rather than typed in here.
+ */
 export interface RobotConnectionSettings {
   id: string;
   enabled: boolean;
-  type: string;
-  endpoint: string;
   color?: string;
 }
+
+export type DriveControlMode = 'arrows' | 'joystick';
 
 export interface AppSettings {
   unattended_threshold_s: number;
   /** After clearing an alert, same id stays suppressed for this many seconds. */
   alert_suppress_s: number;
   robot_count: number;
+  /**
+   * What the manual-drive control looks like: a four-button direction pad or an
+   * analogue thumbstick. Keyboard WASD/arrow keys drive in either mode, so this
+   * only chooses the on-screen control.
+   */
+  drive_control_mode: DriveControlMode;
   detection_enabled: boolean;
   detection_sensitivity: number;
   /** Catalog class names the detector should look for. */
@@ -199,6 +260,13 @@ export interface AppSettings {
    * the robots to notice.
    */
   detection_class_floors: Record<string, number>;
+  /**
+   * Review radii, metres. Inside `same` a sighting is folded into the object
+   * already on the map without asking; between the two it is the ambiguous
+   * case and the operator is offered the merge.
+   */
+  detection_same_radius_m: number;
+  detection_ask_radius_m: number;
   /**
    * Sparse per-robot overrides of the above, keyed by robot id then class.
    * A robot with no entry follows the fleet value, including later changes
@@ -267,6 +335,7 @@ export type ServerMessage =
   | { type: 'alert'; alert: Alert }
   | { type: 'alert_clear'; id: string }
   | { type: 'settings_state'; settings: AppSettings }
+  | ({ type: 'detection_review' } & DetectionReview)
   | { type: 'slam_graph'; robot_id: string; graph: SlamGraph }
   | SimReset
   | { type: 'map_info'; info: MapInfo };
@@ -283,6 +352,11 @@ export type ClientMessage =
   | { type: 'report_target'; robot_id: string; payload: Point }
   | { type: 'stop_all' }
   | { type: 'reset_sim' }
-  | { type: 'body_command'; robot_id: string; action: 'claim' | 'release' | 'sit' | 'stand' };
+  | { type: 'body_command'; robot_id: string; action: 'claim' | 'release' | 'sit' | 'stand' }
+  | { type: 'detection_accept'; proposal_id: string }
+  | { type: 'detection_ignore'; proposal_id: string }
+  | { type: 'detection_merge'; proposal_id: string; entity_id: string }
+  | { type: 'detection_forget'; entity_id: string }
+  | { type: 'detection_unignore' };
 
 export type ClientAction = ClientMessage['type'];

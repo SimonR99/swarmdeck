@@ -133,8 +133,28 @@ registration diagnostics from `GET /api/map/status`.
 
 The live map distinguishes the path already travelled (solid) from Nav2's current
 predicted path (dashed). The settings button persists the unattended-warning delay,
-expected fleet size, adapter identities/endpoints, and perception controls in
-`sessions/settings.json`; the fleet size is consumed on the next Gazebo/adapter start.
+expected fleet size, per-robot enable and map colour, the manual drive control, and
+perception controls in `sessions/settings.json`; the fleet size is consumed on the next
+Gazebo/adapter start.
+
+A robot's platform, adapter build, ROS distro and connecting address are **reported**, not
+configured — the adapter dials the backend and declares them at `hello`, so the dialog
+shows what the robot actually said rather than asking anyone to predeclare it. Porting to
+a new platform therefore means writing an adapter against
+[the protocol](adapters/protocol/README.md), with no backend or settings change.
+
+Located detections are not placed on the map by the detector. They go to an operator
+review queue at the bottom-left of the map, where each is accepted, ignored, or merged
+into an object already there; an accepted object's position is the mean of every
+observation folded into it, and one already on the map stops asking. Confirmed objects
+draw solid, pending ones dashed. See [perception.md](docs/perception.md).
+
+Manual drive comes in two shapes, set by `drive_control_mode`. **Arrows** (the default) is
+a four-button pad, one direction per button, which is what a finger on a tablet can
+reliably hit; **joystick** is the analogue thumbstick, which gives proportional speed and
+smooth diagonals but needs a sustained drag held at the right angle. WASD and the arrow
+keys drive in either mode, and diagonals still work — on the pad by holding two buttons,
+on the keyboard by holding two keys.
 
 The stack includes MediaMTX for low-latency WHEP/WebRTC video. Set
 `MEDIAMTX_WEBRTC_HOSTS` to the operator host's LAN address when browsers run on other

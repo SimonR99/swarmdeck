@@ -1,12 +1,18 @@
 <script lang="ts">
   import {
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
     CircleSlash,
     Crosshair,
     Gauge,
     Octagon
   } from 'lucide-svelte';
+  import { untrack } from 'svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
+  import { settings } from '$lib/stores/settings.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import Badge from '../ui/Badge.svelte';
@@ -14,9 +20,14 @@
   const activeId = $derived(fleet.selected[0] ?? null);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
   const canDrive = $derived(Boolean(activeId && fleet.can(activeId, 'navigate') && robot?.online));
+  // Operator setting, defaulting to the arrow pad: one button per direction is
+  // what a finger on a tablet can hit, where a thumbstick needs a sustained
+  // drag held at the right angle.
+  const driveMode = $derived(settings.value.drive_control_mode ?? 'arrows');
 
   type Direction = 'up' | 'down' | 'left' | 'right';
 
+  const DIRECTIONS: Direction[] = ['up', 'down', 'left', 'right'];
   const MAX_ANGULAR_SPEED = 0.8;
   const JOYSTICK_RADIUS = 45;
   const JOYSTICK_DEAD_ZONE = 0.06;
@@ -30,8 +41,17 @@
   let joystickPointer = $state<number | null>(null);
   let joystickElement = $state<HTMLButtonElement>();
 
+  // Which pointer is holding each arrow, so a release only clears the button
+  // the finger that lifted was on -- two-finger diagonals behave like two keys.
+  let padPointers = $state<Record<Direction, number | null>>({
+    up: null,
+    down: null,
+    left: null,
+    right: null
+  });
+
   // Multiple keyboard inputs can be active at once, so diagonal WASD driving
-  // remains available alongside the touch-first joystick.
+  // remains available alongside whichever on-screen control is shown.
   const keyDirs = new Set<Direction>();
 
   function stopTimer() {
@@ -76,9 +96,18 @@
     ];
   }
 
+  /** Keyboard and arrow pad share one set, so a key and a button add up. */
+  function heldDirs(): Set<Direction> {
+    const dirs = new Set(keyDirs);
+    for (const direction of DIRECTIONS) {
+      if (padPointers[direction] !== null) dirs.add(direction);
+    }
+    return dirs;
+  }
+
   function currentVector(): [number, number] {
     if (joystickPointer !== null) return joystickVector();
-    return vectorFor(keyDirs);
+    return vectorFor(heldDirs());
   }
 
   function labelFor(linear: number, angular: number): string {
@@ -110,8 +139,36 @@
   function hardStop() {
     keyDirs.clear();
     resetJoystick();
+    resetPad();
     stopDrive(true);
     if (activeId) actions.cancelGoal(activeId);
+  }
+
+  function pressArrow(event: PointerEvent, direction: Direction) {
+    if (!activeId || !canDrive) return;
+    event.preventDefault();
+    // Record the hold before capturing, as the joystick does: capture is the
+    // nicety (it keeps the release on this button when a finger slides off its
+    // edge), and it must not be able to cost the drive itself.
+    padPointers[direction] = event.pointerId;
+    (event.currentTarget as HTMLButtonElement).setPointerCapture(event.pointerId);
+    updateDrive();
+  }
+
+  /** Release only what this pointer was holding; other fingers keep driving. */
+  function releasePointer(pointerId: number): boolean {
+    let released = false;
+    for (const direction of DIRECTIONS) {
+      if (padPointers[direction] === pointerId) {
+        padPointers[direction] = null;
+        released = true;
+      }
+    }
+    return released;
+  }
+
+  function resetPad() {
+    for (const direction of DIRECTIONS) padPointers[direction] = null;
   }
 
   function keyDirection(key: string): Direction | null {
@@ -158,6 +215,18 @@
     if (driving) updateDrive();
   }
 
+  // A control removed mid-hold never gets its release, so swapping the pad for
+  // the stick -- or losing the robot -- has to stop the robot itself.
+  $effect(() => {
+    driveMode;
+    canDrive;
+    untrack(() => {
+      resetJoystick();
+      resetPad();
+      stopDrive();
+    });
+  });
+
   $effect(() => {
     const id = activeId;
     const down = (event: KeyboardEvent) => {
@@ -174,14 +243,19 @@
       keyDirs.delete(direction);
       updateDrive();
     };
+    // Listening on the window, not the controls: a pointer released outside the
+    // page -- over a browser chrome element, or after a capture is broken -- is
+    // still a release, and missing it would leave the robot driving.
     const pointerUp = (event: PointerEvent) => {
-      if (event.pointerId !== joystickPointer) return;
-      resetJoystick(event.pointerId);
+      const wasJoystick = event.pointerId === joystickPointer;
+      if (wasJoystick) resetJoystick(event.pointerId);
+      if (!releasePointer(event.pointerId) && !wasJoystick) return;
       updateDrive();
     };
     const clearAll = () => {
       keyDirs.clear();
       resetJoystick();
+      resetPad();
       stopDrive();
     };
     window.addEventListener('keydown', down);
@@ -195,6 +269,7 @@
       driving = false;
       keyDirs.clear();
       resetJoystick();
+      resetPad();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
       window.removeEventListener('pointerup', pointerUp);
@@ -243,26 +318,81 @@
           <span class="text-[9px] text-fg-dim">WASD / arrows</span>
         </div>
 
-        <div class="relative mx-auto h-[124px] w-[124px]">
-          <button
-            bind:this={joystickElement}
-            type="button"
-            aria-label="Drive joystick. Push up or down to drive and left or right to turn."
-            disabled={!canDrive}
-            class:joystick-active={joystickPointer !== null}
-            class="joystick-base"
-            onpointerdown={startJoystick}
-            onpointermove={updateJoystick}
-          >
-            <span class="joystick-forward" aria-hidden="true">FWD</span>
-            <span class="joystick-reverse" aria-hidden="true">REV</span>
-            <span
-              class="joystick-thumb"
-              style="transform: translate({joystickX * JOYSTICK_RADIUS}px, {joystickY * JOYSTICK_RADIUS}px)"
-              aria-hidden="true"
-            ></span>
-          </button>
-        </div>
+        {#if driveMode === 'joystick'}
+          <div class="relative mx-auto h-[124px] w-[124px]">
+            <button
+              bind:this={joystickElement}
+              type="button"
+              aria-label="Drive joystick. Push up or down to drive and left or right to turn."
+              disabled={!canDrive}
+              class:joystick-active={joystickPointer !== null}
+              class="joystick-base"
+              onpointerdown={startJoystick}
+              onpointermove={updateJoystick}
+            >
+              <span class="joystick-forward" aria-hidden="true">FWD</span>
+              <span class="joystick-reverse" aria-hidden="true">REV</span>
+              <span
+                class="joystick-thumb"
+                style="transform: translate({joystickX * JOYSTICK_RADIUS}px, {joystickY * JOYSTICK_RADIUS}px)"
+                aria-hidden="true"
+              ></span>
+            </button>
+          </div>
+        {:else}
+          <!--
+            One button per direction, sized for a finger rather than a mouse.
+            Forward and reverse span the pad because they are the two an
+            operator holds longest; turns split the middle row the way the keys
+            they mirror sit on a keyboard.
+          -->
+          <div class="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              aria-label="Drive forward"
+              aria-pressed={padPointers.up !== null}
+              disabled={!canDrive}
+              class="arrow-key col-span-2"
+              class:arrow-held={padPointers.up !== null}
+              onpointerdown={(event) => pressArrow(event, 'up')}
+            >
+              <ArrowUp class="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              aria-label="Turn left"
+              aria-pressed={padPointers.left !== null}
+              disabled={!canDrive}
+              class="arrow-key"
+              class:arrow-held={padPointers.left !== null}
+              onpointerdown={(event) => pressArrow(event, 'left')}
+            >
+              <ArrowLeft class="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              aria-label="Turn right"
+              aria-pressed={padPointers.right !== null}
+              disabled={!canDrive}
+              class="arrow-key"
+              class:arrow-held={padPointers.right !== null}
+              onpointerdown={(event) => pressArrow(event, 'right')}
+            >
+              <ArrowRight class="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              aria-label="Drive in reverse"
+              aria-pressed={padPointers.down !== null}
+              disabled={!canDrive}
+              class="arrow-key col-span-2"
+              class:arrow-held={padPointers.down !== null}
+              onpointerdown={(event) => pressArrow(event, 'down')}
+            >
+              <ArrowDown class="h-4 w-4" />
+            </button>
+          </div>
+        {/if}
 
         <button
           type="button"
@@ -394,6 +524,35 @@
   }
   .joystick-active .joystick-thumb {
     transition: none;
+  }
+  .arrow-key {
+    display: grid;
+    place-items: center;
+    height: 38px;
+    border: 1px solid var(--color-border);
+    border-radius: 5px;
+    background: var(--color-surface-2);
+    color: var(--color-fg);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.3);
+    /* A held arrow must not also pan, zoom, or pop a text selection: on a
+       tablet those gestures cancel the pointer, which reads as the robot
+       stopping for no reason mid-drive. */
+    touch-action: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    transition: background-color 90ms, border-color 90ms, color 90ms;
+  }
+  .arrow-key:hover:not(:disabled) {
+    border-color: var(--color-border-strong);
+  }
+  .arrow-key:disabled {
+    opacity: 0.4;
+  }
+  .arrow-held:not(:disabled) {
+    border-color: var(--color-accent);
+    background: var(--color-accent);
+    color: white;
+    box-shadow: inset 0 2px 5px rgb(0 0 0 / 0.18);
   }
   .speed-slider {
     width: 100%;

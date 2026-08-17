@@ -154,12 +154,58 @@ monotonic. Run it after editing any prompt or floor.
 Nothing else needs touching: the settings dialog, the protocol, the camera overlay and
 the map markers all read the catalog through the backend.
 
+## Operator review: what earns a place on the shared map
+
+A score floor answers "is this a real detection?". It cannot answer "is this the same
+duck I already have, or a second one?" — that is a question about geometry and identity,
+and the detector has no way to know. The review pipeline (`detect/review.py`) is where an
+operator answers it.
+
+Two stores, deliberately separate:
+
+| | `_detections` | `review_store` |
+|---|---|---|
+| Holds | live camera tracks | validated map objects |
+| Keyed by | `{robot_id}:{track_id}` | its own entity id |
+| Lifetime | retracted when the object leaves frame | outlives every sighting |
+| Position | the latest frame | mean of all accepted observations |
+
+Each located sighting is triaged against the confirmed entities of its own class:
+
+- **within `detection_same_radius_m`** (0.5 m) — the object already on the map. Folded in
+  silently, its centroid re-averaged. This is the overwhelming majority: a robot parked in
+  front of a duck emits a sighting every frame, and prompting per frame would make the
+  queue worthless. **An object on the map never asks again.**
+- **out to `detection_ask_radius_m`** (1.5 m) — genuinely ambiguous. Raised as a proposal
+  with the merge *pre-suggested* and the distance named, so the operator answers "same or
+  different" instead of re-deriving it from coordinates.
+- **beyond** — proposed as a new object.
+
+The operator answers accept / ignore / merge. **Ignore writes a suppression zone**, which
+is what separates it from dismiss: without one the next frame re-proposes the same object
+and the operator answers forever. Repeat sightings near a pending proposal strengthen that
+one item rather than queueing near-duplicates, and the pending list is capped by dropping
+the *weakest* evidence, so a mislabelling detector cannot bury the one real finding.
+
+Position is a running mean over every accepted observation, kept as sums so it is O(1) and
+covers all evidence rather than a recent window. One monocular range estimate is worth
+little; twenty from two robots at different angles put the marker where the object is.
+
+Nothing is hidden from the map while it waits. Confirmed objects draw as a solid disc with
+a ring, pending ones as a dashed hollow ring — so an unreviewed guess is visible but never
+mistakable for something a person accepted.
+
 ## Known limits
 
 - The reference photographs are hand-held close-ups. A pass proves the prompt binds to
   the right concept; it is not a field accuracy figure for a robot camera across a room.
 - Distractor confusion is real and unfixed. A plush unicorn scores 0.53 as `rubber_duck`,
   and a small desk object scores 0.29 as `filament_spool`. Both sit above their floors.
+  Operator review is the backstop for exactly this: a confident wrong label reaches the
+  queue, not the map.
+- The review radii are metric and class-independent. Two objects of one class genuinely
+  closer than `detection_same_radius_m` will merge into a single entity with no way to
+  split them; `detection_forget` is the only recourse.
 - Everything above was measured on YOLOE-26n-seg (nano) on CPU. The s/m/l checkpoints
   were compared on these images with a first-pass prompt set and were not better — 26l
   found neither the cone nor the spool where 26n found both — so nano stayed. That

@@ -6,6 +6,7 @@
   import DrivePanel from '$lib/components/controls/DrivePanel.svelte';
   import SwarmGraphPanel from '$lib/components/slam/SwarmGraphPanel.svelte';
   import AlertStack from '$lib/components/alerts/AlertStack.svelte';
+  import DetectionReview from '$lib/components/detections/DetectionReview.svelte';
   import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
   import { startConnection, teardown } from '$lib/api/connection';
   import { PanelRightClose, PanelRightOpen } from 'lucide-svelte';
@@ -32,6 +33,7 @@
     <div class="relative min-w-0 flex-1">
       <MapView />
       <AlertStack />
+      <DetectionReview />
     </div>
 
     <!-- Camera: collapsible so the map can go full width on a 10in tablet -->

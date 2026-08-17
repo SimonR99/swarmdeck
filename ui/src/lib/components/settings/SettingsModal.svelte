@@ -3,6 +3,7 @@
   import Button from '$lib/components/ui/Button.svelte';
   import { settings, colorForRobot } from '$lib/stores/settings.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
+  import { fleet } from '$lib/stores/fleet.svelte';
   import type { AppSettings } from '$lib/types/protocol';
 
   let { open, onclose }: { open: boolean; onclose: () => void } = $props();
@@ -96,8 +97,6 @@
       draft.robots.push({
         id: `robot_${index}`,
         enabled: true,
-        type: 'ros2',
-        endpoint: 'ws://localhost:8080/adapter',
         color: colorForRobot(`robot_${index}`, index)
       });
     }
@@ -194,7 +193,22 @@
               {#each [1, 2, 3, 4, 5, 6, 7, 8] as count}<option value={count}>{count}</option>{/each}
             </select>
           </label>
+
+          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+            Manual drive control
+            <select
+              bind:value={draft.drive_control_mode}
+              class="h-9 w-full rounded-[4px] border border-border bg-surface px-2 text-xs text-fg outline-none"
+            >
+              <option value="arrows">Arrows — one button per direction</option>
+              <option value="joystick">Joystick — analogue thumbstick</option>
+            </select>
+          </label>
         </div>
+        <p class="mt-2 text-[10px] text-fg-dim">
+          Arrows suit a tablet, where one button at a time is easier to hit than a thumbstick.
+          WASD and the arrow keys drive in either mode.
+        </p>
         <p class="mt-2 text-[10px] text-fg-dim">
           After you clear an alert, the same condition will not reappear until the suppress window ends.
         </p>
@@ -217,6 +231,38 @@
           Raise a class until false positives disappear. The % on a camera box
           is the model's confidence for that detection. Changes apply the moment
           you save, to markers already on the map as well as new ones.
+        </p>
+
+        <div class="mt-3 grid gap-3 sm:grid-cols-2">
+          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+            Same object within
+            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+              <input
+                type="number" min="0.05" max="5" step="0.05"
+                bind:value={draft.detection_same_radius_m}
+                disabled={!draft.detection_enabled}
+                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none disabled:opacity-40"
+              />
+              <span class="text-fg-dim">m</span>
+            </div>
+          </label>
+          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+            Ask about merges within
+            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+              <input
+                type="number" min="0.05" max="10" step="0.05"
+                bind:value={draft.detection_ask_radius_m}
+                disabled={!draft.detection_enabled}
+                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none disabled:opacity-40"
+              />
+              <span class="text-fg-dim">m</span>
+            </div>
+          </label>
+        </div>
+        <p class="mt-2 text-[10px] text-fg-dim">
+          A sighting inside the first radius is the object already on the map and is added to it
+          silently. Between the two it is ambiguous, and the review queue offers the merge.
+          Beyond, it is proposed as a new object.
         </p>
 
         {#if detectionCatalog.classes.length}
@@ -332,33 +378,49 @@
         <div class="mb-2 flex items-end justify-between">
           <div>
             <div class="text-[11px] font-semibold text-fg">Robot connections & map colors</div>
-            <div class="mt-0.5 text-[10px] text-fg-dim">OFF hides that robot from the map and controls after Save. Endpoints apply on next adapter start.</div>
+            <div class="mt-0.5 text-[10px] text-fg-dim">OFF hides that robot from the map and controls after Save. Type and address are reported by the adapter, not set here.</div>
           </div>
           <span class="text-[9px] text-fg-dim">Save to apply</span>
         </div>
 
         <div class="space-y-2">
           {#each draft.robots.slice(0, draft.robot_count) as robot, index (index)}
-            <div class="grid grid-cols-[32px_32px_1fr_90px] gap-2 rounded-[5px] border border-border bg-bg/60 p-2 sm:grid-cols-[32px_32px_1fr_90px_2fr]">
-              <button
-                title={robot.enabled ? 'Disable robot' : 'Enable robot'}
-                class="mt-0.5 grid h-8 w-8 place-items-center rounded-[3px] border text-[9px] font-bold
-                       {robot.enabled ? 'border-ok/30 bg-ok/8 text-ok' : 'border-border text-fg-dim'}"
-                onclick={() => (robot.enabled = !robot.enabled)}
-              >{robot.enabled ? 'ON' : 'OFF'}</button>
-              <input
-                type="color"
-                value={colorForRobot(robot.id, index, robot.color)}
-                oninput={(e) => (robot.color = e.currentTarget.value)}
-                class="h-8 w-8 cursor-pointer rounded-[3px] border border-border bg-surface p-0.5"
-                title="Robot Map Color"
-                aria-label="Robot map color"
-              />
-              <input bind:value={robot.id} aria-label="Robot ID" class="h-8 min-w-0 rounded-[3px] border border-border bg-surface px-2 text-[10px] text-fg outline-none" />
-              <select bind:value={robot.type} aria-label="Robot adapter type" class="h-8 rounded-[3px] border border-border bg-surface px-1.5 text-[10px] text-fg outline-none">
-                <option value="ros2">ROS 2</option><option value="ros1">ROS 1</option><option value="spot">Spot</option><option value="sim">Simulation</option>
-              </select>
-              <input bind:value={robot.endpoint} aria-label="Adapter endpoint" class="col-span-4 h-8 min-w-0 rounded-[3px] border border-border bg-surface px-2 font-mono text-[9px] text-fg outline-none sm:col-span-1" />
+            {@const live = fleet.get(robot.id)}
+            <div class="rounded-[5px] border border-border bg-bg/60 p-2">
+              <div class="grid grid-cols-[32px_32px_1fr] gap-2">
+                <button
+                  title={robot.enabled ? 'Disable robot' : 'Enable robot'}
+                  class="grid h-8 w-8 place-items-center rounded-[3px] border text-[9px] font-bold
+                         {robot.enabled ? 'border-ok/30 bg-ok/8 text-ok' : 'border-border text-fg-dim'}"
+                  onclick={() => (robot.enabled = !robot.enabled)}
+                >{robot.enabled ? 'ON' : 'OFF'}</button>
+                <input
+                  type="color"
+                  value={colorForRobot(robot.id, index, robot.color)}
+                  oninput={(e) => (robot.color = e.currentTarget.value)}
+                  class="h-8 w-8 cursor-pointer rounded-[3px] border border-border bg-surface p-0.5"
+                  title="Robot map colour"
+                  aria-label="Robot map colour"
+                />
+                <input bind:value={robot.id} aria-label="Robot ID" class="h-8 min-w-0 rounded-[3px] border border-border bg-surface px-2 text-[10px] text-fg outline-none" />
+              </div>
+              <!--
+                Reported, not configured. The adapter declares what it is at
+                `hello` and the socket knows where it dialled in from, so asking
+                an operator to type either would only create a second source of
+                truth that can disagree with the robot.
+              -->
+              <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-[72px] font-mono text-[9px] text-fg-dim">
+                {#if live?.online}
+                  <span class="text-ok">● online</span>
+                  <span>{live.robot_type}</span>
+                  {#if live.peer}<span>from {live.peer}</span>{/if}
+                  {#if live.adapter}<span>{live.adapter}</span>{/if}
+                  {#if live.ros}<span>{live.ros}</span>{/if}
+                {:else}
+                  <span>not connected — the adapter dials in and declares itself</span>
+                {/if}
+              </div>
             </div>
           {/each}
         </div>

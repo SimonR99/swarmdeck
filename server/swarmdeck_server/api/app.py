@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from ..bus import bus, mark_session_start, session_elapsed, stamps
 from ..config.detection import DETECTION_CLASSES, floor_for
 from ..config.settings import SettingsStore, disabled_robot_ids, is_robot_enabled
+from ..detect.review import ReviewStore
 from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
@@ -39,6 +40,7 @@ async def lifespan(_: FastAPI):
     if not CONFIG:
         load_config()
     settings_store.load()
+    apply_review_radii(settings_store.value)
     map_service.set_excluded(disabled_robot_ids(settings_store.value))
     tasks = [
         asyncio.create_task(state_loop()),
@@ -67,6 +69,11 @@ _alerts: dict[str, dict[str, Any]] = {}
 _alert_suppress_until: dict[str, float] = {}
 _camera_frames: dict[str, tuple[bytes, float, int]] = {}
 _detections: dict[str, dict[str, Any]] = {}
+# Live camera tracks above; operator-validated map objects below. They are
+# deliberately separate stores: a track is "what a camera can see right now",
+# an entity is "what the fleet agreed is there". See detect/review.py.
+review_store = ReviewStore()
+_review_pushed_at = 0.0
 _camera_seq = 0
 
 # A robot still reporting telemetry can stop delivering frames entirely — a
@@ -130,6 +137,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     map_service.__dict__.update(new_service.__dict__)
     _camera_frames.clear()
     _detections.clear()
+    review_store.reset()
     return CONFIG
 
 
@@ -240,6 +248,25 @@ def frozen_camera_message(robot: Any) -> str | None:
     if frozen_s <= CAMERA_STALE_S:
         return None
     return f"{robot.robot_id} camera frozen for {int(frozen_s)} s"
+
+
+def review_state() -> dict[str, Any]:
+    return {"type": "detection_review", **review_store.snapshot()}
+
+
+async def broadcast_review(urgency: str = "now") -> None:
+    """Push review state, rate-limiting the merely-incremental updates."""
+    global _review_pushed_at
+    now = time.monotonic()
+    if urgency != "now" and now - _review_pushed_at < 1.0:
+        return
+    _review_pushed_at = now
+    await broadcast(review_state())
+
+
+def apply_review_radii(settings: dict[str, Any]) -> None:
+    review_store.same_radius = float(settings.get("detection_same_radius_m", 0.5))
+    review_store.ask_radius = float(settings.get("detection_ask_radius_m", 1.5))
 
 
 def detection_hidden(detection: dict[str, Any], settings: dict[str, Any]) -> bool:
@@ -488,6 +515,10 @@ async def reset_fleet() -> dict[str, Any]:
 
         map_service.reset()
         _detections.clear()
+        # Validated objects describe the world before the reset. Keeping them
+        # would leave confirmed markers floating over a map that no longer has
+        # the geometry they were placed against.
+        review_store.reset()
         _camera_frames.clear()
         # Alerts describe a world that no longer exists — an `unattended` warning
         # for a robot now back at its spawn pose is stale by construction. The
@@ -584,6 +615,14 @@ async def put_settings(request: Request) -> dict[str, Any]:
     # must not outlive the operator removing their category (or switching
     # detection off), otherwise saving the dialog leaves old objects behind.
     discard_disabled_detections(settings)
+    # Validated objects follow the same rule as the raw tracks: a class the
+    # operator switched off must not leave confirmed markers on the map.
+    review_store.drop_classes(
+        set(settings.get("detection_classes") or [])
+        if settings.get("detection_enabled", True)
+        else set()
+    )
+    apply_review_radii(settings)
     # Raising or lowering a floor, unlike removing a class, is reversible: the
     # entity is hidden in place and re-judged here, so the dashboard reflects a
     # new threshold on the save itself rather than whenever the robots next ask.
@@ -607,6 +646,7 @@ async def put_settings(request: Request) -> dict[str, Any]:
     # ahead of it would be judged against the floors it is meant to replace.
     for detection in revised:
         await broadcast({"type": "detection", "detection": detection})
+    await broadcast_review()
     return message
 
 
@@ -992,6 +1032,7 @@ async def gui_socket(ws: WebSocket) -> None:
         await ws.send_json({"type": "fleet_change", "robots": fleet_snapshot()})
         await ws.send_json(session_state())
         await ws.send_json({"type": "settings_state", "settings": settings_store.value})
+        await ws.send_json(review_state())
         for a in _alerts.values():
             await ws.send_json({"type": "alert", "alert": a})
 
@@ -1034,6 +1075,31 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         and kind in {"set_goal", "drive", "body_command"}
         and not is_robot_enabled(settings_store.value, rid)
     ):
+        return
+
+    if kind in {
+        "detection_accept",
+        "detection_ignore",
+        "detection_merge",
+        "detection_forget",
+        "detection_unignore",
+    }:
+        pid = str(msg.get("proposal_id", ""))
+        if kind == "detection_accept":
+            changed = review_store.accept(pid) is not None
+        elif kind == "detection_ignore":
+            changed = review_store.ignore(pid)
+        elif kind == "detection_merge":
+            changed = review_store.merge(pid, str(msg.get("entity_id", ""))) is not None
+        elif kind == "detection_unignore":
+            changed = review_store.clear_ignored() > 0
+        else:
+            changed = review_store.forget(str(msg.get("entity_id", "")))
+        # Silence on an unknown id is deliberate: two operators can answer the
+        # same proposal, and the loser of that race must not get an error for
+        # having agreed.
+        if changed:
+            await broadcast_review()
         return
 
     if kind == "set_goal":
@@ -1201,7 +1267,8 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         if msg.get("protocol") not in SUPPORTED_PROTOCOLS:
             await ws.close(code=4400)
             return True
-        r = registry.hello(msg, ws)
+        client = getattr(ws, "client", None)
+        r = registry.hello(msg, ws, peer=client.host if client else "")
         robot_id = r.robot_id
         if r.coordinate_frame == "merged":
             map_service.set_transform(robot_id, 0.0, 0.0, 0.0)
@@ -1220,6 +1287,7 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         rid = msg["robot_id"]
         camera = msg.get("camera", "front")
         visible: set[str] = set()
+        review_push: str | None = None
         for item in msg.get("items", []):
             # Adapters refresh settings every few seconds.  Ignore proposals
             # from an in-flight batch built with the previous class selection,
@@ -1252,12 +1320,36 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             }
             det["hidden"] = detection_hidden(det, settings_store.value)
             _detections[detection_id] = det
+
+            # Route the located sighting to the operator's review queue. Only
+            # evidence that clears the display floor is worth asking about: a
+            # detection the operator has already decided is noise should not
+            # come back as a question.
+            if det["map_position"] and not det["hidden"]:
+                outcome, _target = review_store.observe(
+                    rid,
+                    det["class"],
+                    det["map_position"]["x"],
+                    det["map_position"]["y"],
+                    score,
+                )
+                # A new question goes out at once — the operator is waiting on
+                # it. Folds and updates only shift a centroid, arrive at frame
+                # rate, and are coalesced onto a 1 Hz tick so the queue stays
+                # live without putting a broadcast on the hot path.
+                if outcome == "proposed":
+                    review_push = "now"
+                elif outcome in ("folded", "updated") and review_push is None:
+                    review_push = "soon"
             # Robots capture below the operator's floor on purpose, so that
             # lowering it later can be answered from this cache instead of from
             # frames that no longer exist.  Until then the entity is stored and
             # not sent: an operator who raised a floor should see no trace of it.
             if not det["hidden"]:
                 await broadcast({"type": "detection", "detection": det})
+
+        if review_push:
+            await broadcast_review(review_push)
 
         # An object that has left the frame is reported by its ABSENCE
         # from the batch; the protocol carries no per-object "lost"

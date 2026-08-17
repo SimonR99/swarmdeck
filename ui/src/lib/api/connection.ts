@@ -4,6 +4,7 @@ import { mapStore } from '$lib/stores/mapstore.svelte';
 import { session } from '$lib/stores/session.svelte';
 import { settings } from '$lib/stores/settings.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
+import { review } from '$lib/stores/review.svelte';
 import { MockFleet } from './mock';
 
 /**
@@ -55,6 +56,9 @@ function dispatch(msg: ServerMessage) {
       break;
     case 'settings_state':
       settings.apply(msg.settings);
+      break;
+    case 'detection_review':
+      review.apply(msg);
       break;
     case 'slam_graph':
       mapStore.applySlamGraph(msg.robot_id, msg.graph);
@@ -182,6 +186,27 @@ export const actions = {
    */
   resetSim() {
     sendAction({ type: 'reset_sim' });
+  },
+
+  /**
+   * Detection review. Nothing is applied optimistically: the backend owns the
+   * queue, two operators can answer the same proposal, and the authoritative
+   * `detection_review` broadcast is what resolves that race.
+   */
+  acceptDetection(proposalId: string) {
+    sendAction({ type: 'detection_accept', proposal_id: proposalId });
+  },
+  ignoreDetection(proposalId: string) {
+    sendAction({ type: 'detection_ignore', proposal_id: proposalId });
+  },
+  mergeDetection(proposalId: string, entityId: string) {
+    sendAction({ type: 'detection_merge', proposal_id: proposalId, entity_id: entityId });
+  },
+  forgetDetection(entityId: string) {
+    sendAction({ type: 'detection_forget', entity_id: entityId });
+  },
+  clearIgnoredDetections() {
+    sendAction({ type: 'detection_unignore' });
   }
 };
 

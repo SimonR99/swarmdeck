@@ -22,6 +22,7 @@
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
+  import { review } from '$lib/stores/review.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { MapRegistration } from '$lib/types/protocol';
@@ -262,6 +263,57 @@
    * therefore between robots, not between the keyframes that closed — an
    * operator wants to know who has met whom, and the keyframe pair is detail.
    */
+  /**
+   * Operator-reviewed objects, drawn over the raw sightings above.
+   *
+   * Confirmed and pending are deliberately the same hue and deliberately not
+   * the same weight: a solid disc with a ring is something a person accepted,
+   * a dashed hollow ring is a question still open. Nothing is hidden — an
+   * unreviewed object is still visible on the map — but the operator can tell
+   * at a glance which markers the fleet merely guessed at.
+   */
+  function drawReviewedObjects(ctx: CanvasRenderingContext2D) {
+    ctx.save();
+    for (const e of review.entities) {
+      const g = mapStore.worldToGrid(e.position.x, e.position.y);
+      if (!g) continue;
+      const { sx, sy } = screenOf(g.gx, g.gy);
+      const color = detectionCatalog.colorOf(e.class);
+      ctx.beginPath();
+      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sx, sy, 8.5, 0, Math.PI * 2);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    }
+
+    ctx.setLineDash([3, 3]);
+    for (const p of review.proposals) {
+      const g = mapStore.worldToGrid(p.position.x, p.position.y);
+      if (!g) continue;
+      const { sx, sy } = screenOf(g.gx, g.gy);
+      const color = detectionCatalog.colorOf(p.class);
+      const focused = review.focused === p.id;
+      ctx.globalAlpha = focused ? 1 : 0.55;
+      ctx.beginPath();
+      ctx.arc(sx, sy, focused ? 11 : 8, 0, Math.PI * 2);
+      ctx.lineWidth = focused ? 2 : 1.5;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.globalAlpha = focused ? 0.28 : 0.12;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
   function drawLoopClosures(ctx: CanvasRenderingContext2D) {
     const graphs = mapStore.slamGraphs;
     if (!showPlans) return;
@@ -371,6 +423,8 @@
       ctx.fillStyle = color;
       ctx.fill();
     }
+
+    drawReviewedObjects(ctx);
 
     // per robot: trail, goal, body
     for (const r of robotsOnMap()) {
@@ -572,6 +626,9 @@
     void view.tx;
     void view.ty;
     void session.detections;
+    void review.entities;
+    void review.proposals;
+    void review.focused;
     void showGrid;
     void showTrails;
     void showLabels;

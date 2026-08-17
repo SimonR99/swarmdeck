@@ -21,6 +21,7 @@ from swarmdeck_server.api.app import (
     load_config,
     map_service,
     robot_state,
+    review_store,
     settings_store,
 )
 from swarmdeck_server.fleet.registry import Registry
@@ -1715,3 +1716,91 @@ def test_a_reconnecting_adapter_is_told_nobody_is_watching():
         app_registry.robots.clear()
         app_registry._sinks.clear()
         _camera_watchers.clear()
+
+
+def test_a_located_detection_reaches_the_operators_review_queue():
+    """The adapter proposes; nothing lands on the map unasked.
+
+    This is the wiring test for the queue rather than the triage logic — the
+    radii and merge behaviour are covered in test_detection_review.py.
+    """
+    app_registry.robots.clear()
+    review_store.reset()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                # Every GUI socket is handed a review snapshot on connect;
+                # swallow it so the assertions below read the ingest broadcast.
+                assert _drain_for(gui, "detection_review")["proposals"] == []
+                ad.send_json(
+                    {"type": "hello", "protocol": 2, "robot_id": "r0",
+                     "coordinate_frame": "merged"}
+                )
+                ad.send_json(
+                    {
+                        "type": "detections", "robot_id": "r0", "camera": "front",
+                        "items": [{
+                            "id": "rubber_duck_0", "class": "rubber_duck", "score": 0.9,
+                            "bbox": [0.1, 0.2, 0.3, 0.4],
+                            "map_position": {"x": 2.0, "y": 1.0},
+                        }],
+                    }
+                )
+                state = _drain_for(gui, "detection_review")
+                assert len(state["proposals"]) == 1
+                assert not state["entities"], "a detection must not place itself"
+                proposal = state["proposals"][0]
+                assert proposal["class"] == "rubber_duck"
+                assert proposal["position"] == {"x": 2.0, "y": 1.0}
+                assert proposal["robot_ids"] == ["r0"]
+
+                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                after = _drain_for(gui, "detection_review")
+                assert not after["proposals"]
+                assert len(after["entities"]) == 1
+                assert after["entities"][0]["position"] == {"x": 2.0, "y": 1.0}
+    finally:
+        app_registry.robots.clear()
+        _detections.clear()
+        review_store.reset()
+
+
+def test_an_accepted_object_stops_asking_and_recentres_on_new_evidence():
+    """Two robots, one duck: the second sighting must refine, not duplicate."""
+    app_registry.robots.clear()
+    review_store.reset()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                assert _drain_for(gui, "detection_review")["proposals"] == []
+                ad.send_json(
+                    {"type": "hello", "protocol": 2, "robot_id": "r0",
+                     "coordinate_frame": "merged"}
+                )
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "front",
+                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.9,
+                                "map_position": {"x": 0.0, "y": 0.0}}]}
+                )
+                proposal = _drain_for(gui, "detection_review")["proposals"][0]
+                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                _drain_for(gui, "detection_review")
+
+                # A second robot sees the same duck 0.4 m off — inside `same`.
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "rear",
+                     "items": [{"id": "d9", "class": "rubber_duck", "score": 0.8,
+                                "map_position": {"x": 0.4, "y": 0.0}}]}
+                )
+                _drain_for(gui, "detection")  # the raw track still flows
+
+                snapshot = review_store.snapshot()
+                assert not snapshot["proposals"], "an object on the map must not ask again"
+                assert len(snapshot["entities"]) == 1
+                # Mean of both accepted observations, not the latest frame.
+                assert snapshot["entities"][0]["position"] == {"x": 0.2, "y": 0.0}
+                assert snapshot["entities"][0]["observations"] == 2
+    finally:
+        app_registry.robots.clear()
+        _detections.clear()
+        review_store.reset()

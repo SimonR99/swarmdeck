@@ -14,14 +14,25 @@ from .detection import (
     validate_classes,
     validate_robot_floors,
 )
+from ..detect.review import DEFAULT_ASK_RADIUS_M, DEFAULT_SAME_RADIUS_M
 
 
 MAX_ROBOTS = 8
+# How the dashboard draws its manual-drive control.  "arrows" is a four-button
+# pad, one direction per button, which is what a gloved finger on a tablet can
+# actually hit; "joystick" is the analogue thumbstick.  Keyboard WASD/arrow keys
+# work in both, so this only chooses what is on screen.
+DRIVE_CONTROL_MODES = ("arrows", "joystick")
+DEFAULT_DRIVE_CONTROL_MODE = "arrows"
 DEFAULT_COLORS = [
     "#007aff", "#8944ab", "#008f87", "#c93400",
     "#d30f72", "#b26a00", "#5865f2", "#2d8a3f",
 ]
-# Named hardware robots keep a stable colour regardless of list index.
+# Named hardware robots get a stable DEFAULT colour regardless of list index,
+# so `aslan_0` is the same orange on every deployment without anyone choosing
+# it. This is a default and nothing more: an operator who picks a colour in the
+# dialog gets that colour. It used to win over the operator's choice, which made
+# the picker silently inert for exactly the three real robots in the fleet.
 IDENTITY_COLORS = {
     "spot": "#c9a000",
     "botman": "#007aff",
@@ -67,9 +78,16 @@ def defaults() -> dict[str, Any]:
         "unattended_threshold_s": 45,
         "alert_suppress_s": 30,
         "robot_count": 4,
+        "drive_control_mode": DEFAULT_DRIVE_CONTROL_MODE,
         "detection_enabled": True,
         "detection_sensitivity": 0.55,
         "detection_classes": list(DETECTION_CLASS_NAMES),
+        # Detection review radii, in metres. Inside `same`, a sighting is the
+        # object we already have and is folded in without asking; between the
+        # two it is the ambiguous case and the operator is offered the merge.
+        # See detect/review.py.
+        "detection_same_radius_m": DEFAULT_SAME_RADIUS_M,
+        "detection_ask_radius_m": DEFAULT_ASK_RADIUS_M,
         # Fleet-wide display floors, and the sparse per-robot overrides of them.
         # Both are enforced by the backend against stored detections; neither is
         # something a robot obeys.  See config/detection.py.
@@ -83,8 +101,6 @@ def defaults() -> dict[str, Any]:
             {
                 "id": f"robot_{index}",
                 "enabled": True,
-                "type": "ros2",
-                "endpoint": "ws://localhost:8080/adapter",
                 "color": default_color(f"robot_{index}", index),
             }
             for index in range(4)
@@ -126,11 +142,25 @@ class SettingsStore:
             )
         except (TypeError, ValueError):
             pass
+        mode = str(source.get("drive_control_mode", DEFAULT_DRIVE_CONTROL_MODE)).strip()
+        if mode in DRIVE_CONTROL_MODES:
+            base["drive_control_mode"] = mode
         base["detection_enabled"] = bool(source.get("detection_enabled", True))
         try:
             base["detection_sensitivity"] = round(
                 max(0.1, min(1.0, float(source.get("detection_sensitivity", 0.55)))), 2
             )
+        except (TypeError, ValueError):
+            pass
+        # `ask` must stay at or above `same`, or the ambiguous band inverts and
+        # every sighting past the fold-in radius looks like a brand new object.
+        try:
+            same = max(0.05, min(5.0, float(
+                source.get("detection_same_radius_m", DEFAULT_SAME_RADIUS_M))))
+            ask = max(0.05, min(10.0, float(
+                source.get("detection_ask_radius_m", DEFAULT_ASK_RADIUS_M))))
+            base["detection_same_radius_m"] = round(same, 2)
+            base["detection_ask_radius_m"] = round(max(same, ask), 2)
         except (TypeError, ValueError):
             pass
         base["detection_classes"] = validate_classes(source.get("detection_classes"))
@@ -153,15 +183,16 @@ class SettingsStore:
                 if not robot_id or robot_id in seen:
                     continue
                 seen.add(robot_id)
-                if _identity_stem(robot_id) in IDENTITY_COLORS or not item.get("color"):
+                color = str(item.get("color") or "").strip()[:32]
+                if not color:
                     color = default_color(robot_id, len(clean))
-                else:
-                    color = str(item.get("color")).strip()[:32]
+                # `type` and `endpoint` used to be stored here and read by
+                # nothing. Adapters dial the backend and declare what they are
+                # at `hello`, so both were a second source of truth that could
+                # only ever disagree with the robot. Dropped rather than wired.
                 clean.append({
                     "id": robot_id,
                     "enabled": bool(item.get("enabled", True)),
-                    "type": str(item.get("type", "ros2")).strip()[:32] or "ros2",
-                    "endpoint": str(item.get("endpoint", "ws://localhost:8080/adapter")).strip()[:256],
                     "color": color,
                 })
             if clean:
@@ -174,8 +205,6 @@ class SettingsStore:
             base["robots"].append({
                 "id": f"robot_{index}",
                 "enabled": True,
-                "type": "ros2",
-                "endpoint": "ws://localhost:8080/adapter",
                 "color": default_color(f"robot_{index}", index),
             })
         return base

@@ -21,6 +21,10 @@ class Robot:
     robot_type: str = "unknown"
     adapter: str = ""
     ros: str = ""
+    # Where the adapter dialled in from. Observed, never configured: the
+    # backend is always the listener, so the only truthful source for this is
+    # the socket itself.
+    peer: str = ""
     coordinate_frame: str = "local"
     capabilities: list[str] = field(default_factory=list)
     footprint_radius: float = 0.3
@@ -48,6 +52,14 @@ class Robot:
             "type": "robot_state",
             "robot_id": self.robot_id,
             "robot_type": self.robot_type,
+            # What this robot says it is, and where it said it from. The
+            # settings dialog used to ask an operator to type these in, which
+            # created a second source of truth that could disagree with the
+            # robot. Bringing up a new platform needs to SHOW what it reported,
+            # not require it to be declared in advance.
+            "adapter": self.adapter,
+            "ros": self.ros,
+            "peer": self.peer,
             "pose": self.pose,
             "battery": self.battery,
             "mode": self.mode,
@@ -71,12 +83,16 @@ class Registry:
         self.robots: dict[str, Robot] = {}
         self._sinks: dict[str, Any] = {}  # robot_id -> adapter websocket
 
-    def hello(self, msg: dict[str, Any], sink: Any) -> Robot:
+    def hello(self, msg: dict[str, Any], sink: Any, peer: str = "") -> Robot:
         rid = msg["robot_id"]
         r = self.robots.get(rid) or Robot(robot_id=rid)
         r.robot_type = msg.get("robot_type", "unknown")
         r.adapter = msg.get("adapter", "")
         r.ros = msg.get("ros", "")
+        # Only overwrite on a socket that knows its peer, so a reconnect
+        # through a proxy cannot blank a previously good address.
+        if peer:
+            r.peer = peer
         r.coordinate_frame = (
             "merged" if msg.get("coordinate_frame") == "merged" else "local"
         )

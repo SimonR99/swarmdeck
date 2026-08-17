@@ -12,17 +12,25 @@ export const DEFAULT_ROBOT_COLORS = [
   '#2d8a3f'
 ];
 
-/** Stable identity colours for named hardware robots (independent of join order). */
+/**
+ * Stable DEFAULT colours for named hardware robots, independent of join order.
+ * Mirrors IDENTITY_COLORS in the backend's config/settings.py.
+ */
 export const ROBOT_IDENTITY_COLORS: Record<string, string> = {
   spot: '#c9a000',
   botman: '#007aff',
   aslan: '#e07000'
 };
 
+/**
+ * A configured colour always wins. The identity table is only what a robot
+ * gets when nobody has chosen for it — checking it first made the settings
+ * colour picker do nothing at all for spot, botman and aslan.
+ */
 export function colorForRobot(id: string, index = 0, configured?: string): string {
+  if (configured) return configured;
   const stem = id.replace(/_\d+$/, '');
   if (ROBOT_IDENTITY_COLORS[stem]) return ROBOT_IDENTITY_COLORS[stem];
-  if (configured) return configured;
   return DEFAULT_ROBOT_COLORS[index % DEFAULT_ROBOT_COLORS.length];
 }
 
@@ -30,6 +38,7 @@ const fallback: AppSettings = {
   unattended_threshold_s: 45,
   alert_suppress_s: 30,
   robot_count: 4,
+  drive_control_mode: 'arrows',
   detection_enabled: true,
   detection_sensitivity: 0.55,
   // Overwritten by the backend's own catalog on first load; this is only what
@@ -41,6 +50,8 @@ const fallback: AppSettings = {
     'filament_spool',
     'pool_noodle'
   ],
+  detection_same_radius_m: 0.5,
+  detection_ask_radius_m: 1.5,
   detection_class_floors: {
     rubber_duck: 0.25,
     wooden_block: 0.35,
@@ -61,8 +72,6 @@ const fallback: AppSettings = {
   robots: Array.from({ length: 4 }, (_, index) => ({
     id: `robot_${index}`,
     enabled: true,
-    type: 'ros2',
-    endpoint: 'ws://localhost:8080/adapter',
     color: colorForRobot(`robot_${index}`, index)
   }))
 };
