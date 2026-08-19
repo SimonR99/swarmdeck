@@ -119,9 +119,9 @@ services:
       - --rtsp-url
       - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/spot_0"
       - --bitrate-kbps
-      - "${VIDEO_BITRATE_KBPS:-1200}"
+      - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps
-      - "${VIDEO_FPS:-15}"
+      - "${VIDEO_FPS:-10}"
     restart: unless-stopped
 
   # Same YOLOE sidecar as Botman/Tars. The compose service is still called

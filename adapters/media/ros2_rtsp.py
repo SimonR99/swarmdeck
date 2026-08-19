@@ -135,8 +135,8 @@ def main() -> None:
         help="sensor_msgs/Image fallback when --topic has no JPEG",
     )
     parser.add_argument("--rtsp-url", required=True)
-    parser.add_argument("--bitrate-kbps", type=int, default=1200)
-    parser.add_argument("--fps", type=int, default=15)
+    parser.add_argument("--bitrate-kbps", type=int, default=700)
+    parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--robot-id", default="robot")
     args = parser.parse_args()
 
