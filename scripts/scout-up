@@ -220,5 +220,43 @@ require_subscriber \
 require_subscriber \
   "${camera_topic}" "/swarmdeck_media_${robot_id}" "SwarmDeck media"
 
+require_backend_registration() {
+  local attempt
+  for attempt in {1..30}; do
+    if python3 - "${backend_host}" "${backend_port}" "${robot_id}" <<'PY'
+import json
+import sys
+import urllib.request
+
+host, port, expected = sys.argv[1:]
+try:
+    with urllib.request.urlopen(f"http://{host}:{port}/api/fleet", timeout=4) as response:
+        payload = json.load(response)
+except Exception:
+    raise SystemExit(1)
+robots = payload.get("robots") if isinstance(payload, dict) else []
+if not isinstance(robots, list):
+    raise SystemExit(1)
+if not any(
+    isinstance(robot, dict)
+    and robot.get("robot_id") == expected
+    and robot.get("online") is True
+    for robot in robots
+):
+    raise SystemExit(1)
+PY
+    then
+      echo "SwarmDeck backend: ${robot_id} registered and reporting live state"
+      return
+    fi
+    sleep 2
+  done
+
+  echo "SwarmDeck backend did not report ${robot_id} online at http://${backend_host}:${backend_port}/api/fleet" >&2
+  return 1
+}
+
+require_backend_registration
+
 echo "${robot_id}: ready"
 REMOTE_SCRIPT

@@ -1,6 +1,10 @@
 """Static contracts for the operator-side robot deployment configuration."""
 
 import re
+import http.server
+import os
+import subprocess
+import threading
 from pathlib import Path
 
 
@@ -74,3 +78,107 @@ def test_deployment_uses_one_repo_key_and_no_separate_media_host():
         compose = (COMPOSE_DIR / compose_name).read_text()
         assert "BACKEND_HOST" in compose
         assert "ROBOT_REPO" in compose
+
+
+def test_compose_profiles_define_backend_identity_for_readiness_checks():
+    for name in COMPOSE_BY_PROFILE:
+        source = (PROFILE_DIR / f"{name}.env").read_text()
+        assert re.search(r'^:\s+"\$\{DEPLOY_ROBOT_ID:=', source, re.MULTILINE)
+
+    deploy = (REPO / "scripts/deploy").read_text()
+    remote = (REPO / "scripts/deploy-remote").read_text()
+    verifier = (REPO / "scripts/deploy-verify").read_text()
+    assert '"$BACKEND_HOST" "$BACKEND_PORT" "$DEPLOY_ROBOT_ID"' in deploy
+    assert '"$repo/scripts/deploy-verify"' in remote
+    assert "/api/fleet" in verifier
+    assert "State.Health" in verifier
+
+
+class _FleetHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 - stdlib handler API
+        if self.path != "/api/fleet":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b'{"robots":[{"robot_id":"botman_0","online":true}]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        return
+
+
+def test_deploy_verify_checks_live_backend_registration():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FleetHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = subprocess.run(
+            [
+                str(REPO / "scripts/deploy-verify"),
+                str(REPO),
+                "",
+                "127.0.0.1",
+                str(server.server_port),
+                "botman_0",
+                "5",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+    assert result.returncode == 0, result.stderr
+    assert "registered and reporting live state" in result.stdout
+
+
+def test_deploy_verify_accepts_running_healthy_containers(tmp_path):
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -eu
+[[ $1 == inspect && $2 == -f ]] || exit 2
+case $3 in
+  '{{.State.Status}}') echo running ;;
+  '{{if .State.Health}}{{.State.Health.Status}}{{end}}') echo healthy ;;
+  *) echo "$FAKE_REPO" ;;
+esac
+"""
+    )
+    fake_docker.chmod(0o755)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FleetHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        environment = os.environ.copy()
+        environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+        environment["FAKE_REPO"] = str(REPO)
+        result = subprocess.run(
+            [
+                str(REPO / "scripts/deploy-verify"),
+                str(REPO),
+                "adapter media",
+                "127.0.0.1",
+                str(server.server_port),
+                "botman_0",
+                "5",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=10,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+    assert result.returncode == 0, result.stderr

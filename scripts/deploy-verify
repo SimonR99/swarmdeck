@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Post-start checks for a Compose robot deployment.
+#
+# This is deliberately separate from deploy-remote's lifecycle orchestration:
+# a container being alive is only a prerequisite.  A deployment is ready when
+# required containers are alive (and healthy when they expose a healthcheck)
+# and the adapter has registered and sent live state to the operator backend.
+
+set -Eeuo pipefail
+
+[[ $# -ge 5 ]] || {
+  echo "usage: deploy-verify <repo> <containers> <backend-host> <backend-port> <robot-id> [timeout-s]" >&2
+  exit 2
+}
+
+repo=$1
+check_containers=$2
+backend_host=$3
+backend_port=$4
+robot_id=$5
+timeout_s=${6:-90}
+
+[[ "$timeout_s" =~ ^[1-9][0-9]*$ ]] || {
+  echo "deploy verify: timeout must be a positive integer (got '$timeout_s')" >&2
+  exit 2
+}
+[[ -n "$backend_host" && -n "$backend_port" && -n "$robot_id" ]] || {
+  echo "deploy verify: backend host, port, and robot id are required" >&2
+  exit 2
+}
+
+inspect_container() {
+  local container=$1 status health source
+  status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)
+  health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container" 2>/dev/null || true)
+  source=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/swarmdeck"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)
+
+  if [[ "$status" != running ]]; then
+    echo "container $container is $([[ -n "$status" ]] && echo "$status" || echo missing)" >&2
+    return 1
+  fi
+  # A healthcheck is an explicit service contract.  Containers without one
+  # still pass on `running`; requiring a made-up health state would reject
+  # valid adapters and media bridges that cannot probe their ROS graph.
+  if [[ -n "$health" && "$health" != healthy ]]; then
+    echo "container $container health is $health" >&2
+    return 1
+  fi
+  if [[ "$source" != "$repo" ]]; then
+    echo "container $container source mount is '$source' (expected '$repo')" >&2
+    return 1
+  fi
+}
+
+backend_ready() {
+  # Python is part of every adapter image and gives us JSON parsing without
+  # making jq/curl an undocumented robot-image dependency.  The backend's
+  # `online` flag is based on recent robot_state messages, so registration alone
+  # cannot make a stale adapter look ready.
+  python3 - "$backend_host" "$backend_port" "$robot_id" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+host, port, expected = sys.argv[1:]
+url = f"http://{host}:{port}/api/fleet"
+try:
+    with urllib.request.urlopen(url, timeout=4) as response:
+        payload = json.load(response)
+except Exception as exc:
+    print(f"backend request failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+robots = payload.get("robots") if isinstance(payload, dict) else None
+if not isinstance(robots, list):
+    print("backend returned no fleet list", file=sys.stderr)
+    raise SystemExit(1)
+
+robot = next(
+    (item for item in robots if isinstance(item, dict) and item.get("robot_id") == expected),
+    None,
+)
+if robot is None:
+    print(f"backend has not registered robot {expected}", file=sys.stderr)
+    raise SystemExit(1)
+if robot.get("online") is not True:
+    print(f"backend reports robot {expected} offline", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+deadline=$((SECONDS + timeout_s))
+last_container_error=""
+last_backend_error=""
+echo "  verifying robot containers and backend liveness"
+while :; do
+  containers_ready=yes
+  for container in $check_containers; do
+    if ! container_error=$(inspect_container "$container" 2>&1); then
+      containers_ready=no
+      last_container_error=$container_error
+    fi
+  done
+
+  backend_error=""
+  if ! backend_error=$(backend_ready 2>&1); then
+    last_backend_error=$backend_error
+    backend_ready_now=no
+  else
+    backend_ready_now=yes
+  fi
+
+  if [[ "$containers_ready" == yes && "$backend_ready_now" == yes ]]; then
+    echo "  adapter $robot_id is registered and reporting live state"
+    exit 0
+  fi
+  if (( SECONDS >= deadline )); then
+    echo "  required deployment checks did not become ready within ${timeout_s}s" >&2
+    [[ -n "$last_container_error" ]] && echo "  container check: $last_container_error" >&2
+    [[ -n "$last_backend_error" ]] && echo "  backend check: $last_backend_error" >&2
+    echo "  backend endpoint: http://${backend_host}:${backend_port}/api/fleet" >&2
+    echo "  expected robot id: ${robot_id}" >&2
+    exit 1
+  fi
+  sleep 2
+done

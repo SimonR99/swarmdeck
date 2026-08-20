@@ -22,9 +22,13 @@ make deploy ROBOT=botman
 ```
 
 The pipeline is SSH preflight, source sync, remote override, optional preparation,
-build, Compose reset/start, and a container/source-mount check. Scout's native
-helper additionally verifies its ROS data. `--dry-run` previews without writes;
-`--no-build`, `--no-reset`, `--no-up`, and `--no-verify` skip stages.
+build, Compose reset/start, and bounded readiness verification. Required
+containers must be running (and healthy when they define a healthcheck), keep
+the expected source mount, and have the profile's `DEPLOY_ROBOT_ID` registered
+and reporting live state at `BACKEND_HOST:BACKEND_PORT/api/fleet`. Scout's native
+helper additionally verifies its ROS data before checking backend liveness.
+`--dry-run` previews without writes; `--no-build`, `--no-reset`, `--no-up`, and
+`--no-verify` skip stages.
 
 Aslan's base driver is safety-gated behind a Compose profile:
 `DEPLOY_COMPOSE_PROFILES=base make deploy ROBOT=aslan`.

@@ -92,10 +92,13 @@ make deploy ROBOT=all
 ```
 
 Deployment performs an SSH preflight, source sync, override generation, image
-build, Compose reset/start, and configured post-start checks. The generic check
-confirms adapter/media containers and source mounts; Scout additionally verifies
-ROS topics and subscribers. Robot-specific workspaces, calibration, and safety
-options remain in `deploy/robots/<name>.env`.
+build, Compose reset/start, and bounded post-start checks. Compose profiles must
+have their adapter/media containers running (and healthy when a healthcheck is
+defined), with the expected source mount, and the configured adapter must be
+registered and reporting live state at `/api/fleet`. Scout additionally verifies
+its ROS topics and subscribers before the same backend liveness check. Robot-
+specific workspaces, calibration, and safety options remain in
+`deploy/robots/<name>.env`.
 
 Read the [hardware procedure](docs/operations/hardware-bringup.md), the
 [fleet matrix](docs/robots/fleet.md), and the individual robot page before
@@ -119,8 +122,12 @@ flowchart LR
 | Path | Purpose |
 |---|---|
 | `adapters/` | Protocol adapters, media bridges, and perception sidecar. |
+| `adapters/runtime.py` | Shared ROS-independent protocol, sensor, detection, and deadman policy used by hardware bridges. |
 | `server/` | ROS-free FastAPI backend. |
+| `server/swarmdeck_server/api/map_routes.py` | Map HTTP transport and upload validation, kept separate from control/websocket handlers. |
+| `server/swarmdeck_server/mapsvc/` | Map state, immutable publication snapshots, rendering/output, and collaborative-SLAM collaborators. |
 | `ui/` | Svelte 5 dashboard. |
+| `ui/src/lib/components/map2d/` | Map interaction in `MapView.svelte`; canvas layers live in `mapLayers.ts`. |
 | `swarmdeck_ros/src/` | Gazebo, SLAM, Nav2, and collaborative-SLAM packages. |
 | `configs/` | Simulation and backend session configuration. |
 | `deploy/` | Docker, operator services, and physical-robot Compose files. |

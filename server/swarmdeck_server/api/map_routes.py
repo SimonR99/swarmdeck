@@ -1,0 +1,260 @@
+"""HTTP handlers for merged, local, and adapter-uploaded map products.
+
+The FastAPI application keeps compatibility wrappers for these handlers in
+``api.app``.  Keeping map transport here prevents the websocket/control module
+from becoming the owner of binary upload validation and map rendering policy.
+"""
+
+from __future__ import annotations
+
+import zlib
+from typing import Any
+
+import numpy as np
+from fastapi import Request, Response
+from fastapi.responses import JSONResponse
+
+from ..events.logger import events
+from ..fleet.registry import registry
+from ..mapsvc.service import GridMeta, map_service
+
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+# 1 cm, which is finer than the 5 cm occupancy grid and keeps a cloud inside
+# int16 out to +/-327 m. This is part of the adapter HTTP wire format.
+CLOUD_SCALE = 0.01
+
+
+async def get_map() -> Response:
+    content, seq = map_service.map_png()
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(seq)},
+    )
+
+
+async def get_map_status() -> dict[str, Any]:
+    """Merge mode, per-robot transforms, and registration quality (FR-M6)."""
+    return map_service.status()
+
+
+async def get_map_info() -> dict[str, Any]:
+    return {"type": "map_info", "info": map_service.map_info()}
+
+
+def _robots_blocking_map_reset(robot_id: str | None = None) -> list[str]:
+    """Robots whose current command state makes a map reset unsafe."""
+    robots = (
+        [registry.robots[robot_id]]
+        if robot_id in registry.robots
+        else list(registry.robots.values()) if robot_id is None else []
+    )
+    return sorted(
+        robot.robot_id
+        for robot in robots
+        if robot.nav_status == "active" or robot.goal is not None
+    )
+
+
+async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Response:
+    """Reset backend map products and publish the matching patch."""
+    from .app import broadcast
+
+    blocked = _robots_blocking_map_reset(robot_id)
+    if blocked:
+        return JSONResponse(
+            {
+                "error": "map reset refused while navigation is active",
+                "robots": blocked,
+            },
+            status_code=409,
+        )
+
+    # A collaborative backend supplies one already-fused grid, so this service
+    # has no per-robot cells it could subtract from it. Clearing one robot would
+    # falsely imply that it had been removed. The explicit fleet reset remains
+    # available and clears that fused product wholesale.
+    if (
+        robot_id is not None
+        and map_service.merge_mode == "cslam"
+        and map_service.global_grid is not None
+    ):
+        return JSONResponse(
+            {
+                "error": "targeted reset unavailable for a fused collaborative map; reset all maps"
+            },
+            status_code=409,
+        )
+
+    reset = await map_service.reset_robot_async(robot_id)
+    await broadcast({"type": "network_clear", "robot_id": robot_id})
+    patch = map_service.take_patch()
+    if patch is not None:
+        await broadcast(patch)
+    events.log("map_reset", {"scope": scope, "robot_id": robot_id, "robots": reset})
+    return JSONResponse(
+        {
+            "ok": True,
+            "scope": scope,
+            "robots": reset,
+            "info": map_service.map_info(),
+        }
+    )
+
+
+async def reset_robot_map(robot_id: str) -> Response:
+    """Clear one robot's backend map products without restarting its SLAM."""
+    return await _publish_map_reset("robot", robot_id)
+
+
+async def reset_all_maps() -> Response:
+    """Clear every backend map product, provided the fleet is stationary."""
+    return await _publish_map_reset("all")
+
+
+async def get_local_map(robot_id: str) -> Response:
+    """The robot's unregistered SLAM grid, expressed in its own map frame."""
+    content = map_service.local_png(robot_id)
+    info = map_service.local_info(robot_id)
+    if content is None or info is None:
+        return JSONResponse({"error": "local map not available"}, status_code=404)
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(info["seq"])},
+    )
+
+
+async def get_local_map_info(robot_id: str) -> Response:
+    info = map_service.local_info(robot_id)
+    if info is None:
+        return JSONResponse({"error": "local map not available"}, status_code=404)
+    return JSONResponse(info)
+
+
+async def get_local_network(robot_id: str) -> Response:
+    """Full robot-local Wi-Fi heatmap for reconnects and view switches."""
+    snapshot = map_service.network_snapshot(robot_id)
+    if snapshot is None:
+        return JSONResponse({"error": "network heatmap not available"}, status_code=404)
+    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
+
+
+def _inflate(body: bytes) -> bytes:
+    """zlib-decompress an upload, refusing anything past MAX_UPLOAD_BYTES."""
+    decompressor = zlib.decompressobj()
+    raw = decompressor.decompress(body, MAX_UPLOAD_BYTES)
+    if decompressor.unconsumed_tail:
+        raise ValueError("upload exceeds the maximum decompressed size")
+    return raw
+
+
+async def post_map(request: Request) -> Any:
+    """Adapter occupancy grid upload (zlib int8, row-major)."""
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    try:
+        meta = GridMeta(
+            resolution=float(request.query_params.get("resolution", 0.05)),
+            width=int(request.query_params.get("width", 0)),
+            height=int(request.query_params.get("height", 0)),
+            origin_x=float(request.query_params.get("origin_x", 0.0)),
+            origin_y=float(request.query_params.get("origin_y", 0.0)),
+        )
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "malformed grid metadata"}, status_code=400)
+    if meta.width <= 0 or meta.height <= 0:
+        return JSONResponse({"error": "width and height required"}, status_code=400)
+    try:
+        raw = _inflate(await request.body())
+        cells = np.frombuffer(raw, dtype=np.int8)
+    except (zlib.error, ValueError) as exc:
+        return JSONResponse({"error": f"malformed grid: {exc}"}, status_code=400)
+    if cells.size != meta.width * meta.height:
+        return JSONResponse({"error": "size mismatch"}, status_code=400)
+    await map_service.ingest_async(rid, meta, cells.reshape(meta.height, meta.width))
+    return {"ok": True, "cells": int(cells.size)}
+
+
+async def post_global_map(request: Request) -> Any:
+    """Adopt a collaborative backend's already-merged common-frame grid."""
+    try:
+        meta = GridMeta(
+            resolution=float(request.query_params.get("resolution", 0.05)),
+            width=int(request.query_params.get("width", 0)),
+            height=int(request.query_params.get("height", 0)),
+            origin_x=float(request.query_params.get("origin_x", 0.0)),
+            origin_y=float(request.query_params.get("origin_y", 0.0)),
+        )
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "malformed grid metadata"}, status_code=400)
+    if meta.width <= 0 or meta.height <= 0:
+        return JSONResponse({"error": "width and height required"}, status_code=400)
+    try:
+        raw = _inflate(await request.body())
+        cells = np.frombuffer(raw, dtype=np.int8)
+    except (zlib.error, ValueError):
+        return JSONResponse({"error": "malformed grid"}, status_code=400)
+    if cells.size != meta.width * meta.height:
+        return JSONResponse({"error": "size mismatch"}, status_code=400)
+    map_service.set_global_grid(meta, cells.reshape(meta.height, meta.width))
+    return {"ok": True, "cells": int(cells.size)}
+
+
+async def post_cloud(request: Request) -> Any:
+    """Adapter 3D map cloud upload (zlib int16 xyz triples)."""
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    scale = float(request.query_params.get("scale", CLOUD_SCALE))
+    try:
+        raw = _inflate(await request.body())
+        quantised = np.frombuffer(raw, dtype=np.int16)
+    except (zlib.error, ValueError) as exc:
+        return JSONResponse({"error": f"malformed cloud: {exc}"}, status_code=400)
+    if quantised.size % 3:
+        return JSONResponse({"error": "xyz triples expected"}, status_code=400)
+    points = quantised.reshape(-1, 3).astype(np.float32) * scale
+    await map_service.set_cloud_async(rid, points)
+    return {"ok": True, "points": int(len(points))}
+
+
+async def post_scan(request: Request) -> Any:
+    """Adapter lidar scan upload for robots without an OccupancyGrid."""
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    try:
+        origin_x = float(request.query_params["origin_x"])
+        origin_y = float(request.query_params["origin_y"])
+    except (KeyError, ValueError):
+        return JSONResponse({"error": "origin_x/origin_y required"}, status_code=400)
+    scale = float(request.query_params.get("scale", CLOUD_SCALE))
+    try:
+        raw = _inflate(await request.body())
+        quantised = np.frombuffer(raw, dtype=np.int16)
+    except (zlib.error, ValueError) as exc:
+        return JSONResponse({"error": f"malformed scan: {exc}"}, status_code=400)
+    if quantised.size % 2:
+        return JSONResponse({"error": "xy pairs expected"}, status_code=400)
+    points = quantised.reshape(-1, 2).astype(np.float32) * scale
+    await map_service.ingest_scan_async(rid, origin_x, origin_y, points)
+    return {"ok": True, "points": int(len(points))}
+
+
+async def get_cloud() -> Response:
+    """Merged 3D cloud for the GUI's optional 3D view."""
+    points, indices, names = map_service.merged_cloud()
+    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
+    body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
+    return Response(
+        content=body,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Cloud-Points": str(len(points)),
+            "X-Cloud-Scale": str(CLOUD_SCALE),
+            "X-Cloud-Robots": ",".join(names),
+        },
+    )

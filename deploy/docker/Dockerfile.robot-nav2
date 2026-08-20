@@ -18,7 +18,7 @@ COPY swarmdeck_ros/src/swarmdeck_nav /nav_ws/src/swarmdeck_nav
 RUN . /opt/ros/humble/setup.sh \
     && colcon build --merge-install --packages-select swarmdeck_nav
 
-COPY docker/robot-nav2-entrypoint.sh /usr/local/bin/robot-nav2-entrypoint.sh
+COPY deploy/docker/robot-nav2-entrypoint.sh /usr/local/bin/robot-nav2-entrypoint.sh
 RUN chmod +x /usr/local/bin/robot-nav2-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/robot-nav2-entrypoint.sh"]

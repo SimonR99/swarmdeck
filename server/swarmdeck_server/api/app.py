@@ -10,11 +10,9 @@ import json
 import math
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import yaml
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -26,6 +24,12 @@ from ..detect.review import ReviewStore
 from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
+
+# Compatibility exports for callers that historically imported map transport
+# constants/helpers from ``api.app``. The route implementation now lives in
+# ``map_routes``; keeping these names here avoids a needless API break while
+# the FastAPI handlers remain thin composition-root wrappers.
+from .map_routes import CLOUD_SCALE, MAX_UPLOAD_BYTES, _inflate
 
 # 2 adds one optional adapter message, `slam_graph`, carrying a robot's view of a
 # collaborative pose graph. Purely additive: a protocol-1 adapter never sends it
@@ -588,7 +592,7 @@ async def reset_fleet() -> dict[str, Any]:
         silent = sorted(_reset_pending)
         _reset_pending.clear()
 
-        map_service.reset()
+        await map_service.reset_async()
         await broadcast({"type": "network_clear", "robot_id": None})
         _detections.clear()
         # Validated objects describe the world before the reset. Keeping them
@@ -662,409 +666,144 @@ def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | 
 
 @app.get("/api/config")
 async def get_config() -> dict[str, Any]:
-    return {
-        "config": CONFIG,
-        "settings": settings_store.value,
-        "protocol": PROTOCOL_VERSION,
-        "supported_protocols": list(SUPPORTED_PROTOCOLS),
-    }
+    from .control_routes import get_config as handler
+    return await handler()
 
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
-    return {"type": "settings_state", "settings": settings_store.value}
+    from .control_routes import get_settings as handler
+    return await handler()
 
 
 @app.get("/api/detection/classes")
 async def get_detection_classes() -> dict[str, Any]:
-    """What the detector can be asked to look for, for the settings dialog."""
-    return {"classes": DETECTION_CLASSES}
+    from .control_routes import get_detection_classes as handler
+    return await handler()
 
 
 @app.put("/api/settings")
 async def put_settings(request: Request) -> dict[str, Any]:
-    try:
-        payload = await request.json()
-    except Exception:
-        return JSONResponse({"error": "JSON body required"}, status_code=400)
-    settings = settings_store.save(payload)
-    # Map detections intentionally outlive their camera boxes.  That persistence
-    # must not outlive the operator removing their category (or switching
-    # detection off), otherwise saving the dialog leaves old objects behind.
-    discard_disabled_detections(settings)
-    # Validated objects follow the same rule as the raw tracks: a class the
-    # operator switched off must not leave confirmed markers on the map.
-    review_store.drop_classes(
-        set(settings.get("detection_classes") or [])
-        if settings.get("detection_enabled", True)
-        else set()
-    )
-    apply_review_radii(settings)
-    save_review(force=True)
-    # Raising or lowering a floor, unlike removing a class, is reversible: the
-    # entity is hidden in place and re-judged here, so the dashboard reflects a
-    # new threshold on the save itself rather than whenever the robots next ask.
-    revised = reapply_detection_floors(settings)
-    await asyncio.to_thread(map_service.set_excluded, disabled_robot_ids(settings))
-    for rid in disabled_robot_ids(settings):
-        await registry.send(rid, {"type": "cancel_goal", **stamps()})
-        await registry.send(
-            rid, {"type": "drive", "linear": 0.0, "angular": 0.0, **stamps()}
-        )
-        robot = registry.robots.get(rid)
-        if robot is not None:
-            robot.goal = None
-            if robot.nav_status == "active":
-                robot.nav_status = "idle"
-    events.log("settings_update", {"settings": settings})
-    message = {"type": "settings_state", "settings": settings}
-    await broadcast(message)
-    # After the settings broadcast, never before: the dashboard reconciles its
-    # own store against the new floors when that arrives, and a detection sent
-    # ahead of it would be judged against the floors it is meant to replace.
-    for detection in revised:
-        await broadcast({"type": "detection", "detection": detection})
-    await broadcast_review()
-    return message
+    from .control_routes import put_settings as handler
+    return await handler(request)
 
 
 @app.get("/api/fleet")
 async def get_fleet() -> dict[str, Any]:
-    return {"robots": fleet_snapshot()}
+    from .control_routes import get_fleet as handler
+    return await handler()
 
 
 @app.get("/api/session")
 async def get_session() -> dict[str, Any]:
-    return session_state()
+    from .control_routes import get_session as handler
+    return await handler()
 
 
 @app.post("/api/session/start")
 async def start_session() -> dict[str, Any]:
-    name = f"S_{CONFIG.get('name', 'session')}_{datetime.now():%Y%m%dT%H%M%S}"
-    out = REPO / "sessions" / name
-    events.open(out)
-    (out / "manifest.json").write_text(
-        json.dumps({"name": name, "config": CONFIG, "started": time.time()}, indent=2)
-    )
-    mark_session_start()
-    SESSION.update(running=True, name=name, started_at=time.time(), recording=True)
-    events.log("session_start", {"name": name})
-    await broadcast(session_state())
-    return session_state()
+    from .control_routes import start_session as handler
+    return await handler()
 
 
 @app.post("/api/session/stop")
 async def stop_session() -> dict[str, Any]:
-    events.log("session_stop", {"name": SESSION["name"]})
-    events.close()
-    SESSION.update(running=False, recording=False)
-    await broadcast(session_state())
-    return session_state()
+    from .control_routes import stop_session as handler
+    return await handler()
 
 
 @app.post("/api/sim/reset")
 async def post_sim_reset() -> dict[str, Any]:
-    """Same reset the GUI button issues, awaited rather than broadcast.
-
-    Exists so the reset can be exercised from a shell or a test without driving a
-    browser — `curl -X POST .../api/sim/reset` returns the outcome, including
-    which robots failed to confirm, instead of only announcing it on a socket.
-    """
-    return await reset_fleet()
+    from .control_routes import post_sim_reset as handler
+    return await handler()
 
 
 @app.get("/api/map")
 async def get_map() -> Response:
-    return Response(
-        content=map_service.as_png(),
-        media_type="image/png",
-        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(map_service.seq)},
-    )
+    from .map_routes import get_map as handler
+    return await handler()
 
 
 @app.get("/api/map/status")
 async def get_map_status() -> dict[str, Any]:
-    """Merge mode, per-robot transforms, and registration quality (FR-M6)."""
-    return map_service.status()
+    from .map_routes import get_map_status as handler
+    return await handler()
 
 
 @app.get("/api/map/info")
 async def get_map_info() -> dict[str, Any]:
-    return {"type": "map_info", "info": map_service.meta.as_dict(map_service.seq)}
+    from .map_routes import get_map_info as handler
+    return await handler()
 
 
 def _robots_blocking_map_reset(robot_id: str | None = None) -> list[str]:
-    """Robots whose current command state makes a map reset unsafe."""
-    robots = (
-        [registry.robots[robot_id]]
-        if robot_id in registry.robots
-        else list(registry.robots.values()) if robot_id is None else []
-    )
-    return sorted(
-        robot.robot_id
-        for robot in robots
-        if robot.nav_status == "active" or robot.goal is not None
-    )
+    from .map_routes import _robots_blocking_map_reset as handler
+    return handler(robot_id)
 
 
 async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Response:
-    blocked = _robots_blocking_map_reset(robot_id)
-    if blocked:
-        return JSONResponse(
-            {
-                "error": "map reset refused while navigation is active",
-                "robots": blocked,
-            },
-            status_code=409,
-        )
-
-    # A collaborative backend supplies one already-fused grid, so this service
-    # has no per-robot cells it could subtract from it. Clearing one robot would
-    # falsely imply that it had been removed. The explicit fleet reset remains
-    # available and clears that fused product wholesale.
-    if robot_id is not None and map_service.merge_mode == "cslam" and map_service.global_grid is not None:
-        return JSONResponse(
-            {"error": "targeted reset unavailable for a fused collaborative map; reset all maps"},
-            status_code=409,
-        )
-
-    reset = await map_service.reset_robot_async(robot_id)
-    await broadcast({"type": "network_clear", "robot_id": robot_id})
-    patch = map_service.take_patch()
-    if patch is not None:
-        await broadcast(patch)
-    events.log(
-        "map_reset",
-        {"scope": scope, "robot_id": robot_id, "robots": reset},
-    )
-    return JSONResponse(
-        {
-            "ok": True,
-            "scope": scope,
-            "robots": reset,
-            "info": map_service.meta.as_dict(map_service.seq),
-        }
-    )
+    from .map_routes import _publish_map_reset as handler
+    return await handler(scope, robot_id)
 
 
 @app.post("/api/map/reset/{robot_id}")
 async def reset_robot_map(robot_id: str) -> Response:
-    """Clear one robot's backend map products without restarting its SLAM."""
-    return await _publish_map_reset("robot", robot_id)
+    from .map_routes import reset_robot_map as handler
+    return await handler(robot_id)
 
 
 @app.post("/api/map/reset")
 async def reset_all_maps() -> Response:
-    """Clear every backend map product, provided the fleet is stationary."""
-    return await _publish_map_reset("all")
+    from .map_routes import reset_all_maps as handler
+    return await handler()
 
 
 @app.get("/api/map/local/{robot_id}")
 async def get_local_map(robot_id: str) -> Response:
-    """The robot's unregistered SLAM grid, expressed in its own map frame."""
-    content = map_service.local_png(robot_id)
-    info = map_service.local_info(robot_id)
-    if content is None or info is None:
-        return JSONResponse({"error": "local map not available"}, status_code=404)
-    return Response(
-        content=content,
-        media_type="image/png",
-        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(info["seq"])},
-    )
+    from .map_routes import get_local_map as handler
+    return await handler(robot_id)
 
 
 @app.get("/api/map/local/{robot_id}/info")
 async def get_local_map_info(robot_id: str) -> Response:
-    info = map_service.local_info(robot_id)
-    if info is None:
-        return JSONResponse({"error": "local map not available"}, status_code=404)
-    return JSONResponse(info)
+    from .map_routes import get_local_map_info as handler
+    return await handler(robot_id)
 
 
 @app.get("/api/map/local/{robot_id}/network")
 async def get_local_network(robot_id: str) -> Response:
-    """Full robot-local Wi-Fi heatmap for reconnects and view switches."""
-    snapshot = map_service.network_snapshot(robot_id)
-    if snapshot is None:
-        return JSONResponse({"error": "network heatmap not available"}, status_code=404)
-    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
-
-
-# Ceiling on a decompressed adapter upload. A 100 m map at 5 cm is 4 M cells, so
-# this is generous for anything the fleet can legitimately send while keeping a
-# malformed or hostile body from expanding without bound inside the event loop.
-MAX_UPLOAD_BYTES = 64 * 1024 * 1024
-
-
-def _inflate(body: bytes) -> bytes:
-    """zlib-decompress an upload, refusing anything past MAX_UPLOAD_BYTES."""
-    import zlib
-
-    decompressor = zlib.decompressobj()
-    raw = decompressor.decompress(body, MAX_UPLOAD_BYTES)
-    if decompressor.unconsumed_tail:
-        raise ValueError("upload exceeds the maximum decompressed size")
-    return raw
+    from .map_routes import get_local_network as handler
+    return await handler(robot_id)
 
 
 @app.post("/api/adapter/map")
 async def post_map(request: Request) -> Any:
-    """Adapter uploads its occupancy grid (zlib int8, row-major).
-
-    Validated the same way `/api/adapter/global_map` is. This is the endpoint
-    every robot with an `OccupancyGrid` uses, and an unvalidated reshape turns a
-    truncated upload into a 500 with a traceback instead of a 400 an adapter can
-    log and retry against.
-    """
-    import zlib
-
-    rid = request.query_params.get("robot_id", "")
-    if not rid:
-        return JSONResponse({"error": "robot_id required"}, status_code=400)
-    try:
-        meta = GridMeta(
-            resolution=float(request.query_params.get("resolution", 0.05)),
-            width=int(request.query_params.get("width", 0)),
-            height=int(request.query_params.get("height", 0)),
-            origin_x=float(request.query_params.get("origin_x", 0.0)),
-            origin_y=float(request.query_params.get("origin_y", 0.0)),
-        )
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "malformed grid metadata"}, status_code=400)
-    if meta.width <= 0 or meta.height <= 0:
-        return JSONResponse({"error": "width and height required"}, status_code=400)
-    try:
-        raw = _inflate(await request.body())
-        cells = np.frombuffer(raw, dtype=np.int8)
-    except (zlib.error, ValueError) as exc:
-        return JSONResponse({"error": f"malformed grid: {exc}"}, status_code=400)
-    if cells.size != meta.width * meta.height:
-        return JSONResponse({"error": "size mismatch"}, status_code=400)
-    await map_service.ingest_async(rid, meta, cells.reshape(meta.height, meta.width))
-    return {"ok": True, "cells": int(cells.size)}
-
-
-# 1 cm, which is finer than the 5 cm occupancy grid and keeps a cloud inside
-# int16 out to +/-327 m. Quantising at the transport rather than sending float32
-# halves the bytes for a view whose points are one pixel on screen.
-CLOUD_SCALE = 0.01
+    from .map_routes import post_map as handler
+    return await handler(request)
 
 
 @app.post("/api/adapter/global_map")
 async def post_global_map(request: Request) -> Any:
-    """A collaborative back end's already-merged grid, in its own common frame.
-
-    Distinct from `/api/adapter/map`, which takes ONE robot's grid to be merged
-    here. This is the whole map, produced by the back end from its own keyframes
-    at its own optimised poses, and in `cslam` mode it is used as-is. Merging it
-    again against per-robot grids from a different SLAM system is exactly the
-    mistake that put robots 11-16 m from ground truth.
-    """
-    import zlib
-
-    meta = GridMeta(
-        resolution=float(request.query_params.get("resolution", 0.05)),
-        width=int(request.query_params.get("width", 0)),
-        height=int(request.query_params.get("height", 0)),
-        origin_x=float(request.query_params.get("origin_x", 0.0)),
-        origin_y=float(request.query_params.get("origin_y", 0.0)),
-    )
-    if meta.width <= 0 or meta.height <= 0:
-        return JSONResponse({"error": "width and height required"}, status_code=400)
-    try:
-        raw = _inflate(await request.body())
-        cells = np.frombuffer(raw, dtype=np.int8)
-    except (zlib.error, ValueError):
-        return JSONResponse({"error": "malformed grid"}, status_code=400)
-    if cells.size != meta.width * meta.height:
-        return JSONResponse({"error": "size mismatch"}, status_code=400)
-    map_service.set_global_grid(meta, cells.reshape(meta.height, meta.width))
-    return {"ok": True, "cells": int(cells.size)}
+    from .map_routes import post_global_map as handler
+    return await handler(request)
 
 
 @app.post("/api/adapter/cloud")
 async def post_cloud(request: Request) -> Any:
-    """Adapter uploads its 3D map cloud (zlib int16 xyz triples, 1 cm units).
-
-    Optional, and deliberately so: a robot on 2D SLAM has no such cloud, never
-    calls this, and the GUI's 3D view simply stays empty for it. Throttle to
-    0.5 Hz — this is a view of an accumulated map, not a sensor stream.
-    """
-    import zlib
-
-    rid = request.query_params.get("robot_id", "")
-    if not rid:
-        return JSONResponse({"error": "robot_id required"}, status_code=400)
-    scale = float(request.query_params.get("scale", CLOUD_SCALE))
-    try:
-        raw = _inflate(await request.body())
-        quantised = np.frombuffer(raw, dtype=np.int16)
-    except (zlib.error, ValueError):
-        return JSONResponse({"error": "malformed cloud"}, status_code=400)
-    if quantised.size % 3:
-        return JSONResponse({"error": "xyz triples expected"}, status_code=400)
-    points = quantised.reshape(-1, 3).astype(np.float32) * scale
-    await map_service.set_cloud_async(rid, points)
-    return {"ok": True, "points": int(len(points))}
+    from .map_routes import post_cloud as handler
+    return await handler(request)
 
 
 @app.post("/api/adapter/scan")
 async def post_scan(request: Request) -> Any:
-    """One lidar scan for a robot with no `OccupancyGrid` publisher of its own.
-
-    Body: zlib int16 xy pairs (1 cm units, already deduplicated onto a voxel
-    lattice by the adapter — see adapter_ros1.py). `origin_x`/`origin_y` are
-    the sensor's position in the SAME frame as the points, at capture time,
-    used to raytrace free space back to it — see `mapsvc/scan_grid.py`. Feeds
-    the same `ingest()` a robot that publishes its own grid uses, so
-    registration and merging are unaffected either way.
-    """
-    import zlib
-
-    rid = request.query_params.get("robot_id", "")
-    if not rid:
-        return JSONResponse({"error": "robot_id required"}, status_code=400)
-    try:
-        origin_x = float(request.query_params["origin_x"])
-        origin_y = float(request.query_params["origin_y"])
-    except (KeyError, ValueError):
-        return JSONResponse({"error": "origin_x/origin_y required"}, status_code=400)
-    scale = float(request.query_params.get("scale", CLOUD_SCALE))
-    try:
-        raw = _inflate(await request.body())
-        quantised = np.frombuffer(raw, dtype=np.int16)
-    except (zlib.error, ValueError):
-        return JSONResponse({"error": "malformed scan"}, status_code=400)
-    if quantised.size % 2:
-        return JSONResponse({"error": "xy pairs expected"}, status_code=400)
-    points = quantised.reshape(-1, 2).astype(np.float32) * scale
-    await map_service.ingest_scan_async(rid, origin_x, origin_y, points)
-    return {"ok": True, "points": int(len(points))}
+    from .map_routes import post_scan as handler
+    return await handler(request)
 
 
 @app.get("/api/map/cloud")
 async def get_cloud() -> Response:
-    """The merged 3D cloud for the GUI's optional 3D view.
-
-    Same shape as the 2D map's transport: one HTTP fetch of everything, polled
-    slowly, rather than a stream. A cloud is large and changes slowly, and the
-    3D view is not on the operator's critical path.
-    """
-    import zlib
-
-    points, indices, names = map_service.merged_cloud()
-    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
-    body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
-    return Response(
-        content=body,
-        media_type="application/octet-stream",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Cloud-Points": str(len(points)),
-            "X-Cloud-Scale": str(CLOUD_SCALE),
-            "X-Cloud-Robots": ",".join(names),
-        },
-    )
+    from .map_routes import get_cloud as handler
+    return await handler()
 
 
 @app.post("/api/adapter/camera")
@@ -1116,7 +855,7 @@ async def gui_socket(ws: WebSocket) -> None:
     await ws.accept()
     _gui_clients.add(ws)
     try:
-        await ws.send_json({"type": "map_info", "info": map_service.meta.as_dict(map_service.seq)})
+        await ws.send_json({"type": "map_info", "info": map_service.map_info()})
         await ws.send_json({"type": "fleet_change", "robots": fleet_snapshot()})
         await ws.send_json(session_state())
         await ws.send_json({"type": "settings_state", "settings": settings_store.value})

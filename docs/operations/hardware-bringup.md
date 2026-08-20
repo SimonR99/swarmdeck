@@ -5,9 +5,11 @@
 Set `BACKEND_HOST` in `deploy/fleet.env` to the workstation running SwarmDeck.
 Robot profiles in `deploy/robots/` hold SSH, workspace, sensor, and calibration
 values. Deployment performs SSH preflight, sync, configuration, build, and
-Compose reset/start. Generic verification checks adapter/media containers and
-mounts; Scout also checks live ROS data. The manual checklist below is still
-required.
+Compose reset/start. Readiness verification waits for required containers to
+run (and report healthy when they define healthchecks), confirms the source
+mount, and queries the operator backend until the profile's adapter is
+registered and reporting live state. Scout also checks live ROS data first. The
+manual checklist below is still required.
 
 ```bash
 make deploy ROBOT=botman

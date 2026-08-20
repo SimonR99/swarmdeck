@@ -67,6 +67,15 @@ from adapters.perception.depth_projection import (
     transform_points,
 )
 from adapters.network_quality import read_link_quality
+from adapters.runtime import (
+    AdapterDetectionMixin,
+    AdapterLinkMixin,
+    AdapterSensorMixin,
+    AdapterTelemetryMixin,
+    deep_merge,
+    stamp_seconds,
+    yaw_of,
+)
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -253,22 +262,15 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
-def deep_merge(base: dict, override: dict) -> dict:
-    out = dict(base)
-    for key, value in (override or {}).items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
-
-
-def yaw_of(q) -> float:
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
-
-
-class HardwareBridge:
+class HardwareBridge(
+    AdapterDetectionMixin,
+    AdapterLinkMixin,
+    AdapterSensorMixin,
+    AdapterTelemetryMixin,
+):
     """One real robot's ROS interface, expressed as the SwarmDeck protocol."""
+
+    _TRACK_IDS = staticmethod(track_ids) if track_ids is not None else None
 
     # Deliberately stale — see the matching default in adapter_ros2.py. A link
     # nobody has been heard on is not a link that may drive the robot.
@@ -431,6 +433,10 @@ class HardwareBridge:
 
     # ------------------------------------------------------------- capabilities
 
+    def _network_quality(self, iface: str):
+        # Keep the legacy module-level seam available to offline callers/tests.
+        return read_link_quality(iface)
+
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""
         caps: list[str] = []
@@ -449,42 +455,6 @@ class HardwareBridge:
         return caps
 
     # ------------------------------------------------------------- ROS inputs
-
-    def _on_odom(self, msg: Odometry) -> None:
-        # Kept only as a FALLBACK for the pose. See map_pose(): odometry drifts
-        # without bound and is not where a robot's map-frame pose comes from.
-        p = msg.pose.pose
-        self._odom_pose = {
-            "x": p.position.x, "y": p.position.y, "yaw": yaw_of(p.orientation)
-        }
-
-    def _on_map(self, msg: OccupancyGrid) -> None:
-        self.grid = msg
-        self._grid_dirty = True
-
-    @staticmethod
-    def _cloud_xyz(msg: PointCloud2) -> np.ndarray:
-        """Extract xyz from a PointCloud2 without pulling in point_cloud2 helpers.
-
-        Reads the x/y/z field offsets rather than assuming they are the first
-        three floats: LVI-SAM's registered cloud carries intensity too, and its
-        placement is not something to guess at. Mirrors adapter_sim's
-        `_cloud_xyz` exactly — same wire format, same reasoning.
-        """
-        offsets = {f.name: f.offset for f in msg.fields if f.name in ("x", "y", "z")}
-        if len(offsets) != 3:
-            return np.zeros((0, 3), dtype=np.float32)
-        raw = np.frombuffer(msg.data, dtype=np.uint8)
-        count = len(raw) // msg.point_step if msg.point_step else 0
-        if not count:
-            return np.zeros((0, 3), dtype=np.float32)
-        rows = raw[: count * msg.point_step].reshape(count, msg.point_step)
-        columns = [
-            rows[:, offsets[axis] : offsets[axis] + 4].copy().view(np.float32).ravel()
-            for axis in ("x", "y", "z")
-        ]
-        points = np.stack(columns, axis=1)
-        return points[np.isfinite(points).all(axis=1)]
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
         """Prepare one registered XYZ cloud for both map consumers.
@@ -595,60 +565,11 @@ class HardwareBridge:
             {"x": round(float(x), 3), "y": round(float(y), 3)} for x, y in mapped[:, :2]
         ]
 
-    def _on_battery(self, msg: BatteryState) -> None:
-        # REP-147 percentage is 0..1, but plenty of drivers publish 0..100 and
-        # some publish NaN when the value is unknown. Normalise and refuse NaN
-        # rather than reporting a battery the GUI would draw as empty.
-        value = float(msg.percentage)
-        if math.isnan(value):
-            self.battery = None
-            return
-        self.battery = value / 100.0 if value > 1.0 else value
-
     def _on_camera_compressed(self, msg: CompressedImage) -> None:
         if msg.format and "jpeg" not in msg.format.lower():
             return
         # Queue for detection; do NOT run inference here. See run_detection().
         self._detect_pending = (bytes(msg.data), getattr(msg, "header", None))
-
-    @staticmethod
-    def _image_to_bgr(msg: Image):
-        """Decode a sensor_msgs/Image, honouring `step`, or None.
-
-        `step` is not decoration: ROS images may pad each row for alignment and
-        several real drivers do. Reshaping to (height, width, -1) assumes
-        `step == width * channels`, which on a padded stream either raises — and
-        the caller's `except` then silently drops every frame, so the camera
-        appears dead with nothing in the log — or, worse, silently succeeds and
-        yields a skewed image. Mirrors `adapter_ros2._image_to_bgr` exactly.
-        """
-        try:
-            import cv2
-        except ImportError:
-            return None
-        encoding = str(getattr(msg, "encoding", "")).lower()
-        channels = {
-            "rgb8": 3, "8uc3": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1
-        }.get(encoding)
-        if channels is None:
-            return None
-        try:
-            step = int(getattr(msg, "step", 0)) or msg.width * channels
-            rows = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, step)
-            frame = rows[:, : msg.width * channels].reshape(
-                msg.height, msg.width, channels
-            )
-        except (ValueError, TypeError):
-            return None
-        if encoding in ("rgb8", "8uc3"):
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        if encoding == "rgba8":
-            return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-        if encoding == "bgra8":
-            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        if encoding == "mono8":
-            return frame.reshape(msg.height, msg.width)
-        return frame
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Detection takes JPEG (the sidecar posts it). Imported lazily so a
@@ -696,40 +617,6 @@ class HardwareBridge:
                 self._detect_bgr(frame, due_checked=True, image_header=image_header)
         except (ValueError, TypeError):
             return
-
-    def _detection_due(self) -> bool:
-        if not self._detection_enabled or self._detector is None:
-            return False
-        now = time.monotonic()
-        if now - self._last_detection_at < self._detection_period_s:
-            return False
-        self._last_detection_at = now
-        return True
-
-    def _on_camera_depth_cloud(self, msg: PointCloud2) -> None:
-        # Keep the message, not a 640x480 XYZ copy, so a conversion is paid only
-        # for the few pixels inside a detection box and only at detector rate.
-        self._camera_depth_cloud = msg
-
-    def _on_camera_depth(self, msg: Image) -> None:
-        self._camera_depth_image = msg
-
-    def _on_camera_info(self, msg: CameraInfo) -> None:
-        self._camera_info = msg
-
-    def _on_camera_color_info(self, msg: CameraInfo) -> None:
-        self._camera_color_info = msg
-
-    @staticmethod
-    def _stamp_seconds(header) -> float | None:
-        stamp = getattr(header, "stamp", None)
-        if stamp is None:
-            return None
-        try:
-            value = float(stamp.to_sec())
-        except (AttributeError, TypeError, ValueError):
-            return None
-        return value if value > 0.0 and math.isfinite(value) else None
 
     def _depth_image_kwargs(self, depth_header) -> dict | None:
         """Extra args for `point_for_depth_image`, or None to skip this frame.
@@ -831,62 +718,6 @@ class HardwareBridge:
             )
             return None
 
-    def _detect_bgr(
-        self,
-        frame: np.ndarray,
-        *,
-        due_checked: bool = False,
-        image_header=None,
-    ) -> None:
-        if not due_checked and not self._detection_due():
-            return
-        # Build the next batch off to the side. The websocket thread can call
-        # take_detections() while this ROS callback is waiting for inference;
-        # appending directly to self._detections lets that thread replace the
-        # list with None between proposals.
-        detections = []
-        for detection, track_id in track_ids(self._detector.detect_bgr(frame)):
-            item = detection.as_protocol(track_id)
-            item["map_position"] = self._depth_map_position(
-                detection.bbox, image_header, detection.polygon
-            )
-            detections.append(item)
-        self._detections = detections
-
-    def take_detections(self) -> list[dict] | None:
-        current = self._detections
-        self._detections = None
-        return current
-
-    def refresh_settings(self) -> None:
-        """Apply dashboard perception controls without coupling them to ROS."""
-        try:
-            with urllib.request.urlopen(f"{self.http_url}/api/settings", timeout=2) as response:
-                payload = json.loads(response.read())
-            settings = payload.get("settings", {})
-            enabled = bool(settings.get("detection_enabled", True))
-            if self._detection_enabled and not enabled:
-                self._detections = []
-            self._detection_enabled = enabled
-            if self._detector is not None:
-                self._detector.sensitivity = max(
-                    0.1,
-                    min(1.0, float(settings.get("detection_sensitivity", 0.55))),
-                )
-                # Classes an operator switched off must stop appearing at once,
-                # not at the next restart: the batch is rebuilt every frame, so
-                # a narrowed list clears their boxes on the following one.
-                self._detector.classes = settings.get("detection_classes")
-                # The CAPTURE floor, not the operator's display floor; the
-                # backend enforces the latter against stored detections. See
-                # capture_floors() in the server's config/detection.py. The
-                # fallback keeps a new adapter working against an old backend.
-                self._detector.class_floors = settings.get(
-                    "detection_capture_floors"
-                ) or settings.get("detection_class_floors")
-        except Exception as exc:
-            rospy.logwarn(f"[{self.id}] settings refresh failed: {exc}")
-
     # ------------------------------------------------------------- pose
 
     def map_pose(self) -> dict[str, float]:
@@ -923,49 +754,7 @@ class HardwareBridge:
                 )
             return dict(fallback)
 
-    def state(self) -> dict[str, Any]:
-        state = {
-            "type": "robot_state",
-            "robot_id": self.id,
-            "t_mono": round(time.monotonic() - self.t0, 4),
-            "pose": self.map_pose(),
-            "battery": self.battery,
-            "mode": self.mode,
-            "nav_status": self.nav_status,
-            "goal": self.goal,
-            "planned_path": self.planned_path,
-        }
-        network_iface = str(self.cfg.get("network_iface", ""))
-        if network_iface:
-            # Explicit null clears a previously-good live reading if the radio
-            # disassociates while the control socket survives on another link.
-            state["network"] = read_link_quality(network_iface)
-        return state
-
     # ------------------------------------------------------------- commands
-
-    def _on_nav_cmd_vel(self, msg: Twist) -> None:
-        """Relay a topic-based nav stack's own cmd_vel — ONLY while navigating.
-
-        `pathFollower` runs its control loop continuously and publishes to
-        cmd_vel at ~27 Hz regardless of whether a goal is active — confirmed
-        live, it was still streaming zero-velocity Twists with nothing to do.
-        `topics.nav_stop` makes ITS commanded value zero but does not stop it
-        from publishing, so a single teleop publish racing that continuous
-        stream gets overwritten within tens of milliseconds either way.
-        `topics.nav_cmd_vel` (see launch/local_planner_muxed.launch) remaps
-        its output away from the real cmd_vel so this adapter is the ONLY
-        thing that ever publishes there — teleop direct, nav relayed through
-        here, never both racing the same topic.
-
-        `link_ok()` is checked here as well as in `link_watchdog` so the
-        invariant lives in the relay rather than depending on a timer having
-        already run: no operator, no autonomous motion.
-        """
-        if self.nav_status == "active" and self.pub_cmd is not None:
-            if not self.link_ok():
-                return
-            self.pub_cmd.publish(msg)
 
     def drive(self, linear: float, angular: float) -> None:
         if self.pub_cmd is None:
@@ -992,93 +781,6 @@ class HardwareBridge:
         self.pub_cmd.publish(twist)
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
-
-    def note_drive_command(self, linear: float, angular: float) -> None:
-        """Latch the operator's newest intent — see the twin in adapter_ros2.py.
-
-        Executing inline replays a backlog: the GUI repeats `drive` every 120 ms
-        while held, and a congested link queues those rather than dropping them,
-        so on recovery every stale "forward" runs in order with the stop that
-        ended the press at the back of the queue.
-        """
-        self._pending_drive = (float(linear), float(angular))
-        self._last_link_at = time.monotonic()
-
-    def apply_pending_drive(self) -> None:
-        pending = self._pending_drive
-        if pending is None:
-            return
-        self._pending_drive = None
-        self.drive(*pending)
-
-    def _watchdogs(self) -> None:
-        """Actuation and both deadmen, on one 20 Hz timer driven by the robot's
-        own clock — so they keep running when the link cannot."""
-        self.apply_pending_drive()
-        self.drive_watchdog()
-        self.link_watchdog()
-
-    def drive_watchdog(self) -> None:
-        """Stop if teleop commands stop arriving.
-
-        Not optional on hardware. The GUI sends `drive` continuously while a
-        button is held; if the network drops mid-hold, the last command would
-        otherwise execute forever.
-        """
-        if self.mode != "teleop" or self._last_drive_at == 0.0:
-            return
-        if time.monotonic() - self._last_drive_at > self.cfg["drive_timeout_s"]:
-            self.drive(0.0, 0.0)
-            self.mode = "idle"
-            self._last_drive_at = 0.0
-
-    def link_ok(self) -> bool:
-        """Has the operator link been heard from recently enough to trust it?"""
-        return (
-            time.monotonic() - self._last_link_at
-            <= float(self.cfg["link_timeout_s"])
-        )
-
-    def note_link_activity(self) -> None:
-        """Record traffic in either direction — see `link_timeout_s`."""
-        self._last_link_at = time.monotonic()
-
-    def link_watchdog(self) -> None:
-        """Stop autonomy when the operator link goes stale.
-
-        Cancel before zeroing: pathFollower's stream is relayed on `nav_status`
-        alone, so a zero Twist published while the goal is still active is
-        overwritten within tens of milliseconds by the next relayed sample.
-        """
-        if self.nav_status != "active" or self.link_ok():
-            return
-        rospy.logwarn(
-            f"[{self.id}] operator link stale > {self.cfg['link_timeout_s']}s "
-            "with a goal active; cancelling and stopping"
-        )
-        self.cancel_goal()
-        self.drive(0.0, 0.0)
-
-    def stop(self) -> None:
-        self.drive(0.0, 0.0)
-        self.cancel_goal()
-        self.mode = "estop"
-
-    def stop_for_exit(self) -> None:
-        """Leave the robot stationary as this process dies.
-
-        See the matching method in adapter_ros2.py: every deadman lives in this
-        process, so exiting without zeroing hands a moving robot to nobody.
-        Repeated because one publish immediately before exit can still be in the
-        transport when the process goes away.
-        """
-        for _ in range(3):
-            try:
-                self.cancel_goal()
-                self.drive(0.0, 0.0)
-            except Exception:
-                pass
-            time.sleep(0.05)
 
     def navigate_to(self, goal: dict[str, float]) -> None:
         if self.pub_nav_goal is not None:

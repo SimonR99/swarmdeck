@@ -51,6 +51,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from adapters.perception.depth_projection import point_for_depth_image
 from adapters.perception.object_detector import ObjectDetector, track_ids
+from adapters.runtime import AdapterSensorMixin, cloud_xyz, stamp_seconds, yaw_of
 
 # The platform table, imported from the spawner rather than restated here.
 #
@@ -152,22 +153,6 @@ def upload_cslam_grid(http_url: str) -> None:
         ).read()
     except Exception as exc:
         print(f"[adapter_sim] cslam grid upload failed: {exc}")
-
-
-def yaw_of(q) -> float:
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y**2 + q.z**2))
-
-
-def stamp_seconds(header) -> float | None:
-    """Seconds from a ROS header stamp, or None if it carries no usable time."""
-    stamp = getattr(header, "stamp", None)
-    if stamp is None:
-        return None
-    try:
-        value = float(stamp.sec) + float(stamp.nanosec) * 1e-9
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return value if value > 0.0 and math.isfinite(value) else None
 
 
 def camera_point_to_map(
@@ -407,7 +392,7 @@ def reset_world(logger) -> bool:
         return True
 
 
-class RobotBridge:
+class RobotBridge(AdapterSensorMixin):
     """Per-robot ROS subscriptions and command publisher."""
 
     def __init__(
@@ -637,29 +622,6 @@ class RobotBridge:
     def _on_cloud(self, msg: PointCloud2) -> None:
         self._cloud = msg
         self._cloud_dirty = True
-
-    @staticmethod
-    def _cloud_xyz(msg: PointCloud2) -> np.ndarray:
-        """Extract xyz from a PointCloud2 without pulling in point_cloud2 helpers.
-
-        Reads the x/y/z field offsets rather than assuming they are the first
-        three floats: RTAB-Map's cloud carries intensity and ring fields too, and
-        their placement is not something to guess at.
-        """
-        offsets = {f.name: f.offset for f in msg.fields if f.name in ("x", "y", "z")}
-        if len(offsets) != 3:
-            return np.zeros((0, 3), dtype=np.float32)
-        raw = np.frombuffer(msg.data, dtype=np.uint8)
-        count = len(raw) // msg.point_step if msg.point_step else 0
-        if not count:
-            return np.zeros((0, 3), dtype=np.float32)
-        rows = raw[: count * msg.point_step].reshape(count, msg.point_step)
-        columns = [
-            rows[:, offsets[axis] : offsets[axis] + 4].copy().view(np.float32).ravel()
-            for axis in ("x", "y", "z")
-        ]
-        points = np.stack(columns, axis=1)
-        return points[np.isfinite(points).all(axis=1)]
 
     def upload_cloud(self) -> None:
         """Voxel-downsample the 3D map and push it, quantised to 1 cm.

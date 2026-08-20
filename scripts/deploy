@@ -63,6 +63,7 @@ load_profile() {
   : "${DEPLOY_ENV_KEYS:?profile must define DEPLOY_ENV_KEYS}"
   : "${DEPLOY_COMPOSE_PROFILES:=}"
   : "${DEPLOY_CHECK_CONTAINERS:=}"
+  : "${DEPLOY_ROBOT_ID:=}"
   : "${DEPLOY_PRE_BUILD_SCRIPT:=}"
   : "${DEPLOY_OPERATOR_UP_SCRIPT:=}"
   : "${DEPLOY_OPERATOR_UP_KEYS:=}"
@@ -157,7 +158,7 @@ run_remote() {
     "$DEPLOY_REMOTE_REPO/scripts/deploy-remote" \
     "$DEPLOY_REMOTE_REPO" "$remote_env" "$DEPLOY_COMPOSE_FILE" \
     "$build" "$reset" "$up" "$verify" "$DEPLOY_CHECK_CONTAINERS" "$pre_build" \
-    "$DEPLOY_COMPOSE_PROFILES"
+    "$DEPLOY_COMPOSE_PROFILES" "$BACKEND_HOST" "$BACKEND_PORT" "$DEPLOY_ROBOT_ID"
   ssh "${SSH_OPTS[@]}" "$DEPLOY_SSH_HOST" "$command"
 }
 

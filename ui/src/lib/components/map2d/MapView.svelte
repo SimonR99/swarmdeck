@@ -22,11 +22,18 @@
   import { session } from '$lib/stores/session.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
-  import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { review } from '$lib/stores/review.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { MapRegistration } from '$lib/types/protocol';
+  import {
+    drawLoopClosures,
+    drawMetricGrid,
+    drawNetworkHeatmap,
+    drawReviewedObjects,
+    drawRobots,
+    drawScaleBar
+  } from './mapLayers';
 
   let host = $state<HTMLDivElement | null>(null);
   let canvas = $state<HTMLCanvasElement | null>(null);
@@ -206,190 +213,7 @@
     }
   }
 
-  function drawMetricGrid(ctx: CanvasRenderingContext2D, width: number, height: number) {
-    const info = mapStore.info;
-    if (!info || !showGrid) return;
-    const pixelsPerMetre = view.scale / info.resolution;
-    const spacing = pixelsPerMetre >= 24 ? 1 : pixelsPerMetre >= 7 ? 5 : 10;
-    const maxX = info.origin.x + info.width * info.resolution;
-    const maxY = info.origin.y + info.height * info.resolution;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, width, height);
-    ctx.clip();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(60, 68, 80, 0.10)';
-
-    for (let x = Math.ceil(info.origin.x / spacing) * spacing; x <= maxX; x += spacing) {
-      const a = mapStore.viewToGrid(x, info.origin.y);
-      const b = mapStore.viewToGrid(x, maxY);
-      if (!a || !b) continue;
-      const sa = screenOf(a.gx, a.gy);
-      const sb = screenOf(b.gx, b.gy);
-      ctx.moveTo(sa.sx, sa.sy);
-      ctx.lineTo(sb.sx, sb.sy);
-    }
-    for (let y = Math.ceil(info.origin.y / spacing) * spacing; y <= maxY; y += spacing) {
-      const a = mapStore.viewToGrid(info.origin.x, y);
-      const b = mapStore.viewToGrid(maxX, y);
-      if (!a || !b) continue;
-      const sa = screenOf(a.gx, a.gy);
-      const sb = screenOf(b.gx, b.gy);
-      ctx.moveTo(sa.sx, sa.sy);
-      ctx.lineTo(sb.sx, sb.sy);
-    }
-    ctx.stroke();
-
-    // World origin remains distinct from the ordinary metric grid.
-    const origin = mapStore.viewToGrid(0, 0);
-    if (origin) {
-      const s = screenOf(origin.gx, origin.gy);
-      ctx.strokeStyle = 'rgba(11, 92, 173, 0.24)';
-      ctx.beginPath();
-      ctx.moveTo(s.sx, 0);
-      ctx.lineTo(s.sx, height);
-      ctx.moveTo(0, s.sy);
-      ctx.lineTo(width, s.sy);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  /**
-   * Inter-robot loop closures, drawn between the two robots' current positions.
-   *
-   * This is the one thing on the map that a stitched fleet cannot show: a line
-   * here means those two robots recognised the same place and constrained each
-   * other's pose graph, which is what corrects both their drift. The line is
-   * therefore between robots, not between the keyframes that closed — an
-   * operator wants to know who has met whom, and the keyframe pair is detail.
-   */
-  /**
-   * Operator-reviewed objects, drawn over the raw sightings above.
-   *
-   * Confirmed and pending are deliberately the same hue and deliberately not
-   * the same weight: a solid disc with a ring is something a person accepted,
-   * a dashed hollow ring is a question still open. Nothing is hidden — an
-   * unreviewed object is still visible on the map — but the operator can tell
-   * at a glance which markers the fleet merely guessed at.
-   */
-  /**
-   * Whether a reviewed object belongs in the current view.
-   *
-   * Positions are in the merged frame, so a local view showing one robot's own
-   * grid must only draw objects that robot contributed to — anything else would
-   * be painted at merged-frame coordinates over a local-frame map.
-   */
-  function reviewVisible(robotIds: string[]): boolean {
-    const enabled = robotIds.filter((id) => fleet.isEnabled(id));
-    if (!enabled.length) return false;
-    if (mapStore.viewMode === 'local') return enabled.includes(mapStore.viewRobot ?? '');
-    return true;
-  }
-
-  function drawReviewedObjects(ctx: CanvasRenderingContext2D) {
-    ctx.save();
-    for (const e of review.entities) {
-      if (!reviewVisible(e.robot_ids)) continue;
-      const g = mapStore.worldToGrid(e.position.x, e.position.y);
-      if (!g) continue;
-      const { sx, sy } = screenOf(g.gx, g.gy);
-      const color = detectionCatalog.colorOf(e.class);
-      ctx.beginPath();
-      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#ffffff';
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(sx, sy, 8.5, 0, Math.PI * 2);
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = color;
-      ctx.stroke();
-    }
-
-    ctx.setLineDash([3, 3]);
-    for (const p of review.proposals) {
-      if (!reviewVisible(p.robot_ids)) continue;
-      const g = mapStore.worldToGrid(p.position.x, p.position.y);
-      if (!g) continue;
-      const { sx, sy } = screenOf(g.gx, g.gy);
-      const color = detectionCatalog.colorOf(p.class);
-      const focused = review.focused === p.id;
-      ctx.globalAlpha = focused ? 1 : 0.55;
-      ctx.beginPath();
-      ctx.arc(sx, sy, focused ? 11 : 8, 0, Math.PI * 2);
-      ctx.lineWidth = focused ? 2 : 1.5;
-      ctx.strokeStyle = color;
-      ctx.stroke();
-      ctx.globalAlpha = focused ? 0.28 : 0.12;
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    }
-    ctx.restore();
-  }
-
-  function drawLoopClosures(ctx: CanvasRenderingContext2D) {
-    const graphs = mapStore.slamGraphs;
-    if (!showPlans) return;
-    const seen = new Set<string>();
-    ctx.save();
-    ctx.setLineDash([1, 3]);
-    ctx.lineWidth = 1.5;
-    for (const [robotId, graph] of Object.entries(graphs)) {
-      const a = fleet.get(robotId);
-      if (!a) continue;
-      for (const link of graph.inter_robot) {
-        // Both robots report the same pair; draw it once.
-        const key = [robotId, link.other].sort().join('|');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const b = fleet.get(link.other);
-        if (!b) continue;
-        const ga = mapStore.worldToGrid(a.pose.x, a.pose.y);
-        const gb = mapStore.worldToGrid(b.pose.x, b.pose.y);
-        if (!ga || !gb) continue;
-        const pa = screenOf(ga.gx, ga.gy);
-        const pb = screenOf(gb.gx, gb.gy);
-        ctx.beginPath();
-        ctx.moveTo(pa.sx, pa.sy);
-        ctx.lineTo(pb.sx, pb.sy);
-        // More closures is more confidence, up to a point worth seeing.
-        ctx.globalAlpha = Math.min(0.75, 0.25 + link.count * 0.06);
-        ctx.strokeStyle = '#0b5cad';
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
-    ctx.globalAlpha = 1;
-    ctx.setLineDash([]);
-  }
-
-  function drawNetworkHeatmap(ctx: CanvasRenderingContext2D) {
-    const layer = mapStore.networkLayer;
-    if (
-      !showNetwork ||
-      mapStore.viewMode !== 'local' ||
-      !layer ||
-      layer.robotId !== mapStore.viewRobot
-    ) return;
-
-    const maxY = layer.info.origin.y + layer.info.height * layer.info.resolution;
-    const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
-    if (!topLeft) return;
-    const screen = screenOf(topLeft.gx, topLeft.gy);
-    const width = (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
-    const height = (layer.info.height * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
-    ctx.save();
-    ctx.globalAlpha = 0.62;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(layer.canvas, screen.sx, screen.sy, width, height);
-    ctx.restore();
-  }
-
+  // Canvas layers live in mapLayers.ts; this component owns only viewport state.
   function draw() {
     if (!canvas || !host) return;
     const ctx = canvas.getContext('2d');
@@ -404,36 +228,23 @@
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-
-    // background
     ctx.fillStyle = '#f5f5f7';
     ctx.fillRect(0, 0, w, h);
 
     const info = mapStore.info;
     const grid = mapStore.canvas;
-
     if (!view.initialised && info && fleet.count) {
       view.initialised = true;
       fitMap();
     }
     if (follow) centreOnFleet();
 
-    // occupancy grid
     if (grid && info) {
       const gw = info.width * view.scale;
       const gh = info.height * view.scale;
       ctx.imageSmoothingEnabled = view.scale < 1;
       ctx.drawImage(grid, view.tx, view.ty, gw, gh);
-
-      // Network quality is contextual map colour; keep the max-pooled wall
-      // mask above it so the overlay never hides an obstacle.
-      drawNetworkHeatmap(ctx);
-
-      // Below one screen pixel per cell the grid alone cannot render a wall:
-      // smoothing averages a one-cell wall into its neighbours until it is a
-      // pale smudge, and nearest-neighbour drops it wherever the sampling grid
-      // misses. Composite a max-pooled occupancy mask on top, point-sampled, so
-      // walls keep full contrast at every zoom. See mapstore.svelte.ts.
+      drawNetworkHeatmap(ctx, screenOf, view, showNetwork);
       const mask = mapStore.occupancyMask(view.scale);
       if (mask) {
         ctx.imageSmoothingEnabled = false;
@@ -441,203 +252,22 @@
       }
     }
 
-    drawMetricGrid(ctx, w, h);
-    drawLoopClosures(ctx);
-
-    // Map markers come from the review store alone -- see drawReviewedObjects.
-    //
-    // `session.detections` deliberately does NOT draw its `map_position` here
-    // any more. Those are raw per-frame estimates, one per robot per track, so
-    // a single duck seen by two robots put two noisy dots on the map alongside
-    // the reviewed marker: three markers for one object, two of which moved
-    // every frame and none of which the operator had agreed to. The raw store's
-    // job on the map is finished at triage; its `bbox` still drives the camera
-    // overlay, which is a different question ("what can this camera see now").
-    drawReviewedObjects(ctx);
-
-    // per robot: trail, goal, body
-    for (const r of robotsOnMap()) {
-      const color = fleet.colorOf(r.robot_id);
-      const g = mapStore.worldToGrid(r.pose.x, r.pose.y);
-      if (!g) continue;
-      const { sx, sy } = screenOf(g.gx, g.gy);
-
-      // trail
-      let t = trails.get(r.robot_id);
-      if (!t) trails.set(r.robot_id, (t = []));
-      const last = t[t.length - 1];
-      if (!last || Math.hypot(last.x - g.gx, last.y - g.gy) > 3) {
-        t.push({ x: g.gx, y: g.gy });
-        if (t.length > 400) t.shift();
-      }
-      if (showTrails && t.length > 1) {
-        ctx.beginPath();
-        const p0 = screenOf(t[0].x, t[0].y);
-        ctx.moveTo(p0.sx, p0.sy);
-        for (const p of t.slice(1)) {
-          const s = screenOf(p.x, p.y);
-          ctx.lineTo(s.sx, s.sy);
-        }
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.28;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-
-      // Nav2's current global plan (predicted route), visually stronger and
-      // dashed so it cannot be confused with the path already travelled.
-      if (showPlans && r.planned_path?.length > 1) {
-        ctx.beginPath();
-        const first = mapStore.worldToGrid(r.planned_path[0].x, r.planned_path[0].y);
-        if (first) {
-          const p0 = screenOf(first.gx, first.gy);
-          ctx.moveTo(p0.sx, p0.sy);
-          for (const point of r.planned_path.slice(1)) {
-            const gridPoint = mapStore.worldToGrid(point.x, point.y);
-            if (!gridPoint) continue;
-            const p = screenOf(gridPoint.gx, gridPoint.gy);
-            ctx.lineTo(p.sx, p.sy);
-          }
-          ctx.setLineDash([7, 4]);
-          ctx.strokeStyle = color;
-          ctx.globalAlpha = 0.78;
-          ctx.lineWidth = 2.5;
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      // Optional sensor/footprint layer: useful for checking heading, camera
-      // coverage and whether a proposed route has reasonable wall clearance.
-      if (showSensors && info) {
-        // The robot's own declared radius, not a constant: the fleet is mixed
-        // (0.42 m Scout Mini to 0.64 m Bunker) and drawing them all at one size
-        // makes the footprint overlay useless for judging clearance. Falls back
-        // to the smallest platform for an adapter that declares nothing.
-        const footprintPx = ((r.footprint_radius ?? 0.42) / info.resolution) * view.scale;
-        const sensorPx = (2.0 / info.resolution) * view.scale;
-        ctx.save();
-        ctx.translate(sx, sy);
-        ctx.rotate(-mapStore.worldYawToView(r.pose.yaw));
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.arc(0, 0, sensorPx, -0.6, 0.6);
-        ctx.closePath();
-        ctx.fillStyle = color;
-        ctx.globalAlpha = 0.055;
-        ctx.fill();
-        ctx.globalAlpha = 0.45;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        ctx.lineTo(Math.min(sensorPx, 54), 0);
-        ctx.stroke();
-        ctx.restore();
-
-        ctx.beginPath();
-        ctx.arc(sx, sy, footprintPx, 0, Math.PI * 2);
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.32;
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
-      }
-
-      // goal + link
-      if (r.goal) {
-        const gg = mapStore.worldToGrid(r.goal.x, r.goal.y);
-        if (gg) {
-          const s = screenOf(gg.gx, gg.gy);
-          ctx.setLineDash([5, 5]);
-          ctx.beginPath();
-          ctx.moveTo(sx, sy);
-          ctx.lineTo(s.sx, s.sy);
-          ctx.strokeStyle = color;
-          ctx.globalAlpha = 0.5;
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.globalAlpha = 1;
-
-          ctx.beginPath();
-          ctx.arc(s.sx, s.sy, 6, 0, Math.PI * 2);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 2;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(s.sx - 9, s.sy);
-          ctx.lineTo(s.sx + 9, s.sy);
-          ctx.moveTo(s.sx, s.sy - 9);
-          ctx.lineTo(s.sx, s.sy + 9);
-          ctx.globalAlpha = 0.6;
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-      }
-
-      // selection halo
-      if (fleet.isSelected(r.robot_id)) {
-        ctx.beginPath();
-        ctx.arc(sx, sy, 16, 0, Math.PI * 2);
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.45;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-
-      // body: triangle pointing along yaw (screen y is inverted vs world)
-      ctx.save();
-      ctx.translate(sx, sy);
-      ctx.rotate(-mapStore.worldYawToView(r.pose.yaw));
-      ctx.beginPath();
-      ctx.moveTo(11, 0);
-      ctx.lineTo(-7, 7);
-      ctx.lineTo(-4, 0);
-      ctx.lineTo(-7, -7);
-      ctx.closePath();
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.restore();
-
-      // label
-      if (showLabels) {
-        ctx.font = '600 10px ui-sans-serif, system-ui';
-        ctx.fillStyle = color;
-        ctx.textAlign = 'center';
-        ctx.fillText(robotDisplayName(r.robot_id), sx, sy - 18);
-      }
-    }
-
-    // scale bar
+    drawMetricGrid(ctx, w, h, info, view, screenOf, showGrid);
+    drawLoopClosures(ctx, screenOf, showPlans);
+    drawReviewedObjects(ctx, screenOf);
     if (info) {
-      const metres = 5;
-      const px = (metres / info.resolution) * view.scale;
-      if (px > 24 && px < w * 0.6) {
-        ctx.strokeStyle = '#98989d';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(16, h - 18);
-        ctx.lineTo(16 + px, h - 18);
-        ctx.moveTo(16, h - 22);
-        ctx.lineTo(16, h - 14);
-        ctx.moveTo(16 + px, h - 22);
-        ctx.lineTo(16 + px, h - 14);
-        ctx.stroke();
-        ctx.font = '500 10px ui-sans-serif, system-ui';
-        ctx.fillStyle = '#6e6e73';
-        ctx.textAlign = 'left';
-        ctx.fillText(`${metres} m`, 16, h - 26);
-      }
+      drawRobots(ctx, robotsOnMap(), {
+        info,
+        view,
+        screenOf,
+        trails,
+        showTrails,
+        showPlans,
+        showSensors,
+        showLabels
+      });
     }
+    drawScaleBar(ctx, info, view, w, h);
   }
 
   // Redraw whenever the map, fleet, settings, or view changes.

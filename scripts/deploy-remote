@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 [[ $# -ge 8 ]] || {
-  echo "usage: deploy-remote <repo> <env-file> <compose-file> <build> <reset> <up> <verify> <containers> [pre-build] [profiles]" >&2
+  echo "usage: deploy-remote <repo> <env-file> <compose-file> <build> <reset> <up> <verify> <containers> [pre-build] [profiles] [backend-host] [backend-port] [robot-id]" >&2
   exit 2
 }
 
@@ -18,6 +18,9 @@ do_verify=$7
 check_containers=$8
 pre_build=${9:-}
 compose_profiles=${10:-}
+backend_host=${11:-}
+backend_port=${12:-}
+robot_id=${13:-}
 
 cd "$repo"
 
@@ -57,26 +60,16 @@ if [[ "$do_up" == yes ]]; then
 fi
 
 status_compose=("${compose[@]}" --profile '*')
-if [[ "$do_verify" == yes && -n "$check_containers" ]]; then
-  echo "  checking adapter/media containers and source mounts"
-  deadline=$((SECONDS + 90))
-  while :; do
-    all_ready=yes
-    for container in $check_containers; do
-      status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)
-      source=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/swarmdeck"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)
-      if [[ "$status" != running || "$source" != "$repo" ]]; then
-        all_ready=no
-      fi
-    done
-    [[ "$all_ready" == yes ]] && break
-    if (( SECONDS >= deadline )); then
-      "${status_compose[@]}" ps --all
-      echo "  required container or source mount did not become ready" >&2
-      exit 1
-    fi
-    sleep 2
-  done
+if [[ "$do_verify" == yes ]]; then
+  [[ -n "$backend_host" && -n "$backend_port" && -n "$robot_id" ]] || {
+    echo "  deployment verification requires backend host, port, and robot id" >&2
+    exit 1
+  }
+  if ! "$repo/scripts/deploy-verify" \
+    "$repo" "$check_containers" "$backend_host" "$backend_port" "$robot_id"; then
+    "${status_compose[@]}" ps --all
+    exit 1
+  fi
 fi
 
 "${status_compose[@]}" ps --all
