@@ -1,0 +1,76 @@
+# Swarm-SLAM overlay: adds collaborative SLAM to the simulated fleet.
+#
+#   SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#                  -f docker-compose.cslam.yml --profile gazebo up --build -d
+#   make docker-up-cslam
+#
+# Requires the RTAB-Map backend: cslam's motion prior is `odom_icp`, the lidar
+# odometry, and a single-ring lidar produces no cloud to build descriptors from.
+#
+# `network_mode: service:gazebo` puts this container in the Gazebo container's
+# network namespace, which is what makes the two share one ROS graph. DDS
+# discovery is multicast and does not cross Docker's default bridge reliably; a
+# shared namespace sidesteps that completely and needs no Zenoh router. On real
+# hardware the robots are genuinely separate machines and this is where
+# `rmw_zenoh_cpp` goes instead — the node graph is identical either way, which
+# is the point of keeping this in an overlay rather than in the base compose.
+#
+# Note the consequence of sharing a namespace: this service publishes no ports
+# of its own and `depends_on` cannot be combined with a healthcheck wait, so it
+# starts alongside Gazebo and waits for topics itself.
+
+services:
+  # The donor has to opt in: joining another container's IPC namespace fails with
+  # "non-shareable IPC" unless that container declares `shareable`. Set here
+  # rather than in the base compose file so the plain stack stays unchanged.
+  gazebo:
+    ipc: shareable
+    environment:
+      # Collaborative SLAM needs the fleet to keep MOVING for as long as cslam is
+      # up, and this is not a detail — it is the single easiest way to conclude
+      # the whole stack is broken when it is working.
+      #
+      # cslam creates a keyframe every `keyframe_generation_ratio_distance`
+      # metres travelled. A parked robot therefore produces exactly one keyframe,
+      # forever, and with one keyframe there is nothing to describe, nothing to
+      # exchange, and no loop to close — silently, with every node healthy. The
+      # default EXPLORE_SECONDS outlives a normal session but not a long
+      # collaborative run, so it is raised here rather than left to chance.
+      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-2400}"
+
+  cslam:
+    profiles: ["gazebo"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cslam
+    image: swarmdeck-cslam:local
+    depends_on:
+      - gazebo
+    network_mode: "service:gazebo"
+    # Sharing the network namespace is NOT enough, and the way it fails is
+    # deceptive. Fast DDS discovers peers over UDP but carries data over shared
+    # memory for anything on the same host, and each container has its own
+    # /dev/shm. The result: `ros2 topic list` inside this container shows every
+    # fleet topic, `ros2 node info` shows the subscriptions correctly bound —
+    # and not one message ever arrives. cslam initialises, exchanges heartbeats
+    # with its own siblings (same container, so SHM works), and produces zero
+    # keyframes forever without logging anything.
+    ipc: "service:gazebo"
+    environment:
+      ROS_DOMAIN_ID: "42"
+      CSLAM_ROBOTS: "${CSLAM_ROBOTS:-4}"
+      # Long enough for Gazebo, the per-robot SLAM stacks and icp_odometry to be
+      # publishing. cslam's own sync will drop anything that arrives early.
+      CSLAM_DELAY: "${CSLAM_DELAY:-90}"
+    command:
+      - bash
+      - -lc
+      - >-
+        source /opt/ros/jazzy/setup.bash &&
+        source /cslam_ws/install/setup.bash &&
+        echo "[cslam] waiting ${CSLAM_DELAY}s for the fleet" &&
+        sleep "${CSLAM_DELAY}" &&
+        echo "[cslam] launching for ${CSLAM_ROBOTS} robots" &&
+        ros2 launch swarmdeck_cslam cslam_fleet.launch.py robots:=${CSLAM_ROBOTS}
+    restart: unless-stopped

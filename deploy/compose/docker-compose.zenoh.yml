@@ -1,0 +1,62 @@
+# Multi-MACHINE networking, for real robots.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.zenoh.yml up -d
+#
+# WHY THIS EXISTS SEPARATELY FROM THE SIM OVERLAYS
+# ------------------------------------------------
+# `docker-compose.cslam.yml` and `docker-compose.dlio.yml` share the Gazebo
+# container's network AND IPC namespaces. That works because every "robot" is a
+# container on one machine, and it is the only reason Fast DDS can move data
+# between them — it discovers over UDP but carries payloads through /dev/shm,
+# so containers with separate /dev/shm see every topic and receive nothing.
+#
+# None of that survives real robots, which are separate machines. Default DDS
+# discovery is multicast, which most Wi-Fi networks either drop or flood, and it
+# is O(n^2) in participants. Zenoh replaces it with a router: each robot
+# connects out to a known endpoint, so discovery works across subnets and the
+# fleet scales without a multicast storm.
+#
+# UNVERIFIED. This has never run against physical robots — it is written from
+# the rmw_zenoh documentation and the topology the fleet needs. Treat every
+# value below as a starting point to test, not a setting that is known good.
+# docs/hardware-bringup.md lists what to check first.
+
+services:
+  # The router every robot dials. Runs next to the backend, on the machine an
+  # operator can reach; robots need only outbound connectivity to it.
+  zenoh-router:
+    image: eclipse/zenoh:latest
+    command: ["-l", "tcp/0.0.0.0:7447"]
+    ports:
+      - "7447:7447"
+    restart: unless-stopped
+
+  server:
+    environment:
+      # The backend itself speaks no ROS, so it needs nothing from Zenoh. Listed
+      # only so `depends_on` orders startup sanely.
+      SWARMDECK_ZENOH_ROUTER: "tcp/zenoh-router:7447"
+    depends_on:
+      - zenoh-router
+# ---------------------------------------------------------------------------
+# ON EACH ROBOT (not in this file — robots are not containers here):
+#
+#   sudo apt install ros-jazzy-rmw-zenoh-cpp
+#   export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+#   export ZENOH_ROUTER_CONFIG_URI=/etc/swarmdeck/zenoh_session.json5
+#
+# with a session config pointing at the router:
+#
+#   { mode: "client", connect: { endpoints: ["tcp/<operator-host>:7447"] } }
+#
+# Then run one adapter per robot, on the robot:
+#
+#   python3 adapters/adapter_ros2/adapter_ros2.py \
+#     --robot-id robot_0 \
+#     --config adapters/adapter_ros2/config/duckiebot.yaml \
+#     --host <operator-host>
+#
+# Note the adapter reaches the BACKEND over plain websocket/HTTP, not over
+# Zenoh. Only ROS traffic needs Zenoh; the protocol link is deliberately
+# transport-independent so a robot on a different stack can still join.
+# ---------------------------------------------------------------------------

@@ -1,0 +1,357 @@
+# Botman bring-up owned entirely by SwarmDeck. The MIST workspace is mounted
+# read-only and invoked through its installed rover_launch package; this file
+# never edits, rebuilds, or overlays anything in /ssd/mist_ws.
+#
+# ROS_DOMAIN_ID: the MIST image's own entrypoint (/tmp/setup.sh inside
+# bunker_super_odom:dev) exports `ROS_DOMAIN_ID=17` unconditionally, so every
+# service built on that image lands on domain 17 no matter what Compose sets.
+# SwarmDeck's own images set no domain and therefore default to 0. When the two
+# halves disagree, discovery does not fail loudly: each side sees a healthy ROS
+# graph containing only its own nodes, `ros2 topic list` still shows the
+# subscribed names, and the robot simply reports pose (0, 0, 0) with no map and
+# no camera. Keep this pinned to whatever that entrypoint exports.
+x-ros-domain: &ros_domain "${BOTMAN_ROS_DOMAIN_ID:-17}"
+
+services:
+  robot_stack:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-stack
+    network_mode: host
+    # Fast DDS uses shared memory for same-host ROS 2 traffic. Both services
+    # must share the host IPC namespace or discovery succeeds while large
+    # PointCloud2/Odometry samples never reach the adapter.
+    ipc: host
+    privileged: true
+    runtime: nvidia
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+    command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
+    restart: unless-stopped
+
+  # Ouster OS1-128 driver and SuperOdometry SLAM.
+  #
+  # These are the robot's own nodes, started here for the same reason
+  # `oak_camera` is: on 2026-08-07 `bunker_gnm.launch.py` in the read-only MIST
+  # workspace was reduced to `declare_args + [bunker_launch]`, with the lidar,
+  # SLAM, VectorNav, usb_cam and foxglove entries commented out on the line
+  # above. `robot_stack` therefore starts the Bunker base and nothing else, and
+  # SwarmDeck loses the two topics it depends on for pose and map —
+  # /laser_odometry and /registered_scan have no publisher at all.
+  #
+  # Both services invoke the launch files already installed in /ssd/mist_ws with
+  # that workspace's own configs, byte for byte the arguments the commented-out
+  # block passed. Nothing here overrides MIST's tuning or calibration.
+  #
+  # If MIST restores that launch line, DELETE these two services rather than
+  # leaving them: a second ouster driver cannot bind the same sensor, and two
+  # SuperOdometry instances would publish conflicting /laser_odometry.
+  lidar:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-lidar
+    network_mode: host
+    ipc: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+    command:
+      - ros2
+      - launch
+      - ouster_ros
+      - driver.launch.py
+      - params_file:=/workspace/install/rover_launch/share/rover_launch/config/drivers/driver_ouster.yaml
+      - ouster_ns:=ouster
+      - viz:=False
+      - os_driver_name:=os_driver
+      - throttle_rate:=0.1
+      - input_topic:=/ouster/points
+      - output_topic:=/ouster/points_throttled
+    restart: unless-stopped
+
+  slam:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-slam
+    network_mode: host
+    ipc: host
+    privileged: true
+    runtime: nvidia
+    depends_on:
+      lidar:
+        condition: service_started
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+    command:
+      - ros2
+      - launch
+      - super_odometry
+      - os1_128.launch.py
+      - config_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128.yaml
+      - calibration_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128_calibration.yaml
+    restart: unless-stopped
+
+  # Botman's physical camera is an OAK-D Pro, which is a DepthAI USB device
+  # (03e7:2485) rather than a V4L2 /dev/video* webcam.  The upstream
+  # bunker_gnm launch only starts usb_cam and leaves its OAK block commented,
+  # so own the missing launch here without changing /ssd/mist_ws.  Its driver
+  # and firmware come from the same existing image/workspace as robot_stack;
+  # the only writable/configuration source is this SwarmDeck checkout.
+  oak_camera:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-oak
+    network_mode: host
+    ipc: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /ssd/mist_ws:/workspace:ro
+      # RGBD by default, which is what lets duck detections become map
+      # markers; see botman_oak_rgbd.yaml for the USB/CPU bandwidth it costs
+      # and what remains unverified about it. `BOTMAN_OAK_PARAMS=botman_oak_rgb.yaml`
+      # reverts to RGB-only if that cost is not worth paying.
+      - ./adapters/media/config/${BOTMAN_OAK_PARAMS:-botman_oak_rgbd.yaml}:/app/swarmdeck/botman_oak.yaml:ro
+    command:
+      - ros2
+      - launch
+      - depthai_ros_driver
+      - camera.launch.py
+      - name:=oak
+      - params_file:=/app/swarmdeck/botman_oak.yaml
+      - rectify_rgb:=false
+      - use_rviz:=false
+    restart: unless-stopped
+
+  # Where the OAK-D Pro is bolted, relative to the frame Botman's pose is
+  # reported in. Depth gives a detection a range; only this gives it a place.
+  #
+  # Starts by default alongside the rest of the stack now, but the numbers
+  # still MUST come from a tape measure on the actual robot: the live TF tree
+  # contains no calibrated edge onto the camera, and this project has already
+  # paid for one hand-guessed extrinsic (0.47 m of pose error nobody noticed
+  # for weeks). Left unset, the node refuses to parse its arguments and says so
+  # in its log, rather than silently claiming the camera is the lidar — that
+  # fail-loud default is deliberately NOT overridden with a guess here.
+  #
+  #   BOTMAN_OAK_X=<measured> BOTMAN_OAK_Y=<measured> BOTMAN_OAK_Z=<measured> \
+  #   BOTMAN_OAK_ROLL=<measured> BOTMAN_OAK_PITCH=<measured> BOTMAN_OAK_YAW=<measured> \
+  #   docker compose -f docker-compose.robot-botman.yml up -d
+  #
+  # x forward / y left / z up from `os_lidar` to the DepthAI driver's own base
+  # frame; the driver publishes the rest of the chain to the optical frames its
+  # images are stamped with. Verify the child frame name against
+  # `ros2 run tf2_tools view_frames` — it is the driver's, not ours.
+  oak_mount_tf:
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-oak-tf
+    depends_on:
+      oak_camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - tf2_ros
+      - static_transform_publisher
+      - --x
+      - "${BOTMAN_OAK_X:-unset-measure-the-oak-mount}"
+      - --y
+      - "${BOTMAN_OAK_Y:-unset-measure-the-oak-mount}"
+      - --z
+      - "${BOTMAN_OAK_Z:-unset-measure-the-oak-mount}"
+      - --roll
+      - "${BOTMAN_OAK_ROLL:-unset-measure-the-oak-mount}"
+      - --pitch
+      - "${BOTMAN_OAK_PITCH:-unset-measure-the-oak-mount}"
+      - --yaw
+      - "${BOTMAN_OAK_YAW:-unset-measure-the-oak-mount}"
+      - --frame-id
+      - os_lidar
+      - --child-frame-id
+      - oak-d-base-frame
+    restart: unless-stopped
+
+  adapter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-adapter
+    depends_on:
+      robot_stack:
+        condition: service_started
+      lidar:
+        condition: service_started
+      slam:
+        condition: service_started
+      # `service_started`, NOT `service_healthy`, for both of these.
+      #
+      # Gating on health meant a subsystem that could degrade on its own instead
+      # took the whole robot off the dashboard: no telemetry, no map, no camera,
+      # and — the part that matters — no teleop. A detector that cannot reach
+      # Ultralytics to fetch its weights on a site with no internet never
+      # reports healthy, and a bt_navigator that will not reach `active` never
+      # does either. "Nav2 won't come up, drive it manually" is exactly the
+      # fallback that gate foreclosed.
+      #
+      # Nothing is lost by starting anyway. `capabilities()` is derived from what
+      # actually resolves at runtime, so navigation is still not advertised until
+      # the action server exists; and `ObjectDetector.detect_bgr` is fail-closed,
+      # returning an empty batch and recording `last_error`. Both already degrade
+      # correctly — the dependency was the only thing making them fatal.
+      nav2:
+        condition: service_started
+      oak_camera:
+        condition: service_started
+      duck_detector:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    volumes:
+      # Adapter source comes off the mount, not out of the image. The image is
+      # still what supplies the DEPENDENCIES (rclpy, cv2, websockets); this only
+      # replaces our own Python, which is the same arrangement aslan and spot
+      # already use. Without it a one-line adapter change needs a multi-minute
+      # `up -d --build` on the robot, so botman -- the machine on the worst link
+      # and therefore the one most often needing a fix -- was always the slowest
+      # to update. `scripts/deploy botman` now rsyncs and restarts, ~10 s.
+      - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+      SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
+    command:
+      - python3
+      - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py
+      - --robot-id
+      - botman_0
+      - --config
+      - /app/swarmdeck/adapters/adapter_ros2/config/bunker.yaml
+      - --host
+      - "${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}"
+      - --port
+      - "${BACKEND_PORT:-8080}"
+    restart: unless-stopped
+
+  duck_detector:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.duck-detector
+      args:
+        ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
+    image: swarmdeck-duck-detector:jetpack6
+    container_name: swarmdeck-botman-duck-detector
+    network_mode: host
+    ipc: host
+    runtime: nvidia
+    volumes:
+      - duck_detector_models:/models
+    restart: unless-stopped
+
+  # Production low-latency video path. The adapter independently keeps the
+  # backend's 5 Hz JPEG preview as a fallback; this process converts the same
+  # device-encoded OAK JPEGs to baseline H.264 and pushes an RTSP/TCP stream to
+  # central MediaMTX, where the browser consumes it over WHEP/WebRTC.
+  media:
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-media
+    depends_on:
+      oak_camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    volumes:
+      # Same reasoning as the adapter above: our source off the mount, the
+      # image's job is the dependencies (ffmpeg, cv_bridge).
+      - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - python3
+      - /app/swarmdeck/adapters/media/ros2_rtsp.py
+      - --robot-id
+      - botman_0
+      - --topic
+      - /oak/rgb/image_raw/compressed
+      - --rtsp-url
+      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/botman_0"
+      - --bitrate-kbps
+      - "${VIDEO_BITRATE_KBPS:-700}"
+      - --fps
+      - "${VIDEO_FPS:-10}"
+    restart: unless-stopped
+
+  # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
+  # Keep this independent of Nav2 so costmaps still get a pose if Nav2 restarts.
+  odom_tf:
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-botman-odom-tf
+    depends_on:
+      - slam
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - swarmdeck_nav
+      - odom_to_tf
+      - --ros-args
+      - -r
+      - __node:=botman_odom_to_tf_host
+      - -p
+      - odom_topic:=/laser_odometry
+      - -p
+      - parent_frame:=map
+      - -p
+      - child_frame:=os_lidar
+      - -p
+      - planar:=true
+      - -p
+      - use_receive_time:=true
+    restart: unless-stopped
+
+  # Reuses swarmdeck_ros/src/swarmdeck_nav, with Botman-specific frames,
+  # odometry and Ouster scan configuration. Nav2 writes only cmd_vel_nav;
+  # the adapter remains the sole publisher to the real Bunker /cmd_vel and
+  # relays autonomy only while its NavigateToPose goal is active.
+  nav2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robot-nav2
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-botman-nav2
+    depends_on:
+      # Nav2's pose comes from SLAM's /laser_odometry and its costmaps from the
+      # lidar's /ouster/scan; robot_stack alone supplies neither.
+      - robot_stack
+      - lidar
+      - slam
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /nav_ws/install/setup.sh &&
+          ros2 action list | grep -qx '/botman_0/navigate_to_pose' &&
+          ros2 lifecycle get /botman_0/bt_navigator | grep -q '^active'
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  duck_detector_models:

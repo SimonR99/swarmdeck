@@ -89,7 +89,7 @@ deploy_one() {
   # The compose file too, never --delete'd: it defines the mount that makes all
   # of the above visible, so shipping code without it silently deploys nothing
   # on a robot whose container has not been recreated yet.
-  local composeflags=(-a)
+  local composeflags=(-a -L)
   [[ "$dry" == "yes" ]] && composeflags+=(-n -i)
   if ! rsync "${composeflags[@]}" "$REPO/$compose" "$host:$path/$compose"; then
     echo "  compose rsync FAILED" >&2
