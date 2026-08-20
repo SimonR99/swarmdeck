@@ -7,7 +7,7 @@
 # Why this is a separate file rather than the default: a `devices` reservation
 # with `driver: nvidia` makes `docker compose up` fail outright on a machine
 # with no NVIDIA runtime, so the base compose file has to stay portable. CI and
-# GPU-less workstations keep using `make docker-up`.
+# GPU-less workstations use the base Compose command shown above.
 #
 # What it buys. The base stack runs `LIBGL_ALWAYS_SOFTWARE=1`, so Gazebo's
 # `gpu_lidar` sensors raytrace on the CPU at roughly 0.58x real time. Every
@@ -15,7 +15,7 @@
 # is paid for out of that budget, which is why the mapping lidar was still at
 # 360 samples per revolution (1.003 deg) and distant walls came out dotted.
 # Moving the raytracing onto the GPU is what makes a realistic lidar
-# affordable; see docs/operations/known-issues.md #8.
+# affordable; see "Gazebo lidar" in docs/operations/known-issues.md.
 #
 # Verified on this host: `--gpus all` with NVIDIA_DRIVER_CAPABILITIES=all
 # injects /usr/share/glvnd/egl_vendor.d/10_nvidia.json, which libglvnd loads

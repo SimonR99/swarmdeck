@@ -37,7 +37,7 @@ def test_aslan_launch_keeps_mist_workspace_read_only_and_can_explicit():
     volumes = compose["services"]["robot_stack"]["volumes"]
     command = compose["services"]["robot_stack"]["command"][2]
 
-    assert "/ssd/mist_ws_ros2:/workspace:ro" in volumes
+    assert "${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}:/workspace:ro" in volumes
     assert "${ASLAN_CAN_INTERFACE:-can2}" in command
     assert "start_base:=true" in command
     assert "start_lidar:=false" in command
@@ -79,4 +79,3 @@ def test_aslan_slam_uses_vectornav_imu():
     assert "imu_topic:=/vectornav/imu" in slam_command
     assert vn["vectornav"]["ros__parameters"]["port"] == "/dev/vectornav"
     assert vn["vectornav"]["ros__parameters"]["baud"] == 115200
-

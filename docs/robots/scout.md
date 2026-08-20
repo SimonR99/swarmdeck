@@ -1,30 +1,23 @@
-# Scout Mini (TARS) Bring-up
+# Scout Mini (TARS)
 
-The Scout Mini is an AgileX 4WD skid-steer rover running native ROS 1 Noetic on a Jetson AGX Xavier.
+Scout is an AgileX Scout Mini on native ROS 1 Noetic with LVI-SAM, Ouster,
+VectorNav, RealSense D435, local planning, and the ROS 1 adapter.
 
-## Hardware Specifications
-- **Base**: AgileX Scout Mini (`0.62 x 0.585 m`).
-- **Compute**: Jetson AGX Xavier (Ubuntu 20.04 / ROS 1 Noetic).
-- **Sensors**: Ouster OS1 lidar, VectorNav VN-100 IMU, Intel RealSense D435 camera.
-- **SLAM**: LVI-SAM producing `/lvi_sam/lidar/mapping/odometry`.
+Prerequisites on the robot:
 
-## Bring-up Instructions
+- SSH alias `scout`; robot IP `192.168.1.230`; checkout `/ssd/swarmdeck`.
+- Catkin workspace `/ssd/catkin_ws` and MIST workspace `/ssd/mist_ws`.
+- Ouster hostname and camera topic from `deploy/robots/scout.env`.
 
-1. **Deploy and launch the Autonomous Stack & SwarmDeck Bridge**:
-   From the operator machine, execute:
-   ```bash
-   make deploy ROBOT=scout
-   ```
-   This syncs/builds the checkout, SSHs into `scout`, configures the ROS 1 master and network interfaces, and launches:
-   - Base drivers and sensors (`rover_agx.launch`)
-   - Low-latency RealSense camera publisher (`scout_camera_low_latency.launch`, 10 FPS / 700 kbps)
-   - Media streaming bridge (`ros1_rtsp.py`)
-   - ROS 1 SwarmDeck adapter (`adapters/adapter_ros1/adapter_ros1.py`)
+```bash
+make deploy ROBOT=scout
+```
 
-   `./scripts/scout-up` remains available as the low-level bring-up/check command
-   when the images are already deployed.
+Scout is the exception to the generic Compose start: deployment builds/resets
+containers, then `scripts/scout-up` starts the native ROS graph and verifies the
+ROS master, lidar, odometry, camera, planner, adapter, and media subscriptions.
+Use `scripts/scout-up` directly only after deployment.
 
-2. **Operator Station Server**:
-   ```bash
-   .venv/bin/python -m swarmdeck_server --config configs/hardware_tars.yaml
-   ```
+The repository currently has no unified Scout shutdown helper. Compose services
+can be stopped with the generated `.deploy/scout.env`; native ROS launches must
+also be stopped using the robot's process supervisor or launch-session procedure.

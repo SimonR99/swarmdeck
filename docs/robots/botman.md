@@ -1,40 +1,27 @@
-# Botman Bring-up
+# Botman
 
-Botman is an AgileX Bunker tracked rover running ROS 2 Humble in Docker on a Jetson AGX Orin.
+Botman is an AgileX Bunker on ROS 2 Humble with Ouster OS1-128,
+SuperOdometry, Nav2, and an OAK-D Pro RGB-D camera.
 
-## Hardware Specifications
-- **Base**: AgileX Bunker (`1.02 x 0.78 m`, circumscribed radius 0.65 m).
-- **Compute**: Jetson AGX Orin (Ubuntu 22.04 / Docker).
-- **Sensors**: Ouster OS1-128 lidar, Luxonis OAK-D Pro RGB-D camera.
-- **SLAM**: SuperOdometry publishing `/laser_odometry` and registered lidar scans.
+Prerequisites on the robot:
 
-## Bring-up Instructions
+- SSH at `botman@192.168.1.49`; checkout `/ssd/swarmdeck`.
+- Read-only MIST workspace `/ssd/mist_ws` and image `bunker_super_odom:dev`.
+- ROS domain 17.
+- Measured transform from `os_lidar` to `oak-d-base-frame`.
 
-1. **Start SwarmDeck Server**:
-   ```bash
-   cd server
-   .venv/bin/python -m swarmdeck_server --config ../configs/hardware_botman.yaml
-   ```
+Deployment refuses guessed camera extrinsics:
 
-2. **Deploy and start Robot-Side Services**:
-   From the operator workstation:
-   ```bash
-   BACKEND_HOST=<OPERATOR_IP> \
-   BOTMAN_OAK_X=<measured> BOTMAN_OAK_Y=<measured> BOTMAN_OAK_Z=<measured> \
-   BOTMAN_OAK_ROLL=<measured> BOTMAN_OAK_PITCH=<measured> BOTMAN_OAK_YAW=<measured> \
-   make deploy ROBOT=botman
-   ```
-   The operator command syncs the checkout, writes the overrides on Botman,
-   builds the local images, resets the old Compose stack, and starts it.
-   This launches:
-   - Bunker base driver & SuperOdometry mapping stack
-   - OAK-D Pro RGB-D camera publisher (`botman_oak_rgbd.yaml`)
-   - OAK mount TF publisher (`oak_mount_tf`)
-   - Duck detection sidecar (`duck_detector`)
-   - SwarmDeck ROS 2 adapter (`adapter`)
-   - Low-latency media streaming bridge (`media`)
+```bash
+BOTMAN_OAK_X=<m> BOTMAN_OAK_Y=<m> BOTMAN_OAK_Z=<m> \
+BOTMAN_OAK_ROLL=<rad> BOTMAN_OAK_PITCH=<rad> BOTMAN_OAK_YAW=<rad> \
+make deploy ROBOT=botman
+```
 
-3. **Manual shutdown (if needed)**:
-   ```bash
-   ssh botman 'cd /ssd/swarmdeck && docker compose -f deploy/compose/docker-compose.robot-botman.yml down'
-   ```
+This starts the base, lidar, SuperOdometry, camera/TF, Nav2, detection, adapter,
+and media services. Complete the common [pre-flight checks](../operations/hardware-bringup.md).
+
+```bash
+ssh botman 'cd /ssd/swarmdeck && docker compose --env-file .deploy/botman.env \
+  -f deploy/compose/docker-compose.robot-botman.yml --profile "*" down'
+```

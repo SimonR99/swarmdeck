@@ -2,6 +2,12 @@
 
 set -Eeuo pipefail
 
+# Use the same server/media defaults as every deployment, including when this
+# low-level helper is run directly instead of through scripts/deploy.
+operator_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "${operator_repo}/deploy/fleet.env"
+
 # Run from the operator workstation. Each setting can be overridden inline, e.g.
 # DEPLOY_SSH_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 \
 #   ./scripts/scout-up
@@ -9,13 +15,13 @@ scout_host=${DEPLOY_SSH_HOST:-scout}
 scout_repo=${DEPLOY_REMOTE_REPO:-${ROBOT_REPO:-/ssd/swarmdeck}}
 robot_id=${ROBOT_ID:-tars_0}
 robot_ip=${ROBOT_IP:-192.168.1.230}
-backend_host=${BACKEND_HOST:-192.168.1.161}
-backend_port=${BACKEND_PORT:-8080}
+backend_host=$BACKEND_HOST
+backend_port=$BACKEND_PORT
 ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
 camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
 robot_config=${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}
-video_bitrate=${VIDEO_BITRATE_KBPS:-700}
-video_fps=${VIDEO_FPS:-10}
+video_bitrate=$VIDEO_BITRATE_KBPS
+video_fps=$VIDEO_FPS
 
 echo "Starting ${robot_id} on ${scout_host}..."
 

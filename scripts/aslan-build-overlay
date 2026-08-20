@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 # Run on Aslan. MIST's workspace is always read-only; all generated and patched
 # build inputs live under the SwarmDeck checkout.
-repo=${ASLAN_REPO:-/ssd/swarmdeck}
+repo=${ROBOT_REPO:-/ssd/swarmdeck}
 mist_ws=${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}
 overlay=${ASLAN_OVERLAY:-${repo}/.aslan_ros}
 image=${ASLAN_ROS_IMAGE:-bunker:dev}

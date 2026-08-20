@@ -1,19 +1,14 @@
-# Known Issues & Guidelines
+# Known issues
 
-Active technical caveats and operational guidelines for SwarmDeck.
-
----
-
-## Active Caveats
-
-### 1. Map Registration Requires Spatial Overlap
-- **Behavior**: Pairwise auto-registration (`auto` merge mode) requires at least ~35% spatial support to establish reliable loop closures.
-- **Guideline**: If robots explore disjoint areas, use `static` mode with known spawn coordinates (`configs/scenarios/` or `configs/hardware_*.yaml`).
-
-### 2. Prompt-Tuned Zero-Shot Detection Sensitivity
-- **Behavior**: YOLOE-26n-seg text prompts are sensitive to phrasing (e.g. `yellow duck toy` vs generic terms).
-- **Guideline**: Use the operator review drawer in the UI to confirm proposals or draw ignore zones in cluttered environments. Validate new object prompts with `tests/perception/test_catalog_recall.py`.
-
-### 3. Aslan Hardware Domain & Extrinsics
-- **Behavior**: Aslan and Botman must maintain distinct `ROS_DOMAIN_ID` settings to prevent FastDDS participant collisions.
-- **Guideline**: Static transforms between camera and lidar frames must be measured precisely and passed via environment variables (e.g. `BOTMAN_OAK_X`).
+| Area | Limitation and response |
+|---|---|
+| Auto map registration | Requires overlapping known space and may refuse repetitive or disjoint maps. Inspect `GET /api/map/status`; use `static` mode with surveyed transforms when available. |
+| Collaborative merge | RTAB-Map grids and Swarm-SLAM trajectories currently disagree by metres. Treat `cslam` as experimental; do not use its transforms for physical navigation. |
+| 3D simulation | `GRID_3D=true` preserves cloud height but roughly halves simulation speed. Leave it off unless the 3D structure is needed. |
+| DLIO in Gazebo | Simulated clouds lack per-point timestamps, so DLIO cannot demonstrate de-skewing. Do not extrapolate its Gazebo result to hardware. |
+| Odometry covariance | The simulation EKF is tuned for its current measurement model. Enabling `FUSE_COVARIANCE=true` requires retuning process noise. |
+| Gazebo lidar | Height-filtered planar mapping requires one or an odd number of vertical rings; even counts have no horizontal return. Low horizontal sample counts make distant walls discontinuous; use the configured lidar profiles. |
+| Detection prompts | YOLOE results depend on prompt and hardware domain. Validate catalog changes with `tests/perception/test_catalog_recall.py` and use operator review. |
+| Hardware frames | Camera/lidar extrinsics must be measured. Botman intentionally refuses deployment without its six OAK mount values. |
+| ROS domains | Keep each hardware stack on its documented `ROS_DOMAIN_ID` unless the entire graph is reconfigured together. |
+| Remote access | SwarmDeck has no authentication. Put an authenticating proxy in front of any hardware-facing deployment. |

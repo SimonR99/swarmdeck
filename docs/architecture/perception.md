@@ -1,42 +1,42 @@
 # Perception & Object Detection
 
-SwarmDeck incorporates an open-vocabulary object detection and 3D spatial projection pipeline to identify targets (such as rubber ducks, cones, and obstacles) and project them into the global map.
-
----
+SwarmDeck detects configured object classes, optionally projects them through
+depth into the map, and asks the operator to review located observations.
 
 ## 1. Detection Architecture
 
-```text
-┌─────────────────┐       ┌────────────────────────┐       ┌──────────────────────┐
-│  Robot Camera   │ RGB   │ YOLOE Sidecar Server   │ BBoxes│ Depth Projection     │
-│ (OAK-D/RealSense├──────►│ (YOLOE-26n-seg on GPU) ├──────►│ (RGBD De-projection) │
-└─────────────────┘       └────────────────────────┘       └──────────┬───────────┘
-                                                                      │ (X, Y, Z) in Map
-                                                           ┌──────────▼───────────┐
-                                                           │ SwarmDeck Backend    │
-                                                           │ (Review & Map Store) │
-                                                           └──────────────────────┘
+```mermaid
+flowchart LR
+    RGB["Robot RGB camera"] -->|Frame| Adapter["Robot adapter"]
+    Adapter <-->|Inference request / result| YOLOE["YOLOE sidecar"]
+    Depth["Aligned depth (when valid)"] -.-> Adapter
+    TF["TF / odometry (local map transform)"] -.-> Adapter
+    Adapter -->|Detection with optional map position| Backend["SwarmDeck backend"]
+    Backend --> Review["Operator review"]
+    Backend --> Store["Persistent detection store"]
+    Backend --> UI["Video overlay and map markers"]
 ```
 
-1. **Inference Sidecar** (`adapters/perception/yoloe_server.py`):
-   - Runs open-vocabulary promptable segmentation (`yoloe-26n-seg.pt`).
-   - Accepts prompt text lists and returns 2D bounding boxes, polygon masks, class labels, and confidence scores.
-2. **Catalog & Confidence Floors** (`adapters/perception/catalog.py`):
-   - Defines target classes with empirically verified prompt embeddings and per-class minimum confidence floors.
-   - Verified via reference photographs in `tests/perception/fixtures/`.
-3. **3D Depth Projection** (`adapters/perception/depth_projection.py`):
-   - Aligns RGB detection masks with depth/disparity maps.
-   - Samples depth within the detected mask, removes floor/background outliers, and projects centroid coordinates into 3D robot frame.
-   - Transforms 3D target coordinates into the global map frame via TF / odometry.
+1. `adapters/perception/yoloe_server.py` runs YOLOE-26n segmentation and
+   returns class, confidence, normalized box, and optional polygon.
+2. `adapters/perception/catalog.py` defines the supported classes, prompts, and
+   capture floors; reference images live in `tests/perception/fixtures/`.
+3. `adapters/perception/depth_projection.py` samples aligned depth inside the
+   detection mask, rejects invalid/floor/background values, and transforms the
+   result into the robot's local map frame.
+
+Missing or stale depth/TF removes only `map_position`; video boxes still work.
+The backend converts valid local positions into the shared map frame.
 
 ---
 
 ## 2. Operator Review & Persistence
 
-Detections are presented to the operator in the web UI for validation:
-- **Candidate Proposal**: A newly detected object appears on the map as a tentative marker.
-- **Operator Actions**:
-  - **Confirm**: Locks the detection as a verified map landmark.
-  - **Reject**: Dismisses false positives.
-  - **Ignore Zone**: Creates an exclusion polygon where further detections are ignored.
-- **Persistence**: Approved and rejected detections persist in `sessions/detections.json` across server restarts.
+Located observations enter a review queue. The operator may accept, ignore, or
+merge a proposal into an existing same-class object. Nearby repeated sightings
+are folded into the entity only after enough viewpoint movement, preventing a
+parked robot's depth bias from dominating the average position.
+
+Class and per-robot confidence floors are applied by the backend and can be
+changed without discarding lower-confidence evidence already captured. Reviewed
+entities and decisions persist in `sessions/detections.json`.

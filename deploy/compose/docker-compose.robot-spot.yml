@@ -25,7 +25,7 @@ x-spot-stack: &spot-stack
   volumes:
     - /dev:/dev
     - ${SPOT_WORKSPACE:-/home/indro/mist_ws_ros2}:/workspace:ro
-    - ${SPOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
+    - ${ROBOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
   environment:
     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
     ROS_DOMAIN_ID: *ros_domain
@@ -76,8 +76,8 @@ services:
     volumes:
       - /dev:/dev
       - ${SPOT_WORKSPACE:-/home/indro/mist_ws_ros2}:/workspace:ro
-      - ${SPOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
-      - ${SPOT_REPO:-/home/indro/swarmdeck}/.spot_pip:/root/.local
+      - ${ROBOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
+      - ${ROBOT_REPO:-/home/indro/swarmdeck}/.spot_pip:/root/.local
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -103,7 +103,7 @@ services:
     volumes:
       # Our source off the mount, dependencies out of the image — see the
       # adapter service. Without this an `ros2_rtsp.py` fix needs a rebuild.
-      - ${SPOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
+      - ${ROBOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -117,7 +117,7 @@ services:
       - --raw-topic
       - /d435/color/image_raw
       - --rtsp-url
-      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/spot_0"
+      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/spot_0"
       - --bitrate-kbps
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps
@@ -140,7 +140,7 @@ services:
     runtime: nvidia
     volumes:
       - duck_detector_models:/models
-      - ${SPOT_REPO:-/home/indro/swarmdeck}/adapters:/app/adapters:ro
+      - ${ROBOT_REPO:-/home/indro/swarmdeck}/adapters:/app/adapters:ro
     restart: unless-stopped
 
 volumes:

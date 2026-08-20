@@ -56,7 +56,7 @@ services:
       - --topic
       - "${CAMERA_TOPIC:?set CAMERA_TOPIC to a sensor_msgs/CompressedImage topic}"
       - --rtsp-url
-      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/${ROBOT_ID}"
+      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/${ROBOT_ID}"
       - --bitrate-kbps
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps

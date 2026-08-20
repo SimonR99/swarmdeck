@@ -220,7 +220,7 @@ services:
       # and therefore the one most often needing a fix -- was always the slowest
       # to update. The deployment helper rsyncs the source and recreates the
       # mounted services after the image build.
-      - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -268,7 +268,7 @@ services:
     volumes:
       # Same reasoning as the adapter above: our source off the mount, the
       # image's job is the dependencies (ffmpeg, cv_bridge).
-      - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -280,7 +280,7 @@ services:
       - --topic
       - /oak/rgb/image_raw/compressed
       - --rtsp-url
-      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/botman_0"
+      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/botman_0"
       - --bitrate-kbps
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps

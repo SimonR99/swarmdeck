@@ -34,7 +34,7 @@
 # Requires the cslam overlay:
 #   make docker-up-cslam
 #
-#   SLAM_BACKEND=rtabmap SWARMDECK_CONFIG=/app/study/4robot_3d.yaml make docker-up-gpu
+#   SLAM_BACKEND=rtabmap SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml make docker-up-gpu
 #
 # Identical to 4robot.yaml except the lidar profile. `generic_32` publishes a
 # real point cloud on <ns>/scan/points, which is what icp_odometry registers

@@ -5,7 +5,7 @@
 # adjacent returns land one 5 cm cell apart at 2.9 m and three cells apart at
 # 8.6 m, and distant walls come out as dotted fans.
 #
-#   SWARMDECK_CONFIG=/app/study/baseline_legacy.yaml make docker-up-gpu
+#   SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml make docker-up-gpu
 #
 # Run it on the GPU like the real configs, so a comparison isolates the sensor
 # rather than measuring the simulator's real-time factor as well.

@@ -1,75 +1,74 @@
 # SwarmDeck Architecture
 
-SwarmDeck connects heterogeneous multi-robot fleets to a responsive web dashboard without requiring ROS dependencies on the host server or browser.
+SwarmDeck connects heterogeneous robots to a web dashboard without ROS on the
+server or browser.
 
-```text
-┌────────────────────────────────────────────────────────┐
-│                   SwarmDeck UI (Browser)               │
-│   Svelte 5 · Canvas 2D / Three.js 3D · WebRTC / WHEP   │
-└───────────────────────────▲────────────────────────────┘
-                            │ WebSocket / REST / WebRTC
-┌───────────────────────────▼────────────────────────────┐
-│               SwarmDeck Server (FastAPI)               │
-│   Fleet Manager · MapService (2D Merge) · Bus · API    │
-└───────────────────────────▲────────────────────────────┘
-                            │ SwarmDeck Wire Protocol (WS)
-       ┌────────────────────┼────────────────────┐
-       │                    │                    │
-┌──────▼──────┐      ┌──────▼──────┐      ┌──────▼──────┐
-│ ROS 2 Bridge│      │ ROS 1 Bridge│      │ Mock / Sim  │
-│  (Botman /  │      │(Scout Mini) │      │  (Gazebo /  │
-│ Spot / Aslan)      │             │      │  Synthetic) │
-└──────┬──────┘      └──────┬──────┘      └─────────────┘
-       │                    │
-┌──────▼──────┐      ┌──────▼──────┐
-│  Perception │      │ Media Stream│
-│   Sidecar   │      │(RTSP/Media- │
-│ (YOLOE-26n) │      │    MTX)     │
-└─────────────┘      └─────────────┘
+```mermaid
+flowchart TB
+    UI["Browser UI<br/>Svelte 5 · Canvas 2D · WebGL2 3D"]
+    Server["FastAPI server<br/>Fleet · Maps · Events · API"]
+    ROS2["ROS 2 adapter<br/>Botman · Aslan · Spot"]
+    ROS1["ROS 1 adapter<br/>Scout Mini"]
+    Sim["Gazebo adapter"]
+    Mock["Synthetic adapter"]
+    Detector["YOLOE perception sidecar"]
+    Media["MediaMTX"]
+
+    UI <-->|REST / WebSocket| Server
+    ROS2 <-->|Adapter protocol| Server
+    ROS1 <-->|Adapter protocol| Server
+    Sim <-->|Adapter protocol| Server
+    Mock <-->|Adapter protocol| Server
+    ROS2 <-->|Inference| Detector
+    ROS1 <-->|Inference| Detector
+    Sim <-->|Inference| Detector
+    ROS2 -->|RTSP| Media
+    ROS1 -->|RTSP| Media
+    Sim -->|RTSP| Media
+    Media -->|WHEP / WebRTC| UI
 ```
-
----
 
 ## 1. System Components
 
 ### A. SwarmDeck Server (`server/`)
-- **Language & Runtime**: Python 3.11+ using FastAPI, Starlette WebSockets, and NumPy.
-- **ROS Independence**: Pure Python with no `rclpy` or `rospy` dependencies.
-- **Core Services**:
-  - `FleetManager`: Tracks robot registrations, telemetry, heartbeats, and status.
-  - `MapService`: Accumulates 2D lidar scans via raytracing, dynamically expands map boundaries, and merges multi-robot grids using voting or static priors.
-  - `EventBus`: Decoupled publish/subscribe bus for robot telemetry, detections, and operator commands.
+
+- FastAPI, WebSockets, and NumPy; no `rclpy` or `rospy`.
+- Fleet registry for identity, capabilities, telemetry, liveness, and commands.
+- Map service for scan accumulation, dynamic bounds, registration, merging, and
+  network-quality grids.
+- Detection review, persistent settings, and timestamped event logging.
 
 ### B. User Interface (`ui/`)
-- **Framework**: Svelte 5 (Runes mode), Vite, Tailwind CSS 4, Lucide icons.
-- **Visualizations**:
-  - 2D Canvas: High-performance occupancy grid renderer with dynamic canvas reallocation and sub-pixel delta patching.
-  - 3D Viewer: Three.js point cloud renderer for robot lidar scans and detection bounding volumes.
-- **Media**: Low-latency video via WebRTC (WHEP) with fallback JPEG polling, real-time FPS and ping diagnostic HUD overlay.
+
+Svelte 5 renders the 2D occupancy map and a raw-WebGL2 point cloud. It consumes
+REST/WebSocket state and WHEP/WebRTC video, with JPEG fallback and stream/link
+diagnostics.
 
 ### C. Protocol Adapters (`adapters/`)
-- **ROS 1 Adapter** (`adapters/adapter_ros1/`): Connects to ROS 1 Noetic nodes (e.g., Scout Mini / LVI-SAM).
-- **ROS 2 Adapter** (`adapters/adapter_ros2/`): Connects to ROS 2 Humble/Jazzy nodes (e.g., Botman, Aslan, Spot).
-- **Simulation Adapter** (`adapters/adapter_sim/`): Interfaces with Gazebo simulation environments.
-- **Mock Adapter** (`adapters/adapter_mock/`): Pure synthetic multi-robot generator for UI testing without ROS or GPU requirements.
 
----
+- `adapter_ros1`: ROS 1 Noetic hardware, including Scout/LVI-SAM.
+- `adapter_ros2`: ROS 2 Humble/Jazzy hardware, including Bunker and Spot.
+- `adapter_sim`: Gazebo fleet.
+- `adapter_mock`: synthetic fleet without ROS or a GPU.
+
+All use the same [wire protocol](../../adapters/protocol/README.md).
 
 ## 2. Coordinate Frames & Transforms
 
 SwarmDeck standardizes coordinate frames across heterogeneous robots:
 
 | Frame | Scope | Description |
-| :--- | :--- | :--- |
-| `world` | Global | Common reference frame anchored at the origin of the primary reference robot. |
-| `map` | Robot Local | SLAM-estimated fixed map frame for a specific robot. |
-| `odom` | Robot Local | Continuous wheel/inertial odometry frame. |
-| `base_link` | Robot Body | Physical robot chassis geometric center. |
-| `sensor` | Robot Sensor | Sensor optical or lidar frames (e.g., `os_lidar`, `camera_color_optical_frame`). |
+|---|---|---|
+| shared/world | Fleet | Backend/UI merged frame, normally anchored to the reference robot. |
+| `map` | Robot | Local SLAM frame. |
+| `odom` | Robot | Continuous odometry frame. |
+| `base_link` | Robot | Chassis frame. |
+| sensor frames | Robot | Camera, lidar, and IMU frames. |
 
-### 2D Global Map Merging & Dynamic Expansion
-1. **Raytracing Accumulator**: Converts 2D/3D point clouds into raytraced occupancy grids (`UNKNOWN`, `FREE`, `OCCUPIED`).
-2. **Dynamic Bounds Expansion**: If a robot explores beyond the initial map window, the accumulator and `MapService` automatically expand their extents in chunk increments, broadcasting resized geometry (`width`, `height`, `origin`) to the frontend.
-3. **Multi-Robot Alignment**:
-   - `auto`: Computes pairwise SE(2) cross-correlations over occupied/free cells with coverage support gating.
-   - `static`: Uses configured start poses from scenario/robot configuration files.
+### 2D map merging
+
+Registered scans can be raytraced into `UNKNOWN`, `FREE`, and `OCCUPIED` cells;
+native occupancy grids use the same merge path. Bounds expand as robots explore.
+`static` mode uses configured transforms, `auto` estimates guarded SE(2)
+alignments from overlapping grids, and `cslam` consumes a collaborative graph.
+See [collaborative-slam.md](collaborative-slam.md) for limits.

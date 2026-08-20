@@ -1,242 +1,232 @@
-# SwarmDeck Adapter Protocol v1
+# SwarmDeck adapter protocol
 
-The **only** interface between robots and the backend. The backend has no ROS
-dependency; any robot that speaks this protocol joins the fleet.
+This is the only robot/backend interface. The backend supports protocol versions
+1 and 2; version 2 adds the optional `slam_graph` message. Adapters may use any
+language, OS, middleware, or planner.
 
-Implement it in any language, on any OS, against any ROS version (or none).
+## Transport
 
-## Channels
-
-| Direction | Channel | Purpose |
+| Direction | Endpoint | Data |
 |---|---|---|
-| adapter → backend | `WS /adapter` | `hello`, `robot_state`, `nav_status`, `detections`, `map_meta`, `reset_done` |
-| backend → adapter | same socket | `navigate_to`, `cancel_goal`, `drive`, `stop`, `set_mode`, `reset`, `body_command`, `camera_interest` |
-| adapter → backend | `POST /api/adapter/map` | occupancy grid, throttled ≤ 1 Hz |
-| adapter → backend | `POST /api/adapter/camera` | optional JPEG preview fallback, ≤ 5 Hz, gated by `camera_interest` |
-| adapter → MediaMTX | `RTSP push :8554/<robot_id>` | H.264 camera |
+| bidirectional | `WS /adapter` | Registration, telemetry, detections, commands. |
+| adapter → backend | `POST /api/adapter/map` | One robot's occupancy grid. |
+| adapter → backend | `POST /api/adapter/scan` | Registered XY scan when no grid is available. |
+| adapter → backend | `POST /api/adapter/cloud` | Optional registered XYZ cloud. |
+| collaborative backend → backend | `POST /api/adapter/global_map` | Already-merged common-frame grid. |
+| adapter → backend | `POST /api/adapter/camera` | Optional JPEG fallback. |
+| adapter → MediaMTX | `RTSP :8554/<robot_id>` | Production H.264 video. |
 
-## Handshake
+Binary uploads are zlib-compressed and capped by the server. Retry rejected
+uploads only after correcting the payload.
 
-First message on connect. The backend replies `hello_ack` or closes with a reason.
+## Registration
+
+The first WebSocket message must be `hello`; reconnects send it again. The
+backend replies with `hello_ack` or closes the socket.
 
 ```jsonc
-{ "type": "hello", "protocol": 1,
-  "robot_id": "spot_0", "robot_type": "spot",
-  "adapter": "adapter_spot/0.3.1", "ros": "noetic",
+{
+  "type": "hello",
+  "protocol": 2,
+  "robot_id": "spot_0",
+  "robot_type": "spot",
+  "adapter": "adapter_ros2/0.3.1",
+  "ros": "humble",
   "coordinate_frame": "local",
-  "capabilities": ["navigate", "camera", "map", "battery", "estop"],
-  "footprint_radius": 0.55 }
+  "capabilities": ["navigate", "camera", "map", "battery", "network", "estop", "body"],
+  "footprint_radius": 0.55
+}
 ```
 
-`coordinate_frame` defaults to `local`: poses, goals, and occupancy grids are in that
-robot's own navigation-map frame. An adapter whose data already uses the backend's
-merged frame (for example the synthetic mock adapter) declares `merged` instead.
+`robot_id` is the stable identity key. `coordinate_frame` defaults to `local`,
+meaning pose, goal, map, scan, and cloud data use that robot's navigation-map
+frame. Use `merged` only when data already uses the backend's shared frame.
 
-`capabilities` drives the GUI. A robot without `navigate` shows no goal controls; one
-without `map` contributes no grid. **Never assume a capability.**
+Capabilities drive the UI and command routing:
 
-| Capability | Meaning |
+| Capability | Contract |
 |---|---|
-| `navigate` | accepts `navigate_to` / `cancel_goal` |
-| `map` | pushes occupancy grids |
-| `camera` | streams to MediaMTX under its `robot_id` |
-| `battery` | reports `battery` in `robot_state` |
-| `network` | reports robot-side Wi-Fi quality in `robot_state` for the local-map heatmap |
-| `estop` | accepts `stop` |
-| `body` | accepts `body_command` (`claim` / `release` / `sit` / `stand`) |
-| `reset` | accepts `reset` — **simulation only**, see below |
+| `navigate` | Accept `navigate_to` and `cancel_goal`. |
+| `map` | Upload grids or registered scans. |
+| `camera` | Publish video under `robot_id`. |
+| `battery` | Include `battery` in `robot_state`. |
+| `network` | Include synchronized Wi-Fi quality in `robot_state`. |
+| `estop` | Accept `stop`. |
+| `body` | Accept `body_command`. |
+| `reset` | Accept full simulation reset; never advertise on hardware. |
 
-### `reset` is for simulated robots only
+Never advertise a capability the adapter cannot currently honor.
 
-A `reset` returns a robot to the state it started in: back at its spawn pose, with
-its map and its odometry filter forgotten. Only a simulator can honour that — a
-physical robot cannot teleport, and clearing the SLAM map of a machine that is
-standing in a real building leaves it navigating against nothing.
+## Adapter messages
 
-**A hardware adapter must never advertise `reset`** (rule 4). `adapter_ros2` does
-not, and its capability list is derived from configured topics, so it cannot start
-doing so by accident. The GUI hides the reset control unless some robot advertises
-the capability, which is what keeps the button off a hardware dashboard.
-
-## Adapter → backend
+`robot_state` is required at 5 Hz:
 
 ```jsonc
-// robot_state — 5 Hz, required
-{ "type": "robot_state", "robot_id": "robot_0", "t_mono": 18234.55,
+{
+  "type": "robot_state",
+  "robot_id": "robot_0",
+  "t_mono": 18234.55,
   "pose": {"x": 1.2, "y": -3.4, "yaw": 0.78},
-  "battery": 0.82, "mode": "nav", "nav_status": "active",
+  "battery": 0.82,
+  "mode": "nav",
+  "nav_status": "active",
   "network": {"interface": "wlan0", "quality_pct": 71.4, "rssi_dbm": -58.0},
   "goal": {"x": 5.0, "y": 2.0},
-  "planned_path": [{"x": 1.2, "y": -3.4}, {"x": 2.1, "y": -2.7}] }
-
-// detections — on detection
-// `class` is one of the catalog names in adapters/perception/catalog.py;
-// `id` is `<class>_<slot>`, numbered within that class. `polygon` is the
-// segmentation outline in the same normalized frame as `bbox`, and is null
-// when the model returned no mask — consumers must handle both.
-//
-// Report everything above `detection_capture_floors` from GET /api/settings —
-// NOT the operator's `detection_class_floors`. The backend applies the
-// operator's floor to its own stored entities, so an adapter that pre-filtered
-// to it would make raising a floor irreversible: the evidence needed to undo
-// the change would never have been sent. See docs/architecture/perception.md.
-{ "type": "detections", "robot_id": "robot_2", "t_mono": 18251.7,
-  "camera": "front",
-  "items": [{"id": "disc_cone_0", "class": "disc_cone", "score": 0.91,
-             "bbox": [0.41, 0.33, 0.12, 0.18],
-             "polygon": [[0.47, 0.33], [0.53, 0.44], [0.41, 0.51]],
-             "map_position": {"x": 7.1, "y": -2.2}}] }
-
-// map_meta — after POST /api/adapter/map
-{ "type": "map_meta", "robot_id": "robot_0", "t_mono": 18260.0,
-  "resolution": 0.05, "width": 1000, "height": 1000,
-  "origin": {"x": -25.0, "y": -25.0} }
-
-// reset_done — after a `reset` command has been carried out
-{ "type": "reset_done", "robot_id": "robot_0", "t_mono": 18299.1,
-  "ok": true, "steps": {"world": true, "pose": true, "odometry": true,
-                        "slam": true, "costmaps": true} }
+  "planned_path": [{"x": 1.2, "y": -3.4}, {"x": 2.1, "y": -2.7}]
+}
 ```
 
-`steps` names what the adapter did, and each is reported separately because the
-half-failures are the interesting ones: a reset where `pose` succeeded but `slam`
-did not leaves the fleet back at the start drawing the map it had before, which
-is a specific and recognisable symptom rather than a generic failure.
+- `mode`: `idle`, `nav`, `teleop`, or `estop`.
+- `nav_status`: `idle`, `active`, `succeeded`, `failed`, or `cancelled`.
+- `planned_path` is a bounded, downsampled planner polyline.
+- `network` is optional and must be sampled with the accompanying pose. Use
+  `network_iface: auto` or an explicit Linux wireless interface in the supplied
+  hardware adapters; an empty value disables it.
 
-`reset_done` is what lets the backend clear its merged map without racing the
-adapter. The backend holds the last grid every robot uploaded; if it cleared them
-the moment it sent `reset`, an upload already in flight — or one taken from a
-cache the adapter had not yet dropped — would put the old map straight back. So
-the adapter finishes the reset, drops its cached grid and cloud, and only then
-reports `reset_done`; the backend clears on receipt. `ok: false` still gets sent,
-with `steps` naming what failed, because a reset that half-worked is something the
-operator has to be told about rather than left to infer from a stale map.
+Send a complete `detections` batch for the current camera frame:
 
-`nav_status` ∈ `idle` | `active` | `succeeded` | `failed` | `cancelled`
-`mode` ∈ `idle` | `nav` | `teleop` | `estop`
+```jsonc
+{
+  "type": "detections",
+  "robot_id": "robot_2",
+  "t_mono": 18251.7,
+  "camera": "front",
+  "items": [{
+    "id": "disc_cone_0",
+    "class": "disc_cone",
+    "score": 0.91,
+    "bbox": [0.41, 0.33, 0.12, 0.18],
+    "polygon": [[0.47, 0.33], [0.53, 0.44], [0.41, 0.51]],
+    "map_position": {"x": 7.1, "y": -2.2}
+  }]
+}
+```
 
-`planned_path` is the adapter's current planner output, downsampled to a bounded
-polyline. The GUI renders it dashed beside the solid path actually travelled.
-`network` is optional and is sampled on the robot in the same packet as `pose`,
-so the backend can accumulate link quality spatially without guessing which
-pose belonged to a later measurement. Hardware adapters enable it with
-`network_iface: auto` (first `/proc/net/wireless` interface) or an explicit
-interface name; an empty value disables the capability.
-Detection boxes use normalized `[x, y, width, height]` image coordinates; stable item
-IDs let the backend update one observation instead of stacking duplicate boxes.
-`map_position` is optional. Depth-capable adapters derive it from an RGB-aligned depth
-sample and transform that point into their navigation-map frame; adapters without a
-fresh, valid depth/TF result send `null` and the GUI shows only the video box.
+Boxes and polygon points are normalized image coordinates. IDs are stable
+within a class. An item absent from the next batch is no longer visible.
+`map_position` is optional and must be derived from valid, fresh depth and TF;
+never guess a location.
 
-## Backend → adapter
+Adapters capture detections at `detection_capture_floors` from
+`GET /api/settings`, not at the operator display floors. The backend keeps the
+lower-level evidence so threshold changes remain reversible.
+
+After completing a simulation reset, drop cached maps/clouds and send:
+
+```jsonc
+{
+  "type": "reset_done",
+  "robot_id": "robot_0",
+  "t_mono": 18299.1,
+  "ok": true,
+  "steps": {"world": true, "pose": true, "odometry": true, "slam": true, "costmaps": true}
+}
+```
+
+The backend waits for acknowledgements before clearing its cached map. Send
+`ok: false` with per-step results after partial failure. Hardware adapters must
+not advertise or implement reset.
+
+Protocol 2 adapters may report collaborative graph state:
+
+```jsonc
+{
+  "type": "slam_graph",
+  "robot_id": "robot_0",
+  "t_mono": 18300.0,
+  "keyframes": 82,
+  "in_common_frame": true,
+  "residual": 0.04,
+  "inter_robot": ["robot_1"],
+  "common_pose": {"x": 1.0, "y": 2.0, "yaw": 0.1},
+  "origin": {"x": 0.9, "y": 2.1, "yaw": 0.1, "frame": "swarm_map"}
+}
+```
+
+Adapters without a collaborative backend omit this message.
+
+`map_meta` remains accepted after a map upload for compatibility, but grid
+metadata is carried by the HTTP request.
+
+## Backend commands
 
 ```jsonc
 { "type": "navigate_to", "seq": 41, "goal": {"x": 4.0, "y": 1.5, "yaw": 0.0} }
 { "type": "cancel_goal", "seq": 42 }
-{ "type": "drive",       "seq": 43, "linear": 0.28, "angular": 0.0 }
-{ "type": "stop",        "seq": 44 }
-{ "type": "set_mode",    "seq": 45, "mode": "teleop" }
-{ "type": "reset",       "seq": 46 }
-{ "type": "body_command","seq": 47, "action": "stand" }
+{ "type": "drive", "seq": 43, "linear": 0.28, "angular": 0.0 }
+{ "type": "stop", "seq": 44 }
+{ "type": "set_mode", "seq": 45, "mode": "teleop" }
+{ "type": "reset", "seq": 46 }
+{ "type": "body_command", "seq": 47, "action": "stand" }
 { "type": "camera_interest", "watched": false }
 ```
 
-`camera_interest` is sent when the operator changes which camera is displayed,
-and once after every `hello`. Only the robot a dashboard is actually showing
-uploads at its configured `camera_period_s`; the rest fall back to roughly one
-frame every two seconds — enough that selecting a robot paints something at
-once, without four robots streaming video nobody is looking at. Measured at
-73–78 KB per frame against 0.4 KB of telemetry, that is most of a wireless
-link's budget.
+Commands are planner-agnostic. The adapter translates `navigate_to` to Nav2,
+`move_base`, or a vendor API. Local-frame goals are converted by the backend
+before transmission.
 
-Two rules for implementers. **Default to watched**, so an adapter talking to a
-backend that never sends this keeps uploading — a lost message must cost
-bandwidth, never video. And **do not gate detection on it**: map markers are a
-property of the fleet, not of whichever camera happens to be on screen.
+`body_command.action` is `claim`, `release`, `sit`, or `stand`. Ignore it without
+the `body` capability.
 
-`body_command.action` is one of `claim`, `release`, `sit`, `stand`. A robot
-without the `body` capability ignores it. On Spot these map onto Clearpath
-`spot_driver` Trigger services; `stand` may power the motors first, and
-`claim` also releases the software e-stop and a leftover tablet keepalive.
+`camera_interest` changes JPEG fallback rate, not RTSP or detection. Default to
+watched until the first message; losing this command may consume bandwidth but
+must not hide video. Never gate detection on camera interest.
 
-**Commands are planner-agnostic.** The adapter maps `navigate_to` to Nav2,
-`move_base`, or a vendor action (Spot: Clearpath `/trajectory` in `body`).
-The GUI must never send planner-specific fields.
+## Binary payloads
 
-For the default `local` frame, `navigate_to.goal` is expressed in that robot's local
-navigation map. The backend converts between it and the shared merged-map frame, using
-the same transform as map merging. Adapter `robot_state.pose` and `robot_state.goal` use
-the declared frame too; GUI clients always receive shared-frame coordinates.
-
-## Map upload
-
-```
-POST /api/adapter/map?robot_id=robot_0
-Content-Type: application/octet-stream
-Body: zlib-compressed int8[] row-major, -1 unknown, 0 free, 100 occupied
-```
-
-Send `map_meta` on the WebSocket immediately after, so the backend can interpret it.
-
-## Map-from-scan upload
-
-For a robot whose SLAM stack registers a point cloud but never projects one to a 2D
-`OccupancyGrid` (a LOAM-family pipeline like LVI-SAM is the common case) — send scans
-instead of a finished grid, and the backend raytraces them into one itself
-(`mapsvc/scan_grid.py`), then feeds it through the exact same merge/registration path a
-native grid uses:
-
-```
-POST /api/adapter/scan?robot_id=robot_0&origin_x=1.2&origin_y=-3.4
-Content-Type: application/octet-stream
-Body: zlib-compressed int16[] xy pairs, 1 cm units (points * 100, rounded)
-```
-
-`origin_x`/`origin_y` are the sensor's position, in the same frame as the points, at
-capture time — used to raytrace free space from the sensor back to each return. Points
-should already be deduplicated onto (roughly) the grid's resolution before upload; a raw
-registered scan is far denser than a raytraced grid needs. Mutually exclusive in
-practice with `POST /api/adapter/map` per robot, not mutually exclusive in the protocol —
-an adapter advertising `map` because it configures this path rather than a native grid
-topic is exactly protocol rule 4 working as intended.
-
-## Optional 3D cloud upload
-
-An adapter with registered XYZ points in its declared local map frame may also
-feed the GUI's 3D viewer. This is independent of whether its 2D map comes from
-`POST /api/adapter/map` or `POST /api/adapter/scan`:
+### Occupancy grid
 
 ```text
-POST /api/adapter/cloud?robot_id=robot_0&scale=0.01
+POST /api/adapter/map?robot_id=<id>&resolution=<m>&width=<n>&height=<n>&origin_x=<m>&origin_y=<m>
 Content-Type: application/octet-stream
-Body: zlib-compressed int16[] xyz triples (points / scale, rounded)
+Body: zlib(int8 row-major cells), values -1 unknown, 0 free, 100 occupied
 ```
 
-Voxel-downsample before upload and send slowly (roughly 0.25 Hz). The backend
-retains the newest cloud for each robot and transforms registered members into
-the shared fleet frame. This transport is SLAM-implementation agnostic: the
-points need only be registered in the same local map frame as that robot's pose
-and 2D map.
-
-## Camera preview fallback
-
-MediaMTX/WHEP remains the production low-latency path. During development, or when that
-pipeline is unavailable, an adapter may send its newest browser-ready JPEG to:
+### Registered scan
 
 ```text
-POST /api/adapter/camera?robot_id=robot_0
+POST /api/adapter/scan?robot_id=<id>&origin_x=<m>&origin_y=<m>&scale=0.01
+Body: zlib(int16 XY pairs), coordinates = metres / scale
+```
+
+Points and sensor origin use the same local map frame. Deduplicate points near
+the target grid resolution before upload. Normally a robot sends either grids or
+scans, not both.
+
+### Point cloud
+
+```text
+POST /api/adapter/cloud?robot_id=<id>&scale=0.01
+Body: zlib(int16 XYZ triples), coordinates = metres / scale
+```
+
+Send registered, voxel-downsampled points slowly (about 0.25–0.5 Hz). Only
+robots accepted into the shared frame contribute to the merged 3D view.
+
+### Collaborative global grid
+
+```text
+POST /api/adapter/global_map?resolution=<m>&width=<n>&height=<n>&origin_x=<m>&origin_y=<m>
+Body: zlib(int8 row-major cells)
+```
+
+Use only for a grid already optimized in the collaborative common frame.
+
+### JPEG fallback
+
+```text
+POST /api/adapter/camera?robot_id=<id>
 Content-Type: image/jpeg
 ```
 
-Throttle previews to 5 Hz. The GUI first attempts WHEP, then polls
-`GET /api/camera/<robot_id>` without caching. This fallback keeps the backend ROS-free
-and makes camera wiring testable; it is not the Phase 4 latency solution.
+Send browser-ready JPEG at no more than 5 Hz. Production video uses RTSP and
+WHEP; the UI falls back to `GET /api/camera/<robot_id>`.
 
 ## Rules
 
-1. `t_mono` is the adapter's monotonic clock in seconds. The backend adds wall and
-   session time on receipt.
-2. Reconnect with backoff. Re-send `hello` every time.
-3. Unknown message types are ignored, not fatal — forward compatibility.
-4. Never send a capability you cannot honour.
-5. `robot_id` must be stable across reconnects; it is the identity key everywhere.
+1. `t_mono` is the adapter's monotonic clock in seconds; the backend adds wall
+   and session timestamps.
+2. Reconnect with backoff and send `hello` after every connection.
+3. Ignore unknown messages for forward compatibility.
+4. Advertise only capabilities that are currently usable.
+5. Keep `robot_id` stable across reconnects.

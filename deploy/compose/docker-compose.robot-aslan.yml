@@ -8,14 +8,14 @@
 x-ros-domain: &ros_domain "${ASLAN_ROS_DOMAIN_ID:-49}"
 
 x-aslan-stack: &aslan-stack
-  image: bunker:dev
+  image: ${ASLAN_ROS_IMAGE:-bunker:dev}
   network_mode: host
   ipc: host
   privileged: true
   volumes:
     - /dev:/dev
     - ${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}:/workspace:ro
-    - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     - ${ASLAN_OVERLAY:-/ssd/swarmdeck/.aslan_ros}/install:/aslan_overlay:ro
   environment:
     ROS_DOMAIN_ID: *ros_domain
@@ -168,8 +168,8 @@ services:
       # `/app/swarmdeck`, matching every other robot and the `aslan-stack`
       # anchor above. This service used to mount the repo at `/app` instead,
       # which is why aslan alone needed different paths in its command.
-      - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
-      - ${ASLAN_REPO:-/ssd/swarmdeck}/.aslan_pip:/root/.local:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}/.aslan_pip:/root/.local:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -221,7 +221,7 @@ services:
     volumes:
       # Our source off the mount, dependencies out of the image — see the
       # adapter service. Without this an `ros2_rtsp.py` fix needs a rebuild.
-      - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -233,7 +233,7 @@ services:
       - --topic
       - /oak/rgb/image_raw/compressed
       - --rtsp-url
-      - "rtsp://${MEDIA_HOST:-${BACKEND_HOST}}:${MEDIA_RTSP_PORT:-8554}/aslan_0"
+      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/aslan_0"
       - --bitrate-kbps
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps

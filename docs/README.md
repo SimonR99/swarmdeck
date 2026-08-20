@@ -1,22 +1,18 @@
-# SwarmDeck Documentation
+# Documentation
 
-SwarmDeck is a web-first multi-robot operations platform providing live telemetry, 2D/3D map merging, real-time WebRTC camera streams, open-vocabulary object detection, and coordinated teleoperation.
+Start with the root [README](../README.md) for setup and package structure.
 
-## Directory Guide
+| Topic | Document |
+|---|---|
+| Components, data flow, and frames | [Architecture](architecture/overview.md) |
+| Mapping modes and Swarm-SLAM limits | [Collaborative SLAM](architecture/collaborative-slam.md) |
+| Detection and operator review | [Perception](architecture/perception.md) |
+| Product scope and acceptance criteria | [Requirements](architecture/requirements.md) |
+| Implemented and remaining work | [Roadmap](architecture/roadmap.md) |
+| Adapter messages and binary payloads | [Adapter protocol](../adapters/protocol/README.md) |
+| Physical fleet hardware | [Fleet matrix](robots/fleet.md) |
+| Deployment and safety checks | [Hardware bring-up](operations/hardware-bringup.md) |
+| Active limitations | [Known issues](operations/known-issues.md) |
 
-### 📐 Architecture
-- [System Architecture](architecture/overview.md) — Core backend, UI, adapters, map engine, and coordinate frame conventions.
-- [Perception Pipeline](architecture/perception.md) — Open-vocabulary object detector (YOLOE), depth projection, and detection review.
-- [Collaborative SLAM](architecture/collaborative-slam.md) — Swarm-SLAM multi-robot mapping and RTAB-Map integration.
-- [Requirements & Protocol](architecture/requirements.md) — Protocol specifications, schemas, and non-functional targets.
-
-### 🤖 Robot Platforms
-- [Fleet Overview](robots/fleet.md) — Hardware summary, network matrix, and platform support.
-- [Scout Mini (TARS)](robots/scout.md) — AgileX Scout Mini running ROS 1 Noetic & LVI-SAM.
-- [Botman](robots/botman.md) — AgileX Bunker running ROS 2 Humble & SuperOdometry with OAK-D Pro RGB-D.
-- [Aslan](robots/aslan.md) — AgileX Bunker running ROS 2 Humble & SuperOdometry.
-- [Spot](robots/spot.md) — Boston Dynamics Spot payload running ROS 2 Humble & LIO-SAM.
-
-### 🚀 Operations & Deployment
-- [Hardware Bring-up & Deployment](operations/hardware-bringup.md) — Deploying adapters to physical robots, Zenoh routing, and operator setup.
-- [Known Issues & Troubleshooting](operations/known-issues.md) — Active issues, diagnostic tips, and performance guidelines.
+Robot-specific prerequisites and shutdown commands: [Scout](robots/scout.md),
+[Botman](robots/botman.md), [Aslan](robots/aslan.md), and [Spot](robots/spot.md).

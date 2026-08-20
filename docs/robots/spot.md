@@ -1,28 +1,25 @@
-# Spot Bring-up
+# Spot
 
-Spot is a Boston Dynamics quadruped equipped with an onboard Jetson AGX Orin payload running ROS 2 Humble.
+Spot uses a Jetson AGX Orin ROS 2 payload with the Clearpath Spot driver,
+Ouster lidar, VectorNav/LIO-SAM, RealSense D435, and the ROS 2 adapter.
 
-## Hardware Specifications
-- **Base**: Boston Dynamics Spot.
-- **Payload Compute**: Jetson AGX Orin.
-- **Sensors**: Velodyne VLP-16 lidar + RealSense D435 camera.
-- **SLAM**: LIO-SAM.
+Prerequisites on the payload:
 
-## Bring-up Instructions
+- SSH alias `spot`; checkout `/home/indro/swarmdeck`.
+- Read-only workspace `/home/indro/mist_ws_ros2`.
+- Prebuilt `spot:dev` and `spot_lio_sam:dev` images.
+- ROS domain 0 and working Spot credentials/configuration in the installed
+  driver workspace.
 
-1. **Start SwarmDeck Server**:
-   ```bash
-   cd server
-   .venv/bin/python -m swarmdeck_server --config ../configs/hardware_spot.yaml
-   ```
+```bash
+make deploy ROBOT=spot
+```
 
-2. **Deploy and start Robot-Side Services**:
-   From the operator workstation:
-   ```bash
-   BACKEND_HOST=<OPERATOR_IP> make deploy ROBOT=spot
-   ```
+Claim, release, sit, and stand are exposed as body commands. Automatic claim and
+stand remain disabled; confirm the physical e-stop state before using them.
+Complete the common [pre-flight checks](../operations/hardware-bringup.md).
 
-3. **Manual shutdown (if needed)**:
-   ```bash
-   ssh spot 'cd /home/indro/swarmdeck && docker compose -f deploy/compose/docker-compose.robot-spot.yml down'
-   ```
+```bash
+ssh spot 'cd /home/indro/swarmdeck && docker compose --env-file .deploy/spot.env \
+  -f deploy/compose/docker-compose.robot-spot.yml --profile "*" down'
+```

@@ -3,17 +3,14 @@
     ros2 launch swarmdeck_cslam cslam.launch.py namespace:=robot_0 robot_id:=0 \\
          max_nb_robots:=4
 
-**Status: builds, not yet run.** `docker/Dockerfile.cslam` produces a working
-image — cslam compiles on Jazzy against the apt `ros-jazzy-gtsam` 4.2, so the
-GTSAM 4.1.1 pin upstream's docs call for is not needed here. Executable and
-parameter names below are taken from that built workspace rather than from
-documentation. What has still never happened is a real inter-robot loop closure:
-the nodes have not been started against the Gazebo fleet. See
-docs/architecture/collaborative-slam.md.
+**Status: experimental.** The image builds on Jazzy against apt GTSAM 4.2 and
+the Gazebo fleet has produced geometrically verified inter-robot closures.
+RTAB-Map grids and cslam trajectories still disagree, so cslam transforms are
+not ready for physical navigation. See docs/architecture/collaborative-slam.md.
 
 What this is for. Everything upstream of it — SLAM Toolbox, RTAB-Map, the grid
 merge — leaves each robot with a private pose graph, so no robot's drift is ever
-corrected by another's observations (docs/operations/known-issues.md #4). cslam adds the
+corrected by another's observations. cslam adds the
 missing capability: robot A recognises a place robot B has been, that becomes a
 constraint between the two graphs, and optimising them jointly corrects BOTH
 robots while yielding the relative transform as a by-product. Grid registration

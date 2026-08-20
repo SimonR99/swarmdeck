@@ -1,10 +1,8 @@
 # SwarmDeck Docker stack
 #
 # Default (full sim):  docker compose --profile gazebo up --build -d
-#                      make docker-up
 #
 # Mock fleet only:     docker compose --profile mock up --build -d
-#                      make docker-up-mock
 #
 # UI: http://localhost:5173   API: http://localhost:8080
 

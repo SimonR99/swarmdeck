@@ -58,7 +58,8 @@ W=$(timeout 12 gz topic -e -n 1 -t /robot_0/scan/points 2>/dev/null | grep -m1 '
 H=$(timeout 12 gz topic -e -n 1 -t /robot_0/scan/points 2>/dev/null | grep -m1 '^height' | awk '{print $2}')
 [[ "${W:-0}" -gt 0 ]] || fail "lidar produced no points"
 # Single ring is required: a multi-ring lidar cannot feed 2D SLAM through a
-# height band (each ring truncates at a different range). See KNOWN_ISSUES.md.
+# height band (each ring truncates at a different range). See "Gazebo lidar" in
+# docs/operations/known-issues.md.
 [[ "${H:-0}" == "1" ]] || fail "lidar must be single-ring for 2D SLAM, got height=$H"
 echo "   ok: $W beams, $H ring"
 

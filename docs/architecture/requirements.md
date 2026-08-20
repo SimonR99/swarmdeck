@@ -2,10 +2,9 @@
 
 ## 1. Purpose
 
-SwarmDeck is a **multi-robot supervision stack**: a fleet of lidar-equipped robots, a
-merged 2D map, and a browser GUI from which one operator supervises all of them.
-Everything the operator sees and does is recorded with synchronized timestamps for
-offline analysis.
+SwarmDeck is a **multi-robot supervision stack**: lidar-equipped robots, merged
+maps, and a browser GUI for one operator. This document is the target product
+contract, not an implementation-status report; see the root README and roadmap.
 
 Built and validated in simulation. **Robots connect through a version-agnostic adapter
 contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
@@ -40,7 +39,7 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 | **Operator** | Supervise 1–4 robots from one screen. No ROS knowledge. |
 | **Session operator** | Configure a run, start/stop, verify recording is complete. |
 | **Analyst** | Open recorded sessions with standard tools; replay them. |
-| **Robot integrator** | Add a new robot by writing one adapter, changing nothing else. |
+| **Robot integrator** | Add a robot without changing backend or UI code. |
 
 ## 4. Functional requirements
 
@@ -48,8 +47,8 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 
 - **FR-A1** Robots connect to the backend through a documented **adapter contract**.
   The backend has **no ROS dependency** of any kind.
-- **FR-A2** Ship adapters for: ROS 2 (rclpy), simulation, and a documented slot for
-  ROS 1 (rospy) and vendor SDKs.
+- **FR-A2** Ship ROS 1, ROS 2, simulation, and ROS-free reference adapters; allow
+  vendor SDK adapters through the same contract.
 - **FR-A3** An adapter runs in its own environment — its own OS, ROS distro, or
   container — and never requires matching the backend host.
 - **FR-A4** Robots of different types coexist in one fleet with no backend change.
@@ -135,7 +134,7 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 | **NFR-6** | Map updates reach the GUI within 1 s. |
 | **NFR-7** | Stream or adapter loss is surfaced in the GUI, never silently dropped. |
 | **NFR-8** | Every module runs and is testable in isolation, with the others mocked. |
-| **NFR-9** | Adding a robot type requires writing one adapter and touching no other module. |
+| **NFR-9** | Adding a robot type requires no backend or UI code change; physical deployment may add adapter configuration, packaging, and calibration. |
 
 ## 6. Acceptance criteria
 
@@ -154,23 +153,17 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 11. Two runs with the same seed produce identical start poses, target placement, and
     dynamic-obstacle behaviour.
 12. **The backend runs with zero ROS packages installed**, driven by a mock adapter.
-13. The whole stack starts with one command:
+13. The Docker simulation stack starts with one command:
     ```bash
-    ros2 launch swarmdeck_bringup session.launch.py config:=configs/4robot.yaml
+    make docker-up-gpu
     ```
 
 ## 7. Prerequisites
 
-Present: ROS 2 Jazzy, Gazebo Harmonic, `ros_gz_*`, `rosbag2_storage_mcap`, `cv_bridge`.
+Docker is the supported setup. Host simulation development uses ROS 2 Jazzy,
+Gazebo Harmonic, Nav2, SLAM Toolbox, `robot_localization`, and optionally
+RTAB-Map. MediaMTX and perception runtimes are included in Compose images.
 
-Install in Phase 0 (verified available in apt):
-`ros-jazzy-navigation2`, `ros-jazzy-nav2-bringup`, `ros-jazzy-slam-toolbox` (2.8.5),
-`ros-jazzy-pointcloud-to-laserscan` (2.0.2), `ros-jazzy-nav2-map-server`.
-
-Source build: `m-explore-ros2` (`multirobot_map_merge`) — not packaged for Jazzy.
-Also MediaMTX, GStreamer (`base`/`good`/`bad`/`libav`), ONNX Runtime.
-
-**ROS 1 note.** Noetic is EOL (May 2025), targets Ubuntu 20.04, and cannot be installed
-on this 24.04 host. `ros-jazzy-ros1-bridge` is not in the repos. Any ROS 1 robot must
-run its adapter in its own environment or container — which the adapter contract
-requires anyway.
+ROS 1 Noetic is EOL and must run in the robot's own environment or container;
+the ROS-free backend does not require a ROS 1 bridge. See the root README for
+commands and the hardware guide for physical deployment.
