@@ -4,22 +4,39 @@ This guide outlines the standard procedure for deploying SwarmDeck adapters and 
 
 ---
 
-## 1. Fleet Deployment via `scripts/deploy`
+## 1. Fleet Deployment from the Operator Console
 
-All robots bind-mount the checkout read-only on their onboard storage. Code updates are deployed directly via `scripts/deploy`:
+The operator workstation owns the full robot lifecycle. Profiles in
+`deploy/robots/` contain the SSH target, remote checkout path, Compose file,
+defaults, and required calibration overrides. The standard command performs
+source sync, override generation, image build, a safe Compose stack reset,
+recreation, and a source-mount/container check:
 
 ```bash
-# Deploy to a specific robot (rsync source + restart containers)
-./scripts/deploy aslan
-./scripts/deploy botman
-./scripts/deploy spot
+# Deploy one robot
+make deploy ROBOT=botman
 
-# Deploy to all reachable robots
-./scripts/deploy all
+# Deploy every profile, continuing past an unreachable robot
+make deploy ROBOT=all
 
-# Dry-run deployment preview
-./scripts/deploy botman --dry-run
+# Preview transfer and overrides without changing a robot
+make deploy ROBOT=botman DEPLOY_ARGS=--dry-run
 ```
+
+Operator overrides stay out of the Compose files:
+
+```bash
+BACKEND_HOST=192.168.1.10 \
+BOTMAN_OAK_X=0.42 BOTMAN_OAK_Y=0.00 BOTMAN_OAK_Z=0.80 \
+BOTMAN_OAK_ROLL=0 BOTMAN_OAK_PITCH=0 BOTMAN_OAK_YAW=0 \
+make deploy ROBOT=botman
+```
+
+The lower-level equivalent is `./scripts/deploy botman`. `--no-build` is the
+fast path when only mounted source changed; `--no-reset` keeps the current
+Compose stack running while it is recreated. “Reset” means stopping/removing
+Compose containers only. It does not teleport a physical robot or reset SLAM;
+that capability is simulator-only.
 
 ---
 

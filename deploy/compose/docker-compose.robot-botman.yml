@@ -25,7 +25,7 @@ services:
     runtime: nvidia
     volumes:
       - /dev:/dev
-      - /ssd/mist_ws:/workspace:ro
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
     command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
     restart: unless-stopped
 
@@ -54,7 +54,7 @@ services:
     privileged: true
     volumes:
       - /dev:/dev
-      - /ssd/mist_ws:/workspace:ro
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
     command:
       - ros2
       - launch
@@ -81,7 +81,7 @@ services:
         condition: service_started
     volumes:
       - /dev:/dev
-      - /ssd/mist_ws:/workspace:ro
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
     command:
       - ros2
       - launch
@@ -105,12 +105,12 @@ services:
     privileged: true
     volumes:
       - /dev:/dev
-      - /ssd/mist_ws:/workspace:ro
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
       # RGBD by default, which is what lets duck detections become map
       # markers; see botman_oak_rgbd.yaml for the USB/CPU bandwidth it costs
       # and what remains unverified about it. `BOTMAN_OAK_PARAMS=botman_oak_rgb.yaml`
       # reverts to RGB-only if that cost is not worth paying.
-      - ./adapters/media/config/${BOTMAN_OAK_PARAMS:-botman_oak_rgbd.yaml}:/app/swarmdeck/botman_oak.yaml:ro
+      - ../../adapters/media/config/${BOTMAN_OAK_PARAMS:-botman_oak_rgbd.yaml}:/app/swarmdeck/botman_oak.yaml:ro
     command:
       - ros2
       - launch
@@ -135,7 +135,7 @@ services:
   #
   #   BOTMAN_OAK_X=<measured> BOTMAN_OAK_Y=<measured> BOTMAN_OAK_Z=<measured> \
   #   BOTMAN_OAK_ROLL=<measured> BOTMAN_OAK_PITCH=<measured> BOTMAN_OAK_YAW=<measured> \
-  #   docker compose -f docker-compose.robot-botman.yml up -d
+  #   docker compose -f deploy/compose/docker-compose.robot-botman.yml up -d
   #
   # x forward / y left / z up from `os_lidar` to the DepthAI driver's own base
   # frame; the driver publishes the rest of the chain to the optical frames its
@@ -177,7 +177,7 @@ services:
 
   adapter:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-botman-adapter
@@ -239,7 +239,7 @@ services:
 
   duck_detector:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
@@ -324,7 +324,7 @@ services:
   # relays autonomy only while its NavigateToPose goal is active.
   nav2:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-nav2
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-botman-nav2

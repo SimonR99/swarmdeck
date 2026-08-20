@@ -3,6 +3,7 @@
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
         build-deploy up-deploy down-deploy \
+        deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
         docker-ps docker-test docker-test-launch
 
@@ -17,8 +18,10 @@ help:
 	@echo "  make [build|up|down]-server  Docker: backend + UI only"
 	@echo "  make [build|up|down]-sim     Docker: Gazebo/SLAM/Nav2/adapter_sim (needs server up)"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
-	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see hardware-bringup.md)"
-	@echo "  make up-scout        start Scout ROS/SLAM, camera, adapter and media on ssh host 'scout'"
+	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
+	@echo "  make deploy ROBOT=botman    operator-side sync + override + build + reset + up"
+	@echo "  make deploy ROBOT=all       deploy every profile in deploy/robots/"
+	@echo "  make up-scout        legacy Scout-only bring-up (use make deploy ROBOT=scout)"
 	@echo "  make docker-up-gpu   full stack (server+ui+sim), Gazebo rendering on an NVIDIA GPU"
 	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
 	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
@@ -72,6 +75,13 @@ COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml
 # Override SCOUT_HOST, SCOUT_REPO, ROBOT_IP, BACKEND_HOST or OUSTER_HOST_NAME as needed.
 up-scout:
 	./scripts/scout-up
+
+# --- operator-side physical robot deployment
+# ROBOT is one profile name or `all`; DEPLOY_ARGS can carry --dry-run,
+# --no-build, --no-reset, etc. The matrix and implementation live in
+# scripts/deploy and deploy/robots/, not in per-robot Make recipes.
+deploy:
+	./scripts/deploy $(ROBOT) $(DEPLOY_ARGS)
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:
@@ -157,18 +167,18 @@ docker-ps:
 	$(COMPOSE) --profile gazebo --profile mock ps
 
 docker-test:
-	docker compose build server
-	docker compose run --rm --no-deps server python -m pytest /app/server/tests -q
+	$(COMPOSE) build server
+	$(COMPOSE) run --rm --no-deps server python -m pytest /app/server/tests -q
 
 # Launch files are plain Python that nothing executes until Gazebo starts, so an
 # undefined name in one costs a full stack startup to find. This builds every
 # LaunchDescription in the ROS image, which takes under a second.
 docker-test-launch:
-	docker compose build gazebo
-	docker compose run --rm --no-deps --entrypoint bash gazebo -lc \
+	$(COMPOSE) build gazebo
+	$(COMPOSE) run --rm --no-deps --entrypoint bash gazebo -lc \
 	  'source /opt/ros/jazzy/setup.bash && source /app/swarmdeck_ros/install/setup.bash && \
 	   cd /app && python3 -m pytest swarmdeck_ros/src/swarmdeck_bringup/test -q'
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log}
-	docker compose --profile gazebo --profile mock down --rmi local --volumes --remove-orphans 2>/dev/null || true
+	$(COMPOSE) --profile gazebo --profile mock down --rmi local --volumes --remove-orphans 2>/dev/null || true

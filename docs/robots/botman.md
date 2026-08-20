@@ -16,11 +16,16 @@ Botman is an AgileX Bunker tracked rover running ROS 2 Humble in Docker on a Jet
    .venv/bin/python -m swarmdeck_server --config ../configs/hardware_botman.yaml
    ```
 
-2. **Start Robot-Side Services (on Botman)**:
-   From the SwarmDeck checkout on Botman:
+2. **Deploy and start Robot-Side Services**:
+   From the operator workstation:
    ```bash
-   BACKEND_HOST=<OPERATOR_IP> docker compose -f docker-compose.robot-botman.yml up -d
+   BACKEND_HOST=<OPERATOR_IP> \
+   BOTMAN_OAK_X=<measured> BOTMAN_OAK_Y=<measured> BOTMAN_OAK_Z=<measured> \
+   BOTMAN_OAK_ROLL=<measured> BOTMAN_OAK_PITCH=<measured> BOTMAN_OAK_YAW=<measured> \
+   make deploy ROBOT=botman
    ```
+   The operator command syncs the checkout, writes the overrides on Botman,
+   builds the local images, resets the old Compose stack, and starts it.
    This launches:
    - Bunker base driver & SuperOdometry mapping stack
    - OAK-D Pro RGB-D camera publisher (`botman_oak_rgbd.yaml`)
@@ -29,7 +34,7 @@ Botman is an AgileX Bunker tracked rover running ROS 2 Humble in Docker on a Jet
    - SwarmDeck ROS 2 adapter (`adapter`)
    - Low-latency media streaming bridge (`media`)
 
-3. **Shutdown**:
+3. **Manual shutdown (if needed)**:
    ```bash
-   docker compose -f docker-compose.robot-botman.yml down
+   ssh botman 'cd /ssd/swarmdeck && docker compose -f deploy/compose/docker-compose.robot-botman.yml down'
    ```

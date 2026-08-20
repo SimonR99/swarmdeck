@@ -16,12 +16,13 @@ Spot is a Boston Dynamics quadruped equipped with an onboard Jetson AGX Orin pay
    .venv/bin/python -m swarmdeck_server --config ../configs/hardware_spot.yaml
    ```
 
-2. **Start Robot-Side Services (on Spot payload)**:
+2. **Deploy and start Robot-Side Services**:
+   From the operator workstation:
    ```bash
-   BACKEND_HOST=<OPERATOR_IP> docker compose -f docker-compose.robot-spot.yml up -d
+   BACKEND_HOST=<OPERATOR_IP> make deploy ROBOT=spot
    ```
 
-3. **Shutdown**:
+3. **Manual shutdown (if needed)**:
    ```bash
-   docker compose -f docker-compose.robot-spot.yml down
+   ssh spot 'cd /home/indro/swarmdeck && docker compose -f deploy/compose/docker-compose.robot-spot.yml down'
    ```

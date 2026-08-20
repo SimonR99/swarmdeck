@@ -3,12 +3,13 @@
 set -Eeuo pipefail
 
 # Run from the operator workstation. Each setting can be overridden inline, e.g.
-# SCOUT_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 make up-scout
+# SCOUT_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 make deploy ROBOT=scout
 scout_host=${SCOUT_HOST:-scout}
 scout_repo=${SCOUT_REPO:-/ssd/swarmdeck}
 robot_id=${ROBOT_ID:-tars_0}
 robot_ip=${ROBOT_IP:-192.168.1.230}
 backend_host=${BACKEND_HOST:-192.168.1.161}
+backend_port=${BACKEND_PORT:-8080}
 ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
 camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
 
@@ -16,19 +17,25 @@ echo "Starting ${robot_id} on ${scout_host}..."
 
 ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${scout_repo}" \
+  "${SCOUT_CATKIN_WS:-/ssd/catkin_ws}" \
+  "${SCOUT_MIST_WS:-/ssd/mist_ws}" \
   "${robot_id}" \
   "${robot_ip}" \
   "${backend_host}" \
+  "${backend_port}" \
   "${ouster_host}" \
   "${camera_topic}" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 repo=$1
-robot_id=$2
-robot_ip=$3
-backend_host=$4
-ouster_host=$5
-camera_topic=$6
+catkin_ws=$2
+mist_ws=$3
+robot_id=$4
+robot_ip=$5
+backend_host=$6
+backend_port=$7
+ouster_host=$8
+camera_topic=$9
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
@@ -41,11 +48,12 @@ planner_launch="${repo}/adapters/adapter_ros1/launch/local_planner_muxed.launch"
 # must be disabled only while those trusted environment scripts are sourced.
 set +u
 source /opt/ros/noetic/setup.bash
-source /ssd/catkin_ws/devel/setup.bash
-source /ssd/mist_ws/devel/setup.bash
+source "${catkin_ws}/devel/setup.bash"
+source "${mist_ws}/devel/setup.bash"
 set -u
 
 export ROBOT_ID="${robot_id}"
+export ROBOT_REPO="${repo}"
 export OUSTER_HOST_NAME="${ouster_host}"
 export ROS_IP="${robot_ip}"
 export ROS_MASTER_URI="http://${robot_ip}:11311"
@@ -123,7 +131,7 @@ wait_for_master
 # vendor profile holds colour until depth on this USB 2.1 camera.
 if pgrep -f "[r]oslaunch rover_launch rs_d400.launch" >/dev/null; then
   echo "RealSense camera: vendor rs_d400.launch is already running." >&2
-  echo "That profile is why teleop video lags. Stop it and re-run make up-scout" >&2
+  echo "That profile is why teleop video lags. Stop it and re-run make deploy ROBOT=scout" >&2
   echo "so scout_camera_low_latency.launch can own the D435i." >&2
 else
   start_detached \
@@ -154,6 +162,7 @@ start_detached \
 
 export ROBOT_IP="${robot_ip}"
 export BACKEND_HOST="${backend_host}"
+export BACKEND_PORT="${backend_port}"
 export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
 export CAMERA_TOPIC="${camera_topic}"
 export VIDEO_BITRATE_KBPS="${VIDEO_BITRATE_KBPS:-700}"
@@ -178,11 +187,15 @@ export VIDEO_FPS="${VIDEO_FPS:-10}"
   elif docker compose version >/dev/null 2>&1; then
     COMPOSE_FILE="deploy/compose/docker-compose.robot-ros1.yml"
     [[ ! -f "$COMPOSE_FILE" ]] && COMPOSE_FILE="docker-compose.robot-ros1.yml"
-    docker compose -f "$COMPOSE_FILE" up -d
+    compose_env=()
+    [[ -f "${repo}/.deploy/scout.env" ]] && compose_env+=(--env-file "${repo}/.deploy/scout.env")
+    docker compose "${compose_env[@]}" -f "$COMPOSE_FILE" up -d --remove-orphans
   elif command -v docker-compose >/dev/null 2>&1; then
     COMPOSE_FILE="deploy/compose/docker-compose.robot-ros1.yml"
     [[ ! -f "$COMPOSE_FILE" ]] && COMPOSE_FILE="docker-compose.robot-ros1.yml"
-    docker-compose -f "$COMPOSE_FILE" up -d
+    compose_env=()
+    [[ -f "${repo}/.deploy/scout.env" ]] && compose_env+=(--env-file "${repo}/.deploy/scout.env")
+    docker-compose "${compose_env[@]}" -f "$COMPOSE_FILE" up -d --remove-orphans
   else
     echo "Adapter/media containers are missing and Docker Compose is not installed" >&2
     exit 1

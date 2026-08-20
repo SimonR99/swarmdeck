@@ -16,12 +16,18 @@ Aslan is an AgileX Bunker tracked rover running ROS 2 Humble in Docker on a Jets
    .venv/bin/python -m swarmdeck_server --config ../configs/hardware_aslan.yaml
    ```
 
-2. **Start Robot-Side Services (on Aslan)**:
+2. **Deploy and start Robot-Side Services**:
+   From the operator workstation:
    ```bash
-   BACKEND_HOST=<OPERATOR_IP> docker compose -f docker-compose.robot-aslan.yml up -d
+   BACKEND_HOST=<OPERATOR_IP> make deploy ROBOT=aslan
    ```
+   This also builds the Aslan ROS overlay before building and starting the
+   robot-side Compose services.
+   The base driver remains opt-in for safety; once the physical e-stop and
+   CAN interface are ready, use `DEPLOY_COMPOSE_PROFILES=base` with the same
+   command to start it.
 
-3. **Shutdown**:
+3. **Manual shutdown (if needed)**:
    ```bash
-   docker compose -f docker-compose.robot-aslan.yml down
+   ssh aslan 'cd /ssd/swarmdeck && docker compose -f deploy/compose/docker-compose.robot-aslan.yml down'
    ```

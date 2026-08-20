@@ -1,6 +1,6 @@
 # GPU overlay for the Gazebo service.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#   docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml \
 #                  --profile gazebo up --build -d
 #   make docker-up-gpu
 #

@@ -1,6 +1,7 @@
 # Multi-MACHINE networking, for real robots.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.zenoh.yml up -d
+#   docker compose -f deploy/compose/docker-compose.yml \
+#                  -f deploy/compose/docker-compose.zenoh.yml up -d
 #
 # WHY THIS EXISTS SEPARATELY FROM THE SIM OVERLAYS
 # ------------------------------------------------
@@ -19,7 +20,7 @@
 # UNVERIFIED. This has never run against physical robots — it is written from
 # the rmw_zenoh documentation and the topology the fleet needs. Treat every
 # value below as a starting point to test, not a setting that is known good.
-# docs/hardware-bringup.md lists what to check first.
+# docs/operations/hardware-bringup.md lists what to check first.
 
 services:
   # The router every robot dials. Runs next to the backend, on the machine an

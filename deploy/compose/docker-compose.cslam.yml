@@ -1,8 +1,10 @@
 # Swarm-SLAM overlay: adds collaborative SLAM to the simulated fleet.
 #
 #   SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
-#                  -f docker-compose.cslam.yml --profile gazebo up --build -d
+#   docker compose -f deploy/compose/docker-compose.yml \
+#                  -f deploy/compose/docker-compose.gpu.yml \
+#                  -f deploy/compose/docker-compose.cslam.yml \
+#                  --profile gazebo up --build -d
 #   make docker-up-cslam
 #
 # Requires the RTAB-Map backend: cslam's motion prior is `odom_icp`, the lidar
@@ -42,7 +44,7 @@ services:
   cslam:
     profiles: ["gazebo"]
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.cslam
     image: swarmdeck-cslam:local
     depends_on:

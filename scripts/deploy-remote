@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Generic remote Compose lifecycle called by scripts/deploy.
+
+set -Eeuo pipefail
+
+[[ $# -ge 8 ]] || {
+  echo "usage: deploy-remote <repo> <env-file> <compose-file> <build> <reset> <up> <verify> <containers> [pre-build] [profiles]" >&2
+  exit 2
+}
+
+repo=$1
+env_file=$2
+compose_file=$3
+do_build=$4
+do_reset=$5
+do_up=$6
+do_verify=$7
+check_containers=$8
+pre_build=${9:-}
+compose_profiles=${10:-}
+
+cd "$repo"
+
+if [[ -n "$pre_build" ]]; then
+  echo "  preparing build inputs with $pre_build"
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+  "$repo/$pre_build"
+fi
+
+compose=(docker compose --env-file "$env_file" -f "$compose_file")
+for profile in $compose_profiles; do
+  compose+=(--profile "$profile")
+done
+echo "  validating Compose configuration"
+"${compose[@]}" config --quiet
+
+if [[ "$do_build" == yes ]]; then
+  echo "  building robot images"
+  "${compose[@]}" build
+fi
+
+if [[ "$do_reset" == yes ]]; then
+  echo "  resetting old Compose stack"
+  # Include previously enabled profiles too. This matters for a stack such as
+  # Aslan's optional `base` service: an ordinary `down` without that profile
+  # can leave an old base container running while the new deployment omits it.
+  reset_compose=("${compose[@]}" --profile '*')
+  "${reset_compose[@]}" down --remove-orphans
+fi
+
+if [[ "$do_up" == yes ]]; then
+  echo "  recreating robot stack"
+  "${compose[@]}" up -d --force-recreate --remove-orphans
+fi
+
+status_compose=("${compose[@]}" --profile '*')
+if [[ "$do_verify" == yes && -n "$check_containers" ]]; then
+  echo "  checking adapter/media containers and source mounts"
+  deadline=$((SECONDS + 90))
+  while :; do
+    all_ready=yes
+    for container in $check_containers; do
+      status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)
+      source=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/swarmdeck"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)
+      if [[ "$status" != running || "$source" != "$repo" ]]; then
+        all_ready=no
+      fi
+    done
+    [[ "$all_ready" == yes ]] && break
+    if (( SECONDS >= deadline )); then
+      "${status_compose[@]}" ps --all
+      echo "  required container or source mount did not become ready" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+fi
+
+"${status_compose[@]}" ps --all

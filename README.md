@@ -11,7 +11,7 @@ Gazebo can coexist in one fleet.
 
 **For real robots**, `adapters/adapter_ros2/` (`rclpy`/Nav2) and `adapters/adapter_ros1/`
 (`rospy`/`move_base`) are the hardware adapters — same protocol, same config schema, pick
-whichever matches the robot's own ROS generation. [`docs/hardware-bringup.md`](docs/hardware-bringup.md)
+whichever matches the robot's own ROS generation. [`docs/operations/hardware-bringup.md`](docs/operations/hardware-bringup.md)
 is the ordered test plan. Neither has **been run against physical hardware** — the code
 is unit-tested and the sim-only assumptions are now parameters, but every topic name,
 QoS/latching choice and timeout is a hypothesis until a robot proves it.
@@ -23,7 +23,7 @@ gotten on each.
 See [`docs/`](docs/) for [architecture](docs/architecture.md),
 [requirements](docs/requirements.md), and the [roadmap](docs/roadmap.md).
 Physical Bunker procedures are documented separately for
-[Botman](docs/botman.md) and [Aslan](docs/aslan.md).
+[Botman](docs/robots/botman.md) and [Aslan](docs/robots/aslan.md).
 
 ## Quick start — Docker (recommended)
 
@@ -336,8 +336,10 @@ Odometry) is wired up as an alternative for hardware evaluation:
 
 ```bash
 SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
-  docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
-                 -f docker-compose.dlio.yml --profile gazebo up --build -d
+  docker compose -f deploy/compose/docker-compose.yml \
+                 -f deploy/compose/docker-compose.gpu.yml \
+                 -f deploy/compose/docker-compose.dlio.yml \
+                 --profile gazebo up --build -d
 ```
 
 Measured in simulation it is **worse** — 0.262 m vs 0.137 m displacement error, 17.3 vs

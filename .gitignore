@@ -32,3 +32,4 @@ sessions/*
 .env
 .env.local
 *.local.yaml
+.deploy/

@@ -2,8 +2,10 @@
 # Odometry, for evaluation.
 #
 #   SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
-#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
-#                  -f docker-compose.dlio.yml --profile gazebo up --build -d
+#   docker compose -f deploy/compose/docker-compose.yml \
+#                  -f deploy/compose/docker-compose.gpu.yml \
+#                  -f deploy/compose/docker-compose.dlio.yml \
+#                  --profile gazebo up --build -d
 #
 # Same IPC/network sharing as the cslam overlay, and for the same reason: Fast
 # DDS discovers over UDP but moves data over /dev/shm, so a separate IPC
@@ -15,7 +17,7 @@ services:
   dlio:
     profiles: ["gazebo"]
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.dlio
     image: swarmdeck-dlio:local
     depends_on:

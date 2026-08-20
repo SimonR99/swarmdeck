@@ -91,7 +91,7 @@ services:
   # The adapter keeps the 5 Hz JPEG fallback independently.
   media:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-spot-media
@@ -129,7 +129,7 @@ services:
   # filament_spool, pool_noodle (adapters/perception/catalog.py).
   duck_detector:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6

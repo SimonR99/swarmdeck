@@ -11,7 +11,7 @@
 services:
   server:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.server
     image: swarmdeck-server:local
     command:
@@ -32,8 +32,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./sessions:/app/sessions
-      - ./configs:/app/configs:ro
+      - ../../sessions:/app/sessions
+      - ../../configs:/app/configs:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/config"]
       interval: 10s
@@ -44,7 +44,7 @@ services:
 
   ui:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.ui
     image: swarmdeck-ui:local
     depends_on:
@@ -71,7 +71,7 @@ services:
   gazebo:
     profiles: ["gazebo"]
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.gazebo
     image: swarmdeck-sim:local
     depends_on:
@@ -107,8 +107,8 @@ services:
       LIBGL_ALWAYS_SOFTWARE: "1"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
     volumes:
-      - ./sessions:/app/sessions
-      - ./configs:/app/configs:ro
+      - ../../sessions:/app/sessions
+      - ../../configs:/app/configs:ro
     shm_size: "2gb"
     restart: unless-stopped
 
@@ -118,7 +118,7 @@ services:
   duck_detector:
     profiles: ["gazebo"]
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: "${ULTRALYTICS_IMAGE:-ultralytics/ultralytics:8.4.14-cpu}"
@@ -133,7 +133,7 @@ services:
   mock:
     profiles: ["mock"]
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.server
     image: swarmdeck-server:local
     depends_on:

@@ -14,9 +14,9 @@ x-aslan-stack: &aslan-stack
   privileged: true
   volumes:
     - /dev:/dev
-    - /ssd/mist_ws_ros2:/workspace:ro
-    - /ssd/swarmdeck:/app/swarmdeck:ro
-    - /ssd/swarmdeck/.aslan_ros/install:/aslan_overlay:ro
+    - ${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}:/workspace:ro
+    - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    - ${ASLAN_OVERLAY:-/ssd/swarmdeck/.aslan_ros}/install:/aslan_overlay:ro
   environment:
     ROS_DOMAIN_ID: *ros_domain
   restart: unless-stopped
@@ -84,7 +84,7 @@ services:
   # Same host-side bridge Aslan already runs as swarmdeck-aslan-odom-tf.
   odom_tf:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-nav2
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-aslan-odom-tf
@@ -117,7 +117,7 @@ services:
 
   nav2:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-nav2
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-aslan-nav2
@@ -164,12 +164,12 @@ services:
     network_mode: host
     ipc: host
     volumes:
-      - /ssd/mist_ws_ros2:/workspace:ro
+      - ${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}:/workspace:ro
       # `/app/swarmdeck`, matching every other robot and the `aslan-stack`
       # anchor above. This service used to mount the repo at `/app` instead,
       # which is why aslan alone needed different paths in its command.
       - ${ASLAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
-      - /ssd/swarmdeck/.aslan_pip:/root/.local:ro
+      - ${ASLAN_REPO:-/ssd/swarmdeck}/.aslan_pip:/root/.local:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -209,7 +209,7 @@ services:
   # this process encodes H.264 and pushes RTSP/TCP to MediaMTX.
   media:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-aslan-media
@@ -242,7 +242,7 @@ services:
 
   duck_detector:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
