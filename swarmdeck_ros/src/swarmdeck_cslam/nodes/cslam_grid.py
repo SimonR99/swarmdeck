@@ -11,7 +11,7 @@ and they disagree: measured on a live four-robot run, cslam and RTAB-Map placed
 the *same robot* 8.1 m apart in what is nominally that robot's own map frame,
 and 6.8-19.5 m apart for robots in the shared cluster frame. Merging across that
 gap put every robot 11-16 m from ground truth while plain grid registration
-managed 0.03-0.20 m (docs/KNOWN_ISSUES.md).
+managed 0.03-0.20 m (docs/operations/known-issues.md).
 
 The fix is not a better transform. It is to stop mixing the two systems: take
 BOTH the geometry and the poses from cslam. Each keyframe cloud is rendered at

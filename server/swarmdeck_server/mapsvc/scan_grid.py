@@ -6,12 +6,12 @@ pipeline like LVI-SAM, which registers a point cloud but never projects one to
 sensor's position instead of a finished grid. This accumulates them into the
 exact `GridMeta`/int8-cells shape `MapService.ingest` expects from a robot
 that DOES publish its own grid, so the entire merge/registration pipeline
-downstream (`docs/collaborative-slam.md`) is unchanged and unaware of the
+downstream (`docs/architecture/collaborative-slam.md`) is unchanged and unaware of the
 difference.
 
 Marking cells "occupied" from points alone is not what an occupancy grid is
 for — the free/unknown/occupied distinction is what grid registration keys off
-(`docs/collaborative-slam.md` §2.2: known-free contradiction is what breaks
+(`docs/architecture/collaborative-slam.md` §2.2: known-free contradiction is what breaks
 rotational symmetry). Every point is a lidar return, so the straight line from
 the sensor to it is, by construction, free space the beam passed through
 unobstructed.
@@ -48,7 +48,7 @@ OCCUPIED = 100
 # `FREE_AT = -1` deliberately keeps the old "one beam marks its path free"
 # behaviour. Requiring a second observation was tried on the live fleet and had
 # to be reverted: free space is not cosmetic here, it is the registration signal.
-# `docs/collaborative-slam.md` §2.2 keys grid matching on known-free
+# `docs/architecture/collaborative-slam.md` §2.2 keys grid matching on known-free
 # contradiction, and withholding it collapsed pairwise overlap from 1252 cells to
 # 26, `support` from 0.98 to 0.05, and threw every robot out of the merged map.
 # The long free spikes a lone spurious return still paints are the price of that

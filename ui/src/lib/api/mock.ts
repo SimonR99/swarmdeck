@@ -21,6 +21,7 @@ interface MockRobot {
   yaw: number;
   target: { x: number; y: number } | null;
   battery: number;
+  quality: number;
   navStatus: RobotState['nav_status'];
   mode: RobotState['mode'];
   lastAttended: number;
@@ -66,6 +67,9 @@ export class MockFleet {
   private seq = 0;
   private t0 = performance.now();
   private detectionSeq = 0;
+  private network = new Map<string, Uint8Array>();
+  private networkDirty = new Map<string, { x0: number; y0: number; x1: number; y1: number }>();
+  private networkSeq = new Map<string, number>();
 
   constructor(
     private emit: (m: ServerMessage) => void,
@@ -89,11 +93,13 @@ export class MockFleet {
         yaw: Math.random() * Math.PI * 2,
         target: null,
         battery: 0.7 + Math.random() * 0.3,
+        quality: 75,
         navStatus: 'idle',
         mode: 'idle',
         lastAttended: 0,
-        caps: ['navigate', 'map', 'camera', 'battery', 'estop']
+        caps: ['navigate', 'map', 'camera', 'battery', 'network', 'estop']
       });
+      this.network.set(`robot_${i}`, new Uint8Array(W * H).fill(255));
     }
 
     const info: MapInfo = { resolution: RES, width: W, height: H, origin: ORIGIN, seq: 0 };
@@ -101,6 +107,7 @@ export class MockFleet {
 
     this.timers.push(setInterval(() => this.step(0.2), 200) as unknown as number);
     this.timers.push(setInterval(() => this.pushPatch(), 600) as unknown as number);
+    this.timers.push(setInterval(() => this.pushNetworkPatches(), 1000) as unknown as number);
     this.timers.push(setInterval(() => this.maybeDetect(), 5200) as unknown as number);
 
     this.emit({
@@ -173,8 +180,11 @@ export class MockFleet {
         }
       }
       r.battery = Math.max(0.05, r.battery - dt * 0.00035);
+      const apDistance = Math.hypot(r.x - 3, r.y + 2);
+      r.quality = Math.max(4, Math.min(100, 98 - apDistance * 3.2 + Math.sin(tMono * 0.7 + r.x) * 4));
       r.lastAttended += dt;
       this.reveal(r.x, r.y);
+      this.recordNetwork(r);
 
       this.emit({
         type: 'robot_state',
@@ -191,7 +201,12 @@ export class MockFleet {
         planned_path: r.target ? [{ x: r.x, y: r.y }, r.target] : [],
         capabilities: r.caps,
         unattended_s: r.lastAttended,
-        online: true
+        online: true,
+        network: {
+          interface: 'mock-wlan0',
+          quality_pct: r.quality,
+          rssi_dbm: -90 + r.quality * 0.5
+        }
       });
 
       if (r.lastAttended > 45 && r.lastAttended < 45.3) {
@@ -209,6 +224,73 @@ export class MockFleet {
         });
       }
     }
+  }
+
+  private recordNetwork(robot: MockRobot) {
+    const grid = this.network.get(robot.id);
+    if (!grid) return;
+    const cx = Math.round((robot.x - ORIGIN.x) / RES);
+    const cy = Math.round(H - (robot.y - ORIGIN.y) / RES);
+    const radius = 14;
+    const x0 = Math.max(0, cx - radius);
+    const y0 = Math.max(0, cy - radius);
+    const x1 = Math.min(W, cx + radius + 1);
+    const y1 = Math.min(H, cy + radius + 1);
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        if ((x - cx) ** 2 + (y - cy) ** 2 <= radius * radius) {
+          grid[y * W + x] = Math.round(robot.quality);
+        }
+      }
+    }
+    const dirty = this.networkDirty.get(robot.id);
+    this.networkDirty.set(
+      robot.id,
+      dirty
+        ? {
+            x0: Math.min(x0, dirty.x0),
+            y0: Math.min(y0, dirty.y0),
+            x1: Math.max(x1, dirty.x1),
+            y1: Math.max(y1, dirty.y1)
+          }
+        : { x0, y0, x1, y1 }
+    );
+  }
+
+  private pushNetworkPatches() {
+    for (const [robotId, bounds] of this.networkDirty) {
+      const grid = this.network.get(robotId);
+      if (!grid) continue;
+      const w = bounds.x1 - bounds.x0;
+      const h = bounds.y1 - bounds.y0;
+      const sub = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) {
+        sub.set(
+          grid.subarray((bounds.y0 + y) * W + bounds.x0, (bounds.y0 + y) * W + bounds.x1),
+          y * w
+        );
+      }
+      const compressed = deflate(sub);
+      let binary = '';
+      for (let i = 0; i < compressed.length; i++) binary += String.fromCharCode(compressed[i]);
+      const seq = (this.networkSeq.get(robotId) ?? 0) + 1;
+      this.networkSeq.set(robotId, seq);
+      this.emit({
+        type: 'network_patch',
+        robot_id: robotId,
+        seq,
+        resolution: RES,
+        origin: ORIGIN,
+        width: W,
+        height: H,
+        x0: bounds.x0,
+        y0: bounds.y0,
+        w,
+        h,
+        data: btoa(binary)
+      });
+    }
+    this.networkDirty.clear();
   }
 
   /** Reveal ground truth within sensor radius, simulating SLAM. */

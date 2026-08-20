@@ -32,7 +32,7 @@ WHAT IS DELIBERATELY NOT DONE
 This has never run against physical hardware. It is written against the protocol
 spec (adapters/protocol/README.md) and the working `adapter_sim` reference, and
 its message construction is unit-tested, but every timeout, QoS choice and frame
-name below is a hypothesis until a robot proves it. See docs/hardware-bringup.md
+name below is a hypothesis until a robot proves it. See docs/operations/hardware-bringup.md
 for the order to validate them in.
 """
 
@@ -78,6 +78,7 @@ from adapters.perception.depth_projection import (
     point_for_depth_image,
     transform_point,
 )
+from adapters.network_quality import read_link_quality
 
 # Transport quantisation for registered-cloud uploads. One centimetre keeps a
 # normal building-scale map inside int16 while remaining finer than either
@@ -135,6 +136,9 @@ DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
     "ros_distro": "jazzy",
     "footprint_radius": 0.35,
+    # Linux wireless interface to sample into the per-robot network heatmap.
+    # "auto" uses the first row in /proc/net/wireless; empty disables it.
+    "network_iface": "",
     # Frames. `map` and `base_link` are REP-105 names and the only two that must
     # exist; the pose is a tf2 lookup between them rather than a composition of
     # transforms we recognise, because a real TF tree has links we do not know
@@ -493,6 +497,8 @@ class HardwareBridge:
             caps.append("camera")
         if self.cfg["topics"].get("battery"):
             caps.append("battery")
+        if self.cfg.get("network_iface"):
+            caps.append("network")
         if self.pub_cmd is not None:
             caps.append("estop")
         services = self.cfg.get("services") or {}
@@ -932,7 +938,7 @@ class HardwareBridge:
             return dict(fallback)
 
     def state(self) -> dict[str, Any]:
-        return {
+        state = {
             "type": "robot_state",
             "robot_id": self.id,
             "t_mono": round(time.monotonic() - self.t0, 4),
@@ -943,6 +949,12 @@ class HardwareBridge:
             "goal": self.goal,
             "planned_path": self.planned_path,
         }
+        network_iface = str(self.cfg.get("network_iface", ""))
+        if network_iface:
+            # Explicit null clears a previously-good live reading if the radio
+            # disassociates while the control socket survives on another link.
+            state["network"] = read_link_quality(network_iface)
+        return state
 
     # ------------------------------------------------------------- commands
 

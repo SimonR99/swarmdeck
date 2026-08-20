@@ -169,7 +169,7 @@ Relevant prior art:
 On `multirobot_map_merge` specifically: writing the registration by hand was a
 defensible call, because the backend is required to import no ROS (stated as
 acceptance criterion 12 in `api/app.py`) and that package is a ROS 2 node. What
-should not have happened silently is that `docs/roadmap.md` named it as the plan
+should not have happened silently is that `docs/architecture/roadmap.md` named it as the plan
 and something else shipped.
 
 ### A staged path

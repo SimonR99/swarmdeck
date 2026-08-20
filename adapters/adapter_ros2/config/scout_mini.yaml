@@ -13,7 +13,7 @@
 #
 # THIS CANNOT RUN YET: adapter_ros2.py needs `rclpy` (ROS 2), and every topic above is
 # ROS 1 (`rospy`, `roslaunch`, `catkin`). tars's native ROS 2 (Foxy) install is also
-# broken (see docs/fleet-status.md). Bridging (ros1_bridge, or porting the driver) is a
+# broken (see docs/robots/fleet.md). Bridging (ros1_bridge, or porting the driver) is a
 # separate piece of work; this file documents what the bridge would need to carry.
 robot_type: scout_mini
 footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box (scout_mini.urdf.xacro base_x_size/base_y_size) — not the true footprint, since Scout Mini's outline isn't a circle

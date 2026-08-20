@@ -74,7 +74,7 @@ def test_render_keeps_the_proximity_lidar_planar():
 def test_horizontal_resolution_reaches_the_far_wall():
     """The default profile must put adjacent rays inside one 5 cm grid cell
     across the 24 m building, or distant walls come out dotted — the defect this
-    whole profile mechanism exists to fix (docs/KNOWN_ISSUES.md #8)."""
+    whole profile mechanism exists to fix (docs/operations/known-issues.md #8)."""
     spec = lidar_spec({})
     spacing_at_12m = 12.0 * math.radians(spec.h_step_deg)
     assert spacing_at_12m < 0.05, (

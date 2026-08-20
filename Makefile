@@ -1,4 +1,4 @@
-.PHONY: help install ui ui-build server mock sim test clean up-scout tunnel \
+.PHONY: help install ui ui-build server mock sim test clean tunnel \
         build-server up-server down-server \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
@@ -21,7 +21,6 @@ help:
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
 	@echo "  make deploy ROBOT=botman    operator-side sync + override + build + reset + up"
 	@echo "  make deploy ROBOT=all       deploy every profile in deploy/robots/"
-	@echo "  make up-scout        legacy Scout-only bring-up (use make deploy ROBOT=scout)"
 	@echo "  make docker-up-gpu   full stack (server+ui+sim), Gazebo rendering on an NVIDIA GPU"
 	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
 	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
@@ -70,11 +69,6 @@ test:
 
 # --- Base Compose Command
 COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml
-
-# --- Scout Mini hardware: start the host ROS graph and robot-side containers.
-# Override SCOUT_HOST, SCOUT_REPO, ROBOT_IP, BACKEND_HOST or OUSTER_HOST_NAME as needed.
-up-scout:
-	./scripts/scout-up
 
 # --- operator-side physical robot deployment
 # ROBOT is one profile name or `all`; DEPLOY_ARGS can carry --dry-run,

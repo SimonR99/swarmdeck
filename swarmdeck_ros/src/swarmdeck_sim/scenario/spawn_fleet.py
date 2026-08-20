@@ -93,7 +93,7 @@ class LidarSpec:
             # is tilted, and a tilted ring at elevation e vanishes beyond
             # (band half-height / sin e) once a height band slices it. That is
             # what turned the merged map into a hatched wedge; see
-            # docs/KNOWN_ISSUES.md. Refuse rather than map badly in silence.
+            # docs/operations/known-issues.md. Refuse rather than map badly in silence.
             raise ValueError(
                 f"lidar rings={self.rings} is even, so no ring sits at elevation 0 "
                 f"and any height band truncates the 2D scan at short range. "
@@ -125,7 +125,7 @@ class LidarSpec:
         Gazebo spreads samples across [min_angle, max_angle] INCLUSIVE. On a full
         revolution that makes the first and last ray the same bearing, so 360
         samples buy 359 distinct ones — which is where the 1.003 deg in
-        docs/KNOWN_ISSUES.md comes from rather than a round 1.000.
+        docs/operations/known-issues.md comes from rather than a round 1.000.
         """
         return 360.0 / (self.h_samples - 1)
 

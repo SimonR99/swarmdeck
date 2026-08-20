@@ -9,7 +9,7 @@ adapters by construction.
 
 What these CANNOT test is whether the topic names, QoS/latching and frame
 names are right for any particular robot. That needs hardware — see
-docs/hardware-bringup.md.
+docs/operations/hardware-bringup.md.
 """
 
 from __future__ import annotations
@@ -109,10 +109,11 @@ def test_config_merge_is_deep_not_shallow(mod):
 
 def test_capabilities_reflect_configuration_only(mod):
     """Protocol rule 4: never advertise a capability you cannot honour."""
-    full = _bridge(mod, {"topics": {"battery": "battery_state",
+    full = _bridge(mod, {"network_iface": "auto",
+                         "topics": {"battery": "battery_state",
                                     "camera_compressed": "cam/compressed"}})
     caps = full.capabilities()
-    assert {"navigate", "map", "camera", "battery", "estop"} <= set(caps)
+    assert {"navigate", "map", "camera", "battery", "network", "estop"} <= set(caps)
 
     bare = _bridge(mod, {
         "topics": {"odom": "odom", "map": "", "cmd_vel": "", "battery": "",
@@ -128,6 +129,23 @@ def test_camera_capability_needs_a_real_topic(mod):
     assert "camera" not in no_cam.capabilities()
     raw_only = _bridge(mod, {"topics": {"camera": "image_raw"}})
     assert "camera" in raw_only.capabilities()
+
+
+def test_state_pose_tags_robot_side_network_sample(mod, monkeypatch):
+    bridge = _bridge(mod, {"network_iface": "auto"})
+    bridge.t0 = __import__("time").monotonic()
+    bridge.battery = None
+    bridge.planned_path = []
+    bridge.map_pose = lambda: {"x": 1.5, "y": -2.0, "yaw": 0.25}
+    monkeypatch.setattr(
+        mod,
+        "read_link_quality",
+        lambda _iface: {"interface": "wlan0", "quality_pct": 72.0, "rssi_dbm": -58.0},
+    )
+
+    state = bridge.state()
+    assert state["pose"] == {"x": 1.5, "y": -2.0, "yaw": 0.25}
+    assert state["network"]["quality_pct"] == 72.0
 
 
 def _stamp(seconds: float):

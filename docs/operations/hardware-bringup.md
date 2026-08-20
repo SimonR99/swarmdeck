@@ -62,5 +62,9 @@ make up-server
 Before starting autonomous or teleoperated runs:
 1. **Physical E-Stop**: Confirm wireless e-stop is armed and functioning.
 2. **Network Connectivity**: Verify ping to robot IP and check `ROS_DOMAIN_ID` separation.
+   Set `network_iface: auto` (or the exact wireless interface name) in the
+   adapter config, then confirm the selected robot's Local map shows samples
+   under **Layers → Network heatmap**. Wired robots legitimately report no
+   Wi-Fi samples.
 3. **Camera Stream**: Confirm WHEP WebRTC stream shows live FPS and latency HUD on the dashboard.
 4. **Map Accumulation**: Drive the robot 1 meter and confirm raytraced free space appears on the 2D grid.

@@ -3,15 +3,19 @@
 set -Eeuo pipefail
 
 # Run from the operator workstation. Each setting can be overridden inline, e.g.
-# SCOUT_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 make deploy ROBOT=scout
-scout_host=${SCOUT_HOST:-scout}
-scout_repo=${SCOUT_REPO:-/ssd/swarmdeck}
+# DEPLOY_SSH_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 \
+#   ./scripts/scout-up
+scout_host=${DEPLOY_SSH_HOST:-scout}
+scout_repo=${DEPLOY_REMOTE_REPO:-${ROBOT_REPO:-/ssd/swarmdeck}}
 robot_id=${ROBOT_ID:-tars_0}
 robot_ip=${ROBOT_IP:-192.168.1.230}
 backend_host=${BACKEND_HOST:-192.168.1.161}
 backend_port=${BACKEND_PORT:-8080}
 ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
 camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
+robot_config=${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}
+video_bitrate=${VIDEO_BITRATE_KBPS:-700}
+video_fps=${VIDEO_FPS:-10}
 
 echo "Starting ${robot_id} on ${scout_host}..."
 
@@ -24,7 +28,10 @@ ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${backend_host}" \
   "${backend_port}" \
   "${ouster_host}" \
-  "${camera_topic}" <<'REMOTE_SCRIPT'
+  "${camera_topic}" \
+  "${robot_config}" \
+  "${video_bitrate}" \
+  "${video_fps}" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 repo=$1
@@ -36,6 +43,9 @@ backend_host=$6
 backend_port=$7
 ouster_host=$8
 camera_topic=$9
+robot_config=${10}
+video_bitrate=${11}
+video_fps=${12}
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
@@ -163,10 +173,10 @@ start_detached \
 export ROBOT_IP="${robot_ip}"
 export BACKEND_HOST="${backend_host}"
 export BACKEND_PORT="${backend_port}"
-export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
+export ROBOT_CONFIG="${robot_config}"
 export CAMERA_TOPIC="${camera_topic}"
-export VIDEO_BITRATE_KBPS="${VIDEO_BITRATE_KBPS:-700}"
-export VIDEO_FPS="${VIDEO_FPS:-10}"
+export VIDEO_BITRATE_KBPS="${video_bitrate}"
+export VIDEO_FPS="${video_fps}"
 
 (
   cd "${repo}"
@@ -185,19 +195,12 @@ export VIDEO_FPS="${VIDEO_FPS:-10}"
       echo "SwarmDeck detector started; adapter/media restarted to reconnect to ROS"
     fi
   elif docker compose version >/dev/null 2>&1; then
-    COMPOSE_FILE="deploy/compose/docker-compose.robot-ros1.yml"
-    [[ ! -f "$COMPOSE_FILE" ]] && COMPOSE_FILE="docker-compose.robot-ros1.yml"
     compose_env=()
     [[ -f "${repo}/.deploy/scout.env" ]] && compose_env+=(--env-file "${repo}/.deploy/scout.env")
-    docker compose "${compose_env[@]}" -f "$COMPOSE_FILE" up -d --remove-orphans
-  elif command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE_FILE="deploy/compose/docker-compose.robot-ros1.yml"
-    [[ ! -f "$COMPOSE_FILE" ]] && COMPOSE_FILE="docker-compose.robot-ros1.yml"
-    compose_env=()
-    [[ -f "${repo}/.deploy/scout.env" ]] && compose_env+=(--env-file "${repo}/.deploy/scout.env")
-    docker-compose "${compose_env[@]}" -f "$COMPOSE_FILE" up -d --remove-orphans
+    docker compose "${compose_env[@]}" \
+      -f deploy/compose/docker-compose.robot-ros1.yml up -d --remove-orphans
   else
-    echo "Adapter/media containers are missing and Docker Compose is not installed" >&2
+    echo "Adapter/media containers are missing and Docker Compose v2 is not installed" >&2
     exit 1
   fi
 )

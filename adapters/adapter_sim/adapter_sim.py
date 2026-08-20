@@ -583,7 +583,7 @@ class RobotBridge:
         numbers, robot for robot. Composing from TF instead brings it to ~0.07 m,
         which is SLAM's own residual. Worse, wheel odometry is the channel that
         breaks catastrophically when a differential drive jams and spins its
-        wheels (8.8-30.5 m of error measured in docs/KNOWN_ISSUES.md), which is
+        wheels (8.8-30.5 m of error measured in docs/operations/known-issues.md), which is
         why robot markers would occasionally jump right off the building.
 
         The wheel topic remains a fallback for a robot whose TF carries no

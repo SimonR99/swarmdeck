@@ -8,6 +8,7 @@
 # same backend safely.
 robot_type: agilex_bunker
 ros_distro: humble
+network_iface: auto
 
 # Bunker is 1.023 x 0.778 m. Keep the conservative circumscribed radius used
 # for the other physical Bunker until a calibrated lidar/base transform exists.

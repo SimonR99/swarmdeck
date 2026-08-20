@@ -63,7 +63,7 @@
               and is invisible beyond it, so with 8 rings over +/-0.26 rad the
               innermost sits at 0.0371 rad and a 0.15 m band truncates the whole
               scan at 4.04 m of the lidar's 16 m — the hatched wedge recorded in
-              docs/KNOWN_ISSUES.md. No band fixes that, and no choice of filter
+              docs/operations/known-issues.md. No band fixes that, and no choice of filter
               frame fixes it either: the geometry is range-dependent in every
               frame. An odd N puts one ring at exactly 0 elevation, which passes
               any band at full range, and the tilted rings then add genuine 3D
@@ -116,7 +116,7 @@
         100 Hz the preintegration error over one 10 Hz scan swamps the benefit
         and those packages either refuse to initialise or drift. Wheel+IMU EKF
         fusion is happy at 50 Hz, so drop back only if nothing downstream needs
-        inertial odometry. See docs/collaborative-slam.md.
+        inertial odometry. See docs/architecture/collaborative-slam.md.
       -->
       <!--
         The noise block is not optional. Gazebo's default IMU is NOISELESS: it

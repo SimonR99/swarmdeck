@@ -1,5 +1,5 @@
 import { inflate } from 'pako';
-import type { MapInfo, MapPatch, MapStatus, SlamGraph } from '$lib/types/protocol';
+import type { MapInfo, MapPatch, MapStatus, NetworkPatch, SlamGraph } from '$lib/types/protocol';
 
 /**
  * Occupancy grid, held as an offscreen canvas. The displayed grid is either
@@ -46,6 +46,11 @@ const state = $state({
 
 let canvas: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
+let networkCanvas: HTMLCanvasElement | null = null;
+let networkCtx: CanvasRenderingContext2D | null = null;
+let networkInfo: MapInfo | null = null;
+let networkRobot: string | null = null;
+let networkSeq = -1;
 let statusLoading = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
@@ -114,6 +119,48 @@ function autoWantsLocal(robotId: string | null, recommended: boolean): boolean {
 let maskLevels: HTMLCanvasElement[] = [];
 let occupied: Uint8Array | null = null; // 1 byte per cell of the base grid
 let maskDirty = true;
+
+const NETWORK_LOW = [210, 48, 115] as const;
+const NETWORK_MID = [245, 190, 60] as const;
+const NETWORK_HIGH = [31, 158, 137] as const;
+
+function networkColor(quality: number): [number, number, number, number] {
+  const q = Math.max(0, Math.min(100, quality));
+  const a = q <= 50 ? NETWORK_LOW : NETWORK_MID;
+  const b = q <= 50 ? NETWORK_MID : NETWORK_HIGH;
+  const t = q <= 50 ? q / 50 : (q - 50) / 50;
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+    205
+  ];
+}
+
+function networkImageData(values: Uint8Array, width: number, height: number): ImageData {
+  const image = new ImageData(width, height);
+  for (let i = 0; i < values.length; i++) {
+    const offset = i * 4;
+    if (values[i] === 255) {
+      image.data[offset + 3] = 0;
+      continue;
+    }
+    const color = networkColor(values[i]);
+    image.data[offset] = color[0];
+    image.data[offset + 1] = color[1];
+    image.data[offset + 2] = color[2];
+    image.data[offset + 3] = color[3];
+  }
+  return image;
+}
+
+function clearNetworkLayer() {
+  networkCanvas = null;
+  networkCtx = null;
+  networkInfo = null;
+  networkRobot = null;
+  networkSeq = -1;
+}
 
 function ensureCanvas(w: number, h: number) {
   if (!canvas) {
@@ -278,6 +325,18 @@ export const mapStore = {
   get canvas() {
     return canvas;
   },
+  get networkLayer() {
+    // Canvas objects are deliberately module-local; revision makes this getter
+    // reactive for the legend while the draw loop reads the same live object.
+    void state.revision;
+    if (!networkCanvas || !networkInfo || !networkRobot) return null;
+    return { canvas: networkCanvas, info: networkInfo, robotId: networkRobot, seq: networkSeq };
+  },
+  clearNetwork(robotId: string | null = null) {
+    if (robotId !== null && networkRobot !== robotId) return;
+    clearNetworkLayer();
+    state.revision++;
+  },
 
   /**
    * Occupancy mask to composite over the grid at a given screen scale, or null
@@ -432,6 +491,86 @@ export const mapStore = {
     state.revision++;
   },
 
+  /** Incremental per-robot Wi-Fi overlay, retained only for the local map on screen. */
+  applyNetworkPatch(patch: NetworkPatch) {
+    if (state.viewMode !== 'local' || state.viewRobot !== patch.robot_id) return;
+    if (networkRobot === patch.robot_id && patch.seq < networkSeq) return;
+    let values: Uint8Array;
+    try {
+      const compressed = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
+      values = inflate(compressed);
+    } catch {
+      console.warn('[swarmdeck] ignored malformed network heatmap patch');
+      return;
+    }
+    if (values.length !== patch.w * patch.h) {
+      console.warn('[swarmdeck] ignored malformed network heatmap patch');
+      return;
+    }
+
+    const dimensionsChanged =
+      networkRobot !== patch.robot_id ||
+      !networkInfo ||
+      networkInfo.origin.x !== patch.origin.x ||
+      networkInfo.origin.y !== patch.origin.y ||
+      networkInfo.resolution !== patch.resolution ||
+      networkInfo.width !== patch.width ||
+      networkInfo.height !== patch.height;
+
+    if (dimensionsChanged) {
+      const oldCanvas = networkCanvas;
+      const oldInfo = networkInfo;
+      const keepOld = networkRobot === patch.robot_id && oldCanvas && oldInfo;
+      networkCanvas = document.createElement('canvas');
+      networkCanvas.width = patch.width;
+      networkCanvas.height = patch.height;
+      networkCtx = networkCanvas.getContext('2d');
+      networkCtx?.clearRect(0, 0, patch.width, patch.height);
+      if (keepOld && networkCtx) {
+        const offX = Math.round((oldInfo.origin.x - patch.origin.x) / patch.resolution);
+        const offY = Math.round(
+          patch.height - oldInfo.height - (oldInfo.origin.y - patch.origin.y) / patch.resolution
+        );
+        networkCtx.drawImage(oldCanvas, offX, offY);
+      }
+    }
+
+    networkInfo = {
+      resolution: patch.resolution,
+      width: patch.width,
+      height: patch.height,
+      origin: patch.origin,
+      seq: patch.seq
+    };
+    networkRobot = patch.robot_id;
+    networkSeq = patch.seq;
+    if (!networkCtx) return;
+    networkCtx.putImageData(networkImageData(values, patch.w, patch.h), patch.x0, patch.y0);
+    state.revision++;
+  },
+
+  async loadNetworkSnapshot(robotId: string, generation = loadGeneration) {
+    try {
+      const response = await fetch(
+        `/api/map/local/${encodeURIComponent(robotId)}/network`,
+        { cache: 'no-store' }
+      );
+      if (!response.ok) {
+        if (response.status === 404) return;
+        throw new Error(`network heatmap ${response.status}`);
+      }
+      const patch = (await response.json()) as NetworkPatch;
+      if (
+        generation !== loadGeneration ||
+        state.viewMode !== 'local' ||
+        state.viewRobot !== robotId
+      ) return;
+      this.applyNetworkPatch(patch);
+    } catch (error) {
+      console.warn('[swarmdeck] network heatmap restore failed', error);
+    }
+  },
+
   /** Lightweight registration health, separate from the high-rate map patches. */
   async refreshStatus() {
     if (statusLoading) return;
@@ -463,6 +602,7 @@ export const mapStore = {
     state.revision++;
 
     if (state.viewMode === 'local' && state.viewRobot) {
+      clearNetworkLayer();
       await this.selectRobotView(state.viewRobot);
       return;
     }
@@ -509,6 +649,7 @@ export const mapStore = {
 
     if (state.viewMode !== desiredMode || state.viewRobot !== desiredRobot) {
       loadGeneration++;
+      clearNetworkLayer();
       state.viewMode = desiredMode;
       state.viewRobot = desiredRobot;
       state.seq = -1;
@@ -554,6 +695,7 @@ export const mapStore = {
       state.seq = info.seq;
       state.ready = true;
       state.revision++;
+      await this.loadNetworkSnapshot(robotId!, generation);
     } catch (error) {
       console.warn('[swarmdeck] local map restore failed', error);
     }
@@ -634,6 +776,7 @@ export const mapStore = {
     loadGeneration++;
     canvas = null;
     ctx = null;
+    clearNetworkLayer();
     maskLevels = [];
     occupied = null;
     maskDirty = true;

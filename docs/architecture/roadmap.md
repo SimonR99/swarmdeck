@@ -105,7 +105,7 @@ re-fetch on incremental change.
 - Then `auto` mode for unknown relative starts (FR-S4). **Shipped differently from the plan:**
   this line named `multirobot_map_merge`, but that is a ROS 2 node and the backend must import
   no ROS (acceptance criterion 12), so registration is implemented in `mapsvc` with numpy —
-  see `docs/architecture.md` §5.2 and `docs/collaborative-slam.md`.
+  see `docs/architecture/overview.md` §5.2 and `docs/architecture/collaborative-slam.md`.
 - UI: multi-robot selection, duplicate-goal rejection, per-robot trails.
 
 **Demo:** four robots with unknown starts converge to one aligned map after observing

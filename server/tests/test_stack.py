@@ -17,6 +17,7 @@ from swarmdeck_server.api.app import (
     _detections,
     app,
     detection_position,
+    handle_adapter_message,
     handle_gui_message,
     load_config,
     map_service,
@@ -105,6 +106,21 @@ def test_local_map_png_and_info_roundtrip():
         assert image.size == (n, n)
 
         assert c.get("/api/map/local/missing").status_code == 404
+
+
+def test_local_network_heatmap_snapshot_roundtrip():
+    map_service.ingest_network_sample("robot_0", 1.0, -1.5, 68.0)
+    with TestClient(app) as c:
+        response = c.get("/api/map/local/robot_0/network")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["type"] == "network_patch"
+        assert payload["robot_id"] == "robot_0"
+        values = np.frombuffer(
+            zlib.decompress(base64.b64decode(payload["data"])), dtype=np.uint8
+        )
+        assert 68 in values
+        assert c.get("/api/map/local/missing/network").status_code == 404
 
 
 def test_targeted_map_reset_discards_only_one_robots_accumulated_products():
@@ -224,6 +240,28 @@ def test_registry_capabilities_and_neglect():
 
     reg.hello({"robot_id": "mock", "coordinate_frame": "merged"}, sink=None)
     assert reg.robots["mock"].coordinate_frame == "merged"
+
+
+def test_robot_state_network_sample_is_stored_at_the_same_pose():
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    map_service.reset_robot()
+    try:
+        app_registry.hello({"robot_id": "r0", "capabilities": ["network"]}, sink=None)
+        asyncio.run(handle_adapter_message({
+            "type": "robot_state",
+            "robot_id": "r0",
+            "pose": {"x": 2.5, "y": -3.0, "yaw": 0.1},
+            "network": {"interface": "wlan0", "quality_pct": 42.0, "rssi_dbm": -69.0},
+        }, None))
+
+        state = app_registry.robots["r0"].to_state()
+        assert state["network"]["rssi_dbm"] == -69.0
+        assert map_service.network_snapshot("r0") is not None
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+        map_service.reset_robot()
 
 
 def test_a_reconnect_does_not_unbind_the_new_socket():

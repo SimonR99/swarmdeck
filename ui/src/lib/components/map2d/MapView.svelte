@@ -13,7 +13,8 @@
     Route,
     ScanLine,
     Tags,
-    Trash2
+    Trash2,
+    Wifi
   } from 'lucide-svelte';
   import Map3D from '$lib/components/map3d/Map3D.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
@@ -52,6 +53,7 @@
   let showLabels = $state(true);
   let showSensors = $state(false);
   let showPlans = $state(true);
+  let showNetwork = $state(true);
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
 
@@ -366,6 +368,28 @@
     ctx.setLineDash([]);
   }
 
+  function drawNetworkHeatmap(ctx: CanvasRenderingContext2D) {
+    const layer = mapStore.networkLayer;
+    if (
+      !showNetwork ||
+      mapStore.viewMode !== 'local' ||
+      !layer ||
+      layer.robotId !== mapStore.viewRobot
+    ) return;
+
+    const maxY = layer.info.origin.y + layer.info.height * layer.info.resolution;
+    const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
+    if (!topLeft) return;
+    const screen = screenOf(topLeft.gx, topLeft.gy);
+    const width = (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
+    const height = (layer.info.height * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
+    ctx.save();
+    ctx.globalAlpha = 0.62;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(layer.canvas, screen.sx, screen.sy, width, height);
+    ctx.restore();
+  }
+
   function draw() {
     if (!canvas || !host) return;
     const ctx = canvas.getContext('2d');
@@ -400,6 +424,10 @@
       const gh = info.height * view.scale;
       ctx.imageSmoothingEnabled = view.scale < 1;
       ctx.drawImage(grid, view.tx, view.ty, gw, gh);
+
+      // Network quality is contextual map colour; keep the max-pooled wall
+      // mask above it so the overlay never hides an obstacle.
+      drawNetworkHeatmap(ctx);
 
       // Below one screen pixel per cell the grid alone cannot render a wall:
       // smoothing averages a one-cell wall into its neighbours until it is a
@@ -635,6 +663,7 @@
     void showLabels;
     void showSensors;
     void showPlans;
+    void showNetwork;
     draw();
   });
 
@@ -781,6 +810,9 @@
   );
   const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
   const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);
+  const viewedNetwork = $derived(
+    mapStore.viewRobot ? fleet.get(mapStore.viewRobot)?.network ?? null : null
+  );
   const resetRobotBlocked = $derived(
     resetPending ||
       !resetRobot ||
@@ -943,6 +975,14 @@
         </button>
         <button
           class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          title="Robot-side Wi-Fi quality on the selected robot's local map"
+          onclick={() => (showNetwork = !showNetwork)}
+        >
+          <span class="flex items-center gap-2"><Wifi class="h-3.5 w-3.5" /> Network heatmap</span>
+          <span class="font-semibold {showNetwork ? 'text-accent' : 'text-fg-dim'}">{showNetwork ? 'ON' : 'OFF'}</span>
+        </button>
+        <button
+          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (show3D = !show3D)}
         >
           <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D cloud</span>
@@ -1035,6 +1075,25 @@
       </div>
     {/if}
   </div>
+
+  {#if showNetwork && mapStore.viewMode === 'local' && mapStore.networkLayer}
+    <div
+      class="pointer-events-none absolute bottom-11 left-3 z-20 rounded-[4px] border border-border
+             bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
+    >
+      <div class="mb-1 flex items-center justify-between gap-4">
+        <span class="font-semibold uppercase tracking-[0.07em]">Wi-Fi quality</span>
+        <span class="font-mono text-fg-muted">
+          {viewedNetwork ? `${Math.round(viewedNetwork.quality_pct)}% · ${Math.round(viewedNetwork.rssi_dbm)} dBm` : 'history'}
+        </span>
+      </div>
+      <div
+        class="h-1.5 w-44 rounded-full"
+        style="background:linear-gradient(90deg, rgb(210 48 115), rgb(245 190 60), rgb(31 158 137))"
+      ></div>
+      <div class="mt-0.5 flex justify-between"><span>Poor</span><span>Fair</span><span>Good</span></div>
+    </div>
+  {/if}
 
   <!-- View controls keep the same meaning in 2D and 3D. -->
   <div class="panel-glow absolute bottom-3 right-3 z-20 flex flex-col overflow-hidden rounded-[4px] border border-border bg-surface/95">

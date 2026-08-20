@@ -42,6 +42,12 @@ function dispatch(msg: ServerMessage) {
     case 'map_patch':
       mapStore.applyGlobalPatch(msg);
       break;
+    case 'network_patch':
+      mapStore.applyNetworkPatch(msg);
+      break;
+    case 'network_clear':
+      mapStore.clearNetwork(msg.robot_id);
+      break;
     case 'detection':
       session.addDetection(msg.detection);
       break;

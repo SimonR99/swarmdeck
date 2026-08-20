@@ -10,7 +10,15 @@ export const PROTOCOL_VERSION = 1;
  * which no physical robot can honour. The reset control is gated on some robot
  * advertising it, which is what keeps it off a hardware dashboard.
  */
-export type Capability = 'navigate' | 'map' | 'camera' | 'battery' | 'estop' | 'reset' | 'body';
+export type Capability =
+  | 'navigate'
+  | 'map'
+  | 'camera'
+  | 'battery'
+  | 'network'
+  | 'estop'
+  | 'reset'
+  | 'body';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 // `recover` is the adapter reversing a robot out of a pose Nav2 could not plan
 // from. It moves on its own, briefly and without an operator command, so it has
@@ -55,6 +63,12 @@ export interface RobotState extends Stamps {
   online: boolean;
   /** Circumscribed chassis radius, metres, as declared by the adapter at `hello`. */
   footprint_radius?: number;
+  /** Robot-side Wi-Fi measurement, sampled with this pose. */
+  network?: {
+    interface: string;
+    quality_pct: number;
+    rssi_dbm: number;
+  } | null;
 }
 
 export interface Detection {
@@ -161,6 +175,23 @@ export interface MapPatch {
   w: number;
   h: number;
   /** base64(zlib(int8[])) row-major, -1 unknown / 0 free / 100 occupied */
+  data: string;
+}
+
+/** Incremental robot-local Wi-Fi quality grid; 255 means no sample. */
+export interface NetworkPatch {
+  type: 'network_patch';
+  robot_id: string;
+  seq: number;
+  resolution: number;
+  origin: Point;
+  width: number;
+  height: number;
+  x0: number;
+  y0: number;
+  w: number;
+  h: number;
+  /** base64(zlib(uint8[])) top-down, 0-100 quality / 255 no data */
   data: string;
 }
 
@@ -335,6 +366,8 @@ export interface SimReset {
 export type ServerMessage =
   | RobotState
   | MapPatch
+  | NetworkPatch
+  | { type: 'network_clear'; robot_id: string | null }
   | SessionState
   | { type: 'fleet_change'; robots: RobotState[] }
   | { type: 'detection'; detection: Detection }

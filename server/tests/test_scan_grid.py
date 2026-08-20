@@ -26,7 +26,7 @@ def test_a_single_beam_marks_free_along_it_and_occupied_at_the_end():
 
     Withholding free space until a second observation was tried on the live
     fleet and reverted: grid registration keys on known-free contradiction
-    (`docs/collaborative-slam.md` §2.2), and the delay collapsed pairwise
+    (`docs/architecture/collaborative-slam.md` §2.2), and the delay collapsed pairwise
     overlap from 1252 cells to 26 and emptied the merged map. See the gain
     constants in scan_grid.py.
     """

@@ -46,6 +46,7 @@ async def lifespan(_: FastAPI):
     tasks = [
         asyncio.create_task(state_loop()),
         asyncio.create_task(map_loop()),
+        asyncio.create_task(network_loop()),
         asyncio.create_task(session_loop()),
         # Registration runs here rather than inside each upload — see
         # MapService.registration_worker. Without this task the transforms in
@@ -446,6 +447,16 @@ async def map_loop() -> None:
             await broadcast(patch)
 
 
+async def network_loop() -> None:
+    """1 Hz per-robot Wi-Fi heatmap patches."""
+    while True:
+        await asyncio.sleep(1.0)
+        for robot_id in map_service.network_robot_ids():
+            patch = map_service.take_network_patch(robot_id)
+            if patch:
+                await broadcast(patch)
+
+
 async def session_loop() -> None:
     ticks = 0
     while True:
@@ -578,6 +589,7 @@ async def reset_fleet() -> dict[str, Any]:
         _reset_pending.clear()
 
         map_service.reset()
+        await broadcast({"type": "network_clear", "robot_id": None})
         _detections.clear()
         # Validated objects describe the world before the reset. Keeping them
         # would leave confirmed markers floating over a map that no longer has
@@ -817,6 +829,7 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
         )
 
     reset = await map_service.reset_robot_async(robot_id)
+    await broadcast({"type": "network_clear", "robot_id": robot_id})
     patch = map_service.take_patch()
     if patch is not None:
         await broadcast(patch)
@@ -866,6 +879,15 @@ async def get_local_map_info(robot_id: str) -> Response:
     if info is None:
         return JSONResponse({"error": "local map not available"}, status_code=404)
     return JSONResponse(info)
+
+
+@app.get("/api/map/local/{robot_id}/network")
+async def get_local_network(robot_id: str) -> Response:
+    """Full robot-local Wi-Fi heatmap for reconnects and view switches."""
+    snapshot = map_service.network_snapshot(robot_id)
+    if snapshot is None:
+        return JSONResponse({"error": "network heatmap not available"}, status_code=404)
+    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
 
 
 # Ceiling on a decompressed adapter upload. A 100 m map at 5 cm is 4 M cells, so
@@ -1355,7 +1377,20 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
 
     elif kind == "robot_state":
-        registry.update_state(msg)
+        robot = registry.update_state(msg)
+        network = msg.get("network")
+        pose = msg.get("pose")
+        if robot is not None and isinstance(network, dict) and isinstance(pose, dict):
+            try:
+                map_service.ingest_network_sample(
+                    robot.robot_id,
+                    float(pose["x"]),
+                    float(pose["y"]),
+                    float(network["quality_pct"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                # Optional telemetry must never cost the robot its control link.
+                pass
 
     elif kind == "detections":
         rid = msg["robot_id"]

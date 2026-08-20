@@ -14,6 +14,7 @@
 # 192.168.50.3 — do not start that without a person at the e-stop.
 robot_type: boston_dynamics_spot
 ros_distro: humble
+network_iface: auto
 
 # Body 1100 x 500 mm. Circumscribed radius is 0.604 m; round up so the UI
 # never draws a footprint smaller than the chassis. The registered-cloud map

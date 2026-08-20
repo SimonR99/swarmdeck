@@ -30,7 +30,7 @@ fleet:
   #               carries real 3D structure. Needs slam_backend:=rtabmap.
   #
   # Rings must be 1 or an odd value: an even count leaves no ring at elevation 0,
-  # and the sliced 2D scan then truncates at short range (docs/KNOWN_ISSUES.md).
+  # and the sliced 2D scan then truncates at short range (docs/operations/known-issues.md).
   lidar:
     profile: generic_2d
 

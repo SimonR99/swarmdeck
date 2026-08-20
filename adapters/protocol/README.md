@@ -41,6 +41,7 @@ without `map` contributes no grid. **Never assume a capability.**
 | `map` | pushes occupancy grids |
 | `camera` | streams to MediaMTX under its `robot_id` |
 | `battery` | reports `battery` in `robot_state` |
+| `network` | reports robot-side Wi-Fi quality in `robot_state` for the local-map heatmap |
 | `estop` | accepts `stop` |
 | `body` | accepts `body_command` (`claim` / `release` / `sit` / `stand`) |
 | `reset` | accepts `reset` — **simulation only**, see below |
@@ -64,6 +65,7 @@ the capability, which is what keeps the button off a hardware dashboard.
 { "type": "robot_state", "robot_id": "robot_0", "t_mono": 18234.55,
   "pose": {"x": 1.2, "y": -3.4, "yaw": 0.78},
   "battery": 0.82, "mode": "nav", "nav_status": "active",
+  "network": {"interface": "wlan0", "quality_pct": 71.4, "rssi_dbm": -58.0},
   "goal": {"x": 5.0, "y": 2.0},
   "planned_path": [{"x": 1.2, "y": -3.4}, {"x": 2.1, "y": -2.7}] }
 
@@ -77,7 +79,7 @@ the capability, which is what keeps the button off a hardware dashboard.
 // NOT the operator's `detection_class_floors`. The backend applies the
 // operator's floor to its own stored entities, so an adapter that pre-filtered
 // to it would make raising a floor irreversible: the evidence needed to undo
-// the change would never have been sent. See docs/perception.md.
+// the change would never have been sent. See docs/architecture/perception.md.
 { "type": "detections", "robot_id": "robot_2", "t_mono": 18251.7,
   "camera": "front",
   "items": [{"id": "disc_cone_0", "class": "disc_cone", "score": 0.91,
@@ -115,6 +117,11 @@ operator has to be told about rather than left to infer from a stale map.
 
 `planned_path` is the adapter's current planner output, downsampled to a bounded
 polyline. The GUI renders it dashed beside the solid path actually travelled.
+`network` is optional and is sampled on the robot in the same packet as `pose`,
+so the backend can accumulate link quality spatially without guessing which
+pose belonged to a later measurement. Hardware adapters enable it with
+`network_iface: auto` (first `/proc/net/wireless` interface) or an explicit
+interface name; an empty value disables the capability.
 Detection boxes use normalized `[x, y, width, height]` image coordinates; stable item
 IDs let the backend update one observation instead of stacking duplicate boxes.
 `map_position` is optional. Depth-capable adapters derive it from an RGB-aligned depth

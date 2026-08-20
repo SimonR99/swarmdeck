@@ -1,5 +1,5 @@
 # Single-robot server session for Botman. Robot drivers and SuperOdometry are
-# started by docker-compose.robot-botman.yml; this file configures only the
+# started by deploy/compose/docker-compose.robot-botman.yml; this file configures only the
 # ROS-free SwarmDeck backend.
 name: hardware_botman
 seed: 20260806

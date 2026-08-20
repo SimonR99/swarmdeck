@@ -15,13 +15,12 @@ whichever matches the robot's own ROS generation. [`docs/operations/hardware-bri
 is the ordered test plan. Neither has **been run against physical hardware** — the code
 is unit-tested and the sim-only assumptions are now parameters, but every topic name,
 QoS/latching choice and timeout is a hypothesis until a robot proves it.
-[`docs/hardware-readiness.md`](docs/hardware-readiness.md) audits what is already correct
-and what still is not. [`docs/fleet-status.md`](docs/fleet-status.md) tracks the actual
-physical fleet — per-robot hardware, network and ROS state, and how far terrain prep has
-gotten on each.
+[`docs/robots/fleet.md`](docs/robots/fleet.md) tracks the physical fleet — per-robot
+hardware, network and ROS state. [`docs/operations/hardware-bringup.md`](docs/operations/hardware-bringup.md)
+is the deployment and validation checklist.
 
-See [`docs/`](docs/) for [architecture](docs/architecture.md),
-[requirements](docs/requirements.md), and the [roadmap](docs/roadmap.md).
+See [`docs/`](docs/) for [architecture](docs/architecture/overview.md),
+[requirements](docs/architecture/requirements.md), and the [roadmap](docs/architecture/roadmap.md).
 Physical Bunker procedures are documented separately for
 [Botman](docs/robots/botman.md) and [Aslan](docs/robots/aslan.md).
 
@@ -149,7 +148,7 @@ into an object already there; an accepted object's position is the mean of every
 observation folded into it, and one already on the map stops asking. Confirmed objects
 draw solid, pending ones dashed, and the "N on map" pill lists what has been placed so
 individual objects can be deleted. All of it persists to `sessions/detections.json`, so a
-restart does not lose the operator's decisions. See [perception.md](docs/perception.md).
+restart does not lose the operator's decisions. See [perception.md](docs/architecture/perception.md).
 
 Manual drive comes in two shapes, set by `drive_control_mode`. **Arrows** (the default) is
 a four-button pad, one direction per button, which is what a finger on a tablet can
@@ -261,7 +260,7 @@ The EKF deliberately does **not** consume those. Feeding it real covariance was 
 make it ten times worse (0.46 m -> 4.80 m mean error over 300 s), because
 `process_noise_covariance` was tuned for the zero-covariance regime where the filter tracks
 measurements exactly. `fuse_covariance:=true` turns it on for anyone who wants to re-tune;
-see `docs/KNOWN_ISSUES.md` #7. The relay is used on the 3D path, where RTAB-Map's
+see `docs/operations/known-issues.md` #7. The relay is used on the 3D path, where RTAB-Map's
 `icp_odometry` weighs the inertial prior by covariance and cannot work around a zero.
 
 Exploration alternates wandering with two kinds of long-range leg. **Homing** returns a robot
@@ -346,7 +345,7 @@ Measured in simulation it is **worse** — 0.262 m vs 0.137 m displacement error
 9.7 deg heading — but that is a statement about Gazebo, not about DLIO: its central
 mechanism is per-point de-skewing and Gazebo's cloud carries no per-point timestamps, so
 what is being measured is DLIO without its main idea. It also publishes at ~100 Hz against
-icp_odometry's ~2 Hz. See `docs/KNOWN_ISSUES.md` #6 before drawing conclusions.
+icp_odometry's ~2 Hz. See `docs/operations/known-issues.md` #6 before drawing conclusions.
 
 ### Swarm SLAM
 
@@ -374,7 +373,7 @@ subscriber cannot deserialise a type it does not have.
 correlation, and it is **not the default, because measured against ground truth it is much
 worse** (11-16 m against 0.03-0.20 m). The grids come from RTAB-Map and the transforms from
 cslam — two independent SLAM systems whose trajectories disagree by metres. See
-`docs/KNOWN_ISSUES.md` #5 for the measurement and what unifying them would take.
+`docs/operations/known-issues.md` #5 for the measurement and what unifying them would take.
 
 Membership requires more than a loop closure. A fleet that has split into groups which never
 met has *two* common frames, and overlaying them would place robots confidently in the wrong
@@ -383,7 +382,7 @@ absent.
 
 Getting there meant five silent traps — namespace convention, a shared IPC namespace, the
 right front-end executable, TEASER++'s Python bindings, and a fleet that keeps moving. All
-are written up in `docs/KNOWN_ISSUES.md`.
+are written up in `docs/operations/known-issues.md`.
 
 Everything downstream of it is built and tested. `map.merge_mode: cslam` makes membership of
 the merged map depend on a robot actually having closed a loop with the fleet, and demotes
@@ -493,7 +492,7 @@ sudo apt install ros-jazzy-robot-localization \
 ```
 
 MediaMTX is included in the Docker stack for video. `multirobot_map_merge` is deliberately *not* used: it is
-a ROS node, and the backend is ROS-free by design — see `docs/architecture.md` §1.
+a ROS node, and the backend is ROS-free by design — see `docs/architecture/overview.md` §1.
 
 **ROS 1 note.** Noetic is EOL and cannot install on Ubuntu 24.04, and
 `ros-jazzy-ros1-bridge` does not exist. A ROS 1 robot runs `adapter_ros1` in its own

@@ -25,6 +25,7 @@ from .registration import (
     register_3d,
     score_transform,
 )
+from .network_grid import NetworkGridAccumulator
 from .scan_grid import ScanGridAccumulator, drop_range_outliers
 
 UNKNOWN = -1
@@ -186,6 +187,12 @@ class MapService:
         # `robot_grids`, which `ingest_scan` feeds into via the same `ingest()`
         # a robot with a native grid uses.
         self._scan_grids: dict[str, ScanGridAccumulator] = {}
+        # Robot-side Wi-Fi quality, accumulated in each robot's own map frame.
+        # This is independent of `_scan_grids`: native OccupancyGrid robots
+        # need the same heatmap as scan-fed robots.
+        self._network_grids: dict[str, NetworkGridAccumulator] = {}
+        self._network_prev: dict[str, np.ndarray] = {}
+        self._network_seq: dict[str, int] = {}
         # A ready-made merged grid supplied by a collaborative back end, already
         # in its common frame. When present in `cslam` mode there is nothing to
         # merge: the back end has done it, from its own keyframes at its own
@@ -249,6 +256,7 @@ class MapService:
                 set(self.robot_grids)
                 | set(self.robot_clouds)
                 | set(self._scan_grids)
+                | set(self._network_grids)
                 | set(self.slam_graphs)
             )
             # A registration queued before the reset describes grids that no
@@ -270,6 +278,9 @@ class MapService:
             self.cslam_disagreement.clear()
             self.robot_clouds.clear()
             self._scan_grids.clear()
+            self._network_grids.clear()
+            self._network_prev.clear()
+            self._network_seq.clear()
             self.global_grid = None
             self.common_poses.clear()
             self.cslam_frames.clear()
@@ -284,6 +295,7 @@ class MapService:
                 self.robot_grids,
                 self.robot_clouds,
                 self._scan_grids,
+                self._network_grids,
                 self.slam_graphs,
                 self.common_poses,
                 self.cslam_frames,
@@ -303,6 +315,9 @@ class MapService:
         self.cslam_disagreement.pop(robot_id, None)
         self.robot_clouds.pop(robot_id, None)
         self._scan_grids.pop(robot_id, None)
+        self._network_grids.pop(robot_id, None)
+        self._network_prev.pop(robot_id, None)
+        self._network_seq.pop(robot_id, None)
         self.common_poses.pop(robot_id, None)
         self.cslam_frames.pop(robot_id, None)
         self._registration_due.discard(robot_id)
@@ -422,6 +437,9 @@ class MapService:
         # It costs nothing in the simulator, where nothing uses this path, and
         # makes the reset a no-op for every robot mapping from `map_cloud`.
         self._scan_grids.clear()
+        self._network_grids.clear()
+        self._network_prev.clear()
+        self._network_seq.clear()
         # All of these describe registrations against grids that no longer exist.
         self.cloud_registrations.clear()
         self.cloud_z_offsets.clear()
@@ -739,6 +757,27 @@ class MapService:
                 self.ingest_scan, robot_id, origin_x, origin_y, points_xy, register=False
             )
         self._mark_registration_due(robot_id)
+
+    def ingest_network_sample(
+        self, robot_id: str, x: float, y: float, quality_pct: float
+    ) -> bool:
+        """Place one robot-side Wi-Fi sample in that robot's local map frame."""
+        if (
+            not robot_id
+            or not all(math.isfinite(value) for value in (x, y, quality_pct))
+            or not 0.0 <= quality_pct <= 100.0
+        ):
+            return False
+        acc = self._network_grids.get(robot_id)
+        if acc is None:
+            acc = NetworkGridAccumulator(
+                x,
+                y,
+                resolution=max(0.25, self.meta.resolution),
+                size_m=self._initial_size_m,
+            )
+            self._network_grids[robot_id] = acc
+        return acc.integrate(x, y, quality_pct)
 
     # ------------------------------------------------------------ registration
 
@@ -1368,6 +1407,78 @@ class MapService:
             "h": y1 - y0,
             "data": base64.b64encode(zlib.compress(sub.tobytes())).decode(),
         }
+
+    def network_robot_ids(self) -> list[str]:
+        return list(self._network_grids)
+
+    def _network_payload(
+        self,
+        robot_id: str,
+        meta: GridMeta,
+        display: np.ndarray,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        seq: int,
+    ) -> dict[str, Any]:
+        sub = np.ascontiguousarray(display[y0:y1, x0:x1])
+        return {
+            "type": "network_patch",
+            "robot_id": robot_id,
+            "seq": seq,
+            "resolution": meta.resolution,
+            "origin": {"x": meta.origin_x, "y": meta.origin_y},
+            "width": meta.width,
+            "height": meta.height,
+            "x0": x0,
+            "y0": y0,
+            "w": x1 - x0,
+            "h": y1 - y0,
+            "data": base64.b64encode(zlib.compress(sub.tobytes(), 1)).decode(),
+        }
+
+    def take_network_patch(self, robot_id: str) -> dict[str, Any] | None:
+        """Return the changed top-down heatmap rectangle for one robot."""
+        acc = self._network_grids.get(robot_id)
+        if acc is None:
+            return None
+        # Accumulators use ordinary Cartesian row order (low y first); browser
+        # canvases are top-down, like `_grid_png`, so patches are flipped here.
+        display = np.flipud(acc.quality_grid())
+        previous = self._network_prev.get(robot_id)
+        if previous is None or previous.shape != display.shape:
+            y0, x0 = 0, 0
+            y1, x1 = display.shape
+        else:
+            changed = display != previous
+            if not changed.any():
+                return None
+            ys, xs = np.where(changed)
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+        self._network_prev[robot_id] = display.copy()
+        seq = self._network_seq.get(robot_id, 0) + 1
+        self._network_seq[robot_id] = seq
+        return self._network_payload(robot_id, acc.meta, display, x0, y0, x1, y1, seq)
+
+    def network_snapshot(self, robot_id: str) -> dict[str, Any] | None:
+        """Return a full heatmap without disturbing websocket dirty tracking."""
+        acc = self._network_grids.get(robot_id)
+        if acc is None:
+            return None
+        display = np.flipud(acc.quality_grid())
+        height, width = display.shape
+        return self._network_payload(
+            robot_id,
+            acc.meta,
+            display,
+            0,
+            0,
+            width,
+            height,
+            self._network_seq.get(robot_id, 0),
+        )
 
     # Unknown / free / occupied. Must stay in step with the palette in
     # ui/src/lib/stores/mapstore.svelte.ts: the same map reaches the browser as

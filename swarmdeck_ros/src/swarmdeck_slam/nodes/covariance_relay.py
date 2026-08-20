@@ -8,7 +8,7 @@ running on `process_noise_covariance` alone, which works but leaves the filter
 unable to down-weight a momentarily bad sample. Anything that weighs its inputs
 properly — RTAB-Map's ICP odometry, and a GTSAM back end most of all — cannot
 sidestep it: a zero covariance is either rejected or believed absolutely, and
-neither produces a sane estimate. This is docs/KNOWN_ISSUES.md #7.
+neither produces a sane estimate. This is docs/operations/known-issues.md #7.
 
 So this node stamps the noise that `robot.sdf.jinja` actually injects, and
 nothing more. It invents no information: the numbers here are the simulated

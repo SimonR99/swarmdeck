@@ -6,9 +6,8 @@
 One process per robot, running ON the robot (or on a machine that shares its ROS
 graph). This is `adapter_ros2` ported to `rospy`/`actionlib`, not a different
 design: same protocol, same config schema, same capability/deadman rules. It
-exists because some robots in this fleet (the AgileX Scout/Bunker units) run a
-real ROS 1 stack today and porting *that* to ROS 2 is out of scope for joining
-a fleet — see docs/fleet-status.md for which robot is which.
+exists because some robots in this fleet run a real ROS 1 stack today — see
+docs/robots/fleet.md for the platform matrix.
 
 WHY THIS IS A SEPARATE FILE, NOT AN IF/ELSE IN adapter_ros2.py
 ----------------------------------------------------------------
@@ -28,7 +27,7 @@ This has never run against physical hardware (import-checked against a real
 `rospy`/Noetic install on `scout`, nothing more — see
 `adapters/adapter_ros1/config/scout_mini.yaml` for what was read out of that
 robot's actual stack). Every topic name, frame and timeout below is a
-hypothesis until a robot proves it. See docs/hardware-bringup.md.
+hypothesis until a robot proves it. See docs/operations/hardware-bringup.md.
 """
 
 from __future__ import annotations
@@ -67,6 +66,7 @@ from adapters.perception.depth_projection import (
     transform_point,
     transform_points,
 )
+from adapters.network_quality import read_link_quality
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -105,6 +105,9 @@ except ImportError:  # pragma: no cover - depends on the robot's install
 DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
     "footprint_radius": 0.35,
+    # Linux wireless interface to sample into the per-robot network heatmap.
+    # "auto" uses the first row in /proc/net/wireless; empty disables it.
+    "network_iface": "",
     # Frames. `map` and `base_link` are REP-105 names and the only two that must
     # exist; the pose is a tf2 lookup between them rather than a composition of
     # transforms we recognise, because a real TF tree has links we do not know
@@ -184,7 +187,7 @@ DEFAULTS: dict[str, Any] = {
     # outside are dropped before upload: ground and ceiling returns would
     # otherwise flood the grid with false occupied cells. The default is a
     # starting guess, not a calibration — verify against the actual map that
-    # comes out, per docs/hardware-bringup.md.
+    # comes out, per docs/operations/hardware-bringup.md.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
     # How close counts as "arrived" for a `nav_goal`-topic navigation stack,
     # metres. Unlike actionlib there is no explicit success signal to wait
@@ -439,6 +442,8 @@ class HardwareBridge:
             caps.append("camera")
         if self.cfg["topics"].get("battery"):
             caps.append("battery")
+        if self.cfg.get("network_iface"):
+            caps.append("network")
         if self.pub_cmd is not None:
             caps.append("estop")
         return caps
@@ -919,7 +924,7 @@ class HardwareBridge:
             return dict(fallback)
 
     def state(self) -> dict[str, Any]:
-        return {
+        state = {
             "type": "robot_state",
             "robot_id": self.id,
             "t_mono": round(time.monotonic() - self.t0, 4),
@@ -930,6 +935,12 @@ class HardwareBridge:
             "goal": self.goal,
             "planned_path": self.planned_path,
         }
+        network_iface = str(self.cfg.get("network_iface", ""))
+        if network_iface:
+            # Explicit null clears a previously-good live reading if the radio
+            # disassociates while the control socket survives on another link.
+            state["network"] = read_link_quality(network_iface)
+        return state
 
     # ------------------------------------------------------------- commands
 

@@ -36,7 +36,7 @@ ends. Driving back to the start every `--loop-period` seconds makes at least one
 large loop closure per cycle a property of the run rather than an accident, which
 is what pulls accumulated drift out of the whole graph — and it is also what gives
 several robots overlapping coverage, without which map registration is ill-posed
-(docs/KNOWN_ISSUES.md #2) and inter-robot loop closure has nothing to match.
+(docs/operations/known-issues.md #2) and inter-robot loop closure has nothing to match.
 
 Homing steers on `<ns>/odom`, which drifts. That is deliberate: it is the same
 information the robot itself has, and homing only has to get near enough for SLAM

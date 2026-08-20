@@ -9,11 +9,11 @@ GTSAM 4.1.1 pin upstream's docs call for is not needed here. Executable and
 parameter names below are taken from that built workspace rather than from
 documentation. What has still never happened is a real inter-robot loop closure:
 the nodes have not been started against the Gazebo fleet. See
-docs/collaborative-slam.md.
+docs/architecture/collaborative-slam.md.
 
 What this is for. Everything upstream of it — SLAM Toolbox, RTAB-Map, the grid
 merge — leaves each robot with a private pose graph, so no robot's drift is ever
-corrected by another's observations (docs/KNOWN_ISSUES.md #4). cslam adds the
+corrected by another's observations (docs/operations/known-issues.md #4). cslam adds the
 missing capability: robot A recognises a place robot B has been, that becomes a
 constraint between the two graphs, and optimising them jointly corrects BOTH
 robots while yielding the relative transform as a by-product. Grid registration

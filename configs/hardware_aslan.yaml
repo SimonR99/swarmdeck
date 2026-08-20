@@ -1,5 +1,5 @@
 # Single-robot server session for Aslan. Robot drivers and SuperOdometry are
-# started by docker-compose.robot-aslan.yml; this config is backend-only.
+# started by deploy/compose/docker-compose.robot-aslan.yml; this config is backend-only.
 name: hardware_aslan
 seed: 20260806
 

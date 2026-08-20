@@ -15,7 +15,7 @@
 # is paid for out of that budget, which is why the mapping lidar was still at
 # 360 samples per revolution (1.003 deg) and distant walls came out dotted.
 # Moving the raytracing onto the GPU is what makes a realistic lidar
-# affordable; see docs/KNOWN_ISSUES.md #8.
+# affordable; see docs/operations/known-issues.md #8.
 #
 # Verified on this host: `--gpus all` with NVIDIA_DRIVER_CAPABILITIES=all
 # injects /usr/share/glvnd/egl_vendor.d/10_nvidia.json, which libglvnd loads

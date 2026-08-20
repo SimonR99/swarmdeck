@@ -15,7 +15,7 @@ Why replace the wheel+gyro EKF rather than fuse with it. The EKF's measured
 weakness is not noise, it is that wheel odometry cannot observe slip at all: a
 jammed differential drive keeps turning its wheels and the plugin integrates
 motion that never happened, which no filter downstream can undo (8.8-30.5 m of
-error, docs/KNOWN_ISSUES.md). Lidar odometry observes the world directly and is
+error, docs/operations/known-issues.md). Lidar odometry observes the world directly and is
 simply immune to that. Running both would also put two publishers on
 `odom -> base_link`, and a TF tree that flickers between two estimates is worse
 than either — which is exactly why session.launch.py already drops the drive
@@ -31,7 +31,7 @@ the backend map service, Nav2's static layer and the GUI cannot tell which
 backend produced it. That is the property that makes this swap cheap.
 
 What it still does NOT do: share anything between robots. Each robot keeps a
-private pose graph and its own map frame. See docs/collaborative-slam.md.
+private pose graph and its own map frame. See docs/architecture/collaborative-slam.md.
 """
 
 from launch import LaunchDescription
@@ -219,7 +219,7 @@ def generate_launch_description() -> LaunchDescription:
             # constants because these are the simulated robot's numbers: on
             # hardware they come from that unit's URDF or a calibration, and a
             # wrong extrinsic tilts every scan in a way SLAM cannot recover
-            # from. See docs/hardware-readiness.md.
+            # from. See docs/operations/hardware-bringup.md.
             # De-skewing. FALSE by default only because Gazebo's cloud carries
             # no per-point timestamps (verified: fields are x y z intensity
             # ring), so there is nothing to interpolate against and enabling it

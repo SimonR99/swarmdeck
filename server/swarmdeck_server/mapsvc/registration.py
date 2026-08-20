@@ -36,7 +36,7 @@ numpy only — no OpenCV, no PCL, no extra packages. It is far simpler than a
 pose-graph SLAM backend and needs no inter-robot communication, which matters
 for a mixed ROS 1 / ROS 2 fleet where robots cannot share a SLAM system. It is
 also only a *map stitcher*: it never feeds a correction back to any robot, so it
-cannot fix anyone's drift. See docs/collaborative-slam.md.
+cannot fix anyone's drift. See docs/architecture/collaborative-slam.md.
 """
 
 from __future__ import annotations
@@ -346,7 +346,7 @@ def _evaluate(
 
     # Shared known area. Two maps that barely overlap admit many transforms that
     # explain the sliver equally well, so a strong match over a tiny shared
-    # region is not evidence — it is the ill-posed case (docs/KNOWN_ISSUES.md).
+    # region is not evidence — it is the ill-posed case (docs/operations/known-issues.md).
     ref_k = np.union1d(ref_o, _cell_keys(ref_free, lo, res, span))
     mov_k = np.union1d(mov_o, _cell_keys(rot_free, lo, res, span))
     shared = int(np.intersect1d(ref_k, mov_k, assume_unique=True).size)

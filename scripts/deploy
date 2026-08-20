@@ -26,8 +26,6 @@ Default stages: sync, override, build, reset stack, up, verify.
   --no-reset      keep the existing stack while recreating it
   --no-up         stop after sync/override/build (also disables reset/verify)
   --no-verify     skip the post-up container/mount check
-  --verify        compatibility alias for the default verification
-  --no-restart    compatibility alias for sync/override only
 USAGE
   exit 2
 }
@@ -57,7 +55,6 @@ load_profile() {
   : "${DEPLOY_REMOTE_REPO:?profile must define DEPLOY_REMOTE_REPO}"
   : "${DEPLOY_COMPOSE_FILE:?profile must define DEPLOY_COMPOSE_FILE}"
   : "${DEPLOY_ENV_KEYS:?profile must define DEPLOY_ENV_KEYS}"
-  : "${DEPLOY_MODE:=compose}"
   : "${DEPLOY_COMPOSE_PROFILES:=}"
   : "${DEPLOY_CHECK_CONTAINERS:=}"
   : "${DEPLOY_PRE_BUILD_SCRIPT:=}"
@@ -166,7 +163,6 @@ run_operator_up() {
 
 deploy_one() (
   local target="$1" dry="$2" sync="$3" build="$4" reset="$5" up="$6" verify="$7"
-  TARGET="$target"
   load_profile "$target"
   echo "──────── $target  ($DEPLOY_SSH_HOST:$DEPLOY_REMOTE_REPO)"
   preflight
@@ -188,12 +184,12 @@ deploy_one() (
   [[ "$sync" == yes ]] && sync_repo no
   write_overrides "$target" no
   local compose_up="$up"
-  [[ "$DEPLOY_MODE" == operator-script ]] && compose_up=no
+  [[ -n "$DEPLOY_OPERATOR_UP_SCRIPT" ]] && compose_up=no
   local remote_verify="$verify"
   # Native ROS operators bring the Compose services up themselves after the
   # host graph is ready. The generic remote verifier would otherwise inspect
   # containers during the intentional gap between `down` and `scout-up`.
-  [[ "$DEPLOY_MODE" == operator-script ]] && remote_verify=no
+  [[ -n "$DEPLOY_OPERATOR_UP_SCRIPT" ]] && remote_verify=no
   run_remote "$target" "$build" "$reset" "$compose_up" "$remote_verify"
   [[ "$up" == yes ]] && run_operator_up
   echo "  $target: ready"
@@ -211,8 +207,6 @@ main() {
       --no-reset) reset=no ;;
       --no-up) up=no; reset=no; verify=no ;;
       --no-verify) verify=no ;;
-      --verify) verify=yes ;;
-      --no-restart) sync=yes; build=no; reset=no; up=no; verify=no ;;
       *) usage ;;
     esac
     shift

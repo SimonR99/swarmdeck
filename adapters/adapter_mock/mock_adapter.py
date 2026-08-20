@@ -96,6 +96,10 @@ class MockRobot:
         self.reveal()
 
     def state(self) -> dict:
+        # Synthetic AP near the centre: deterministic spatial falloff makes the
+        # local-map heatmap useful in the full backend demo without real Wi-Fi.
+        distance = math.hypot(self.x - 3.0, self.y + 2.0)
+        quality = max(4.0, min(100.0, 98.0 - distance * 3.2))
         return {
             "type": "robot_state",
             "robot_id": self.id,
@@ -105,6 +109,11 @@ class MockRobot:
             "mode": self.mode,
             "nav_status": self.nav_status,
             "goal": self.target,
+            "network": {
+                "interface": "mock-wlan0",
+                "quality_pct": round(quality, 1),
+                "rssi_dbm": round(-90.0 + quality * 0.5, 1),
+            },
         }
 
     def slam_graph(self) -> dict:
@@ -196,7 +205,9 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                             "ros": "none",
                             # Synthetic poses and maps already share one global frame.
                             "coordinate_frame": "merged",
-                            "capabilities": ["navigate", "map", "camera", "battery", "estop"],
+                            "capabilities": [
+                                "navigate", "map", "camera", "battery", "network", "estop"
+                            ],
                             "footprint_radius": 0.35,
                         }
                     )

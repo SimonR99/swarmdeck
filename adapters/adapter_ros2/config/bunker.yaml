@@ -12,6 +12,7 @@
 #   ros2 launch rover_launch bunker_gnm.launch.py
 robot_type: agilex_bunker
 ros_distro: humble
+network_iface: auto
 
 # Bunker is 1.023 x 0.778 m. The circumscribed radius is 0.643 m; round up so
 # the UI never draws a footprint smaller than the physical tracked chassis.

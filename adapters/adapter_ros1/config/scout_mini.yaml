@@ -8,10 +8,11 @@
 # nothing else to start talking to tars's real topics.
 #
 # Live on tars since 2026-08-06: SLAM, camera, map, and now navigate_to via
-# local_planner. See docs/fleet-status.md for exactly what's running and what
+# local_planner. See docs/robots/fleet.md for the platform matrix and what
 # was verified. navigate_to WILL drive the robot once a goal is sent — see the
 # nav_goal/nav_stop comments below before assuming this is inert.
 robot_type: scout_mini
+network_iface: auto
 footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box (scout_mini.urdf.xacro base_x_size/base_y_size) — not the true footprint, since Scout Mini's outline isn't a circle
 
 # ekf_agx.yaml's single EKF instance publishes odom_lidar -> base_link_filtered, and
@@ -32,7 +33,7 @@ base_frame: base_link_filtered
 #
 # The floor is 0.575 m below the frame origin and PITCHED 2.52 degrees, almost
 # purely in x — a lidar<->IMU extrinsic/gravity-alignment error, not a sloped
-# room, and the same defect docs/fleet-status.md flags as the reason not to
+# room, and the same defect docs/robots/fleet.md flags as the reason not to
 # trust this robot's displayed pose.
 #
 # That tilt does put floor into this band, but far less than it looks like it

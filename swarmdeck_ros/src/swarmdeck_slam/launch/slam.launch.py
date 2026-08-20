@@ -27,7 +27,7 @@ out of it — see the node below for why the band is as tight as it is, and
 robot.sdf.jinja for why the ring count must be odd.
 
 This is still 2D SLAM either way. It cannot use the 3D structure, correct z/roll/
-pitch drift, or close loops visually; see docs/collaborative-slam.md for what a
+pitch drift, or close loops visually; see docs/architecture/collaborative-slam.md for what a
 3D-capable per-robot SLAM would change.
 """
 
@@ -69,7 +69,7 @@ def generate_launch_description() -> LaunchDescription:
             # constants because these are the simulated robot's numbers: on
             # hardware they come from that unit's URDF or a calibration, and a
             # wrong extrinsic tilts every scan in a way SLAM cannot recover
-            # from. See docs/hardware-readiness.md.
+            # from. See docs/operations/hardware-bringup.md.
             DeclareLaunchArgument("lidar_x", default_value="-0.07"),
             DeclareLaunchArgument("lidar_z", default_value="0.402"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),

@@ -218,7 +218,8 @@ services:
       # already use. Without it a one-line adapter change needs a multi-minute
       # `up -d --build` on the robot, so botman -- the machine on the worst link
       # and therefore the one most often needing a fix -- was always the slowest
-      # to update. `scripts/deploy botman` now rsyncs and restarts, ~10 s.
+      # to update. The deployment helper rsyncs the source and recreates the
+      # mounted services after the image build.
       - ${BOTMAN_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
