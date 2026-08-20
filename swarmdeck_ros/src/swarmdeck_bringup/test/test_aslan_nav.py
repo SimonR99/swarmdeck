@@ -28,7 +28,7 @@ def test_aslan_services_share_the_robot_ros_domain():
     adapter_dependencies = compose["services"]["adapter"]["depends_on"]
     assert adapter_dependencies["lidar"]["condition"] == "service_started"
     assert adapter_dependencies["slam"]["condition"] == "service_started"
-    assert "nav2" not in adapter_dependencies
+    assert adapter_dependencies["nav2"]["condition"] == "service_started"
     assert "robot_stack" not in adapter_dependencies
 
 

@@ -20,10 +20,30 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
+import numpy as np
+
+class _Cv2Stub:
+    IMWRITE_JPEG_QUALITY = 1
+    COLOR_RGB2BGR = 1
+    COLOR_RGBA2BGR = 2
+    COLOR_BGRA2BGR = 3
+
+    @staticmethod
+    def cvtColor(frame, code):
+        return frame
+
+    @staticmethod
+    def imencode(ext, frame, params=None):
+        return True, np.array([0xFF, 0xD8, 0xFF, 0xD9], dtype=np.uint8)
+
+
+if "cv2" not in sys.modules and importlib.util.find_spec("cv2") is None:
+    sys.modules["cv2"] = _Cv2Stub()
+
 # Submodules must be listed individually: `from nav2_msgs.srv import X` imports
 # `nav2_msgs.srv`, and a MagicMock parent does not make its children importable.
 STUBBED_ROS_MODULES = [
-    "cv2", "websockets", "rclpy", "rclpy.action", "rclpy.node", "rclpy.parameter",
+    "websockets", "rclpy", "rclpy.action", "rclpy.node", "rclpy.parameter",
     "rclpy.qos",
     "action_msgs", "action_msgs.msg", "geometry_msgs", "geometry_msgs.msg",
     "nav_msgs", "nav_msgs.msg", "nav2_msgs", "nav2_msgs.action", "nav2_msgs.srv",

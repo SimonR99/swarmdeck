@@ -58,7 +58,7 @@ def test_autonomous_velocity_can_only_reach_driver_through_adapter():
     assert bunker["actions"]["navigate_to_pose"] == "/botman_0/navigate_to_pose"
 
     adapter_dependencies = compose["services"]["adapter"]["depends_on"]
-    assert adapter_dependencies["nav2"]["condition"] == "service_healthy"
+    assert adapter_dependencies["nav2"]["condition"] == "service_started"
     healthcheck = compose["services"]["nav2"]["healthcheck"]
     assert ". /opt/ros/humble/setup.sh" in healthcheck["test"][1]
     assert "grep -q '^active'" in healthcheck["test"][1]

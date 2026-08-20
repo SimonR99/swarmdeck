@@ -190,7 +190,7 @@ frontend falls back to a built-in simulator, so UI work needs no backend at all.
 
 ```bash
 cd swarmdeck_ros && colcon build --symlink-install && source install/setup.bash
-ros2 launch swarmdeck_bringup session.launch.py config:=study/4robot.yaml
+ros2 launch swarmdeck_bringup session.launch.py config:=configs/4robot.yaml
 # then, separately:
 make server
 python3 adapters/adapter_sim/adapter_sim.py   # count comes from persistent settings
@@ -205,15 +205,16 @@ where appropriate, so lidar mapping and camera perception see the same environme
 
 | Path | What |
 |---|---|
-| `adapters/protocol/` | **The contract of record.** Changing it is deliberate and versioned. |
-| `adapters/adapter_*/` | `mock` (synthetic), `sim` (Gazebo), `ros2` (hardware, **untested on a robot**) |
-| `swarmdeck_ros/src/` | Gazebo world, robot model, SLAM, Nav2, bringup |
-| `server/` | FastAPI backend — fleet registry, map merge, events, recording |
+| `adapters/protocol/` | **The contract of record.** WebSocket/JSON telemetry and command schemas. |
+| `adapters/` | `adapter_mock` (synthetic), `adapter_sim` (Gazebo), `adapter_ros1` (Scout Mini), `adapter_ros2` (Bunker/Spot), `media/`, `perception/` |
+| `swarmdeck_ros/src/` | Gazebo world, robot models, SLAM, Nav2, and ROS bringup packages |
+| `server/` | FastAPI backend — fleet registry, map merging & dynamic expansion, events, recording |
 | `ui/` | Svelte 5 + Tailwind frontend |
-| `study/` | Session configs (`1robot.yaml`, `2robot.yaml`, `4robot.yaml`) |
-| `sessions/` | Recorded output, one directory per session |
-| `docker/` | Server, UI, and Gazebo/ROS images; compose file at repo root |
-| `scripts/` | Operator helpers — `tunnel.sh` publishes the running stack on a public URL |
+| `configs/` | Session & fleet configs (`1robot.yaml`, `4robot.yaml`, `hardware_botman.yaml`, etc.) |
+| `sessions/` | Recorded session outputs & persistent settings/detections |
+| `docker/` | Dockerfiles and entrypoints for server, UI, duck detector, and ROS/Gazebo environments |
+| `scripts/` | Fleet deployment (`deploy`), hardware bringup (`scout-up`), and networking utilities |
+| `docs/` | [System Documentation](docs/README.md) covering Architecture, Robots, and Operations |
 
 ## Map merging
 
@@ -239,7 +240,7 @@ four metrics, and the map view explains which test refused.
 This registration is automatic whenever `merge_mode: auto`, but it is **not** a shared
 multi-robot pose graph. Each robot closes its own loops first; the map service then aligns
 the corrected occupancy grids, so one robot's observations never correct another's drift.
-[`docs/collaborative-slam.md`](docs/collaborative-slam.md) explains the limits of that and
+[`docs/architecture/collaborative-slam.md`](docs/architecture/collaborative-slam.md) explains the limits of that and
 the migration path to true collaborative SLAM.
 
 ### Odometry
@@ -298,11 +299,11 @@ apart at 2.9 m and three cells apart at 8.6 m, and distant walls come out as dot
 rather than lines. Real units are 0.1–0.4°. Rings must be 1 or **odd** — an even count
 leaves no ring at zero elevation, and the spawner refuses it.
 
-`study/baseline_legacy.yaml` reproduces the old sensor exactly, so "the map got better"
+`configs/baseline_legacy.yaml` reproduces the old sensor exactly, so "the map got better"
 stays a measurement rather than an opinion:
 
 ```bash
-SWARMDECK_CONFIG=/app/study/baseline_legacy.yaml make docker-up-gpu
+SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml make docker-up-gpu
 ```
 
 ### Per-robot SLAM backend
@@ -312,7 +313,7 @@ SWARMDECK_CONFIG=/app/study/baseline_legacy.yaml make docker-up-gpu
 `slam_backend:=rtabmap` is the 3D lidar + IMU path, and needs a multi-ring profile:
 
 ```bash
-SLAM_BACKEND=rtabmap SWARMDECK_CONFIG=/app/study/4robot_3d.yaml make docker-up-gpu
+SLAM_BACKEND=rtabmap SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml make docker-up-gpu
 ```
 
 Two nodes, and the split matters. `icp_odometry` owns `odom -> base_link`, registering each
@@ -334,7 +335,7 @@ timestamps; turn it on for real hardware, where every driver worth using stamps 
 Odometry) is wired up as an alternative for hardware evaluation:
 
 ```bash
-SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
                  -f docker-compose.dlio.yml --profile gazebo up --build -d
 ```

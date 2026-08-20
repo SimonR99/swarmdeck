@@ -11,9 +11,13 @@ import pytest
 # client only needs OpenCV to encode its HTTP payload, so provide that narrow
 # seam here when the real package is absent instead of adding OpenCV to the
 # backend's production dependency set.
-if importlib.util.find_spec("cv2") is None:
+if "cv2" not in sys.modules and importlib.util.find_spec("cv2") is None:
     sys.modules["cv2"] = SimpleNamespace(
         IMWRITE_JPEG_QUALITY=1,
+        COLOR_RGB2BGR=1,
+        COLOR_RGBA2BGR=2,
+        COLOR_BGRA2BGR=3,
+        cvtColor=lambda frame, _code: frame,
         imencode=lambda *_args, **_kwargs: (
             True,
             np.array([0xFF, 0xD8, 0xFF, 0xD9], dtype=np.uint8),

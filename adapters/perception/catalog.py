@@ -10,7 +10,7 @@ Deliberately dependency-free -- the server imports it to describe the catalog
 to the browser, and it must not drag numpy or OpenCV into that process.
 
 `prompts` are measured, not chosen by taste.  YOLOE's text encoder is literal
-in ways that are hard to guess: on the reference photograph in `images/`,
+in ways that are hard to guess: on the reference photograph in `tests/perception/fixtures/`,
 "traffic cone" and "sports cone" score *nothing* on a flat sports saucer that
 "orange plastic saucer" finds at 0.70, because the word "cone" pulls the
 embedding towards tall highway cones.  Re-run `tests/perception/test_catalog_recall.py`

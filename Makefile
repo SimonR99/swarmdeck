@@ -62,11 +62,7 @@ tunnel:
 	./scripts/tunnel.sh
 
 test:
-	cd server && $(CLEANENV) .venv/bin/python -m pytest tests -q
-	$(CLEANENV) server/.venv/bin/python -m pytest \
-	  swarmdeck_ros/src/swarmdeck_sim/test \
-	  swarmdeck_ros/src/swarmdeck_bringup/test \
-	  adapters/test -q
+	$(CLEANENV) server/.venv/bin/pytest -q
 	cd ui && npm run check
 
 # --- Scout Mini hardware: start the host ROS graph and robot-side containers.

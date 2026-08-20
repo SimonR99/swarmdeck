@@ -4,7 +4,7 @@ Every other perception test in this repo mocks the model away, which is right:
 adapters must be testable without PyTorch.  But the catalog's prompts and score
 floors are empirical claims about a neural network, and nothing above this
 level can tell a good prompt from a bad one.  So this file runs the real
-weights against the reference photographs in ``images/``.
+weights against the reference photographs in ``tests/perception/fixtures/``.
 
 It is therefore not part of ``make test``.  Run it inside the detector image,
 which is the only place the model and its weights exist:
@@ -36,7 +36,7 @@ from adapters.perception import catalog  # noqa: E402
 from adapters.perception.yoloe_server import YoloeModel  # noqa: E402
 
 
-IMAGES = REPO / "images"
+FIXTURES = REPO / "tests" / "perception" / "fixtures"
 
 #: image stem -> the class that photograph is of.
 EXPECTED = {
@@ -59,7 +59,7 @@ def model() -> YoloeModel:
 def frames() -> dict:
     loaded = {}
     for stem in EXPECTED:
-        path = IMAGES / f"{stem}.jpg"
+        path = FIXTURES / f"{stem}.jpg"
         if not path.exists():  # pragma: no cover - reference set is committed
             pytest.skip(f"missing reference photograph {path}")
         loaded[stem] = cv2.imread(str(path))

@@ -17,17 +17,17 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 - Gazebo simulation: indoor world, 4 differential-drive robots with lidar, IMU, wheel
   odometry, RGB camera.
 - Per-robot 2D SLAM producing an occupancy grid.
-- Merged 2D map across robots, supporting unknown relative start poses.
-- Autonomous navigation per robot.
-- Web GUI: 2D map, per-robot cameras, status, click-to-navigate, alerts.
-- Low-latency video for up to 4 simultaneous camera feeds.
-- Object detection on robot cameras, projected onto the map.
+- Merged 2D occupancy grid across robots, supporting unknown relative start poses.
+- 3D point cloud visualization layer with voxel downsampling and detection volumes.
+- Autonomous navigation and teleoperation per robot.
+- Web GUI: 2D map canvas, 3D scene, per-robot cameras, status, click-to-navigate, alerts.
+- Low-latency video via WebRTC (WHEP) for simultaneous camera feeds.
+- Open-vocabulary object detection (YOLOE) projected onto the global map.
 - Synchronized recording and offline replay of a full session.
 - **Heterogeneous fleet support** via per-robot adapters (ROS 2, ROS 1, simulation).
 
 **Out of scope**
 
-- 3D map building or 3D map display. Lidar pointclouds are reduced to 2D scans.
 - Long-range or lossy-link networking. LAN and localhost only.
 - Authentication, multi-user, cloud, high availability.
 - More than one operator at a time.
