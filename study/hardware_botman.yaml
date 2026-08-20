@@ -11,7 +11,7 @@ fleet:
     profile: generic_32
 
 map:
-  merge_mode: static
+  merge_mode: auto
   size_m: 40.0
   resolution: 0.05
   start_poses: {}

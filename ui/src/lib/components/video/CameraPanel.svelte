@@ -33,6 +33,103 @@
   /** Age of the newest JPEG the backend holds, from `X-Frame-Age-Ms`. */
   let frameAgeMs = $state(0);
   let mediaAspect = $state(16 / 9);
+  let fps = $state(0);
+  let pingLatencyMs = $state(0);
+
+  const ROLLING_ALPHA = 0.2;
+  let lastFrameTime = 0;
+  let rfcHandle: number | null = null;
+  let statsTimer: number | null = null;
+
+  function recordFrame(now: number) {
+    if (lastFrameTime > 0) {
+      const dt = (now - lastFrameTime) / 1000;
+      if (dt > 0.001 && dt < 2.0) {
+        const instantFps = 1 / dt;
+        fps = fps === 0 ? instantFps : fps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
+      }
+    }
+    lastFrameTime = now;
+  }
+
+  function recordLatency(instantMs: number) {
+    if (instantMs >= 0 && instantMs < 10000) {
+      pingLatencyMs =
+        pingLatencyMs === 0
+          ? instantMs
+          : pingLatencyMs * (1 - ROLLING_ALPHA) + instantMs * ROLLING_ALPHA;
+    }
+  }
+
+  function startVideoFrameLoop() {
+    stopVideoFrameLoop();
+    if (!video) return;
+    if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+      const onFrame = (now: DOMHighResTimeStamp) => {
+        recordFrame(now);
+        if (streamSource === 'webrtc' && video) {
+          rfcHandle = (video as any).requestVideoFrameCallback(onFrame);
+        }
+      };
+      rfcHandle = (video as any).requestVideoFrameCallback(onFrame);
+    }
+  }
+
+  function stopVideoFrameLoop() {
+    if (rfcHandle !== null && video && 'cancelVideoFrameCallback' in HTMLVideoElement.prototype) {
+      (video as any).cancelVideoFrameCallback(rfcHandle);
+    }
+    rfcHandle = null;
+    lastFrameTime = 0;
+  }
+
+  function startStatsPolling() {
+    stopStatsPolling();
+    statsTimer = window.setInterval(async () => {
+      if (!pc || streamSource !== 'webrtc') return;
+      try {
+        const stats = await pc.getStats();
+        let foundRtt = false;
+        stats.forEach((report) => {
+          if (
+            report.type === 'candidate-pair' &&
+            (report.state === 'succeeded' || report.nominated)
+          ) {
+            const rtt =
+              report.currentRoundTripTime ??
+              (report.responsesReceived > 0
+                ? report.totalRoundTripTime / report.responsesReceived
+                : undefined);
+            if (typeof rtt === 'number' && Number.isFinite(rtt)) {
+              recordLatency(rtt * 1000);
+              foundRtt = true;
+            }
+          }
+        });
+        if (!foundRtt) {
+          stats.forEach((report) => {
+            if (report.type === 'inbound-rtp') {
+              if (typeof report.roundTripTime === 'number' && Number.isFinite(report.roundTripTime)) {
+                recordLatency(report.roundTripTime * 1000);
+              }
+              if (rfcHandle === null && typeof report.framesPerSecond === 'number' && report.framesPerSecond > 0) {
+                fps = fps === 0 ? report.framesPerSecond : fps * (1 - ROLLING_ALPHA) + report.framesPerSecond * ROLLING_ALPHA;
+              }
+            }
+          });
+        }
+      } catch {
+        // Ignored
+      }
+    }, 1000);
+  }
+
+  function stopStatsPolling() {
+    if (statsTimer) {
+      clearInterval(statsTimer);
+      statsTimer = null;
+    }
+  }
 
   // Back off between WHEP attempts. Not every robot publishes RTSP -- the
   // simulator never does -- so for those the retry is permanent, and a fixed
@@ -141,6 +238,8 @@
           whepFailures = 0;
           streamSource = 'webrtc';
           streamState = 'live';
+          startVideoFrameLoop();
+          startStatsPolling();
         } else if (
           candidate.connectionState === 'failed' ||
           candidate.connectionState === 'disconnected'
@@ -215,11 +314,13 @@
     // causes a white/black flash between every JPEG frame.
     const refresh = async () => {
       try {
+        const t0 = performance.now();
         const response = await fetch(
           `/api/camera/${encodeURIComponent(robotId)}?t=${Date.now()}`,
           { cache: 'no-store' }
         );
         if (!response.ok) throw new Error(`camera ${response.status}`);
+        recordLatency(performance.now() - t0);
         // The request succeeding says the backend answered, not that the robot
         // is still sending. Only this header distinguishes live video from the
         // last frame before a link went bad.
@@ -245,6 +346,7 @@
           target.src = objectUrl;
         });
         await target.decode();
+        recordFrame(performance.now());
         if (generation !== fallbackGeneration) {
           URL.revokeObjectURL(objectUrl);
           return;
@@ -273,6 +375,10 @@
 
   /** Close the peer connection, leaving any JPEG preview running. */
   function closePeer() {
+    stopVideoFrameLoop();
+    stopStatsPolling();
+    fps = 0;
+    pingLatencyMs = 0;
     if (whepProbeTimer) clearTimeout(whepProbeTimer);
     whepProbeTimer = null;
     const closing = pc;
@@ -283,6 +389,7 @@
 
   /** Stop the JPEG loop and release its buffers, leaving WHEP state alone. */
   function stopFallback() {
+    lastFrameTime = 0;
     fallbackGeneration++;
     fallbackFailures = 0;
     if (fallbackTimer) clearTimeout(fallbackTimer);
@@ -299,6 +406,10 @@
   function teardown() {
     closePeer();
     stopFallback();
+    stopVideoFrameLoop();
+    stopStatsPolling();
+    fps = 0;
+    pingLatencyMs = 0;
     if (whepRetryTimer) clearTimeout(whepRetryTimer);
     whepRetryTimer = null;
     whepFailures = 0;
@@ -363,6 +474,7 @@
       autoplay
       muted
       playsinline
+      onplay={startVideoFrameLoop}
       onloadedmetadata={updateVideoAspect}
       onresize={updateVideoAspect}
     ></video>
@@ -456,6 +568,22 @@
         {/if}
       {/each}
     </div>
+
+    <!-- Live diagnostics overlay: FPS & rolling average ping latency -->
+    {#if streamState === 'live'}
+      <div
+        class="pointer-events-none absolute bottom-1.5 right-1.5 z-30 flex items-center gap-1.5 rounded-[3px]
+               border border-white/10 bg-black/65 px-1.5 py-0.5 font-mono text-[10px] font-medium
+               tabular-nums text-white/90 shadow-sm backdrop-blur-md"
+      >
+        <span class="flex items-center gap-1">
+          <span class="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+          <span>{fps > 0 ? Math.round(fps) : '--'} FPS</span>
+        </span>
+        <span class="text-white/30">·</span>
+        <span class="text-white/80">{pingLatencyMs > 0 ? `${Math.round(pingLatencyMs)} ms` : '-- ms'}</span>
+      </div>
+    {/if}
   </div>
 
   <!-- camera switcher -->

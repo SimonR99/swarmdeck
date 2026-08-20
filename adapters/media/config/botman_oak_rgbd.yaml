@@ -1,12 +1,12 @@
 # Botman's OAK-D Pro with depth, for placing duck detections on the map.
 #
-# The RGB-only profile in botman_oak_rgb.yaml stays the default: this one starts
-# the stereo pair as well, which costs USB bandwidth and Jetson CPU on a robot
-# whose video path was tuned measurement by measurement (docs/fleet-status.md).
-# Select it deliberately:
+# Default as of docker-compose.robot-botman.yml: this starts the stereo pair
+# as well as RGB, which costs USB bandwidth and Jetson CPU on a robot whose
+# video path was tuned measurement by measurement (docs/fleet-status.md).
+# Revert to RGB-only deliberately with:
 #
-#     BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml docker compose \
-#       -f docker-compose.robot-botman.yml --profile oak-depth up -d
+#     BOTMAN_OAK_PARAMS=botman_oak_rgb.yaml docker compose \
+#       -f docker-compose.robot-botman.yml up -d
 #
 # UNVERIFIED ON THE ROBOT. Written against depthai_ros_driver's documented
 # parameters, not against the copy installed in /ssd/mist_ws. Confirm the names

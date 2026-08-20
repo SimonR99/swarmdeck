@@ -362,7 +362,62 @@ export const mapStore = {
   applyGlobalPatch(patch: MapPatch) {
     if (state.viewMode !== 'global') return;
     if (!state.info) return;
-    ensureCanvas(state.info.width, state.info.height);
+
+    const patchWidth = patch.width ?? state.info.width;
+    const patchHeight = patch.height ?? state.info.height;
+    const patchOriginX = patch.origin.x;
+    const patchOriginY = patch.origin.y;
+
+    const dimensionsChanged =
+      state.info.origin.x !== patchOriginX ||
+      state.info.origin.y !== patchOriginY ||
+      state.info.width !== patchWidth ||
+      state.info.height !== patchHeight;
+
+    if (dimensionsChanged) {
+      const oldInfo = state.info;
+      const oldCanvas = document.createElement('canvas');
+      oldCanvas.width = oldInfo.width;
+      oldCanvas.height = oldInfo.height;
+      const oldCtx = oldCanvas.getContext('2d');
+      if (canvas && oldCtx) {
+        oldCtx.drawImage(canvas, 0, 0);
+      }
+      const oldOccupied = occupied ? new Uint8Array(occupied) : null;
+
+      state.info = {
+        resolution: patch.resolution,
+        width: patchWidth,
+        height: patchHeight,
+        origin: patch.origin,
+        seq: patch.seq
+      };
+      ensureCanvas(patchWidth, patchHeight);
+
+      if (ctx && oldInfo) {
+        const offX = Math.round((oldInfo.origin.x - patchOriginX) / patch.resolution);
+        const offY = Math.round(
+          patchHeight - oldInfo.height - (oldInfo.origin.y - patchOriginY) / patch.resolution
+        );
+        ctx.drawImage(oldCanvas, offX, offY);
+
+        if (oldOccupied && occupied) {
+          for (let y = 0; y < oldInfo.height; y++) {
+            const srcRow = y * oldInfo.width;
+            const dstRow = (y + offY) * patchWidth + offX;
+            if (y + offY >= 0 && y + offY < patchHeight) {
+              for (let x = 0; x < oldInfo.width; x++) {
+                if (x + offX >= 0 && x + offX < patchWidth) {
+                  occupied[dstRow + x] = oldOccupied[srcRow + x];
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      ensureCanvas(state.info.width, state.info.height);
+    }
     if (!ctx) return;
 
     const raw = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));

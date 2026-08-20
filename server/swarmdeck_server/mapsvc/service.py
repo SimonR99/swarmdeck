@@ -136,6 +136,8 @@ def estimate_z_offset(
 
 class MapService:
     def __init__(self, resolution: float = 0.05, size_m: float = 30.0) -> None:
+        self._initial_resolution = resolution
+        self._initial_size_m = size_m
         n = int(size_m / resolution)
         self.meta = GridMeta(resolution, n, n, -size_m / 2, -size_m / 2)
         self.merged = np.full((n, n), UNKNOWN, dtype=np.int8)
@@ -367,7 +369,38 @@ class MapService:
         picked by whichever grid arrived first, keeping it merely keeps the same
         robot in the role across the reset.
         """
-        self.merged = np.full_like(self.merged, UNKNOWN)
+        init_n = int(self._initial_size_m / self._initial_resolution)
+        old_prev = self._prev
+        old_meta = self.meta
+
+        self.meta = GridMeta(
+            self._initial_resolution, init_n, init_n,
+            -self._initial_size_m / 2, -self._initial_size_m / 2
+        )
+        self.merged = np.full((init_n, init_n), UNKNOWN, dtype=np.int8)
+
+        if (old_meta.width != init_n or old_meta.height != init_n or
+                old_meta.origin_x != self.meta.origin_x or old_meta.origin_y != self.meta.origin_y):
+            new_prev = np.full((init_n, init_n), UNKNOWN, dtype=np.int8)
+            res = self.meta.resolution
+            off_x = int(round((old_meta.origin_x - self.meta.origin_x) / res))
+            off_y = int(round((old_meta.origin_y - self.meta.origin_y) / res))
+            src_x0 = max(0, -off_x)
+            src_y0 = max(0, -off_y)
+            dst_x0 = max(0, off_x)
+            dst_y0 = max(0, off_y)
+            copy_w = min(old_meta.width - src_x0, init_n - dst_x0)
+            copy_h = min(old_meta.height - src_y0, init_n - dst_y0)
+            if copy_w > 0 and copy_h > 0:
+                new_prev[dst_y0 : dst_y0 + copy_h, dst_x0 : dst_x0 + copy_w] = old_prev[src_y0 : src_y0 + copy_h, src_x0 : src_x0 + copy_w]
+            self._prev = new_prev
+        else:
+            self._prev = old_prev
+
+        cx = self.meta.origin_x + (np.arange(init_n) + 0.5) * self.meta.resolution
+        cy = self.meta.origin_y + (np.arange(init_n) + 0.5) * self.meta.resolution
+        self._wx, self._wy = np.meshgrid(cx, cy)
+
         self.robot_grids.clear()
         self.robot_revisions.clear()
         self.robot_clouds.clear()
@@ -1184,6 +1217,60 @@ class MapService:
         out[valid] = cells[gy[valid], gx[valid]]
         return out
 
+    def _ensure_extent_for_members(
+        self, member_items: list[tuple[GridMeta, np.ndarray, tuple[float, float, float]]]
+    ) -> None:
+        """Expand merged grid extent if member grids extend outside current meta."""
+        if not member_items:
+            return
+        min_x = self.meta.origin_x
+        max_x = self.meta.origin_x + self.meta.width * self.meta.resolution
+        min_y = self.meta.origin_y
+        max_y = self.meta.origin_y + self.meta.height * self.meta.resolution
+
+        res = self.meta.resolution
+        for meta, _, tf in member_items:
+            tx, ty, yaw = tf
+            c, s = math.cos(yaw), math.sin(yaw)
+            corners_x = [meta.origin_x, meta.origin_x + meta.width * meta.resolution]
+            corners_y = [meta.origin_y, meta.origin_y + meta.height * meta.resolution]
+            for cx in corners_x:
+                for cy in corners_y:
+                    wx = tx + cx * c - cy * s
+                    wy = ty + cx * s + cy * c
+                    min_x = min(min_x, wx)
+                    max_x = max(max_x, wx)
+                    min_y = min(min_y, wy)
+                    max_y = max(max_y, wy)
+
+        cur_min_x = self.meta.origin_x
+        cur_max_x = self.meta.origin_x + self.meta.width * res
+        cur_min_y = self.meta.origin_y
+        cur_max_y = self.meta.origin_y + self.meta.height * res
+
+        if min_x < cur_min_x or max_x > cur_max_x or min_y < cur_min_y or max_y > cur_max_y:
+            CHUNK_M = 5.0
+            new_min_x = math.floor((min_x - CHUNK_M) / res) * res
+            new_max_x = math.ceil((max_x + CHUNK_M) / res) * res
+            new_min_y = math.floor((min_y - CHUNK_M) / res) * res
+            new_max_y = math.ceil((max_y + CHUNK_M) / res) * res
+
+            new_width = int(round((new_max_x - new_min_x) / res))
+            new_height = int(round((new_max_y - new_min_y) / res))
+
+            new_prev = np.full((new_height, new_width), UNKNOWN, dtype=np.int8)
+            off_x = int(round((cur_min_x - new_min_x) / res))
+            off_y = int(round((cur_min_y - new_min_y) / res))
+            new_prev[off_y : off_y + self.meta.height, off_x : off_x + self.meta.width] = self._prev
+            self._prev = new_prev
+
+            self.meta = GridMeta(res, new_width, new_height, new_min_x, new_min_y)
+            self.merged = np.full((new_height, new_width), UNKNOWN, dtype=np.int8)
+
+            cx = self.meta.origin_x + (np.arange(new_width) + 0.5) * res
+            cy = self.meta.origin_y + (np.arange(new_height) + 0.5) * res
+            self._wx, self._wy = np.meshgrid(cx, cy)
+
     def _remerge(self) -> None:
         """Combine every member's grid, resolving disagreements by vote.
 
@@ -1213,18 +1300,25 @@ class MapService:
             # Same offset as the poses: the back end's grid is in its common
             # frame, anchored at the reference robot's start pose.
             meta, cells = self.global_grid
+            self._ensure_extent_for_members([(meta, cells, self._common_to_world())])
             self.merged = self._warp(meta, cells, self._common_to_world())
             return
 
         members = self.global_members()
-        warped_grids = [
-            self._warp(meta, cells, self.transforms.get(rid, (0.0, 0.0, 0.0)))
+        items = [
+            (meta, cells, self.transforms.get(rid, (0.0, 0.0, 0.0)))
             for rid, (meta, cells) in self.robot_grids.items()
             if rid in members
         ]
-        if not warped_grids:
+        if not items:
             self.merged = np.full_like(self.merged, UNKNOWN)
             return
+
+        self._ensure_extent_for_members(items)
+        warped_grids = [
+            self._warp(meta, cells, tf)
+            for meta, cells, tf in items
+        ]
 
         if self.merge_conflict == "occupied":
             out = np.full_like(self.merged, UNKNOWN)
@@ -1266,6 +1360,8 @@ class MapService:
             "seq": self.seq,
             "resolution": self.meta.resolution,
             "origin": {"x": self.meta.origin_x, "y": self.meta.origin_y},
+            "width": self.meta.width,
+            "height": self.meta.height,
             "x0": x0,
             "y0": y0,
             "w": x1 - x0,

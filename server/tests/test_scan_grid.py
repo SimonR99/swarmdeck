@@ -135,15 +135,26 @@ def test_occupied_is_never_downgraded_by_a_later_free_ray():
     assert acc.cells[hy, hx] == OCCUPIED
 
 
-def test_points_and_origin_outside_the_window_are_dropped_not_crashed():
+def test_outlier_point_beyond_max_range_is_dropped():
     acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=4.0)
-    # Point far outside the 4 m window.
+    # Point far outside max lidar range (e.g. 100m, 100m).
     acc.integrate(0.0, 0.0, np.array([[100.0, 100.0]], dtype=np.float32))
     assert (acc.cells == OCCUPIED).sum() == 0
 
-    # Origin itself outside the window: nothing to raytrace from, no crash.
-    acc.integrate(500.0, 500.0, np.array([[500.5, 500.0]], dtype=np.float32))
-    assert (acc.cells != UNKNOWN).sum() == 0
+
+def test_robot_outside_initial_window_expands_grid_and_updates_map():
+    """When a robot drives beyond its initial window, the grid dynamically
+    expands so scans continue to update the map with free and occupied cells."""
+    acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=4.0)
+    # Initial window is [-2.0, 2.0] in x and y.
+    # Robot drives to (10.0, 0.0) (well outside the 4m window) and returns a hit at (10.5, 0.0).
+    acc.integrate(10.0, 0.0, np.array([[10.5, 0.0]], dtype=np.float32))
+
+    hx, hy = acc._to_cell(10.5, 0.0)
+    ox, oy = acc._to_cell(10.0, 0.0)
+    assert acc.cells[hy, hx] == OCCUPIED
+    assert acc.cells[oy, ox] == FREE
+    assert (acc.cells == OCCUPIED).sum() >= 1
 
 
 def test_empty_points_is_a_noop():
@@ -261,3 +272,45 @@ def test_outlier_filter_is_a_noop_on_a_tiny_scan():
     tiny = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     assert len(drop_range_outliers(0.0, 0.0, tiny)) == 2
     assert len(drop_range_outliers(0.0, 0.0, np.zeros((0, 2), np.float32))) == 0
+
+
+def test_ingest_scan_outside_initial_map_extent_expands_merged_map():
+    """When a robot explores beyond the initial MapService extent, the merged map
+    and accumulator both expand and update without dropping scans."""
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("static")
+    svc.set_transform("r0", 0.0, 0.0, 0.0)
+
+    # Initial extent is [-5.0, 5.0] in x and y.
+    # Ingest a scan from robot at (20.0, 0.0) with returns at (21.0, 0.0).
+    svc.ingest_scan("r0", 20.0, 0.0, np.array([[21.0, 0.0]], dtype=np.float32))
+
+    # The accumulator and merged map should now cover x=21.0
+    assert "r0" in svc.robot_grids
+    meta, cells = svc.robot_grids["r0"]
+    assert meta.origin_x + meta.width * meta.resolution >= 21.0
+    assert (cells == OCCUPIED).any()
+
+    # Merged map should also cover x=21.0 and contain the occupied return
+    assert svc.meta.origin_x + svc.meta.width * svc.meta.resolution >= 21.0
+    assert (svc.merged == OCCUPIED).any()
+
+    patch = svc.take_patch()
+    assert patch is not None
+    assert patch["type"] == "map_patch"
+    assert patch["width"] == svc.meta.width
+    assert patch["height"] == svc.meta.height
+
+
+def test_map_reset_restores_initial_extent_after_expansion():
+    """Resetting after expansion returns the service to its configured initial bounds."""
+    svc = MapService(resolution=0.1, size_m=10.0)
+    svc.set_mode("static")
+    svc.ingest_scan("r0", 30.0, 0.0, np.array([[31.0, 0.0]], dtype=np.float32))
+    assert svc.meta.width * svc.meta.resolution > 10.0
+
+    svc.reset()
+    assert (svc.merged == UNKNOWN).all()
+    assert svc.meta.width * svc.meta.resolution == 10.0
+    assert svc.meta.origin_x == -5.0
+    assert svc.meta.origin_y == -5.0

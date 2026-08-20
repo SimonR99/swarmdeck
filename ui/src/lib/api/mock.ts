@@ -232,14 +232,23 @@ export class MockFleet {
       y0 = H,
       x1 = 0,
       y1 = 0;
+    let anyInside = false;
     for (const r of this.robots) {
       const cx = Math.round((r.x - ORIGIN.x) / RES);
       const cy = Math.round(H - (r.y - ORIGIN.y) / RES);
-      x0 = Math.max(0, Math.min(x0, cx - REVEAL_R - 2));
-      y0 = Math.max(0, Math.min(y0, cy - REVEAL_R - 2));
-      x1 = Math.min(W, Math.max(x1, cx + REVEAL_R + 2));
-      y1 = Math.min(H, Math.max(y1, cy + REVEAL_R + 2));
+      const rx0 = cx - REVEAL_R - 2;
+      const ry0 = cy - REVEAL_R - 2;
+      const rx1 = cx + REVEAL_R + 2;
+      const ry1 = cy + REVEAL_R + 2;
+      if (rx1 > 0 && rx0 < W && ry1 > 0 && ry0 < H) {
+        x0 = Math.min(x0, Math.max(0, rx0));
+        y0 = Math.min(y0, Math.max(0, ry0));
+        x1 = Math.max(x1, Math.min(W, rx1));
+        y1 = Math.max(y1, Math.min(H, ry1));
+        anyInside = true;
+      }
     }
+    if (!anyInside) return;
     const w = x1 - x0;
     const h = y1 - y0;
     if (w <= 0 || h <= 0) return;

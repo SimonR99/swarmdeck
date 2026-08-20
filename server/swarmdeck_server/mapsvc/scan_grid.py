@@ -19,6 +19,8 @@ unobstructed.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .grid_meta import GridMeta
@@ -140,14 +142,16 @@ def _bresenham(x0: int, y0: int, x1: int, y1: int) -> tuple[np.ndarray, np.ndarr
     return np.array(xs, dtype=np.int64), np.array(ys, dtype=np.int64)
 
 
+MAX_RAY_RANGE_M = 50.0  # Max realistic lidar range; returns beyond this are noise/sky
+EXPAND_CHUNK_M = 5.0    # Margin in metres when expanding the grid bounds
+
+
 class ScanGridAccumulator:
     """One robot's persistent occupancy grid, built up scan by scan.
 
-    Fixed size, anchored on the first scan's sensor position — the same way a
-    SLAM stack anchors its own map at wherever the robot started. A point (or
-    ray) that falls outside this window is dropped rather than growing the
-    grid; that bounds a robot to roughly `size_m` of travel from its start in
-    any direction, which is a real limitation, not a hidden one.
+    Anchored on the first scan's sensor position, and dynamically expanded
+    as the robot explores or moves outside the initial window so map updates
+    continue uninterrupted regardless of travel distance.
     """
 
     def __init__(
@@ -173,6 +177,35 @@ class ScanGridAccumulator:
             return gx, gy
         return None
 
+    def _expand(self, min_x: float, max_x: float, min_y: float, max_y: float) -> None:
+        """Expand grid dimensions to cover [min_x, max_x] x [min_y, max_y]."""
+        cur_min_x = self.meta.origin_x
+        cur_max_x = self.meta.origin_x + self.meta.width * self.meta.resolution
+        cur_min_y = self.meta.origin_y
+        cur_max_y = self.meta.origin_y + self.meta.height * self.meta.resolution
+
+        res = self.meta.resolution
+        new_min_x = min(cur_min_x, math.floor((min_x - EXPAND_CHUNK_M) / res) * res)
+        new_max_x = max(cur_max_x, math.ceil((max_x + EXPAND_CHUNK_M) / res) * res)
+        new_min_y = min(cur_min_y, math.floor((min_y - EXPAND_CHUNK_M) / res) * res)
+        new_max_y = max(cur_max_y, math.ceil((max_y + EXPAND_CHUNK_M) / res) * res)
+
+        new_width = int(round((new_max_x - new_min_x) / res))
+        new_height = int(round((new_max_y - new_min_y) / res))
+
+        new_cells = np.full((new_height, new_width), UNKNOWN, dtype=np.int8)
+        new_evidence = np.zeros((new_height, new_width), dtype=np.int32)
+
+        off_x = int(round((cur_min_x - new_min_x) / res))
+        off_y = int(round((cur_min_y - new_min_y) / res))
+
+        new_cells[off_y : off_y + self.meta.height, off_x : off_x + self.meta.width] = self.cells
+        new_evidence[off_y : off_y + self.meta.height, off_x : off_x + self.meta.width] = self._evidence
+
+        self.cells = new_cells
+        self._evidence = new_evidence
+        self.meta = GridMeta(res, new_width, new_height, new_min_x, new_min_y)
+
     def integrate(
         self, origin_x: float, origin_y: float, points_xy: np.ndarray
     ) -> None:
@@ -183,14 +216,42 @@ class ScanGridAccumulator:
         gain constants for why a verdict now needs corroboration in the free
         direction and stays revisable in the occupied one.
         """
+        if points_xy.size == 0 or not math.isfinite(origin_x) or not math.isfinite(origin_y):
+            return
+
+        finite = np.isfinite(points_xy).all(axis=1)
+        valid_pts = points_xy[finite]
+        if valid_pts.size == 0:
+            return
+
+        dx = valid_pts[:, 0] - origin_x
+        dy = valid_pts[:, 1] - origin_y
+        in_range = (dx * dx + dy * dy) <= (MAX_RAY_RANGE_M * MAX_RAY_RANGE_M)
+        valid_pts = valid_pts[in_range]
+        if valid_pts.size == 0:
+            return
+
+        req_min_x = min(float(origin_x), float(valid_pts[:, 0].min()))
+        req_max_x = max(float(origin_x), float(valid_pts[:, 0].max()))
+        req_min_y = min(float(origin_y), float(valid_pts[:, 1].min()))
+        req_max_y = max(float(origin_y), float(valid_pts[:, 1].max()))
+
+        cur_min_x = self.meta.origin_x
+        cur_max_x = self.meta.origin_x + self.meta.width * self.meta.resolution
+        cur_min_y = self.meta.origin_y
+        cur_max_y = self.meta.origin_y + self.meta.height * self.meta.resolution
+
+        if req_min_x < cur_min_x or req_max_x >= cur_max_x or req_min_y < cur_min_y or req_max_y >= cur_max_y:
+            self._expand(req_min_x, req_max_x, req_min_y, req_max_y)
+
         origin_cell = self._to_cell(origin_x, origin_y)
-        if origin_cell is None or points_xy.size == 0:
+        if origin_cell is None:
             return
         ox, oy = origin_cell
         width = self.meta.width
         crossed: list[np.ndarray] = []
         hits: list[int] = []
-        for px, py in points_xy:
+        for px, py in valid_pts:
             hit = self._to_cell(float(px), float(py))
             if hit is None:
                 continue

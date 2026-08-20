@@ -106,11 +106,11 @@ services:
     volumes:
       - /dev:/dev
       - /ssd/mist_ws:/workspace:ro
-      # RGB only by default. `BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml` starts the
-      # stereo pair as well, which is what lets duck detections become map
-      # markers; see that file for the bandwidth it costs and what remains
-      # unverified about it.
-      - ./adapters/media/config/${BOTMAN_OAK_PARAMS:-botman_oak_rgb.yaml}:/app/swarmdeck/botman_oak.yaml:ro
+      # RGBD by default, which is what lets duck detections become map
+      # markers; see botman_oak_rgbd.yaml for the USB/CPU bandwidth it costs
+      # and what remains unverified about it. `BOTMAN_OAK_PARAMS=botman_oak_rgb.yaml`
+      # reverts to RGB-only if that cost is not worth paying.
+      - ./adapters/media/config/${BOTMAN_OAK_PARAMS:-botman_oak_rgbd.yaml}:/app/swarmdeck/botman_oak.yaml:ro
     command:
       - ros2
       - launch
@@ -125,24 +125,23 @@ services:
   # Where the OAK-D Pro is bolted, relative to the frame Botman's pose is
   # reported in. Depth gives a detection a range; only this gives it a place.
   #
-  # OPT-IN AND UNMEASURED, deliberately. `--profile oak-depth` starts it, and
-  # the numbers must come from a tape measure on the actual robot: the live TF
-  # tree contains no calibrated edge onto the camera, and this project has
-  # already paid for one hand-guessed extrinsic (0.47 m of pose error nobody
-  # noticed for weeks). Left unset, the node refuses to parse its arguments and
-  # says so in its log, rather than silently claiming the camera is the lidar.
+  # Starts by default alongside the rest of the stack now, but the numbers
+  # still MUST come from a tape measure on the actual robot: the live TF tree
+  # contains no calibrated edge onto the camera, and this project has already
+  # paid for one hand-guessed extrinsic (0.47 m of pose error nobody noticed
+  # for weeks). Left unset, the node refuses to parse its arguments and says so
+  # in its log, rather than silently claiming the camera is the lidar — that
+  # fail-loud default is deliberately NOT overridden with a guess here.
   #
   #   BOTMAN_OAK_X=<measured> BOTMAN_OAK_Y=<measured> BOTMAN_OAK_Z=<measured> \
   #   BOTMAN_OAK_ROLL=<measured> BOTMAN_OAK_PITCH=<measured> BOTMAN_OAK_YAW=<measured> \
-  #   BOTMAN_OAK_PARAMS=botman_oak_rgbd.yaml \
-  #   docker compose -f docker-compose.robot-botman.yml --profile oak-depth up -d
+  #   docker compose -f docker-compose.robot-botman.yml up -d
   #
   # x forward / y left / z up from `os_lidar` to the DepthAI driver's own base
   # frame; the driver publishes the rest of the chain to the optical frames its
   # images are stamped with. Verify the child frame name against
   # `ros2 run tf2_tools view_frames` — it is the driver's, not ours.
   oak_mount_tf:
-    profiles: ["oak-depth"]
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-botman-oak-tf
     depends_on:

@@ -7,8 +7,8 @@ set -Eeuo pipefail
 scout_host=${SCOUT_HOST:-scout}
 scout_repo=${SCOUT_REPO:-/ssd/swarmdeck}
 robot_id=${ROBOT_ID:-tars_0}
-robot_ip=${ROBOT_IP:-192.168.1.24}
-backend_host=${BACKEND_HOST:-192.168.1.223}
+robot_ip=${ROBOT_IP:-192.168.1.230}
+backend_host=${BACKEND_HOST:-192.168.1.161}
 ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
 camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
 
@@ -47,6 +47,8 @@ set -u
 
 export ROBOT_ID="${robot_id}"
 export OUSTER_HOST_NAME="${ouster_host}"
+export ROS_IP="${robot_ip}"
+export ROS_MASTER_URI="http://${robot_ip}:11311"
 
 start_detached() {
   local label=$1
@@ -154,6 +156,8 @@ export ROBOT_IP="${robot_ip}"
 export BACKEND_HOST="${backend_host}"
 export ROBOT_CONFIG=adapters/adapter_ros1/config/scout_mini.yaml
 export CAMERA_TOPIC="${camera_topic}"
+export VIDEO_BITRATE_KBPS="${VIDEO_BITRATE_KBPS:-700}"
+export VIDEO_FPS="${VIDEO_FPS:-10}"
 
 (
   cd "${repo}"

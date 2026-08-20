@@ -154,6 +154,8 @@ export interface MapPatch {
   seq: number;
   resolution: number;
   origin: Point;
+  width?: number;
+  height?: number;
   x0: number;
   y0: number;
   w: number;
