@@ -156,7 +156,7 @@ contract**, so ROS 2 robots, ROS 1 robots, and Gazebo can coexist in one fleet.
 12. **The backend runs with zero ROS packages installed**, driven by a mock adapter.
 13. The whole stack starts with one command:
     ```bash
-    ros2 launch swarmdeck_bringup session.launch.py config:=study/4robot.yaml
+    ros2 launch swarmdeck_bringup session.launch.py config:=configs/4robot.yaml
     ```
 
 ## 7. Prerequisites

@@ -125,7 +125,12 @@ _reset_running = False
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     global CONFIG, map_service
-    p = Path(path) if path else REPO / "study" / "4robot.yaml"
+    if path:
+        p = Path(path)
+    elif (REPO / "configs" / "4robot.yaml").exists():
+        p = REPO / "configs" / "4robot.yaml"
+    else:
+        p = REPO / "study" / "4robot.yaml"
     CONFIG = yaml.safe_load(p.read_text()) if p.exists() else {}
 
     mcfg = CONFIG.get("map", {}) or {}

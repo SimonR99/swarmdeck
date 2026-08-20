@@ -42,7 +42,8 @@ RUN pip3 install --break-system-packages --no-cache-dir websockets
 WORKDIR /app
 COPY swarmdeck_ros /app/swarmdeck_ros
 COPY adapters /app/adapters
-COPY study /app/study
+COPY configs /app/configs
+RUN ln -s /app/configs /app/study
 COPY docker/gazebo-entrypoint.sh /usr/local/bin/gazebo-entrypoint.sh
 RUN chmod +x /usr/local/bin/gazebo-entrypoint.sh \
     && mkdir -p /app/sessions

@@ -14,7 +14,7 @@ export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 
 BACKEND_HOST="${BACKEND_HOST:-server}"
 BACKEND_PORT="${BACKEND_PORT:-8080}"
-CONFIG="${SWARMDECK_CONFIG:-/app/study/4robot.yaml}"
+CONFIG="${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
 HEADLESS="${HEADLESS:-true}"
 # Must outlast session.launch.py's staggered per-robot bringup, or the adapter
 # starts advertising robots whose SLAM is not active yet.

@@ -1,7 +1,7 @@
 # DLIO overlay: replaces RTAB-Map's icp_odometry with Direct LiDAR-Inertial
 # Odometry, for evaluation.
 #
-#   SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+#   SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 #                  -f docker-compose.dlio.yml --profile gazebo up --build -d
 #
@@ -16,7 +16,7 @@ services:
     profiles: ["gazebo"]
     build:
       context: .
-      dockerfile: docker/Dockerfile.dlio
+      dockerfile: deploy/docker/Dockerfile.dlio
     image: swarmdeck-dlio:local
     depends_on:
       - gazebo

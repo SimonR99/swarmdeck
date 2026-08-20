@@ -85,7 +85,7 @@ services:
   odom_tf:
     build:
       context: .
-      dockerfile: docker/Dockerfile.robot-nav2
+      dockerfile: deploy/docker/Dockerfile.robot-nav2
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-aslan-odom-tf
     depends_on:
@@ -118,7 +118,7 @@ services:
   nav2:
     build:
       context: .
-      dockerfile: docker/Dockerfile.robot-nav2
+      dockerfile: deploy/docker/Dockerfile.robot-nav2
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-aslan-nav2
     depends_on:
@@ -210,7 +210,7 @@ services:
   media:
     build:
       context: .
-      dockerfile: docker/Dockerfile.robot-ros2
+      dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-aslan-media
     depends_on:
@@ -243,7 +243,7 @@ services:
   duck_detector:
     build:
       context: .
-      dockerfile: docker/Dockerfile.duck-detector
+      dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
     image: swarmdeck-duck-detector:jetpack6

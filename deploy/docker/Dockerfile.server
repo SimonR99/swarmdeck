@@ -16,7 +16,8 @@ RUN apt-get update \
 COPY server/pyproject.toml /app/server/pyproject.toml
 COPY server/swarmdeck_server /app/server/swarmdeck_server
 COPY server/tests /app/server/tests
-COPY study /app/study
+COPY configs /app/configs
+RUN ln -s /app/configs /app/study
 COPY adapters /app/adapters
 RUN mkdir -p /app/sessions
 

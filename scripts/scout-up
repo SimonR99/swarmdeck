@@ -176,9 +176,13 @@ export VIDEO_FPS="${VIDEO_FPS:-10}"
       echo "SwarmDeck detector started; adapter/media restarted to reconnect to ROS"
     fi
   elif docker compose version >/dev/null 2>&1; then
-    docker compose -f docker-compose.robot-ros1.yml up -d
+    COMPOSE_FILE="deploy/compose/docker-compose.robot-ros1.yml"
+    [[ ! -f "$COMPOSE_FILE" ]] && COMPOSE_FILE="docker-compose.robot-ros1.yml"
+    docker compose -f "$COMPOSE_FILE" up -d
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose -f docker-compose.robot-ros1.yml up -d
+    COMPOSE_FILE="deploy/compose/docker-compose.robot-ros1.yml"
+    [[ ! -f "$COMPOSE_FILE" ]] && COMPOSE_FILE="docker-compose.robot-ros1.yml"
+    docker-compose -f "$COMPOSE_FILE" up -d
   else
     echo "Adapter/media containers are missing and Docker Compose is not installed" >&2
     exit 1

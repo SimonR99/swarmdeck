@@ -1,6 +1,6 @@
 """One-command launch for the whole simulated stack (acceptance criterion 13).
 
-    ros2 launch swarmdeck_bringup session.launch.py config:=study/4robot.yaml
+    ros2 launch swarmdeck_bringup session.launch.py config:=configs/4robot.yaml
 
 Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot odometry
 fusion + SLAM + Nav2. The backend and UI run separately (`make server`, `make ui`)
@@ -339,7 +339,7 @@ def setup(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
-            DeclareLaunchArgument("config", default_value="study/4robot.yaml"),
+            DeclareLaunchArgument("config", default_value="configs/4robot.yaml"),
             DeclareLaunchArgument("headless", default_value="true"),
             DeclareLaunchArgument(
                 "slam_backend",

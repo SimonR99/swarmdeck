@@ -31,10 +31,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # repo does not carry, and a --delete sync proposes removing them. The others
 # are clean. (The stale nested adapters/adapters/ copy was removed 2026-08-13.)
 ROBOTS=(
-  "aslan|aslan@192.168.1.139|/ssd/swarmdeck||swarmdeck-aslan-adapter swarmdeck-aslan-media|docker-compose.robot-aslan.yml"
-  "spot|spot|/home/indro/swarmdeck|--delete|swarmdeck-spot-adapter swarmdeck-spot-media|docker-compose.robot-spot.yml"
-  "botman|botman@192.168.1.49|/ssd/swarmdeck|--delete|swarmdeck-botman-adapter swarmdeck-botman-media|docker-compose.robot-botman.yml"
-  "scout|scout|/ssd/swarmdeck|--delete|swarmdeck-adapter swarmdeck-media|docker-compose.robot-ros1.yml"
+  "aslan|aslan@192.168.1.139|/ssd/swarmdeck||swarmdeck-aslan-adapter swarmdeck-aslan-media|deploy/compose/docker-compose.robot-aslan.yml"
+  "spot|spot|/home/indro/swarmdeck|--delete|swarmdeck-spot-adapter swarmdeck-spot-media|deploy/compose/docker-compose.robot-spot.yml"
+  "botman|botman@192.168.1.49|/ssd/swarmdeck|--delete|swarmdeck-botman-adapter swarmdeck-botman-media|deploy/compose/docker-compose.robot-botman.yml"
+  "scout|scout|/ssd/swarmdeck|--delete|swarmdeck-adapter swarmdeck-media|deploy/compose/docker-compose.robot-ros1.yml"
 )
 
 RSYNC_COMMON=(-a --exclude __pycache__ --exclude '*.pyc' --exclude '*.pre-duck-map-*')
@@ -91,7 +91,10 @@ deploy_one() {
   # on a robot whose container has not been recreated yet.
   local composeflags=(-a -L)
   [[ "$dry" == "yes" ]] && composeflags+=(-n -i)
-  if ! rsync "${composeflags[@]}" "$REPO/$compose" "$host:$path/$compose"; then
+  # Sync to deploy/compose/ (making dir if needed) and copy to root for compatibility
+  ssh "$host" "mkdir -p $path/$(dirname "$compose")" 2>/dev/null || true
+  if ! rsync "${composeflags[@]}" "$REPO/$compose" "$host:$path/$compose" || \
+     ! rsync "${composeflags[@]}" "$REPO/$compose" "$host:$path/$(basename "$compose")"; then
     echo "  compose rsync FAILED" >&2
     return 1
   fi

@@ -65,6 +65,9 @@ test:
 	$(CLEANENV) server/.venv/bin/pytest -q
 	cd ui && npm run check
 
+# --- Base Compose Command
+COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml
+
 # --- Scout Mini hardware: start the host ROS graph and robot-side containers.
 # Override SCOUT_HOST, SCOUT_REPO, ROBOT_IP, BACKEND_HOST or OUSTER_HOST_NAME as needed.
 up-scout:
@@ -72,48 +75,46 @@ up-scout:
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:
-	docker compose build server ui
+	$(COMPOSE) build server ui
 
 up-server:
-	docker compose up --build -d server ui
+	$(COMPOSE) up --build -d server ui
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 
 down-server:
-	docker compose stop server ui
-	docker compose rm -f server ui
+	$(COMPOSE) stop server ui
+	$(COMPOSE) rm -f server ui
 
 # --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
 # docker-compose.yml means this brings the server up too if it isn't already.
 build-sim:
-	docker compose --profile gazebo build gazebo
+	$(COMPOSE) --profile gazebo build gazebo
 
 up-sim:
-	docker compose --profile gazebo up --build -d gazebo
+	$(COMPOSE) --profile gazebo up --build -d gazebo
 	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
 
 down-sim:
-	docker compose --profile gazebo stop gazebo
-	docker compose --profile gazebo rm -f gazebo
+	$(COMPOSE) --profile gazebo stop gazebo
+	$(COMPOSE) --profile gazebo rm -f gazebo
 
 # --- synthetic fleet: no Gazebo/ROS. Also depends_on: server.
 build-mock:
-	docker compose --profile mock build mock
+	$(COMPOSE) --profile mock build mock
 
 up-mock:
-	docker compose --profile mock up --build -d mock
+	$(COMPOSE) --profile mock up --build -d mock
 	@echo "Fleet:            mock adapter (no Gazebo)"
 
 down-mock:
-	docker compose --profile mock stop mock
-	docker compose --profile mock rm -f mock
+	$(COMPOSE) --profile mock stop mock
+	$(COMPOSE) --profile mock rm -f mock
 
 # --- real fleet deployment: server + UI + a Zenoh router, so robots on other
 # machines can reach both the backend and each other's ROS graph. No Gazebo, no
-# cslam, no mock — this is the actual bring-up target. UNVERIFIED against
-# physical robots (see docker-compose.zenoh.yml); adapters run per-robot,
-# outside Docker, per docs/hardware-bringup.md.
-ZENOH_COMPOSE = -f docker-compose.yml -f docker-compose.zenoh.yml
+# cslam, no mock — this is the actual bring-up target.
+ZENOH_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
 
 build-deploy:
 	docker compose $(ZENOH_COMPOSE) build server ui
@@ -130,33 +131,30 @@ down-deploy:
 	docker compose $(ZENOH_COMPOSE) stop server ui zenoh-router
 	docker compose $(ZENOH_COMPOSE) rm -f server ui zenoh-router
 
-# Full stack (server+ui+sim) with Gazebo rendering on the GPU. Software rendering caps the sim
-# at ~0.58x real time, which is the budget every lidar-fidelity increase has to
-# come out of; see docker-compose.gpu.yml.
-GPU_COMPOSE = -f docker-compose.yml -f docker-compose.gpu.yml
+# Full stack (server+ui+sim) with Gazebo rendering on the GPU.
+GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
 docker-up-gpu:
 	docker compose $(GPU_COMPOSE) --profile gazebo up --build -d
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "Fleet:            Gazebo (GPU) + adapter_sim (allow ~45s for robots to appear)"
 
-# Collaborative SLAM: the fleet plus Swarm-SLAM. Needs the 3D lidar profile and
-# the RTAB-Map backend, since cslam's motion prior is the lidar odometry.
-CSLAM_COMPOSE = -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.cslam.yml
+# Collaborative SLAM: the fleet plus Swarm-SLAM.
+CSLAM_COMPOSE = $(GPU_COMPOSE) -f deploy/compose/docker-compose.cslam.yml
 docker-up-cslam:
-	SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+	SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
 	  docker compose $(CSLAM_COMPOSE) --profile gazebo up --build -d
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
 
 docker-down:
-	docker compose --profile gazebo --profile mock down
+	$(COMPOSE) --profile gazebo --profile mock down
 
 docker-logs:
-	docker compose --profile gazebo --profile mock logs -f
+	$(COMPOSE) --profile gazebo --profile mock logs -f
 
 docker-ps:
-	docker compose --profile gazebo --profile mock ps
+	$(COMPOSE) --profile gazebo --profile mock ps
 
 docker-test:
 	docker compose build server

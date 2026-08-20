@@ -1,4 +1,4 @@
-"""Entry point: python -m swarmdeck_server [--config study/4robot.yaml]"""
+"""Entry point: python -m swarmdeck_server [--config configs/4robot.yaml]"""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,7 @@ from .api.app import app, load_config
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="swarmdeck_server")
-    ap.add_argument("--config", default=None, help="path to a study config yaml")
+    ap.add_argument("--config", default=None, help="path to a fleet config yaml")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()

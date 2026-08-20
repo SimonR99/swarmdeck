@@ -39,7 +39,7 @@ kill -0 "$GZ_PID" 2>/dev/null || fail "gz sim died; see $LOG"
 echo "   ok: pid $GZ_PID alive"
 
 echo "== 3. fleet spawns =="
-python3 "$SIM/scenario/spawn_fleet.py" --config "$REPO/study/4robot.yaml" || fail "spawn"
+python3 "$SIM/scenario/spawn_fleet.py" --config "$REPO/configs/4robot.yaml" || fail "spawn"
 sleep 10
 
 echo "== 4. sensors publish =="

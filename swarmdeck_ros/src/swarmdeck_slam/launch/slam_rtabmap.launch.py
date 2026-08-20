@@ -1,7 +1,7 @@
 """Per-robot 3D SLAM on a lidar + IMU, as a drop-in alternative to SLAM Toolbox.
 
     ros2 launch swarmdeck_bringup session.launch.py slam_backend:=rtabmap \\
-         config:=study/4robot_3d.yaml
+         config:=configs/4robot_3d.yaml
 
 Two nodes, and the split matters:
 

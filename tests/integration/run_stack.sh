@@ -24,7 +24,7 @@ setsid nohup gz sim -s -r --headless-rendering -v 1 "$WORLD" </dev/null >"$LOGS/
 sleep 15
 
 echo "[3/6] spawn $N robots"
-python3 "$SIM/scenario/spawn_fleet.py" --config "$REPO/study/${N}robot.yaml" 2>&1 | sed 's/^/      /'
+python3 "$SIM/scenario/spawn_fleet.py" --config "$REPO/configs/${N}robot.yaml" 2>&1 | sed 's/^/      /'
 sleep 8
 
 echo "[4/6] clock bridge"

@@ -7,7 +7,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[4]
 CONFIG = REPO / "adapters/adapter_ros2/config/aslan_bunker.yaml"
-COMPOSE = REPO / "docker-compose.robot-aslan.yml"
+COMPOSE = REPO / "deploy/compose/docker-compose.robot-aslan.yml"
 LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/aslan.launch.py"
 ROBOT_LAUNCH = REPO / "adapters/adapter_ros2/launch/aslan_bunker.launch.py"
 

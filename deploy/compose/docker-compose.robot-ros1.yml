@@ -4,7 +4,7 @@ services:
   adapter:
     build:
       context: .
-      dockerfile: docker/Dockerfile.robot-ros1
+      dockerfile: deploy/docker/Dockerfile.robot-ros1
     image: swarmdeck-robot-ros1:local
     container_name: swarmdeck-adapter
     depends_on:
@@ -66,7 +66,7 @@ services:
   duck_detector:
     build:
       context: .
-      dockerfile: docker/Dockerfile.duck-detector
+      dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: "${ULTRALYTICS_IMAGE:-ultralytics/ultralytics:8.4.14-jetson-jetpack5}"
     image: swarmdeck-duck-detector:jetpack5

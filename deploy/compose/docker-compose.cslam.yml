@@ -1,6 +1,6 @@
 # Swarm-SLAM overlay: adds collaborative SLAM to the simulated fleet.
 #
-#   SWARMDECK_CONFIG=/app/study/4robot_3d.yaml SLAM_BACKEND=rtabmap \
+#   SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
 #                  -f docker-compose.cslam.yml --profile gazebo up --build -d
 #   make docker-up-cslam
@@ -43,7 +43,7 @@ services:
     profiles: ["gazebo"]
     build:
       context: .
-      dockerfile: docker/Dockerfile.cslam
+      dockerfile: deploy/docker/Dockerfile.cslam
     image: swarmdeck-cslam:local
     depends_on:
       - gazebo

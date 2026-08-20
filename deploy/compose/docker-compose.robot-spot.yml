@@ -92,7 +92,7 @@ services:
   media:
     build:
       context: .
-      dockerfile: docker/Dockerfile.robot-ros2
+      dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-spot-media
     depends_on:
@@ -130,7 +130,7 @@ services:
   duck_detector:
     build:
       context: .
-      dockerfile: docker/Dockerfile.duck-detector
+      dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
     image: swarmdeck-duck-detector:jetpack6

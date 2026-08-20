@@ -13,7 +13,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[4]
 PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
 BUNKER = REPO / "adapters/adapter_ros2/config/bunker.yaml"
-COMPOSE = REPO / "docker-compose.robot-botman.yml"
+COMPOSE = REPO / "deploy/compose/docker-compose.robot-botman.yml"
 BOTMAN_LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/botman.launch.py"
 
 

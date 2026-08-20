@@ -48,9 +48,9 @@ docker run --rm --runtime nvidia --entrypoint bash \
       /workspace/src/localization/SuperOdom/super_odometry/. \
       /overlay/src/super_odometry/
     patch -d /overlay/src/super_odometry -p1 \
-      < /app/swarmdeck/patches/aslan-superodom-gtsam.patch
+      < /app/swarmdeck/deploy/patches/aslan-superodom-gtsam.patch
     patch -d /overlay/src/super_odometry -p1 \
-      < /app/swarmdeck/patches/aslan-superodom-imu-quat.patch
+      < /app/swarmdeck/deploy/patches/aslan-superodom-imu-quat.patch
 
     source /overlay/install/setup.bash
     colcon --log-base /overlay/log build \

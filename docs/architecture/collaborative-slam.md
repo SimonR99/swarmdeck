@@ -52,7 +52,7 @@ wrong**, with translation errors up to 1.8 m.
 
 Two things hid it. The six parametrised test yaws are 0, 0, 35, −60, 120, 175 — of
 those, 0, −60 and 120 sit exactly on the 4° grid and the other two are 1° off,
-inside the peak. And `study/4robot.yaml` starts robots at yaw 0, 0, π, π, so every
+inside the peak. And `configs/4robot.yaml` starts robots at yaw 0, 0, π, π, so every
 *relative* heading in the demo is 0 or 180°, also exactly on the grid.
 
 The ratio test could not catch it either: it compares rival *translations* within
