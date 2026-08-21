@@ -29,13 +29,14 @@ topics:
   plan: ""
   cmd_vel: /cmd_vel
   battery: ""
-  # OAK-D on USB (03e7:2485). RGB MJPEG from the SwarmDeck oak_camera service.
-  # Depth/map markers need the RGBD profile plus a measured mount TF, same as
-  # Botman; until then detections stay bbox-only.
+  # OAK-D on USB (03e7:2485). The default camera service runs the RGB-D profile
+  # so detections can be projected onto the map. The aligned stereo stream and
+  # its CameraInfo share the RGB pixel grid; the mount TF is published by the
+  # Aslan oak_mount_tf service.
   camera: ""
   camera_compressed: /oak/rgb/image_raw/compressed
-  camera_depth: ""
-  camera_info: ""
+  camera_depth: /oak/stereo/image_raw
+  camera_info: /oak/stereo/camera_info
   # Nav2 never publishes to the physical driver. The adapter relays this
   # isolated output only while its own NavigateToPose goal is active.
   nav_cmd_vel: /aslan_0/cmd_vel_nav

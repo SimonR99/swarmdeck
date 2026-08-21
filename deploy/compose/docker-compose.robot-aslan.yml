@@ -161,6 +161,10 @@ services:
         condition: service_started
       duck_detector:
         condition: service_started
+      oak_camera:
+        condition: service_started
+      oak_mount_tf:
+        condition: service_started
     network_mode: host
     ipc: host
     volumes:
@@ -187,9 +191,9 @@ services:
       - "${BACKEND_PORT:-8080}"
     restart: unless-stopped
 
-  # Same OAK-D RGB MJPEG profile as Botman. depthai_ros_driver must be in the
-  # mounted workspace; this service does not install it. Mapping still starts
-  # if the camera is missing — adapter does not wait on oak_camera.
+  # Same OAK-D RGB-D profile as Botman. depthai_ros_driver must be in the
+  # mounted workspace; this service does not install it. RGB-D is the default
+  # because map projection needs the aligned stereo stream.
   oak_camera:
     <<: *aslan-stack
     container_name: swarmdeck-aslan-oak
@@ -201,9 +205,46 @@ services:
         . /workspace/install/setup.bash &&
         ros2 launch depthai_ros_driver camera.launch.py
         name:=oak
-        params_file:=/app/swarmdeck/adapters/media/config/${ASLAN_OAK_PARAMS:-botman_oak_rgb.yaml}
+        params_file:=/app/swarmdeck/adapters/media/config/${ASLAN_OAK_PARAMS:-botman_oak_rgbd.yaml}
         rectify_rgb:=false
         use_rviz:=false
+
+  # Camera mount relative to the SLAM pose frame. Aslan's approximate z value
+  # is -0.04 m relative to os_lidar; replace it with a measured transform when
+  # available. Without this edge, depth has no map coordinate.
+  oak_mount_tf:
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-aslan-oak-tf
+    depends_on:
+      oak_camera:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - tf2_ros
+      - static_transform_publisher
+      - --x
+      - "${ASLAN_OAK_X:-0.03}"
+      - --y
+      - "${ASLAN_OAK_Y:-0.00}"
+      - --z
+      - "${ASLAN_OAK_Z:--0.04}"
+      - --roll
+      - "${ASLAN_OAK_ROLL:-0}"
+      - --pitch
+      - "${ASLAN_OAK_PITCH:-0}"
+      - --yaw
+      - "${ASLAN_OAK_YAW:-0}"
+      - --frame-id
+      - os_lidar
+      - --child-frame-id
+      - oak-d-base-frame
+    restart: unless-stopped
 
   # Production low-latency video. The adapter keeps the 5 Hz JPEG fallback;
   # this process encodes H.264 and pushes RTSP/TCP to MediaMTX.
