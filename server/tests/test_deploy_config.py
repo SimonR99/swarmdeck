@@ -94,6 +94,20 @@ def test_compose_profiles_define_backend_identity_for_readiness_checks():
     assert "State.Health" in verifier
 
 
+def test_scout_deployment_has_clean_refresh_and_native_opt_out():
+    deploy = (REPO / "scripts/deploy").read_text()
+    scout = (REPO / "scripts/scout-up").read_text()
+    profile = (PROFILE_DIR / "scout.env").read_text()
+
+    assert "--no-native-reset" in deploy
+    assert "SCOUT_NATIVE_RESET" in profile
+    assert "SCOUT_CONTAINER_RESET" in profile
+    assert "reset_native_graph" in scout
+    assert '"${compose[@]}" down --remove-orphans' in scout
+    assert '"${compose[@]}" up -d --force-recreate --remove-orphans' in scout
+    assert 'docker rm -f "$container"' in scout
+
+
 class _FleetHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib handler API
         if self.path != "/api/fleet":

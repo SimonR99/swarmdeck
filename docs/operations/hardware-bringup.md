@@ -26,8 +26,10 @@ make deploy ROBOT=botman
 ```
 
 Use `./scripts/deploy botman` directly when needed. `--no-build` reuses images;
-`--no-reset` avoids `compose down`; `--no-up` stops after preparation. Deployment
-reset affects containers only, never robot pose or SLAM state.
+`--no-reset` avoids `compose down`; `--no-native-reset` preserves Scout's native
+ROS launchers; `--no-up` stops after preparation. Deployment reset affects
+containers and the known Scout launchers only; it never moves the robot or clears
+robot-side SLAM state.
 
 ## Start operator services
 

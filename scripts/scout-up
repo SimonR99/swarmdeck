@@ -22,6 +22,36 @@ camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
 robot_config=${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}
 video_bitrate=$VIDEO_BITRATE_KBPS
 video_fps=$VIDEO_FPS
+native_reset=${SCOUT_NATIVE_RESET:-yes}
+container_reset=${SCOUT_CONTAINER_RESET:-yes}
+
+case "$native_reset" in
+  yes|no) ;;
+  *)
+    echo "SCOUT_NATIVE_RESET must be yes or no (got '$native_reset')" >&2
+    exit 2
+    ;;
+esac
+
+case "$container_reset" in
+  yes|no) ;;
+  *)
+    echo "SCOUT_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2
+    exit 2
+    ;;
+esac
+
+# These values are also consumed by the operator-side Compose refresh after the
+# SSH session returns. Export them explicitly so direct `scripts/scout-up` calls
+# behave the same as calls made through `scripts/deploy`.
+export ROBOT_ID="$robot_id"
+export ROBOT_IP="$robot_ip"
+export BACKEND_HOST="$backend_host"
+export BACKEND_PORT="$backend_port"
+export ROBOT_CONFIG="$robot_config"
+export CAMERA_TOPIC="$camera_topic"
+export VIDEO_BITRATE_KBPS="$video_bitrate"
+export VIDEO_FPS="$video_fps"
 
 echo "Starting ${robot_id} on ${scout_host}..."
 
@@ -37,7 +67,8 @@ ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${camera_topic}" \
   "${robot_config}" \
   "${video_bitrate}" \
-  "${video_fps}" <<'REMOTE_SCRIPT'
+  "${video_fps}" \
+  "${native_reset}" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 repo=$1
@@ -52,6 +83,7 @@ camera_topic=$9
 robot_config=${10}
 video_bitrate=${11}
 video_fps=${12}
+native_reset=${13:-yes}
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
@@ -59,6 +91,14 @@ planner_log=/tmp/swarmdeck-scout-planner.log
 slam_launch="${repo}/adapters/adapter_ros1/launch/scout_mini_slam.launch"
 camera_launch="${repo}/adapters/adapter_ros1/launch/scout_camera_low_latency.launch"
 planner_launch="${repo}/adapters/adapter_ros1/launch/local_planner_muxed.launch"
+
+case "$native_reset" in
+  yes|no) ;;
+  *)
+    echo "native ROS reset must be yes or no (got '$native_reset')" >&2
+    exit 2
+    ;;
+esac
 
 # Catkin's generated setup hooks inspect variables before defining them, so nounset
 # must be disabled only while those trusted environment scripts are sourced.
@@ -73,6 +113,88 @@ export ROBOT_REPO="${repo}"
 export OUSTER_HOST_NAME="${ouster_host}"
 export ROS_IP="${robot_ip}"
 export ROS_MASTER_URI="http://${robot_ip}:11311"
+
+process_ids() {
+  pgrep -f "$1" || true
+}
+
+stop_matching() {
+  local label=$1 pattern=$2 attempt
+  local -a pids=()
+
+  mapfile -t pids < <(process_ids "$pattern")
+  if ((${#pids[@]} == 0)); then
+    echo "${label}: not running"
+    return
+  fi
+
+  echo "${label}: stopping ${#pids[@]} process(es)"
+  kill -INT "${pids[@]}" 2>/dev/null || true
+  for attempt in {1..10}; do
+    mapfile -t pids < <(process_ids "$pattern")
+    ((${#pids[@]} == 0)) && return
+    sleep 1
+  done
+
+  echo "${label}: still running; sending TERM" >&2
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+  for attempt in {1..5}; do
+    mapfile -t pids < <(process_ids "$pattern")
+    ((${#pids[@]} == 0)) && return
+    sleep 1
+  done
+
+  echo "${label}: still running; sending KILL" >&2
+  kill -KILL "${pids[@]}" 2>/dev/null || true
+}
+
+reset_native_graph() {
+  if [[ "$native_reset" != yes ]]; then
+    echo "Native ROS reset: skipped"
+    return
+  fi
+
+  echo "Resetting known Scout ROS launchers..."
+  # Stop launch parents first so their child nodes receive the normal ROS
+  # shutdown path. The patterns are deliberately tied to Scout's launch files;
+  # roscore and unrelated robot processes are left alone.
+  stop_matching "Local planner" "[l]ocal_planner_muxed.launch"
+  stop_matching "D400 mount TF" "[s]tatic_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link"
+  stop_matching "RealSense legacy camera" "[r]oslaunch rover_launch rs_d400.launch"
+  stop_matching "RealSense camera" "[r]oslaunch .*${camera_launch}"
+  stop_matching "ROS/SLAM" "[r]oslaunch .*${slam_launch}"
+}
+
+reset_containers() {
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "Scout clean refresh requires Docker Compose v2" >&2
+    exit 1
+  fi
+
+  export ROBOT_REPO="${operator_repo}"
+  local -a compose=(docker compose --project-name swarmdeck-scout)
+  [[ -f "${operator_repo}/.deploy/scout.env" ]] &&
+    compose+=(--env-file "${operator_repo}/.deploy/scout.env")
+  compose+=(--file "${operator_repo}/deploy/compose/docker-compose.robot-ros1.yml")
+
+  if [[ "$container_reset" == yes ]]; then
+    echo "Resetting Scout containers..."
+    "${compose[@]}" down --remove-orphans
+
+    # Explicit container names allow us to clean containers created by an older
+    # Compose project name as well as containers managed by this one. Do not
+    # remove volumes: detector weights are intentionally cached across deploys.
+    for container in swarmdeck-duck-detector swarmdeck-adapter swarmdeck-media; do
+      if docker inspect "$container" >/dev/null 2>&1; then
+        docker rm -f "$container" >/dev/null
+      fi
+    done
+  else
+    echo "Scout container reset: skipped"
+  fi
+
+  "${compose[@]}" up -d --force-recreate --remove-orphans
+}
 
 start_detached() {
   local label=$1
@@ -134,6 +256,9 @@ require_subscriber() {
   return 1
 }
 
+reset_native_graph
+reset_containers
+
 start_detached \
   "ROS/SLAM" \
   "[r]oslaunch .*${slam_launch}" \
@@ -183,33 +308,6 @@ export ROBOT_CONFIG="${robot_config}"
 export CAMERA_TOPIC="${camera_topic}"
 export VIDEO_BITRATE_KBPS="${video_bitrate}"
 export VIDEO_FPS="${video_fps}"
-
-(
-  cd "${repo}"
-  if docker inspect swarmdeck-duck-detector swarmdeck-adapter swarmdeck-media >/dev/null 2>&1; then
-    docker start swarmdeck-duck-detector >/dev/null
-    camera_graph=$(rostopic info "${camera_topic}" 2>/dev/null || true)
-    if grep -Fq "/swarmdeck_adapter_${robot_id}" <<<"${camera_graph}" && \
-       grep -Fq "/swarmdeck_media_${robot_id}" <<<"${camera_graph}"; then
-      docker start swarmdeck-adapter swarmdeck-media >/dev/null
-      echo "SwarmDeck detector/adapter/media: already connected"
-    else
-      # rospy processes do not reliably restore their subscriptions after the
-      # ROS master disappears. A container can therefore be running while the
-      # UI receives no video or telemetry.
-      docker restart swarmdeck-adapter swarmdeck-media >/dev/null
-      echo "SwarmDeck detector started; adapter/media restarted to reconnect to ROS"
-    fi
-  elif docker compose version >/dev/null 2>&1; then
-    compose_env=()
-    [[ -f "${repo}/.deploy/scout.env" ]] && compose_env+=(--env-file "${repo}/.deploy/scout.env")
-    docker compose "${compose_env[@]}" \
-      -f deploy/compose/docker-compose.robot-ros1.yml up -d --remove-orphans
-  else
-    echo "Adapter/media containers are missing and Docker Compose v2 is not installed" >&2
-    exit 1
-  fi
-)
 
 require_topic /os_cloud_node/points "Ouster point cloud"
 require_topic /odometry/filtered "Filtered odometry"

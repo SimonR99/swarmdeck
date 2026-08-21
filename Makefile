@@ -68,7 +68,10 @@ test:
 	cd ui && npm run check
 
 # --- Base Compose Command
-COMPOSE ?= docker compose -f deploy/compose/docker-compose.yml
+# Pin the project name so every Make target shares one network and one set of
+# containers regardless of the directory from which Compose derives its name.
+COMPOSE_PROJECT ?= swarmdeck
+COMPOSE ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml
 
 # --- operator-side physical robot deployment
 # ROBOT is one profile name or `all`; DEPLOY_ARGS can carry --dry-run,
@@ -118,13 +121,13 @@ down-mock:
 # --- real fleet deployment: server + UI + a Zenoh router, so robots on other
 # machines can reach both the backend and each other's ROS graph. No Gazebo, no
 # cslam, no mock — this is the actual bring-up target.
-ZENOH_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
+ZENOH_COMPOSE = -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
 
 build-deploy:
 	docker compose $(ZENOH_COMPOSE) build server ui
 
 up-deploy:
-	docker compose $(ZENOH_COMPOSE) up --build -d server ui zenoh-router
+	docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "Zenoh router:     tcp/<this-host>:7447"
@@ -132,8 +135,7 @@ up-deploy:
 	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
 
 down-deploy:
-	docker compose $(ZENOH_COMPOSE) stop server ui zenoh-router
-	docker compose $(ZENOH_COMPOSE) rm -f server ui zenoh-router
+	docker compose $(ZENOH_COMPOSE) down --remove-orphans
 
 # Full stack (server+ui+sim) with Gazebo rendering on the GPU.
 GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml

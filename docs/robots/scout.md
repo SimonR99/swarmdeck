@@ -14,9 +14,19 @@ make deploy ROBOT=scout
 ```
 
 Scout is the exception to the generic Compose start: deployment builds/resets
-containers, then `scripts/scout-up` starts the native ROS graph and verifies the
-ROS master, lidar, odometry, camera, planner, adapter, and media subscriptions.
-Use `scripts/scout-up` directly only after deployment.
+the robot-side inputs, then `scripts/scout-up` cleanly stops Scout's known native
+ROS launchers, recreates the operator-side detector/adapter/media containers, and
+starts the native graph again. It verifies the ROS master, lidar, odometry,
+camera, planner, adapter, media subscriptions, and backend registration. Use
+`scripts/scout-up` directly only after deployment.
+
+The default deployment refreshes only the known Scout launch files and leaves
+`roscore` and unrelated ROS processes alone. To preserve an already-running
+native graph, use:
+
+```bash
+make deploy ROBOT=scout DEPLOY_ARGS=--no-native-reset
+```
 
 The repository currently has no unified Scout shutdown helper. Compose services
 can be stopped with the generated `.deploy/scout.env`; native ROS launches must

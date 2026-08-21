@@ -25,6 +25,8 @@ Default stages: sync, override, build, reset stack, up, verify.
   --no-sync       keep the remote checkout
   --no-build      reuse existing images
   --no-reset      keep the existing stack while recreating it
+  --no-native-reset
+                  for Scout, keep the native ROS launchers running
   --no-up         stop after sync/override/build (also disables reset/verify)
   --no-verify     skip the post-up container/mount check
 USAGE
@@ -175,8 +177,14 @@ run_operator_up() {
 }
 
 deploy_one() (
-  local target="$1" dry="$2" sync="$3" build="$4" reset="$5" up="$6" verify="$7"
+  local target="$1" dry="$2" sync="$3" build="$4" reset="$5" up="$6" verify="$7" native_reset="$8" container_reset="$9"
   load_profile "$target"
+  if [[ "$target" == scout ]]; then
+    SCOUT_NATIVE_RESET="$native_reset"
+    SCOUT_CONTAINER_RESET="$container_reset"
+    export SCOUT_NATIVE_RESET
+    export SCOUT_CONTAINER_RESET
+  fi
   echo "──────── $target  ($DEPLOY_SSH_HOST:$DEPLOY_REMOTE_REPO)"
   preflight
 
@@ -191,6 +199,10 @@ deploy_one() (
     [[ "$build" == yes ]] && echo "  would: build"
     [[ "$reset" == yes ]] && echo "  would: reset stack"
     [[ "$up" == yes ]] && echo "  would: up"
+    if [[ "$target" == scout ]]; then
+      [[ "$native_reset" == yes ]] && echo "  would: reset native ROS launchers" ||
+        echo "  native ROS reset: skipped"
+    fi
     return 0
   fi
 
@@ -211,14 +223,15 @@ deploy_one() (
 main() {
   [[ $# -ge 1 ]] || usage
   local target="$1"; shift
-  local dry=no sync=yes build=yes reset=yes up=yes verify=yes
+  local dry=no sync=yes build=yes reset=yes up=yes verify=yes native_reset=yes container_reset=yes
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run) dry=yes ;;
       --no-sync) sync=no ;;
       --no-build) build=no ;;
-      --no-reset) reset=no ;;
-      --no-up) up=no; reset=no; verify=no ;;
+      --no-reset) reset=no; container_reset=no ;;
+      --no-native-reset) native_reset=no ;;
+      --no-up) up=no; reset=no; verify=no; native_reset=no; container_reset=no ;;
       --no-verify) verify=no ;;
       *) usage ;;
     esac
@@ -236,7 +249,7 @@ main() {
 
   local name failed=0
   for name in "${targets[@]}"; do
-    deploy_one "$name" "$dry" "$sync" "$build" "$reset" "$up" "$verify" ||
+    deploy_one "$name" "$dry" "$sync" "$build" "$reset" "$up" "$verify" "$native_reset" "$container_reset" ||
       failed=$((failed + 1))
   done
   echo

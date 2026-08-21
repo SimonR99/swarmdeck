@@ -6,6 +6,12 @@
 #
 # UI: http://localhost:5173   API: http://localhost:8080
 
+# Keep the project identity stable when this file is invoked from the repository
+# root, from deploy/compose, or through the Makefile. Without this, Compose
+# derives the name from the compose-file directory and can leave two stacks
+# (for example, `swarmdeck-*` and `compose-*`) competing for the same ports.
+name: swarmdeck
+
 services:
   server:
     build:
