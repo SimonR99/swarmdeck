@@ -11,6 +11,7 @@ import { mapStore } from '$lib/stores/mapstore.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
+import type { DetectionEntity, DetectionProposal } from '$lib/types/protocol';
 
 export type ScreenPoint = { sx: number; sy: number };
 export type GridPoint = { gx: number; gy: number };
@@ -95,6 +96,59 @@ function reviewVisible(robotIds: string[]): boolean {
   return true;
 }
 
+export interface ReviewedObjectHit {
+  id: string;
+  kind: 'entity' | 'proposal';
+  robotIds: string[];
+  /** The robot that most recently contributed a retained sample, when known. */
+  robotId: string | null;
+  distance: number;
+}
+
+function mostRecentRobot(object: DetectionEntity | DetectionProposal): string | null {
+  if ('samples' in object && object.samples.length) {
+    return object.samples.reduce((latest, sample) =>
+      sample.t > latest.t ? sample : latest
+    ).robot_id;
+  }
+  return object.robot_ids[0] ?? null;
+}
+
+/** Find the reviewed map marker under a click, using the same world transform as drawing. */
+export function hitTestReviewedObject(
+  sx: number,
+  sy: number,
+  screenOf: ScreenOf,
+  maxDistance = 18
+): ReviewedObjectHit | null {
+  let nearest: ReviewedObjectHit | null = null;
+
+  const consider = (
+    object: DetectionEntity | DetectionProposal,
+    kind: ReviewedObjectHit['kind']
+  ) => {
+    if (!reviewVisible(object.robot_ids)) return;
+    const grid = mapStore.worldToGrid(object.position.x, object.position.y);
+    if (!grid) return;
+    const screen = screenOf(grid.gx, grid.gy);
+    const distance = Math.hypot(screen.sx - sx, screen.sy - sy);
+    if (distance > maxDistance || (nearest && distance >= nearest.distance)) return;
+    nearest = {
+      id: object.id,
+      kind,
+      robotIds: object.robot_ids,
+      robotId: mostRecentRobot(object),
+      distance
+    };
+  };
+
+  // Proposals are actionable notifications, so inspect them first when two
+  // markers overlap exactly. A confirmed entity still wins when it is closer.
+  for (const proposal of review.proposals) consider(proposal, 'proposal');
+  for (const entity of review.entities) consider(entity, 'entity');
+  return nearest;
+}
+
 /** Draw operator-reviewed detections over the occupancy layer. */
 export function drawReviewedObjects(ctx: CanvasRenderingContext2D, screenOf: ScreenOf) {
   ctx.save();
@@ -104,16 +158,17 @@ export function drawReviewedObjects(ctx: CanvasRenderingContext2D, screenOf: Scr
     if (!g) continue;
     const { sx, sy } = screenOf(g.gx, g.gy);
     const color = detectionCatalog.colorOf(entity.class);
+    const focused = review.highlighted === entity.id;
     ctx.beginPath();
-    ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+    ctx.arc(sx, sy, focused ? 8 : 6, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
     ctx.lineWidth = 2;
     ctx.strokeStyle = '#ffffff';
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(sx, sy, 8.5, 0, Math.PI * 2);
-    ctx.lineWidth = 1.5;
+    ctx.arc(sx, sy, focused ? 11 : 8.5, 0, Math.PI * 2);
+    ctx.lineWidth = focused ? 2 : 1.5;
     ctx.strokeStyle = color;
     ctx.stroke();
   }
@@ -125,7 +180,7 @@ export function drawReviewedObjects(ctx: CanvasRenderingContext2D, screenOf: Scr
     if (!g) continue;
     const { sx, sy } = screenOf(g.gx, g.gy);
     const color = detectionCatalog.colorOf(proposal.class);
-    const focused = review.focused === proposal.id;
+    const focused = review.highlighted === proposal.id;
     ctx.globalAlpha = focused ? 1 : 0.55;
     ctx.beginPath();
     ctx.arc(sx, sy, focused ? 11 : 8, 0, Math.PI * 2);

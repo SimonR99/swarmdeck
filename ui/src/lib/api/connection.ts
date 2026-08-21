@@ -179,6 +179,18 @@ export const actions = {
   switchCamera(robotId: string) {
     sendAction({ type: 'switch_camera', robot_id: robotId });
   },
+  /** Focus a detection's source robot in the fleet, map, and camera. */
+  focusRobot(robotId: string) {
+    if (!fleet.isEnabled(robotId)) return;
+    fleet.focus(robotId);
+    sendAction({ type: 'select_robots', robot_ids: [...fleet.selected] });
+    if (fleet.can(robotId, 'camera')) {
+      sendAction({ type: 'switch_camera', robot_id: robotId });
+    }
+    // A detection is a world location; the source robot's local map is the
+    // unambiguous frame to inspect after choosing it from a notification.
+    void mapStore.setViewPreference('local', robotId);
+  },
   acknowledgeAlert(id: string) {
     session.acknowledge(id);
     sendAction({ type: 'acknowledge_alert', id });

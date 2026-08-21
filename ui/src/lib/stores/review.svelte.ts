@@ -18,7 +18,9 @@ const state = $state({
   ignored: 0,
   radii: { same: 0.5, ask: 1.5, ignore: 1.0 },
   /** Proposal the operator is pointing at, so the map can highlight it. */
-  focused: null as string | null
+  focused: null as string | null,
+  /** Detection the operator selected from the map or notification panel. */
+  selected: null as string | null
 });
 
 export const review = {
@@ -36,6 +38,12 @@ export const review = {
   },
   get focused() {
     return state.focused;
+  },
+  get selected() {
+    return state.selected;
+  },
+  get highlighted() {
+    return state.selected ?? state.focused;
   },
   get pending() {
     return state.proposals.length;
@@ -65,6 +73,10 @@ export const review = {
     state.focused = id;
   },
 
+  select(id: string | null) {
+    state.selected = id;
+  },
+
   apply(message: DetectionReview) {
     state.entities = message.entities ?? [];
     state.proposals = message.proposals ?? [];
@@ -72,8 +84,19 @@ export const review = {
     if (message.radii) state.radii = message.radii;
     // A proposal that was answered elsewhere must not stay highlighted on the
     // map pointing at nothing.
-    if (state.focused && !state.proposals.some((p) => p.id === state.focused)) {
+    if (
+      state.focused &&
+      !state.proposals.some((p) => p.id === state.focused) &&
+      !state.entities.some((e) => e.id === state.focused)
+    ) {
       state.focused = null;
+    }
+    if (
+      state.selected &&
+      !state.proposals.some((p) => p.id === state.selected) &&
+      !state.entities.some((e) => e.id === state.selected)
+    ) {
+      state.selected = null;
     }
   },
 
@@ -82,5 +105,6 @@ export const review = {
     state.proposals = [];
     state.ignored = 0;
     state.focused = null;
+    state.selected = null;
   }
 };

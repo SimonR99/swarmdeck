@@ -2,7 +2,6 @@
   import { Check, GitMerge, EyeOff, RotateCcw, MapPin, Trash2 } from 'lucide-svelte';
   import { review } from '$lib/stores/review.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
-  import { fleet } from '$lib/stores/fleet.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { DetectionProposal } from '$lib/types/protocol';
@@ -40,17 +39,21 @@
     busyUntil = now + SETTLE_MS;
   }
 
-  const shown = $derived(review.proposals.slice(0, MAX_SHOWN));
+  const shown = $derived(
+    [
+      ...review.proposals.filter((p) => p.id === review.selected),
+      ...review.proposals.filter((p) => p.id !== review.selected)
+    ].slice(0, MAX_SHOWN)
+  );
   const overflow = $derived(Math.max(0, review.proposals.length - MAX_SHOWN));
 
   function label(name: string): string {
     return detectionCatalog.classes.find((c) => c.name === name)?.label ?? name;
   }
 
-  function seenBy(p: DetectionProposal): string {
-    const names = p.robot_ids.map((id) => robotDisplayName(id));
-    if (names.length === 1) return names[0];
-    return `${names.length} robots`;
+  function seenBy(robotIds: string[]): string {
+    const names = robotIds.map((id) => robotDisplayName(id));
+    return names.length ? names.join(', ') : 'Unknown robot';
   }
 
   function accept(p: DetectionProposal) {
@@ -73,6 +76,19 @@
     decided();
     actions.mergeDetection(p.id, entityId);
   }
+
+  function selectProposal(p: DetectionProposal) {
+    review.select(p.id);
+    const robotId = p.robot_ids[0];
+    if (robotId) actions.focusRobot(robotId);
+  }
+
+  $effect(() => {
+    // A confirmed map marker has no pending card. Open the retained-object
+    // list when the operator selects that marker so its detecting robot(s) are
+    // still visible in the notification panel.
+    if (review.selected && review.entityOf(review.selected)) listOpen = true;
+  });
 </script>
 
 {#if review.proposals.length || review.ignored || review.entities.length}
@@ -97,11 +113,15 @@
       <div
         class="pointer-events-auto rounded-[5px] border border-border bg-surface/95 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)]
                backdrop-blur-xl transition-colors
-               {review.focused === p.id ? 'border-accent' : ''}"
+               {review.selected === p.id || review.focused === p.id ? 'border-accent' : ''}"
         onmouseenter={() => review.focus(p.id)}
         onmouseleave={() => review.focus(null)}
       >
-        <div class="flex items-start gap-2 px-2.5 pt-2.5">
+        <button
+          class="flex w-full items-start gap-2 px-2.5 pt-2.5 text-left"
+          title="Show the detecting robot and its local map"
+          onclick={() => selectProposal(p)}
+        >
           <span
             class="mt-[3px] h-2.5 w-2.5 shrink-0 rounded-full"
             style="background:{detectionCatalog.colorOf(p.class)}"
@@ -119,12 +139,12 @@
               overwhelming evidence for a single biased estimate.
             -->
             <div class="mt-0.5 text-[9px] text-fg-dim">
-              {seenBy(p)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'}
+              {seenBy(p.robot_ids)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'}
               {#if p.sightings > p.observations}<span class="opacity-70">of {p.sightings} frames</span>{/if}
               · {p.position.x.toFixed(1)}, {p.position.y.toFixed(1)} m
             </div>
           </div>
-        </div>
+        </button>
 
         {#if suggested && p.suggested_distance !== null}
           <!--
@@ -248,7 +268,10 @@
         </div>
         <div class="flex max-h-56 flex-col overflow-y-auto">
           {#each review.entities as e (e.id)}
-            <div class="flex items-center gap-2 border-b border-border/60 px-2.5 py-1.5 last:border-b-0">
+            <div
+              class="flex items-center gap-2 border-b border-border/60 px-2.5 py-1.5 last:border-b-0
+                     {review.selected === e.id ? 'bg-accent/8' : ''}"
+            >
               <span
                 class="h-2 w-2 shrink-0 rounded-full"
                 style="background:{detectionCatalog.colorOf(e.class)}"
@@ -258,7 +281,7 @@
                 <div class="text-[9px] text-fg-dim">
                   {e.position.x.toFixed(1)}, {e.position.y.toFixed(1)} m ·
                   {e.observations} viewpoint{e.observations === 1 ? '' : 's'} ·
-                  {e.robot_ids.length} robot{e.robot_ids.length === 1 ? '' : 's'}
+                  {seenBy(e.robot_ids)}
                 </div>
               </div>
               <button

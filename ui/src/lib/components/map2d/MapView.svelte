@@ -32,7 +32,8 @@
     drawNetworkHeatmap,
     drawReviewedObjects,
     drawRobots,
-    drawScaleBar
+    drawScaleBar,
+    hitTestReviewedObject
   } from './mapLayers';
 
   let host = $state<HTMLDivElement | null>(null);
@@ -288,6 +289,7 @@
     void review.entities;
     void review.proposals;
     void review.focused;
+    void review.selected;
     void showGrid;
     void showTrails;
     void showLabels;
@@ -395,6 +397,16 @@
     // In inspection mode, map markers are directly selectable. Shift-click
     // mirrors the fleet rail's additive selection behaviour.
     if (!navigation.goalMode) {
+      const detection = hitTestReviewedObject(clickX, clickY, screenOf);
+      if (detection) {
+        // Keep the notification card and the map marker in lockstep. This also
+        // brings a proposal outside the first three queue cards into view.
+        review.select(detection.id);
+        const robotId = detection.robotId ?? detection.robotIds[0];
+        if (robotId) actions.focusRobot(robotId);
+        return;
+      }
+
       let nearest: { id: string; distance: number } | null = null;
       for (const robot of robotsOnMap()) {
         const grid = mapStore.worldToGrid(robot.pose.x, robot.pose.y);
