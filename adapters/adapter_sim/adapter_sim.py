@@ -83,9 +83,6 @@ DEPTH_MAX_AGE_S = 0.35
 # 5 cm occupancy grid on purpose: this feeds a view whose points are one pixel.
 CLOUD_VOXEL = 0.10
 
-#: Camera period for a robot no dashboard is showing. Not zero, so selecting a
-#: robot paints a slightly stale frame at once rather than a black panel.
-IDLE_CAMERA_PERIOD_S = 2.0
 # Transport quantisation. 1 cm keeps a cloud well inside int16 and is far finer
 # than the voxel above, so it costs nothing in fidelity.
 CLOUD_SCALE = 0.01
@@ -444,9 +441,6 @@ class RobotBridge(AdapterSensorMixin):
         self._detector = ObjectDetector()
         self._detection_enabled = True
         self._detections: list[dict] | None = None
-        # Lowered only by the backend's `camera_interest`; a backend that never
-        # sends it leaves this True and behaviour unchanged.
-        self.camera_watched = True
         self._goal_handle = None
         self._goal_generation = 0
         self._last_drive_at = 0.0
@@ -1274,23 +1268,24 @@ class RobotBridge(AdapterSensorMixin):
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
 
-    def upload_camera(self, post_frame: bool = True) -> None:
-        """Detect on the newest ROS image, and optionally upload it.
+    def process_camera(self) -> None:
+        """Run perception on the newest local camera image.
 
-        `post_frame` is False for a robot no dashboard is showing. Detection
-        still runs — it is what puts markers on the shared map — but the JPEG,
-        which is three orders of magnitude larger, stays home.
+        Simulation has no media publisher in the Gazebo container. Keep the
+        image local for detection instead of sending a JPEG preview over the
+        adapter connection; hardware robots use their dedicated H.264 RTSP
+        publisher for operator video.
         """
         if not self._camera_dirty or self._camera_frame is None:
             return
         if not self._upload_lock.acquire(blocking=False):
             return  # a reset is running; see upload_map
         try:
-            self._upload_camera_locked(post_frame)
+            self._process_camera_locked()
         finally:
             self._upload_lock.release()
 
-    def _upload_camera_locked(self, post_frame: bool = True) -> None:
+    def _process_camera_locked(self) -> None:
         if not self._camera_dirty or self._camera_frame is None:
             return
         self._camera_dirty = False
@@ -1331,25 +1326,8 @@ class RobotBridge(AdapterSensorMixin):
                     )
                     detections.append(item)
             self._detections = detections
-            if not post_frame:
-                return
-
-            ok, encoded = cv2.imencode(
-                ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 78]
-            )
-            if not ok:
-                return
-            url = f"{self.http_url}/api/adapter/camera?robot_id={self.id}"
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    url,
-                    data=encoded.tobytes(),
-                    headers={"Content-Type": "image/jpeg"},
-                ),
-                timeout=2,
-            ).read()
         except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] camera upload failed: {exc}")
+            self.node.get_logger().warn(f"[{self.id}] camera processing failed: {exc}")
 
     def take_detections(self) -> list[dict] | None:
         current = self._detections
@@ -1398,8 +1376,6 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif t == "drive":
                             bridge.drive(msg.get("linear", 0.0), msg.get("angular", 0.0))
-                        elif t == "camera_interest":
-                            bridge.camera_watched = bool(msg.get("watched", True))
                         elif t == "reset":
                             # Several seconds of blocking service calls. Run it
                             # off the loop and do not await it here, or this
@@ -1412,7 +1388,6 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                     last_cloud = 0.0
                     last_graph = 0.0
                     last_cslam_grid = 0.0
-                    last_camera = 0.0
                     last_frame = 0.0
                     last_settings = 0.0
                     last_nav_health = 0.0
@@ -1472,18 +1447,10 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             await loop.run_in_executor(None, bridge.upload_cloud)
                         if now - last_frame > 0.2:
                             last_frame = now
-                            # Detection runs on every frame regardless: map
-                            # markers belong to the fleet, not to whichever
-                            # camera is on screen. Only the JPEG POST waits on
-                            # someone actually watching, and even then an
-                            # unwatched robot still posts occasionally so
-                            # selecting it paints something at once.
-                            post = bridge.camera_watched or (
-                                now - last_camera > IDLE_CAMERA_PERIOD_S
-                            )
-                            if post:
-                                last_camera = now
-                            await loop.run_in_executor(None, bridge.upload_camera, post)
+                            # Detection runs on every frame regardless of which
+                            # camera is on screen. No image is sent over the
+                            # adapter connection.
+                            await loop.run_in_executor(None, bridge.process_camera)
                             detections = bridge.take_detections()
                             if detections is not None:
                                 await ws.send(json.dumps({

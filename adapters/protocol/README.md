@@ -13,7 +13,6 @@ language, OS, middleware, or planner.
 | adapter → backend | `POST /api/adapter/scan` | Registered XY scan when no grid is available. |
 | adapter → backend | `POST /api/adapter/cloud` | Optional registered XYZ cloud. |
 | collaborative backend → backend | `POST /api/adapter/global_map` | Already-merged common-frame grid. |
-| adapter → backend | `POST /api/adapter/camera` | Optional JPEG fallback. |
 | adapter → MediaMTX | `RTSP :8554/<robot_id>` | Production H.264 video. |
 
 Binary uploads are zlib-compressed and capped by the server. Retry rejected
@@ -168,9 +167,8 @@ before transmission.
 `body_command.action` is `claim`, `release`, `sit`, or `stand`. Ignore it without
 the `body` capability.
 
-`camera_interest` changes JPEG fallback rate, not RTSP or detection. Default to
-watched until the first message; losing this command may consume bandwidth but
-must not hide video. Never gate detection on camera interest.
+`camera_interest` is retained as a compatibility command and has no effect on
+the H.264 stream or detection. Never gate detection on camera interest.
 
 ## Binary payloads
 
@@ -212,15 +210,16 @@ Body: zlib(int8 row-major cells)
 
 Use only for a grid already optimized in the collaborative common frame.
 
-### JPEG fallback
+### Camera video
 
 ```text
-POST /api/adapter/camera?robot_id=<id>
-Content-Type: image/jpeg
+RTSP :8554/<robot_id>  (H.264, baseline, 640x480, low-latency TCP)
 ```
 
-Send browser-ready JPEG at no more than 5 Hz. Production video uses RTSP and
-WHEP; the UI falls back to `GET /api/camera/<robot_id>`.
+The browser consumes this stream through MediaMTX WHEP/WebRTC. There is no JPEG
+network fallback; if WHEP is unavailable, the UI reports `NO SIGNAL` and retries.
+Robot-side ROS `CompressedImage` data may still be JPEG internally because the
+media publisher decodes it before encoding H.264.
 
 ## Rules
 

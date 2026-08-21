@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import { VideoOff, Radio } from 'lucide-svelte';
   import Badge from '../ui/Badge.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
@@ -9,30 +9,19 @@
   import { robotDisplayName } from '$lib/robotDisplayName';
 
   /**
-   * WebRTC camera view.
-   * Streams arrive from MediaMTX via WHEP at /whep/<robot_id>. When no stream is
-   * available (mock mode, or MediaMTX down) the panel degrades to a placeholder
-   * rather than blocking the operator.
-   */
+   * H.264 camera view.
+   * Streams arrive from MediaMTX via WHEP at /whep/<robot_id>. There is no JPEG
+   * fallback: when H.264 is unavailable the panel reports NO SIGNAL.
+  */
 
   let video = $state<HTMLVideoElement | null>(null);
-  let imageA = $state<HTMLImageElement | null>(null);
-  let imageB = $state<HTMLImageElement | null>(null);
   let pc: RTCPeerConnection | null = null;
-  let fallbackTimer: number | null = null;
-  let fallbackFailures = 0;
   let whepRetryTimer: number | null = null;
   let whepProbeTimer: number | null = null;
   let whepFailures = 0;
-  let objectA: string | null = null;
-  let objectB: string | null = null;
-  let activeFrame = $state<0 | 1>(0);
-  let fallbackGeneration = 0;
-  let streamSource = $state<'webrtc' | 'jpeg' | null>(null);
-  let streamState = $state<'idle' | 'connecting' | 'live' | 'stale' | 'unavailable'>('idle');
-  /** Age of the newest JPEG the backend holds, from `X-Frame-Age-Ms`. */
-  let frameAgeMs = $state(0);
-  let mediaAspect = $state(16 / 9);
+  let streamSource = $state<'webrtc' | null>(null);
+  let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
+  let mediaAspect = $state(4 / 3);
   let fps = $state(0);
   let pingLatencyMs = $state(0);
 
@@ -131,42 +120,14 @@
     }
   }
 
-  // Back off between WHEP attempts. Not every robot publishes RTSP -- the
-  // simulator never does -- so for those the retry is permanent, and a fixed
-  // ten-second period means a full ICE gathering and an SDP round trip every
-  // ten seconds for the life of the session, over whatever link the operator
-  // happens to be on.
+  // Back off between WHEP attempts. A robot may be booting its H.264 publisher
+  // or temporarily disconnected, so retry without generating any JPEG traffic.
   const WHEP_RETRY_MIN_MS = 10_000;
   const WHEP_RETRY_MAX_MS = 160_000;
   // A negotiation that neither connects nor fails is the ordinary outcome when
   // ICE cannot reach the media server -- the state machine simply sits in
   // `connecting`. Nothing but a deadline ends it.
   const WHEP_PROBE_TIMEOUT_MS = 12_000;
-  // Consecutive failed JPEG fetches before the panel admits it. One dropped
-  // frame is normal on a remote link; a run of them is not a live picture.
-  const FALLBACK_FAILURES_BEFORE_UNAVAILABLE = 3;
-  /**
-   * Past this, the backend's newest frame stops being "live video".
-   *
-   * The poll succeeds no matter how old the frame behind it is, so without an
-   * age check a robot on a congested link shows a frozen picture under a green
-   * Live badge — measured at 15 s on botman_0 while the badge read Live. Two
-   * seconds is comfortably above the ~0.6 s p95 a healthy link produces.
-   */
-  const FRAME_STALE_MS = 2000;
-  /**
-   * Grace period after switching robots, before staleness is believed.
-   *
-   * An unwatched robot uploads once every IDLE_CAMERA_PERIOD_S (2.0 s in both
-   * adapters), so the newest frame for a robot we have only just selected can
-   * legitimately be 2 s old — exactly FRAME_STALE_MS. Those two constants being
-   * equal meant selecting a robot reported congestion for the first poll or two
-   * every single time, on a link that was perfectly healthy. This waits for the
-   * robot to have had a chance to answer at full rate before judging it.
-   */
-  const SWITCH_GRACE_MS = 2600;
-  let watchingSince = 0;
-
   const activeId = $derived(fleet.activeCamera);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
   const color = $derived(activeId ? fleet.colorOf(activeId) : 'var(--color-fg-dim)');
@@ -194,18 +155,10 @@
     });
   }
 
-  /**
-   * Negotiate WHEP, optionally as a background probe.
-   *
-   * A background probe must leave whatever is already on screen alone until it
-   * has media of its own to replace it with. An earlier version tore the JPEG
-   * loop down before every attempt, which turned a permanently unavailable
-   * stream into a black "Connecting…" panel every ten seconds, forever.
-   */
+  /** Negotiate the robot's H.264 WHEP stream. */
   async function connectWhep(robotId: string, background = false) {
     closePeer();
     if (!background) {
-      stopFallback();
       streamSource = null;
       streamState = 'connecting';
     }
@@ -231,10 +184,9 @@
       candidate.onconnectionstatechange = () => {
         if (pc !== candidate) return;
         if (candidate.connectionState === 'connected') {
-          // Media is flowing; only now is it safe to drop the JPEG preview.
+          // Media is flowing; only now is it safe to show the video element.
           if (whepProbeTimer) clearTimeout(whepProbeTimer);
           whepProbeTimer = null;
-          stopFallback();
           whepFailures = 0;
           streamSource = 'webrtc';
           streamState = 'live';
@@ -289,10 +241,11 @@
     }
   }
 
-  /** Hold the JPEG preview and keep probing WHEP, with a widening gap. */
+  /** Report the H.264 outage and keep probing with a widening gap. */
   function handleWhepFailure(robotId: string) {
     whepFailures += 1;
-    if (streamSource !== 'jpeg') startJpegFallback(robotId);
+    streamSource = null;
+    streamState = 'unavailable';
     if (whepRetryTimer) clearTimeout(whepRetryTimer);
     whepRetryTimer = window.setTimeout(
       () => {
@@ -303,77 +256,7 @@
     );
   }
 
-  function startJpegFallback(robotId: string) {
-    stopFallback();
-    streamSource = 'jpeg';
-    streamState = 'connecting';
-    const generation = ++fallbackGeneration;
-
-    // Fetch, decode, then atomically swap a local object URL. Updating the
-    // visible image's HTTP URL directly exposes its empty/loading state and
-    // causes a white/black flash between every JPEG frame.
-    const refresh = async () => {
-      try {
-        const t0 = performance.now();
-        const response = await fetch(
-          `/api/camera/${encodeURIComponent(robotId)}?t=${Date.now()}`,
-          { cache: 'no-store' }
-        );
-        if (!response.ok) throw new Error(`camera ${response.status}`);
-        recordLatency(performance.now() - t0);
-        // The request succeeding says the backend answered, not that the robot
-        // is still sending. Only this header distinguishes live video from the
-        // last frame before a link went bad.
-        frameAgeMs = Number(response.headers.get('X-Frame-Age-Ms') ?? 0);
-        const objectUrl = URL.createObjectURL(await response.blob());
-        const nextFrame: 0 | 1 = activeFrame === 0 ? 1 : 0;
-        await tick();
-        const target = nextFrame === 0 ? imageA : imageB;
-        if (!target) throw new Error('camera buffer unavailable');
-        const previousInactive = nextFrame === 0 ? objectA : objectB;
-        if (previousInactive) URL.revokeObjectURL(previousInactive);
-        if (nextFrame === 0) {
-          objectA = objectUrl;
-        } else {
-          objectB = objectUrl;
-        }
-        await new Promise<void>((resolve, reject) => {
-          target.onload = () => {
-            setMediaAspect(target.naturalWidth, target.naturalHeight);
-            resolve();
-          };
-          target.onerror = () => reject(new Error('camera frame decode failed'));
-          target.src = objectUrl;
-        });
-        await target.decode();
-        recordFrame(performance.now());
-        if (generation !== fallbackGeneration) {
-          URL.revokeObjectURL(objectUrl);
-          return;
-        }
-        activeFrame = nextFrame;
-        fallbackFailures = 0;
-        const settling = Date.now() - watchingSince < SWITCH_GRACE_MS;
-        streamState =
-          frameAgeMs > FRAME_STALE_MS && !settling ? 'stale' : 'live';
-      } catch {
-        // Report a stall even once the panel has gone live. Leaving the badge
-        // on "Live" because it was live a moment ago is the one thing a camera
-        // panel must never do.
-        fallbackFailures += 1;
-        if (fallbackFailures >= FALLBACK_FAILURES_BEFORE_UNAVAILABLE) {
-          streamState = 'unavailable';
-        }
-      } finally {
-        if (generation === fallbackGeneration) {
-          fallbackTimer = window.setTimeout(refresh, 200);
-        }
-      }
-    };
-    void refresh();
-  }
-
-  /** Close the peer connection, leaving any JPEG preview running. */
+  /** Close the H.264 peer connection. */
   function closePeer() {
     stopVideoFrameLoop();
     stopStatsPolling();
@@ -387,25 +270,8 @@
     if (video) video.srcObject = null;
   }
 
-  /** Stop the JPEG loop and release its buffers, leaving WHEP state alone. */
-  function stopFallback() {
-    lastFrameTime = 0;
-    fallbackGeneration++;
-    fallbackFailures = 0;
-    if (fallbackTimer) clearTimeout(fallbackTimer);
-    fallbackTimer = null;
-    imageA?.removeAttribute('src');
-    imageB?.removeAttribute('src');
-    if (objectA) URL.revokeObjectURL(objectA);
-    if (objectB) URL.revokeObjectURL(objectB);
-    objectA = null;
-    objectB = null;
-    activeFrame = 0;
-  }
-
   function teardown() {
     closePeer();
-    stopFallback();
     stopVideoFrameLoop();
     stopStatsPolling();
     fps = 0;
@@ -414,7 +280,7 @@
     whepRetryTimer = null;
     whepFailures = 0;
     streamSource = null;
-    mediaAspect = 16 / 9;
+    mediaAspect = 4 / 3;
   }
 
   $effect(() => {
@@ -430,11 +296,8 @@
       untrack(() => actions.switchCamera(''));
       return;
     }
-    // Announce interest on every change, not just on an explicit click: the
-    // panel also arrives here on first mount and whenever the fleet store picks
-    // a robot for us, and a robot nobody has told the backend about stays on
-    // its 2 s idle rate while it is being watched.
-    watchingSince = Date.now();
+    // Keep the backend's selected-camera state in sync while negotiating the
+    // H.264 stream. No camera frame travels over the adapter websocket.
     untrack(() => actions.switchCamera(id));
     untrack(() => connectWhep(id));
     return () => untrack(teardown);
@@ -452,13 +315,9 @@
       </span>
     </div>
     {#if streamState === 'live'}
-      <Badge tone="ok">Live {streamSource === 'jpeg' ? 'preview' : ''}</Badge>
+      <Badge tone="ok">Live H.264</Badge>
     {:else if streamState === 'connecting'}
       <Badge tone="accent">…</Badge>
-    {:else if streamState === 'stale'}
-      <!-- The age, not just the word: 3 s of congestion and a robot that
-           stopped sending an hour ago look identical without it. -->
-      <Badge tone="warn">STALE {(frameAgeMs / 1000).toFixed(frameAgeMs < 10000 ? 1 : 0)}s</Badge>
     {:else if streamState === 'unavailable'}
       <Badge tone="warn">NO SIGNAL</Badge>
     {/if}
@@ -479,39 +338,7 @@
       onresize={updateVideoAspect}
     ></video>
 
-    {#if streamSource === 'jpeg'}
-      <img
-        bind:this={imageA}
-        class="absolute inset-0 h-full w-full object-contain transition-none {activeFrame === 0
-          ? 'z-20'
-          : 'z-10'}"
-        data-active={activeFrame === 0}
-        alt="Live camera for {activeId ? robotDisplayName(activeId) : 'robot'}"
-      />
-      <img
-        bind:this={imageB}
-        class="absolute inset-0 h-full w-full object-contain transition-none {activeFrame === 1
-          ? 'z-20'
-          : 'z-10'}"
-        data-active={activeFrame === 1}
-        alt="Live camera buffer for {activeId ? robotDisplayName(activeId) : 'robot'}"
-      />
-    {/if}
-
-    {#if streamState === 'stale'}
-      <!-- Scrim, not a cover. The last frame is still the best picture of the
-           room we have and hiding it throws that away; what it must not do is
-           pass for live, so it is dimmed and captioned with its own age. -->
-      <div class="pointer-events-none absolute inset-0 z-40 grid place-items-center bg-black/45">
-        <div class="flex flex-col items-center gap-1.5 text-warn">
-          <VideoOff class="h-5 w-5" />
-          <span class="text-[10px] font-semibold">
-            Frozen {(frameAgeMs / 1000).toFixed(frameAgeMs < 10000 ? 1 : 0)}s ago
-          </span>
-          <span class="text-[9px] text-fg-dim">Link congested — not live</span>
-        </div>
-      </div>
-    {:else if streamState !== 'live'}
+    {#if streamState !== 'live'}
       <div class="absolute inset-0 z-40 grid place-items-center bg-surface-2">
         <div class="flex flex-col items-center gap-2 text-fg-dim">
           <div class="grid h-10 w-10 place-items-center rounded-[4px] border border-border bg-surface">

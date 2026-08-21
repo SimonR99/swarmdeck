@@ -23,6 +23,8 @@ camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
 robot_config=${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}
 video_bitrate=$VIDEO_BITRATE_KBPS
 video_fps=$VIDEO_FPS
+video_width=$VIDEO_WIDTH
+video_height=$VIDEO_HEIGHT
 native_reset=${SCOUT_NATIVE_RESET:-yes}
 container_reset=${SCOUT_CONTAINER_RESET:-yes}
 
@@ -53,6 +55,8 @@ export ROBOT_CONFIG="$robot_config"
 export CAMERA_TOPIC="$camera_topic"
 export VIDEO_BITRATE_KBPS="$video_bitrate"
 export VIDEO_FPS="$video_fps"
+export VIDEO_WIDTH="$video_width"
+export VIDEO_HEIGHT="$video_height"
 
 echo "Starting ${robot_id} on ${scout_host}..."
 
@@ -70,6 +74,8 @@ ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${robot_config}" \
   "${video_bitrate}" \
   "${video_fps}" \
+  "${video_width}" \
+  "${video_height}" \
   "${native_reset}" \
   "${container_reset}" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
@@ -87,8 +93,10 @@ camera_topic=${10}
 robot_config=${11}
 video_bitrate=${12}
 video_fps=${13}
-native_reset=${14:-yes}
-container_reset=${15:-yes}
+video_width=${14}
+video_height=${15}
+native_reset=${16:-yes}
+container_reset=${17:-yes}
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
@@ -315,6 +323,8 @@ export ROBOT_CONFIG="${robot_config}"
 export CAMERA_TOPIC="${camera_topic}"
 export VIDEO_BITRATE_KBPS="${video_bitrate}"
 export VIDEO_FPS="${video_fps}"
+export VIDEO_WIDTH="${video_width}"
+export VIDEO_HEIGHT="${video_height}"
 
 require_topic /os_cloud_node/points "Ouster point cloud"
 require_topic /odometry/filtered "Filtered odometry"

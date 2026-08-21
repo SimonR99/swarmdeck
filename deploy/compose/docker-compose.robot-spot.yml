@@ -87,8 +87,8 @@ services:
       - export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && python3 /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py --robot-id spot_0 --config /app/swarmdeck/adapters/adapter_ros2/config/spot.yaml --host ${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host} --port ${BACKEND_PORT:-8080}
 
   # Production low-latency video. usb_cam may only publish raw rgb8, so
-  # --raw-topic JPEG-encodes /d435/color/image_raw when compressed is absent.
-  # The adapter keeps the 5 Hz JPEG fallback independently.
+  # --raw-topic JPEG-encodes /d435/color/image_raw when compressed is absent;
+  # the only outbound stream is then scaled to 640x480 H.264 over RTSP/TCP.
   media:
     build:
       context: ../..
@@ -122,6 +122,10 @@ services:
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps
       - "${VIDEO_FPS:-10}"
+      - --width
+      - "${VIDEO_WIDTH:-640}"
+      - --height
+      - "${VIDEO_HEIGHT:-480}"
     restart: unless-stopped
 
   # Same YOLOE sidecar as Botman/Tars. The compose service is still called

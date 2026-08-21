@@ -61,6 +61,10 @@ services:
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps
       - "${VIDEO_FPS:-10}"
+      - --width
+      - "${VIDEO_WIDTH:-640}"
+      - --height
+      - "${VIDEO_HEIGHT:-480}"
     restart: unless-stopped
 
   duck_detector:

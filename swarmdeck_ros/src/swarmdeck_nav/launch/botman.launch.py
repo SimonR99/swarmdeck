@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -32,6 +33,7 @@ _BUNKER_RADIUS = f"{(_FRONT ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
 
 def generate_launch_description() -> LaunchDescription:
     use_sim_time = LaunchConfiguration("use_sim_time")
+    publish_odom_tf = LaunchConfiguration("publish_odom_tf")
     package_share = FindPackageShare("swarmdeck_nav")
 
     odometry_tf = Node(
@@ -39,6 +41,7 @@ def generate_launch_description() -> LaunchDescription:
         executable="odom_to_tf",
         name="botman_odom_to_tf",
         output="screen",
+        condition=IfCondition(publish_odom_tf),
         parameters=[
             {
                 "use_sim_time": use_sim_time,
@@ -69,7 +72,9 @@ def generate_launch_description() -> LaunchDescription:
             "tf_topic": "/tf",
             "tf_static_topic": "/tf_static",
             "robot_radius": _BUNKER_RADIUS,
-            "inflation_radius": "0.90",
+            # Keep the physical Bunker footprint, but use the requested
+            # 0.50 m obstacle-inflation margin instead of the old 0.90 m.
+            "inflation_radius": "0.50",
             "footprint": _BUNKER_FOOTPRINT,
             # Nav2 never writes the Bunker driver's /cmd_vel directly. The
             # hardware adapter relays this final output only for an active goal.
@@ -81,6 +86,10 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            # The physical Compose deployment has a separate odom_tf service so
+            # pose survives a Nav2 restart. It passes false here to avoid two
+            # broadcasters publishing the same map -> os_lidar transform.
+            DeclareLaunchArgument("publish_odom_tf", default_value="true"),
             odometry_tf,
             nav2,
         ]

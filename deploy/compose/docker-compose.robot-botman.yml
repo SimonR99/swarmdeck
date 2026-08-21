@@ -253,10 +253,9 @@ services:
       - duck_detector_models:/models
     restart: unless-stopped
 
-  # Production low-latency video path. The adapter independently keeps the
-  # backend's 5 Hz JPEG preview as a fallback; this process converts the same
-  # device-encoded OAK JPEGs to baseline H.264 and pushes an RTSP/TCP stream to
-  # central MediaMTX, where the browser consumes it over WHEP/WebRTC.
+  # Production low-latency video path. This process converts the device-encoded
+  # OAK JPEGs to 640x480 baseline H.264 and pushes only RTSP/TCP to central
+  # MediaMTX, where the browser consumes it over WHEP/WebRTC.
   media:
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-botman-media
@@ -285,10 +284,16 @@ services:
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps
       - "${VIDEO_FPS:-10}"
+      - --width
+      - "${VIDEO_WIDTH:-640}"
+      - --height
+      - "${VIDEO_HEIGHT:-480}"
     restart: unless-stopped
 
   # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
-  # Keep this independent of Nav2 so costmaps still get a pose if Nav2 restarts.
+  # Keep one bridge independent of Nav2 so costmaps still get a pose if Nav2
+  # restarts. botman.launch.py disables its embedded copy in this deployment;
+  # two broadcasters for the same dynamic edge corrupt the TF cache.
   odom_tf:
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-botman-odom-tf
@@ -340,6 +345,12 @@ services:
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - launch
+      - swarmdeck_nav
+      - botman.launch.py
+      - publish_odom_tf:=false
     healthcheck:
       test:
         - CMD-SHELL

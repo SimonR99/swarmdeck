@@ -19,6 +19,8 @@ SHARED_KEYS = {
     "MEDIA_RTSP_PORT",
     "VIDEO_BITRATE_KBPS",
     "VIDEO_FPS",
+    "VIDEO_WIDTH",
+    "VIDEO_HEIGHT",
 }
 LEGACY_KEYS = {"MEDIA_HOST", "ASLAN_REPO", "BOTMAN_REPO", "SPOT_REPO"}
 
@@ -106,6 +108,33 @@ def test_scout_deployment_has_clean_refresh_and_native_opt_out():
     assert '"${compose[@]}" down --remove-orphans' in scout
     assert '"${compose[@]}" up -d --force-recreate --remove-orphans' in scout
     assert 'docker rm -f "$container"' in scout
+    assert "--project-name swarmdeck" in (REPO / "scripts/deploy-remote").read_text()
+
+
+def test_hardware_camera_policy_is_h264_640x480_without_jpeg_fallback():
+    media_scripts = [
+        (REPO / "adapters/media/ros1_rtsp.py").read_text(),
+        (REPO / "adapters/media/ros2_rtsp.py").read_text(),
+    ]
+    for source in media_scripts:
+        assert "videoscale" in source
+        assert "width={width},height={height}" in source
+        assert "x264enc tune=zerolatency speed-preset=ultrafast" in source
+
+    for compose_name in COMPOSE_BY_PROFILE.values():
+        source = (COMPOSE_DIR / compose_name).read_text()
+        assert '"${VIDEO_WIDTH:-640}"' in source
+        assert '"${VIDEO_HEIGHT:-480}"' in source
+
+    for path in (
+        REPO / "adapters/adapter_ros1/adapter_ros1.py",
+        REPO / "adapters/adapter_ros2/adapter_ros2.py",
+        REPO / "adapters/adapter_sim/adapter_sim.py",
+        REPO / "ui/src/lib/components/video/CameraPanel.svelte",
+    ):
+        source = path.read_text()
+        assert "/api/adapter/camera" not in source
+        assert "/api/camera/" not in source
 
 
 class _FleetHandler(http.server.BaseHTTPRequestHandler):

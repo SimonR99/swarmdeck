@@ -33,7 +33,10 @@ if [[ -n "$pre_build" ]]; then
   "$repo/$pre_build"
 fi
 
-compose=(docker compose --env-file "$env_file" -f "$compose_file")
+# Robot compose files live below deploy/compose, whose directory name would
+# otherwise become the project name. Keep it stable so `down` removes a stack
+# created by an earlier invocation from a different working directory.
+compose=(docker compose --project-name swarmdeck --env-file "$env_file" -f "$compose_file")
 for profile in $compose_profiles; do
   compose+=(--profile "$profile")
 done

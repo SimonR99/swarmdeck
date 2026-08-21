@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push a ROS 2 camera topic to an RTSP server with low latency.
+"""Push a ROS 2 camera topic to an H.264 RTSP server with low latency.
 
 `--topic` is a JPEG CompressedImage (OAK / RealSense). `--raw-topic` is a
 sensor_msgs/Image fallback for drivers such as usb_cam that may never publish
@@ -29,7 +29,7 @@ from jpeg_frame import image_to_jpeg  # noqa: E402
 
 
 class Ros2JpegRtspPublisher(Node):
-    """Keep only the newest eligible JPEG and encode it for MediaMTX."""
+    """Keep only the newest eligible frame and encode it as H.264 for MediaMTX."""
 
     def __init__(
         self,
@@ -39,6 +39,8 @@ class Ros2JpegRtspPublisher(Node):
         bitrate_kbps: int,
         fps: int,
         raw_topic: str = "",
+        width: int = 640,
+        height: int = 480,
     ) -> None:
         safe_id = re.sub(r"[^a-zA-Z0-9_]", "_", robot_id)
         super().__init__(f"swarmdeck_media_{safe_id}")
@@ -50,8 +52,8 @@ class Ros2JpegRtspPublisher(Node):
             f'max-bytes=100000 caps="image/jpeg,framerate={fps}/1" '
             "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
             "! jpegparse ! jpegdec "
-            "! videoconvert "
-            f"! video/x-raw,format=I420,framerate={fps}/1 "
+            "! videoconvert ! videoscale method=bilinear "
+            f"! video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 "
             f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate_kbps} "
             f"key-int-max={fps} bframes=0 rc-lookahead=0 sync-lookahead=0 "
             "sliced-threads=true byte-stream=true "
@@ -137,8 +139,13 @@ def main() -> None:
     parser.add_argument("--rtsp-url", required=True)
     parser.add_argument("--bitrate-kbps", type=int, default=700)
     parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--robot-id", default="robot")
     args = parser.parse_args()
+
+    if args.width < 1 or args.height < 1:
+        parser.error("--width and --height must be positive")
 
     rclpy.init()
     publisher = Ros2JpegRtspPublisher(
@@ -148,6 +155,8 @@ def main() -> None:
         args.bitrate_kbps,
         max(1, args.fps),
         raw_topic=args.raw_topic,
+        width=args.width,
+        height=args.height,
     )
     source = args.topic + (f" or {args.raw_topic}" if args.raw_topic else "")
     publisher.get_logger().info(f"streaming {source} to {args.rtsp_url}")

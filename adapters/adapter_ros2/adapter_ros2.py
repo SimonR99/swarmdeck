@@ -96,11 +96,6 @@ MAP_CLOUD_SCALE = 0.01
 MAP_CLOUD_VOXEL = 0.05
 MAP_CLOUD_3D_VOXEL = 0.10
 
-#: Camera period for a robot no dashboard is showing. Not zero: switching to a
-#: robot should paint something immediately, and one frame every two seconds is
-#: ~2% of the airtime the full rate costs (measured 73 KB/frame at 5 Hz).
-IDLE_CAMERA_PERIOD_S = 2.0
-
 # The detector needs OpenCV and the inference sidecar's client; a robot image
 # built without them still runs, just without perception.
 try:
@@ -211,7 +206,7 @@ DEFAULTS: dict[str, Any] = {
         "state_hz": 5.0,
         "map_period_s": 2.0,
         "cloud_period_s": 4.0,
-        "camera_period_s": 0.2,   # detection poll; hardware video is WebRTC
+        "camera_period_s": 0.2,   # detection poll; hardware video is H.264/WebRTC
     },
     "perception": {
         "enabled": True,
@@ -335,8 +330,6 @@ class HardwareBridge(
         # Newest frame awaiting detection, as (jpeg, header). The ROS callback
         # only ever assigns it; run_detection() consumes it from a worker thread.
         self._detect_pending: tuple[bytes, Any] | None = None
-        # Separate from detection so a sidecar outage cannot starve the UI preview.
-        self._camera_jpeg: bytes | None = None
         self._camera_depth_image: Image | None = None
         self._camera_info: CameraInfo | None = None
         self._camera_color_info: CameraInfo | None = None
@@ -357,11 +350,6 @@ class HardwareBridge(
                     perception.get("detector_url") or None,
                     classes=perception.get("classes"),
                 )
-        # Whether any dashboard currently shows this robot's camera. Defaults to
-        # True and is only ever lowered by the backend: an adapter talking to a
-        # backend that never sends `camera_interest` must keep uploading, so a
-        # lost or unsupported message costs bandwidth and never video.
-        self.camera_watched = True
         self._detection_period_s = max(0.05, float(perception.get("period_s", 0.2)))
         self._last_detection_at = 0.0
         self._detections: list[dict] | None = None
@@ -561,15 +549,13 @@ class HardwareBridge(
         if msg.format and "jpeg" not in msg.format.lower():
             return
         jpeg = bytes(msg.data)
-        self._camera_jpeg = jpeg
         # Queue for detection; do NOT run inference here. See run_detection().
         self._detect_pending = (jpeg, getattr(msg, "header", None))
 
     def _on_camera_raw(self, msg: Image) -> None:
-        # Detection takes JPEG (the sidecar posts it). Imported lazily so a
-        # robot with no camera needs no OpenCV. Also fills the 5 Hz GUI
-        # fallback: a raw-only driver (usb_cam yuyv2rgb) never publishes
-        # CompressedImage unless image_transport's jpeg plugin is loaded.
+        # Detection takes JPEG internally. Imported lazily so a robot with no
+        # camera needs no OpenCV. Hardware video is produced separately by the
+        # H.264 RTSP media publisher; this conversion never goes to the backend.
         try:
             import cv2
         except ImportError:
@@ -587,7 +573,6 @@ class HardwareBridge(
         if not ok:
             return
         jpeg = buf.tobytes()
-        self._camera_jpeg = jpeg
         self._detect_pending = (jpeg, getattr(msg, "header", None))
 
     def run_detection(self) -> None:
@@ -1137,23 +1122,6 @@ class HardwareBridge(
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] 3D cloud upload failed: {exc}")
 
-    def upload_camera(self) -> None:
-        """Push the newest device-encoded JPEG as the /api/camera fallback."""
-        jpeg = self._camera_jpeg
-        if not jpeg or not jpeg.startswith(b"\xff\xd8"):
-            return
-        url = f"{self.http_url}/api/adapter/camera?robot_id={self.id}"
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    url, data=jpeg, headers={"Content-Type": "image/jpeg"},
-                ),
-                timeout=2,
-            ).read()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] camera upload failed: {exc}")
-
-
 async def run_until_first_failure(*coros: Any) -> None:
     """Run coroutines together; the first to fail cancels the rest and raises.
 
@@ -1238,8 +1206,6 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif kind == "set_mode":
                             bridge.mode = msg.get("mode", bridge.mode)
-                        elif kind == "camera_interest":
-                            bridge.camera_watched = bool(msg.get("watched", True))
                         elif kind == "body_command":
                             await asyncio.get_running_loop().run_in_executor(
                                 None, bridge.body_command, msg.get("action", "")
@@ -1330,16 +1296,14 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     rates = bridge.cfg["rates"]
                     tick = 1.0 / float(rates["state_hz"])
                     loop = asyncio.get_running_loop()
-                    last_cam = 0.0
                     last_detect = 0.0
                     while True:
                         now = time.monotonic()
 
-                        # Detection runs at the configured rate no matter who is
-                        # watching: map markers are a property of the fleet, not
-                        # of whichever camera happens to be on screen. It is the
-                        # 73 KB JPEG below that is worth withholding, not the
-                        # few hundred bytes of detections.
+                        # Detection runs at the configured rate regardless of
+                        # which camera is on screen. The H.264 media publisher
+                        # owns the operator video path and never uses this
+                        # protocol connection for camera frames.
                         if now - last_detect > float(rates["camera_period_s"]):
                             await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
@@ -1352,18 +1316,6 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                                     "items": detections,
                                 })
                             last_detect = time.monotonic()
-
-                        # Unwatched robots idle rather than stop, so selecting
-                        # one shows a slightly stale picture at once instead of
-                        # a black panel for a round trip.
-                        camera_period = (
-                            float(rates["camera_period_s"])
-                            if bridge.camera_watched
-                            else IDLE_CAMERA_PERIOD_S
-                        )
-                        if now - last_cam > camera_period:
-                            await loop.run_in_executor(None, bridge.upload_camera)
-                            last_cam = time.monotonic()
 
                         await asyncio.sleep(tick)
 

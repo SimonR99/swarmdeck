@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push a ROS 1 JPEG camera topic to an RTSP server with low latency.
+"""Push a ROS 1 camera topic to an H.264 RTSP server with low latency.
 
 The process is intentionally separate from perception.  A slow detector can
 drop frames without ever stalling the operator's video stream.
@@ -20,7 +20,17 @@ from gi.repository import Gst
 
 
 class RosJpegRtspPublisher:
-    def __init__(self, topic: str, rtsp_url: str, bitrate_kbps: int, fps: int) -> None:
+    """Read compressed camera frames and publish only H.264 over RTSP."""
+
+    def __init__(
+        self,
+        topic: str,
+        rtsp_url: str,
+        bitrate_kbps: int,
+        fps: int,
+        width: int,
+        height: int,
+    ) -> None:
         Gst.init(None)
         self._frame_period_s = 1.0 / fps
         self._last_frame_at = 0.0
@@ -29,8 +39,8 @@ class RosJpegRtspPublisher:
             f'max-bytes=100000 caps="image/jpeg,framerate={fps}/1" '
             "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
             "! jpegparse ! jpegdec "
-            "! videoconvert "
-            f"! video/x-raw,format=I420,framerate={fps}/1 "
+            "! videoconvert ! videoscale method=bilinear "
+            f"! video/x-raw,format=I420,width={width},height={height},framerate={fps}/1 "
             f"! x264enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate_kbps} "
             f"key-int-max={fps} bframes=0 rc-lookahead=0 sync-lookahead=0 "
             "sliced-threads=true byte-stream=true "
@@ -98,12 +108,22 @@ def main() -> None:
     parser.add_argument("--rtsp-url", required=True)
     parser.add_argument("--bitrate-kbps", type=int, default=700)
     parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--robot-id", default="robot")
     args = parser.parse_args()
 
+    if args.width < 1 or args.height < 1:
+        parser.error("--width and --height must be positive")
+
     rospy.init_node(f"swarmdeck_media_{args.robot_id}", anonymous=False)
     publisher = RosJpegRtspPublisher(
-        args.topic, args.rtsp_url, args.bitrate_kbps, max(1, args.fps)
+        args.topic,
+        args.rtsp_url,
+        args.bitrate_kbps,
+        max(1, args.fps),
+        args.width,
+        args.height,
     )
     rospy.loginfo(f"streaming {args.topic} to {args.rtsp_url}")
     try:

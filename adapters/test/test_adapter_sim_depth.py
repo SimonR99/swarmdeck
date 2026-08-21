@@ -263,13 +263,8 @@ def test_the_operator_is_told_why_markers_are_missing_but_not_flooded(bridge):
     assert bridge.node.get_logger().warn.call_count == 1
 
 
-def test_an_unwatched_camera_still_detects(sim_module, monkeypatch):
-    """Gating the upload must not gate perception.
-
-    Detection runs inside `_upload_camera_locked`, so the obvious way to make
-    camera uploads demand-driven also stops an unwatched robot contributing map
-    markers — which is the fleet's job, not the video panel's.
-    """
+def test_camera_processing_still_detects_without_a_preview_upload(sim_module, monkeypatch):
+    """Perception stays local and never posts a JPEG preview."""
     import threading
     from unittest.mock import MagicMock
 
@@ -309,7 +304,7 @@ def test_an_unwatched_camera_still_detects(sim_module, monkeypatch):
         lambda *a, **k: posted.append(a) or MagicMock(),
     )
 
-    bridge.upload_camera(post_frame=False)
+    bridge.process_camera()
 
     assert posted == [], "an unwatched robot must not upload the JPEG"
     detections = bridge.take_detections()

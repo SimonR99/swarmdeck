@@ -22,6 +22,10 @@ make deploy ROBOT=botman
 This starts the base, lidar, SuperOdometry, camera/TF, Nav2, detection, adapter,
 and media services. Complete the common [pre-flight checks](../operations/hardware-bringup.md).
 
+Botman navigation uses the Scout-like responsive Nav2 tuning: a `0.4 m/s`
+linear cap and `0.50 m` obstacle-inflation margin. The physical Bunker footprint
+is still retained in Nav2; only the extra clearance around obstacles is reduced.
+
 ```bash
 ssh botman 'cd /ssd/swarmdeck && docker compose --env-file .deploy/botman.env \
   -f deploy/compose/docker-compose.robot-botman.yml --profile "*" down'
