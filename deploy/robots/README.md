@@ -5,9 +5,9 @@ from this directory. Profiles contain SSH, checkout, Compose, workspace, sensor,
 and calibration settings. They are trusted Bash fragments; operator environment
 values take precedence.
 
-Keep secrets and per-run calibration in the operator environment, not tracked
-profiles. Generated overrides are written remotely under `.deploy/` with mode
-0600.
+Keep secrets and improved per-run calibration in the operator environment, not
+tracked profiles. Generated overrides are written remotely under `.deploy/`
+with mode 0600.
 
 From the operator workstation:
 

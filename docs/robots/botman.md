@@ -10,7 +10,8 @@ Prerequisites on the robot:
 - ROS domain 17.
 - Measured transform from `os_lidar` to `oak-d-base-frame`.
 
-Deployment refuses guessed camera extrinsics:
+The profile currently has coarse camera extrinsic defaults. Replace them with
+measured values when available:
 
 ```bash
 BOTMAN_OAK_X=<m> BOTMAN_OAK_Y=<m> BOTMAN_OAK_Z=<m> \

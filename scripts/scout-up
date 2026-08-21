@@ -17,6 +17,7 @@ robot_id=${ROBOT_ID:-tars_0}
 robot_ip=${ROBOT_IP:-192.168.1.230}
 backend_host=$BACKEND_HOST
 backend_port=$BACKEND_PORT
+media_rtsp_port=${MEDIA_RTSP_PORT:-8554}
 ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
 camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
 robot_config=${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}
@@ -63,12 +64,14 @@ ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${robot_ip}" \
   "${backend_host}" \
   "${backend_port}" \
+  "${media_rtsp_port}" \
   "${ouster_host}" \
   "${camera_topic}" \
   "${robot_config}" \
   "${video_bitrate}" \
   "${video_fps}" \
-  "${native_reset}" <<'REMOTE_SCRIPT'
+  "${native_reset}" \
+  "${container_reset}" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 repo=$1
@@ -78,12 +81,14 @@ robot_id=$4
 robot_ip=$5
 backend_host=$6
 backend_port=$7
-ouster_host=$8
-camera_topic=$9
-robot_config=${10}
-video_bitrate=${11}
-video_fps=${12}
-native_reset=${13:-yes}
+media_rtsp_port=$8
+ouster_host=$9
+camera_topic=${10}
+robot_config=${11}
+video_bitrate=${12}
+video_fps=${13}
+native_reset=${14:-yes}
+container_reset=${15:-yes}
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
@@ -171,11 +176,13 @@ reset_containers() {
     exit 1
   fi
 
-  export ROBOT_REPO="${operator_repo}"
+  # This part runs on Scout, so Compose must use the remote checkout. The
+  # operator-side repository path is not defined inside this SSH session.
+  export ROBOT_REPO="${repo}"
   local -a compose=(docker compose --project-name swarmdeck-scout)
-  [[ -f "${operator_repo}/.deploy/scout.env" ]] &&
-    compose+=(--env-file "${operator_repo}/.deploy/scout.env")
-  compose+=(--file "${operator_repo}/deploy/compose/docker-compose.robot-ros1.yml")
+  [[ -f "${repo}/.deploy/scout.env" ]] &&
+    compose+=(--env-file "${repo}/.deploy/scout.env")
+  compose+=(--file "${repo}/deploy/compose/docker-compose.robot-ros1.yml")
 
   if [[ "$container_reset" == yes ]]; then
     echo "Resetting Scout containers..."
@@ -317,6 +324,27 @@ require_subscriber \
   "${camera_topic}" "/swarmdeck_adapter_${robot_id}" "SwarmDeck adapter"
 require_subscriber \
   "${camera_topic}" "/swarmdeck_media_${robot_id}" "SwarmDeck media"
+
+require_rtsp_stream() {
+  local rtsp_url="rtsp://${backend_host}:${media_rtsp_port}/${robot_id}"
+  local probe
+  probe="$(
+    docker exec swarmdeck-media timeout 8s \
+      gst-launch-1.0 -v \
+      rtspsrc location="${rtsp_url}" protocols=tcp latency=0 \
+      ! rtph264depay ! fakesink sync=false 2>&1 || true
+  )"
+  if grep -Fq "Sent PLAY request" <<<"${probe}" &&
+     grep -Fq "video/x-h264" <<<"${probe}"; then
+    echo "MediaMTX RTSP: ${robot_id} H.264 stream is readable"
+    return 0
+  fi
+  echo "MediaMTX RTSP: ${robot_id} stream is not readable at ${rtsp_url}" >&2
+  echo "${probe}" | tail -n 30 >&2
+  return 1
+}
+
+require_rtsp_stream
 
 require_backend_registration() {
   local attempt

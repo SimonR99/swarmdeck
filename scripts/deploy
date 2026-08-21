@@ -215,8 +215,10 @@ deploy_one() (
   # host graph is ready. The generic remote verifier would otherwise inspect
   # containers during the intentional gap between `down` and `scout-up`.
   [[ -n "$DEPLOY_OPERATOR_UP_SCRIPT" ]] && remote_verify=no
-  run_remote "$target" "$build" "$reset" "$compose_up" "$remote_verify"
-  [[ "$up" == yes ]] && run_operator_up
+  run_remote "$target" "$build" "$reset" "$compose_up" "$remote_verify" || return 1
+  if [[ "$up" == yes ]]; then
+    run_operator_up || return 1
+  fi
   echo "  $target: ready"
 )
 

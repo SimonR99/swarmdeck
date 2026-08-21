@@ -17,7 +17,7 @@ make deploy ROBOT=all
 make deploy ROBOT=botman DEPLOY_ARGS=--dry-run
 ```
 
-Supply per-run calibration through the environment:
+Override the coarse profile calibration with measured values when available:
 
 ```bash
 BOTMAN_OAK_X=0.42 BOTMAN_OAK_Y=0.00 BOTMAN_OAK_Z=0.80 \

@@ -65,10 +65,19 @@ services:
   # API; on real robots the streams publish direct to :8554.
   mediamtx:
     image: bluenviron/mediamtx:latest-ffmpeg
+    environment:
+      # WebRTC's HTTP handshake is not the media path. Browsers also need a
+      # reachable ICE host and the fixed 8189 port; without these Docker's
+      # private 172.x address is advertised and every WHEP session times out.
+      MTX_WEBRTCADDITIONALHOSTS: "${MEDIAMTX_WEBRTC_HOST:-192.168.1.161}"
+      # Keep a TCP ICE fallback for networks that block UDP.
+      MTX_WEBRTCLOCALTCPADDRESS: ":8189"
     ports:
       - "8554:8554"   # RTSP ingest from robots
       - "8889:8889"   # WHEP WebRTC egress to browser
       - "8891:8889"   # diagnostic WHEP port for browser direct-test
+      - "8189:8189/udp" # WebRTC ICE media
+      - "8189:8189/tcp" # WebRTC ICE fallback
     restart: unless-stopped
 
   # Full simulated fleet + 2D SLAM + Nav2 + simulation adapter.
