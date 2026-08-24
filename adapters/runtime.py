@@ -57,6 +57,75 @@ def map_cloud_height_limits(band: dict[str, Any] | None) -> tuple[float, float]:
     return min_z, max_z
 
 
+def project_occupied_cloud(
+    points_xy: np.ndarray,
+    *,
+    resolution: float = 0.05,
+    padding_m: float = 1.0,
+    max_cells: int = 8_000_000,
+) -> tuple[float, int, int, float, float, np.ndarray] | None:
+    """Project XY returns into an occupied-only 2D grid.
+
+    This is intentionally a projection, not a raytracer: an accumulated SLAM
+    point cloud contains surface returns but does not retain the sensor origin
+    for every point, so cells that are not hit remain UNKNOWN rather than being
+    guessed FREE. The tuple is ``(resolution, width, height, origin_x,
+    origin_y, cells)`` and ``cells`` is row-major ``int8`` occupancy data.
+    """
+    points = np.asarray(points_xy)
+    if points.ndim != 2 or points.shape[1] < 2:
+        return None
+    try:
+        resolution = float(resolution)
+        padding_m = max(0.0, float(padding_m))
+        max_cells = int(max_cells)
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(resolution)
+        or resolution <= 0.0
+        or max_cells <= 0
+    ):
+        return None
+
+    xy = np.asarray(points[:, :2], dtype=np.float64)
+    xy = xy[np.isfinite(xy).all(axis=1)]
+    if not len(xy):
+        return None
+
+    # GridMeta/OccupancyGrid use a lower-left origin and half-open cells. Using
+    # the integer lattice here keeps the origin stable at exact resolution
+    # boundaries, including for negative SLAM coordinates.
+    lattice = np.floor(xy / resolution).astype(np.int64)
+    min_cell_x = int(lattice[:, 0].min())
+    max_cell_x = int(lattice[:, 0].max())
+    min_cell_y = int(lattice[:, 1].min())
+    max_cell_y = int(lattice[:, 1].max())
+    padding_cells = int(math.ceil(padding_m / resolution))
+    min_cell_x -= padding_cells
+    max_cell_x += padding_cells
+    min_cell_y -= padding_cells
+    max_cell_y += padding_cells
+
+    width = max_cell_x - min_cell_x + 1
+    height = max_cell_y - min_cell_y + 1
+    if width <= 0 or height <= 0 or width * height > max_cells:
+        return None
+
+    cells = np.full((height, width), -1, dtype=np.int8)
+    gx = lattice[:, 0] - min_cell_x
+    gy = lattice[:, 1] - min_cell_y
+    cells[gy, gx] = 100
+    return (
+        resolution,
+        width,
+        height,
+        min_cell_x * resolution,
+        min_cell_y * resolution,
+        cells,
+    )
+
+
 def yaw_of(q) -> float:
     """Return planar yaw from a ROS quaternion-like object."""
     return math.atan2(

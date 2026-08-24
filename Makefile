@@ -5,7 +5,8 @@
         build-deploy up-deploy down-deploy \
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
-        docker-ps docker-test docker-test-launch
+        docker-ps docker-test docker-test-launch \
+        test-slam install-slam
 
 help:
 	@echo "SwarmDeck"
@@ -30,6 +31,8 @@ help:
 	@echo "  make sim             launch Gazebo simulation (host ROS)"
 	@echo "  make tunnel          publish the running stack on a public URL"
 	@echo "  make test            run all tests (local venv)"
+	@echo "  make install-slam    bootstrap the SLAM back-end venv (Python 3.12)"
+	@echo "  make test-slam       run collaborative SLAM back-end tests only"
 
 install:
 	cd ui && npm install
@@ -65,7 +68,18 @@ tunnel:
 
 test:
 	$(CLEANENV) server/.venv/bin/pytest -q
+	$(MAKE) test-slam
 	cd ui && npm run check
+
+# The SLAM back-end runs its own interpreter: gtsam 4.2.2 segfaults under the
+# numpy 2.x the server venv is built on, so it is pinned to Python 3.12 and kept
+# in a separate distribution. Bootstrapped with `make install-slam`.
+test-slam:
+	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
+
+install-slam:
+	cd slam && uv venv --python 3.12 .venv && \
+	  uv pip install --python .venv/bin/python -e ../adapters/protocol -e ".[dev]"
 
 # --- Base Compose Command
 # Pin the project name so every Make target shares one network and one set of

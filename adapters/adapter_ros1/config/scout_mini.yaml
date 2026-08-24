@@ -54,6 +54,10 @@ map_cloud_height_band:
   floor_z: -0.575
   min_z: 0.150
   max_z: 0.395
+# Projection of map_global into the SwarmDeck OccupancyGrid.
+native_map_resolution: 0.05
+native_map_padding_m: 1.0
+native_map_max_cells: 8000000
 retain_free_space: true
 
 topics:
@@ -61,16 +65,17 @@ topics:
   # what this stack's own rover_scout_adapter.py subscribes to for pose — prefer it over
   # scout_base_node's raw `odom` wheel odometry.
   odom: /odometry/filtered
-  # No OccupancyGrid publisher exists in rover_agx.launch, and none is being added —
-  # see map_cloud below instead.
+  # No OccupancyGrid publisher exists in rover_agx.launch. The adapter projects
+  # LVI-SAM's accumulated 3D map_global into a 2D OccupancyGrid below.
   map: ""
-  # LVI-SAM's per-scan registered XYZ cloud, already transformed into odom_lidar
-  # (same frame as map_frame above) — confirmed live, ~5 Hz, 2026-08-06. The
-  # adapter derives both products from it: a height-filtered XY scan that the
-  # backend raytraces into the 2D map, and a coarser XYZ cloud for the GUI's 3D
-  # viewer. Nothing new runs on the robot for either path. cloud_registered_raw
-  # (undownsampled) also exists if this one proves too sparse.
-  map_cloud: /lvi_sam/lidar/mapping/cloud_registered
+  # Do not use the per-scan source for Scout's 2D map: map_global is the native
+  # accumulated cloud and is projected directly by _on_global_map_cloud. This
+  # also prevents historical points from being raytraced as one current scan.
+  map_cloud: ""
+  # Confirmed live PointCloud2, frame_id=odom_lidar. This is LVI-SAM's complete
+  # accumulated map, so it is the source for both Scout's 2D projection and the
+  # SwarmDeck 3D cloud view.
+  map_cloud_global: /lvi_sam/lidar/mapping/map_global
   # localPlanner's selected local path — the route it actually intends to drive,
   # ~100 poses at 10 Hz. Published in `chassis_link` (a VEHICLE frame, 0.476 m
   # below os_sensor — the same offset as the planner's own sensorOffsetZ), not

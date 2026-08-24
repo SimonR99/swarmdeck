@@ -46,6 +46,11 @@ with x forward and y left. The dashboard draws it when present and falls back
 to `footprint_radius`; navigation stacks should use the same polygon for their
 collision footprint.
 
+An adapter may also expose an accumulated 3D SLAM cloud as a global map source.
+That source is projected into an occupied-only 2D grid in the adapter's map
+frame; cells not hit by the cloud remain unknown because a historical cloud
+does not contain the individual sensor origins needed to prove free space.
+
 Capabilities drive the UI and command routing:
 
 | Capability | Contract |

@@ -84,6 +84,11 @@ def _bridge(mod, cfg_override=None):
     # link itself means to model. The class default is deliberately stale.
     bridge._last_link_at = __import__("time").monotonic()
     bridge._last_cloud_prepare_at = 0.0
+    bridge._native_map_frame_warned = False
+    bridge.grid = None
+    bridge._grid_dirty = False
+    bridge._cloud_points = None
+    bridge._cloud_dirty = False
     bridge._camera_depth_image = None
     bridge._camera_info = None
     bridge._camera_color_info = None
@@ -520,6 +525,14 @@ def test_map_cloud_alone_still_advertises_the_map_capability(mod):
     assert "map" not in neither.capabilities()
 
 
+def test_global_map_cloud_alone_still_advertises_the_map_capability(mod):
+    bridge = _bridge(
+        mod,
+        {"topics": {"map": "", "map_cloud": "", "map_cloud_global": "map_global"}},
+    )
+    assert "map" in bridge.capabilities()
+
+
 class _FakeField:
     def __init__(self, name: str, offset: int) -> None:
         self.name = name
@@ -546,6 +559,14 @@ def _fake_cloud(points, extra_fields=()):
     return type("M", (), {
         "fields": fields, "point_step": point_step, "data": data,
     })()
+
+
+def _fake_cloud_with_header(points, frame="odom_lidar", stamp=0.0):
+    msg = _fake_cloud(points)
+    msg.header = type(
+        "Header", (), {"frame_id": frame, "stamp": _stamp(stamp)}
+    )()
+    return msg
 
 
 def test_cloud_xyz_reads_field_offsets_not_position(mod):
@@ -591,6 +612,53 @@ def test_on_map_cloud_keeps_xyz_for_the_3d_view(mod):
     assert bridge._cloud_points[:, 2].tolist() == pytest.approx([0.02, 2.5])
     assert bridge._cloud_dirty is True
     assert bridge._scan_points.shape == (1, 2)
+
+
+def test_global_map_cloud_projects_only_the_configured_height_slice(mod):
+    bridge = _bridge(
+        mod,
+        {
+            "map_frame": "odom_lidar",
+            "topics": {"map": "", "map_cloud": "", "map_cloud_global": "map_global"},
+            "map_cloud_height_band": {"min_z": 0.0, "max_z": 1.0},
+            "native_map_resolution": 0.5,
+            "native_map_padding_m": 0.5,
+        },
+    )
+    bridge._on_global_map_cloud(
+        _fake_cloud_with_header(
+            [
+                (1.0, 2.0, 0.5),    # retained occupied return
+                (1.1, 2.1, 0.6),    # same 0.5 m cell
+                (4.0, 4.0, 2.0),    # above the requested band
+                (8.0, 8.0, -1.0),   # below the requested band
+            ]
+        )
+    )
+
+    assert bridge._scan_dirty is False
+    assert bridge._grid_dirty is True
+    assert bridge.grid.header.frame_id == "odom_lidar"
+    assert bridge.grid.info.resolution == pytest.approx(0.5)
+    assert bridge.grid.info.origin.position.x == pytest.approx(0.5)
+    assert bridge.grid.info.origin.position.y == pytest.approx(1.5)
+    cells = mod.np.asarray(bridge.grid.data, dtype=mod.np.int8).reshape(
+        bridge.grid.info.height, bridge.grid.info.width
+    )
+    assert int((cells == 100).sum()) == 1
+    assert (cells == -1).sum() > 0
+
+
+def test_global_map_cloud_drops_a_cloud_in_the_wrong_frame(mod):
+    bridge = _bridge(
+        mod,
+        {"map_frame": "odom_lidar", "topics": {"map_cloud_global": "map_global"}},
+    )
+    bridge._on_global_map_cloud(
+        _fake_cloud_with_header([(1.0, 2.0, 0.5)], frame="map")
+    )
+    assert bridge.grid is None
+    assert bridge._grid_dirty is False
 
 
 def test_3d_downsampling_is_limited_to_the_upload_rate(mod, monkeypatch):

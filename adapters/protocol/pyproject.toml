@@ -1,0 +1,20 @@
+[project]
+name = "swarmdeck-protocol"
+version = "0.1.0"
+description = "SwarmDeck wire protocol — the single source of truth shared by adapters, server, and SLAM back-end"
+# Deliberately dependency-light and version-agnostic: this package is imported by
+# the adapters (3.13 / numpy 2.x, and whatever a robot's ROS distro ships), by the
+# server (3.13 / numpy 2.x) and by swarmdeck-slam (3.12 / numpy 1.26, pinned by
+# gtsam). Anything added here must work on all of them.
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["swarmdeck_protocol*"]

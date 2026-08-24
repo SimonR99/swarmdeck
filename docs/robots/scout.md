@@ -31,3 +31,10 @@ make deploy ROBOT=scout DEPLOY_ARGS=--no-native-reset
 The repository currently has no unified Scout shutdown helper. Compose services
 can be stopped with the generated `.deploy/scout.env`; native ROS launches must
 also be stopped using the robot's process supervisor or launch-session procedure.
+
+Scout's ROS 1 profile uses LVI-SAM's accumulated
+`/lvi_sam/lidar/mapping/map_global` as the SwarmDeck map source. The adapter
+projects the 3D cloud to 2D using returns from 15 cm above the floor through the
+Scout height plus 15 cm (0.150–0.395 m), and forwards the accumulated cloud to
+the 3D viewer. The projection marks returned cells occupied; unobserved cells
+remain unknown rather than being treated as safe free space.

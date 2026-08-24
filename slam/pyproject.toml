@@ -1,0 +1,36 @@
+[project]
+name = "swarmdeck-slam"
+version = "0.1.0"
+description = "SwarmDeck collaborative SLAM back-end — pose-graph optimization over multi-robot keyframes"
+# Pinned to 3.12: gtsam 4.2.2 publishes no numpy>=2-compatible build. Importing
+# it under numpy 2.x appears to succeed and then SEGFAULTS on the first array
+# marshalling call (verified 2026-08-24), so the constraint is real rather than
+# stale metadata. This is also why the package is a separate distribution from
+# swarmdeck-server, which runs 3.13/numpy 2.x.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=1.26,<2",
+  "scipy>=1.11",
+  "gtsam==4.2.2",
+  "small-gicp>=1.0.1",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "httpx>=0.27",
+  # The wire format is shared with the adapters and the server; it lives in one
+  # place so encode and decode cannot drift apart. Resolved from the local path
+  # below rather than PyPI -- it is not published.
+  "swarmdeck-protocol",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["swarmdeck_slam*"]
+
+[tool.uv.sources]
+swarmdeck-protocol = { path = "../adapters/protocol", editable = true }

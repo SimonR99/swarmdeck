@@ -74,6 +74,7 @@ from adapters.runtime import (
     AdapterTelemetryMixin,
     deep_merge,
     map_cloud_height_limits,
+    project_occupied_cloud,
     stamp_seconds,
     yaw_of,
 )
@@ -137,6 +138,12 @@ DEFAULTS: dict[str, Any] = {
         # backend raytraces this into a grid itself (mapsvc/scan_grid.py)
         # rather than the adapter needing its own occupancy-grid mapper.
         "map_cloud": "",
+        # Accumulated/global PointCloud2 from a 3D SLAM stack. Unlike
+        # `map_cloud`, this is already the whole map, so the adapter projects it
+        # directly to an occupied-only OccupancyGrid and must not raytrace it as
+        # one scan. Unknown cells stay unknown because the cloud has no per-point
+        # sensor origins from which safe free-space evidence could be recovered.
+        "map_cloud_global": "",
         "plan": "plan",
         "cmd_vel": "cmd_vel",
         "battery": "",       # empty disables the capability
@@ -206,6 +213,12 @@ DEFAULTS: dict[str, Any] = {
     # then they mean physical heights above the floor and the adapter adds that
     # map-frame floor reference before filtering.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
+    # Native accumulated-cloud projection settings. The resulting grid is
+    # occupied-only; free cells can only be asserted by a native OccupancyGrid
+    # or the separate per-scan raytracing path.
+    "native_map_resolution": 0.05,
+    "native_map_padding_m": 1.0,
+    "native_map_max_cells": 8_000_000,
     # Keep ray-traced known-free cells white after the lidar moves on. Unknown
     # cells remain unknown; this only controls retention of observed free space.
     "retain_free_space": False,
@@ -312,6 +325,7 @@ class HardwareBridge(
         self._cloud_points: np.ndarray | None = None
         self._cloud_dirty = False
         self._last_cloud_prepare_at = 0.0
+        self._native_map_frame_warned = False
         self.planned_path: list[dict[str, float]] = []
         self.battery: float | None = None
         self.nav_status = "idle"
@@ -361,6 +375,13 @@ class HardwareBridge(
         if topics.get("map_cloud"):
             rospy.Subscriber(
                 topics["map_cloud"], PointCloud2, self._on_map_cloud, queue_size=1
+            )
+        if topics.get("map_cloud_global"):
+            rospy.Subscriber(
+                topics["map_cloud_global"],
+                PointCloud2,
+                self._on_global_map_cloud,
+                queue_size=1,
             )
         if topics.get("plan"):
             rospy.Subscriber(topics["plan"], NavPath, self._on_plan, queue_size=10)
@@ -453,7 +474,11 @@ class HardwareBridge(
         caps: list[str] = []
         if self.nav_client is not None or self.pub_nav_goal is not None:
             caps.append("navigate")
-        if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
+        if (
+            self.cfg["topics"].get("map")
+            or self.cfg["topics"].get("map_cloud")
+            or self.cfg["topics"].get("map_cloud_global")
+        ):
             caps.append("map")
         if self.cfg["topics"].get("camera") or self.cfg["topics"].get("camera_compressed"):
             caps.append("camera")
@@ -466,6 +491,20 @@ class HardwareBridge(
         return caps
 
     # ------------------------------------------------------------- ROS inputs
+
+    def _prepare_display_cloud(self, points: np.ndarray) -> None:
+        """Keep a coarser XYZ copy for the optional 3D map viewer."""
+        now = time.monotonic()
+        cloud_period = max(
+            0.1, float(self.cfg.get("rates", {}).get("cloud_period_s", 4.0))
+        )
+        if now - self._last_cloud_prepare_at < cloud_period:
+            return
+        self._last_cloud_prepare_at = now
+        cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
+        _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
+        self._cloud_points = points[cloud_keep]
+        self._cloud_dirty = True
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
         """Prepare one registered XYZ cloud for both map consumers.
@@ -484,20 +523,11 @@ class HardwareBridge(
         if not len(points):
             return
 
-        now = time.monotonic()
-        cloud_period = max(
-            0.1, float(self.cfg.get("rates", {}).get("cloud_period_s", 4.0))
-        )
         # The source runs at lidar rate (~5 Hz on TARS), but the viewer polls
         # slowly. A full 3D np.unique() on every scan spent roughly a third of a
         # CPU core preparing clouds that could never be uploaded. Reduce only
         # when the next display sample is due; the 2D scan below remains live.
-        if now - self._last_cloud_prepare_at >= cloud_period:
-            self._last_cloud_prepare_at = now
-            cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
-            _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
-            self._cloud_points = points[cloud_keep]
-            self._cloud_dirty = True
+        self._prepare_display_cloud(points)
 
         min_z, max_z = map_cloud_height_limits(
             self.cfg.get("map_cloud_height_band")
@@ -519,6 +549,70 @@ class HardwareBridge(
         # registration.py relies on to break rotational symmetry.
         self._scan_origin = self.map_pose()
         self._scan_dirty = True
+
+    def _on_global_map_cloud(self, msg: PointCloud2) -> None:
+        """Project an accumulated 3D SLAM map into Scout's 2D map.
+
+        LVI-SAM's ``map_global`` is a complete registered cloud, not a single
+        sensor sweep. It is therefore safe to mark occupied XY cells from it,
+        but unsafe to send those points through ``upload_scan``: doing so would
+        pretend every historical return was observed from the robot's current
+        pose and carve false free corridors through the map.
+        """
+        header = getattr(msg, "header", None)
+        frame = str(getattr(header, "frame_id", "") or "").lstrip("/")
+        expected = str(self.map_frame or "").lstrip("/")
+        if frame and expected and frame != expected:
+            if not self._native_map_frame_warned:
+                self._native_map_frame_warned = True
+                rospy.logwarn(
+                    f"[{self.id}] dropping accumulated map cloud in frame "
+                    f"{frame!r}; expected {expected!r}"
+                )
+            return
+
+        points = self._cloud_xyz(msg)
+        if not len(points):
+            return
+        # The accumulated source is also the correct cloud for the GUI's 3D
+        # view; this replaces the old latest-scan view when Scout uses the global
+        # topic.
+        self._prepare_display_cloud(points)
+
+        min_z, max_z = map_cloud_height_limits(
+            self.cfg.get("map_cloud_height_band")
+        )
+        slice_points = points[
+            (points[:, 2] >= min_z) & (points[:, 2] <= max_z)
+        ]
+        projected = project_occupied_cloud(
+            slice_points[:, :2],
+            resolution=self.cfg.get("native_map_resolution", 0.05),
+            padding_m=self.cfg.get("native_map_padding_m", 1.0),
+            max_cells=self.cfg.get("native_map_max_cells", 8_000_000),
+        )
+        if projected is None:
+            rospy.logwarn(
+                f"[{self.id}] accumulated map cloud produced no valid 2D grid "
+                f"within the configured height band or cell limit"
+            )
+            return
+
+        resolution, width, height, origin_x, origin_y, cells = projected
+        grid = OccupancyGrid()
+        grid.header.frame_id = self.map_frame
+        if header is not None and hasattr(header, "stamp"):
+            grid.header.stamp = header.stamp
+        grid.info.resolution = resolution
+        grid.info.width = width
+        grid.info.height = height
+        grid.info.origin.position.x = origin_x
+        grid.info.origin.position.y = origin_y
+        grid.info.origin.position.z = 0.0
+        grid.info.origin.orientation.w = 1.0
+        grid.data = cells.ravel(order="C").tolist()
+        self.grid = grid
+        self._grid_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
         """Publish the planner's intended route, in `map_frame`.
@@ -991,6 +1085,12 @@ class HardwareBridge(
         regardless of which upload path fed it (`app.py`'s `map_loop`), so
         there is nothing extra to announce here.
         """
+        # An accumulated/global cloud has already been projected to `self.grid`.
+        # Sending the same historical points as a scan would raytrace them from
+        # one current origin and overwrite the direct map with false free space.
+        if self.cfg["topics"].get("map_cloud_global"):
+            self._scan_dirty = False
+            return
         if not self._scan_dirty or self._scan_points is None:
             return
         self._scan_dirty = False
@@ -1016,12 +1116,11 @@ class HardwareBridge(
             rospy.logwarn(f"[{self.id}] scan upload failed: {exc}")
 
     def upload_cloud(self) -> None:
-        """Push the latest registered XYZ scan to the optional 3D viewer.
+        """Push the latest registered XYZ cloud to the optional 3D viewer.
 
         Unlike ``upload_scan``, this intentionally keeps Z and does no height
-        filtering. The backend already knows how to place each robot's local
-        cloud into the merged frame; this is the same transport used by the
-        simulation adapter and is not tied to a particular SLAM package.
+        filtering. For a global 3D SLAM topic this is the accumulated map; for
+        the ordinary map-cloud topic it is the latest registered scan.
         """
         if not self._cloud_dirty or self._cloud_points is None:
             return
