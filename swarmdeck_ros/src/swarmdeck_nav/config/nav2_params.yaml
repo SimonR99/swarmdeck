@@ -35,12 +35,18 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.35
+      # The dashboard sets points (x/y), not final orientations. The adapter
+      # supplies a neutral quaternion because NavigateToPose requires one;
+      # accept any heading so the robot stops at the point without a final turn.
+      yaw_goal_tolerance: 3.2
       stateful: true
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
-      min_vel_x: 0.0
+      # Forward is preferred by the critic below, but reverse remains
+      # available when a point is behind the robot or the forward path is
+      # blocked.
+      min_vel_x: -0.6
       max_vel_x: 0.6
       max_vel_theta: 1.2
       min_speed_xy: 0.0
@@ -58,13 +64,17 @@ controller_server:
       transform_tolerance: 0.2
       critics:
         ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
-         "PathAlign", "PathDist", "GoalDist"]
+         "PathAlign", "PathDist", "GoalDist", "PreferForward"]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
       GoalAlign.scale: 24.0
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
+      # Prefer driving nose-first, while retaining reverse as a valid fallback
+      # when turning would be less safe or the forward corridor is blocked.
+      PreferForward.scale: 1.0
+      PreferForward.penalty: 1.0
       RotateToGoal.scale: 32.0
 
 local_costmap:

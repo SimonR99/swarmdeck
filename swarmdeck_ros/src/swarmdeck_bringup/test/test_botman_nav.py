@@ -46,13 +46,36 @@ def test_botman_params_are_humble_compatible_and_need_no_grid_map():
     assert global_map["track_unknown_space"] is False
 
 
+def test_bunker_point_goals_do_not_require_a_final_heading():
+    params = yaml.safe_load(PARAMS.read_text())
+    goal_checker = params["controller_server"]["ros__parameters"]["goal_checker"]
+
+    # The adapter must provide a quaternion for NavigateToPose, but dashboard
+    # goals contain only x/y. A tolerance greater than pi makes every planar
+    # heading valid, so reaching XY ends navigation without a corrective turn.
+    assert goal_checker["yaw_goal_tolerance"] > 3.141592653589793
+
+
+def test_bunker_point_goals_can_use_forward_or_reverse_velocity():
+    params = yaml.safe_load(PARAMS.read_text())
+    controller = params["controller_server"]["ros__parameters"]
+    follow_path = controller["FollowPath"]
+    smoother = params["velocity_smoother"]["ros__parameters"]
+
+    assert follow_path["max_vel_x"] > 0.0
+    assert follow_path["min_vel_x"] < 0.0
+    assert smoother["min_velocity"][0] <= follow_path["min_vel_x"]
+    assert "PreferForward" in follow_path["critics"]
+    assert follow_path["PreferForward.penalty"] > 0.0
+
+
 def test_autonomous_velocity_can_only_reach_driver_through_adapter():
     params = yaml.safe_load(PARAMS.read_text())
     bunker = yaml.safe_load(BUNKER.read_text())
     compose = yaml.safe_load(COMPOSE.read_text())
 
     smoother = params["velocity_smoother"]["ros__parameters"]
-    assert smoother["max_velocity"] == [0.2, 0.0, 0.2]
+    assert smoother["max_velocity"] == [0.4, 0.0, 0.6]
     assert bunker["topics"]["cmd_vel"] == "/cmd_vel"
     assert bunker["topics"]["nav_cmd_vel"] == "/botman_0/cmd_vel_nav"
     assert bunker["actions"]["navigate_to_pose"] == "/botman_0/navigate_to_pose"
@@ -73,14 +96,16 @@ def test_botman_passes_the_bunker_footprint_instead_of_the_scout_default():
     """nav.launch.py rewrites robot_radius from launch args, default 0.422 m.
 
     That is a Scout Mini. A Bunker launched without an override plans as a
-    42 cm disc around the lidar; the deck is then an obstacle and the only
-    recovery is reverse. The chassis rectangle has to be in the lidar frame.
+    42 cm disc around the lidar; the deck is then an obstacle and forward
+    planning can fail. The chassis rectangle has to be in the lidar frame.
     """
     source = BOTMAN_LAUNCH.read_text()
     assert '"robot_radius": _BUNKER_RADIUS' in source
     assert '"footprint": _BUNKER_FOOTPRINT' in source
-    assert "_LIDAR_X = -0.150" in source
-    # Front bumper must sit inside the polygon, not on a 0.65 m circle.
-    half_l, lidar_x = 1.023 / 2.0, -0.150
+    assert "_LIDAR_X = 0.150" in source
+    # Both ends of the chassis must sit inside the polygon in the lidar frame.
+    half_l, lidar_x = 1.023 / 2.0, 0.150
     front = half_l - lidar_x
-    assert front > 0.65
+    rear = -half_l - lidar_x
+    assert front > 0.0
+    assert abs(rear) > 0.65

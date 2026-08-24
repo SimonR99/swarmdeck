@@ -13,7 +13,13 @@
 # nav_goal/nav_stop comments below before assuming this is inert.
 robot_type: scout_mini
 network_iface: auto
-footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box (scout_mini.urdf.xacro base_x_size/base_y_size) — not the true footprint, since Scout Mini's outline isn't a circle
+footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box
+# Scout Mini rectangle in `base_frame` (base_link_filtered), x forward / y left.
+footprint:
+  - [0.310, 0.293]
+  - [0.310, -0.293]
+  - [-0.310, -0.293]
+  - [-0.310, 0.293]
 
 # ekf_agx.yaml's single EKF instance publishes odom_lidar -> base_link_filtered, and
 # nothing in this stack publishes a "map" frame at all. LVI-SAM's fused input
@@ -24,7 +30,9 @@ map_frame: odom_lidar
 base_frame: base_link_filtered
 
 # Ouster is mounted above base_link_filtered; LVI-SAM's frame origin is roughly
-# the sensor's own start pose (confirmed live: z ~0.26 m there).
+# the sensor's own start pose. The measured floor reference below is used to
+# express the filter in physical height above the floor rather than making the
+# map-origin choice look like a robot-height setting.
 #
 # MEASURED 2026-08-12, 50k accumulated points of cloud_registered, robust plane
 # fit to the returns below -0.35:
@@ -36,22 +44,16 @@ base_frame: base_link_filtered
 # room, and the same defect docs/robots/fleet.md flags as the reason not to
 # trust this robot's displayed pose.
 #
-# That tilt does put floor into this band, but far less than it looks like it
-# should: only 201 of ~50k points, all at 5.4-6.1 m range, in the -x direction
-# where the floor climbs. There is a real wall at x = -6.3 m (the cloud has no
-# returns whatsoever beyond it), so the floor never gets far enough away to rise
-# any higher. The tilt is a pose problem here, not a mapping one.
+# The tilt is a pose problem rather than a mapping one. floor_z is therefore a
+# calibrated reference, not a claim that the floor is perfectly level across
+# the whole accumulated cloud; recalibrate it if the SLAM origin changes.
 #
-# min_z 0.0 was tried and REVERTED. It cut occupied cells 76% (6856 -> 1633) and
-# the map looked much cleaner, but classifying the removed z slice [-0.3, 0.0)
-# against the floor plane above showed only 5.0% of it was floor: 28.6% was real
-# obstacles 15-40 cm up and 64.2% was structure higher than that. It was not
-# cleaning the map, it was deleting the furniture — including everything at the
-# height a Scout Mini actually collides with. Do not raise min_z to make the map
-# look tidier; this lab is genuinely cluttered and the speckle is mostly real.
+# The requested physical band is 0.150..0.395 m: 15 cm above the floor through
+# the Scout Mini's nominal 0.245 m chassis height plus 15 cm.
 map_cloud_height_band:
-  min_z: -0.3
-  max_z: 0.5
+  floor_z: -0.575
+  min_z: 0.150
+  max_z: 0.395
 
 topics:
   # /odometry/filtered is the EKF's fused output (fusing LVI-SAM lidar odometry), and is

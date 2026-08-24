@@ -407,6 +407,7 @@ class RobotBridge(AdapterSensorMixin):
         spec = robot_spec(self.platform)
         self.robot_type = spec.robot_type
         self.footprint_radius = round(spec.footprint_radius, 3)
+        self.footprint = json.loads(spec.footprint)
         self.spawn_z = spec.spawn_z
         # Where this platform's RGBD camera is bolted, from the same table the
         # SDF was rendered from. Turning a duck detection into a map marker is
@@ -751,6 +752,7 @@ class RobotBridge(AdapterSensorMixin):
             # teleport to spawn and forget the map. See the protocol README.
             "capabilities": ["navigate", "map", "camera", "battery", "estop", "reset"],
             "footprint_radius": self.footprint_radius,
+            "footprint": self.footprint,
         }
 
     def state(self) -> dict:

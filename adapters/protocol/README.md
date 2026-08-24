@@ -33,13 +33,18 @@ backend replies with `hello_ack` or closes the socket.
   "ros": "humble",
   "coordinate_frame": "local",
   "capabilities": ["navigate", "camera", "map", "battery", "network", "estop", "body"],
-  "footprint_radius": 0.55
+  "footprint_radius": 0.55,
+  "footprint": [[0.50, 0.30], [0.50, -0.30], [-0.50, -0.30], [-0.50, 0.30]]
 }
 ```
 
 `robot_id` is the stable identity key. `coordinate_frame` defaults to `local`,
 meaning pose, goal, map, scan, and cloud data use that robot's navigation-map
 frame. Use `merged` only when data already uses the backend's shared frame.
+`footprint` is optional and is a polygon in the robot's reported `base_frame`,
+with x forward and y left. The dashboard draws it when present and falls back
+to `footprint_radius`; navigation stacks should use the same polygon for their
+collision footprint.
 
 Capabilities drive the UI and command routing:
 

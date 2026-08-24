@@ -86,14 +86,22 @@ controller_server:
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.5
-      yaw_goal_tolerance: 0.5
+      # SwarmDeck sends point goals, not pose goals. NavigateToPose still
+      # requires an orientation, so the adapter fills in yaw=0; accepting the
+      # full planar heading range makes Nav2 finish as soon as XY is reached
+      # instead of rotating the Bunker back to that synthetic heading.
+      yaw_goal_tolerance: 3.2
       stateful: true
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
-      min_vel_x: 0.0
+      # Keep forward motion preferred by its larger cap, but allow a slow
+      # reverse trajectory when a point is behind the chassis or the forward
+      # corridor is blocked. The velocity smoother below enforces the same
+      # -0.2 m/s reverse limit.
+      min_vel_x: -0.2
       # Scout's pathFollower is capped at 0.4 m/s. This is the matching
-      # physical speed cap for Botman's Nav2 controller.
+      # physical speed cap for the Bunker's Nav2 controller.
       max_vel_x: 0.4
       max_vel_theta: 0.6
       min_speed_xy: 0.0
@@ -114,13 +122,17 @@ controller_server:
       stateful: true
       critics:
         ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
-         "PathAlign", "PathDist", "GoalDist"]
+         "PathAlign", "PathDist", "GoalDist", "PreferForward"]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
       GoalAlign.scale: 24.0
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
+      # Prefer driving nose-first, but leave reverse trajectories available
+      # when turning would be less safe or the forward corridor is blocked.
+      PreferForward.scale: 1.0
+      PreferForward.penalty: 1.0
       RotateToGoal.scale: 32.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
@@ -136,7 +148,7 @@ local_costmap:
       width: 8
       height: 8
       resolution: 0.05
-      robot_radius: 0.65
+      robot_radius: 0.77
       # Required for nav.launch.py to inject the real Bunker polygon. Without
       # this key RewrittenYaml silently leaves Nav2 on the circular fallback.
       footprint: "[]"
@@ -176,7 +188,7 @@ global_costmap:
       width: 40
       height: 40
       resolution: 0.1
-      robot_radius: 0.65
+      robot_radius: 0.77
       # Required for nav.launch.py to inject the real Bunker polygon. Without
       # this key RewrittenYaml silently leaves Nav2 on the circular fallback.
       footprint: "[]"

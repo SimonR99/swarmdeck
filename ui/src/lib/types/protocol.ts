@@ -37,6 +37,9 @@ export interface Point {
   y: number;
 }
 
+/** Chassis polygon in the robot's base frame, x forward / y left. */
+export type Footprint = [number, number][];
+
 export interface Stamps {
   t_mono: number;
   t_wall: number;
@@ -63,6 +66,8 @@ export interface RobotState extends Stamps {
   online: boolean;
   /** Circumscribed chassis radius, metres, as declared by the adapter at `hello`. */
   footprint_radius?: number;
+  /** Exact chassis polygon in base-frame metres, when the adapter provides it. */
+  footprint?: Footprint | null;
   /** Robot-side Wi-Fi measurement, sampled with this pose. */
   network?: {
     interface: string;
@@ -395,8 +400,10 @@ export type ClientMessage =
   | { type: 'detection_accept'; proposal_id: string }
   | { type: 'detection_ignore'; proposal_id: string }
   | { type: 'detection_merge'; proposal_id: string; entity_id: string }
-  | { type: 'detection_forget'; entity_id: string }
-  | { type: 'detection_forget_all' }
+  | { type: 'detection_forget'; entity_id?: string; proposal_id?: string }
+  | { type: 'detection_forget_all'; include_proposals?: boolean }
+  | { type: 'detection_clear_proposals' }
+  | { type: 'detection_delete_all' }
   | { type: 'detection_unignore' };
 
 export type ClientAction = ClientMessage['type'];

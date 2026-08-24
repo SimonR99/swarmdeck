@@ -16,7 +16,13 @@
 # broken (see docs/robots/fleet.md). Bridging (ros1_bridge, or porting the driver) is a
 # separate piece of work; this file documents what the bridge would need to carry.
 robot_type: scout_mini
-footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box (scout_mini.urdf.xacro base_x_size/base_y_size) — not the true footprint, since Scout Mini's outline isn't a circle
+footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link box
+# Scout Mini rectangle in `base_frame` (base_link_filtered), x forward / y left.
+footprint:
+  - [0.310, 0.293]
+  - [0.310, -0.293]
+  - [-0.310, -0.293]
+  - [-0.310, 0.293]
 
 # ekf_agx.yaml's single EKF instance publishes odom_lidar -> base_link_filtered, and
 # nothing in this stack publishes a "map" frame at all. LVI-SAM's fused input
@@ -25,6 +31,15 @@ footprint_radius: 0.43  # circumscribed circle of the 0.62 x 0.585 m base_link b
 # expects "map". Do not default this back to map/base_link; that pair does not exist here.
 map_frame: odom_lidar
 base_frame: base_link_filtered
+
+# LVI-SAM's registered map origin is approximately 0.575 m above the floor
+# (measured on tars). Scout Mini's nominal chassis height is 0.245 m, so keep
+# returns from 0.150..0.395 m above the floor. The adapter converts these
+# physical heights through floor_z before filtering the registered cloud.
+map_cloud_height_band:
+  floor_z: -0.575
+  min_z: 0.150
+  max_z: 0.395
 
 topics:
   # /odometry/filtered is the EKF's fused output (fusing LVI-SAM lidar odometry), and is

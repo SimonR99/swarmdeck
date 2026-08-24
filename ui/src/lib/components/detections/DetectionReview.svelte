@@ -77,6 +77,13 @@
     actions.mergeDetection(p.id, entityId);
   }
 
+  function forgetProposal(p: DetectionProposal) {
+    if (settling) return;
+    mergeOpen = null;
+    decided();
+    actions.forgetProposal(p.id);
+  }
+
   function selectProposal(p: DetectionProposal) {
     review.select(p.id);
     const robotId = p.robot_ids[0];
@@ -98,168 +105,170 @@
     the "x, y m · cm/cell · rev N" bar completely — and at z-30 over its z-20,
     invisibly. The stack grows upward, so this only moves its baseline.
   -->
-  <div class="pointer-events-none absolute bottom-12 left-3 z-30 flex w-[268px] flex-col gap-2">
-    {#if overflow}
-      <div class="pointer-events-auto self-start rounded-full border border-border bg-surface/95
-                  px-2.5 py-1 text-[9px] font-semibold text-fg-muted backdrop-blur-xl">
-        +{overflow} more awaiting review
+  <div class="pointer-events-none absolute bottom-12 left-3 z-30 flex flex-col items-start gap-1.5">
+    {#if review.proposals.length}
+      <div
+        class="pointer-events-auto flex items-center justify-between gap-2 rounded-full border
+               border-border bg-surface/95 px-2.5 py-0.5 text-[8px] font-semibold text-fg-muted
+               shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl"
+      >
+        <span>
+          {review.proposals.length} awaiting review
+          {#if overflow > 0}
+            <span class="font-normal text-fg-dim">(+{overflow} in queue)</span>
+          {/if}
+        </span>
+        <button
+          class="font-medium text-danger hover:underline"
+          title="Delete all proposals awaiting review"
+          onclick={() => actions.clearProposals()}
+        >
+          Delete all
+        </button>
       </div>
     {/if}
 
     {#each shown as p (p.id)}
       {@const suggested = review.entityOf(p.suggested_entity_id)}
       {@const candidates = review.mergeCandidates(p)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!--
+        Icon + buttons: class/score/position used to run
+        as three lines of text per card, which is too much screen for a 10in
+        tablet held in one hand. All of that detail still exists — it's just a
+        title tooltip on the dot now, and a tap opens the robot on the map.
+      -->
       <div
-        class="pointer-events-auto rounded-[5px] border border-border bg-surface/95 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)]
-               backdrop-blur-xl transition-colors
+        role="group"
+        aria-label="Detection proposal"
+        class="pointer-events-auto flex items-center gap-1 rounded-full border border-border
+               bg-surface/95 p-1 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl
+               transition-colors
                {review.selected === p.id || review.focused === p.id ? 'border-accent' : ''}"
         onmouseenter={() => review.focus(p.id)}
         onmouseleave={() => review.focus(null)}
       >
         <button
-          class="flex w-full items-start gap-2 px-2.5 pt-2.5 text-left"
-          title="Show the detecting robot and its local map"
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-full hover:bg-surface-2"
+          title="{label(p.class)} · {Math.round(p.best_score * 100)}% · {seenBy(p.robot_ids)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'} · {p.position.x.toFixed(1)}, {p.position.y.toFixed(1)} m"
           onclick={() => selectProposal(p)}
         >
           <span
-            class="mt-[3px] h-2.5 w-2.5 shrink-0 rounded-full"
+            class="h-2.5 w-2.5 rounded-full"
             style="background:{detectionCatalog.colorOf(p.class)}"
           ></span>
-          <div class="min-w-0 flex-1">
-            <div class="flex items-baseline gap-1.5 text-[11px] font-semibold text-fg">
-              {label(p.class)}
-              <span class="text-[9px] font-medium text-fg-dim">
-                {Math.round(p.best_score * 100)}%
-              </span>
-            </div>
-            <!--
-              Viewpoints, not frames. A parked robot produces thousands of
-              frames of one measurement, so showing that number would read as
-              overwhelming evidence for a single biased estimate.
-            -->
-            <div class="mt-0.5 text-[9px] text-fg-dim">
-              {seenBy(p.robot_ids)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'}
-              {#if p.sightings > p.observations}<span class="opacity-70">of {p.sightings} frames</span>{/if}
-              · {p.position.x.toFixed(1)}, {p.position.y.toFixed(1)} m
-            </div>
-          </div>
         </button>
 
-        {#if suggested && p.suggested_distance !== null}
-          <!--
-            The ambiguous case, which is the only one worth an operator's
-            attention. Naming the distance is what makes the question
-            answerable: "same duck seen from a worse angle" and "a second duck"
-            look identical without it.
-          -->
-          <div class="mx-2.5 mt-2 rounded-[4px] border border-warn/30 bg-warn/8 px-2 py-1.5 text-[9px] text-fg-muted">
-            {p.suggested_distance.toFixed(2)} m from a {label(p.class)} already on the map —
-            same object?
-          </div>
-        {/if}
+        <button
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-ok/40
+                 bg-ok/8 text-ok hover:bg-ok/15 disabled:opacity-40"
+          disabled={settling}
+          title={suggested ? 'Separate' : 'Accept'}
+          onclick={() => accept(p)}
+        >
+          <Check class="h-3.5 w-3.5" />
+        </button>
 
-        <div class="flex gap-1 p-2.5 pt-2">
+        {#if candidates.length}
           <button
-            class="flex h-7 flex-1 items-center justify-center gap-1 rounded-[4px] border border-ok/40
-                   bg-ok/8 text-[9px] font-semibold text-ok hover:bg-ok/15
+            class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border transition-colors
+                   {suggested
+                     ? 'border-accent bg-accent/10 text-accent hover:bg-accent/20'
+                     : 'border-border text-fg-muted hover:bg-surface-2'}
                    disabled:opacity-40"
             disabled={settling}
-            onclick={() => accept(p)}
+            title="Merge"
+            onclick={() =>
+              suggested && candidates.length === 1
+                ? merge(p, suggested.id)
+                : (mergeOpen = mergeOpen === p.id ? null : p.id)}
           >
-            <Check class="h-3 w-3" /> {suggested ? 'Separate' : 'Accept'}
+            <GitMerge class="h-3.5 w-3.5" />
           </button>
-
-          {#if candidates.length}
-            <button
-              class="flex h-7 flex-1 items-center justify-center gap-1 rounded-[4px] border text-[9px]
-                     font-semibold transition-colors
-                     {suggested
-                       ? 'border-accent bg-accent/10 text-accent hover:bg-accent/20'
-                       : 'border-border text-fg-muted hover:bg-surface-2'}
-                     disabled:opacity-40"
-              disabled={settling}
-              onclick={() =>
-                suggested && candidates.length === 1
-                  ? merge(p, suggested.id)
-                  : (mergeOpen = mergeOpen === p.id ? null : p.id)}
-            >
-              <GitMerge class="h-3 w-3" /> Merge
-            </button>
-          {/if}
-
-          <button
-            class="flex h-7 w-8 items-center justify-center rounded-[4px] border border-border
-                   text-fg-dim hover:bg-surface-2 hover:text-fg disabled:opacity-40"
-            disabled={settling}
-            title="Ignore this object here, and stop asking about it"
-            onclick={() => ignore(p)}
-          >
-            <EyeOff class="h-3 w-3" />
-          </button>
-        </div>
-
-        {#if mergeOpen === p.id}
-          <div class="border-t border-border px-2.5 py-2">
-            <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
-              Merge into
-            </div>
-            <div class="flex max-h-32 flex-col gap-1 overflow-y-auto">
-              {#each candidates as candidate (candidate.id)}
-                {@const d = Math.hypot(
-                  candidate.position.x - p.position.x,
-                  candidate.position.y - p.position.y
-                )}
-                <button
-                  class="flex items-center justify-between rounded-[3px] border border-border px-2 py-1
-                         text-[9px] text-fg hover:bg-surface-2"
-                  onclick={() => merge(p, candidate.id)}
-                >
-                  <span>{label(candidate.class)} · {candidate.observations} viewpoints</span>
-                  <span class="tabular text-fg-dim">{d.toFixed(2)} m</span>
-                </button>
-              {/each}
-            </div>
-          </div>
         {/if}
+
+        <button
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-border
+                 text-fg-dim hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          disabled={settling}
+          title="Ignore this object here, and stop asking about it"
+          onclick={() => ignore(p)}
+        >
+          <EyeOff class="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-border
+                 text-fg-dim hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+          disabled={settling}
+          title="Delete this proposal"
+          onclick={() => forgetProposal(p)}
+        >
+          <Trash2 class="h-3.5 w-3.5" />
+        </button>
       </div>
+
+      {#if mergeOpen === p.id}
+        <div class="pointer-events-auto w-48 rounded-[5px] border border-border bg-surface/95
+                    shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl">
+          <div class="px-2 pt-1.5 text-[8px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+            Merge into
+          </div>
+          <div class="flex max-h-32 flex-col gap-1 overflow-y-auto p-1.5">
+            {#each candidates as candidate (candidate.id)}
+              {@const d = Math.hypot(
+                candidate.position.x - p.position.x,
+                candidate.position.y - p.position.y
+              )}
+              <button
+                class="flex items-center justify-between rounded-[3px] border border-border px-1.5 py-0.5
+                       text-[8px] text-fg hover:bg-surface-2"
+                onclick={() => merge(p, candidate.id)}
+              >
+                <span>{label(candidate.class)} · {candidate.observations} viewpoints</span>
+                <span class="tabular text-fg-dim">{d.toFixed(2)} m</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
     {/each}
 
-    <div class="pointer-events-auto flex flex-wrap items-center gap-1.5">
+    <div class="pointer-events-auto flex flex-wrap items-center gap-1">
       {#if review.entities.length}
         <button
-          class="flex items-center gap-1 rounded-full border bg-surface/95 px-2.5 py-1 text-[9px]
+          class="flex items-center gap-1 rounded-full border bg-surface/95 px-2 py-0.5 text-[8px]
                  font-semibold backdrop-blur-xl transition-colors
                  {listOpen ? 'border-accent text-accent' : 'border-border text-fg-muted hover:text-fg'}"
           onclick={() => (listOpen = !listOpen)}
         >
-          <MapPin class="h-2.5 w-2.5" />
+          <MapPin class="h-2 w-2" />
           {review.entities.length} on map
         </button>
       {/if}
       {#if review.ignored}
         <button
-          class="flex items-center gap-1 rounded-full border border-border bg-surface/95 px-2.5 py-1
-                 text-[9px] font-medium text-fg-dim backdrop-blur-xl hover:text-fg"
+          class="flex items-center gap-1 rounded-full border border-border bg-surface/95 px-2 py-0.5
+                 text-[8px] font-medium text-fg-dim backdrop-blur-xl hover:text-fg"
           title="Stop suppressing ignored objects, so they can be proposed again"
           onclick={() => actions.clearIgnoredDetections()}
         >
-          <RotateCcw class="h-2.5 w-2.5" />
+          <RotateCcw class="h-2 w-2" />
           {review.ignored} ignored
         </button>
       {/if}
     </div>
 
     {#if listOpen && review.entities.length}
-      <div class="pointer-events-auto rounded-[5px] border border-border bg-surface/95 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl">
-        <div class="flex items-center justify-between border-b border-border px-2.5 py-1.5">
-          <span class="text-[9px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+      <div class="pointer-events-auto w-56 rounded-[5px] border border-border bg-surface/95 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl">
+        <div class="flex items-center justify-between border-b border-border px-2 py-1">
+          <span class="text-[8px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
             Confirmed objects
           </span>
           <button
-            class="text-[9px] font-medium text-danger hover:underline"
+            class="text-[8px] font-medium text-danger hover:underline"
+            title="Delete all detections (confirmed objects and proposals awaiting review)"
             onclick={() => {
-              actions.forgetAllDetections();
+              actions.deleteAllDetections();
               listOpen = false;
             }}
           >
@@ -269,33 +278,33 @@
         <div class="flex max-h-56 flex-col overflow-y-auto">
           {#each review.entities as e (e.id)}
             <div
-              class="flex items-center gap-2 border-b border-border/60 px-2.5 py-1.5 last:border-b-0
+              class="flex items-center gap-1.5 border-b border-border/60 px-2 py-1 last:border-b-0
                      {review.selected === e.id ? 'bg-accent/8' : ''}"
             >
               <span
-                class="h-2 w-2 shrink-0 rounded-full"
+                class="h-1.5 w-1.5 shrink-0 rounded-full"
                 style="background:{detectionCatalog.colorOf(e.class)}"
               ></span>
               <div class="min-w-0 flex-1">
-                <div class="truncate text-[10px] font-medium text-fg">{label(e.class)}</div>
-                <div class="text-[9px] text-fg-dim">
+                <div class="truncate text-[9px] font-medium text-fg">{label(e.class)}</div>
+                <div class="text-[8px] text-fg-dim">
                   {e.position.x.toFixed(1)}, {e.position.y.toFixed(1)} m ·
                   {e.observations} viewpoint{e.observations === 1 ? '' : 's'} ·
                   {seenBy(e.robot_ids)}
                 </div>
               </div>
               <button
-                class="grid h-6 w-6 shrink-0 place-items-center rounded-[3px] text-fg-dim
+                class="grid h-5 w-5 shrink-0 place-items-center rounded-[3px] text-fg-dim
                        hover:bg-danger/10 hover:text-danger"
                 title="Remove from the map. Still visible to a robot, it will be proposed again — use Ignore to silence it."
                 onclick={() => actions.forgetDetection(e.id)}
               >
-                <Trash2 class="h-3 w-3" />
+                <Trash2 class="h-2.5 w-2.5" />
               </button>
             </div>
           {/each}
         </div>
-        <div class="border-t border-border px-2.5 py-1.5 text-[9px] text-fg-dim">
+        <div class="border-t border-border px-2 py-1 text-[8px] text-fg-dim">
           Deleting only unplaces it. A robot still looking at the object will propose it
           again — Ignore is what stops the asking.
         </div>

@@ -612,7 +612,7 @@
           class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (showSensors = !showSensors)}
         >
-          <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Sensors + footprint</span>
+          <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Sensors + actual footprint</span>
           <span class="font-semibold {showSensors ? 'text-accent' : 'text-fg-dim'}">{showSensors ? 'ON' : 'OFF'}</span>
         </button>
         <button

@@ -373,3 +373,47 @@ def test_forget_all_clears_confirmed_but_not_the_ignore_zones():
     assert not s.entities
     assert len(s.ignored) == 1, "ignoring is a separate decision from placing"
     assert s.forget_all() == 0
+
+
+def test_forget_proposal_removes_single_proposal_without_ignoring():
+    s = store()
+    _, duck = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    assert duck.id in s.proposals
+
+    assert s.forget_proposal(duck.id) is True
+    assert not s.proposals
+    assert not s.ignored, "forgetting a proposal must not add an ignore suppression zone"
+    assert s.forget_proposal(duck.id) is False
+
+
+def test_clear_proposals_clears_all_awaiting_review():
+    s = store()
+    _, d1 = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    _, d2 = s.observe("robot_0", "wooden_block", 5.0, 5.0, 0.9)
+    _, d3 = s.observe("robot_0", "disc_cone", 10.0, 10.0, 0.9)
+    s.accept(d1.id)
+
+    assert len(s.proposals) == 2
+    assert len(s.entities) == 1
+
+    cleared = s.clear_proposals()
+    assert cleared == 2
+    assert not s.proposals
+    assert len(s.entities) == 1, "clearing proposals must preserve confirmed entities"
+
+
+def test_delete_all_clears_both_confirmed_and_proposals():
+    s = store()
+    _, d1 = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    _, d2 = s.observe("robot_0", "wooden_block", 5.0, 5.0, 0.9)
+    s.accept(d1.id)
+    _, d3 = s.observe("robot_0", "disc_cone", 10.0, 10.0, 0.9)
+
+    assert len(s.entities) == 1
+    assert len(s.proposals) == 2
+
+    count = s.delete_all()
+    assert count == 3
+    assert not s.entities
+    assert not s.proposals
+

@@ -39,6 +39,24 @@ def deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def map_cloud_height_limits(band: dict[str, Any] | None) -> tuple[float, float]:
+    """Return the cloud filter limits in the registered map frame.
+
+    Older profiles expressed ``min_z``/``max_z`` directly in the map frame.
+    Hardware profiles can also provide ``floor_z``; in that form the two
+    values are physical heights above the floor, which keeps the requested
+    clearance independent of where SLAM placed the map origin.
+    """
+    band = band or {}
+    min_z = float(band.get("min_z", -1e9))
+    max_z = float(band.get("max_z", 1e9))
+    if "floor_z" in band:
+        floor_z = float(band["floor_z"])
+        min_z += floor_z
+        max_z += floor_z
+    return min_z, max_z
+
+
 def yaw_of(q) -> float:
     """Return planar yaw from a ROS quaternion-like object."""
     return math.atan2(

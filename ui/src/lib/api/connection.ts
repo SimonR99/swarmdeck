@@ -240,8 +240,17 @@ export const actions = {
   forgetDetection(entityId: string) {
     sendAction({ type: 'detection_forget', entity_id: entityId });
   },
+  forgetProposal(proposalId: string) {
+    sendAction({ type: 'detection_forget', proposal_id: proposalId });
+  },
   forgetAllDetections() {
     sendAction({ type: 'detection_forget_all' });
+  },
+  clearProposals() {
+    sendAction({ type: 'detection_clear_proposals' });
+  },
+  deleteAllDetections() {
+    sendAction({ type: 'detection_delete_all' });
   },
   clearIgnoredDetections() {
     sendAction({ type: 'detection_unignore' });

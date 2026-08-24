@@ -11,7 +11,7 @@ import { mapStore } from '$lib/stores/mapstore.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
-import type { DetectionEntity, DetectionProposal } from '$lib/types/protocol';
+import type { DetectionEntity, DetectionProposal, Footprint } from '$lib/types/protocol';
 
 export type ScreenPoint = { sx: number; sy: number };
 export type GridPoint = { gx: number; gy: number };
@@ -23,6 +23,7 @@ export interface MapRobot {
   pose: { x: number; y: number; yaw: number };
   planned_path?: { x: number; y: number }[];
   footprint_radius?: number;
+  footprint?: Footprint | null;
   goal?: { x: number; y: number } | null;
 }
 
@@ -273,6 +274,24 @@ export interface RobotLayerOptions {
   showLabels: boolean;
 }
 
+/** Transform an adapter-declared base-frame polygon into map pixels. */
+function footprintOnScreen(robot: MapRobot, screenOf: ScreenOf): ScreenPoint[] | null {
+  const footprint = robot.footprint;
+  if (!footprint || footprint.length < 3) return null;
+  const c = Math.cos(robot.pose.yaw);
+  const s = Math.sin(robot.pose.yaw);
+  const points: ScreenPoint[] = [];
+  for (const [x, y] of footprint) {
+    const grid = mapStore.worldToGrid(
+      robot.pose.x + c * x - s * y,
+      robot.pose.y + s * x + c * y
+    );
+    if (!grid) return null;
+    points.push(screenOf(grid.gx, grid.gy));
+  }
+  return points;
+}
+
 /** Draw trails, plans, sensors, goals, selection halos, bodies, and labels. */
 export function drawRobots(
   ctx: CanvasRenderingContext2D,
@@ -332,7 +351,6 @@ export function drawRobots(
     }
 
     if (showSensors) {
-      const footprintPx = ((robot.footprint_radius ?? 0.42) / info.resolution) * view.scale;
       const sensorPx = (2.0 / info.resolution) * view.scale;
       ctx.save();
       ctx.translate(sx, sy);
@@ -353,13 +371,26 @@ export function drawRobots(
       ctx.stroke();
       ctx.restore();
 
-      ctx.beginPath();
-      ctx.arc(sx, sy, footprintPx, 0, Math.PI * 2);
+      const polygon = footprintOnScreen(robot, screenOf);
       ctx.setLineDash([3, 3]);
       ctx.strokeStyle = color;
       ctx.globalAlpha = 0.32;
       ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.beginPath();
+      if (polygon) {
+        ctx.moveTo(polygon[0].sx, polygon[0].sy);
+        for (const point of polygon.slice(1)) ctx.lineTo(point.sx, point.sy);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.06;
+        ctx.fill();
+        ctx.globalAlpha = 0.55;
+        ctx.stroke();
+      } else {
+        const footprintPx = ((robot.footprint_radius ?? 0.42) / info.resolution) * view.scale;
+        ctx.arc(sx, sy, footprintPx, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
     }

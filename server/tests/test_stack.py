@@ -242,6 +242,19 @@ def test_registry_capabilities_and_neglect():
     assert reg.robots["mock"].coordinate_frame == "merged"
 
 
+def test_registry_forwards_declared_robot_footprint():
+    reg = Registry()
+    footprint = [[0.5, 0.3], [0.5, -0.3], [-0.5, -0.3], [-0.5, 0.3]]
+
+    robot = reg.hello(
+        {"robot_id": "r0", "footprint_radius": 0.6, "footprint": footprint},
+        sink=None,
+    )
+
+    assert robot.footprint == footprint
+    assert robot.to_state()["footprint"] == footprint
+
+
 def test_robot_state_network_sample_is_stored_at_the_same_pose():
     app_registry.robots.clear()
     app_registry._sinks.clear()
@@ -721,6 +734,12 @@ def test_goal_routing_converts_shared_coordinates_to_robot_frame():
         assert robot_state(robot)["pose"] == pytest.approx(
             {"x": 3.0, "y": 0.0, "yaw": math.pi / 2}
         )
+
+        robot.planned_path = [{"x": 2.0, "y": 1.0}, {"x": 3.0, "y": 1.0}]
+        assert robot_state(robot)["planned_path"] == pytest.approx([
+            {"x": 3.0, "y": 0.0},
+            {"x": 3.0, "y": 1.0},
+        ])
 
         # Synthetic adapters can explicitly bypass conversion when their data
         # already uses the shared map frame.
@@ -1942,6 +1961,60 @@ def test_deleting_a_confirmed_object_is_persisted_immediately(tmp_path, monkeypa
         review_store.reset()
         app_module.load_review()
         assert review_store.snapshot()["entities"] == []
+    finally:
+        app_registry.robots.clear()
+        _detections.clear()
+        review_store.reset()
+
+
+def test_clearing_proposals_and_deleting_all_via_websocket(tmp_path, monkeypatch):
+    from swarmdeck_server.api import app as app_module
+
+    monkeypatch.setattr(app_module, "REVIEW_PATH", tmp_path / "detections.json")
+    app_registry.robots.clear()
+    review_store.reset()
+    try:
+        with TestClient(app) as c:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+                _drain_for(gui, "detection_review")
+                ad.send_json({"type": "hello", "protocol": 2, "robot_id": "r0",
+                              "coordinate_frame": "merged"})
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "front",
+                     "items": [
+                         {"id": "d0", "class": "rubber_duck", "score": 0.9, "map_position": {"x": 1.0, "y": 1.0}},
+                         {"id": "d1", "class": "wooden_block", "score": 0.9, "map_position": {"x": 5.0, "y": 5.0}},
+                     ]}
+                )
+                props = _drain_for(gui, "detection_review")["proposals"]
+                assert len(props) == 2
+
+                # Accept first proposal
+                gui.send_json({"type": "detection_accept", "proposal_id": props[0]["id"]})
+                rev = _drain_for(gui, "detection_review")
+                assert len(rev["entities"]) == 1
+                assert len(rev["proposals"]) == 1
+
+                # Clear remaining proposals
+                gui.send_json({"type": "detection_clear_proposals"})
+                rev = _drain_for(gui, "detection_review")
+                assert len(rev["entities"]) == 1
+                assert len(rev["proposals"]) == 0
+
+                # Send a fresh detection
+                ad.send_json(
+                    {"type": "detections", "robot_id": "r0", "camera": "front",
+                     "items": [{"id": "d2", "class": "disc_cone", "score": 0.85, "map_position": {"x": 8.0, "y": 8.0}}]}
+                )
+                rev = _drain_for(gui, "detection_review")
+                assert len(rev["entities"]) == 1
+                assert len(rev["proposals"]) == 1
+
+                # Delete all (both entities and proposals)
+                gui.send_json({"type": "detection_delete_all"})
+                rev = _drain_for(gui, "detection_review")
+                assert len(rev["entities"]) == 0
+                assert len(rev["proposals"]) == 0
     finally:
         app_registry.robots.clear()
         _detections.clear()

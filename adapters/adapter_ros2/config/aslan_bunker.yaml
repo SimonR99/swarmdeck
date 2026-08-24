@@ -10,23 +10,34 @@ robot_type: agilex_bunker
 ros_distro: humble
 network_iface: auto
 
-# Bunker is 1.023 x 0.778 m. Keep the conservative circumscribed radius used
-# for the other physical Bunker until a calibrated lidar/base transform exists.
-# The registered-cloud map path also reuses it to reject chassis self-returns.
-footprint_radius: 0.65
+# Bunker is 1.023 x 0.778 m. `base_frame` below is os_lidar and the sensor is
+# mounted at the front, 0.15 m ahead of centre, so the far rear corners are
+# 0.767 m away. The registered-cloud map path reuses this radius to reject
+# chassis self-returns.
+footprint_radius: 0.77
+footprint:
+  # Same physical rectangle and lidar-frame origin as Botman.
+  - [0.362, 0.389]
+  - [0.362, -0.389]
+  - [-0.662, -0.389]
+  - [-0.662, 0.389]
 
 map_frame: map
 base_frame: os_lidar
 
+# Same Bunker envelope and SuperOdometry map origin as Botman: nominal chassis
+# height 0.400 m, with the requested 0.150..0.550 m physical obstacle band.
 map_cloud_height_band:
-  min_z: -0.3
-  max_z: 0.5
+  floor_z: -0.520
+  min_z: 0.150
+  max_z: 0.550
 
 topics:
   odom: /laser_odometry
   map: ""
   map_cloud: /registered_scan
-  plan: ""
+  # Nav2's planner_server publishes its global route in the robot namespace.
+  plan: /aslan_0/plan
   cmd_vel: /cmd_vel
   battery: ""
   # OAK-D on USB (03e7:2485). The default camera service runs the RGB-D profile

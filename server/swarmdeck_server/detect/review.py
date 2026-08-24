@@ -407,9 +407,29 @@ class ReviewStore:
         """
         return self.entities.pop(entity_id, None) is not None
 
-    def forget_all(self) -> int:
+    def forget_proposal(self, proposal_id: str) -> bool:
+        """Remove a proposal awaiting review without creating an ignore zone."""
+        return self.proposals.pop(proposal_id, None) is not None
+
+    def forget_all(self, include_proposals: bool = False) -> int:
         count = len(self.entities)
         self.entities.clear()
+        if include_proposals:
+            count += len(self.proposals)
+            self.proposals.clear()
+        return count
+
+    def clear_proposals(self) -> int:
+        """Clear all pending proposals awaiting review."""
+        count = len(self.proposals)
+        self.proposals.clear()
+        return count
+
+    def delete_all(self) -> int:
+        """Clear all confirmed entities and all pending proposals."""
+        count = len(self.entities) + len(self.proposals)
+        self.entities.clear()
+        self.proposals.clear()
         return count
 
     def clear_ignored(self) -> int:

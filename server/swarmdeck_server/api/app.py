@@ -499,7 +499,10 @@ def robot_state(robot: Any) -> dict[str, Any]:
         state["pose"] = dict(direct)
         if state["goal"]:
             state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
-        state["planned_path"] = []
+        state["planned_path"] = [
+            map_service.robot_to_world(robot.robot_id, point)
+            for point in state.get("planned_path", [])
+        ]
         return state
     state["pose"] = map_service.robot_to_world(robot.robot_id, state["pose"])
     if state["goal"]:
@@ -910,21 +913,34 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         "detection_merge",
         "detection_forget",
         "detection_forget_all",
+        "detection_clear_proposals",
+        "detection_delete_all",
         "detection_unignore",
     }:
         pid = str(msg.get("proposal_id", ""))
+        eid = str(msg.get("entity_id", ""))
         if kind == "detection_accept":
             changed = review_store.accept(pid) is not None
         elif kind == "detection_ignore":
             changed = review_store.ignore(pid)
         elif kind == "detection_merge":
-            changed = review_store.merge(pid, str(msg.get("entity_id", ""))) is not None
+            changed = review_store.merge(pid, eid) is not None
         elif kind == "detection_unignore":
             changed = review_store.clear_ignored() > 0
         elif kind == "detection_forget_all":
-            changed = review_store.forget_all() > 0
+            include_props = bool(msg.get("include_proposals", False))
+            changed = review_store.forget_all(include_proposals=include_props) > 0
+        elif kind == "detection_clear_proposals":
+            changed = review_store.clear_proposals() > 0
+        elif kind == "detection_delete_all":
+            changed = review_store.delete_all() > 0
         else:
-            changed = review_store.forget(str(msg.get("entity_id", "")))
+            if pid and not eid:
+                changed = review_store.forget_proposal(pid)
+            elif eid:
+                changed = review_store.forget(eid) or review_store.forget_proposal(eid)
+            else:
+                changed = False
         # Silence on an unknown id is deliberate: two operators can answer the
         # same proposal, and the loser of that race must not get an error for
         # having agreed.

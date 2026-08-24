@@ -20,6 +20,12 @@ network_iface: auto
 # never draws a footprint smaller than the chassis. The registered-cloud map
 # path also reuses this to reject lidar returns from the body/legs.
 footprint_radius: 0.61
+# Body rectangle in `base_frame` (body), x forward / y left.
+footprint:
+  - [0.550, 0.250]
+  - [0.550, -0.250]
+  - [-0.550, -0.250]
+  - [-0.550, 0.250]
 
 # LIO-SAM publishes map -> odom_link -> lidar_link. lidar_link is yawed 90°
 # from the chassis (static TF in spot.launch.py, copied from MIST). The GUI
@@ -29,18 +35,22 @@ footprint_radius: 0.61
 map_frame: map
 base_frame: body
 
-# LIO-SAM starts the map at the first lidar pose. Payload lidar sits near
-# body height (~0.5 m); this band is a first guess and must be checked
-# against the first live cloud.
+# LIO-SAM starts the map at the first lidar pose. Spot's standing envelope is
+# about 0.610 m high, so the requested physical obstacle band is 0.150..0.760 m
+# above the floor. The payload lidar is near 0.500 m, which is the current
+# map-frame floor reference; calibrate floor_z if the live SLAM origin differs.
 map_cloud_height_band:
-  min_z: -0.3
-  max_z: 0.5
+  floor_z: -0.500
+  min_z: 0.150
+  max_z: 0.760
 
 topics:
   odom: /lio_sam/mapping/odometry
   map: ""                 # LIO-SAM publishes no OccupancyGrid
   map_cloud: /lio_sam/mapping/cloud_registered
-  plan: /lio_sam/mapping/path
+  # LIO-SAM's path is an odometry/history trail, not Spot's Trajectory route.
+  # Clearpath's Trajectory action does not expose a planned-path topic.
+  plan: ""
   # Point nav uses /trajectory (not Nav2). Joystick uses /cmd_vel. Both need
   # the driver, a claimed lease, and a standing robot.
   cmd_vel: /cmd_vel
@@ -61,9 +71,23 @@ actions:
   navigate_to_pose: ""
   trajectory: /trajectory
 
-# Clearpath spot_driver Trigger services. MIST's spot.yaml leaves
-# `spot_name` empty, so these are un-namespaced. Advertising `body`
-# shows Claim/Release and Sit/Stand; they no-op until --profile driver.
+# A point goal has no requested yaw, so the adapter keeps the current body
+# heading. These are SDK mobility limits for both forward/lateral walking and
+# turning; the Trajectory duration is only a timeout and does not set speed.
+trajectory:
+  frame: body
+  duration_s: 30.0
+  precise_positioning: true
+  disable_obstacle_avoidance: false
+  velocity_limit:
+    linear_x: 0.25
+    linear_y: 0.25
+    angular_z: 0.5
+
+# Clearpath spot_driver services. MIST's spot.yaml leaves `spot_name` empty, so
+# these are un-namespaced. The body controls are Triggers; max_velocity uses
+# spot_msgs/SetVelocity. Advertising `body` shows Claim/Release and Sit/Stand;
+# they no-op until --profile driver.
 services:
   claim: /claim
   release: /release
@@ -75,6 +99,7 @@ services:
   # motors off after Claim already took the lease.
   estop_release: /estop/release
   clear_keepalive: /clear_keepalive
+  max_velocity: /max_velocity
 
 rates:
   state_hz: 5.0

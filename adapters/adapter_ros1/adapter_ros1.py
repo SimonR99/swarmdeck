@@ -73,6 +73,7 @@ from adapters.runtime import (
     AdapterSensorMixin,
     AdapterTelemetryMixin,
     deep_merge,
+    map_cloud_height_limits,
     stamp_seconds,
     yaw_of,
 )
@@ -114,6 +115,10 @@ except ImportError:  # pragma: no cover - depends on the robot's install
 DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
     "footprint_radius": 0.35,
+    # Optional polygon in base_frame coordinates, x forward / y left. The
+    # radius remains the conservative fallback for map filtering and older
+    # protocol peers.
+    "footprint": [],
     # Linux wireless interface to sample into the per-robot network heatmap.
     # "auto" uses the first row in /proc/net/wireless; empty disables it.
     "network_iface": "",
@@ -197,6 +202,9 @@ DEFAULTS: dict[str, Any] = {
     # otherwise flood the grid with false occupied cells. The default is a
     # starting guess, not a calibration — verify against the actual map that
     # comes out, per docs/operations/hardware-bringup.md.
+    # min_z/max_z are map-frame limits by default. A profile may add floor_z;
+    # then they mean physical heights above the floor and the adapter adds that
+    # map-frame floor reference before filtering.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
     # How close counts as "arrived" for a `nav_goal`-topic navigation stack,
     # metres. Unlike actionlib there is no explicit success signal to wait
@@ -488,9 +496,9 @@ class HardwareBridge(
             self._cloud_points = points[cloud_keep]
             self._cloud_dirty = True
 
-        band = self.cfg.get("map_cloud_height_band", {})
-        min_z = float(band.get("min_z", -1e9))
-        max_z = float(band.get("max_z", 1e9))
+        min_z, max_z = map_cloud_height_limits(
+            self.cfg.get("map_cloud_height_band")
+        )
         xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
         if not len(xy):
             self._scan_points = np.zeros((0, 2), dtype=np.float32)
@@ -1083,6 +1091,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     "coordinate_frame": "local",
                     "capabilities": bridge.capabilities(),
                     "footprint_radius": bridge.cfg["footprint_radius"],
+                    "footprint": bridge.cfg.get("footprint") or None,
                 }))
                 rospy.loginfo(
                     f"[{bridge.id}] connected; capabilities="

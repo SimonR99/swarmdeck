@@ -9,6 +9,7 @@ REPO = Path(__file__).resolve().parents[4]
 CONFIG = REPO / "adapters/adapter_ros2/config/aslan_bunker.yaml"
 COMPOSE = REPO / "deploy/compose/docker-compose.robot-aslan.yml"
 LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/aslan.launch.py"
+PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
 ROBOT_LAUNCH = REPO / "adapters/adapter_ros2/launch/aslan_bunker.launch.py"
 
 
@@ -57,6 +58,23 @@ def test_aslan_nav_namespace_and_tf_bridge_are_distinct():
     assert '"use_receive_time": True' in source
     assert '"robot_radius": _BUNKER_RADIUS' in source
     assert '"footprint": _BUNKER_FOOTPRINT' in source
+    assert "_LIDAR_X = 0.150" in source
+    assert '"inflation_radius": "0.50"' in source
+
+
+def test_aslan_uses_the_same_bunker_footprint_radius():
+    config = yaml.safe_load(CONFIG.read_text())
+
+    assert config["footprint_radius"] == 0.77
+
+
+def test_aslan_uses_the_same_forward_or_reverse_nav_limits():
+    params = yaml.safe_load(PARAMS.read_text())
+    follow_path = params["controller_server"]["ros__parameters"]["FollowPath"]
+
+    assert follow_path["min_vel_x"] == -0.2
+    assert follow_path["max_vel_x"] == 0.4
+    assert "PreferForward" in follow_path["critics"]
 
 
 def test_aslan_slam_uses_vectornav_imu():

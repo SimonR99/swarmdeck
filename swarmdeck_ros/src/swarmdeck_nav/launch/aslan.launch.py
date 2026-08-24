@@ -7,18 +7,27 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-# Keep in step with botman.launch.py — both Bunkers share this Nav2 YAML, and
-# nav.launch.py overwrites robot_radius/footprint unless these are passed.
+# Keep in step with botman.launch.py — both physical robots are the same Bunker
+# chassis, and nav.launch.py overwrites robot_radius/footprint/inflation_radius
+# unless these are passed.
+#
+# The chassis is expressed in the *lidar* frame because robot_base_frame is
+# os_lidar and the live TF tree has no os_lidar -> base_link edge. The Ouster is
+# mounted at the front, 0.15 m ahead of the chassis centre. Using the simulated
+# -0.15 m value mirrors the footprint and leaves the real rear deck outside the
+# collision polygon, which makes Nav2 treat the robot as its own obstacle.
 _BUNKER_HALF_L = 1.023 / 2.0
 _BUNKER_HALF_W = 0.778 / 2.0
-_LIDAR_X = -0.150
+_LIDAR_X = 0.150
 _FRONT = _BUNKER_HALF_L - _LIDAR_X
 _REAR = -_BUNKER_HALF_L - _LIDAR_X
 _BUNKER_FOOTPRINT = (
     f"[[{_FRONT:.3f},{_BUNKER_HALF_W:.3f}],[{_FRONT:.3f},{-_BUNKER_HALF_W:.3f}],"
     f"[{_REAR:.3f},{-_BUNKER_HALF_W:.3f}],[{_REAR:.3f},{_BUNKER_HALF_W:.3f}]]"
 )
-_BUNKER_RADIUS = f"{(_FRONT ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+# Use the end furthest from the lidar for the fallback circle. With the sensor
+# ahead of centre that is the rear, not the front.
+_BUNKER_RADIUS = f"{(max(abs(_FRONT), abs(_REAR)) ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -50,14 +59,14 @@ def generate_launch_description() -> LaunchDescription:
             "namespace": "aslan_0",
             "use_sim_time": use_sim_time,
             # The two Bunkers expose the same SuperOdometry/Ouster interfaces
-            # and share the same conservative physical limits.
+            # and share the same physical footprint and navigation limits.
             "params_file": PathJoinSubstitution(
                 [package_share, "config", "botman_nav2_params.yaml"]
             ),
             "tf_topic": "/tf",
             "tf_static_topic": "/tf_static",
             "robot_radius": _BUNKER_RADIUS,
-            "inflation_radius": "0.90",
+            "inflation_radius": "0.50",
             "footprint": _BUNKER_FOOTPRINT,
             "controller_cmd_vel_topic": "cmd_vel_nav_raw",
             "output_cmd_vel_topic": "cmd_vel_nav",

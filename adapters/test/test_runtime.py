@@ -8,7 +8,13 @@ import types
 import numpy as np
 import pytest
 
-from adapters.runtime import cloud_xyz, deep_merge, stamp_seconds, yaw_of
+from adapters.runtime import (
+    cloud_xyz,
+    deep_merge,
+    map_cloud_height_limits,
+    stamp_seconds,
+    yaw_of,
+)
 
 
 def test_deep_merge_preserves_profile_siblings():
@@ -27,6 +33,20 @@ def test_stamp_seconds_accepts_both_ros_timestamp_shapes():
     assert stamp_seconds(ros1) == 2.5
     assert stamp_seconds(ros2) == 2.5
     assert stamp_seconds(types.SimpleNamespace(stamp=None)) is None
+
+
+def test_map_cloud_height_limits_can_be_expressed_above_a_floor():
+    assert map_cloud_height_limits({
+        "floor_z": -0.5,
+        "min_z": 0.15,
+        "max_z": 0.65,
+    }) == pytest.approx((-0.35, 0.15))
+
+
+def test_map_cloud_height_limits_preserves_legacy_map_frame_profiles():
+    assert map_cloud_height_limits({"min_z": -0.3, "max_z": 0.5}) == pytest.approx(
+        (-0.3, 0.5)
+    )
 
 
 def test_cloud_xyz_honours_field_offsets_and_drops_nonfinite_rows():

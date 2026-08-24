@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -29,7 +30,7 @@ _STUBBED = [
     "action_msgs", "action_msgs.msg",
     "tf2_ros", "websockets", "cv2",
     "std_srvs", "std_srvs.srv",
-    "spot_msgs", "spot_msgs.action",
+    "spot_msgs", "spot_msgs.action", "spot_msgs.srv",
 ]
 
 
@@ -89,7 +90,11 @@ def _bridge(mod, cfg_override=None):
     bridge._cloud_points = None
     bridge._cloud_dirty = False
     bridge._last_cloud_prepare_at = 0.0
+    bridge._plan_frame_warned = False
     bridge._body_clients = {}
+    bridge._velocity_client = (
+        MagicMock() if cfg.get("services", {}).get("max_velocity") else None
+    )
     return bridge
 
 
@@ -209,6 +214,18 @@ def _identity_tf():
     return type("TF", (), {"transform": transform})()
 
 
+def _yaw_tf(yaw):
+    rot = type("Q", (), {
+        "x": 0.0,
+        "y": 0.0,
+        "z": __import__("math").sin(yaw / 2.0),
+        "w": __import__("math").cos(yaw / 2.0),
+    })()
+    trans = type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})()
+    transform = type("X", (), {"rotation": rot, "translation": trans})()
+    return type("TF", (), {"transform": transform})()
+
+
 def test_trajectory_action_advertises_navigate(mod):
     """Spot has no Nav2 server; /trajectory is what click-to-pose talks to."""
     none = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": ""}})
@@ -237,6 +254,123 @@ def test_trajectory_goal_is_transformed_into_body(mod):
     assert msg.duration.sec >= 1
     assert bridge.nav_status == "active"
     assert bridge.goal == {"x": 1.5, "y": -2.0}
+
+
+def test_trajectory_point_goal_preserves_current_heading(mod):
+    """A click without yaw must not silently become absolute map yaw zero."""
+    bridge = _bridge(mod, {
+        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}
+    })
+    bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.8)
+    bridge.traj_client.server_is_ready.return_value = True
+
+    bridge.navigate_to({"x": 1.5, "y": -2.0})
+
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.pose.orientation.z == pytest.approx(0.0)
+    assert msg.target_pose.pose.orientation.w == pytest.approx(1.0)
+
+
+def test_trajectory_explicit_yaw_is_still_honoured(mod):
+    bridge = _bridge(mod, {
+        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}
+    })
+    bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.8)
+    bridge.traj_client.server_is_ready.return_value = True
+
+    bridge.navigate_to({"x": 1.5, "y": -2.0, "yaw": 0.0})
+
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.pose.orientation.z == pytest.approx(
+        __import__("math").sin(-0.8 / 2.0)
+    )
+    assert msg.target_pose.pose.orientation.w == pytest.approx(
+        __import__("math").cos(-0.8 / 2.0)
+    )
+
+
+def test_trajectory_applies_configured_velocity_limit(mod):
+    bridge = _bridge(mod, {
+        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+        "services": {"max_velocity": "/max_velocity"},
+        "trajectory": {"velocity_limit": {
+            "linear_x": 0.25, "linear_y": 0.2, "angular_z": 0.5,
+        }},
+    })
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge.traj_client.server_is_ready.return_value = True
+    bridge._velocity_client.wait_for_service.return_value = True
+    future = MagicMock()
+    future.done.return_value = True
+    future.result.return_value = type("Response", (), {
+        "success": True, "message": "",
+    })()
+    bridge._velocity_client.call_async.return_value = future
+
+    bridge.navigate_to({"x": 1.0, "y": 2.0})
+
+    request = bridge._velocity_client.call_async.call_args[0][0]
+    assert request.velocity_limit.linear.x == pytest.approx(0.25)
+    assert request.velocity_limit.linear.y == pytest.approx(0.2)
+    assert request.velocity_limit.angular.z == pytest.approx(0.5)
+    bridge.traj_client.send_goal_async.assert_called_once()
+
+
+def test_trajectory_does_not_run_unlimited_when_limit_service_is_down(mod):
+    bridge = _bridge(mod, {
+        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+        "services": {"max_velocity": "/max_velocity"},
+        "trajectory": {"velocity_limit": {
+            "linear_x": 0.25, "linear_y": 0.25, "angular_z": 0.5,
+        }},
+    })
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge.traj_client.server_is_ready.return_value = True
+    bridge._velocity_client.wait_for_service.return_value = False
+
+    bridge.navigate_to({"x": 1.0, "y": 2.0})
+
+    bridge.traj_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "failed"
+
+
+def test_spot_config_enables_conservative_trajectory_limits():
+    config = yaml.safe_load(
+        (REPO / "adapters/adapter_ros2/config/spot.yaml").read_text()
+    )
+
+    assert config["services"]["max_velocity"] == "/max_velocity"
+    assert config["trajectory"]["velocity_limit"] == {
+        "linear_x": 0.25,
+        "linear_y": 0.25,
+        "angular_z": 0.5,
+    }
+
+
+def test_hardware_configs_declare_four_corner_footprints():
+    for name in ("bunker", "aslan_bunker", "spot"):
+        config = yaml.safe_load(
+            (REPO / f"adapters/adapter_ros2/config/{name}.yaml").read_text()
+        )
+        assert len(config["footprint"]) == 4
+        assert all(len(point) == 2 for point in config["footprint"])
+
+
+def test_hardware_configs_declare_physical_map_height_bands():
+    expected = {
+        "bunker": (-0.520, 0.550),
+        "aslan_bunker": (-0.520, 0.550),
+        "spot": (-0.500, 0.760),
+        "scout_mini": (-0.575, 0.395),
+    }
+    for name, (floor_z, max_height) in expected.items():
+        config = yaml.safe_load(
+            (REPO / f"adapters/adapter_ros2/config/{name}.yaml").read_text()
+        )
+        band = config["map_cloud_height_band"]
+        assert band["floor_z"] == pytest.approx(floor_z)
+        assert band["min_z"] == pytest.approx(0.150)
+        assert band["max_z"] == pytest.approx(max_height)
 
 
 def test_trajectory_goal_without_tf_is_dropped(mod):
@@ -393,6 +527,64 @@ def test_registered_cloud_uses_declared_offsets_and_height_band(mod):
     assert bridge._cloud_points[0].tolist() == pytest.approx([1.0, 2.0, -0.5])
     assert bridge._cloud_points[1].tolist() == pytest.approx([3.0, 4.0, 0.5])
     assert bridge._cloud_points[2].tolist() == pytest.approx([5.0, 6.0, 2.5])
+
+
+def test_registered_cloud_height_band_can_use_a_map_floor_reference(mod):
+    bridge = _bridge(mod, {
+        "map_cloud_height_band": {
+            "floor_z": -0.4,
+            "min_z": 0.15,
+            "max_z": 0.55,
+        }
+    })
+    msg = _fake_cloud([
+        (1.0, 2.0, -0.2),  # 0.20 m above the floor: keep
+        (3.0, 4.0, 0.1),   # 0.50 m above the floor: keep
+        (5.0, 6.0, 0.2),   # 0.60 m above the floor: drop
+    ])
+    bridge._on_map_cloud(msg)
+
+    assert bridge._scan_points.tolist() == pytest.approx([[1.0, 2.0], [3.0, 4.0]])
+
+
+def _plan_msg(frame, points):
+    msg = MagicMock()
+    msg.header.frame_id = frame
+    msg.header.stamp = MagicMock()
+    msg.poses = []
+    for x, y, z in points:
+        pose = MagicMock()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.position.z = z
+        msg.poses.append(pose)
+    return msg
+
+
+def test_ros2_plan_in_map_frame_is_visible_without_a_tf_lookup(mod):
+    bridge = _bridge(mod, {"map_frame": "map", "topics": {"plan": "/botman_0/plan"}})
+    bridge._on_plan(_plan_msg("map", [(1.0, 2.0, 0.0), (3.0, 4.0, 0.0)]))
+
+    assert bridge.planned_path == [
+        {"x": 1.0, "y": 2.0},
+        {"x": 3.0, "y": 4.0},
+    ]
+    bridge.tf_buffer.lookup_transform.assert_not_called()
+
+
+def test_ros2_plan_in_another_frame_is_transformed_before_upload(mod):
+    bridge = _bridge(mod, {"map_frame": "map", "topics": {"plan": "/plan"}})
+    transform = _yaw_tf(math.pi / 2.0)
+    transform.transform.translation.x = 10.0
+    transform.transform.translation.y = 5.0
+    bridge.tf_buffer.lookup_transform.return_value = transform
+
+    bridge._on_plan(_plan_msg("base_link", [(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)]))
+
+    assert bridge.planned_path == [
+        {"x": 10.0, "y": 6.0},
+        {"x": 10.0, "y": 7.0},
+    ]
 
 
 def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):

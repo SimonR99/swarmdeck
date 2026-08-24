@@ -33,8 +33,9 @@ def generate_launch_description() -> LaunchDescription:
             source_file=namespaced_params,
             root_key=namespace,
             # The fleet is no longer uniform, so footprint cannot live in the
-            # shared YAML: a Scout Mini is 0.42 m circumscribed and a Bunker
-            # 0.64 m. RewrittenYaml rewrites a bare key wherever it appears,
+            # shared YAML: a Scout Mini is 0.42 m circumscribed and a Bunker is
+            # about 0.77 m from its front-mounted lidar. RewrittenYaml rewrites
+            # a bare key wherever it appears,
             # which reaches both the global and local costmap copies.
             #
             # Inflation is passed alongside rather than derived here, because a
@@ -141,7 +142,7 @@ def generate_launch_description() -> LaunchDescription:
             # gets these defaults. They are the smallest platform (Scout Mini)
             # so a forgotten override plans too tightly rather than refusing to
             # plan. On a Bunker that is fatal in a different way: the lidar
-            # sees the deck as an obstacle and the only recovery is reverse.
+            # sees the deck as an obstacle and can make forward planning fail.
             # Hardware launches MUST pass robot_radius / footprint.
             DeclareLaunchArgument("robot_radius", default_value="0.422"),
             DeclareLaunchArgument("inflation_radius", default_value="0.70"),

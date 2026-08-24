@@ -77,6 +77,7 @@ from adapters.perception.depth_projection import (
     point_for_bbox,
     point_for_depth_image,
     transform_point,
+    transform_points,
 )
 from adapters.network_quality import read_link_quality
 from adapters.runtime import (
@@ -85,6 +86,7 @@ from adapters.runtime import (
     AdapterSensorMixin,
     AdapterTelemetryMixin,
     deep_merge,
+    map_cloud_height_limits,
     stamp_seconds,
     yaw_of,
 )
@@ -123,6 +125,11 @@ try:
 except ImportError:  # pragma: no cover - depends on the robot's install
     Trajectory = None
 
+try:
+    from spot_msgs.srv import SetVelocity
+except ImportError:  # pragma: no cover - depends on the robot's install
+    SetVelocity = None
+
 # Spot (and similar) body services. `stand` may also call `power_on` first.
 BODY_ACTIONS = ("claim", "release", "sit", "stand")
 # Trigger names that are not GUI body actions: motors, software e-stop allow,
@@ -140,6 +147,10 @@ DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
     "ros_distro": "jazzy",
     "footprint_radius": 0.35,
+    # Optional polygon in base_frame coordinates, x forward / y left. The
+    # radius remains the conservative fallback for map filtering and older
+    # protocol peers.
+    "footprint": [],
     # Linux wireless interface to sample into the per-robot network heatmap.
     # "auto" uses the first row in /proc/net/wireless; empty disables it.
     "network_iface": "",
@@ -176,6 +187,9 @@ DEFAULTS: dict[str, Any] = {
         # teleop, cancellation and e-stop authoritative.
         "nav_cmd_vel": "",
     },
+    # min_z/max_z are map-frame limits by default. A profile may add floor_z;
+    # then they mean physical heights above the floor and the adapter adds that
+    # map-frame floor reference before filtering.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
     "actions": {
         "navigate_to_pose": "navigate_to_pose",
@@ -189,6 +203,10 @@ DEFAULTS: dict[str, Any] = {
         "duration_s": 30.0,
         "precise_positioning": True,
         "disable_obstacle_avoidance": False,
+        # Optional Spot SDK mobility limit, applied through /max_velocity
+        # immediately before each trajectory. `duration_s` is only a timeout;
+        # it does not control how quickly Spot walks to the target.
+        "velocity_limit": {},
     },
     # Empty disables the `body` capability. Spot's Clearpath driver exposes
     # these as std_srvs/Trigger; a robot without them leaves them blank.
@@ -201,6 +219,8 @@ DEFAULTS: dict[str, Any] = {
         "stop": "",
         "estop_release": "",
         "clear_keepalive": "",
+        # Spot SDK mobility limit service (spot_msgs/SetVelocity).
+        "max_velocity": "",
     },
     "rates": {
         "state_hz": 5.0,
@@ -319,6 +339,7 @@ class HardwareBridge(
         self._cloud_dirty = False
         self._last_cloud_prepare_at = 0.0
         self.planned_path: list[dict[str, float]] = []
+        self._plan_frame_warned = False
         self.battery: float | None = None
         self.nav_status = "idle"
         self.mode = "idle"
@@ -453,6 +474,13 @@ class HardwareBridge(
                 if name in BODY_SERVICE_NAMES and topic:
                     self._body_clients[name] = node.create_client(Trigger, topic)
 
+        max_velocity_name = (cfg.get("services") or {}).get("max_velocity")
+        self._velocity_client = None
+        if max_velocity_name and SetVelocity is not None:
+            self._velocity_client = node.create_client(
+                SetVelocity, max_velocity_name
+            )
+
         # The deadman runs off the ROBOT's clock, not the operator link.
         #
         # It used to be called from the websocket tx loop, which is the one place
@@ -519,9 +547,9 @@ class HardwareBridge(
             self._cloud_points = points[cloud_keep]
             self._cloud_dirty = True
 
-        band = self.cfg.get("map_cloud_height_band", {})
-        min_z = float(band.get("min_z", -1e9))
-        max_z = float(band.get("max_z", 1e9))
+        min_z, max_z = map_cloud_height_limits(
+            self.cfg.get("map_cloud_height_band")
+        )
         xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
         if not len(xy):
             self._scan_points = np.zeros((0, 2), dtype=np.float32)
@@ -541,8 +569,58 @@ class HardwareBridge(
         self._scan_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
+        """Publish the planner's intended route, in ``map_frame``.
+
+        Nav2's global plan normally already uses ``map_frame``. Keeping the
+        transform path here as well makes this safe for a controller or vendor
+        planner that publishes its route in another connected frame, and avoids
+        drawing a perfectly plausible route at the wrong place on the map.
+        """
+        if not msg.poses:
+            self.planned_path = []
+            return
+
+        frame = str(getattr(msg.header, "frame_id", "") or "").lstrip("/")
+        if not frame or frame == self.map_frame:
+            points = np.array(
+                [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
+                 for ps in msg.poses],
+                dtype=np.float64,
+            )
+        else:
+            try:
+                stamp = getattr(msg.header, "stamp", None)
+                tf_time = rclpy.time.Time.from_msg(stamp) if stamp is not None else rclpy.time.Time()
+                tf = self.tf_buffer.lookup_transform(self.map_frame, frame, tf_time)
+            except Exception as exc:
+                if not self._plan_frame_warned:
+                    self._plan_frame_warned = True
+                    self.node.get_logger().warn(
+                        f"[{self.id}] no {self.map_frame} -> {frame} transform for "
+                        f"the planned path; not publishing it: {exc}"
+                    )
+                self.planned_path = []
+                return
+            points = np.array(
+                [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
+                 for ps in msg.poses],
+                dtype=np.float64,
+            )
+            points = transform_points(points, tf.transform)
+            if points is None:
+                self.planned_path = []
+                return
+
+        # Planner paths can contain thousands of poses. Keep enough detail for
+        # a smooth line while preventing one robot_state from monopolising the
+        # websocket payload.
+        max_points = 120
+        if len(points) > max_points:
+            indices = np.linspace(0, len(points) - 1, max_points, dtype=int)
+            points = points[indices]
         self.planned_path = [
-            {"x": ps.pose.position.x, "y": ps.pose.position.y} for ps in msg.poses
+            {"x": round(float(x), 3), "y": round(float(y), 3)}
+            for x, y in points[:, :2]
         ]
 
     def _on_camera_compressed(self, msg: CompressedImage) -> None:
@@ -869,6 +947,10 @@ class HardwareBridge(
         msg.pose.header.stamp = self.node.get_clock().now().to_msg()
         msg.pose.pose.position.x = float(goal["x"])
         msg.pose.pose.position.y = float(goal["y"])
+        # NavigateToPose requires an orientation even though SwarmDeck's GUI
+        # command is a point. The Bunker/Nav2 point-goal checker intentionally
+        # accepts any final heading, so this neutral quaternion is not a
+        # request to rotate the robot to yaw zero.
         yaw = float(goal.get("yaw", 0.0))
         msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
@@ -895,6 +977,13 @@ class HardwareBridge(
         if pose is None:
             self.nav_status = "failed"
             return
+        if not self._apply_trajectory_velocity_limit():
+            # A configured limit is a safety constraint, not a preference. Do
+            # not let Spot execute at its unrestricted default merely because
+            # the driver restarted or its service is temporarily unavailable.
+            self.nav_status = "failed"
+            self.mode = "idle"
+            return
         self._goal_generation += 1
         generation = self._goal_generation
         tcfg = self.cfg.get("trajectory") or {}
@@ -912,6 +1001,76 @@ class HardwareBridge(
         future.add_done_callback(
             lambda f, g=generation: self._on_goal_response(f, g)
         )
+
+    def _apply_trajectory_velocity_limit(self) -> bool:
+        """Apply Spot's configured mobility limit before accepting a goal.
+
+        The limit lives in spot_driver rather than in the Trajectory action.
+        Applying it for every goal makes the setting survive a driver restart
+        that did not also restart this adapter.
+        """
+        limit = (self.cfg.get("trajectory") or {}).get("velocity_limit") or {}
+        if not limit:
+            return True
+        client = self._velocity_client
+        if client is None or SetVelocity is None:
+            self.node.get_logger().warn(
+                f"[{self.id}] trajectory velocity limit configured but "
+                "spot_msgs/SetVelocity is unavailable; goal dropped"
+            )
+            return False
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot max_velocity service is not up; goal dropped"
+            )
+            return False
+        try:
+            linear_x = float(limit["linear_x"])
+            linear_y = float(limit.get("linear_y", linear_x))
+            angular_z = float(limit["angular_z"])
+        except (KeyError, TypeError, ValueError):
+            self.node.get_logger().warn(
+                f"[{self.id}] invalid trajectory velocity_limit; goal dropped"
+            )
+            return False
+        if (
+            not all(math.isfinite(v) for v in (linear_x, linear_y, angular_z))
+            or min(linear_x, linear_y, angular_z) <= 0.0
+        ):
+            self.node.get_logger().warn(
+                f"[{self.id}] trajectory velocity limits must be positive; "
+                "goal dropped"
+            )
+            return False
+
+        request = SetVelocity.Request()
+        request.velocity_limit.linear.x = linear_x
+        request.velocity_limit.linear.y = linear_y
+        request.velocity_limit.angular.z = angular_z
+        future = client.call_async(request)
+        deadline = time.monotonic() + 5.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not future.done():
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot max_velocity service timed out; goal dropped"
+            )
+            return False
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot max_velocity service failed: {exc}"
+            )
+            return False
+        if not bool(getattr(response, "success", False)):
+            message = str(getattr(response, "message", "") or "")
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot rejected the trajectory velocity limit"
+                + (f": {message}" if message else "")
+            )
+            return False
+        return True
 
     def _arm_goal(self, goal: dict[str, float]) -> None:
         self.goal = {"x": float(goal["x"]), "y": float(goal["y"])}
@@ -934,17 +1093,24 @@ class HardwareBridge(
         )
         if xyz is None:
             return None
-        yaw = float(goal.get("yaw", 0.0))
-        heading = transform_point(
-            (math.cos(yaw), math.sin(yaw), 0.0),
-            type("T", (), {
-                "rotation": tf.transform.rotation,
-                "translation": type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})(),
-            })(),
-        )
-        if heading is None:
-            return None
-        body_yaw = math.atan2(float(heading[1]), float(heading[0]))
+        if "yaw" not in goal or goal["yaw"] is None:
+            # A map click is a point, not a pose. Identity in the current body
+            # frame tells Spot to keep the heading it had when the goal was
+            # issued. Treating an absent yaw as map yaw zero made it reach the
+            # point and then perform a surprising final turn.
+            body_yaw = 0.0
+        else:
+            yaw = float(goal["yaw"])
+            heading = transform_point(
+                (math.cos(yaw), math.sin(yaw), 0.0),
+                type("T", (), {
+                    "rotation": tf.transform.rotation,
+                    "translation": type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})(),
+                })(),
+            )
+            if heading is None:
+                return None
+            body_yaw = math.atan2(float(heading[1]), float(heading[0]))
         pose = PoseStamped()
         pose.header.frame_id = frame
         pose.header.stamp = self.node.get_clock().now().to_msg()
@@ -1172,6 +1338,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                     "coordinate_frame": "local",
                     "capabilities": bridge.capabilities(),
                     "footprint_radius": bridge.cfg["footprint_radius"],
+                    "footprint": bridge.cfg.get("footprint") or None,
                 }))
                 bridge.node.get_logger().info(
                     f"[{bridge.id}] connected; capabilities="

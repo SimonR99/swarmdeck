@@ -14,11 +14,27 @@ robot_type: agilex_bunker
 ros_distro: humble
 network_iface: auto
 
-# Bunker is 1.023 x 0.778 m. The circumscribed radius is 0.643 m; round up so
-# the UI never draws a footprint smaller than the physical tracked chassis.
-# The registered-cloud map path also reuses this radius to reject lidar returns
-# from the chassis itself before they become permanent occupied cells.
-footprint_radius: 0.65
+# Bunker is 1.023 x 0.778 m, but `base_frame` below is os_lidar, so this radius
+# must be measured from the LIDAR rather than the chassis centre. The sensor is
+# mounted at the front, 0.15 m ahead of centre, which puts the far (rear) corners
+# 0.767 m away; round up so the UI never draws a footprint smaller than the
+# physical tracked chassis.
+#
+# This was 0.65 until 2026-08-21 -- the 0.643 m radius about the chassis *centre*,
+# which is the wrong origin here and left 0.117 m of real chassis outside the
+# circle. The registered-cloud map path reuses this radius to reject lidar returns
+# from the chassis itself; under-sized, rear-deck self-hits survive the filter and
+# ScanGridAccumulator quite correctly marks them permanently occupied, so the
+# moving robot paints a trail of itself into the map.
+footprint_radius: 0.77
+# Exact chassis rectangle in `base_frame` (os_lidar), x forward / y left.
+# Keep this identical to swarmdeck_nav's Nav2 launch footprint so the map and
+# collision checker show the same four corners.
+footprint:
+  - [0.362, 0.389]
+  - [0.362, -0.389]
+  - [-0.662, -0.389]
+  - [-0.662, 0.389]
 
 # SuperOdometry's /laser_odometry carries map -> os_lidar, but the running
 # stack does not broadcast that TF; swarmdeck_nav's odom_to_tf bridge does.
@@ -28,11 +44,14 @@ map_frame: map
 base_frame: os_lidar
 
 # /registered_scan is already transformed into `map`. SuperOdometry starts the
-# map at the lidar pose, so this band selects returns near lidar height while
-# rejecting most floor and ceiling points. Verify against the first live map.
+# map at the lidar pose (about 0.520 m above the floor). The Bunker's nominal
+# collision height is 0.400 m, so the requested physical obstacle band is
+# 0.150..0.550 m above the floor. With floor_z present, the adapter converts
+# these physical heights into registered-map Z limits.
 map_cloud_height_band:
-  min_z: -0.3
-  max_z: 0.5
+  floor_z: -0.520
+  min_z: 0.150
+  max_z: 0.550
 
 topics:
   # SuperOdometry's confirmed live map-frame pose. The launch advertises
@@ -40,7 +59,8 @@ topics:
   odom: /laser_odometry
   map: ""                 # SuperOdometry publishes no OccupancyGrid
   map_cloud: /registered_scan
-  plan: ""
+  # Nav2's planner_server publishes its global route in the robot namespace.
+  plan: /botman_0/plan
   cmd_vel: /cmd_vel       # bunker_messenger.hpp's absolute subscription
   # The driver exposes battery_voltage in custom BunkerStatus, not a
   # sensor_msgs/BatteryState percentage, so do not advertise battery yet.

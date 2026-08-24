@@ -6,6 +6,7 @@ declared at `hello`.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,24 @@ from typing import Any
 from ..bus import bus, stamps
 
 OFFLINE_AFTER_S = 4.0
+
+
+def parse_footprint(value: Any) -> list[list[float]] | None:
+    """Accept a finite 2D base-frame polygon from an adapter hello."""
+    if not isinstance(value, list) or len(value) < 3:
+        return None
+    points: list[list[float]] = []
+    for point in value:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            return None
+        try:
+            x, y = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(x) or not math.isfinite(y):
+            return None
+        points.append([x, y])
+    return points
 
 
 @dataclass
@@ -28,6 +47,8 @@ class Robot:
     coordinate_frame: str = "local"
     capabilities: list[str] = field(default_factory=list)
     footprint_radius: float = 0.3
+    # Optional polygon in the robot's reported base_frame, x forward / y left.
+    footprint: list[list[float]] | None = None
 
     pose: dict[str, float] = field(default_factory=lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0})
     battery: float | None = None
@@ -74,6 +95,7 @@ class Robot:
             # judging whether a robot fits through a gap needs it drawn at the
             # size it actually is. The adapter declares this at `hello`.
             "footprint_radius": self.footprint_radius,
+            "footprint": self.footprint,
             "unattended_s": round(self.unattended_s, 2),
             "online": self.online,
             **stamps(),
@@ -100,6 +122,8 @@ class Registry:
         )
         r.capabilities = list(msg.get("capabilities", []))
         r.footprint_radius = float(msg.get("footprint_radius", 0.3))
+        if "footprint" in msg:
+            r.footprint = parse_footprint(msg.get("footprint"))
         r.last_seen = time.monotonic()
         self.robots[rid] = r
         self._sinks[rid] = sink
