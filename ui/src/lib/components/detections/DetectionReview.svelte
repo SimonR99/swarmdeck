@@ -48,7 +48,7 @@
   const overflow = $derived(Math.max(0, review.proposals.length - MAX_SHOWN));
 
   function label(name: string): string {
-    return detectionCatalog.classes.find((c) => c.name === name)?.label ?? name;
+    return detectionCatalog.labelOf(name);
   }
 
   function seenBy(robotIds: string[]): string {

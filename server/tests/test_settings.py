@@ -251,3 +251,24 @@ def test_raising_every_floor_never_raises_what_is_captured(tmp_path):
     })
 
     assert saved["detection_capture_floors"] == DETECTION_CLASS_FLOORS
+
+
+def test_single_detection_settings_defaults_and_validation(tmp_path):
+    store = SettingsStore(tmp_path / "settings.json")
+    default = store.load()
+    assert default["detection_single_mode"] is False
+    assert default["detection_single_name"] == "Target"
+    assert default["detection_single_color"] == "#fbbf24"
+    assert default["detection_cross_class_merge"] is True
+
+    saved = store.save({
+        "detection_single_mode": True,
+        "detection_single_name": "False positive target",
+        "detection_single_color": "#ff0000",
+        "detection_cross_class_merge": False,
+    })
+    assert saved["detection_single_mode"] is True
+    assert saved["detection_single_name"] == "False positive target"
+    assert saved["detection_single_color"] == "#ff0000"
+    assert saved["detection_cross_class_merge"] is False
+

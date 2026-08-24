@@ -186,11 +186,18 @@ DEFAULTS: dict[str, Any] = {
         # it to the real driver only while an action goal is active, keeping
         # teleop, cancellation and e-stop authoritative.
         "nav_cmd_vel": "",
+        # Nav2's DWB controller trajectory. This is preferred over the global
+        # planner path for the dashboard because it is the route selected for
+        # the next control cycle. Empty disables the optional local route.
+        "local_plan": "",
     },
     # min_z/max_z are map-frame limits by default. A profile may add floor_z;
     # then they mean physical heights above the floor and the adapter adds that
     # map-frame floor reference before filtering.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
+    # Keep ray-traced known-free cells white after the lidar moves on. Unknown
+    # cells remain unknown; this only controls retention of observed free space.
+    "retain_free_space": False,
     "actions": {
         "navigate_to_pose": "navigate_to_pose",
         # Spot: Clearpath `spot_msgs/Trajectory`. Empty on every other robot.
@@ -339,6 +346,8 @@ class HardwareBridge(
         self._cloud_dirty = False
         self._last_cloud_prepare_at = 0.0
         self.planned_path: list[dict[str, float]] = []
+        self._global_planned_path: list[dict[str, float]] = []
+        self._local_planned_path: list[dict[str, float]] = []
         self._plan_frame_warned = False
         self.battery: float | None = None
         self.nav_status = "idle"
@@ -405,6 +414,10 @@ class HardwareBridge(
             )
         if topics.get("plan"):
             node.create_subscription(NavPath, topics["plan"], self._on_plan, 10)
+        if topics.get("local_plan"):
+            node.create_subscription(
+                NavPath, topics["local_plan"], self._on_local_plan, 10
+            )
         if topics.get("battery"):
             node.create_subscription(
                 BatteryState, topics["battery"], self._on_battery, qos_profile_sensor_data
@@ -569,15 +582,30 @@ class HardwareBridge(
         self._scan_dirty = True
 
     def _on_plan(self, msg: NavPath) -> None:
+        self._receive_plan(msg, local=False)
+
+    def _on_local_plan(self, msg: NavPath) -> None:
+        """Keep DWB's currently selected local trajectory for the UI."""
+        self._receive_plan(msg, local=True)
+
+    def _receive_plan(self, msg: NavPath, *, local: bool) -> None:
         """Publish the planner's intended route, in ``map_frame``.
 
-        Nav2's global plan normally already uses ``map_frame``. Keeping the
-        transform path here as well makes this safe for a controller or vendor
-        planner that publishes its route in another connected frame, and avoids
-        drawing a perfectly plausible route at the wrong place on the map.
+        Nav2's global and DWB local plans normally already use ``map_frame``.
+        Keeping the transform path here as well makes this safe for a controller
+        or vendor planner that publishes its route in another connected frame,
+        and avoids drawing a perfectly plausible route at the wrong place.
         """
         if not msg.poses:
-            self.planned_path = []
+            if local:
+                self._local_planned_path = []
+            else:
+                self._global_planned_path = []
+            self.planned_path = (
+                self._local_planned_path
+                if len(self._local_planned_path) > 1
+                else self._global_planned_path
+            )
             return
 
         frame = str(getattr(msg.header, "frame_id", "") or "").lstrip("/")
@@ -597,9 +625,18 @@ class HardwareBridge(
                     self._plan_frame_warned = True
                     self.node.get_logger().warn(
                         f"[{self.id}] no {self.map_frame} -> {frame} transform for "
-                        f"the planned path; not publishing it: {exc}"
+                        f"the {'local' if local else 'global'} planned path; "
+                        f"not publishing it: {exc}"
                     )
-                self.planned_path = []
+                if local:
+                    self._local_planned_path = []
+                else:
+                    self._global_planned_path = []
+                self.planned_path = (
+                    self._local_planned_path
+                    if len(self._local_planned_path) > 1
+                    else self._global_planned_path
+                )
                 return
             points = np.array(
                 [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
@@ -608,7 +645,15 @@ class HardwareBridge(
             )
             points = transform_points(points, tf.transform)
             if points is None:
-                self.planned_path = []
+                if local:
+                    self._local_planned_path = []
+                else:
+                    self._global_planned_path = []
+                self.planned_path = (
+                    self._local_planned_path
+                    if len(self._local_planned_path) > 1
+                    else self._global_planned_path
+                )
                 return
 
         # Planner paths can contain thousands of poses. Keep enough detail for
@@ -618,10 +663,19 @@ class HardwareBridge(
         if len(points) > max_points:
             indices = np.linspace(0, len(points) - 1, max_points, dtype=int)
             points = points[indices]
-        self.planned_path = [
+        path = [
             {"x": round(float(x), 3), "y": round(float(y), 3)}
             for x, y in points[:, :2]
         ]
+        if local:
+            self._local_planned_path = path
+        else:
+            self._global_planned_path = path
+        self.planned_path = (
+            self._local_planned_path
+            if len(self._local_planned_path) > 1
+            else self._global_planned_path
+        )
 
     def _on_camera_compressed(self, msg: CompressedImage) -> None:
         if msg.format and "jpeg" not in msg.format.lower():
@@ -926,14 +980,15 @@ class HardwareBridge(
             return
         if self.nav_client is None:
             return
-        # Non-blocking. `wait_for_server(2.0)` was called straight from the rx
-        # coroutine, so for those two seconds the tx loop could not run: no 5 Hz
-        # state, no reset report. Four seconds of silence is what the backend
-        # reads as the robot going offline (OFFLINE_AFTER_S), so a slow action
-        # server put the robot halfway to being declared dead on every goal.
-        # The server is either up by now or the goal is refused — which is the
-        # same answer two seconds of waiting would have produced.
-        if not self.nav_client.server_is_ready():
+        # Goal submission runs in the adapter's executor worker, not the
+        # websocket receive coroutine, so a brief startup wait cannot stop the
+        # 5 Hz state heartbeat. This matters when Nav2 is still activating: a
+        # click during that window should not be silently turned into a failed
+        # goal just because the action server was a moment late.
+        if (
+            not self.nav_client.server_is_ready()
+            and not self.nav_client.wait_for_server(timeout_sec=3.0)
+        ):
             self.node.get_logger().warn(
                 f"[{self.id}] navigation action server not available; goal dropped"
             )
@@ -967,7 +1022,10 @@ class HardwareBridge(
         Same path as `spot_high_level_controller`: TF `map` into `body`, then
         Clearpath `/trajectory`. The driver rejects any other frame_id.
         """
-        if Trajectory is None or not self.traj_client.server_is_ready():
+        if Trajectory is None or (
+            not self.traj_client.server_is_ready()
+            and not self.traj_client.wait_for_server(timeout_sec=3.0)
+        ):
             self.node.get_logger().warn(
                 f"[{self.id}] Spot trajectory action not available; goal dropped"
             )
@@ -1253,6 +1311,7 @@ class HardwareBridge(
             f"{self.http_url}/api/adapter/scan?robot_id={self.id}"
             f"&origin_x={origin['x']}&origin_y={origin['y']}"
             f"&scale={MAP_CLOUD_SCALE}"
+            f"&retain_free_space={1 if self.cfg.get('retain_free_space', False) else 0}"
         )
         try:
             urllib.request.urlopen(

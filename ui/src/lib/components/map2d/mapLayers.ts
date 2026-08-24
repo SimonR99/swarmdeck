@@ -20,12 +20,40 @@ export type ScreenOf = (gx: number, gy: number) => ScreenPoint;
 
 export interface MapRobot {
   robot_id: string;
+  robot_type?: string;
   pose: { x: number; y: number; yaw: number };
   planned_path?: { x: number; y: number }[];
+  global_planned_path?: { x: number; y: number }[];
+  local_planned_path?: { x: number; y: number }[];
   footprint_radius?: number;
   footprint?: Footprint | null;
   goal?: { x: number; y: number } | null;
 }
+
+// Keep the map useful while an older adapter is reconnecting and has not yet
+// sent the optional polygon in `hello`. These are the same base-frame polygons
+// used by the hardware adapter/Nav2 profiles; a missing live declaration must
+// never make a known square robot look circular.
+const KNOWN_FOOTPRINTS: Record<string, Footprint> = {
+  agilex_bunker: [
+    [0.362, 0.389],
+    [0.362, -0.389],
+    [-0.662, -0.389],
+    [-0.662, 0.389]
+  ],
+  boston_dynamics_spot: [
+    [0.55, 0.25],
+    [0.55, -0.25],
+    [-0.55, -0.25],
+    [-0.55, 0.25]
+  ],
+  scout_mini: [
+    [0.31, 0.293],
+    [0.31, -0.293],
+    [-0.31, -0.293],
+    [-0.31, 0.293]
+  ]
+};
 
 export interface MapInfo {
   width: number;
@@ -276,8 +304,22 @@ export interface RobotLayerOptions {
 
 /** Transform an adapter-declared base-frame polygon into map pixels. */
 function footprintOnScreen(robot: MapRobot, screenOf: ScreenOf): ScreenPoint[] | null {
-  const footprint = robot.footprint;
-  if (!footprint || footprint.length < 3) return null;
+  let footprint = robot.footprint;
+  if (!footprint || footprint.length < 3) {
+    footprint = KNOWN_FOOTPRINTS[robot.robot_type ?? ''];
+  }
+  if (!footprint || footprint.length < 3) {
+    // Unknown/legacy robots still get a square conservative marker. The
+    // declared polygon remains authoritative whenever one is available.
+    const radius = Math.max(0.05, robot.footprint_radius ?? 0.42);
+    const halfSide = radius / Math.SQRT2;
+    footprint = [
+      [halfSide, halfSide],
+      [halfSide, -halfSide],
+      [-halfSide, -halfSide],
+      [-halfSide, halfSide]
+    ];
+  }
   const c = Math.cos(robot.pose.yaw);
   const s = Math.sin(robot.pose.yaw);
   const points: ScreenPoint[] = [];
@@ -327,28 +369,48 @@ export function drawRobots(
       ctx.globalAlpha = 1;
     }
 
-    const plannedPath = robot.planned_path;
-    if (showPlans && plannedPath && plannedPath.length > 1) {
-      const first = mapStore.worldToGrid(plannedPath[0].x, plannedPath[0].y);
-      if (first) {
-        const p0 = screenOf(first.gx, first.gy);
-        ctx.beginPath();
-        ctx.moveTo(p0.sx, p0.sy);
-        for (const point of plannedPath.slice(1)) {
-          const gridPoint = mapStore.worldToGrid(point.x, point.y);
-          if (!gridPoint) continue;
-          const p = screenOf(gridPoint.gx, gridPoint.gy);
-          ctx.lineTo(p.sx, p.sy);
-        }
-        ctx.setLineDash([7, 4]);
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.78;
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
+    const hasSplitPaths =
+      robot.global_planned_path !== undefined || robot.local_planned_path !== undefined;
+    const globalPath = hasSplitPaths ? robot.global_planned_path : robot.planned_path;
+    const localPath = hasSplitPaths ? robot.local_planned_path : undefined;
+
+    const drawPath = (
+      path: { x: number; y: number }[] | undefined,
+      dash: number[],
+      alpha: number,
+      lineWidth: number
+    ) => {
+      if (!showPlans || !path || path.length < 2) return false;
+      // A planner can begin just outside the current map crop. Keep the
+      // visible in-map portion instead of dropping the entire route because
+      // its first pose is not currently drawable.
+      const visiblePath = path
+        .map((point) => mapStore.worldToGrid(point.x, point.y))
+        .filter((point): point is GridPoint => point !== null);
+      if (visiblePath.length < 2) return false;
+      ctx.beginPath();
+      const first = screenOf(visiblePath[0].gx, visiblePath[0].gy);
+      ctx.moveTo(first.sx, first.sy);
+      for (const gridPoint of visiblePath.slice(1)) {
+        const p = screenOf(gridPoint.gx, gridPoint.gy);
+        ctx.lineTo(p.sx, p.sy);
       }
-    }
+      ctx.setLineDash(dash);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      return true;
+    };
+
+    // Global planner route: dashed and subdued. Local controller trajectory:
+    // solid and bright, because it is what the robot currently expects to
+    // execute. Draw the local route last so it remains visible on top.
+    const globalPathVisible = drawPath(globalPath, [8, 5], 0.48, 2);
+    const localPathVisible = drawPath(localPath, [], 0.95, 3);
+    const anyPathVisible = globalPathVisible || localPathVisible;
 
     if (showSensors) {
       const sensorPx = (2.0 / info.resolution) * view.scale;
@@ -386,10 +448,6 @@ export function drawRobots(
         ctx.fill();
         ctx.globalAlpha = 0.55;
         ctx.stroke();
-      } else {
-        const footprintPx = ((robot.footprint_radius ?? 0.42) / info.resolution) * view.scale;
-        ctx.arc(sx, sy, footprintPx, 0, Math.PI * 2);
-        ctx.stroke();
       }
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
@@ -399,16 +457,20 @@ export function drawRobots(
       const goal = mapStore.worldToGrid(robot.goal.x, robot.goal.y);
       if (goal) {
         const s = screenOf(goal.gx, goal.gy);
-        ctx.setLineDash([5, 5]);
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(s.sx, s.sy);
-        ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.5;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
+        // The direct guide is only a fallback while the planner has not
+        // produced a visible route. Always keep the goal marker itself.
+        if (!anyPathVisible) {
+          ctx.setLineDash([2, 6]);
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(s.sx, s.sy);
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = 0.5;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+        }
 
         ctx.beginPath();
         ctx.arc(s.sx, s.sy, 6, 0, Math.PI * 2);

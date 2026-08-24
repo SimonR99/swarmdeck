@@ -62,6 +62,7 @@ def test_bunker_point_goals_can_use_forward_or_reverse_velocity():
     follow_path = controller["FollowPath"]
     smoother = params["velocity_smoother"]["ros__parameters"]
 
+    assert follow_path["publish_local_plan"] is True
     assert follow_path["max_vel_x"] > 0.0
     assert follow_path["min_vel_x"] < 0.0
     assert smoother["min_velocity"][0] <= follow_path["min_vel_x"]
@@ -78,6 +79,8 @@ def test_autonomous_velocity_can_only_reach_driver_through_adapter():
     assert smoother["max_velocity"] == [0.4, 0.0, 0.6]
     assert bunker["topics"]["cmd_vel"] == "/cmd_vel"
     assert bunker["topics"]["nav_cmd_vel"] == "/botman_0/cmd_vel_nav"
+    assert bunker["topics"]["plan"] == "/botman_0/plan"
+    assert bunker["topics"]["local_plan"] == "/botman_0/local_plan"
     assert bunker["actions"]["navigate_to_pose"] == "/botman_0/navigate_to_pose"
 
     adapter_dependencies = compose["services"]["adapter"]["depends_on"]

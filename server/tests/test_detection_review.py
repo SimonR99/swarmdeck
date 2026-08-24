@@ -417,3 +417,41 @@ def test_delete_all_clears_both_confirmed_and_proposals():
     assert not s.entities
     assert not s.proposals
 
+
+def test_cross_class_merge_folds_within_same_radius():
+    s = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True)
+    _, first = s.observe("robot_0", "rubber_duck", 2.0, 3.0, 0.8)
+    entity = s.accept(first.id)
+
+    outcome, target = s.observe("robot_1", "disc_cone", 2.1, 3.05, 0.7)
+    assert outcome == "folded"
+    assert target is entity
+    assert entity.acc.count == 2
+    assert "robot_1" in entity.acc.robots
+
+
+def test_cross_class_merge_suggests_and_merges_different_classes():
+    s = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True)
+    _, first = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
+    entity = s.accept(first.id)
+
+    outcome, proposal = s.observe("robot_1", "wooden_block", 1.0, 0.0, 0.6)
+    assert outcome == "proposed"
+    assert proposal.suggested_entity_id == entity.id
+
+    merged = s.merge(proposal.id, entity.id)
+    assert merged is entity
+    assert entity.acc.count == 2
+    assert math.isclose(entity.acc.x, 0.5, abs_tol=1e-9)
+
+
+def test_cross_class_merge_suppresses_across_classes():
+    s = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True)
+    _, proposal = s.observe("robot_0", "rubber_duck", 4.0, 4.0, 0.8)
+    assert s.ignore(proposal.id) is True
+
+    outcome, target = s.observe("robot_1", "disc_cone", 4.1, 4.05, 0.8)
+    assert outcome == "suppressed"
+    assert target is None
+
+

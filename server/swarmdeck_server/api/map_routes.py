@@ -231,6 +231,9 @@ async def post_scan(request: Request) -> Any:
     except (KeyError, ValueError):
         return JSONResponse({"error": "origin_x/origin_y required"}, status_code=400)
     scale = float(request.query_params.get("scale", CLOUD_SCALE))
+    retain_free_space = request.query_params.get(
+        "retain_free_space", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
     try:
         raw = _inflate(await request.body())
         quantised = np.frombuffer(raw, dtype=np.int16)
@@ -239,7 +242,13 @@ async def post_scan(request: Request) -> Any:
     if quantised.size % 2:
         return JSONResponse({"error": "xy pairs expected"}, status_code=400)
     points = quantised.reshape(-1, 2).astype(np.float32) * scale
-    await map_service.ingest_scan_async(rid, origin_x, origin_y, points)
+    await map_service.ingest_scan_async(
+        rid,
+        origin_x,
+        origin_y,
+        points,
+        retain_free_space=retain_free_space,
+    )
     return {"ok": True, "points": int(len(points))}
 
 

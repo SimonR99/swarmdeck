@@ -97,6 +97,10 @@ def defaults() -> dict[str, Any]:
         # actually asked to capture at.  Never read back from the source dict,
         # so a hand-edited settings.json cannot desynchronise it.
         "detection_capture_floors": dict(DETECTION_CLASS_FLOORS),
+        "detection_single_mode": False,
+        "detection_single_name": "Target",
+        "detection_single_color": "#fbbf24",
+        "detection_cross_class_merge": True,
         "robots": [
             {
                 "id": f"robot_{index}",
@@ -171,6 +175,14 @@ class SettingsStore:
             source.get("detection_robot_floors")
         )
         base["detection_capture_floors"] = capture_floors(base)
+        base["detection_single_mode"] = bool(source.get("detection_single_mode", False))
+        single_name = str(source.get("detection_single_name", "Target")).strip()[:48]
+        base["detection_single_name"] = single_name if single_name else "Target"
+        single_color = str(source.get("detection_single_color", "#fbbf24")).strip()[:32]
+        base["detection_single_color"] = single_color if single_color else "#fbbf24"
+        base["detection_cross_class_merge"] = bool(
+            source.get("detection_cross_class_merge", True)
+        )
 
         robots = source.get("robots")
         if isinstance(robots, list):

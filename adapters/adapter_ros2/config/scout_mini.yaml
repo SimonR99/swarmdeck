@@ -40,6 +40,7 @@ map_cloud_height_band:
   floor_z: -0.575
   min_z: 0.150
   max_z: 0.395
+retain_free_space: true
 
 topics:
   # /odometry/filtered is the EKF's fused output (fusing LVI-SAM lidar odometry), and is

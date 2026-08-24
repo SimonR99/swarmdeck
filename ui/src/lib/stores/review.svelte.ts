@@ -3,6 +3,7 @@ import type {
   DetectionProposal,
   DetectionReview
 } from '$lib/types/protocol';
+import { settings } from '$lib/stores/settings.svelte';
 
 /**
  * Operator review of map detections.
@@ -54,13 +55,16 @@ export const review = {
   },
 
   /**
-   * Other confirmed objects of the same class, nearest first — the candidates
-   * a merge could target when the backend's own suggestion is not the one the
-   * operator means.
+   * Other confirmed objects of the same class (or all objects when cross-class
+   * merging is active), nearest first — the candidates a merge could target
+   * when the backend's own suggestion is not the one the operator means.
    */
   mergeCandidates(proposal: DetectionProposal): DetectionEntity[] {
+    const crossClass =
+      settings.value.detection_single_mode ||
+      settings.value.detection_cross_class_merge;
     return state.entities
-      .filter((e) => e.class === proposal.class)
+      .filter((e) => crossClass || e.class === proposal.class)
       .map((e) => ({
         entity: e,
         d: Math.hypot(e.position.x - proposal.position.x, e.position.y - proposal.position.y)

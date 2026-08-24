@@ -76,13 +76,19 @@ Never advertise a capability the adapter cannot currently honor.
   "nav_status": "active",
   "network": {"interface": "wlan0", "quality_pct": 71.4, "rssi_dbm": -58.0},
   "goal": {"x": 5.0, "y": 2.0},
-  "planned_path": [{"x": 1.2, "y": -3.4}, {"x": 2.1, "y": -2.7}]
+  "planned_path": [{"x": 1.2, "y": -3.4}, {"x": 2.1, "y": -2.7}],
+  "global_planned_path": [{"x": 1.2, "y": -3.4}, {"x": 5.0, "y": 2.0}],
+  "local_planned_path": [{"x": 1.2, "y": -3.4}, {"x": 1.7, "y": -3.1}]
 }
 ```
 
 - `mode`: `idle`, `nav`, `teleop`, or `estop`.
 - `nav_status`: `idle`, `active`, `succeeded`, `failed`, or `cancelled`.
-- `planned_path` is a bounded, downsampled planner polyline.
+- `planned_path` is the backward-compatible effective route (local when
+  available, otherwise global). `global_planned_path` and
+  `local_planned_path` are optional bounded, downsampled polylines that let the
+  UI show the full planner route and the currently selected controller route
+  separately.
 - `network` is optional and must be sampled with the accompanying pose. Use
   `network_iface: auto` or an explicit Linux wireless interface in the supplied
   hardware adapters; an empty value disables it.
@@ -188,13 +194,15 @@ Body: zlib(int8 row-major cells), values -1 unknown, 0 free, 100 occupied
 ### Registered scan
 
 ```text
-POST /api/adapter/scan?robot_id=<id>&origin_x=<m>&origin_y=<m>&scale=0.01
+POST /api/adapter/scan?robot_id=<id>&origin_x=<m>&origin_y=<m>&scale=0.01&retain_free_space=0|1
 Body: zlib(int16 XY pairs), coordinates = metres / scale
 ```
 
 Points and sensor origin use the same local map frame. Deduplicate points near
 the target grid resolution before upload. Normally a robot sends either grids or
-scans, not both.
+scans, not both. With `retain_free_space=1`, the backend keeps cells crossed by
+previous lidar rays known-free (white) instead of aging them back to unknown;
+never-observed cells remain unknown.
 
 ### Point cloud
 

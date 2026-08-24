@@ -326,6 +326,19 @@ class AdapterTelemetryMixin:
         return read_link_quality(iface)
 
     def state(self) -> dict[str, Any]:
+        planned_path = list(getattr(self, "planned_path", []) or [])
+        global_planned_path = getattr(self, "global_planned_path", None)
+        if global_planned_path is None:
+            # ROS 2 Nav2 keeps these caches private for now; accept that name
+            # here so the shared telemetry envelope remains adapter-agnostic.
+            global_planned_path = getattr(self, "_global_planned_path", None)
+        local_planned_path = getattr(self, "local_planned_path", None)
+        if local_planned_path is None:
+            local_planned_path = getattr(self, "_local_planned_path", None)
+        # Older adapters only know the single `planned_path` field. Treat that
+        # route as global so it remains visible after the split is introduced.
+        if global_planned_path is None and local_planned_path is None:
+            global_planned_path = planned_path
         state = {
             "type": "robot_state",
             "robot_id": self.id,
@@ -335,7 +348,12 @@ class AdapterTelemetryMixin:
             "mode": self.mode,
             "nav_status": self.nav_status,
             "goal": self.goal,
-            "planned_path": self.planned_path,
+            # Backward-compatible effective route: local when available,
+            # otherwise global. The two explicit fields below let the UI show
+            # both routes at once for planners that expose both.
+            "planned_path": planned_path,
+            "global_planned_path": list(global_planned_path or []),
+            "local_planned_path": list(local_planned_path or []),
         }
         network_iface = str(self.cfg.get("network_iface", ""))
         if network_iface:

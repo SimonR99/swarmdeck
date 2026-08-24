@@ -43,6 +43,7 @@ map_cloud_height_band:
   floor_z: -0.500
   min_z: 0.150
   max_z: 0.760
+retain_free_space: true
 
 topics:
   odom: /lio_sam/mapping/odometry

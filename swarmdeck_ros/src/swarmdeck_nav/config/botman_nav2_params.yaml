@@ -95,6 +95,9 @@ controller_server:
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
+      # The adapter subscribes to this trajectory so the dashboard can show
+      # what DWB selected for the next control cycle.
+      publish_local_plan: true
       # Keep forward motion preferred by its larger cap, but allow a slow
       # reverse trajectory when a point is behind the chassis or the forward
       # corridor is blocked. The velocity smoother below enforces the same

@@ -31,6 +31,7 @@ map_cloud_height_band:
   floor_z: -0.520
   min_z: 0.150
   max_z: 0.550
+retain_free_space: true
 
 topics:
   odom: /laser_odometry
@@ -38,6 +39,8 @@ topics:
   map_cloud: /registered_scan
   # Nav2's planner_server publishes its global route in the robot namespace.
   plan: /aslan_0/plan
+  # DWB's selected local trajectory, preferred for the dashboard route.
+  local_plan: /aslan_0/local_plan
   cmd_vel: /cmd_vel
   battery: ""
   # OAK-D on USB (03e7:2485). The default camera service runs the RGB-D profile

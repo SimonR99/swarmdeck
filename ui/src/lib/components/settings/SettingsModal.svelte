@@ -20,6 +20,10 @@
   function withCatalogFloors(value: AppSettings): AppSettings {
     return {
       ...value,
+      detection_single_mode: value.detection_single_mode ?? false,
+      detection_single_name: value.detection_single_name ?? 'Target',
+      detection_single_color: value.detection_single_color ?? '#fbbf24',
+      detection_cross_class_merge: value.detection_cross_class_merge ?? true,
       detection_class_floors: {
         ...catalogFloors(),
         ...(value.detection_class_floors ?? {})
@@ -265,6 +269,48 @@
           Beyond, it is proposed as a new object.
         </p>
 
+        <div class="mt-3 rounded-[5px] border border-border bg-bg/60 p-2.5">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <div>
+              <div class="text-[10px] font-semibold text-fg">Single detection</div>
+              <div class="text-[9px] text-fg-dim">
+                Display all detections under the same name and color with cross-class map merging.
+              </div>
+            </div>
+            <label class="flex cursor-pointer items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={draft.detection_single_mode ?? false}
+                onchange={(e) => (draft.detection_single_mode = e.currentTarget.checked)}
+                disabled={!draft.detection_enabled}
+                class="h-4 w-4 rounded border-border accent-[var(--color-accent)] disabled:opacity-40"
+              />
+              <span class="text-[10px] font-medium {draft.detection_single_mode ? 'text-accent' : 'text-fg-dim'}">
+                {draft.detection_single_mode ? 'ON' : 'OFF'}
+              </span>
+            </label>
+          </div>
+          <div class="grid grid-cols-[32px_1fr] gap-2">
+            <input
+              type="color"
+              value={draft.detection_single_color || '#fbbf24'}
+              oninput={(e) => (draft.detection_single_color = e.currentTarget.value)}
+              disabled={!draft.detection_enabled || !draft.detection_single_mode}
+              class="h-8 w-8 cursor-pointer rounded-[3px] border border-border bg-surface p-0.5 disabled:opacity-40"
+              title="Single detection display colour"
+              aria-label="Single detection colour"
+            />
+            <input
+              type="text"
+              bind:value={draft.detection_single_name}
+              placeholder="Single detection name (e.g. Target)"
+              aria-label="Single detection name"
+              disabled={!draft.detection_enabled || !draft.detection_single_mode}
+              class="h-8 min-w-0 rounded-[3px] border border-border bg-surface px-2 text-[10px] text-fg outline-none disabled:opacity-40"
+            />
+          </div>
+        </div>
+
         {#if detectionCatalog.classes.length}
           <div class="mt-3 flex flex-wrap items-center gap-1.5">
             <span class="mr-0.5 text-[9px] font-medium text-fg-muted">Applies to</span>
@@ -328,7 +374,7 @@
                   >
                     <span
                       class="h-2 w-2 rounded-full"
-                      style="background:{on ? detectionCatalog.colorOf(target.name) : 'currentColor'}"
+                      style="background:{on ? detectionCatalog.rawColorOf(target.name) : 'currentColor'}"
                     ></span>
                     {target.label}
                   </button>

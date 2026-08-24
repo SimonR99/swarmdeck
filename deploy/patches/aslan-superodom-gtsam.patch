@@ -8,34 +8,3 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 +  Sophus::Sophus
   ${CERES_LIBRARIES}
  )
-diff --git a/include/super_odometry/ImuPreintegration/imuPreintegration.h b/include/super_odometry/ImuPreintegration/imuPreintegration.h
---- a/include/super_odometry/ImuPreintegration/imuPreintegration.h
-+++ b/include/super_odometry/ImuPreintegration/imuPreintegration.h
-@@ -153,6 +153,6 @@ namespace super_odometry {
-         gtsam::noiseModel::Diagonal::shared_ptr correctionNoise;
-         gtsam::Vector noiseModelBetweenBias;
--        std::shared_ptr<gtsam::PreintegratedImuMeasurements> imuIntegratorOpt_;
--        std::shared_ptr<gtsam::PreintegratedImuMeasurements> imuIntegratorImu_;
-+        boost::shared_ptr<gtsam::PreintegratedImuMeasurements> imuIntegratorOpt_;
-+        boost::shared_ptr<gtsam::PreintegratedImuMeasurements> imuIntegratorImu_;
-         gtsam::Pose3 prevPose_;
-         gtsam::Vector3 prevVel_;
-diff --git a/src/ImuPreintegration/imuPreintegration.cpp b/src/ImuPreintegration/imuPreintegration.cpp
---- a/src/ImuPreintegration/imuPreintegration.cpp
-+++ b/src/ImuPreintegration/imuPreintegration.cpp
-@@ -5,6 +5,7 @@
- // Created by shibo zhao on 2020-09-27.
- //
- #include "super_odometry/ImuPreintegration/imuPreintegration.h"
-+#include <boost/make_shared.hpp>
- 
- 
- namespace super_odometry {
-@@ -62 +63 @@ namespace super_odometry {
--        std::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(config_.imuGravity);
-+        boost::shared_ptr<gtsam::PreintegrationParams> p = gtsam::PreintegrationParams::MakeSharedU(config_.imuGravity);
-@@ -87,2 +88,2 @@ namespace super_odometry {
--        imuIntegratorImu_ = std::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias); // setting up the IMU integration for IMU message
--        imuIntegratorOpt_ = std::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias); // setting up the IMU integration for optimization
-+        imuIntegratorImu_ = boost::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias); // setting up the IMU integration for IMU message
-+        imuIntegratorOpt_ = boost::make_shared<gtsam::PreintegratedImuMeasurements>(p, prior_imu_bias); // setting up the IMU integration for optimization

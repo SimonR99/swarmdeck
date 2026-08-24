@@ -12,6 +12,7 @@ docs/operations/hardware-bringup.md.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -90,6 +91,8 @@ def _bridge(mod, cfg_override=None):
     bridge._cloud_points = None
     bridge._cloud_dirty = False
     bridge._last_cloud_prepare_at = 0.0
+    bridge._global_planned_path = []
+    bridge._local_planned_path = []
     bridge._plan_frame_warned = False
     bridge._body_clients = {}
     bridge._velocity_client = (
@@ -544,7 +547,7 @@ def test_registered_cloud_height_band_can_use_a_map_floor_reference(mod):
     ])
     bridge._on_map_cloud(msg)
 
-    assert bridge._scan_points.tolist() == pytest.approx([[1.0, 2.0], [3.0, 4.0]])
+    assert bridge._scan_points.tolist() == [[1.0, 2.0], [3.0, 4.0]]
 
 
 def _plan_msg(frame, points):
@@ -585,6 +588,56 @@ def test_ros2_plan_in_another_frame_is_transformed_before_upload(mod):
         {"x": 10.0, "y": 6.0},
         {"x": 10.0, "y": 7.0},
     ]
+
+
+def test_ros2_local_plan_is_preferred_over_the_global_route(mod):
+    bridge = _bridge(mod, {"map_frame": "map"})
+    bridge.t0 = __import__("time").monotonic()
+    bridge.battery = None
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge._on_plan(_plan_msg("map", [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)]))
+    bridge._on_local_plan(_plan_msg("map", [
+        (0.0, 0.0, 0.0), (1.0, 0.5, 0.0), (2.0, 1.0, 0.0),
+    ]))
+
+    assert bridge.planned_path == [
+        {"x": 0.0, "y": 0.0},
+        {"x": 1.0, "y": 0.5},
+        {"x": 2.0, "y": 1.0},
+    ]
+    assert bridge.state()["global_planned_path"] == [
+        {"x": 0.0, "y": 0.0},
+        {"x": 5.0, "y": 0.0},
+    ]
+    assert bridge.state()["local_planned_path"] == bridge.planned_path
+
+
+def test_ros2_empty_local_plan_falls_back_to_global_route(mod):
+    bridge = _bridge(mod, {"map_frame": "map"})
+    bridge.t0 = __import__("time").monotonic()
+    bridge.battery = None
+    bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge._on_plan(_plan_msg("map", [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)]))
+    bridge._on_local_plan(_plan_msg("map", []))
+
+    assert bridge.planned_path == [
+        {"x": 0.0, "y": 0.0},
+        {"x": 5.0, "y": 0.0},
+    ]
+    assert bridge.state()["global_planned_path"] == bridge.planned_path
+    assert bridge.state()["local_planned_path"] == []
+
+
+def test_nav_goal_waits_briefly_for_a_starting_nav2_server(mod):
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "navigate_to_pose"}})
+    bridge.nav_client.server_is_ready.return_value = False
+    bridge.nav_client.wait_for_server.return_value = True
+
+    bridge.navigate_to({"x": 1.0, "y": 2.0})
+
+    bridge.nav_client.wait_for_server.assert_called_once_with(timeout_sec=3.0)
+    bridge.nav_client.send_goal_async.assert_called_once()
+    assert bridge.nav_status == "active"
 
 
 def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
@@ -668,7 +721,7 @@ def test_detection_batch_survives_concurrent_collection(mod):
 
 
 def test_upload_scan_excludes_returns_inside_robot_footprint(mod, monkeypatch):
-    bridge = _bridge(mod, {"footprint_radius": 0.65})
+    bridge = _bridge(mod, {"footprint_radius": 0.65, "retain_free_space": True})
     bridge.http_url = "http://backend"
     bridge.map_pose = MagicMock(return_value={"x": 1.0, "y": 2.0, "yaw": 0.0})
     bridge._scan_points = mod.np.array(
@@ -690,6 +743,7 @@ def test_upload_scan_excludes_returns_inside_robot_footprint(mod, monkeypatch):
 
     request = captured["request"]
     assert "origin_x=1.0&origin_y=2.0" in request.full_url
+    assert "retain_free_space=1" in request.full_url
     decoded = mod.np.frombuffer(mod.zlib.decompress(request.data), dtype=mod.np.int16)
     assert decoded.reshape(-1, 2).tolist() == [[170, 200]]
 

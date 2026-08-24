@@ -596,9 +596,10 @@
         </button>
         <button
           class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          title="Dashed = global planner route; solid = local controller route"
           onclick={() => (showPlans = !showPlans)}
         >
-          <span class="flex items-center gap-2"><Route class="h-3.5 w-3.5" /> Predicted routes</span>
+          <span class="flex items-center gap-2"><Route class="h-3.5 w-3.5" /> Global + local paths</span>
           <span class="font-semibold {showPlans ? 'text-accent' : 'text-fg-dim'}">{showPlans ? 'ON' : 'OFF'}</span>
         </button>
         <button

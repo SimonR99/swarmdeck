@@ -663,6 +663,7 @@ class MapService:
         points_xy: np.ndarray,
         *,
         register: bool = True,
+        retain_free_space: bool = False,
     ) -> None:
         """Accumulate one lidar scan into a raytraced grid, then ingest it.
 
@@ -687,8 +688,14 @@ class MapService:
                     origin_y,
                     resolution=self.meta.resolution,
                     size_m=self.meta.width * self.meta.resolution,
+                    retain_free_space=retain_free_space,
                 )
                 self._scan_grids[robot_id] = acc
+            else:
+                # The adapter repeats the profile flag on every upload. Keep
+                # this mutable so a robot can switch profiles without requiring
+                # a backend restart or a map reset.
+                acc.retain_free_space = bool(retain_free_space)
         # Strays first: raytracing one carves a free corridor out past whatever
         # it passed through, and free space is what registration keys on.
         with self._state_lock:
@@ -708,7 +715,13 @@ class MapService:
         self.ingest(robot_id, scan_meta, scan_cells, register=register)
 
     async def ingest_scan_async(
-        self, robot_id: str, origin_x: float, origin_y: float, points_xy: np.ndarray
+        self,
+        robot_id: str,
+        origin_x: float,
+        origin_y: float,
+        points_xy: np.ndarray,
+        *,
+        retain_free_space: bool = False,
     ) -> None:
         """`ingest_scan`, off the event loop — see `ingest_async`.
 
@@ -718,7 +731,13 @@ class MapService:
         """
         async with self._ingest_lock:
             await asyncio.to_thread(
-                self.ingest_scan, robot_id, origin_x, origin_y, points_xy, register=False
+                self.ingest_scan,
+                robot_id,
+                origin_x,
+                origin_y,
+                points_xy,
+                register=False,
+                retain_free_space=retain_free_space,
             )
         self._mark_registration_due(robot_id)
 

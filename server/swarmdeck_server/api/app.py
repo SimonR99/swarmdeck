@@ -330,6 +330,10 @@ async def broadcast_review(urgency: str = "now") -> None:
 def apply_review_radii(settings: dict[str, Any]) -> None:
     review_store.same_radius = float(settings.get("detection_same_radius_m", 0.5))
     review_store.ask_radius = float(settings.get("detection_ask_radius_m", 1.5))
+    review_store.cross_class_merge = bool(
+        settings.get("detection_single_mode", False)
+        or settings.get("detection_cross_class_merge", False)
+    )
 
 
 def detection_hidden(detection: dict[str, Any], settings: dict[str, Any]) -> bool:
@@ -499,18 +503,20 @@ def robot_state(robot: Any) -> dict[str, Any]:
         state["pose"] = dict(direct)
         if state["goal"]:
             state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
-        state["planned_path"] = [
-            map_service.robot_to_world(robot.robot_id, point)
-            for point in state.get("planned_path", [])
-        ]
+        for path_name in ("planned_path", "global_planned_path", "local_planned_path"):
+            state[path_name] = [
+                map_service.robot_to_world(robot.robot_id, point)
+                for point in state.get(path_name, [])
+            ]
         return state
     state["pose"] = map_service.robot_to_world(robot.robot_id, state["pose"])
     if state["goal"]:
         state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
-    state["planned_path"] = [
-        map_service.robot_to_world(robot.robot_id, point)
-        for point in state.get("planned_path", [])
-    ]
+    for path_name in ("planned_path", "global_planned_path", "local_planned_path"):
+        state[path_name] = [
+            map_service.robot_to_world(robot.robot_id, point)
+            for point in state.get(path_name, [])
+        ]
     return state
 
 
@@ -614,6 +620,8 @@ async def reset_fleet() -> dict[str, Any]:
         for robot in registry.robots.values():
             robot.goal = None
             robot.planned_path = []
+            robot.global_planned_path = []
+            robot.local_planned_path = []
             robot.nav_status = "idle"
             robot.mode = "idle"
 

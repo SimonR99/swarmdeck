@@ -69,6 +69,10 @@ const fallback: AppSettings = {
     filament_spool: 0.25,
     pool_noodle: 0.25
   },
+  detection_single_mode: false,
+  detection_single_name: 'Target',
+  detection_single_color: '#fbbf24',
+  detection_cross_class_merge: true,
   robots: Array.from({ length: 4 }, (_, index) => ({
     id: `robot_${index}`,
     enabled: true,

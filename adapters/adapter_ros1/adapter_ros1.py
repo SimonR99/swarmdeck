@@ -206,6 +206,9 @@ DEFAULTS: dict[str, Any] = {
     # then they mean physical heights above the floor and the adapter adds that
     # map-frame floor reference before filtering.
     "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
+    # Keep ray-traced known-free cells white after the lidar moves on. Unknown
+    # cells remain unknown; this only controls retention of observed free space.
+    "retain_free_space": False,
     # How close counts as "arrived" for a `nav_goal`-topic navigation stack,
     # metres. Unlike actionlib there is no explicit success signal to wait
     # for, so this adapter watches its own tf2 pose against the goal.
@@ -999,6 +1002,7 @@ class HardwareBridge(
         url = (
             f"{self.http_url}/api/adapter/scan?robot_id={self.id}"
             f"&origin_x={origin['x']}&origin_y={origin['y']}&scale={MAP_CLOUD_SCALE}"
+            f"&retain_free_space={1 if self.cfg.get('retain_free_space', False) else 0}"
         )
         try:
             urllib.request.urlopen(

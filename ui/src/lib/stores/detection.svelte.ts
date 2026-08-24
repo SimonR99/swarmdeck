@@ -1,4 +1,5 @@
 import type { DetectionClass } from '$lib/types/protocol';
+import { settings } from '$lib/stores/settings.svelte';
 
 /**
  * Marker colour per detection class.
@@ -61,11 +62,26 @@ export const detectionCatalog = {
     }
   },
 
-  labelOf(name: string): string {
+  rawLabelOf(name: string): string {
     return state.classes.find((c) => c.name === name)?.label ?? name;
   },
 
-  colorOf(name: string): string {
+  rawColorOf(name: string): string {
     return CLASS_COLORS[name] ?? FALLBACK_COLOR;
+  },
+
+  labelOf(name: string): string {
+    if (settings.value.detection_single_mode) {
+      return settings.value.detection_single_name || 'Target';
+    }
+    return this.rawLabelOf(name);
+  },
+
+  colorOf(name: string): string {
+    if (settings.value.detection_single_mode) {
+      return settings.value.detection_single_color || '#fbbf24';
+    }
+    return this.rawColorOf(name);
   }
 };
+

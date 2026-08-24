@@ -736,10 +736,31 @@ def test_goal_routing_converts_shared_coordinates_to_robot_frame():
         )
 
         robot.planned_path = [{"x": 2.0, "y": 1.0}, {"x": 3.0, "y": 1.0}]
-        assert robot_state(robot)["planned_path"] == pytest.approx([
-            {"x": 3.0, "y": 0.0},
-            {"x": 3.0, "y": 1.0},
-        ])
+        assert robot_state(robot)["planned_path"][0] == pytest.approx(
+            {"x": 3.0, "y": 0.0}
+        )
+        assert robot_state(robot)["planned_path"][1] == pytest.approx(
+            {"x": 3.0, "y": 1.0}
+        )
+        robot.global_planned_path = [
+            {"x": 2.0, "y": 1.0}, {"x": 2.0, "y": 2.0}
+        ]
+        robot.local_planned_path = [
+            {"x": 2.0, "y": 1.0}, {"x": 3.0, "y": 1.0}
+        ]
+        split_state = robot_state(robot)
+        assert split_state["global_planned_path"][0] == pytest.approx(
+            {"x": 3.0, "y": 0.0}
+        )
+        assert split_state["global_planned_path"][1] == pytest.approx(
+            {"x": 2.0, "y": 0.0}
+        )
+        assert split_state["local_planned_path"][0] == pytest.approx(
+            {"x": 3.0, "y": 0.0}
+        )
+        assert split_state["local_planned_path"][1] == pytest.approx(
+            {"x": 3.0, "y": 1.0}
+        )
 
         # Synthetic adapters can explicitly bypass conversion when their data
         # already uses the shared map frame.
@@ -1071,10 +1092,13 @@ def test_scan_endpoint_builds_a_local_map_for_a_robot_with_no_native_grid():
     with TestClient(app) as c:
         assert c.post("/api/adapter/scan?robot_id=r0", content=body).status_code == 400
         posted = c.post(
-            "/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0", content=body
+            "/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0"
+            "&retain_free_space=1",
+            content=body,
         )
         assert posted.status_code == 200
         assert posted.json()["points"] == 2
+        assert map_service._scan_grids["r0"].retain_free_space is True
 
         info = c.get("/api/map/local/r0/info")
         assert info.status_code == 200

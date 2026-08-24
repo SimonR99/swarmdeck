@@ -157,6 +157,7 @@ class ScanGridAccumulator:
     def __init__(
         self, origin_x: float, origin_y: float,
         resolution: float = 0.05, size_m: float = 40.0,
+        retain_free_space: bool = False,
     ) -> None:
         n = int(size_m / resolution)
         self.meta = GridMeta(
@@ -164,6 +165,12 @@ class ScanGridAccumulator:
             origin_x=origin_x - size_m / 2, origin_y=origin_y - size_m / 2,
         )
         self.cells = np.full((n, n), UNKNOWN, dtype=np.int8)
+        # A scan-fed map may either behave like a live obstacle view (where
+        # free cells age back to unknown) or like a retained occupancy map.
+        # Hardware profiles that have a stable SLAM frame use the latter so
+        # explored floor stays white after the lidar turns away. Unknown cells
+        # are never promoted to free by this option.
+        self.retain_free_space = bool(retain_free_space)
         # int32, not int8: within ONE scan the sensor's own cell is crossed by
         # every beam, so the running total before clamping is on the order of the
         # point count. In int8 that wraps, and the robot's own position would
@@ -280,11 +287,14 @@ class ScanGridAccumulator:
         touched[hit_idx] = True
         np.clip(evidence, -EVIDENCE_CLAMP, EVIDENCE_CLAMP, out=evidence)
 
-        # Free cells this scan did not observe decay toward unknown. See FREE_DECAY.
-        fading = (evidence.reshape(-1) < 0) & ~touched
-        if fading.any():
-            flat = evidence.reshape(-1)
-            flat[fading] = np.minimum(0, flat[fading] + FREE_DECAY)
+        # Free cells this scan did not observe normally decay toward unknown.
+        # Retained maps deliberately skip that aging: a ray-traced floor cell
+        # remains known-free until a later hit provides contrary evidence.
+        if not self.retain_free_space:
+            fading = (evidence.reshape(-1) < 0) & ~touched
+            if fading.any():
+                flat = evidence.reshape(-1)
+                flat[fading] = np.minimum(0, flat[fading] + FREE_DECAY)
 
         self.cells = np.where(
             evidence >= OCCUPIED_AT,

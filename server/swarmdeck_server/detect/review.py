@@ -255,8 +255,8 @@ class IgnoreZone:
     y: float
     radius: float
 
-    def contains(self, cls: str, x: float, y: float) -> bool:
-        return cls == self.cls and math.hypot(x - self.x, y - self.y) <= self.radius
+    def contains(self, cls: str, x: float, y: float, cross_class: bool = False) -> bool:
+        return (cross_class or cls == self.cls) and math.hypot(x - self.x, y - self.y) <= self.radius
 
 
 class ReviewStore:
@@ -265,10 +265,12 @@ class ReviewStore:
         same_radius: float = DEFAULT_SAME_RADIUS_M,
         ask_radius: float = DEFAULT_ASK_RADIUS_M,
         ignore_radius: float = DEFAULT_IGNORE_RADIUS_M,
+        cross_class_merge: bool = False,
     ) -> None:
         self.same_radius = same_radius
         self.ask_radius = ask_radius
         self.ignore_radius = ignore_radius
+        self.cross_class_merge = cross_class_merge
         self.entities: dict[str, Entity] = {}
         self.proposals: dict[str, Proposal] = {}
         self.ignored: list[IgnoreZone] = []
@@ -285,7 +287,7 @@ class ReviewStore:
         best: Entity | None = None
         best_d = math.inf
         for entity in self.entities.values():
-            if entity.cls != cls:
+            if not self.cross_class_merge and entity.cls != cls:
                 continue
             d = math.hypot(entity.acc.x - x, entity.acc.y - y)
             if d < best_d:
@@ -296,7 +298,7 @@ class ReviewStore:
         best: Proposal | None = None
         best_d = math.inf
         for proposal in self.proposals.values():
-            if proposal.cls != cls:
+            if not self.cross_class_merge and proposal.cls != cls:
                 continue
             d = math.hypot(proposal.acc.x - x, proposal.acc.y - y)
             if d < best_d:
@@ -336,7 +338,7 @@ class ReviewStore:
         sample = Sample(robot_id, float(x), float(y), float(score), now)
 
         for zone in self.ignored:
-            if zone.contains(cls, x, y):
+            if zone.contains(cls, x, y, cross_class=self.cross_class_merge):
                 return "suppressed", None
 
         entity, distance = self._nearest_entity(cls, x, y)
@@ -376,7 +378,9 @@ class ReviewStore:
     def merge(self, proposal_id: str, entity_id: str) -> Entity | None:
         proposal = self.proposals.get(proposal_id)
         entity = self.entities.get(entity_id)
-        if proposal is None or entity is None or proposal.cls != entity.cls:
+        if proposal is None or entity is None:
+            return None
+        if not self.cross_class_merge and proposal.cls != entity.cls:
             return None
         self.proposals.pop(proposal_id, None)
         entity.acc.absorb(proposal.acc)
@@ -465,6 +469,7 @@ class ReviewStore:
         return {
             "version": 1,
             "next_id": self._next_id,
+            "cross_class_merge": self.cross_class_merge,
             "entities": [
                 {"id": e.id, "class": e.cls, **_acc_to_dict(e.acc)}
                 for e in self.entities.values()
@@ -492,6 +497,8 @@ class ReviewStore:
         if not isinstance(raw, dict):
             return
         self.reset()
+        if "cross_class_merge" in raw:
+            self.cross_class_merge = bool(raw["cross_class_merge"])
         # A record with no surviving evidence is dropped rather than restored:
         # the centroid divides by `count`, so a zero-count entity would come
         # back as a phantom object sitting at the origin of the map.
@@ -555,4 +562,5 @@ class ReviewStore:
                 "ask": self.ask_radius,
                 "ignore": self.ignore_radius,
             },
+            "cross_class_merge": self.cross_class_merge,
         }

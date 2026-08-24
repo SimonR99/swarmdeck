@@ -61,6 +61,10 @@ export interface RobotState extends Stamps {
   nav_status: NavStatus;
   goal: Point | null;
   planned_path: Point[];
+  /** Global planner route, usually the full route to the goal. */
+  global_planned_path?: Point[];
+  /** Local controller trajectory currently selected for execution. */
+  local_planned_path?: Point[];
   capabilities: Capability[];
   unattended_s: number;
   online: boolean;
@@ -320,6 +324,11 @@ export interface AppSettings {
    * which is what the detectors actually capture at. Read-only for the UI.
    */
   detection_capture_floors: Record<string, number>;
+  /** Unify all detections under a single name and color in the frontend. */
+  detection_single_mode?: boolean;
+  detection_single_name?: string;
+  detection_single_color?: string;
+  detection_cross_class_merge?: boolean;
   robots: RobotConnectionSettings[];
 }
 

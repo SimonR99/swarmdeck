@@ -108,6 +108,29 @@ def test_unobserved_free_space_fades_and_occupied_does_not():
     assert acc.cells[hy, hx] == OCCUPIED, "walls persist when nobody is looking"
 
 
+def test_retained_free_space_stays_white_while_unknown_stays_unknown():
+    """Hardware profiles can retain explored floor without painting the void."""
+    acc = ScanGridAccumulator(
+        origin_x=0.0,
+        origin_y=0.0,
+        resolution=0.05,
+        size_m=10.0,
+        retain_free_space=True,
+    )
+    for _ in range(EVIDENCE_CLAMP):
+        acc.integrate(0.0, 0.0, np.array([[1.0, 0.0]], dtype=np.float32))
+    mx, my = acc._to_cell(0.5, 0.0)
+    hx, hy = acc._to_cell(1.0, 0.0)
+    ux, uy = acc._to_cell(-1.0, -1.0)
+
+    for _ in range(EVIDENCE_CLAMP):
+        acc.integrate(0.0, 0.0, np.array([[0.0, 1.0]], dtype=np.float32))
+
+    assert acc.cells[my, mx] == FREE
+    assert acc.cells[hy, hx] == OCCUPIED
+    assert acc.cells[uy, ux] == UNKNOWN
+
+
 def test_observed_free_space_does_not_fade():
     """A 360° lidar re-confirms visible free space; decay must not eat it."""
     acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)

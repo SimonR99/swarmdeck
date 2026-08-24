@@ -18,6 +18,8 @@ def test_aslan_uses_isolated_navigation_output():
 
     assert config["topics"]["cmd_vel"] == "/cmd_vel"
     assert config["topics"]["nav_cmd_vel"] == "/aslan_0/cmd_vel_nav"
+    assert config["topics"]["plan"] == "/aslan_0/plan"
+    assert config["topics"]["local_plan"] == "/aslan_0/local_plan"
     assert config["actions"]["navigate_to_pose"] == "/aslan_0/navigate_to_pose"
 
 

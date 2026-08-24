@@ -56,6 +56,8 @@ class Robot:
     nav_status: str = "idle"
     goal: dict[str, float] | None = None
     planned_path: list[dict[str, float]] = field(default_factory=list)
+    global_planned_path: list[dict[str, float]] = field(default_factory=list)
+    local_planned_path: list[dict[str, float]] = field(default_factory=list)
     network: dict[str, Any] | None = None
 
     last_seen: float = field(default_factory=time.monotonic)
@@ -88,6 +90,8 @@ class Robot:
             "nav_status": self.nav_status,
             "goal": self.goal,
             "planned_path": self.planned_path,
+            "global_planned_path": self.global_planned_path,
+            "local_planned_path": self.local_planned_path,
             "network": self.network,
             "capabilities": self.capabilities,
             # Forwarded to the GUI because the fleet is mixed: an AgileX Bunker
@@ -144,8 +148,20 @@ class Registry:
             r.nav_status = msg["nav_status"]
         if "goal" in msg:
             r.goal = msg["goal"]
+        split_paths = (
+            "global_planned_path" in msg or "local_planned_path" in msg
+        )
         if "planned_path" in msg:
             r.planned_path = list(msg["planned_path"] or [])[:200]
+        if "global_planned_path" in msg:
+            r.global_planned_path = list(msg["global_planned_path"] or [])[:200]
+        if "local_planned_path" in msg:
+            r.local_planned_path = list(msg["local_planned_path"] or [])[:200]
+        if not split_paths and "planned_path" in msg:
+            # A pre-split adapter's single route is the best available global
+            # planner route; do not make it disappear from the new UI.
+            r.global_planned_path = r.planned_path.copy()
+            r.local_planned_path = []
         if "network" in msg:
             r.network = msg["network"] if isinstance(msg["network"], dict) else None
         return r
