@@ -154,11 +154,16 @@
   }
 
   function robotsOnMap() {
-    const members = mapStore.status?.global_members;
-    if (mapStore.status?.mode === 'auto' && members) {
-      return fleet.robots.filter((robot) => members.includes(robot.robot_id));
+    if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
+      if (!fleet.isEnabled(mapStore.viewRobot)) return [];
+      const robot = fleet.get(mapStore.viewRobot);
+      return robot ? [robot] : [];
     }
-    return fleet.robots;
+    const members = mapStore.status?.global_members;
+    if (members && members.length > 0) {
+      return fleet.robots.filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id));
+    }
+    return [];
   }
 
   function centreRobots(ids?: Set<string>) {

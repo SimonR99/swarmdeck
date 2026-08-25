@@ -87,10 +87,10 @@
       return robot ? [robot] : [];
     }
     const members = mapStore.status?.global_members;
-    if (mapStore.status?.mode === 'auto' && members) {
-      return fleet.robots.filter((robot) => members.includes(robot.robot_id));
+    if (members && members.length > 0) {
+      return fleet.robots.filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id));
     }
-    return fleet.robots;
+    return [];
   }
 
   function centreOnFleet() {
