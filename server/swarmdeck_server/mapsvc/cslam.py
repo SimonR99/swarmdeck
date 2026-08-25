@@ -37,6 +37,8 @@ def set_common_pose(service: Any, robot_id: str, pose: dict[str, float]) -> None
 def common_to_world(service: Any) -> tuple[float, float, float]:
     """Where the collaborative common frame sits in the configured world."""
     with service._state_lock:
+        if service.merge_mode == "graph":
+            return (0.0, 0.0, 0.0)
         reference = service.reference
         priors = dict(service.transform_priors)
     if reference is None:

@@ -813,7 +813,7 @@ export const mapStore = {
 
   /** Global world metres → currently displayed grid pixel. */
   worldToGrid(x: number, y: number): { gx: number; gy: number } | null {
-    if (state.viewMode === 'local' && state.viewRobot) {
+    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
       const tf = state.status?.transforms[state.viewRobot];
       if (tf) {
         const c = Math.cos(tf.yaw);
@@ -831,7 +831,7 @@ export const mapStore = {
   gridToWorld(gx: number, gy: number): { x: number; y: number } | null {
     const point = this.gridToView(gx, gy);
     if (!point) return null;
-    if (state.viewMode === 'local' && state.viewRobot) {
+    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
       const tf = state.status?.transforms[state.viewRobot];
       if (tf) {
         const c = Math.cos(tf.yaw);
@@ -846,7 +846,7 @@ export const mapStore = {
   },
 
   worldYawToView(yaw: number): number {
-    if (state.viewMode === 'local' && state.viewRobot) {
+    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
       yaw -= state.status?.transforms[state.viewRobot]?.yaw ?? 0;
     }
     return yaw;
