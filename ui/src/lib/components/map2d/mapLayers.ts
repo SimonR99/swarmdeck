@@ -392,15 +392,29 @@ export function drawRobots(
       lineWidth: number
     ) => {
       if (!showPlans || !path || path.length < 2) return false;
-      // A planner can begin just outside the current map crop. Keep the
-      // visible in-map portion instead of dropping the entire route because
-      // its first pose is not currently drawable.
       const visiblePath = path
         .map((point) => mapStore.worldToGrid(point.x, point.y))
         .filter((point): point is GridPoint => point !== null);
       if (visiblePath.length < 2) return false;
+
+      // Dark halo for unmistakable contrast over occupied/free/unknown areas
       ctx.beginPath();
       const first = screenOf(visiblePath[0].gx, visiblePath[0].gy);
+      ctx.moveTo(first.sx, first.sy);
+      for (const gridPoint of visiblePath.slice(1)) {
+        const p = screenOf(gridPoint.gx, gridPoint.gy);
+        ctx.lineTo(p.sx, p.sy);
+      }
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#000000';
+      ctx.globalAlpha = 0.5;
+      ctx.lineWidth = lineWidth + 2.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // Colored route stroke
+      ctx.beginPath();
       ctx.moveTo(first.sx, first.sy);
       for (const gridPoint of visiblePath.slice(1)) {
         const p = screenOf(gridPoint.gx, gridPoint.gy);
@@ -410,17 +424,18 @@ export function drawRobots(
       ctx.strokeStyle = color;
       ctx.globalAlpha = alpha;
       ctx.lineWidth = lineWidth;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
       return true;
     };
 
-    // Global planner route: dashed and visible. Local controller trajectory:
-    // solid and bright, because it is what the robot currently expects to
-    // execute. Draw the local route last so it remains visible on top.
-    const globalPathVisible = drawPath(globalPath, [6, 4], 0.75, 2.5);
-    const localPathVisible = drawPath(localPath, [], 0.95, 3);
+    // Global planner route: thick and bright with halo. Local controller trajectory:
+    // solid and vibrant on top.
+    const globalPathVisible = drawPath(globalPath, [8, 5], 0.9, 3.5);
+    const localPathVisible = drawPath(localPath, [], 1.0, 4.0);
     const anyPathVisible = globalPathVisible || localPathVisible;
 
     if (showSensors) {
