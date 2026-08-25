@@ -418,11 +418,13 @@
     if (!navigation.goalMode) {
       const detection = hitTestReviewedObject(clickX, clickY, screenOf);
       if (detection) {
-        // Keep the notification card and the map marker in lockstep. This also
-        // brings a proposal outside the first three queue cards into view.
-        review.select(detection.id);
-        const robotId = detection.robotId ?? detection.robotIds[0];
-        if (robotId) actions.focusRobot(robotId);
+        if (review.selected === detection.id) {
+          review.select(null);
+        } else {
+          review.select(detection.id);
+          const robotId = detection.robotId ?? detection.robotIds[0];
+          if (robotId) actions.focusRobot(robotId);
+        }
         return;
       }
 

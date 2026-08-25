@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { Circle, Globe, Maximize2, Minimize2, Octagon, RotateCcw, Settings2 } from 'lucide-svelte';
+  import {
+    Circle,
+    Globe,
+    Maximize2,
+    Minimize2,
+    Octagon,
+    RotateCcw,
+    Settings2,
+    Share2
+  } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
   import StatusDot from './ui/StatusDot.svelte';
@@ -9,7 +18,13 @@
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { actions } from '$lib/api/connection';
 
-  let { onsettings = () => {} }: { onsettings?: () => void } = $props();
+  let {
+    onsettings = () => {},
+    onswarmslam = () => {}
+  }: {
+    onsettings?: () => void;
+    onswarmslam?: () => void;
+  } = $props();
 
   type FullscreenDocument = Document & {
     webkitFullscreenElement?: Element | null;
@@ -80,6 +95,9 @@
   const selected = $derived(fleet.selected[0] ?? null);
   const isLocal = $derived(mapStore.viewMode === 'local');
   const members = $derived(mapStore.status?.global_members?.length ?? 0);
+  const swarmGraphCount = $derived(
+    Object.keys(mapStore.slamGraphs).filter((id) => fleet.isEnabled(id)).length
+  );
   // A robot the merge has not accepted has no place on the shared map, so its
   // own map is the only honest thing to draw. Say so rather than letting the
   // operator wonder why Global looks empty for it.
@@ -198,6 +216,27 @@
       <span class="hidden text-[11px] text-fg-dim sm:inline">{session.name}</span>
     {/if}
     <span class="tabular text-xs font-medium text-fg-muted">{elapsed}</span>
+    <Button
+      variant="ghost"
+      size="sm"
+      class="px-2 sm:px-3"
+      disabled={swarmGraphCount === 0}
+      title={swarmGraphCount
+        ? 'Open Swarm SLAM details'
+        : 'Swarm SLAM data is not available yet'}
+      onclick={onswarmslam}
+    >
+      <Share2 class="h-4 w-4" />
+      <span class="hidden 2xl:inline">Swarm SLAM</span>
+      {#if swarmGraphCount > 0}
+        <span
+          class="grid h-5 min-w-5 place-items-center rounded-full bg-accent-container px-1
+                 text-[10px] font-bold tabular text-accent-container-fg"
+        >
+          {swarmGraphCount}
+        </span>
+      {/if}
+    </Button>
     <Button
       variant="ghost"
       size="sm"

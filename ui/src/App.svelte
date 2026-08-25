@@ -18,6 +18,7 @@
   let compactLayout = $state(false);
   let responsiveLayoutInitialised = false;
   let settingsOpen = $state(false);
+  let swarmSlamOpen = $state(false);
 
   function openFleet() {
     fleetOpen = true;
@@ -88,7 +89,10 @@
 </script>
 
 <div class="flex h-full flex-col overflow-hidden">
-  <TopBar onsettings={() => (settingsOpen = true)} />
+  <TopBar
+    onsettings={() => (settingsOpen = true)}
+    onswarmslam={() => (swarmSlamOpen = true)}
+  />
 
   <main class="workspace">
     {#if compactLayout && (fleetOpen || controlsOpen)}
@@ -130,7 +134,6 @@
         />
         {#if !videoExpanded}
           <DrivePanel />
-          <SwarmGraphPanel />
         {/if}
       </aside>
     {:else}
@@ -147,3 +150,4 @@
 </div>
 
 <SettingsModal open={settingsOpen} onclose={() => (settingsOpen = false)} />
+<SwarmGraphPanel open={swarmSlamOpen} onclose={() => (swarmSlamOpen = false)} />
