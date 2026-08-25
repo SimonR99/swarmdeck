@@ -825,6 +825,24 @@ async def post_keyframe(request: Request) -> Any:
     return await handler(request)
 
 
+@app.post("/api/slam/optimized_map")
+async def post_optimized_map(request: Request) -> Any:
+    from .map_routes import post_optimized_map as handler
+    return await handler(request)
+
+
+@app.get("/api/map/optimized")
+async def get_optimized_index() -> dict[str, Any]:
+    from .map_routes import get_optimized_index as handler
+    return await handler()
+
+
+@app.get("/api/map/optimized/{scope}")
+async def get_optimized_map(scope: str) -> Response:
+    from .map_routes import get_optimized_map as handler
+    return await handler(scope)
+
+
 @app.post("/api/slam/update")
 async def post_slam_update(request: Request) -> Any:
     from .map_routes import post_slam_update as handler

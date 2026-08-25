@@ -651,6 +651,44 @@
 
         <div class="my-2 border-t border-border"></div>
         <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
+          Map estimate
+        </div>
+        <div class="mb-1 flex gap-1">
+          <button
+            class="flex h-7 flex-1 items-center justify-center rounded-[3px] px-1.5
+                   {mapStore.mapSource === 'slam'
+                     ? 'bg-surface-2 text-fg'
+                     : 'text-fg-muted hover:bg-surface-2'}"
+            title="The grid each robot's own SLAM package built, in its own frame"
+            onclick={() => void mapStore.setMapSource('slam')}
+          >
+            Robot SLAM
+          </button>
+          <button
+            class="flex h-7 flex-1 items-center justify-center rounded-[3px] px-1.5
+                   {mapStore.mapSource === 'optimized'
+                     ? 'bg-surface-2 text-fg'
+                     : 'text-fg-muted hover:bg-surface-2'}"
+            title="The same keyframes posed by the collaborative pose-graph solver"
+            onclick={() => void mapStore.setMapSource('optimized')}
+          >
+            Optimised
+          </button>
+        </div>
+        {#if mapStore.unmergedScopes.length}
+          <div class="mb-1 rounded-[3px] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">
+            Not merged into the fleet map:
+            <span class="font-medium text-fg-muted">
+              {mapStore.unmergedScopes
+                .flatMap((scope) => scope.robots)
+                .map(robotDisplayName)
+                .join(', ')}
+            </span>
+          </div>
+        {/if}
+
+        <div class="my-2 border-t border-border"></div>
+        <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
           Map data
         </div>
         <button

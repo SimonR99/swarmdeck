@@ -1,6 +1,17 @@
 import { inflate } from 'pako';
 import type { MapInfo, MapPatch, MapStatus, NetworkPatch, SlamGraph } from '$lib/types/protocol';
 
+/** One entry from GET /api/map/optimized: a grid the collaborative solver posed. */
+export interface OptimizedScope {
+  /** `robot:<id>` or `component:<n>`. Opaque; the server does not parse it. */
+  scope: string;
+  robots: string[];
+  resolution: number;
+  width: number;
+  height: number;
+  origin: { x: number; y: number };
+}
+
 /**
  * Occupancy grid, held as an offscreen canvas. The displayed grid is either
  * the verified merged map or one selected robot's native SLAM map.
@@ -30,6 +41,14 @@ const state = $state({
   status: null as MapStatus | null,
   statusUpdatedAt: 0,
   viewMode: 'global' as 'global' | 'local',
+  // Orthogonal to viewMode, deliberately. 'slam' is the grid the robot's own
+  // SLAM package built and the adapter uploaded; 'optimized' is the same
+  // keyframes posed by the collaborative solver. Kept as a separate axis rather
+  // than a third viewMode because it answers a different question -- viewMode
+  // asks WHOSE map, this asks WHICH ESTIMATE of it -- and folding them together
+  // would multiply out into states like "global raw" that do not exist.
+  mapSource: 'slam' as 'slam' | 'optimized',
+  optimizedScopes: [] as OptimizedScope[],
   viewRobot: null as string | null,
   // What the OPERATOR asked for, as opposed to what the backend recommends.
   // 'auto' follows the backend's view_by_robot; the other two are a deliberate
@@ -311,6 +330,48 @@ export const mapStore = {
   applySlamGraph(robotId: string, graph: SlamGraph) {
     state.slamGraphs = { ...state.slamGraphs, [robotId]: graph };
   },
+  get mapSource() {
+    return state.mapSource;
+  },
+
+  /** Switch between the robot's own SLAM grid and the solver-posed one. */
+  async setMapSource(source: 'slam' | 'optimized') {
+    if (state.mapSource === source) return;
+    state.mapSource = source;
+    await this.loadOptimizedScopes();
+    if (state.viewMode === 'local' && state.viewRobot) {
+      state.seq = -1;
+      state.ready = false;
+      await this.selectRobotView(state.viewRobot);
+    }
+    state.revision++;
+  },
+
+  /** Refresh which optimized grids exist. Cheap: metadata only, no pixels. */
+  async loadOptimizedScopes() {
+    try {
+      const response = await fetch('/api/map/optimized', { cache: 'no-store' });
+      if (!response.ok) return;
+      const body = (await response.json()) as { maps?: OptimizedScope[] };
+      state.optimizedScopes = body.maps ?? [];
+      state.revision++;
+    } catch (error) {
+      // Non-fatal: the toggle simply offers nothing, and the SLAM grid shows.
+      console.warn('[swarmdeck] optimized map index failed', error);
+    }
+  },
+
+  get optimizedScopes() {
+    return state.optimizedScopes;
+  },
+
+  /** Components holding no other robot: invisible on the merged map by design. */
+  get unmergedScopes() {
+    return state.optimizedScopes.filter(
+      (scope) => scope.scope.startsWith('component:') && scope.robots.length < 2
+    );
+  },
+
   get viewMode() {
     return state.viewMode;
   },
@@ -576,6 +637,9 @@ export const mapStore = {
     if (statusLoading) return;
     statusLoading = true;
     try {
+      // Refreshed on the same cadence as status: the set of optimized scopes
+      // changes exactly when components do, which is what status reports.
+      void this.loadOptimizedScopes();
       const response = await fetch('/api/map/status', { cache: 'no-store' });
       if (!response.ok) throw new Error(`map status ${response.status}`);
       state.status = (await response.json()) as MapStatus;
@@ -668,14 +732,40 @@ export const mapStore = {
 
     const generation = loadGeneration;
     try {
-      const infoResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}/info`, {
-        cache: 'no-store'
-      });
-      if (!infoResponse.ok) throw new Error(`local map info ${infoResponse.status}`);
-      const info = (await infoResponse.json()) as MapInfo;
-      const mapResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}`, {
-        cache: 'no-store'
-      });
+      // The optimized endpoint has no per-scope /info: its geometry comes from
+      // the index, which the store already refreshes. Falling back to the SLAM
+      // grid when a scope is absent matters -- a robot has no optimized map
+      // until the solver has placed at least one of its keyframes, so early in
+      // a run the raw grid is the only thing there is to show.
+      const scopeName = `robot:${robotId!}`;
+      const scope =
+        state.mapSource === 'optimized'
+          ? state.optimizedScopes.find((entry) => entry.scope === scopeName)
+          : undefined;
+
+      let info: MapInfo;
+      let mapResponse: Response;
+      if (scope) {
+        info = {
+          resolution: scope.resolution,
+          width: scope.width,
+          height: scope.height,
+          origin: scope.origin,
+          seq: state.seq + 1
+        } as MapInfo;
+        mapResponse = await fetch(`/api/map/optimized/${encodeURIComponent(scopeName)}`, {
+          cache: 'no-store'
+        });
+      } else {
+        const infoResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}/info`, {
+          cache: 'no-store'
+        });
+        if (!infoResponse.ok) throw new Error(`local map info ${infoResponse.status}`);
+        info = (await infoResponse.json()) as MapInfo;
+        mapResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}`, {
+          cache: 'no-store'
+        });
+      }
       if (!mapResponse.ok) throw new Error(`local map ${mapResponse.status}`);
       const bitmap = await createImageBitmap(await mapResponse.blob());
       if (

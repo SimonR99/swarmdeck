@@ -8,6 +8,7 @@ from becoming the owner of binary upload validation and map rendering policy.
 from __future__ import annotations
 
 import asyncio
+import threading
 import zlib
 from typing import Any
 
@@ -23,6 +24,20 @@ MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 # 1 cm, which is finer than the 5 cm occupancy grid and keeps a cloud inside
 # int16 out to +/-327 m. This is part of the adapter HTTP wire format.
 CLOUD_SCALE = 0.01
+
+# Optimized grids the SLAM back-end renders per robot and per component.
+#
+# Held here rather than in map_service because they are a VIEW, never an input
+# to navigation or merging: the merged map keeps its rule that two components
+# are never overlaid, and these exist so an operator can look at a robot that
+# rule makes invisible -- one that has merged with nobody. Storing them
+# alongside the authoritative merged grid would invite exactly the confusion
+# the rule prevents.
+#
+# Bounded by fleet size (one entry per robot plus one per component), and each
+# scope is overwritten in place on every publish, so this does not grow.
+_optimized: dict[str, tuple[GridMeta, np.ndarray, tuple[str, ...]]] = {}
+_optimized_lock = threading.Lock()
 
 
 async def get_map() -> Response:
@@ -351,3 +366,78 @@ async def get_cloud() -> Response:
             "X-Cloud-Robots": ",".join(names),
         },
     )
+
+
+async def post_optimized_map(request: Request) -> Any:
+    """Accept one scoped optimized grid from the SLAM back-end.
+
+    ``scope`` is opaque here: the back-end names them ``robot:<id>`` and
+    ``component:<n>``, and this endpoint deliberately does not parse or validate
+    that shape, so adding a scope later needs no server change.
+    """
+    scope = request.query_params.get("scope", "")
+    if not scope:
+        return JSONResponse({"error": "scope required"}, status_code=400)
+    try:
+        meta = GridMeta(
+            resolution=float(request.query_params.get("resolution", 0.05)),
+            width=int(request.query_params.get("width", 0)),
+            height=int(request.query_params.get("height", 0)),
+            origin_x=float(request.query_params.get("origin_x", 0.0)),
+            origin_y=float(request.query_params.get("origin_y", 0.0)),
+        )
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "malformed grid metadata"}, status_code=400)
+    if meta.width <= 0 or meta.height <= 0:
+        return JSONResponse({"error": "width and height required"}, status_code=400)
+    body = await request.body()
+    if len(body) > MAX_UPLOAD_BYTES:
+        return JSONResponse({"error": "grid too large"}, status_code=413)
+    try:
+        cells = np.frombuffer(_inflate(body), dtype=np.int8)
+    except (zlib.error, ValueError):
+        return JSONResponse({"error": "malformed grid"}, status_code=400)
+    if cells.size != meta.width * meta.height:
+        return JSONResponse({"error": "size mismatch"}, status_code=400)
+    robots = tuple(r for r in request.query_params.get("robots", "").split(",") if r)
+    with _optimized_lock:
+        _optimized[scope] = (meta, cells.reshape(meta.height, meta.width), robots)
+    return {"ok": True, "scope": scope, "cells": int(cells.size)}
+
+
+async def get_optimized_index() -> dict[str, Any]:
+    """Which optimized scopes exist, so the UI can offer them without guessing."""
+    with _optimized_lock:
+        items = [
+            {
+                "scope": scope,
+                "robots": list(robots),
+                "resolution": meta.resolution,
+                "width": meta.width,
+                "height": meta.height,
+                "origin": {"x": meta.origin_x, "y": meta.origin_y},
+            }
+            for scope, (meta, _cells, robots) in sorted(_optimized.items())
+        ]
+    return {"type": "optimized_maps", "maps": items}
+
+
+async def get_optimized_map(scope: str) -> Response:
+    with _optimized_lock:
+        entry = _optimized.get(scope)
+    if entry is None:
+        return JSONResponse({"error": f"no optimized map for {scope!r}"}, status_code=404)
+    meta, cells, _robots = entry
+    from ..mapsvc.output import grid_png
+
+    return Response(
+        content=grid_png(meta, cells),
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def reset_optimized_maps() -> None:
+    """Drop every scoped grid. Used when the session or the graph resets."""
+    with _optimized_lock:
+        _optimized.clear()
