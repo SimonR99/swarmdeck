@@ -59,6 +59,7 @@ from tf2_ros import Buffer, TransformListener
 # containers run this file directly, so the repository root is not otherwise on
 # sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "protocol"))
 
 from adapters.perception.depth_projection import (
     point_for_bbox,
@@ -78,6 +79,7 @@ from adapters.runtime import (
     stamp_seconds,
     yaw_of,
 )
+from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 
 # Transport quantisation for `map_cloud` uploads, matching adapter_sim's
 # `/api/adapter/cloud` convention: 1 cm keeps a scan well inside int16.
@@ -308,6 +310,12 @@ class HardwareBridge(
         self.cfg = cfg
         self.http_url = http_url
         self.t0 = time.monotonic()
+        rates = cfg.get("rates") or {}
+        self._keyframes = KeyframeUploader(
+            robot_id,
+            http_url,
+            min_period_s=float(rates.get("keyframe_period_s", 2.0)),
+        )
 
         self.map_frame = cfg["map_frame"]
         self.base_frame = cfg["base_frame"]
@@ -549,6 +557,16 @@ class HardwareBridge(
         # registration.py relies on to break rotational symmetry.
         self._scan_origin = self.map_pose()
         self._scan_dirty = True
+        try:
+            pose = self.pose7()
+            if pose is not None:
+                stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
+                self._keyframes.consider(points, pose, stamp)
+        except Exception:
+            # Keyframe production is best-effort. A missing TF, a test double
+            # without a header, or a too-small cloud must not starve the scan
+            # map that the operator is looking at.
+            pass
 
     def _on_global_map_cloud(self, msg: PointCloud2) -> None:
         """Project an accumulated 3D SLAM map into Scout's 2D map.
@@ -859,6 +877,26 @@ class HardwareBridge(
                 )
             return dict(fallback)
 
+    def pose7(self) -> np.ndarray | None:
+        """Full ``T_map_base`` as ``[x,y,z,qx,qy,qz,qw]`` for keyframe upload."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.map_frame, self.base_frame, rospy.Time(0)
+            )
+            t = tf.transform.translation
+            q = tf.transform.rotation
+            return np.array(
+                [t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64
+            )
+        except Exception:
+            stored = getattr(self, "_odom_pose7", None)
+            if stored is not None:
+                return np.asarray(stored, dtype=np.float64)
+            fallback = getattr(self, "_odom_pose", None)
+            if fallback is None:
+                return None
+            return pose7_from_xy_yaw(fallback["x"], fallback["y"], fallback["yaw"])
+
     # ------------------------------------------------------------- commands
 
     def drive(self, linear: float, angular: float) -> None:
@@ -1143,6 +1181,13 @@ class HardwareBridge(
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] 3D cloud upload failed: {exc}")
 
+    def upload_keyframe(self) -> None:
+        """Best-effort keyframe POST. Drops rather than blocking telemetry."""
+        if not self._keyframes.upload_one() and self._keyframes.last_error:
+            rospy.logwarn(
+                f"[{self.id}] keyframe upload failed: {self._keyframes.last_error}"
+            )
+
 
 async def run_until_first_failure(*coros: Any) -> None:
     """Run coroutines together; the first to fail cancels the rest and raises.
@@ -1301,6 +1346,9 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         if now - last_cloud > float(rates["cloud_period_s"]):
                             await loop.run_in_executor(None, bridge.upload_cloud)
                             last_cloud = time.monotonic()
+                        upload_kf = getattr(bridge, "upload_keyframe", None)
+                        if callable(upload_kf):
+                            await loop.run_in_executor(None, upload_kf)
                         if now - last_settings > 5.0:
                             last_settings = now
                             await loop.run_in_executor(None, bridge.refresh_settings)

@@ -22,7 +22,7 @@ COPY adapters /app/adapters
 RUN mkdir -p /app/sessions
 
 WORKDIR /app/server
-RUN pip install -e ".[dev]"
+RUN pip install -e /app/adapters/protocol -e ".[dev]"
 
 WORKDIR /app
 EXPOSE 8080

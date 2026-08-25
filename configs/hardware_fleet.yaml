@@ -21,14 +21,12 @@ fleet:
     profile: generic_32
 
 map:
-  # static, with no start_poses, is the deliberate choice while per-robot local
-  # maps are the goal. It performs NO registration, so ingest never blocks and
-  # every robot's own map keeps flowing. The merged view is then just each map
-  # at its own origin -- honest, since with no start poses the backend genuinely
-  # does not know how the robots relate. Populate start_poses (or move to the
-  # pose-graph back-end in slam/) when merging is the goal; do not switch this
-  # back to `auto` to get merging "for free", which is what regressed before.
-  merge_mode: static
+  # `graph`: local maps keep flowing with no registration; the merged view is
+  # occupancy rendered from the pose-graph back-end in slam/. Do not switch
+  # this to `auto` to get merging "for free" -- that is the 2.44 s/ingest
+  # regression that stalled adapters. Until two robots close a verified loop,
+  # the merged map stays empty and each robot's own map is the truth.
+  merge_mode: graph
   size_m: 40.0
   resolution: 0.05
   start_poses: {}

@@ -12,7 +12,9 @@ language, OS, middleware, or planner.
 | adapter → backend | `POST /api/adapter/map` | One robot's occupancy grid. |
 | adapter → backend | `POST /api/adapter/scan` | Registered XY scan when no grid is available. |
 | adapter → backend | `POST /api/adapter/cloud` | Optional registered XYZ cloud. |
+| adapter → backend | `POST /api/adapter/keyframe` | Pose-graph keyframe (cloud + odom pose + optional descriptor). |
 | collaborative backend → backend | `POST /api/adapter/global_map` | Already-merged common-frame grid. |
+| pose-graph back-end → backend | `POST /api/slam/update` | Optimized `T_world_map`, membership, common poses. |
 | adapter → MediaMTX | `RTSP :8554/<robot_id>` | Production H.264 video. |
 
 Binary uploads are zlib-compressed and capped by the server. Retry rejected
@@ -227,6 +229,30 @@ Body: zlib(int8 row-major cells)
 ```
 
 Use only for a grid already optimized in the collaborative common frame.
+
+### Pose-graph keyframe
+
+```text
+POST /api/adapter/keyframe?robot_id=<id>
+Content-Type: application/octet-stream
+Body: SDKF blob (see swarmdeck_protocol.keyframe)
+```
+
+One voxel-downsampled cloud in the **base frame at capture**, plus `T_odom_base`.
+The query-string `robot_id` must match the blob. The server is a dumb pipe: it
+checks identity and forwards the opaque body to the SLAM process. Adapters
+upload through a bounded queue that **drops** rather than blocking telemetry.
+
+### Pose-graph snapshot
+
+```text
+POST /api/slam/update
+Content-Type: application/json
+```
+
+Published by the SLAM process, not by robots. Carries per-robot `T_world_map`
+(`origins`), `in_common_frame` membership, and optimized `common_poses`. The
+rendered occupancy still uses `POST /api/adapter/global_map`.
 
 ### Camera video
 

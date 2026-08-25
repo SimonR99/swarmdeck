@@ -1,0 +1,201 @@
+"""ROS-free keyframe production: voxel, motion-gate, encode, drop-queue.
+
+Adapters stream keyframes instead of waiting for the server to register grids.
+The upload MUST drop rather than block -- a synchronous POST on this path is
+what stalled telemetry and knocked the live fleet offline
+(``adapters/adapter_ros2/config/bunker.yaml``).
+
+Points are expected in the robot's **map** frame (the same registered cloud
+already used for ``/api/adapter/scan``). They are transformed into the base
+frame at capture before encoding, which is the wire contract.
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+import urllib.error
+import urllib.request
+from collections import deque
+from typing import Any
+
+import numpy as np
+
+from swarmdeck_protocol import ProtocolError, encode_keyframe
+
+DEFAULT_VOXEL_M = 0.2
+DEFAULT_MIN_TRANSLATION_M = 0.5
+DEFAULT_MIN_YAW_RAD = math.radians(15.0)
+DEFAULT_MIN_PERIOD_S = 2.0
+DEFAULT_QUEUE = 2
+DEFAULT_TIMEOUT_S = 2.0
+DEFAULT_MIN_POINTS = 50
+
+
+def se3_from_quat_xyz(pose7: np.ndarray) -> np.ndarray:
+    """``T`` from ``[x, y, z, qx, qy, qz, qw]``. Duplicated from slam/types
+    because adapters cannot import gtsam-pinned code."""
+    values = np.asarray(pose7, dtype=np.float64).reshape(-1)
+    if values.shape != (7,):
+        raise ValueError(f"expected 7 values, got {values.shape}")
+    translation, quat = values[:3], values[3:]
+    norm = float(np.linalg.norm(quat))
+    if norm < 1e-9:
+        raise ValueError("quaternion has zero norm")
+    x, y, z, w = quat / norm
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    matrix[:3, 3] = translation
+    return matrix
+
+
+def points_map_to_base(points_map: np.ndarray, t_map_base: np.ndarray) -> np.ndarray:
+    """Apply ``T_base_map`` so the cloud lives in the base frame at capture."""
+    matrix = se3_from_quat_xyz(t_map_base)
+    rotation = matrix[:3, :3]
+    translation = matrix[:3, 3]
+    pts = np.asarray(points_map, dtype=np.float64)
+    return ((pts - translation) @ rotation).astype(np.float32)
+
+
+def voxel_downsample(points: np.ndarray, voxel_m: float) -> np.ndarray:
+    if points.shape[0] == 0:
+        return points
+    keys = np.round(np.asarray(points, dtype=np.float64) / voxel_m).astype(np.int32)
+    _, keep = np.unique(keys, axis=0, return_index=True)
+    return np.asarray(points)[keep]
+
+
+def pose7_from_xy_yaw(x: float, y: float, yaw: float, z: float = 0.0) -> np.ndarray:
+    return np.array(
+        [x, y, z, 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)],
+        dtype=np.float64,
+    )
+
+
+def _moved(previous: np.ndarray, current: np.ndarray, min_t: float, min_yaw: float) -> bool:
+    delta = current[:3] - previous[:3]
+    if float(np.linalg.norm(delta)) >= min_t:
+        return True
+    # Yaw from quaternion (z-axis): atan2(2(wz+xy), 1-2(y^2+z^2)) with ROS order.
+    def yaw_of(q: np.ndarray) -> float:
+        x, y, z, w = q
+        return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+    dyaw = abs((yaw_of(current[3:]) - yaw_of(previous[3:]) + math.pi) % (2 * math.pi) - math.pi)
+    return dyaw >= min_yaw
+
+
+class KeyframeUploader:
+    """Motion-gated producer with a bounded drop-oldest upload queue."""
+
+    def __init__(
+        self,
+        robot_id: str,
+        http_url: str,
+        *,
+        voxel_m: float = DEFAULT_VOXEL_M,
+        min_translation_m: float = DEFAULT_MIN_TRANSLATION_M,
+        min_yaw_rad: float = DEFAULT_MIN_YAW_RAD,
+        min_period_s: float = DEFAULT_MIN_PERIOD_S,
+        queue_size: int = DEFAULT_QUEUE,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        min_points: int = DEFAULT_MIN_POINTS,
+    ) -> None:
+        self.robot_id = robot_id
+        self.http_url = http_url.rstrip("/")
+        self.voxel_m = voxel_m
+        self.min_translation_m = min_translation_m
+        self.min_yaw_rad = min_yaw_rad
+        self.min_period_s = min_period_s
+        self.timeout_s = timeout_s
+        self.min_points = min_points
+        self._queue: deque[bytes] = deque(maxlen=max(1, queue_size))
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._last_pose: np.ndarray | None = None
+        self._last_at = 0.0
+        self.dropped = 0
+        self.sent = 0
+        self.last_error = ""
+
+    def consider(
+        self,
+        points_map: np.ndarray,
+        t_map_base: np.ndarray,
+        stamp: float,
+    ) -> bool:
+        """Non-blocking. Returns True if a keyframe was enqueued."""
+        pose = np.asarray(t_map_base, dtype=np.float64).reshape(-1)
+        if pose.shape != (7,) or not np.isfinite(pose).all():
+            return False
+        now = time.monotonic()
+        if self._last_pose is not None:
+            if now - self._last_at < self.min_period_s:
+                return False
+            if not _moved(self._last_pose, pose, self.min_translation_m, self.min_yaw_rad):
+                return False
+        pts = np.asarray(points_map)
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < self.min_points:
+            return False
+        try:
+            base_points = voxel_downsample(points_map_to_base(pts, pose), self.voxel_m)
+        except ValueError:
+            return False
+        if base_points.shape[0] < self.min_points:
+            return False
+        with self._lock:
+            seq = self._seq
+            self._seq += 1
+        try:
+            blob = encode_keyframe(
+                robot_id=self.robot_id,
+                seq=seq,
+                stamp=float(stamp),
+                points=base_points,
+                t_odom_base=pose,
+            )
+        except ProtocolError:
+            return False
+        with self._lock:
+            if self._queue.maxlen is not None and len(self._queue) >= self._queue.maxlen:
+                self.dropped += 1
+            self._queue.append(blob)
+            self._last_pose = pose
+            self._last_at = now
+        return True
+
+    def upload_one(self) -> bool:
+        """Blocking POST of at most one queued blob. Safe for an executor."""
+        with self._lock:
+            if not self._queue:
+                return False
+            blob = self._queue.popleft()
+        url = f"{self.http_url}/api/adapter/keyframe?robot_id={self.robot_id}"
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url,
+                    data=blob,
+                    headers={"Content-Type": "application/octet-stream"},
+                ),
+                timeout=self.timeout_s,
+            ).read()
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            self.last_error = str(exc)
+            return False
+        self.sent += 1
+        self.last_error = ""
+        return True
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._queue)

@@ -199,11 +199,14 @@ def _decompress_bounded(payload: bytes) -> bytes:
     return out
 
 
-def decode_keyframe(blob: bytes) -> KeyframePacket:
-    """Parse a keyframe blob. Raises :class:`ProtocolError` on anything malformed.
+def peek_keyframe_header(blob: bytes) -> dict[str, Any]:
+    """Parse only the JSON header. Does not decompress or allocate the cloud.
 
-    Every length is checked against the declared header before it is used, so a
-    corrupt or hostile body fails cleanly instead of producing a mis-shaped array.
+    The server uses this to check identity (``robot_id`` in the blob matches
+    the query string) before it forwards the opaque body to the SLAM process.
+    Decompressing here would put zip-bomb expansion on the FastAPI event loop
+    and would make the server a second decoder of a format it is supposed to
+    pipe, not interpret.
     """
     if len(blob) > MAX_KEYFRAME_BYTES:
         raise ProtocolError(f"keyframe is {len(blob)} bytes, over the {MAX_KEYFRAME_BYTES} limit")
@@ -218,7 +221,7 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
 
     start = _HEADER_STRUCT.size
     end = start + header_len
-    if end > len(blob):
+    if header_len < 0 or end > len(blob):
         raise ProtocolError("header length runs past the end of the blob")
 
     try:
@@ -227,6 +230,18 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
         raise ProtocolError(f"header is not valid UTF-8 JSON: {exc}") from exc
     if not isinstance(header, dict):
         raise ProtocolError("header must be a JSON object")
+    return header
+
+
+def decode_keyframe(blob: bytes) -> KeyframePacket:
+    """Parse a keyframe blob. Raises :class:`ProtocolError` on anything malformed.
+
+    Every length is checked against the declared header before it is used, so a
+    corrupt or hostile body fails cleanly instead of producing a mis-shaped array.
+    """
+    header = peek_keyframe_header(blob)
+    header_len = _HEADER_STRUCT.unpack_from(blob)[2]
+    end = _HEADER_STRUCT.size + header_len
 
     try:
         body = _decompress_bounded(blob[end:])

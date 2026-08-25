@@ -241,6 +241,28 @@ class VerifyConfig:
     real hardware is empirically found to be overconfident relative to
     achieved trajectory accuracy, turn this down."""
 
+    information: str = "hessian"
+    """How a surviving match's information matrix is built.
+
+    ``hessian`` (the default, and what every unit test uses) scales GICP's
+    Gauss-Newton Hessian. That Hessian arrives with roughly a 30:1
+    rotation-to-translation ratio, which over-constrains orientation and is
+    why optimizing with real closures currently *raises* translation ATE
+    (see ``test_optimized_poses_beat_raw_odometry``, a strict xfail).
+
+    ``isotropic`` replaces the Hessian, after the degeneracy gates have
+    already passed, with ``I_6 * isotropic_scale * fitness``. Integration
+    tests show that this is the weighting that actually *improves* ATE
+    (0.93x vs raw odometry). The live back-end uses it until a real Ouster
+    noise model exists to calibrate the Hessian against -- fitting the
+    synthetic fixture would just memorize the fixture.
+    """
+
+    isotropic_scale: float = 400.0
+    """Diagonal weight used when ``information='isotropic'``. Matches the
+    odometry information the live back-end and the integration tests use, so
+    a loop closure and an odometry hop speak in the same units."""
+
 
 def _yaw_of(rotation: np.ndarray) -> float:
     """Yaw (rotation about z) of a 3x3 rotation matrix, via its 2D block.
@@ -395,6 +417,12 @@ def verify_candidate(
     information = _build_information(result.H, result.num_inliers, fitness, config)
     if information is None:
         return None
+    if config.information == "isotropic":
+        # Degeneracy already rejected the match; this only replaces the
+        # (over-rotated) Hessian with a weight the solver can actually use.
+        information = np.eye(6, dtype=np.float64) * (
+            config.isotropic_scale * max(fitness, 1e-6)
+        )
 
     kind = EdgeKind.INTER_LOOP if source.id.robot_id != target.id.robot_id else EdgeKind.INTRA_LOOP
     return Edge(

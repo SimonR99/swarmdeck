@@ -57,7 +57,12 @@ async def lifespan(_: FastAPI):
         # `auto` mode would never be recomputed at all.
         asyncio.create_task(map_service.registration_worker()),
     ]
+    from ..mapsvc import graph_bridge
+
+    graph_bridge.configure()
+    await graph_bridge.start_worker()
     yield
+    await graph_bridge.stop_worker()
     for t in tasks:
         t.cancel()
 
@@ -602,6 +607,9 @@ async def reset_fleet() -> dict[str, Any]:
         _reset_pending.clear()
 
         await map_service.reset_async()
+        from ..mapsvc import graph_bridge
+
+        await asyncio.to_thread(graph_bridge.post_reset)
         await broadcast({"type": "network_clear", "robot_id": None})
         _detections.clear()
         # Validated objects describe the world before the reset. Keeping them
@@ -808,6 +816,18 @@ async def post_cloud(request: Request) -> Any:
 @app.post("/api/adapter/scan")
 async def post_scan(request: Request) -> Any:
     from .map_routes import post_scan as handler
+    return await handler(request)
+
+
+@app.post("/api/adapter/keyframe")
+async def post_keyframe(request: Request) -> Any:
+    from .map_routes import post_keyframe as handler
+    return await handler(request)
+
+
+@app.post("/api/slam/update")
+async def post_slam_update(request: Request) -> Any:
+    from .map_routes import post_slam_update as handler
     return await handler(request)
 
 

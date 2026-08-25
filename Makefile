@@ -6,14 +6,14 @@
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
         docker-ps docker-test docker-test-launch \
-        test-slam install-slam
+        test-slam install-slam slam
 
 help:
 	@echo "SwarmDeck"
 	@echo "  make install         install ui + server dependencies (local)"
 	@echo "  make ui              run frontend dev server (http://localhost:5173)"
 	@echo "  make ui-build        production build of the frontend"
-	@echo "  make server          run backend (http://localhost:8080)"
+	@echo "  make slam            run pose-graph back-end (http://localhost:8090)"
 	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
 	@echo "  make demo            server + mock + ui, all at once"
 	@echo "  make [build|up|down]-server  Docker: backend + UI only"
@@ -36,7 +36,7 @@ help:
 
 install:
 	cd ui && npm install
-	cd server && python3 -m venv .venv && .venv/bin/pip install -q -e ".[dev]"
+	cd server && python3 -m venv .venv && .venv/bin/pip install -q -e "../adapters/protocol" -e ".[dev]"
 
 ui:
 	cd ui && npm run dev
@@ -48,7 +48,10 @@ ui-build:
 CLEANENV = env -u PYTHONPATH -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH
 
 server:
-	cd server && $(CLEANENV) .venv/bin/python -m swarmdeck_server
+	cd server && $(CLEANENV) SWARMDECK_SLAM_URL=http://127.0.0.1:8090 .venv/bin/python -m swarmdeck_server
+
+slam:
+	cd slam && $(CLEANENV) SWARMDECK_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python -m swarmdeck_slam --host 127.0.0.1 --port 8090
 
 N ?= 4
 mock:
@@ -96,16 +99,17 @@ deploy:
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:
-	$(COMPOSE) build server ui
+	$(COMPOSE) build server ui slam
 
 up-server:
-	$(COMPOSE) up --build -d server ui
+	$(COMPOSE) up --build -d server ui slam
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
+	@echo "SLAM back-end:    http://localhost:8090/status"
 
 down-server:
-	$(COMPOSE) stop server ui
-	$(COMPOSE) rm -f server ui
+	$(COMPOSE) stop server ui slam
+	$(COMPOSE) rm -f server ui slam
 
 # --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
 # docker-compose.yml means this brings the server up too if it isn't already.
@@ -141,9 +145,11 @@ build-deploy:
 	docker compose $(ZENOH_COMPOSE) build server ui
 
 up-deploy:
-	docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router
+	SWARMDECK_CONFIG=/app/configs/hardware_fleet.yaml \
+	  docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router slam
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
+	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Zenoh router:     tcp/<this-host>:7447"
 	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
 	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"

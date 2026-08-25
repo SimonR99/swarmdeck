@@ -232,6 +232,19 @@ class AdapterSensorMixin:
             "y": p.position.y,
             "yaw": yaw_of(p.orientation),
         }
+        orientation = p.orientation
+        self._odom_pose7 = np.array(
+            [
+                p.position.x,
+                p.position.y,
+                float(getattr(p.position, "z", 0.0) or 0.0),
+                orientation.x,
+                orientation.y,
+                orientation.z,
+                orientation.w,
+            ],
+            dtype=np.float64,
+        )
 
     def _on_map(self, msg) -> None:
         self.grid = msg

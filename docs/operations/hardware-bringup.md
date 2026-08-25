@@ -34,10 +34,14 @@ robot-side SLAM state.
 ## Start operator services
 
 ```bash
-make up-server       # server + UI
-# or, when a Zenoh router is required:
-make up-deploy       # server + UI + router
+make up-server       # server + UI + pose-graph SLAM back-end
+# Physical fleet (uses configs/hardware_fleet.yaml, merge_mode: graph):
+make up-deploy       # server + UI + SLAM + Zenoh router
 ```
+
+The pose-graph process is required for merged maps. Per-robot local maps still
+upload if it is down; they just will not merge. Confirm it with
+`curl -fsS http://localhost:8090/health`.
 
 Open <http://localhost:5173>. `make tunnel` is simulator-only unless an
 authenticating proxy protects hardware controls.
@@ -50,6 +54,9 @@ authenticating proxy protects hardware controls.
    under **Local map → Layers → Network heatmap**. Wired robots may have none.
 4. Confirm current telemetry and a live WHEP camera stream.
 5. Drive about one metre manually; verify pose, local map, and free-space rays.
-6. If navigation is advertised, issue a short clear-space goal and cancel it.
-7. Confirm stop-all halts motion, then inspect container/ROS logs for restarts or
+6. Confirm `curl -fsS http://localhost:8090/status` shows a growing keyframe
+   count for that robot. Redeploy the adapter if it stays at zero -- keyframe
+   production lives on the robot, not only on the server.
+7. If navigation is advertised, issue a short clear-space goal and cancel it.
+8. Confirm stop-all halts motion, then inspect container/ROS logs for restarts or
    missing sensor data.

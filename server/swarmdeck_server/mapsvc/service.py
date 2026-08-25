@@ -392,7 +392,7 @@ class MapService:
         async with self._ingest_lock:
             return await asyncio.to_thread(self.reset_robot, robot_id)
 
-    MODES = ("static", "auto", "cslam")
+    MODES = ("static", "auto", "cslam", "graph")
 
     def set_mode(self, mode: str) -> None:
         with self._state_lock:
@@ -574,6 +574,36 @@ class MapService:
         from .cslam import set_slam_graph
         set_slam_graph(self, robot_id, graph)
 
+    def apply_slam_update(self, payload: dict[str, Any]) -> None:
+        """Adopt a pose-graph back-end snapshot: origins, membership, poses.
+
+        The occupancy grid arrives separately via ``set_global_grid`` (same
+        wire as the old collaborative global map) so this call stays JSON.
+        """
+        graphs = payload.get("graphs") or {}
+        origins = payload.get("origins") or {}
+        poses = payload.get("common_poses") or {}
+        if not isinstance(graphs, dict) or not isinstance(origins, dict):
+            raise ValueError("slam update is missing graphs/origins")
+        for robot_id, graph in graphs.items():
+            if not isinstance(graph, dict):
+                continue
+            self.set_slam_graph(str(robot_id), graph)
+        for robot_id, origin in origins.items():
+            if not isinstance(origin, dict):
+                continue
+            self.set_cslam_origin(
+                str(robot_id),
+                float(origin.get("x", 0.0)),
+                float(origin.get("y", 0.0)),
+                float(origin.get("yaw", 0.0)),
+                str(origin.get("frame") or ""),
+            )
+        if isinstance(poses, dict):
+            for robot_id, pose in poses.items():
+                if isinstance(pose, dict):
+                    self.set_common_pose(str(robot_id), pose)
+
     def robot_to_world(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
         """Transform a pose from one robot's SLAM frame into the merged frame."""
         with self._state_lock:
@@ -639,8 +669,9 @@ class MapService:
             return
         if self.merge_mode == "auto":
             self._reregister(robot_id)
-        elif self.merge_mode == "cslam":
-            self._cslam_check(robot_id)
+        elif self.merge_mode in ("cslam", "graph"):
+            if self.merge_mode == "cslam":
+                self._cslam_check(robot_id)
         self._remerge()
 
     async def ingest_async(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
@@ -1212,6 +1243,19 @@ class MapService:
                 if self.in_common_frame(rid)
                 and (majority is None or self.cslam_frames.get(rid) == majority)
             })
+        if self.merge_mode == "graph":
+            # Same rule as cslam, but robots do not need a local grid on file
+            # -- the merged product is the rendered pose-graph occupancy, and
+            # a robot that has only streamed keyframes is still a member.
+            majority = self.cslam_majority_frame()
+            known = set(self.robot_grids) | set(self.slam_graphs)
+            return self._without_excluded({
+                rid
+                for rid in known
+                if self.in_common_frame(rid)
+                and majority is not None
+                and self.cslam_frames.get(rid) == majority
+            })
         # `registered`, not the latest result's `confident` flag: a robot that has
         # been accepted keeps its place through a few ambiguous frames, and the
         # merged map it contributes to must not blink out under it meanwhile.
@@ -1334,7 +1378,7 @@ class MapService:
             robot_grids = dict(self.robot_grids)
             transforms = dict(self.transforms)
 
-        if merge_mode == "cslam" and global_grid is not None:
+        if merge_mode in ("cslam", "graph") and global_grid is not None:
             # Same offset as the poses: the back end's grid is in its common
             # frame, anchored at the reference robot's start pose.
             meta, cells = global_grid

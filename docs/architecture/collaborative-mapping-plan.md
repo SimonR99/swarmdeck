@@ -147,18 +147,28 @@ fixture's noise rather than the Ouster's, so it is deliberately left open with a
 divergence guard (`< 3x`) beside it: a calibration error of centimetres and a
 broken solver must not be able to look alike in the suite.
 
-### Phase 2 — Ingestion path
+### Phase 2 — Ingestion path — DONE (tested offline; hardware tomorrow)
 
-- Adapter-side keyframe production: voxel downsample, quantize, descriptor,
-  **bounded async upload queue that drops rather than blocks**.
-  `adapters/adapter_ros2/config/bunker.yaml:107` records what happens otherwise —
-  synchronous uploads stalled the loop that pumps telemetry and knocked both
-  robots offline.
-- Server ingress: `POST /api/adapter/keyframe`, validating identity and
-  forwarding the opaque body. The server stays a dumb pipe and ROS-free.
-- The SLAM back-end as its own process. This is not only a dependency
-  workaround: the optimizer is CPU-heavy and must never run in the asyncio event
-  loop, which is exactly the failure recorded in that bunker comment.
+- Adapter-side keyframe production: voxel downsample, quantize, **bounded async
+  upload queue that drops rather than blocks**. ROS 1 and ROS 2 adapters both
+  stream `POST /api/adapter/keyframe`. Descriptor computation lives in the
+  back-end (the tested copy); adapters send the cloud and pose.
+- Server ingress: `POST /api/adapter/keyframe`, validating identity (query
+  `robot_id` must match the blob) and forwarding the opaque body. The server
+  stays a dumb pipe and ROS-free. `POST /api/slam/update` adopts the optimized
+  `T_world_map` and membership.
+- The SLAM back-end is its own process (`python -m swarmdeck_slam`, Docker
+  service `slam`). Production loop closures use isotropic information — the
+  Hessian weighting is the tracked ATE xfail; isotropic is what actually
+  improves it until real Ouster bags exist to calibrate against.
+
+`configs/hardware_fleet.yaml` is `merge_mode: graph`. Local maps keep flowing
+with no registration. The merged view stays empty until two robots close a
+verified loop, then occupancy is rendered from the joint trajectory.
+
+Offline tests: synthetic two-robot fleet through the wire format merges into
+one component and one grid; disjoint buildings never merge; identity mismatch
+is 400; a down SLAM process does not 500 the adapter.
 
 ### Phase 3 — Robot-side front-end unification
 

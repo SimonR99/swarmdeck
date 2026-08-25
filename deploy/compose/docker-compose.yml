@@ -33,6 +33,8 @@ services:
       # scenario file simply never took effect, because the server was still
       # reading 4robot.yaml.
       - "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
+    environment:
+      SWARMDECK_SLAM_URL: http://slam:8090
     ports:
       - "8080:8080"
     volumes:
@@ -44,6 +46,36 @@ services:
       timeout: 3s
       retries: 5
       start_period: 8s
+    restart: unless-stopped
+
+  slam:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.slam
+    image: swarmdeck-slam:local
+    command:
+      - python
+      - -m
+      - swarmdeck_slam
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8090"
+      - --server-url
+      - "http://server:8080"
+    environment:
+      SWARMDECK_SERVER_URL: http://server:8080
+    ports:
+      - "8090:8090"
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   ui:

@@ -7,6 +7,7 @@ from becoming the owner of binary upload validation and map rendering policy.
 
 from __future__ import annotations
 
+import asyncio
 import zlib
 from typing import Any
 
@@ -76,7 +77,7 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
     # available and clears that fused product wholesale.
     if (
         robot_id is not None
-        and map_service.merge_mode == "cslam"
+        and map_service.merge_mode in ("cslam", "graph")
         and map_service.global_grid is not None
     ):
         return JSONResponse(
@@ -87,6 +88,10 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
         )
 
     reset = await map_service.reset_robot_async(robot_id)
+    if robot_id is None:
+        from ..mapsvc import graph_bridge
+
+        await asyncio.to_thread(graph_bridge.post_reset)
     await broadcast({"type": "network_clear", "robot_id": robot_id})
     patch = map_service.take_patch()
     if patch is not None:
@@ -250,6 +255,54 @@ async def post_scan(request: Request) -> Any:
         retain_free_space=retain_free_space,
     )
     return {"ok": True, "points": int(len(points))}
+
+
+async def post_keyframe(request: Request) -> Any:
+    """Adapter keyframe upload. Validates identity, forwards the opaque body.
+
+    The server does not decode the cloud and does not run the optimizer. A
+    mismatch between the query-string robot_id and the blob's own robot_id is
+    rejected so one robot cannot inject another robot's trajectory.
+    """
+    from swarmdeck_protocol import MAX_KEYFRAME_BYTES, ProtocolError, peek_keyframe_header
+
+    from ..mapsvc import graph_bridge
+
+    rid = request.query_params.get("robot_id", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "empty body"}, status_code=400)
+    if len(body) > MAX_KEYFRAME_BYTES:
+        return JSONResponse({"error": "keyframe too large"}, status_code=413)
+    try:
+        header = peek_keyframe_header(body)
+    except ProtocolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    blob_id = str(header.get("robot_id", ""))
+    if blob_id != rid:
+        return JSONResponse(
+            {"error": f"robot_id mismatch: query {rid!r} vs blob {blob_id!r}"},
+            status_code=400,
+        )
+    result = graph_bridge.enqueue(body)
+    return {"ok": True, "seq": header.get("seq"), **result}
+
+
+async def post_slam_update(request: Request) -> Any:
+    """Pose-graph back-end snapshot: membership, T_world_map, common poses."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "JSON object required"}, status_code=400)
+    try:
+        map_service.apply_slam_update(payload)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"ok": True, "robots": sorted((payload.get("graphs") or {}).keys())}
 
 
 async def get_cloud() -> Response:

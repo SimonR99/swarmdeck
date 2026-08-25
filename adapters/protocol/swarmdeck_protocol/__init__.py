@@ -14,6 +14,7 @@ from .keyframe import (
     ProtocolError,
     decode_keyframe,
     encode_keyframe,
+    peek_keyframe_header,
 )
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "ProtocolError",
     "decode_keyframe",
     "encode_keyframe",
+    "peek_keyframe_header",
 ]

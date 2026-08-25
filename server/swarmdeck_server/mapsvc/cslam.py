@@ -15,6 +15,15 @@ import numpy as np
 
 from .grid_meta import GridMeta
 
+# `cslam` is the legacy Swarm-SLAM path (robots already in a common frame).
+# `graph` is the new pose-graph back-end in slam/: occupancy is rendered from
+# optimized trajectories, never stitched from local grids.
+POSE_GRAPH_MODES = frozenset({"cslam", "graph"})
+
+
+def is_pose_graph_mode(mode: str) -> bool:
+    return mode in POSE_GRAPH_MODES
+
 
 def set_common_pose(service: Any, robot_id: str, pose: dict[str, float]) -> None:
     with service._state_lock:
@@ -39,7 +48,7 @@ def common_pose(service: Any, robot_id: str) -> dict[str, float] | None:
     """Return a usable common-frame pose for a robot in the merged cluster."""
     with service._state_lock:
         merge_mode = service.merge_mode
-    if merge_mode != "cslam" or robot_id not in service.global_members():
+    if not is_pose_graph_mode(merge_mode) or robot_id not in service.global_members():
         return None
     with service._state_lock:
         pose = service.common_poses.get(robot_id)
@@ -58,7 +67,7 @@ def common_pose(service: Any, robot_id: str) -> dict[str, float] | None:
 def set_global_grid(service: Any, meta: GridMeta, cells: np.ndarray) -> None:
     """Adopt a collaborative backend's already-merged common-frame grid."""
     with service._state_lock:
-        if service.merge_mode != "cslam":
+        if not is_pose_graph_mode(service.merge_mode):
             return
         stored_meta = GridMeta(
             meta.resolution,
@@ -80,7 +89,7 @@ def set_cslam_origin(
     """Record a graph-provided robot transform and cluster frame."""
     with service._state_lock:
         service.cslam_frames[robot_id] = frame
-        if service.merge_mode != "cslam":
+        if not is_pose_graph_mode(service.merge_mode):
             return
         service.transforms[robot_id] = (x, y, yaw)
         if service.reference is None:
@@ -108,6 +117,13 @@ def set_slam_graph(service: Any, robot_id: str, graph: dict[str, Any]) -> None:
 
 def in_common_frame(service: Any, robot_id: str) -> bool:
     with service._state_lock:
+        if service.merge_mode == "graph":
+            # Reference is not automatically a member: a singleton has not
+            # merged with anyone, and putting it on the fleet map would look
+            # like a merge that has not happened. Membership is the back-end's
+            # `in_common_frame` flag, set only for robots in a multi-robot
+            # component.
+            return bool(service.slam_graphs.get(robot_id, {}).get("in_common_frame"))
         if robot_id == service.reference:
             return True
         return bool(service.slam_graphs.get(robot_id, {}).get("in_common_frame"))

@@ -107,5 +107,6 @@ rates:
   map_period_s: 8.0
   cloud_period_s: 16.0
   camera_period_s: 0.2
+  keyframe_period_s: 2.5
 
 drive_timeout_s: 0.45
