@@ -59,7 +59,8 @@ class Ros2JpegRtspPublisher(Node):
             "sliced-threads=true byte-stream=true "
             "! video/x-h264,profile=baseline "
             "! h264parse config-interval=-1 "
-            f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0'
+            "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=100000000 leaky=downstream "
+            f'! rtspclientsink location="{rtsp_url}" protocols=udp latency=0'
         )
         self.pipeline = Gst.parse_launch(pipeline)
         self.source = self.pipeline.get_by_name("source")

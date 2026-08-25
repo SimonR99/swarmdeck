@@ -114,6 +114,8 @@ services:
       MTX_WEBRTCLOCALTCPADDRESS: ":8189"
     ports:
       - "8554:8554"   # RTSP ingest from robots
+      - "8000:8000/udp" # RTSP RTP UDP stream
+      - "8001:8001/udp" # RTSP RTCP UDP control
       - "8889:8889"   # WHEP WebRTC egress to browser
       - "8891:8889"   # diagnostic WHEP port for browser direct-test
       - "8189:8189/udp" # WebRTC ICE media

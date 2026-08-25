@@ -33,8 +33,8 @@
   function recordFrame(now: number) {
     if (lastFrameTime > 0) {
       const dt = (now - lastFrameTime) / 1000;
-      if (dt > 0.001 && dt < 2.0) {
-        const instantFps = 1 / dt;
+      if (dt >= 0.025 && dt < 1.5) {
+        const instantFps = Math.min(30, 1 / dt);
         fps = fps === 0 ? instantFps : fps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
       }
     }
@@ -76,6 +76,9 @@
     stopStatsPolling();
     statsTimer = window.setInterval(async () => {
       if (!pc || streamSource !== 'webrtc') return;
+      if (lastFrameTime > 0 && performance.now() - lastFrameTime > 1200) {
+        fps = 0;
+      }
       try {
         const stats = await pc.getStats();
         let foundRtt = false;
@@ -102,7 +105,8 @@
                 recordLatency(report.roundTripTime * 1000);
               }
               if (rfcHandle === null && typeof report.framesPerSecond === 'number' && report.framesPerSecond > 0) {
-                fps = fps === 0 ? report.framesPerSecond : fps * (1 - ROLLING_ALPHA) + report.framesPerSecond * ROLLING_ALPHA;
+                const instantFps = Math.min(30, report.framesPerSecond);
+                fps = fps === 0 ? instantFps : fps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
               }
             }
           });

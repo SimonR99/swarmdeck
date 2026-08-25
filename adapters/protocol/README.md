@@ -286,7 +286,7 @@ or `/<ns>/global_map` (sim). **Local costmaps must not subscribe.**
 ### Camera video
 
 ```text
-RTSP :8554/<robot_id>  (H.264, baseline, 640x480, low-latency TCP)
+RTSP :8554/<robot_id>  (H.264, baseline, 640x480, low-latency UDP)
 ```
 
 The browser consumes this stream through MediaMTX WHEP/WebRTC. There is no JPEG
