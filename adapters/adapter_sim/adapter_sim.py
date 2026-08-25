@@ -15,6 +15,7 @@ import asyncio
 import importlib
 import json
 import math
+import os
 import subprocess
 import sys
 import threading
@@ -99,6 +100,32 @@ CLOUD_SCALE = 0.01
 # swarmdeck_cslam's graph_reporter. Empty unless Swarm-SLAM is running, in
 # which case the GUI's swarm panel appears on its own.
 SLAM_GRAPHS: dict[str, dict] = {}
+
+
+def resolve_sim_robot_count(
+    cli_robots: int | None,
+    env_robots: str = "",
+    config_count: int | None = None,
+    default: int = 4,
+) -> int:
+    """How many simulated robots this process should bridge.
+
+    Dashboard ``robot_count`` is a hardware-session setting (tars/botman/aslan)
+    and must not inflate a 2-robot Gazebo fleet. Prefer the CLI, then
+    ``SWARMDECK_ROBOT_COUNT``, then the YAML that spawned the world.
+    """
+    if cli_robots is not None:
+        count = int(cli_robots)
+    else:
+        env = (env_robots or "").strip()
+        if env:
+            count = int(env)
+        elif config_count is not None:
+            count = int(config_count)
+        else:
+            count = int(default)
+    return max(1, min(count, 5))
+
 
 
 def _on_slam_graph(msg) -> None:
@@ -1621,7 +1648,7 @@ def create_adapter_node():
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--robots", type=int, default=None,
-                    help="override the persisted fleet count")
+                    help="override YAML/SWARMDECK_ROBOT_COUNT fleet size")
     ap.add_argument("--prefix", default="robot_")
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8080)
@@ -1630,33 +1657,35 @@ def main() -> None:
     rclpy.init()
     node = create_adapter_node()
     http_url = f"http://{args.host}:{args.port}"
-    robot_count = args.robots
-    if robot_count is None:
-        try:
-            with urllib.request.urlopen(f"{http_url}/api/settings", timeout=2) as response:
-                runtime = json.loads(response.read()).get("settings", {})
-            robot_count = int(runtime.get("robot_count", 4))
-        except Exception as exc:
-            print(f"[adapter_sim] settings unavailable ({exc}); using 4 robots")
-            robot_count = 4
-    robot_count = max(1, min(robot_count, 5))
+    fleet_cfg: dict = {}
+    try:
+        with urllib.request.urlopen(f"{http_url}/api/config", timeout=5) as response:
+            fleet_cfg = (json.loads(response.read()).get("config") or {}).get("fleet", {}) or {}
+    except Exception as exc:
+        print(f"[adapter_sim] fleet config unavailable ({exc})")
+    config_count = fleet_cfg.get("robot_count")
+    try:
+        config_count_int = int(config_count) if config_count is not None else None
+    except (TypeError, ValueError):
+        config_count_int = None
+    robot_count = resolve_sim_robot_count(
+        args.robots,
+        os.environ.get("SWARMDECK_ROBOT_COUNT", ""),
+        config_count_int,
+    )
     node.create_subscription(String, "/swarmdeck/slam_graph", _on_slam_graph, 10)
     node.create_subscription(
         OccupancyGrid, "/cslam/map", _on_cslam_grid,
         QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
     )
-    # Which platform each robot is, from the SAME config the fleet was spawned
-    # from. Read through the backend rather than off disk so the adapter cannot
-    # end up describing a different fleet than the one Gazebo built.
-    try:
-        with urllib.request.urlopen(f"{http_url}/api/config", timeout=5) as response:
-            fleet_cfg = (json.loads(response.read()).get("config") or {}).get("fleet", {})
+    # Platforms from the SAME config the fleet was spawned from, so the
+    # adapter cannot describe a different fleet than the one Gazebo built.
+    if fleet_cfg:
         platforms = robot_types(fleet_cfg, robot_count, args.prefix)
-    except Exception as exc:
+    else:
         print(
-            f"[adapter_sim] fleet config unavailable ({exc}); "
-            f"assuming every robot is a {DEFAULT_ROBOT_PROFILE}"
+            f"[adapter_sim] assuming every robot is a {DEFAULT_ROBOT_PROFILE}"
         )
         platforms = [DEFAULT_ROBOT_PROFILE] * robot_count
 

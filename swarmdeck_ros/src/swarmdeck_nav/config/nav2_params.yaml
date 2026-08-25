@@ -151,6 +151,13 @@ global_costmap:
       robot_radius: 0.3
       footprint: "[]"
       resolution: 0.05
+      # Same contract as hardware (botman_nav2_params.yaml): follow the robot
+      # with a large rolling window so Nav2 can plan before a collaborative
+      # map arrives, and after it does, so a pose on the unknown fringe is
+      # not "outside" a static 5 m grid. Local costmaps stay live-sensor only.
+      rolling_window: true
+      width: 40
+      height: 40
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:

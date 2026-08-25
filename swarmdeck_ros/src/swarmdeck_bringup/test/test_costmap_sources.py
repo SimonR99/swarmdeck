@@ -86,6 +86,11 @@ def test_global_static_layer_reads_the_collaborative_map():
         sim["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
     )
     assert static["map_topic"] == "/ns/global_map"
+    sim_global = sim["global_costmap"]["global_costmap"]["ros__parameters"]
+    assert sim_global["rolling_window"] is True
+    assert sim_global["width"] >= 40
+    assert sim_global["height"] >= 40
+    assert "static_layer" not in sim["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
 
     hardware = yaml.safe_load((CONFIG_DIR / "botman_nav2_params.yaml").read_text())
     hw_static = (

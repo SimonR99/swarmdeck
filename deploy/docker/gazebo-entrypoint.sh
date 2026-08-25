@@ -59,9 +59,11 @@ if ! kill -0 "${LAUNCH_PID}" 2>/dev/null; then
 fi
 
 echo "[gazebo] starting adapter_sim -> ${BACKEND_HOST}:${BACKEND_PORT}"
-python3 /app/adapters/adapter_sim/adapter_sim.py \
-  --host "${BACKEND_HOST}" \
-  --port "${BACKEND_PORT}" &
+ADAPTER_ARGS=(--host "${BACKEND_HOST}" --port "${BACKEND_PORT}")
+if [ -n "${SWARMDECK_ROBOT_COUNT:-}" ]; then
+  ADAPTER_ARGS+=(--robots "${SWARMDECK_ROBOT_COUNT}")
+fi
+python3 /app/adapters/adapter_sim/adapter_sim.py "${ADAPTER_ARGS[@]}" &
 ADAPTER_PID=$!
 
 # Exit if either child dies.
