@@ -47,7 +47,7 @@
 #
 # Rendering 33 rings x 1800 samples is 60x the raytracing of the old sensor. Run
 # it on the GPU; software rendering will not hold real time.
-name: 4robot_3d
+name: 4robot_cslam
 seed: 20260801
 
 fleet:

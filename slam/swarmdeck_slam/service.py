@@ -23,6 +23,7 @@ import urllib.parse
 import urllib.request
 import zlib
 from collections import deque
+from contextlib import asynccontextmanager
 from typing import Any
 
 import numpy as np
@@ -69,7 +70,6 @@ RENDER = RenderConfig(
     max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "0.395")),
 )
 
-app = FastAPI(title="SwarmDeck SLAM")
 backend = CollaborativeBackend(render=RENDER)
 
 _queue: deque[bytes] = deque()
@@ -245,19 +245,21 @@ def _worker_loop() -> None:
                 _publish_snapshot(snapshot)
 
 
-@app.on_event("startup")
-def _startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     global _worker
     _stop.clear()
     _worker = threading.Thread(target=_worker_loop, name="slam-worker", daemon=True)
     _worker.start()
+    try:
+        yield
+    finally:
+        _stop.set()
+        if _worker is not None:
+            _worker.join(timeout=2.0)
 
 
-@app.on_event("shutdown")
-def _shutdown() -> None:
-    _stop.set()
-    if _worker is not None:
-        _worker.join(timeout=2.0)
+app = FastAPI(title="SwarmDeck SLAM", lifespan=lifespan)
 
 
 @app.get("/health")

@@ -8,40 +8,34 @@ requirements are defined in [requirements.md](requirements.md).
 | Area | Current state |
 |---|---|
 | Adapter contract | Versioned WebSocket/HTTP protocol; backend remains ROS-free. |
-| Adapters | Mock, Gazebo, configurable ROS 1, and configurable ROS 2 adapters. |
+| Adapters | Mock, Gazebo, configurable ROS 1, and configurable ROS 2 adapters (with keyframe streaming). |
 | Fleet UI | Registration, status, selection, alerts, manual drive, navigation, and stop-all. |
-| Mapping | Per-robot views, dynamic grids, `static` and guarded `auto` merging. |
+| Mapping | Per-robot views, dynamic grids, `static`, guarded `auto`, and trajectory-based `graph` modes. |
 | 3D mapping | Optional compressed point-cloud upload and WebGL2 viewer. |
-| Collaborative SLAM | Experimental Swarm-SLAM graph reporting and `cslam` merge mode. |
+| Collaborative SLAM | Joint GTSAM pose-graph back-end (`slam/`), Scan Context loop retrieval, GICP geometric verification, PCM outlier rejection, and trajectory-rendered occupancy grids (`merge_mode: graph`). Legacy Swarm-SLAM `cslam` mode retained for comparison. |
 | Video | RTSP ingest through MediaMTX, WHEP/WebRTC display, JPEG fallback. |
 | Perception | YOLOE sidecar, depth projection, operator review, deduplication, persistence. |
-| Simulation | Seeded Gazebo fleet, SLAM, Nav2, reactive exploration, headless integration test. |
-| Hardware | Scout, Botman, Aslan, and Spot profiles with centralized deployment. |
+| Simulation | Seeded Gazebo fleet, SLAM, Nav2, reactive exploration, keyframe extraction, headless integration test. |
+| Hardware | Scout, Botman, Aslan, and Spot profiles with centralized deployment and verification. |
 | Session events | Session manifest and timestamped JSONL operator/system event log. |
 
 ## Priority work
 
-### 1. Hardware readiness
+### 1. Multi-robot dataset recording & ground truth validation
 
-- Give every robot the same functional post-deploy checks for backend
-  registration, telemetry, map, camera, and advertised navigation interfaces.
-- Add offline deployment validation and a new-robot scaffold.
-- Record calibration and image/workspace prerequisites without embedding secrets.
-- Run repeatable motion, stop, reconnect, and degraded-sensor tests on each robot.
+- Record multi-robot time-aligned bags/MCAP on physical hardware (Ouster lidar + IMU).
+- Survey ground-truth control points to calibrate sensor noise models and information matrices.
+- Validate trajectory optimization against surveyed control points (ATE / RPE).
 
-Exit: one documented command deploys each provisioned robot and reports functional
-readiness, not only running containers.
+Exit: reproducible multi-robot replay harness driven by physical bags with surveyed ground truth.
 
-### 2. Consistent collaborative mapping
+### 2. Robot-side front-end unification
 
-- Make occupancy grids and inter-robot transforms originate from one optimized
-  trajectory estimate.
-- Add loop-consistency checks, disconnected-component handling, and reference
-  recovery.
-- Validate transforms against ground truth and physical surveyed landmarks.
+- Unify front-end lidar-inertial odometry across the fleet using time-synced Ouster lidar + IMU (FAST-LIO2 or DLIO).
+- Gravity-align all front-ends to eliminate extrinsic pitch/tilt errors.
+- Preserve ROS 1 control on Scout Mini while running modernized lidar-inertial front-end in isolated container.
 
-Exit: collaborative mode improves or matches guarded grid registration and never
-places disconnected robots in an assumed common frame.
+Exit: consistent pointcloud and odometry estimates across all hardware platforms.
 
 ### 3. Complete session recording and replay
 

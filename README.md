@@ -11,7 +11,8 @@ SDK, Gazebo, and synthetic robots in the same fleet.
 ## What is implemented
 
 - Dynamic robot registration and capability-driven controls.
-- Per-robot maps plus `static`, `auto`, and optional `cslam` merge modes.
+- Per-robot local maps plus `graph` (collaborative GTSAM pose-graph optimization), `static`, `auto` (2D grid registration), and optional `cslam` merge modes.
+- Collaborative SLAM back-end (`slam/` on port 8090) with Scan Context loop candidate lookup, GICP geometric verification, PCM outlier rejection, and joint trajectory-rendered occupancy grids.
 - Navigation goals, cancel, manual drive, stop-all, trails, and planned paths.
 - 2D occupancy maps, network-quality heatmaps, and an optional WebGL2 3D cloud.
 - WHEP/WebRTC video with a throttled JPEG fallback.
@@ -63,22 +64,24 @@ make docker-test
 Requires Python 3.10+, `venv`, Node.js, and npm:
 
 ```bash
-make install
+make install           # ui + server venv
+make install-slam      # collaborative SLAM back-end venv (Python 3.12)
 make demo              # server + mock fleet + UI
 ```
 
-For separate terminals, use `make server`, `make mock N=4`, and `make ui`.
+> [!IMPORTANT]
+> **Python Environment Isolation:** `slam/` is strictly pinned to Python 3.12 and `numpy<2` because `gtsam==4.2.2` segfaults under NumPy 2.x without Python tracebacks. `server/` runs Python 3.13 / NumPy 2.x. Never combine them into a single virtual environment.
+
+For separate terminals, use `make server`, `make slam`, `make mock N=4`, and `make ui`.
 The UI-only fallback is <http://localhost:5173/?mock=1&robots=4>.
 
 ### Collaborative SLAM
 
 ```bash
-make docker-up-cslam
+make up-sim            # Server + UI + SLAM back-end + Gazebo simulation
 ```
 
-This starts Gazebo with a 3D lidar profile, RTAB-Map, and Swarm-SLAM. It is an
-experimental path; see [collaborative SLAM](docs/architecture/collaborative-slam.md)
-before using `map.merge_mode: cslam`.
+Gazebo adapters stream keyframes to `swarmdeck-slam` on port 8090, which optimizes a joint GTSAM pose graph and renders the merged occupancy grid.
 
 ## Physical robots
 
@@ -109,12 +112,15 @@ robot or erase robot-side SLAM.
 
 ```mermaid
 flowchart LR
-    Robots["Robots / simulation"] -->|WebSocket + HTTP| Server["FastAPI server"]
-    Robots -->|RTSP video| Media["MediaMTX"]
-    Server <-->|REST / WebSocket| UI["Svelte browser UI"]
+    Robots["Robots / simulation"] -->|WebSocket + HTTP| Server["FastAPI server (:8080)"]
+    Robots -->|Keyframe blobs| Server
+    Server -->|Forward keyframes| SLAM["SwarmDeck SLAM (:8090)<br/>GTSAM · GICP · PCM"]
+    SLAM -->|Optimized transforms & global grid| Server
+    Robots -->|RTSP video| Media["MediaMTX (:8554)"]
+    Server <-->|REST / WebSocket| UI["Svelte browser UI (:5173)"]
     Media -->|WHEP / WebRTC| UI
     Server --> Fleet["Fleet registry and commands"]
-    Server --> Maps["Map accumulation and merging"]
+    Server --> Maps["Map accumulation and rendering"]
     Server --> Review["Detection review and settings"]
     Server --> Sessions["Session manifest and JSONL events"]
 ```
@@ -123,7 +129,8 @@ flowchart LR
 |---|---|
 | `adapters/` | Protocol adapters, media bridges, and perception sidecar. |
 | `adapters/runtime.py` | Shared ROS-independent protocol, sensor, detection, and deadman policy used by hardware bridges. |
-| `server/` | ROS-free FastAPI backend. |
+| `server/` | ROS-free FastAPI backend (:8080). |
+| `slam/` | Collaborative SLAM back-end (:8090, Python 3.12 / GTSAM pose graph optimizer). |
 | `server/swarmdeck_server/api/map_routes.py` | Map HTTP transport and upload validation, kept separate from control/websocket handlers. |
 | `server/swarmdeck_server/mapsvc/` | Map state, immutable publication snapshots, rendering/output, and collaborative-SLAM collaborators. |
 | `ui/` | Svelte 5 dashboard. |
@@ -141,15 +148,21 @@ Adapters normally report pose, goals, maps, and clouds in each robot's local
 navigation-map frame. The backend converts them to the shared frame used by the
 UI.
 
+- `graph`: (default in `4robot.yaml`, `2robot.yaml`, and `hardware_fleet.yaml`)
+  trajectory-based collaborative SLAM. Keyframes are sent to `swarmdeck-slam`,
+  loops are closed via Scan Context + GICP, pairwise consistent inter-robot
+  closures are accepted by PCM (minimum clique size 2), GTSAM optimizes the joint
+  graph, and occupancy is rendered from the optimized trajectory. Map and
+  trajectory cannot disagree.
 - `static`: uses configured start transforms.
-- `auto`: estimates SE(2) transforms from overlapping known-free and occupied
-  cells, with score, ambiguity, yaw, support, and optional prior checks.
-- `cslam`: uses the reported collaborative pose graph for membership and
-  transforms; grid registration becomes a diagnostic cross-check.
+- `auto`: (legacy 2D grid stitcher) correlates occupancy grids over SE(2) with
+  score and yaw guards. Kept as an independent diagnostic cross-check.
+- `cslam`: (legacy Swarm-SLAM / RTAB-Map overlay) consumes an external
+  collaborative graph.
 
 Auto-registration needs overlapping observations and may refuse ambiguous maps.
 Use the UI's local-map view and `GET /api/map/status` to distinguish a bad local
-map from a rejected merge. Details are in [collaborative SLAM](docs/architecture/collaborative-slam.md).
+map from a rejected merge. Details are in [collaborative SLAM plan](docs/architecture/collaborative-mapping-plan.md).
 
 Simulation supports SLAM Toolbox with a planar lidar (`SLAM_BACKEND=toolbox`,
 default) or RTAB-Map with a multi-ring lidar:

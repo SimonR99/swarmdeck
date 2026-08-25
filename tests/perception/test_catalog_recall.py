@@ -26,8 +26,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import cv2
 import pytest
+
+cv2 = pytest.importorskip("cv2", reason="OpenCV is required only inside the duck-detector image")
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))

@@ -1,7 +1,9 @@
 # Mapping and collaborative SLAM
 
-SwarmDeck supports independent per-robot SLAM, backend map registration, and an
-experimental Swarm-SLAM integration. These solve different problems.
+> [!NOTE]
+> **Architecture Status**: This document records the initial map-registration and Swarm-SLAM integration analysis, detailing why those approaches were superseded. For the current, active trajectory-merging GTSAM pose-graph architecture (`merge_mode: graph`), see [Collaborative Mapping Plan](collaborative-mapping-plan.md).
+
+SwarmDeck supports trajectory-based collaborative SLAM (`merge_mode: graph`), static start transforms (`static`), backend 2D map registration (`auto`, legacy/diagnostic), and the experimental Swarm-SLAM integration (`cslam`, legacy).
 
 ## Current mapping paths
 
