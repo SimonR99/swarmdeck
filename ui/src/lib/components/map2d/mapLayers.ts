@@ -350,23 +350,31 @@ export function drawRobots(
     let trail = trails.get(robot.robot_id);
     if (!trail) trails.set(robot.robot_id, (trail = []));
     const last = trail[trail.length - 1];
-    if (!last || Math.hypot(last.x - g.gx, last.y - g.gy) > 3) {
-      trail.push({ x: g.gx, y: g.gy });
-      if (trail.length > 400) trail.shift();
+    if (!last || Math.hypot(last.x - robot.pose.x, last.y - robot.pose.y) > 0.08) {
+      trail.push({ x: robot.pose.x, y: robot.pose.y });
+      if (trail.length > 600) trail.shift();
     }
     if (showTrails && trail.length > 1) {
       ctx.beginPath();
-      const p0 = screenOf(trail[0].x, trail[0].y);
-      ctx.moveTo(p0.sx, p0.sy);
-      for (const point of trail.slice(1)) {
-        const p = screenOf(point.x, point.y);
-        ctx.lineTo(p.sx, p.sy);
+      let started = false;
+      for (const point of trail) {
+        const ptGrid = mapStore.worldToGrid(point.x, point.y);
+        if (!ptGrid) continue;
+        const p = screenOf(ptGrid.gx, ptGrid.gy);
+        if (!started) {
+          ctx.moveTo(p.sx, p.sy);
+          started = true;
+        } else {
+          ctx.lineTo(p.sx, p.sy);
+        }
       }
-      ctx.strokeStyle = color;
-      ctx.globalAlpha = 0.28;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
+      if (started) {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
     }
 
     const hasSplitPaths =
