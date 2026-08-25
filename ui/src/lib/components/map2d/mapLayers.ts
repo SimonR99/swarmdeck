@@ -370,9 +370,12 @@ export function drawRobots(
     }
 
     const hasSplitPaths =
-      robot.global_planned_path !== undefined || robot.local_planned_path !== undefined;
-    const globalPath = hasSplitPaths ? robot.global_planned_path : robot.planned_path;
-    const localPath = hasSplitPaths ? robot.local_planned_path : undefined;
+      Boolean((robot.global_planned_path && robot.global_planned_path.length > 0) ||
+      (robot.local_planned_path && robot.local_planned_path.length > 0));
+    const globalPath = hasSplitPaths
+      ? (robot.global_planned_path && robot.global_planned_path.length > 0 ? robot.global_planned_path : robot.planned_path)
+      : robot.planned_path;
+    const localPath = robot.local_planned_path && robot.local_planned_path.length > 0 ? robot.local_planned_path : undefined;
 
     const drawPath = (
       path: { x: number; y: number }[] | undefined,
@@ -405,10 +408,10 @@ export function drawRobots(
       return true;
     };
 
-    // Global planner route: dashed and subdued. Local controller trajectory:
+    // Global planner route: dashed and visible. Local controller trajectory:
     // solid and bright, because it is what the robot currently expects to
     // execute. Draw the local route last so it remains visible on top.
-    const globalPathVisible = drawPath(globalPath, [8, 5], 0.48, 2);
+    const globalPathVisible = drawPath(globalPath, [6, 4], 0.75, 2.5);
     const localPathVisible = drawPath(localPath, [], 0.95, 3);
     const anyPathVisible = globalPathVisible || localPathVisible;
 
