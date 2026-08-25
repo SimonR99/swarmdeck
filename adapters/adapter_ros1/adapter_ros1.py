@@ -660,15 +660,18 @@ class HardwareBridge(
             return
 
         frame = msg.header.frame_id.lstrip("/")
-        if not frame or frame == self.map_frame:
+        if not frame:
+            frame = self.base_frame
+        if frame == self.map_frame:
             self.planned_path = [
                 {"x": ps.pose.position.x, "y": ps.pose.position.y} for ps in msg.poses
             ]
             return
 
         try:
+            stamp = msg.header.stamp if msg.header.stamp.to_sec() > 0 else rospy.Time(0)
             tf = self.tf_buffer.lookup_transform(
-                self.map_frame, frame, msg.header.stamp, rospy.Duration(0.1)
+                self.map_frame, frame, stamp, rospy.Duration(0.1)
             )
         except Exception:
             # Drop the path rather than draw it in the wrong frame: an operator
