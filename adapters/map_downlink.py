@@ -37,6 +37,7 @@ class NavMapClient:
         self.timeout_s = timeout_s
         self.seq = -1
         self.last_error = ""
+        self.cached: DownloadedMap | None = None
 
     def poll(self) -> DownloadedMap | None:
         url = f"{self.http_url}/api/map/nav/{self.robot_id}"
@@ -56,8 +57,12 @@ class NavMapClient:
                 origin_y = float(response.headers["X-Map-Origin-Y"])
                 raw = zlib.decompress(response.read(), bufsize=MAX_BYTES)
         except urllib.error.HTTPError as exc:
-            if exc.code in (304, 404):
+            if exc.code == 304:
                 self.last_error = ""
+                return self.cached
+            if exc.code == 404:
+                self.last_error = ""
+                self.cached = None
                 return None
             self.last_error = str(exc)
             return None
@@ -68,11 +73,9 @@ class NavMapClient:
         if cells.size != width * height:
             self.last_error = "nav map size mismatch"
             return None
-        if seq == self.seq:
-            return None
         self.seq = seq
         self.last_error = ""
-        return DownloadedMap(
+        self.cached = DownloadedMap(
             seq=seq,
             resolution=resolution,
             width=width,
@@ -81,9 +84,53 @@ class NavMapClient:
             origin_y=origin_y,
             cells=cells.reshape(height, width),
         )
+        return self.cached
 
 
-def apply_to_occupancy_grid(grid, downloaded: DownloadedMap, frame_id: str) -> None:
+def clear_robot_disc(
+    cells: np.ndarray,
+    *,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    x: float,
+    y: float,
+    radius_m: float,
+) -> None:
+    """Mark a disc around the live pose free so Nav2's start is not lethal.
+
+    Collaborative occupancy is rendered from optimized keyframes. Live TF can
+    sit on a rasterized wall by a cell or two, and inflation then makes the
+    whole footprint lethal. The map the operator sees is unchanged; only the
+    OccupancyGrid handed to Nav2 is carved.
+    """
+    if radius_m <= 0.0 or resolution <= 0.0:
+        return
+    height, width = cells.shape
+    col = (x - origin_x) / resolution
+    row = (y - origin_y) / resolution
+    rad = radius_m / resolution
+    c0 = max(0, int(np.floor(col - rad)))
+    c1 = min(width, int(np.ceil(col + rad)) + 1)
+    r0 = max(0, int(np.floor(row - rad)))
+    r1 = min(height, int(np.ceil(row + rad)) + 1)
+    if c1 <= c0 or r1 <= r0:
+        return
+    cols = np.arange(c0, c1, dtype=np.float64)
+    rows = np.arange(r0, r1, dtype=np.float64)
+    cc, rr = np.meshgrid(cols, rows)
+    inside = (cc + 0.5 - col) ** 2 + (rr + 0.5 - row) ** 2 <= rad ** 2
+    cells[r0:r1, c0:c1][inside] = np.int8(0)
+
+
+def apply_to_occupancy_grid(
+    grid,
+    downloaded: DownloadedMap,
+    frame_id: str,
+    *,
+    pose_xy: tuple[float, float] | None = None,
+    clear_radius_m: float = 0.0,
+) -> None:
     """Fill a ROS OccupancyGrid in place. Stamp is left to the caller."""
     grid.header.frame_id = frame_id
     info = grid.info
@@ -97,4 +144,15 @@ def apply_to_occupancy_grid(grid, downloaded: DownloadedMap, frame_id: str) -> N
     info.origin.orientation.y = 0.0
     info.origin.orientation.z = 0.0
     info.origin.orientation.w = 1.0
-    grid.data = downloaded.cells.astype(np.int8).reshape(-1).tolist()
+    cells = np.array(downloaded.cells, dtype=np.int8, copy=True)
+    if pose_xy is not None and clear_radius_m > 0.0:
+        clear_robot_disc(
+            cells,
+            origin_x=downloaded.origin_x,
+            origin_y=downloaded.origin_y,
+            resolution=downloaded.resolution,
+            x=float(pose_xy[0]),
+            y=float(pose_xy[1]),
+            radius_m=float(clear_radius_m),
+        )
+    grid.data = cells.reshape(-1).tolist()

@@ -718,7 +718,14 @@ class RobotBridge(AdapterSensorMixin):
                 )
             return
         grid = OccupancyGrid()
-        apply_to_occupancy_grid(grid, downloaded, f"{self.id}/map_frame")
+        pose = self.map_pose()
+        apply_to_occupancy_grid(
+            grid,
+            downloaded,
+            f"{self.id}/map_frame",
+            pose_xy=(pose["x"], pose["y"]),
+            clear_radius_m=float(self.footprint_radius) + 0.15,
+        )
         grid.header.stamp = self.node.get_clock().now().to_msg()
         pub.publish(grid)
 
