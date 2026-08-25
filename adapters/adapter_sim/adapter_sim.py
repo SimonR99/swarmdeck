@@ -618,6 +618,12 @@ class RobotBridge(AdapterSensorMixin):
         uploader = getattr(self, "_keyframes", None)
         if uploader is None or points_map.shape[0] == 0:
             return
+        # Nav2 plans in map_frame from TF. A keyframe posed from wheel
+        # odometry lands in a different frame and the collaborative map
+        # cannot be loaded as a static layer (planner start and the grid
+        # disagree by metres). Wait for odom -> base_link.
+        if getattr(self, "_odom_to_base", None) is None:
+            return
         try:
             uploader.consider(points_map, self._pose7(), stamp)
         except Exception:

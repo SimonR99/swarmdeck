@@ -22,6 +22,7 @@ issuing goals against an empty map is how robots end up jammed against walls.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -109,12 +110,18 @@ def setup(context, *args, **kwargs):
 
     count = int(cfg.get("fleet", {}).get("robot_count", 4))
     # Operator settings are deliberately ROS-independent, but the simulated
-    # fleet consumes the persisted count on its next launch.
-    try:
-        persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
-        count = int(persisted.get("robot_count", count))
-    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
-        pass
+    # fleet consumes the persisted count on its next launch. An explicit
+    # SWARMDECK_ROBOT_COUNT wins so a 2-robot graph test cannot be inflated
+    # by a dashboard left at 7 from a hardware session.
+    env_count = os.environ.get("SWARMDECK_ROBOT_COUNT", "").strip()
+    if env_count:
+        count = int(env_count)
+    else:
+        try:
+            persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
+            count = int(persisted.get("robot_count", count))
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
+            pass
     count = max(1, min(count, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
     seed = cfg.get("seed", 20260801)
