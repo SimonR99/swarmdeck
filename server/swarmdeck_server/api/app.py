@@ -498,22 +498,6 @@ def robot_state(robot: Any) -> dict[str, Any]:
     state = robot.to_state()
     if robot.coordinate_frame == "merged":
         return state
-    # In `cslam` mode the collaborative back end already knows where this robot
-    # is in the frame the map is drawn in, so use that answer rather than
-    # transforming one out of the robot's own SLAM frame. Composing across two
-    # independently optimised trajectories is precisely what put robots 8-18 m
-    # from ground truth.
-    direct = map_service.common_pose(robot.robot_id)
-    if direct is not None:
-        state["pose"] = dict(direct)
-        if state["goal"]:
-            state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
-        for path_name in ("planned_path", "global_planned_path", "local_planned_path"):
-            state[path_name] = [
-                map_service.robot_to_world(robot.robot_id, point)
-                for point in state.get(path_name, [])
-            ]
-        return state
     state["pose"] = map_service.robot_to_world(robot.robot_id, state["pose"])
     if state["goal"]:
         state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
