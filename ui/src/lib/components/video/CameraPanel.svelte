@@ -309,7 +309,7 @@
 
 <div
   class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent
-         bg-surface {expanded ? 'h-full min-h-0' : 'min-h-[240px] flex-1'}"
+         bg-surface {expanded ? 'h-full min-h-0' : 'min-h-[180px] flex-1'}"
 >
   <div class="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
     <div class="flex min-w-0 items-center gap-2.5">
@@ -352,7 +352,7 @@
   </div>
 
   <div
-    class="relative m-3 mb-0 min-h-[132px] flex-1 overflow-hidden rounded-[--radius-control] border border-border/80 bg-surface-2"
+    class="relative m-3 min-h-[100px] flex-1 overflow-hidden rounded-[--radius-control] border border-border/80 bg-surface-2"
   >
     <video
       bind:this={video}
@@ -435,29 +435,6 @@
         <span class="text-white/30">·</span>
         <span class="text-white/80">{pingLatencyMs > 0 ? `${Math.round(pingLatencyMs)} ms` : '-- ms'}</span>
       </div>
-    {/if}
-  </div>
-
-  <!-- camera switcher -->
-  <div class="flex flex-wrap gap-2 p-3">
-    {#each fleet.robots.filter((r) => r.capabilities?.includes('camera')) as r (r.robot_id)}
-      <button
-        class="h-10 touch-target flex-1 rounded-full border px-4 text-[11px] font-semibold
-               transition-colors
-               {fleet.activeCamera === r.robot_id
-          ? 'border-transparent bg-accent-container text-accent-container-fg'
-          : 'border-transparent bg-surface-3 text-fg-muted hover:bg-border'}"
-        onclick={() => {
-          fleet.focus(r.robot_id);
-          actions.selectRobots(fleet.selected);
-          actions.switchCamera(r.robot_id);
-        }}
-      >
-        {robotDisplayName(r.robot_id)}
-      </button>
-    {/each}
-    {#if fleet.robots.filter((r) => r.capabilities?.includes('camera')).length === 0}
-      <span class="px-1 py-1.5 text-[11px] text-fg-dim">No camera-capable robots</span>
     {/if}
   </div>
 

@@ -12,10 +12,18 @@
    * Hidden entirely unless something reports a graph, so the 2D SLAM Toolbox
    * fleet is not shown an empty box.
    */
-  import { ChevronRight, Link2, Share2, TriangleAlert, X } from 'lucide-svelte';
+  import { Link2, Share2, TriangleAlert, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
+
+  let {
+    open = false,
+    onclose = () => {}
+  }: {
+    open?: boolean;
+    onclose?: () => void;
+  } = $props();
 
   const rows = $derived(
     Object.entries(mapStore.slamGraphs)
@@ -28,14 +36,12 @@
   );
   const joined = $derived(rows.filter(([, g]) => g.in_common_frame).length);
   const keyframes = $derived(rows.reduce((total, [, graph]) => total + graph.keyframes, 0));
-  let modalOpen = $state(false);
-
   function closeModal() {
-    modalOpen = false;
+    onclose();
   }
 
   function onKeyDown(event: KeyboardEvent) {
-    if (modalOpen && event.key === 'Escape') closeModal();
+    if (open && event.key === 'Escape') closeModal();
   }
 
   function onBackdropClick(event: MouseEvent) {
@@ -43,42 +49,13 @@
   }
 
   $effect(() => {
-    if (rows.length === 0) modalOpen = false;
+    if (open && rows.length === 0) onclose();
   });
 </script>
 
 <svelte:window onkeydown={onKeyDown} />
 
-{#if rows.length}
-  <button
-    class="panel-glow flex min-h-16 w-full shrink-0 items-center gap-3 rounded-[--radius-panel]
-           border border-transparent bg-surface px-4 text-left transition-[background,box-shadow,transform]
-           hover:bg-surface-2 hover:shadow-md active:scale-[0.99]"
-    aria-haspopup="dialog"
-    onclick={() => (modalOpen = true)}
-  >
-    <span
-      class="grid h-10 w-10 shrink-0 place-items-center rounded-[--radius-control]
-             bg-accent-container text-accent-container-fg"
-    >
-      <Share2 class="h-4 w-4" />
-    </span>
-    <span class="min-w-0 flex-1">
-      <span class="block text-xs font-semibold text-fg">Swarm SLAM</span>
-      <span class="mt-0.5 block text-[10px] text-fg-dim">
-        {closures} closures · {keyframes} keyframes
-      </span>
-    </span>
-    <span
-      class="rounded-full px-2 py-0.5 text-[10px] font-semibold
-             {joined === rows.length ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}"
-    >
-      {joined}/{rows.length} in frame
-    </span>
-    <ChevronRight class="h-4 w-4 shrink-0 text-fg-dim" />
-  </button>
-
-  {#if modalOpen}
+{#if open && rows.length}
     <div
       class="fixed inset-0 z-[100] grid place-items-center bg-fg/35 p-4 backdrop-blur-[3px]"
       role="presentation"
@@ -190,5 +167,4 @@
         </div>
       </div>
     </div>
-  {/if}
 {/if}

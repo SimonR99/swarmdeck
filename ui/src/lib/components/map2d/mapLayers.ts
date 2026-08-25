@@ -71,50 +71,71 @@ export function drawMetricGrid(
   screenOf: ScreenOf,
   showGrid: boolean
 ) {
-  if (!info || !showGrid) return;
-  const pixelsPerMetre = view.scale / info.resolution;
+  if (!showGrid) return;
+  const resolution = info?.resolution ?? 0.05;
+  const originX = info?.origin.x ?? 0;
+  const originY = info?.origin.y ?? 0;
+  const gridHeight = info?.height ?? 0;
+
+  const pixelsPerMetre = view.scale / resolution;
   const spacing = pixelsPerMetre >= 24 ? 1 : pixelsPerMetre >= 7 ? 5 : 10;
-  const maxX = info.origin.x + info.width * info.resolution;
-  const maxY = info.origin.y + info.height * info.resolution;
+
+  // Calculate visible world bounds from viewport corners
+  const minWorldX = originX + ((0 - view.tx) / view.scale) * resolution;
+  const maxWorldX = originX + ((width - view.tx) / view.scale) * resolution;
+  const minWorldY = originY + (gridHeight - ((height - view.ty) / view.scale)) * resolution;
+  const maxWorldY = originY + (gridHeight - ((0 - view.ty) / view.scale)) * resolution;
+
+  const startX = Math.floor(Math.min(minWorldX, maxWorldX) / spacing) * spacing;
+  const endX = Math.ceil(Math.max(minWorldX, maxWorldX) / spacing) * spacing;
+  const startY = Math.floor(Math.min(minWorldY, maxWorldY) / spacing) * spacing;
+  const endY = Math.ceil(Math.max(minWorldY, maxWorldY) / spacing) * spacing;
 
   ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, width, height);
-  ctx.clip();
   ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(60, 68, 80, 0.10)';
+  ctx.strokeStyle = 'rgba(60, 68, 80, 0.12)';
+  ctx.beginPath();
 
-  for (let x = Math.ceil(info.origin.x / spacing) * spacing; x <= maxX; x += spacing) {
-    const a = mapStore.viewToGrid(x, info.origin.y);
-    const b = mapStore.viewToGrid(x, maxY);
-    if (!a || !b) continue;
-    const sa = screenOf(a.gx, a.gy);
-    const sb = screenOf(b.gx, b.gy);
-    ctx.moveTo(sa.sx, sa.sy);
-    ctx.lineTo(sb.sx, sb.sy);
+  // Vertical lines (constant X)
+  for (let x = startX; x <= endX; x += spacing) {
+    const gx = (x - originX) / resolution;
+    const sx = view.tx + gx * view.scale;
+    if (sx >= -1 && sx <= width + 1) {
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, height);
+    }
   }
-  for (let y = Math.ceil(info.origin.y / spacing) * spacing; y <= maxY; y += spacing) {
-    const a = mapStore.viewToGrid(info.origin.x, y);
-    const b = mapStore.viewToGrid(maxX, y);
-    if (!a || !b) continue;
-    const sa = screenOf(a.gx, a.gy);
-    const sb = screenOf(b.gx, b.gy);
-    ctx.moveTo(sa.sx, sa.sy);
-    ctx.lineTo(sb.sx, sb.sy);
+
+  // Horizontal lines (constant Y)
+  for (let y = startY; y <= endY; y += spacing) {
+    const gy = gridHeight - (y - originY) / resolution;
+    const sy = view.ty + gy * view.scale;
+    if (sy >= -1 && sy <= height + 1) {
+      ctx.moveTo(0, sy);
+      ctx.lineTo(width, sy);
+    }
   }
   ctx.stroke();
 
-  const origin = mapStore.viewToGrid(0, 0);
-  if (origin) {
-    const s = screenOf(origin.gx, origin.gy);
-    ctx.strokeStyle = 'rgba(11, 92, 173, 0.24)';
-    ctx.beginPath();
-    ctx.moveTo(s.sx, 0);
-    ctx.lineTo(s.sx, height);
-    ctx.moveTo(0, s.sy);
-    ctx.lineTo(width, s.sy);
-    ctx.stroke();
+  // Origin axes crosshairs at world (0, 0)
+  const originGx = (0 - originX) / resolution;
+  const originGy = gridHeight - (0 - originY) / resolution;
+  const originSx = view.tx + originGx * view.scale;
+  const originSy = view.ty + originGy * view.scale;
+
+  ctx.strokeStyle = 'rgba(11, 92, 173, 0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  if (originSx >= 0 && originSx <= width) {
+    ctx.moveTo(originSx, 0);
+    ctx.lineTo(originSx, height);
   }
+  if (originSy >= 0 && originSy <= height) {
+    ctx.moveTo(0, originSy);
+    ctx.lineTo(width, originSy);
+  }
+  ctx.stroke();
+
   ctx.restore();
 }
 

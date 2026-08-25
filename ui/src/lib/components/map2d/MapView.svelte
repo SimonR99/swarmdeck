@@ -229,7 +229,7 @@
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = '#f5f5f7';
+    ctx.fillStyle = '#d6dae0';
     ctx.fillRect(0, 0, w, h);
 
     const info = mapStore.info;
