@@ -693,12 +693,11 @@ class HardwareBridge(
             dtype=np.float64,
         )
         mapped = transform_points(points, tf.transform)
-        if mapped is None:
-            self.planned_path = []
-            return
-        self.planned_path = [
+        mapped_list = [
             {"x": round(float(x), 3), "y": round(float(y), 3)} for x, y in mapped[:, :2]
         ]
+        self.planned_path = mapped_list
+        self._local_planned_path = mapped_list
 
     def _on_camera_compressed(self, msg: CompressedImage) -> None:
         if msg.format and "jpeg" not in msg.format.lower():

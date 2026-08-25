@@ -483,16 +483,32 @@ export function drawRobots(
       const goal = mapStore.worldToGrid(robot.goal.x, robot.goal.y);
       if (goal) {
         const s = screenOf(goal.gx, goal.gy);
-        // The direct guide is only a fallback while the planner has not
-        // produced a visible route. Always keep the goal marker itself.
-        if (!anyPathVisible) {
-          ctx.setLineDash([2, 6]);
+        // Check if the planner's global route already reaches the goal.
+        // If not (e.g. on robots running only local reactive avoidance like Scout,
+        // or while the planner is still computing), draw the route guide line to the goal.
+        const lastPt = globalPath && globalPath.length > 0 ? globalPath[globalPath.length - 1] : null;
+        const reachesGoal = Boolean(
+          globalPathVisible &&
+          lastPt &&
+          Math.hypot(lastPt.x - robot.goal.x, lastPt.y - robot.goal.y) < 1.0
+        );
+
+        if (!reachesGoal) {
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(s.sx, s.sy);
+          ctx.strokeStyle = '#000000';
+          ctx.globalAlpha = 0.4;
+          ctx.lineWidth = 4.0;
+          ctx.stroke();
+
+          ctx.setLineDash([6, 4]);
           ctx.beginPath();
           ctx.moveTo(sx, sy);
           ctx.lineTo(s.sx, s.sy);
           ctx.strokeStyle = color;
-          ctx.globalAlpha = 0.5;
-          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = 0.85;
+          ctx.lineWidth = 2.5;
           ctx.stroke();
           ctx.setLineDash([]);
           ctx.globalAlpha = 1;
