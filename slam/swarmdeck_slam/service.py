@@ -120,8 +120,8 @@ def _capture(blob: bytes) -> None:
 
 
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "").rstrip("/")
-OPTIMIZE_EVERY_N = int(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_EVERY", "5"))
-OPTIMIZE_EVERY_S = float(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_S", "2.0"))
+OPTIMIZE_EVERY_N = int(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_EVERY", "1"))
+OPTIMIZE_EVERY_S = float(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_S", "1.0"))
 PUBLISH_TIMEOUT_S = 5.0
 
 

@@ -443,13 +443,6 @@
 
   const canGoal = $derived(fleet.selected.filter((id) => fleet.can(id, 'navigate')).length);
   const registrationEntries = $derived(Object.entries(mapStore.status?.registrations ?? {}));
-  const protectedRegistrations = $derived(
-    registrationEntries.filter(([, item]) => item.rejection?.startsWith('outside configured prior'))
-      .length
-  );
-  const acceptedRegistrations = $derived(
-    registrationEntries.filter(([, item]) => item.accepted).length
-  );
   const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
   const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);
   const viewedNetwork = $derived(
@@ -508,44 +501,6 @@
       <div class="text-xs text-fg-dim">Waiting for map…</div>
     </div>
   {/if}
-
-  <div class="absolute left-3 top-3 z-20 flex items-center gap-1.5">
-    <!--
-      Clickable: the backend recommends local vs global, but the operator must be
-      able to overrule it. Inspecting one robot's own map is how you tell whether
-      a bad merge is the registration or the underlying map, and a robot joining
-      the global map used to take that choice away silently.
-    -->
-    <!--
-      Status only. Choosing the view moved to the top bar, where both options
-      are visible side by side; a control here that cycled and was labelled with
-      the mode it was already in read as a status line anyway.
-    -->
-    <div
-      class="flex items-center gap-2 rounded-[4px] border border-border bg-surface/88 px-2.5 py-1
-             text-[10px] font-medium text-fg-muted shadow-sm backdrop-blur-xl"
-      title="Which map is drawn. Change it in the top bar."
-    >
-      <span class="h-1.5 w-1.5 rounded-full {mapStore.ready ? 'bg-ok' : 'bg-warn'}"></span>
-      {mapStore.ready ? mapStore.viewLabel : 'Connecting'}
-    </div>
-    {#if mapStore.status}
-      <div
-        class="rounded-[4px] border border-border bg-surface/88 px-2.5 py-1 text-[10px]
-               font-medium text-fg-muted shadow-sm backdrop-blur-xl"
-        title="Inter-robot map alignment mode"
-      >
-        Alignment {mapStore.status.mode}
-        {#if protectedRegistrations > 0}
-          · {protectedRegistrations} prior-held
-        {:else if acceptedRegistrations > 0}
-          · {acceptedRegistrations} matched
-        {:else if mapStore.status.mode === 'auto'}
-          · local only
-        {/if}
-      </div>
-    {/if}
-  </div>
 
   <!-- goal hint -->
   {#if navigation.goalMode && canGoal > 0}

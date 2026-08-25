@@ -47,7 +47,7 @@ const state = $state({
   // than a third viewMode because it answers a different question -- viewMode
   // asks WHOSE map, this asks WHICH ESTIMATE of it -- and folding them together
   // would multiply out into states like "global raw" that do not exist.
-  mapSource: 'slam' as 'slam' | 'optimized',
+  mapSource: 'optimized' as 'slam' | 'optimized',
   optimizedScopes: [] as OptimizedScope[],
   viewRobot: null as string | null,
   // What the OPERATOR asked for, as opposed to what the backend recommends.
@@ -329,6 +329,13 @@ export const mapStore = {
 
   applySlamGraph(robotId: string, graph: SlamGraph) {
     state.slamGraphs = { ...state.slamGraphs, [robotId]: graph };
+    if (state.mapSource === 'optimized') {
+      void this.loadOptimizedScopes().then(() => {
+        if (state.viewMode === 'local' && state.viewRobot === robotId) {
+          void this.selectRobotView(robotId);
+        }
+      });
+    }
   },
   get mapSource() {
     return state.mapSource;

@@ -377,13 +377,19 @@ export function drawRobots(
       }
     }
 
+    const isNavActive =
+      robot.nav_status === 'active' ||
+      robot.nav_status === 'nav' ||
+      robot.mode === 'nav' ||
+      Boolean(robot.goal);
+
     const hasSplitPaths =
       Boolean((robot.global_planned_path && robot.global_planned_path.length > 0) ||
       (robot.local_planned_path && robot.local_planned_path.length > 0));
-    const globalPath = hasSplitPaths
+    const globalPath = isNavActive && hasSplitPaths
       ? (robot.global_planned_path && robot.global_planned_path.length > 0 ? robot.global_planned_path : robot.planned_path)
-      : robot.planned_path;
-    const localPath = robot.local_planned_path && robot.local_planned_path.length > 0 ? robot.local_planned_path : undefined;
+      : isNavActive ? robot.planned_path : undefined;
+    const localPath = isNavActive && robot.local_planned_path && robot.local_planned_path.length > 0 ? robot.local_planned_path : undefined;
 
     const drawPath = (
       path: { x: number; y: number }[] | undefined,
@@ -391,7 +397,7 @@ export function drawRobots(
       alpha: number,
       lineWidth: number
     ) => {
-      if (!showPlans || !path || path.length < 2) return false;
+      if (!showPlans || !isNavActive || !path || path.length < 2) return false;
       const visiblePath = path
         .map((point) => mapStore.worldToGrid(point.x, point.y))
         .filter((point): point is GridPoint => point !== null);
@@ -479,7 +485,7 @@ export function drawRobots(
       ctx.globalAlpha = 1;
     }
 
-    if (robot.goal) {
+    if (showPlans && isNavActive && robot.goal) {
       const goal = mapStore.worldToGrid(robot.goal.x, robot.goal.y);
       if (goal) {
         const s = screenOf(goal.gx, goal.gy);

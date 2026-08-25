@@ -1040,6 +1040,9 @@ class HardwareBridge(
             self.mode = "idle"
             self.goal = None
             self._nav_waypoints = []
+            self.planned_path = []
+            self._local_planned_path = []
+            self._global_planned_path = []
 
     def _pump_nav_joy(self) -> None:
         """Fake the joystick pathFollower's speed AND localPlanner's path
@@ -1098,6 +1101,9 @@ class HardwareBridge(
             self.pub_nav_stop.publish(Int8(data=1))
         self.goal = None
         self._nav_waypoints = []
+        self.planned_path = []
+        self._local_planned_path = []
+        self._global_planned_path = []
         self.nav_status = "cancelled"
         self.mode = "idle"
 

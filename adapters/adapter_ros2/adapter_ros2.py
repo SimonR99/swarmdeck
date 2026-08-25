@@ -1270,6 +1270,9 @@ class HardwareBridge(
         }.get(status, "failed")
         self.mode = "idle"
         self.goal = None
+        self.planned_path = []
+        self._local_planned_path = []
+        self._global_planned_path = []
         self._goal_handle = None
 
     def cancel_goal(self) -> None:
@@ -1286,6 +1289,9 @@ class HardwareBridge(
         if self.traj_client is not None:
             self._call_trigger("stop")
         self.goal = None
+        self.planned_path = []
+        self._local_planned_path = []
+        self._global_planned_path = []
         self.nav_status = "cancelled"
         self.mode = "idle"
 
