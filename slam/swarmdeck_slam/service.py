@@ -65,9 +65,9 @@ from swarmdeck_slam.render import RenderConfig
 # scout_mini. Move it onto the keyframe rather than widening it if that happens:
 # a band wide enough for both admits the taller robot's floor returns.
 RENDER = RenderConfig(
-    floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "-0.1225")),
-    min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.150")),
-    max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "0.395")),
+    floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "0.0")),
+    min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.08")),
+    max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "2.20")),
 )
 
 backend = CollaborativeBackend(render=RENDER)
