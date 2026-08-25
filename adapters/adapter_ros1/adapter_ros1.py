@@ -518,9 +518,15 @@ class HardwareBridge(
         if now - self._last_cloud_prepare_at < cloud_period:
             return
         self._last_cloud_prepare_at = now
-        cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
+        z_offset = float(self.cfg.get("cloud_z_offset", 0.0))
+        if z_offset != 0.0:
+            pts = points.copy()
+            pts[:, 2] += z_offset
+        else:
+            pts = points
+        cloud_keys = np.round(pts / MAP_CLOUD_3D_VOXEL).astype(np.int32)
         _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
-        self._cloud_points = points[cloud_keep]
+        self._cloud_points = pts[cloud_keep]
         self._cloud_dirty = True
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:

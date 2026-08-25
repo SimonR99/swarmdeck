@@ -477,7 +477,7 @@
   }
 </script>
 
-<div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-card] border border-border bg-bg">
+<div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-panel] border border-border bg-bg">
   <!--
     The 3D view sits over the 2D one rather than replacing it. 2D stays the
     operator's working surface — it is where goals are set and where the fleet

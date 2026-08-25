@@ -116,22 +116,22 @@
   }
 </script>
 
-<header class="flex h-12 shrink-0 items-center gap-2.5 border-b border-border bg-surface px-3">
-  <div class="flex items-center gap-2">
-    <img src="/logo.png" alt="SwarmDeck Logo" class="h-7 w-auto max-w-[140px] object-contain" />
-    <span class="text-[13px] font-semibold tracking-[-0.015em]">SwarmDeck</span>
+<header class="top-bar flex h-14 shrink-0 items-center gap-3 border-b border-border bg-surface px-4">
+  <div class="flex shrink-0 items-center gap-2.5">
+    <img src="/logo.png" alt="SwarmDeck Logo" class="h-8 w-auto max-w-[140px] object-contain" />
+    <span class="text-sm font-semibold tracking-[-0.015em]">SwarmDeck</span>
   </div>
 
   <div class="mx-1 h-5 w-px bg-border"></div>
 
-  <div class="flex items-center gap-2">
+  <div class="flex shrink-0 items-center gap-2">
     <StatusDot tone={connTone as never} pulse={session.connection === 'connecting'} />
-    <span class="text-[10px] font-medium capitalize text-fg-muted">
+    <span class="text-[11px] font-medium capitalize text-fg-muted">
       {session.connection === 'mock' ? 'simulated' : session.connection}
     </span>
   </div>
 
-  <Badge tone="neutral">{fleet.online} of {fleet.count} online</Badge>
+  <Badge tone="neutral" class="hidden md:inline-flex">{fleet.online} of {fleet.count} online</Badge>
 
   <div class="mx-1 h-5 w-px bg-border"></div>
 
@@ -140,12 +140,12 @@
     choice the operator can see rather than a mode they have to discover.
   -->
   <div
-    class="flex items-center rounded-[4px] border border-border bg-surface-2 p-0.5"
+    class="topbar-map flex items-center rounded-[--radius-control] border border-border bg-surface-2 p-1"
     role="group"
     aria-label="Map view"
   >
     <button
-      class="flex items-center gap-1.5 rounded-[3px] px-2 py-1 text-[10px] font-medium
+      class="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium
              transition-colors {!isLocal
         ? 'bg-surface text-fg shadow-sm'
         : 'text-fg-dim hover:text-fg-muted'}"
@@ -158,7 +158,7 @@
       <span class="tabular opacity-60">{members}/{fleet.count}</span>
     </button>
     <button
-      class="flex items-center gap-1.5 rounded-[3px] px-2 py-1 text-[10px] font-medium
+      class="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium
              transition-colors disabled:opacity-40 {isLocal
         ? 'bg-surface text-fg shadow-sm'
         : 'text-fg-dim hover:text-fg-muted'}"
@@ -190,7 +190,7 @@
 
   <div class="flex-1"></div>
 
-  <div class="flex items-center gap-3">
+  <div class="flex shrink-0 items-center gap-2">
     {#if session.name}
       <span class="hidden text-[11px] text-fg-dim sm:inline">{session.name}</span>
     {/if}
@@ -211,13 +211,14 @@
     <Button variant="ghost" size="sm" title="Settings" onclick={onsettings} class="px-2">
       <Settings2 class="h-4 w-4" />
     </Button>
-    <Button variant="outline" size="sm" onclick={() => fleet.selectAll()}>
+    <Button variant="outline" size="sm" onclick={() => fleet.selectAll()} class="hidden xl:inline-flex">
       {fleet.selected.length === fleet.count && fleet.count > 0 ? 'Deselect' : 'Select all'}
     </Button>
     {#if canReset}
       <Button
         variant={armed ? 'danger' : 'outline'}
         size="sm"
+        class="hidden 2xl:inline-flex"
         disabled={session.resetting}
         title="Return the simulation to its start state: robots back at their spawn poses, every map discarded"
         onclick={onReset}

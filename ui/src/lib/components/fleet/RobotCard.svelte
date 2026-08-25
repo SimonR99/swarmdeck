@@ -61,7 +61,7 @@
           {shortName}
         </span>
         {#if robot.robot_type !== 'diffdrive'}
-          <span class="truncate text-[10px] uppercase tracking-wide text-fg-dim">
+          <span class="truncate text-[10px] font-medium tracking-wide text-fg-dim">
             {robot.robot_type}
           </span>
         {/if}
@@ -115,8 +115,8 @@
   {#if selected}
     <div class="mt-3 flex gap-1.5 border-t border-border pt-2.5">
       <button
-        class="inline-flex h-8 flex-1 touch-target items-center justify-center gap-1.5 rounded-[4px]
-               border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+      class="inline-flex h-9 flex-1 touch-target items-center justify-center gap-1.5 rounded-[--radius-control]
+               border border-border bg-surface text-[11px] font-medium text-fg-muted
                transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
         disabled={!fleet.can(robot.robot_id, 'camera')}
         onclick={(e) => {
@@ -128,8 +128,8 @@
         <Video class="h-3.5 w-3.5" /> View
       </button>
       <button
-        class="inline-flex h-8 flex-1 touch-target items-center justify-center gap-1.5 rounded-[4px]
-               border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+        class="inline-flex h-9 flex-1 touch-target items-center justify-center gap-1.5 rounded-[--radius-control]
+               border border-border bg-surface text-[11px] font-medium text-fg-muted
                transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
         disabled={robot.nav_status !== 'active'}
         onclick={(e) => {
@@ -143,8 +143,8 @@
     {#if fleet.can(robot.robot_id, 'body')}
       <div class="mt-1.5 grid grid-cols-2 gap-1.5">
         <button
-          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
-                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
+                 border border-border bg-surface text-[11px] font-medium text-fg-muted
                  transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
@@ -155,8 +155,8 @@
           Claim
         </button>
         <button
-          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
-                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
+                 border border-border bg-surface text-[11px] font-medium text-fg-muted
                  transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
@@ -167,8 +167,8 @@
           Release
         </button>
         <button
-          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
-                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
+                 border border-border bg-surface text-[11px] font-medium text-fg-muted
                  transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
@@ -179,8 +179,8 @@
           Sit
         </button>
         <button
-          class="inline-flex h-8 touch-target items-center justify-center rounded-[4px]
-                 border border-border bg-surface text-[10px] font-medium text-fg-muted shadow-sm
+          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
+                 border border-border bg-surface text-[11px] font-medium text-fg-muted
                  transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {

@@ -279,8 +279,8 @@
   });
 </script>
 
-<section class="panel-glow flex shrink-0 flex-col rounded-[--radius-card] border border-border bg-surface">
-  <header class="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
+<section class="panel-glow flex shrink-0 flex-col rounded-[--radius-panel] border border-border bg-surface">
+  <header class="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
     <div>
       <!--
         Name the robot being driven. The controls act on `fleet.selected[0]`, so
@@ -289,7 +289,7 @@
         one drives off. Saying which one costs nothing and removes the whole
         class of confusion.
       -->
-      <div class="flex items-center gap-1.5 text-[11px] font-semibold text-fg">
+      <div class="flex items-center gap-1.5 text-xs font-semibold text-fg">
         Robot control
         {#if activeId}
           <span class="font-medium" style="color:{fleet.colorOf(activeId)}">
@@ -297,7 +297,7 @@
           </span>
         {/if}
       </div>
-      <div class="mt-0.5 text-[9px] text-fg-dim">
+      <div class="mt-0.5 text-[10px] text-fg-dim">
         {#if fleet.selected.length > 1}
           Drives {activeId ? robotDisplayName(activeId) : ''} only · {fleet.selected.length} selected
         {:else}
@@ -398,8 +398,8 @@
           type="button"
           aria-label="Stop robot"
           disabled={!canDrive}
-          class="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-[4px] border
-                 border-danger/40 bg-danger/5 text-[10px] font-semibold text-danger transition-colors
+          class="mt-2 flex h-10 w-full items-center justify-center gap-1.5 rounded-[--radius-control] border
+                 border-danger/40 bg-danger/5 text-[11px] font-semibold text-danger transition-colors
                  hover:bg-danger/10 disabled:opacity-40"
           onclick={hardStop}
         >
@@ -440,7 +440,7 @@
         </div>
         <button
           disabled={!canDrive}
-          class="flex h-9 w-full items-center justify-center gap-1.5 rounded-[4px] border text-[10px]
+          class="flex h-10 w-full items-center justify-center gap-1.5 rounded-[--radius-control] border text-[11px]
                  font-semibold transition-colors disabled:opacity-40
                  {navigation.goalMode
             ? 'border-accent bg-accent text-white'
@@ -452,8 +452,8 @@
         </button>
         <button
           disabled={robot.nav_status !== 'active'}
-          class="mt-1.5 flex h-8 w-full items-center justify-center gap-1 rounded-[4px] border
-                 border-border text-[9px] font-medium text-fg-muted hover:bg-surface-2
+          class="mt-2 flex h-9 w-full items-center justify-center gap-1 rounded-[--radius-control] border
+                 border-border text-[10px] font-medium text-fg-muted hover:bg-surface-2
                  disabled:opacity-40"
           onclick={() => actions.cancelGoal(activeId)}
         >
@@ -530,7 +530,7 @@
     place-items: center;
     height: 38px;
     border: 1px solid var(--color-border);
-    border-radius: 5px;
+    border-radius: var(--radius-control);
     background: var(--color-surface-2);
     color: var(--color-fg);
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.3);

@@ -1,37 +1,40 @@
 @import 'tailwindcss';
 
-/* SwarmDeck visual system: quiet, light, compact, and touch-friendly. */
+/* A restrained operations palette, 8 px rhythm and one interaction colour. */
 @theme {
-  --color-bg: #f4f5f7;
+  --color-bg: #f6f6f3;
   --color-surface: #ffffff;
-  --color-surface-2: #f0f1f3;
-  --color-surface-3: #e5e7eb;
-  --color-border: #d9dce1;
-  --color-border-strong: #b9bec7;
+  --color-surface-2: #f4f5f6;
+  --color-surface-3: #e9ebee;
+  --color-border: #e1e4e8;
+  --color-border-strong: #c8cdd4;
 
-  --color-fg: #1d1d1f;
-  --color-fg-muted: #6e6e73;
-  --color-fg-dim: #98989d;
+  --color-fg: #18202a;
+  --color-fg-muted: #596474;
+  --color-fg-dim: #8993a1;
 
-  --color-accent: #0b5cad;
+  --color-accent: #2563eb;
   --color-accent-fg: #ffffff;
 
-  --color-ok: #248a3d;
-  --color-warn: #b25f00;
-  --color-danger: #d70015;
-  --color-critical: #d70015;
+  --color-ok: #15803d;
+  --color-warn: #b45309;
+  --color-danger: #dc2626;
+  --color-critical: #dc2626;
 
-  /* Per-robot identity colours, up to 5 robots */
-  --color-robot-0: #007aff;
-  --color-robot-1: #8944ab;
-  --color-robot-2: #008f87;
-  --color-robot-3: #c93400;
-  --color-robot-4: #d30f72;
+  /* Robot colours are reserved for identity and map data, not UI state. */
+  --color-robot-0: #2563eb;
+  --color-robot-1: #7c3aed;
+  --color-robot-2: #0f766e;
+  --color-robot-3: #c2410c;
+  --color-robot-4: #be185d;
 
-  --radius-card: 0.375rem;
+  --radius-control: 0.5rem;
+  --radius-card: 0.625rem;
+  --radius-panel: 0.625rem;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
-  --font-mono: 'SF Mono', ui-monospace, Menlo, monospace;
+  --font-sans: 'Inter', 'Noto Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 }
 
 @layer base {
@@ -43,16 +46,24 @@
   }
 
   body {
+    margin: 0;
     background: var(--color-bg);
     color: var(--color-fg);
     font-family: var(--font-sans);
+    font-size: 14px;
     -webkit-font-smoothing: antialiased;
-    /* Touch-first: no accidental text selection or tap highlight */
+    text-rendering: optimizeLegibility;
     -webkit-tap-highlight-color: transparent;
     user-select: none;
   }
 
-  /* Slim, low-contrast scrollbars. */
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--color-border-strong) transparent;
@@ -63,11 +74,11 @@
   }
   *::-webkit-scrollbar-thumb {
     background: var(--color-border-strong);
-    border-radius: 3px;
+    border-radius: 999px;
   }
 
   :focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid color-mix(in srgb, var(--color-accent), white 10%);
     outline-offset: 2px;
   }
 }
@@ -77,16 +88,188 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Minimum comfortable touch target on a 10in tablet */
   .touch-target {
-    min-height: 36px;
-    min-width: 36px;
+    min-height: 40px;
+    min-width: 40px;
   }
 
   .panel-glow {
     box-shadow:
-      0 0 0 1px rgb(0 0 0 / 0.03),
-      0 4px 16px -12px rgb(0 0 0 / 0.3);
+      0 1px 2px rgb(16 24 40 / 0.035),
+      0 8px 24px -20px rgb(16 24 40 / 0.28);
+  }
+}
+
+.workspace {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.map-workspace {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.side-panel {
+  position: relative;
+  z-index: 30;
+  min-height: 0;
+}
+
+.fleet-panel {
+  width: clamp(232px, 18vw, 288px);
+}
+
+.control-panel {
+  display: flex;
+  width: clamp(320px, 25vw, 384px);
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  transition: width 180ms ease;
+}
+
+.control-panel.video-expanded {
+  width: min(52vw, 760px);
+  overflow: hidden;
+}
+
+.workspace-scrim {
+  display: none;
+}
+
+.panel-tab {
+  position: absolute;
+  top: 16px;
+  z-index: 25;
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: rgb(255 255 255 / 0.94);
+  padding: 0 12px;
+  color: var(--color-fg-muted);
+  box-shadow: 0 8px 24px -18px rgb(16 24 40 / 0.4);
+  backdrop-filter: blur(12px);
+  font-size: 12px;
+  font-weight: 650;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.panel-tab:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-accent);
+}
+
+.panel-tab-left {
+  left: 16px;
+}
+
+.panel-tab-right {
+  right: 16px;
+}
+
+.panel-tab-count {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  color: var(--color-fg-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1180px) {
+  .workspace {
+    display: block;
+  }
+
+  .map-workspace {
+    height: 100%;
+  }
+
+  .workspace-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 40;
+    display: block;
+    border: 0;
+    background: rgb(24 32 42 / 0.22);
+    backdrop-filter: blur(1px);
+  }
+
+  .side-panel {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    z-index: 50;
+    border-radius: var(--radius-panel);
+    box-shadow: 0 24px 64px -28px rgb(16 24 40 / 0.5);
+  }
+
+  .fleet-panel {
+    left: 8px;
+    width: min(320px, calc(100vw - 32px));
+  }
+
+  .control-panel {
+    right: 8px;
+    width: min(384px, calc(100vw - 32px));
+    border-radius: var(--radius-panel);
+    background: var(--color-bg);
+  }
+
+  .control-panel.video-expanded {
+    left: 8px;
+    width: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .workspace {
+    padding: 4px;
+  }
+
+  .side-panel {
+    top: 4px;
+    bottom: 4px;
+  }
+
+  .fleet-panel {
+    left: 4px;
+  }
+
+  .control-panel {
+    right: 4px;
+  }
+
+  .control-panel.video-expanded {
+    left: 4px;
+  }
+
+  .panel-tab {
+    top: 12px;
+  }
+
+  .panel-tab-left {
+    left: 12px;
+  }
+
+  .panel-tab-right {
+    right: 12px;
   }
 }
 
@@ -104,6 +287,7 @@
     opacity: 0;
   }
 }
+
 .animate-ping-ring {
   animation: pulse-ring 1.8s cubic-bezier(0.24, 0, 0.38, 1) infinite;
 }

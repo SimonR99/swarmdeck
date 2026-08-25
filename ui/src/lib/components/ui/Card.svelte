@@ -24,10 +24,10 @@
   this={interactive ? 'button' : 'div'}
   role={interactive ? 'button' : undefined}
   {onclick}
-  style={`${accent ? `--card-accent:${accent}` : ''}${selected && accent ? `;border-color:${accent}` : ''}`}
+  style={accent ? `--card-accent:${accent}` : undefined}
   class="relative w-full overflow-hidden rounded-[--radius-card] border bg-surface text-left
-         shadow-[0_1px_2px_rgb(0_0_0/0.025)] transition-colors duration-150
-         {selected ? 'bg-surface shadow-sm' : 'border-border'}
+         shadow-[0_1px_2px_rgb(16_24_40/0.025)] transition-colors duration-150
+         {selected ? 'border-accent bg-accent/5 ring-1 ring-accent/10' : 'border-border'}
          {interactive ? 'hover:border-border-strong hover:bg-surface-2/40' : ''}
          {padded ? 'p-3' : ''} {klass}"
 >

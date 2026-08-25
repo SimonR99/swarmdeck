@@ -50,10 +50,12 @@ base_frame: base_link_filtered
 #
 # The requested physical band is 0.150..0.395 m: 15 cm above the floor through
 # the Scout Mini's nominal 0.245 m chassis height plus 15 cm.
+cloud_z_offset: -1.25
+
 map_cloud_height_band:
-  floor_z: -0.575
-  min_z: 0.150
-  max_z: 0.550
+  floor_z: 1.000
+  min_z: 0.100
+  max_z: 3.500
 # Projection of map_global into the SwarmDeck OccupancyGrid.
 native_map_resolution: 0.05
 native_map_padding_m: 1.0

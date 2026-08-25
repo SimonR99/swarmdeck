@@ -1,12 +1,22 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { VideoOff, Radio } from 'lucide-svelte';
+  import { Maximize2, Minimize2, PanelRightClose, Radio, VideoOff } from 'lucide-svelte';
   import Badge from '../ui/Badge.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { session } from '$lib/stores/session.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
+
+  let {
+    expanded = false,
+    ontoggleexpand = () => {},
+    oncollapse = () => {}
+  }: {
+    expanded?: boolean;
+    ontoggleexpand?: () => void;
+    oncollapse?: () => void;
+  } = $props();
 
   /**
    * H.264 camera view.
@@ -309,27 +319,53 @@
 </script>
 
 <div
-  class="panel-glow flex flex-col overflow-hidden rounded-[--radius-card] border border-border bg-surface"
+  class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-border
+         bg-surface {expanded ? 'h-full min-h-0' : 'shrink-0'}"
 >
-  <div class="flex h-11 items-center justify-between border-b border-border px-3">
-    <div class="flex items-center gap-2">
+  <div class="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
+    <div class="flex min-w-0 items-center gap-2.5">
       <Radio class="h-3.5 w-3.5" style="color:{color}" />
-      <span class="text-[11px] font-semibold tracking-tight" style="color:{color}">
+      <span class="truncate text-xs font-semibold" style="color:{color}">
         {activeId ? robotDisplayName(activeId) : 'No camera'}
       </span>
     </div>
-    {#if streamState === 'live'}
-      <Badge tone="ok">Live H.264</Badge>
-    {:else if streamState === 'connecting'}
-      <Badge tone="accent">…</Badge>
-    {:else if streamState === 'unavailable'}
-      <Badge tone="warn">NO SIGNAL</Badge>
-    {/if}
+    <div class="flex items-center gap-1">
+      {#if streamState === 'live'}
+        <Badge tone="ok">Live H.264</Badge>
+      {:else if streamState === 'connecting'}
+        <Badge tone="accent">Connecting</Badge>
+      {:else if streamState === 'unavailable'}
+        <Badge tone="warn">No signal</Badge>
+      {/if}
+      <button
+        class="grid h-9 w-9 touch-target place-items-center rounded-[--radius-control]
+               text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        title={expanded ? 'Restore video' : 'Expand video'}
+        aria-label={expanded ? 'Restore video' : 'Expand video'}
+        onclick={ontoggleexpand}
+      >
+        {#if expanded}
+          <Minimize2 class="h-4 w-4" />
+        {:else}
+          <Maximize2 class="h-4 w-4" />
+        {/if}
+      </button>
+      <button
+        class="grid h-9 w-9 touch-target place-items-center rounded-[--radius-control]
+               text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        title="Collapse Robot Control panel"
+        aria-label="Collapse Robot Control panel"
+        onclick={oncollapse}
+      >
+        <PanelRightClose class="h-4 w-4" />
+      </button>
+    </div>
   </div>
 
   <div
-    class="relative m-2 mb-0 shrink-0 overflow-hidden rounded-[4px] bg-black"
-    style="aspect-ratio: {mediaAspect}"
+    class="relative m-2 mb-0 overflow-hidden rounded-[--radius-control] bg-black
+           {expanded ? 'min-h-0 flex-1' : 'shrink-0'}"
+    style={expanded ? undefined : `aspect-ratio: ${mediaAspect}`}
   >
     <video
       bind:this={video}
@@ -345,10 +381,10 @@
     {#if streamState !== 'live'}
       <div class="absolute inset-0 z-40 grid place-items-center bg-surface-2">
         <div class="flex flex-col items-center gap-2 text-fg-dim">
-          <div class="grid h-10 w-10 place-items-center rounded-[4px] border border-border bg-surface">
+          <div class="grid h-10 w-10 place-items-center rounded-[--radius-control] border border-border bg-surface">
             <VideoOff class="h-5 w-5" />
           </div>
-          <span class="text-[10px] font-medium">
+          <span class="text-xs font-medium">
             {streamState === 'connecting' ? 'Connecting…' : 'Stream unavailable'}
           </span>
         </div>
@@ -421,10 +457,10 @@
   <div class="flex flex-wrap gap-1.5 p-2">
     {#each fleet.robots.filter((r) => r.capabilities?.includes('camera')) as r (r.robot_id)}
       <button
-        class="h-8 touch-target flex-1 rounded-[4px] border px-2 text-[10px] font-semibold
+        class="h-9 touch-target flex-1 rounded-[--radius-control] border px-3 text-[11px] font-semibold
                transition-colors
                {fleet.activeCamera === r.robot_id
-          ? 'border-border-strong bg-surface-2 text-fg'
+          ? 'border-accent bg-accent/8 text-accent'
           : 'border-border bg-surface text-fg-muted hover:bg-surface-2'}"
         onclick={() => {
           fleet.focus(r.robot_id);

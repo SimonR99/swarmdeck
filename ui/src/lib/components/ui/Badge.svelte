@@ -19,8 +19,8 @@
 </script>
 
 <span
-  class="inline-flex items-center gap-1 rounded-[3px] border px-1.5 py-0.5
-         text-[9px] font-semibold uppercase tracking-[0.04em] {tones[tone]} {klass}"
+  class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5
+         text-[10px] font-semibold tracking-[0.01em] {tones[tone]} {klass}"
 >
   {@render children?.()}
 </span>

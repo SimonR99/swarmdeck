@@ -30,16 +30,16 @@
 </script>
 
 {#if rows.length}
-  <section class="panel-glow flex shrink-0 flex-col rounded-[--radius-card] border border-border bg-surface">
-    <header class="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
+  <section class="panel-glow flex shrink-0 flex-col rounded-[--radius-panel] border border-border bg-surface">
+    <header class="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
       <div>
-        <div class="text-[11px] font-semibold text-fg">Swarm SLAM</div>
-        <div class="mt-0.5 text-[9px] text-fg-dim">
+        <div class="text-xs font-semibold text-fg">Swarm SLAM</div>
+        <div class="mt-0.5 text-[10px] text-fg-dim">
           Inter-robot loop closures · joint pose graph
         </div>
       </div>
       <span
-        class="rounded-[3px] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.06em]
+        class="rounded-full px-2 py-0.5 text-[10px] font-semibold
                {joined === rows.length ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}"
         title="Robots the collaborative back end has placed in the common frame"
       >
