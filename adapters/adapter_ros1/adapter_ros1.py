@@ -944,7 +944,10 @@ class HardwareBridge(
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
-    def navigate_to(self, goal: dict[str, float]) -> None:
+    def navigate_to(
+        self, goal: dict[str, float], path: list[dict[str, float]] | None = None
+    ) -> None:
+        self._nav_waypoints = [dict(pt) for pt in (path or [])]
         if self.pub_nav_goal is not None:
             self._navigate_to_topic(goal)
             return
@@ -992,6 +995,7 @@ class HardwareBridge(
         }.get(status, "failed")
         self.mode = "idle"
         self.goal = None
+        self._nav_waypoints = []
 
     def _navigate_to_topic(self, goal: dict[str, float]) -> None:
         """`move_base_simple/goal`-style: a plain publish, not an action.
@@ -1029,6 +1033,7 @@ class HardwareBridge(
             self.nav_status = "succeeded"
             self.mode = "idle"
             self.goal = None
+            self._nav_waypoints = []
 
     def _pump_nav_joy(self) -> None:
         """Fake the joystick pathFollower's speed AND localPlanner's path
@@ -1043,34 +1048,28 @@ class HardwareBridge(
             library. This is NOT derived from goalX/Y at all when
             `autonomyMode` is false; only the joystick's own axes drive it.
 
-        Publishing a constant axes[1]=throttle, axes[2]=0 (an earlier version
-        of this method) therefore always signalled "goal straight ahead" —
-        confirmed live: a goal placed behind the robot still drove forward,
-        because joyDir never moved off zero. Fixed by computing the real
-        bearing from the robot's current pose to the goal, every tick (the
-        bearing changes as the robot moves/turns, same reason the
-        RelativeSetPoint scheme needs continuous updates too), and encoding
-        it into both axes so `atan2(axes[2], axes[1])` equals that bearing.
-        `axes[1]` can go negative for a goal behind the robot — pathFollower
-        takes `|axes[1]|` for speed, so sign only ever affects direction,
-        never zeroes the speed gate.
-
-        This build has no joystick staleness timeout (the check exists in
-        source but is commented out) — publishing once would latch a stale
-        direction/speed forever internally. Publish a fresh value every tick
-        instead, the way a real joystick would, and always zero when not
-        actively navigating. None of this needs to be trusted as the safety
-        mechanism — `_on_nav_cmd_vel` only relays to the real cmd_vel while
-        nav_status is "active" regardless of what pathFollower thinks
-        internally, and that's what actually stops the robot.
+        When global path waypoints are available, advance the lookahead waypoint
+        along the global collision-free route so the robot follows paths around
+        corners and walls rather than beelining in a straight line.
         """
         if self.pub_nav_joy is None:
             return
         msg = Joy()
         if self.nav_status == "active" and self.goal is not None:
             pose = self.map_pose()
-            dx = self.goal["x"] - pose["x"]
-            dy = self.goal["y"] - pose["y"]
+            target_pt = self.goal
+            waypoints = getattr(self, "_nav_waypoints", None)
+            if waypoints:
+                while len(waypoints) > 1:
+                    d = math.hypot(waypoints[0]["x"] - pose["x"], waypoints[0]["y"] - pose["y"])
+                    if d < 0.6:
+                        waypoints.pop(0)
+                    else:
+                        break
+                target_pt = waypoints[0]
+
+            dx = target_pt["x"] - pose["x"]
+            dy = target_pt["y"] - pose["y"]
             c, s = math.cos(pose["yaw"]), math.sin(pose["yaw"])
             forward = dx * c + dy * s
             left = -dx * s + dy * c
@@ -1092,6 +1091,7 @@ class HardwareBridge(
         if self.pub_nav_stop is not None:
             self.pub_nav_stop.publish(Int8(data=1))
         self.goal = None
+        self._nav_waypoints = []
         self.nav_status = "cancelled"
         self.mode = "idle"
 
@@ -1305,7 +1305,10 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             # server that may be slow or absent, and blocking
                             # this coroutine stalls every other one on this link.
                             await asyncio.get_running_loop().run_in_executor(
-                                None, bridge.navigate_to, msg.get("goal", {})
+                                None,
+                                bridge.navigate_to,
+                                msg.get("goal", {}),
+                                msg.get("path"),
                             )
                         elif kind == "cancel_goal":
                             bridge.cancel_goal()

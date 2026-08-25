@@ -1011,8 +1011,33 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             if robot.coordinate_frame == "merged"
             else map_service.world_to_robot(rid, goal)
         )
+        # Pre-compute collision-free global A* path for robots (like Scout)
+        # that lack an onboard global grid planner.
+        start_pose = (
+            robot.pose
+            if robot.coordinate_frame == "merged"
+            else map_service.robot_to_world(rid, robot.pose)
+        )
+        world_goal = (
+            goal
+            if robot.coordinate_frame == "merged"
+            else map_service.robot_to_world(rid, local_goal)
+        )
+        planned_world = map_service.plan_path(rid, start_pose, world_goal)
+        local_planned = (
+            planned_world
+            if robot.coordinate_frame == "merged"
+            else [map_service.world_to_robot(rid, pt) for pt in planned_world]
+        ) if planned_world else []
+
         sent = await registry.send(
-            rid, {"type": "navigate_to", "goal": local_goal, **stamps()}
+            rid,
+            {
+                "type": "navigate_to",
+                "goal": local_goal,
+                "path": local_planned,
+                **stamps(),
+            },
         )
         if sent:
             # Reserve immediately. Waiting for the adapter's next 5 Hz state
@@ -1021,25 +1046,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             robot.goal = local_goal
             robot.nav_status = "active"
             robot.mode = "nav"
-            # Pre-compute collision-free global A* path for robots (like Scout)
-            # that lack an onboard global grid planner.
-            start_pose = (
-                robot.pose
-                if robot.coordinate_frame == "merged"
-                else map_service.robot_to_world(rid, robot.pose)
-            )
-            world_goal = (
-                goal
-                if robot.coordinate_frame == "merged"
-                else map_service.robot_to_world(rid, local_goal)
-            )
-            planned_world = map_service.plan_path(rid, start_pose, world_goal)
-            if planned_world:
-                local_planned = (
-                    planned_world
-                    if robot.coordinate_frame == "merged"
-                    else [map_service.world_to_robot(rid, pt) for pt in planned_world]
-                )
+            if local_planned:
                 robot.global_planned_path = local_planned
                 robot.planned_path = local_planned
 
