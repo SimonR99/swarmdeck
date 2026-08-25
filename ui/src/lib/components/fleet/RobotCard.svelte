@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { Battery, Video, TriangleAlert } from 'lucide-svelte';
+  import { Battery, ScanSearch, Video, TriangleAlert } from 'lucide-svelte';
   import Card from '../ui/Card.svelte';
   import Badge from '../ui/Badge.svelte';
   import Meter from '../ui/Meter.svelte';
   import StatusDot from '../ui/StatusDot.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { actions } from '$lib/api/connection';
+  import { session } from '$lib/stores/session.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { RobotState } from '$lib/types/protocol';
 
@@ -16,6 +17,9 @@
   const selected = $derived(fleet.isSelected(robot.robot_id));
   const isCamera = $derived(fleet.activeCamera === robot.robot_id);
   const stale = $derived(robot.unattended_s > unattendedThreshold);
+  const detectionCount = $derived(
+    session.detections.filter((detection) => detection.robot_id === robot.robot_id).length
+  );
 
   const statusTone = $derived(
     !robot.online
@@ -66,6 +70,15 @@
         <StatusDot tone={statusTone as never} pulse={robot.nav_status === 'active'} />
         <span class="truncate text-[13px] font-semibold tracking-tight" style="color:{color}">
           {shortName}
+        </span>
+        <span
+          class="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-surface-3 px-1.5
+                 text-[9px] font-semibold tabular text-fg-muted"
+          title="{detectionCount} detection{detectionCount === 1 ? '' : 's'} from {shortName}"
+          aria-label="{detectionCount} detection{detectionCount === 1 ? '' : 's'}"
+        >
+          <ScanSearch class="h-3 w-3" />
+          {detectionCount}
         </span>
         {#if robot.robot_type !== 'diffdrive'}
           <span class="truncate text-[10px] font-medium tracking-wide text-fg-dim">

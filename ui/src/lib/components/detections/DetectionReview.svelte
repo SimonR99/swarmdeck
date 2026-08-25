@@ -45,6 +45,10 @@
       ...review.proposals.filter((p) => p.id !== review.selected)
     ].slice(0, MAX_SHOWN)
   );
+  const sortedEntities = $derived([
+    ...review.entities.filter((e) => e.id === review.selected),
+    ...review.entities.filter((e) => e.id !== review.selected)
+  ]);
   const overflow = $derived(Math.max(0, review.proposals.length - MAX_SHOWN));
 
   function label(name: string): string {
@@ -140,10 +144,11 @@
       <div
         role="group"
         aria-label="Detection proposal"
-        class="pointer-events-auto flex items-center gap-1 rounded-full border border-border
-               bg-surface/95 p-1 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl
-               transition-colors
-               {review.selected === p.id || review.focused === p.id ? 'border-accent' : ''}"
+        class="pointer-events-auto flex items-center gap-1.5 rounded-full border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl
+               transition-all
+               {review.selected === p.id || review.focused === p.id
+                 ? 'border-accent ring-2 ring-accent/30 scale-[1.04] p-1.5'
+                 : 'border-border p-1'}"
         onmouseenter={() => review.focus(p.id)}
         onmouseleave={() => review.focus(null)}
       >
@@ -276,18 +281,23 @@
           </button>
         </div>
         <div class="flex max-h-56 flex-col overflow-y-auto">
-          {#each review.entities as e (e.id)}
+          {#each sortedEntities as e (e.id)}
             <div
-              class="flex items-center gap-1.5 border-b border-border/60 px-2 py-1 last:border-b-0
-                     {review.selected === e.id ? 'bg-accent/8' : ''}"
+              class="flex items-center gap-2 border-b border-border/60 px-2 py-1.5 last:border-b-0 transition-all
+                     {review.selected === e.id ? 'bg-accent/15 ring-1 ring-accent/40 rounded-[--radius-control] my-0.5' : ''}"
             >
               <span
-                class="h-1.5 w-1.5 shrink-0 rounded-full"
+                class="shrink-0 rounded-full transition-all {review.selected === e.id ? 'h-2.5 w-2.5 ring-2 ring-accent/30' : 'h-1.5 w-1.5'}"
                 style="background:{detectionCatalog.colorOf(e.class)}"
               ></span>
               <div class="min-w-0 flex-1">
-                <div class="truncate text-[9px] font-medium text-fg">{label(e.class)}</div>
-                <div class="text-[8px] text-fg-dim">
+                <div class="truncate {review.selected === e.id ? 'text-[10px] font-semibold text-fg' : 'text-[9px] font-medium text-fg'}">
+                  {label(e.class)}
+                  {#if review.selected === e.id}
+                    <span class="ml-1 text-[8px] font-medium text-accent">(Selected)</span>
+                  {/if}
+                </div>
+                <div class="text-[8px] {review.selected === e.id ? 'text-fg-muted font-medium' : 'text-fg-dim'}">
                   {e.position.x.toFixed(1)}, {e.position.y.toFixed(1)} m ·
                   {e.observations} viewpoint{e.observations === 1 ? '' : 's'} ·
                   {seenBy(e.robot_ids)}

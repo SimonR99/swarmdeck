@@ -181,45 +181,115 @@ export function hitTestReviewedObject(
 /** Draw operator-reviewed detections over the occupancy layer. */
 export function drawReviewedObjects(ctx: CanvasRenderingContext2D, screenOf: ScreenOf) {
   ctx.save();
-  for (const entity of review.entities) {
-    if (!reviewVisible(entity.robot_ids)) continue;
-    const g = mapStore.worldToGrid(entity.position.x, entity.position.y);
-    if (!g) continue;
-    const { sx, sy } = screenOf(g.gx, g.gy);
-    const color = detectionCatalog.colorOf(entity.class);
-    const focused = review.highlighted === entity.id;
-    ctx.beginPath();
-    ctx.arc(sx, sy, focused ? 8 : 6, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#ffffff';
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(sx, sy, focused ? 11 : 8.5, 0, Math.PI * 2);
-    ctx.lineWidth = focused ? 2 : 1.5;
-    ctx.strokeStyle = color;
-    ctx.stroke();
-  }
+
+  // Draw unselected proposals first, then selected on top
+  const proposals = [
+    ...review.proposals.filter((p) => review.highlighted !== p.id && review.selected !== p.id),
+    ...review.proposals.filter((p) => review.highlighted === p.id || review.selected === p.id)
+  ];
 
   ctx.setLineDash([3, 3]);
-  for (const proposal of review.proposals) {
+  for (const proposal of proposals) {
     if (!reviewVisible(proposal.robot_ids)) continue;
     const g = mapStore.worldToGrid(proposal.position.x, proposal.position.y);
     if (!g) continue;
     const { sx, sy } = screenOf(g.gx, g.gy);
     const color = detectionCatalog.colorOf(proposal.class);
-    const focused = review.highlighted === proposal.id;
+    const focused = review.highlighted === proposal.id || review.selected === proposal.id;
     ctx.globalAlpha = focused ? 1 : 0.55;
     ctx.beginPath();
-    ctx.arc(sx, sy, focused ? 11 : 8, 0, Math.PI * 2);
-    ctx.lineWidth = focused ? 2 : 1.5;
+    ctx.arc(sx, sy, focused ? 13 : 8, 0, Math.PI * 2);
+    ctx.lineWidth = focused ? 2.5 : 1.5;
     ctx.strokeStyle = color;
     ctx.stroke();
-    ctx.globalAlpha = focused ? 0.28 : 0.12;
+    ctx.globalAlpha = focused ? 0.35 : 0.12;
     ctx.fillStyle = color;
     ctx.fill();
     ctx.globalAlpha = 1;
+
+    if (focused) {
+      const labelText = `${detectionCatalog.labelOf(proposal.class)} · ${Math.round(proposal.best_score * 100)}%`;
+      ctx.font = '600 11px ui-sans-serif, system-ui';
+      const textMetrics = ctx.measureText(labelText);
+      const pillW = textMetrics.width + 16;
+      const pillH = 22;
+      const pillX = sx - pillW / 2;
+      const pillY = sy - 30;
+
+      ctx.fillStyle = 'rgba(25, 32, 42, 0.92)';
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(pillX, pillY, pillW, pillH, 11);
+      } else {
+        ctx.rect(pillX, pillY, pillW, pillH);
+      }
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(labelText, sx, pillY + pillH / 2);
+    }
+  }
+
+  // Draw unselected entities first, then selected on top
+  const entities = [
+    ...review.entities.filter((e) => review.highlighted !== e.id && review.selected !== e.id),
+    ...review.entities.filter((e) => review.highlighted === e.id || review.selected === e.id)
+  ];
+
+  ctx.setLineDash([]);
+  for (const entity of entities) {
+    if (!reviewVisible(entity.robot_ids)) continue;
+    const g = mapStore.worldToGrid(entity.position.x, entity.position.y);
+    if (!g) continue;
+    const { sx, sy } = screenOf(g.gx, g.gy);
+    const color = detectionCatalog.colorOf(entity.class);
+    const focused = review.highlighted === entity.id || review.selected === entity.id;
+
+    ctx.beginPath();
+    ctx.arc(sx, sy, focused ? 9 : 6, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = focused ? 2.5 : 2;
+    ctx.strokeStyle = '#ffffff';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(sx, sy, focused ? 14 : 8.5, 0, Math.PI * 2);
+    ctx.lineWidth = focused ? 2.5 : 1.5;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+
+    if (focused) {
+      const labelText = detectionCatalog.labelOf(entity.class);
+      ctx.font = '600 11px ui-sans-serif, system-ui';
+      const textMetrics = ctx.measureText(labelText);
+      const pillW = textMetrics.width + 16;
+      const pillH = 22;
+      const pillX = sx - pillW / 2;
+      const pillY = sy - 30;
+
+      ctx.fillStyle = 'rgba(25, 32, 42, 0.92)';
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(pillX, pillY, pillW, pillH, 11);
+      } else {
+        ctx.rect(pillX, pillY, pillW, pillH);
+      }
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(labelText, sx, pillY + pillH / 2);
+    }
   }
   ctx.restore();
 }

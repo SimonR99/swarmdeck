@@ -142,7 +142,6 @@
   // `connecting`. Nothing but a deadline ends it.
   const WHEP_PROBE_TIMEOUT_MS = 12_000;
   const activeId = $derived(fleet.activeCamera);
-  const robot = $derived(activeId ? fleet.get(activeId) : undefined);
   const color = $derived(activeId ? fleet.colorOf(activeId) : 'var(--color-fg-dim)');
   const boxes = $derived(activeId ? session.bboxesFor(activeId) : []);
 
@@ -462,14 +461,4 @@
     {/if}
   </div>
 
-  {#if robot}
-    <div class="mt-auto border-t border-border/70 px-4 py-3 text-[10px] text-fg-dim">
-      <div class="flex justify-between">
-        <span>Detections</span>
-        <span class="tabular text-fg-muted">
-          {session.detections.filter((d) => d.robot_id === robot.robot_id).length}
-        </span>
-      </div>
-    </div>
-  {/if}
 </div>
