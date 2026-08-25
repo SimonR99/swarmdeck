@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from collections import deque
@@ -40,9 +41,36 @@ from swarmdeck_slam.backend import (
     majority_component,
     snapshot_update,
 )
+from swarmdeck_slam.render import RenderConfig
+
+# Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
+# dump of every point. With a single-ring lidar the distinction is invisible --
+# every return sits at one height, so an open band and a tight one render the
+# same grid. With 33 rings it is the difference between a floor plan and a solid
+# rectangle: the downward rings see floor and the upward rings see ceiling, and
+# both rasterize as walls if nothing filters them out. Leaving RenderConfig at
+# its -inf/+inf default was harmless only while the fleet was planar.
+#
+# Bounds are read in the KEYFRAME frame, which is base_link -- keyframe_producer
+# transforms map->base at capture. floor_z is therefore minus the platform's
+# base_link height above the floor (scout_mini: 0.1225, see spawn_fleet.py's
+# ROBOT_PROFILES), which puts the band at 0.0275..0.2725 in base_link. The band
+# itself reuses the calibrated hardware vocabulary from
+# adapters/adapter_ros1/config/scout_mini.yaml: 15 cm above the floor through
+# chassis height plus 15 cm.
+#
+# One band serves the whole fleet, which is correct while every robot shares a
+# chassis and wrong the moment a bunker (base_height 0.200) maps alongside a
+# scout_mini. Move it onto the keyframe rather than widening it if that happens:
+# a band wide enough for both admits the taller robot's floor returns.
+RENDER = RenderConfig(
+    floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "-0.1225")),
+    min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.150")),
+    max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "0.395")),
+)
 
 app = FastAPI(title="SwarmDeck SLAM")
-backend = CollaborativeBackend()
+backend = CollaborativeBackend(render=RENDER)
 
 _queue: deque[bytes] = deque()
 _queue_lock = threading.Lock()
@@ -53,6 +81,43 @@ _last_error = ""
 _last_snapshot: BackendSnapshot | None = None
 _stop = threading.Event()
 _worker: threading.Thread | None = None
+
+# Offline-replay capture. Set SWARMDECK_SLAM_CAPTURE_DIR to record every blob
+# this service accepts, so a Gazebo run can be turned into a dataset once and
+# replayed against the backend in seconds instead of re-flown for every
+# parameter change.
+#
+# Captured at ACCEPT time, deliberately before the bounded queue: a dataset
+# wants everything the fleet actually sent, including blobs a busy optimizer
+# would have dropped. Filenames are the arrival index and nothing else --
+# replay order defines the odometry chain (backend._last_of), so preserving
+# arrival order is what makes a replay reproduce the live graph rather than
+# merely resemble it.
+#
+# Never let capture break ingestion: a full disk must cost a dataset, not the
+# live map.
+CAPTURE_DIR = os.environ.get("SWARMDECK_SLAM_CAPTURE_DIR", "")
+_capture_seq = 0
+_capture_lock = threading.Lock()
+_capture_failed = False
+
+
+def _capture(blob: bytes) -> None:
+    global _capture_seq, _capture_failed
+    if not CAPTURE_DIR or _capture_failed:
+        return
+    with _capture_lock:
+        index = _capture_seq
+        _capture_seq += 1
+    try:
+        directory = os.path.join(CAPTURE_DIR, "keyframes")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, f"{index:06d}.kf"), "wb") as handle:
+            handle.write(blob)
+    except OSError as exc:
+        _capture_failed = True
+        globals()["_last_error"] = f"keyframe capture disabled: {exc}"
+
 
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "").rstrip("/")
 OPTIMIZE_EVERY_N = int(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_EVERY", "5"))
@@ -79,6 +144,21 @@ def _publish_snapshot(snapshot: BackendSnapshot) -> None:
         _last_error = f"slam update failed: {exc}"
         return
 
+    # Per-robot and per-component grids, then the merged one.
+    #
+    # The merged map deliberately shows only the majority component, because
+    # overlaying two components that share no verified transform is a confident
+    # lie. That is the right call for the fleet view and it leaves the operator
+    # unable to see a robot that merged with nobody -- exactly the case worth
+    # looking at. These scoped grids fill that gap without weakening the rule:
+    # each is a separate, separately-labelled map, never overlaid.
+    for robot_id, grid in sorted(snapshot.robot_grids.items()):
+        _publish_grid(f"robot:{robot_id}", grid)
+    for component in snapshot.optimized.components:
+        grid = snapshot.grids.get(component.component_id)
+        if grid is not None:
+            _publish_grid(f"component:{component.component_id}", grid)
+
     grid = majority_component(snapshot)
     if grid is None:
         return
@@ -101,6 +181,37 @@ def _publish_snapshot(snapshot: BackendSnapshot) -> None:
         ).read()
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         _last_error = f"global map publish failed: {exc}"
+
+
+def _publish_grid(scope: str, grid: Any) -> None:
+    """POST one scoped optimized grid. Failure is logged, never raised.
+
+    A scoped grid is a view, not the map Nav2 drives on, so losing one must not
+    disturb the merged publish that follows it.
+    """
+    global _last_error
+    if not SERVER_URL:
+        return
+    payload = zlib.compress(np.ascontiguousarray(grid.cells).tobytes())
+    url = (
+        f"{SERVER_URL}/api/slam/optimized_map"
+        f"?scope={urllib.parse.quote(scope)}"
+        f"&resolution={grid.resolution}&width={grid.width}&height={grid.height}"
+        f"&origin_x={grid.origin_x}&origin_y={grid.origin_y}"
+        f"&robots={urllib.parse.quote(','.join(sorted(grid.robots)))}"
+    )
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/octet-stream"},
+                method="POST",
+            ),
+            timeout=PUBLISH_TIMEOUT_S,
+        ).read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _last_error = f"optimized grid publish failed ({scope}): {exc}"
 
 
 def _worker_loop() -> None:
@@ -192,6 +303,7 @@ async def post_keyframe(request: Request) -> Any:
         return JSONResponse({"error": "empty body"}, status_code=400)
     if len(body) > MAX_KEYFRAME_BYTES:
         return JSONResponse({"error": "keyframe too large"}, status_code=413)
+    _capture(body)
     with _queue_lock:
         if len(_queue) >= _queue_cap:
             _queue.popleft()

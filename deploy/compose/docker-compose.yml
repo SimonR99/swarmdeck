@@ -65,6 +65,14 @@ services:
       - "http://server:8080"
     environment:
       SWARMDECK_SERVER_URL: http://server:8080
+      # Set to a path under /app/sessions to record every accepted keyframe for
+      # offline replay (slam/tools/replay.py). Empty disables capture, which is
+      # the normal state: a long run writes one file per keyframe.
+      SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
+    volumes:
+      # Datasets land beside the session recordings, on the host, so a capture
+      # survives the container it was made in.
+      - ../../sessions:/app/sessions
     ports:
       - "8090:8090"
     depends_on:
@@ -151,6 +159,15 @@ services:
       # operator. Without this nothing drives, and goals issued against an empty
       # map jam robots into walls where wheel slip destroys their odometry.
       EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
+      # Keyframe production budget, per robot. Voxel matches the 0.05 m grid so
+      # the render is not coarser than the cells it fills; the yaw gate drops
+      # captures taken mid-turn, whose clouds are motion-skewed. Both are
+      # exposed here because the right values differ per platform and per link
+      # -- an OS1-128 at 0.05 m is a much larger cloud than the sim's 33 rings.
+      # Set the yaw gate to 0 to disable it (used when capturing a dataset that
+      # should stay ablatable offline).
+      SWARMDECK_KEYFRAME_VOXEL_M: "${SWARMDECK_KEYFRAME_VOXEL_M:-0.05}"
+      SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091

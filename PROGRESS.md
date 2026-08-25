@@ -355,11 +355,66 @@ grid correlation disagree, that is a warning light worth having.
   a single loop between two robots is exactly the case PCM exists to reject. A
   hardware test that drive-bys once and expects a merged map will wait forever.
   Overlap twice.
-- **Production loop closures use isotropic information.** The Hessian path is
-  still the default in `VerifyConfig` (and in the xfail). The live back-end
-  opts into isotropic because that is the weighting that improves ATE. Do not
-  "fix" the xfail by pointing the tests at isotropic -- that would hide the
-  calibration problem rather than solving it.
+- **Production loop closures now use the Hessian.** Changed 2026-08-25 on
+  measured evidence; see "Replay harness" below. The old isotropic default came
+  from the synthetic fixture, which is planar and non-repetitive and therefore
+  never exercises the degenerate geometry the conditioned Hessian describes.
 - **Adapters must be redeployed**, not only the server. Keyframe production
   lives on the robot. A server running `merge_mode: graph` against adapters
   that have not been updated will still show local maps and will never merge.
+
+
+## Replay harness and what it settled (2026-08-25)
+
+A Gazebo run costs ten minutes and never repeats. `slam/tools/replay.py` turns
+one captured run into a repeatable 54-second experiment, scored against Gazebo
+ground truth by the existing `evaluation.py`.
+
+- `SWARMDECK_SLAM_CAPTURE_DIR` records every keyframe blob the service accepts.
+- `scripts/record_ground_truth.py` records `/<ns>/ground_truth` to CSV beside it.
+  Kept out of the adapter wire contract deliberately: real robots cannot supply
+  ground truth, and the back-end must never be scored against an input they
+  lack.
+- `sessions/captures/3d-run-01` is the first dataset: 2 robots, 239 keyframes,
+  9397 truth samples, **4.0 MB**.
+
+### The defect, and four hypotheses that were wrong
+
+The pose graph was *creating* rotation error, not inheriting it: robot_0's yaw
+error went from 3.65 deg at the front end to 9.22 deg after optimization, while
+robot_1 went 1.13 -> 1.14. Measured, in order, all on the same dataset:
+
+| hypothesis | result |
+|---|---|
+| bad inter-robot closures | **wrong** -- disabling them entirely left robot_0 at 9.58 deg |
+| spatial gate on candidates | **inert** -- identical to 2 decimals; code removed |
+| Lowe ratio test on descriptors | **inert** -- 7.0863 -> 7.0856 m |
+| odometry weight too tight | **backwards** -- loosening was catastrophic (62 deg at 0.05x) |
+
+`ODOM_INFORMATION = 400` is load-bearing: it is what currently holds the map
+together against bad closures. Do not loosen it without replacing what it does.
+
+### The actual cause: motion skew at high turn rate
+
+robot_0 turned **1549 deg** over the run to robot_1's 914, with the same path
+length -- and every one of its 6 yaw jumps sits on a hard turn. A spinning lidar
+sweeping during fast rotation produces a cloud of the wrong SHAPE, which is
+worse than a noisy one: GICP fits it confidently and it passes every geometric
+gate (20 deg yaw deviation and an 85% inlier ratio changed nothing).
+
+Dropping keyframes captured above 8 deg/s inverts the defect -- the graph goes
+from degrading robot_0 (3.65 -> 7.38) to improving it (3.54 -> **3.26**). This
+is now enforced live by `DEFAULT_MAX_YAW_RATE` in `adapters/keyframe_producer.py`.
+
+**Sim-specific severity, general mechanism.** Gazebo publishes no per-point
+timestamps, so nothing downstream can de-skew. Real Ouster hardware stamps
+points and a lidar-inertial front end uses them, so on the robots this gate is a
+safeguard rather than the only defence -- loosen it once de-skewing is real.
+
+### A metric that lied
+
+`inter_robot_transform_error` reported ~7 m of collaborative error that did not
+exist. `T_world_map` is not a fixed frame here: the keyframe pose is
+`map_pose()`, and SLAM Toolbox moves `map->odom` throughout a run. Joint ATE over
+the same keyframes was 0.68 m, which cannot be true at the same time. Trust ATE;
+that metric needs a gauge and this data cannot give it one.
