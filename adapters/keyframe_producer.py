@@ -23,7 +23,18 @@ from typing import Any
 
 import numpy as np
 
-from swarmdeck_protocol import ProtocolError, encode_keyframe
+try:
+    from swarmdeck_protocol import ProtocolError, encode_keyframe
+except ImportError:
+    import sys
+    from pathlib import Path
+    _proto_dir = Path(__file__).resolve().parent / "protocol"
+    if _proto_dir.exists() and str(_proto_dir) not in sys.path:
+        sys.path.insert(0, str(_proto_dir))
+    _root_dir = Path(__file__).resolve().parent.parent
+    if _root_dir.exists() and str(_root_dir) not in sys.path:
+        sys.path.insert(0, str(_root_dir))
+    from swarmdeck_protocol import ProtocolError, encode_keyframe
 
 # Matches the occupancy grid's 0.05 m cells. At the previous 0.2 m the cloud
 # arrived FOUR TIMES coarser than the cells it was rasterized into, so a wall
