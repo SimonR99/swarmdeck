@@ -19,6 +19,7 @@ x-aslan-stack: &aslan-stack
     - ${ASLAN_OVERLAY:-/ssd/swarmdeck/.aslan_ros}/install:/aslan_overlay:ro
   environment:
     ROS_DOMAIN_ID: *ros_domain
+    LD_LIBRARY_PATH: "/usr/local/lib:${LD_LIBRARY_PATH:-}"
   restart: unless-stopped
 
 services:
@@ -37,6 +38,7 @@ services:
       - bash
       - -c
       - >-
+        export LD_LIBRARY_PATH=/usr/local/lib:$${LD_LIBRARY_PATH:-} &&
         . /aslan_overlay/setup.bash &&
         ros2 launch
         /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
@@ -52,6 +54,7 @@ services:
       - bash
       - -c
       - >-
+        export LD_LIBRARY_PATH=/usr/local/lib:$${LD_LIBRARY_PATH:-} &&
         . /aslan_overlay/setup.bash &&
         ros2 launch
         /app/swarmdeck/adapters/adapter_ros2/launch/aslan_bunker.launch.py
@@ -70,6 +73,7 @@ services:
       - bash
       - -c
       - >-
+        export LD_LIBRARY_PATH=/usr/local/lib:$${LD_LIBRARY_PATH:-} &&
         . /workspace/install/setup.bash &&
         . /aslan_overlay/setup.bash &&
         ros2 launch
