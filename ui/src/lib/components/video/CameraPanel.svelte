@@ -31,7 +31,6 @@
   let whepFailures = 0;
   let streamSource = $state<'webrtc' | null>(null);
   let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
-  let mediaAspect = $state(4 / 3);
   let fps = $state(0);
   let pingLatencyMs = $state(0);
 
@@ -146,14 +145,6 @@
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
   const color = $derived(activeId ? fleet.colorOf(activeId) : 'var(--color-fg-dim)');
   const boxes = $derived(activeId ? session.bboxesFor(activeId) : []);
-
-  function setMediaAspect(width: number, height: number) {
-    if (width > 0 && height > 0) mediaAspect = width / height;
-  }
-
-  function updateVideoAspect() {
-    if (video) setMediaAspect(video.videoWidth, video.videoHeight);
-  }
 
   async function waitForIceGathering(connection: RTCPeerConnection) {
     if (connection.iceGatheringState === 'complete') return;
@@ -294,7 +285,6 @@
     whepRetryTimer = null;
     whepFailures = 0;
     streamSource = null;
-    mediaAspect = 4 / 3;
   }
 
   $effect(() => {
@@ -320,7 +310,7 @@
 
 <div
   class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent
-         bg-surface {expanded ? 'h-full min-h-0' : 'shrink-0'}"
+         bg-surface {expanded ? 'h-full min-h-0' : 'min-h-[240px] flex-1'}"
 >
   <div class="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
     <div class="flex min-w-0 items-center gap-2.5">
@@ -363,9 +353,7 @@
   </div>
 
   <div
-    class="relative m-3 mb-0 overflow-hidden rounded-[--radius-control] bg-black
-           {expanded ? 'min-h-0 flex-1' : 'shrink-0'}"
-    style={expanded ? undefined : `aspect-ratio: ${mediaAspect}`}
+    class="relative m-3 mb-0 min-h-[132px] flex-1 overflow-hidden rounded-[--radius-control] bg-black"
   >
     <video
       bind:this={video}
@@ -374,8 +362,6 @@
       muted
       playsinline
       onplay={startVideoFrameLoop}
-      onloadedmetadata={updateVideoAspect}
-      onresize={updateVideoAspect}
     ></video>
 
     {#if streamState !== 'live'}

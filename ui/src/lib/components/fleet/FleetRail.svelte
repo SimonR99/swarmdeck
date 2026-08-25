@@ -3,8 +3,16 @@
   import RobotCard from './RobotCard.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { settings } from '$lib/stores/settings.svelte';
+  import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
 
   let { oncollapse = () => {} }: { oncollapse?: () => void } = $props();
+
+  const bodyRobot = $derived.by(() => {
+    if (fleet.selected.length !== 1) return undefined;
+    const robot = fleet.get(fleet.selected[0]);
+    return robot && fleet.can(robot.robot_id, 'body') ? robot : undefined;
+  });
 </script>
 
 <aside
@@ -32,7 +40,7 @@
     </button>
   </header>
 
-  <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
+  <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2">
     {#each fleet.robots as robot (robot.robot_id)}
       <RobotCard {robot} unattendedThreshold={settings.value.unattended_threshold_s} />
     {/each}
@@ -46,4 +54,58 @@
       </div>
     {/if}
   </div>
+
+  {#if bodyRobot}
+    <section class="shrink-0 border-t border-border/70 bg-surface px-3 pb-3 pt-2.5" aria-label="Robot body actions">
+      <div class="mb-2 flex items-center justify-between gap-2 px-1">
+        <div>
+          <div class="text-[11px] font-semibold text-fg">{robotDisplayName(bodyRobot.robot_id)} actions</div>
+          <div class="mt-0.5 text-[9px] text-fg-dim">Body control</div>
+        </div>
+        <span class="h-2 w-2 rounded-full {bodyRobot.online ? 'bg-ok' : 'bg-danger'}"></span>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <button
+          class="inline-flex h-11 touch-target items-center justify-center rounded-full
+                 bg-accent-container px-3 text-[11px] font-semibold text-accent-container-fg
+                 transition-[background,transform] hover:brightness-95 active:scale-[0.98]
+                 disabled:pointer-events-none disabled:opacity-40"
+          disabled={!bodyRobot.online}
+          onclick={() => actions.bodyCommand(bodyRobot.robot_id, 'claim')}
+        >
+          Claim
+        </button>
+        <button
+          class="inline-flex h-11 touch-target items-center justify-center rounded-full
+                 bg-surface-3 px-3 text-[11px] font-semibold text-fg-muted
+                 transition-[background,transform] hover:bg-border active:scale-[0.98]
+                 disabled:pointer-events-none disabled:opacity-40"
+          disabled={!bodyRobot.online}
+          onclick={() => actions.bodyCommand(bodyRobot.robot_id, 'release')}
+        >
+          Release
+        </button>
+        <button
+          class="inline-flex h-11 touch-target items-center justify-center rounded-full
+                 bg-surface-3 px-3 text-[11px] font-semibold text-fg-muted
+                 transition-[background,transform] hover:bg-border active:scale-[0.98]
+                 disabled:pointer-events-none disabled:opacity-40"
+          disabled={!bodyRobot.online}
+          onclick={() => actions.bodyCommand(bodyRobot.robot_id, 'sit')}
+        >
+          Sit
+        </button>
+        <button
+          class="inline-flex h-11 touch-target items-center justify-center rounded-full
+                 bg-surface-3 px-3 text-[11px] font-semibold text-fg-muted
+                 transition-[background,transform] hover:bg-border active:scale-[0.98]
+                 disabled:pointer-events-none disabled:opacity-40"
+          disabled={!bodyRobot.online}
+          onclick={() => actions.bodyCommand(bodyRobot.robot_id, 'stand')}
+        >
+          Stand
+        </button>
+      </div>
+    </section>
+  {/if}
 </aside>

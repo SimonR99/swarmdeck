@@ -28,11 +28,11 @@ def plan_global_path(
     ox = float(meta.origin_x)
     oy = float(meta.origin_y)
 
-    # Convert start and goal to grid pixel coordinates (y=0 is top row)
+    # Convert start and goal to grid array indices (row index = y, col index = x)
     sx = int(round((float(start_world["x"]) - ox) / res))
-    sy = int(round(h - (float(start_world["y"]) - oy) / res))
+    sy = int(round((float(start_world["y"]) - oy) / res))
     gx = int(round((float(goal_world["x"]) - ox) / res))
-    gy = int(round(h - (float(goal_world["y"]) - oy) / res))
+    gy = int(round((float(goal_world["y"]) - oy) / res))
 
     # Clamp inside grid boundaries
     sx = max(0, min(w - 1, sx))
@@ -117,7 +117,7 @@ def plan_global_path(
     return [
         {
             "x": round(ox + px * res, 3),
-            "y": round(oy + (h - py) * res, 3),
+            "y": round(oy + py * res, 3),
         }
         for px, py in sampled
     ]

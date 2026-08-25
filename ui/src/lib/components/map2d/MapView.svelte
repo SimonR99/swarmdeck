@@ -534,7 +534,7 @@
   {/if}
 
   <!-- Map layers and registration diagnostics. -->
-  <div class="absolute bottom-3 right-14 z-20">
+  <div class="absolute bottom-3 right-20 z-20">
     <button
       title="Map layers"
       class="panel-glow flex h-11 items-center gap-2 rounded-full border border-transparent

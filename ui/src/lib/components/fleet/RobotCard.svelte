@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Battery, Navigation, Video, CircleSlash, TriangleAlert } from 'lucide-svelte';
+  import { Battery, Video, TriangleAlert } from 'lucide-svelte';
   import Card from '../ui/Card.svelte';
   import Badge from '../ui/Badge.svelte';
   import Meter from '../ui/Meter.svelte';
@@ -44,13 +44,20 @@
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));
+
+  function chooseRobot(event: MouseEvent | KeyboardEvent) {
+    if (event.shiftKey) fleet.select(robot.robot_id, true);
+    else fleet.focus(robot.robot_id);
+    actions.selectRobots(fleet.selected);
+    if (fleet.can(robot.robot_id, 'camera')) actions.switchCamera(robot.robot_id);
+  }
 </script>
 
 <Card
   interactive
   {selected}
   accent={color}
-  onclick={(e: MouseEvent | KeyboardEvent) => fleet.select(robot.robot_id, e.shiftKey)}
+  onclick={chooseRobot}
   class="pl-4"
 >
   <div class="flex items-start justify-between gap-2">
@@ -112,90 +119,4 @@
     </div>
   {/if}
 
-  {#if selected}
-    <div class="mt-3 flex gap-2 border-t border-accent/15 pt-3">
-      <button
-        class="inline-flex h-10 flex-1 touch-target items-center justify-center gap-1.5 rounded-full
-               border border-transparent bg-accent/10 text-[11px] font-semibold text-accent
-               transition-colors hover:bg-accent/15 disabled:opacity-40"
-        disabled={!fleet.can(robot.robot_id, 'camera')}
-        onclick={(e) => {
-          e.stopPropagation();
-          fleet.setCamera(robot.robot_id);
-          actions.switchCamera(robot.robot_id);
-        }}
-      >
-        <Video class="h-3.5 w-3.5" /> View
-      </button>
-      <button
-        class="inline-flex h-10 flex-1 touch-target items-center justify-center gap-1.5 rounded-full
-               border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
-               transition-colors hover:bg-surface disabled:opacity-40"
-        disabled={robot.nav_status !== 'active'}
-        onclick={(e) => {
-          e.stopPropagation();
-          actions.cancelGoal(robot.robot_id);
-        }}
-      >
-        <CircleSlash class="h-3.5 w-3.5" /> Cancel
-      </button>
-    </div>
-    {#if fleet.can(robot.robot_id, 'body')}
-      <div class="mt-2 grid grid-cols-2 gap-2">
-        <button
-          class="inline-flex h-10 touch-target items-center justify-center rounded-full
-                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
-                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={(e) => {
-            e.stopPropagation();
-            actions.bodyCommand(robot.robot_id, 'claim');
-          }}
-        >
-          Claim
-        </button>
-        <button
-          class="inline-flex h-10 touch-target items-center justify-center rounded-full
-                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
-                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={(e) => {
-            e.stopPropagation();
-            actions.bodyCommand(robot.robot_id, 'release');
-          }}
-        >
-          Release
-        </button>
-        <button
-          class="inline-flex h-10 touch-target items-center justify-center rounded-full
-                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
-                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={(e) => {
-            e.stopPropagation();
-            actions.bodyCommand(robot.robot_id, 'sit');
-          }}
-        >
-          Sit
-        </button>
-        <button
-          class="inline-flex h-10 touch-target items-center justify-center rounded-full
-                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
-                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={(e) => {
-            e.stopPropagation();
-            actions.bodyCommand(robot.robot_id, 'stand');
-          }}
-        >
-          Stand
-        </button>
-      </div>
-    {/if}
-    {#if fleet.can(robot.robot_id, 'navigate')}
-      <div class="mt-1.5 flex items-center gap-1.5 text-[10px] text-fg-dim">
-        <Navigation class="h-3 w-3" /> Use Point nav to choose a destination
-      </div>
-    {/if}
-  {/if}
 </Card>
