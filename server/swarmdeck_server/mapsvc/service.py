@@ -675,6 +675,38 @@ class MapService:
     def _yaw_agrees(cls, a: float, b: float, deg: float = CLOUD_YAW_AGREE_DEG) -> bool:
         return abs(cls._wrap_yaw(a - b)) <= math.radians(deg)
 
+    def plan_path(
+        self,
+        robot_id: str,
+        start_world: dict[str, float],
+        goal_world: dict[str, float],
+        clearance_m: float = 0.35,
+    ) -> list[dict[str, float]]:
+        """Plan a collision-free global A* path in world coordinates."""
+        from .planner import plan_global_path
+
+        with self._state_lock:
+            local_grid = self.robot_grids.get(robot_id)
+            global_grid = self.global_grid
+
+        # If in a multi-robot merged map, plan in global coordinates
+        if self.in_common_frame(robot_id) and global_grid is not None:
+            meta, cells = global_grid
+            return plan_global_path(cells, meta, start_world, goal_world, clearance_m)
+
+        # Otherwise plan in robot's local frame and transform to world
+        if local_grid is not None:
+            meta, cells = local_grid
+            local_start = self.world_to_robot(robot_id, start_world)
+            local_goal = self.world_to_robot(robot_id, goal_world)
+            local_path = plan_global_path(cells, meta, local_start, local_goal, clearance_m)
+            return [self.robot_to_world(robot_id, pt) for pt in local_path]
+
+        return [
+            {"x": round(start_world["x"], 3), "y": round(start_world["y"], 3)},
+            {"x": round(goal_world["x"], 3), "y": round(goal_world["y"], 3)},
+        ]
+
     # ---------------------------------------------------------------- ingest
 
     def ingest(

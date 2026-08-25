@@ -151,15 +151,13 @@ class Registry:
         split_paths = (
             "global_planned_path" in msg or "local_planned_path" in msg
         )
-        if "planned_path" in msg:
-            r.planned_path = list(msg["planned_path"] or [])[:200]
-        if "global_planned_path" in msg:
+        if "global_planned_path" in msg and msg["global_planned_path"]:
             r.global_planned_path = list(msg["global_planned_path"] or [])[:200]
+        elif r.nav_status not in ("active", "nav"):
+            r.global_planned_path = []
         if "local_planned_path" in msg:
             r.local_planned_path = list(msg["local_planned_path"] or [])[:200]
-        if not split_paths and "planned_path" in msg:
-            # A pre-split adapter's single route is the best available global
-            # planner route; do not make it disappear from the new UI.
+        if not split_paths and "planned_path" in msg and msg["planned_path"]:
             r.global_planned_path = r.planned_path.copy()
             r.local_planned_path = []
         if "network" in msg:

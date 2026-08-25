@@ -669,7 +669,15 @@ class HardwareBridge(
             return
 
         try:
-            stamp = msg.header.stamp if msg.header.stamp.to_sec() > 0 else rospy.Time(0)
+            stamp_val = getattr(msg.header, "stamp", None)
+            if stamp_val is None:
+                stamp = rospy.Time(0)
+            elif hasattr(stamp_val, "to_sec"):
+                stamp = stamp_val if stamp_val.to_sec() > 0 else rospy.Time(0)
+            elif isinstance(stamp_val, (int, float)):
+                stamp = rospy.Time.from_sec(stamp_val) if stamp_val > 0 else rospy.Time(0)
+            else:
+                stamp = stamp_val
             tf = self.tf_buffer.lookup_transform(
                 self.map_frame, frame, stamp, rospy.Duration(0.1)
             )

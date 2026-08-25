@@ -1021,11 +1021,35 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             robot.goal = local_goal
             robot.nav_status = "active"
             robot.mode = "nav"
+            # Pre-compute collision-free global A* path for robots (like Scout)
+            # that lack an onboard global grid planner.
+            start_pose = (
+                robot.pose
+                if robot.coordinate_frame == "merged"
+                else map_service.robot_to_world(rid, robot.pose)
+            )
+            world_goal = (
+                goal
+                if robot.coordinate_frame == "merged"
+                else map_service.robot_to_world(rid, local_goal)
+            )
+            planned_world = map_service.plan_path(rid, start_pose, world_goal)
+            if planned_world:
+                local_planned = (
+                    planned_world
+                    if robot.coordinate_frame == "merged"
+                    else [map_service.world_to_robot(rid, pt) for pt in planned_world]
+                )
+                robot.global_planned_path = local_planned
+                robot.planned_path = local_planned
 
     elif kind == "cancel_goal":
         sent = await registry.send(rid, {"type": "cancel_goal", **stamps()})
         if sent and rid in registry.robots:
             registry.robots[rid].goal = None
+            registry.robots[rid].global_planned_path = []
+            registry.robots[rid].local_planned_path = []
+            registry.robots[rid].planned_path = []
 
     elif kind == "drive":
         if not registry.can(rid, "navigate"):
