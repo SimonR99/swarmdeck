@@ -352,7 +352,7 @@
   </div>
 
   <div
-    class="relative m-3 mb-0 min-h-[132px] flex-1 overflow-hidden rounded-[--radius-control] bg-black"
+    class="relative m-3 mb-0 min-h-[132px] flex-1 overflow-hidden rounded-[--radius-control] border border-border/80 bg-surface-2"
   >
     <video
       bind:this={video}
