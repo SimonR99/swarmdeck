@@ -542,10 +542,10 @@ class MapService:
         for rid in targets:
             self._mark_registration_due(rid)
 
-    def merged_cloud(self) -> tuple[np.ndarray, np.ndarray, list[str]]:
-        """Every member robot's cloud transformed into the merged frame."""
+    def merged_cloud(self, robot_id: str | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        """Every member robot's cloud transformed into the merged frame, or one robot's cloud."""
         from .output import merged_cloud
-        return merged_cloud(self)
+        return merged_cloud(self, robot_id=robot_id)
 
     def set_common_pose(self, robot_id: str, pose: dict[str, float]) -> None:
         from .cslam import set_common_pose

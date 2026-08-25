@@ -104,9 +104,9 @@ services:
 
 rates:
   state_hz: 5.0
-  map_period_s: 8.0
-  cloud_period_s: 16.0
+  map_period_s: 4.0
+  cloud_period_s: 4.0
   camera_period_s: 0.2
-  keyframe_period_s: 2.5
+  keyframe_period_s: 2.0
 
 drive_timeout_s: 0.45

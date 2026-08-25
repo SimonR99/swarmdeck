@@ -4,18 +4,34 @@ This is the only robot/backend interface. The backend supports protocol versions
 1 and 2; version 2 adds the optional `slam_graph` message. Adapters may use any
 language, OS, middleware, or planner.
 
+## Architecture & Data Flow
+
+SwarmDeck follows a **trajectory-first collaborative SLAM** design ("Merge trajectories, not grids"):
+1. **Robots send**:
+   - **Odometry / Pose**: 5 Hz continuous pose stream (`robot_state`), from the robot's own local SLAM (LVI-SAM, SuperOdometry, LIO-SAM) or filtered odometry.
+   - **3D Information**: Voxel-downsampled 3D keyframes (`POST /api/adapter/keyframe`) for pose-graph SLAM, plus optional registered 3D cloud (`POST /api/adapter/cloud`) for the WebGL viewer.
+   - **Video Stream**: H.264 camera video via RTSP.
+   - **Operational Metadata**: Battery percentage, Wi-Fi link quality, object detections, nav status, mode, and planned paths.
+2. **Server processes & optimizes**:
+   - Pose-graph SLAM backend (`swarmdeck-slam`) solves intra/inter-robot loop closures and optimizes trajectories.
+   - Renders consistent global occupancy maps directly from optimized poses.
+3. **Server feeds back**:
+   - Navigation map downlink (`GET /api/map/nav/<robot_id>`) published locally as `/global_map` for global path planning (e.g. Nav2).
+   - Robots do **not** need to generate or rasterize 2D occupancy grids on board; 2D map/scan uploads are legacy fallbacks.
+
 ## Transport
 
 | Direction | Endpoint | Data |
 |---|---|---|
-| bidirectional | `WS /adapter` | Registration, telemetry, detections, commands. |
-| adapter → backend | `POST /api/adapter/map` | One robot's occupancy grid. |
-| adapter → backend | `POST /api/adapter/scan` | Registered XY scan when no grid is available. |
-| adapter → backend | `POST /api/adapter/cloud` | Optional registered XYZ cloud. |
-| adapter → backend | `POST /api/adapter/keyframe` | Pose-graph keyframe (cloud + odom pose + optional descriptor). |
-| collaborative backend → backend | `POST /api/adapter/global_map` | Already-merged common-frame grid. |
+| bidirectional | `WS /adapter` | Registration, telemetry (pose, battery, network), detections, commands. |
+| adapter → backend | `POST /api/adapter/keyframe` | **Primary 3D map source**: Pose-graph keyframe (voxel cloud in base frame + capture pose). |
+| adapter → MediaMTX | `RTSP :8554/<robot_id>` | **Video stream**: Production H.264 video. |
+| adapter → backend | `POST /api/adapter/cloud` | Optional registered XYZ cloud for 3D viewer. |
+| backend → adapter | `GET /api/map/nav/<robot_id>` | **Navigation map downlink**: Common-frame grid warped to robot frame for Nav2 `/global_map`. |
+| adapter → backend | `POST /api/adapter/map` | *Legacy fallback*: One robot's 2D occupancy grid. |
+| adapter → backend | `POST /api/adapter/scan` | *Legacy fallback*: Registered XY scan when no grid/keyframes are available. |
+| collaborative backend → backend | `POST /api/adapter/global_map` | Rendered common-frame grid. |
 | pose-graph back-end → backend | `POST /api/slam/update` | Optimized `T_world_map`, membership, common poses. |
-| adapter → MediaMTX | `RTSP :8554/<robot_id>` | Production H.264 video. |
 
 Binary uploads are zlib-compressed and capped by the server. Retry rejected
 uploads only after correcting the payload.

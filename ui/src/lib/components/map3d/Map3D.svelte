@@ -207,7 +207,11 @@
   async function fetchCloud() {
     if (!gl || !positionBuffer || !colourBuffer) return;
     try {
-      const response = await fetch('/api/map/cloud', { cache: 'no-store' });
+      const url =
+        mapStore.viewMode === 'local' && mapStore.viewRobot
+          ? `/api/map/cloud?robot_id=${encodeURIComponent(mapStore.viewRobot)}`
+          : '/api/map/cloud';
+      const response = await fetch(url, { cache: 'no-store' });
       if (!response.ok) throw new Error(`cloud ${response.status}`);
       const total = Number(response.headers.get('X-Cloud-Points') ?? 0);
       const scale = Number(response.headers.get('X-Cloud-Scale') ?? 0.01);

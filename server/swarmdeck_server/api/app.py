@@ -856,9 +856,15 @@ async def get_nav_map(request: Request, robot_id: str) -> Response:
 
 
 @app.get("/api/map/cloud")
-async def get_cloud() -> Response:
+async def get_cloud(request: Request) -> Response:
     from .map_routes import get_cloud as handler
-    return await handler()
+    return await handler(request)
+
+
+@app.get("/api/map/local/{robot_id}/cloud")
+async def get_local_cloud(robot_id: str) -> Response:
+    from .map_routes import get_cloud as handler
+    return await handler(Request(scope={"type": "http", "query_string": f"robot_id={robot_id}".encode()}))
 
 
 @app.post("/api/adapter/camera")

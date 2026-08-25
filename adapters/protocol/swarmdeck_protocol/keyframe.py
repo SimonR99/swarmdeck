@@ -65,7 +65,7 @@ class ProtocolError(ValueError):
     """Raised when a blob is not a valid keyframe. Always safe to surface."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Descriptor:
     """A place-recognition descriptor attached to a keyframe.
 
@@ -86,7 +86,7 @@ class Descriptor:
             raise ProtocolError(f"descriptor data must be 2-D, got shape {self.data.shape}")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class KeyframePacket:
     """One decoded keyframe, ready to become a pose-graph node."""
 

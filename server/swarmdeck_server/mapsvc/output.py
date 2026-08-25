@@ -23,18 +23,30 @@ FREE_RGB = (255, 255, 255)
 OCCUPIED_RGB = (52, 58, 68)
 
 
-def merged_cloud(service: Any) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Return member clouds transformed into the published merged frame."""
-    members = service.global_members()
+def merged_cloud(service: Any, robot_id: str | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Return member clouds transformed into the published merged frame, or one robot's cloud."""
     with service._state_lock:
         robot_clouds = dict(service.robot_clouds)
         transforms = dict(service.transforms)
         cloud_z_offsets = dict(service.cloud_z_offsets)
+
+    if robot_id:
+        if robot_id not in robot_clouds or robot_clouds[robot_id].size == 0:
+            return (
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros(0, dtype=np.uint8),
+                [],
+            )
+        pts = robot_clouds[robot_id]
+        return pts, np.zeros(len(pts), dtype=np.uint8), [robot_id]
+
+    members = service.global_members()
+    selected_rids = members if members else list(robot_clouds.keys())
     chunks: list[np.ndarray] = []
     indices: list[np.ndarray] = []
     names: list[str] = []
-    for rid in sorted(robot_clouds):
-        if rid not in members:
+    for rid in sorted(selected_rids):
+        if rid not in robot_clouds:
             continue
         points = robot_clouds[rid]
         if points.size == 0:

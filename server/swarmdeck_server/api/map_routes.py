@@ -351,9 +351,10 @@ async def get_nav_map(request: Request, robot_id: str) -> Response:
     )
 
 
-async def get_cloud() -> Response:
-    """Merged 3D cloud for the GUI's optional 3D view."""
-    points, indices, names = map_service.merged_cloud()
+async def get_cloud(request: Request | None = None) -> Response:
+    """Merged 3D cloud or single robot 3D cloud for the GUI's 3D view."""
+    robot_id = str(request.query_params.get("robot_id", "") or "") if request else ""
+    points, indices, names = map_service.merged_cloud(robot_id=robot_id or None)
     quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
     body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
     return Response(
