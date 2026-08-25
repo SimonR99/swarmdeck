@@ -80,6 +80,7 @@ def set_global_grid(service: Any, meta: GridMeta, cells: np.ndarray) -> None:
         if stored_cells.shape != (stored_meta.height, stored_meta.width):
             raise ValueError("grid cells shape does not match metadata")
         service.global_grid = (stored_meta, stored_cells)
+        service.global_map_seq = int(getattr(service, "global_map_seq", 0)) + 1
     service._remerge()
 
 

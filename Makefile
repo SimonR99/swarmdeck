@@ -117,7 +117,9 @@ build-sim:
 	$(COMPOSE) --profile gazebo build gazebo
 
 up-sim:
-	$(COMPOSE) --profile gazebo up --build -d gazebo
+	$(COMPOSE) --profile gazebo up --build -d server ui slam gazebo
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
 
 down-sim:

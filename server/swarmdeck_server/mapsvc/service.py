@@ -201,6 +201,7 @@ class MapService:
         # optimised poses, and re-deriving it here could only reintroduce the
         # frame mismatch this exists to remove.
         self.global_grid: tuple[GridMeta, np.ndarray] | None = None
+        self.global_map_seq = 0
         # Each robot's pose as the collaborative back end reports it, already in
         # the common frame the merged map uses.
         self.common_poses: dict[str, dict[str, float]] = {}
@@ -324,6 +325,7 @@ class MapService:
                 self._network_prev.clear()
                 self._network_seq.clear()
                 self.global_grid = None
+                self.global_map_seq = 0
                 self.common_poses.clear()
                 self.cslam_frames.clear()
                 self.transforms = dict(self.transform_priors)
@@ -466,6 +468,7 @@ class MapService:
             self.common_poses.clear()
             self.cslam_frames.clear()
             self.global_grid = None
+            self.global_map_seq = 0
             self.transforms = dict(self.transform_priors)
             # A scan-fed robot has no grid of its own to drop — `_scan_grids` IS
             # its map, accumulated here. Leaving it means the whole pre-reset
@@ -603,6 +606,28 @@ class MapService:
             for robot_id, pose in poses.items():
                 if isinstance(pose, dict):
                     self.set_common_pose(str(robot_id), pose)
+
+    def nav_grid(self, robot_id: str):
+        """Occupancy in ``robot_id``'s map frame, or None until that robot has merged.
+
+        Nav2's global planner loads this. The local costmap must not.
+        """
+        from .nav_map import warp_to_robot_frame
+
+        with self._state_lock:
+            if robot_id not in self._global_members_unlocked():
+                return None
+            if self.global_grid is None:
+                return None
+            meta, cells = self.global_grid
+            stored_meta = GridMeta(
+                meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
+            )
+            stored_cells = np.array(cells, dtype=np.int8, copy=True)
+            tf = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+            seq = int(self.global_map_seq)
+        warped_meta, warped = warp_to_robot_frame(stored_meta, stored_cells, tf)
+        return warped_meta, warped, seq
 
     def robot_to_world(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
         """Transform a pose from one robot's SLAM frame into the merged frame."""

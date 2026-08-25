@@ -81,6 +81,72 @@ def pose7_from_xy_yaw(x: float, y: float, yaw: float, z: float = 0.0) -> np.ndar
     )
 
 
+def points_lidar_to_map(
+    points_lidar: np.ndarray,
+    pose_xy_yaw: tuple[float, float, float],
+    lidar_x: float = 0.0,
+    lidar_z: float = 0.0,
+) -> np.ndarray:
+    """Lift lidar-frame XYZ into the robot's map frame.
+
+    ``pose_xy_yaw`` is ``T_map_base``. The lidar is assumed yaw-aligned with
+    base_link and offset by ``(lidar_x, 0, lidar_z)``, matching the simulated
+    mounts and the hardware adapters' static extrinsics.
+    """
+    pts = np.asarray(points_lidar, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    x = pts[:, 0] + float(lidar_x)
+    y = pts[:, 1]
+    z = pts[:, 2] + float(lidar_z)
+    px, py, yaw = pose_xy_yaw
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    out = np.empty((pts.shape[0], 3), dtype=np.float32)
+    out[:, 0] = px + x * cosine - y * sine
+    out[:, 1] = py + x * sine + y * cosine
+    out[:, 2] = z
+    return out
+
+
+def laser_scan_to_map_points(
+    ranges: np.ndarray,
+    *,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float,
+    range_max: float,
+    pose_xy_yaw: tuple[float, float, float],
+    lidar_x: float = 0.0,
+    lidar_z: float = 0.0,
+    z_layers: tuple[float, ...] = (0.0, 0.12, 0.24),
+) -> np.ndarray:
+    """Convert a planar LaserScan into a thickened map-frame cloud.
+
+    A single ring has no vertical structure for GICP or Scan Context. Copying
+    the hitpoints at a few heights around the lidar mount is the same trick
+    the producer tests use, and it is what lets the 2D Gazebo fleet speak the
+    same keyframe contract as an Ouster.
+    """
+    values = np.asarray(ranges, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    angles = angle_min + np.arange(values.size, dtype=np.float64) * angle_increment
+    valid = np.isfinite(values) & (values > range_min) & (values < range_max)
+    if not np.any(valid):
+        return np.zeros((0, 3), dtype=np.float32)
+    r = values[valid]
+    a = angles[valid]
+    lidar = np.stack([r * np.cos(a), r * np.sin(a), np.zeros(r.shape[0])], axis=1)
+    layers = []
+    for offset in z_layers:
+        layer = lidar.copy()
+        layer[:, 2] = float(offset)
+        layers.append(
+            points_lidar_to_map(layer, pose_xy_yaw, lidar_x=lidar_x, lidar_z=lidar_z)
+        )
+    return np.vstack(layers)
+
+
 def _moved(previous: np.ndarray, current: np.ndarray, min_t: float, min_yaw: float) -> bool:
     delta = current[:3] - previous[:3]
     if float(np.linalg.norm(delta)) >= min_t:

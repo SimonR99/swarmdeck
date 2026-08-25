@@ -195,10 +195,14 @@ global_costmap:
       # Required for nav.launch.py to inject the real Bunker polygon. Without
       # this key RewrittenYaml silently leaves Nav2 on the circular fallback.
       footprint: "[]"
-      track_unknown_space: false
+      track_unknown_space: true
       transform_tolerance: 0.5
       always_send_full_costmap: true
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        map_topic: /global_map
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true

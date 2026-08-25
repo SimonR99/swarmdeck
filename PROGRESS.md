@@ -1,6 +1,6 @@
 # SwarmDeck mapping — progress and handoff
 
-Last updated 2026-08-24, evening. Written so another agent (or the same
+Last updated 2026-08-24, night. Written so another agent (or the same
 human, a day later) can pick this up without re-deriving anything.
 
 ## The goal, stated precisely
@@ -104,7 +104,40 @@ ingest cannot stall. Local maps keep flowing. The merged view is empty until
 two robots close **two** corroborating inter-robot loops (PCM min clique size
 is 2). `make up-deploy` now starts this config plus the slam service.
 
-Offline tests: 422 server+adapter tests pass; 99 slam tests pass, 1 xfail.
+Offline tests: 515 server+adapter tests pass; 101 slam tests pass, 1 xfail.
+
+### Sim is now the same path as hardware (Phase 4, this night)
+
+Gazebo adapters produce keyframes, the slam process merges trajectories, and
+the merged occupancy is sent back so Nav2 can plan on it.
+
+- `adapter_sim` converts `/scan` (or `/scan/points`) into the same SDKF blobs
+  the hardware adapters send. A live 3D cloud suppresses the planar fallback.
+  Planar scans are thickened at a few heights so GICP still has structure;
+  `test_planar_thickened_scans_still_merge_two_robots` covers that.
+- `GET /api/map/nav/<robot_id>` returns the common-frame grid warped into that
+  robot's map frame. 404 until the robot is in a multi-robot component.
+- Adapters publish it latched on `/<ns>/global_map` (sim) or `/global_map`
+  (hardware). Nav2 `static_layer` reads that topic. **Local costmaps have no
+  static layer** — live lidar/bumper only.
+- `configs/4robot.yaml` and `2robot.yaml` are `merge_mode: graph`. `make up-sim`
+  starts `server ui slam gazebo`.
+
+Verified without Gazebo: HTTP slam service merges a synthetic two-robot fleet;
+nav-map warp round-trips occupied cells through a 90-degree `T_world_map`;
+Nav2 YAML points at `/global_map` and the local costmap does not.
+
+Gazebo bring-up (this host, overnight):
+
+```bash
+SWARMDECK_CONFIG=/app/configs/2robot.yaml EXPLORE_SECONDS=300 \
+  make up-sim
+# then: curl -fsS localhost:8090/status
+#       curl -fsS localhost:8080/api/map/status
+```
+
+PCM still needs two corroborating inter-robot closures. `explore.py` already
+sends pairs to a shared meeting point from `start_poses`.
 
 ### Live fleet, as of the previous session (not re-checked; no robot tonight)
 
@@ -128,12 +161,9 @@ that in the browser before touching anything; it sets the baseline.
 ### 1. The server is running a SIMULATION config against real hardware
 
 It was started with `/app/configs/4robot.yaml`, which declares `robot_0..robot_3`
-and elects `robot_0` as the merge reference. **No such robot ever registers**, so
-every real robot is permanently a non-reference robot -- and in `merge_mode:
-auto` that re-runs grid registration on *every* map/cloud ingest, measured at
-**2.44 s per call** (`adapters/adapter_ros2/config/bunker.yaml:107`). That is the
-throughput trap that previously stalled `_ingest_lock`, blew adapter HTTP
-timeouts, and flapped robots offline.
+and elects `robot_0` as the merge reference. **No such robot ever registers**.
+That config is now `merge_mode: graph` (no grid registration), but it is still
+the wrong fleet identity for hardware. Use `hardware_fleet.yaml`.
 
 **Prepared and now the deploy default:** `configs/hardware_fleet.yaml` --
 `robot_count: 0`, `merge_mode: graph`, no start poses. `make up-deploy` uses

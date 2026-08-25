@@ -11,10 +11,10 @@ fleet:
     profile: generic_2d
 
 map:
-  merge_mode: auto          # static | auto
+  merge_mode: graph         # pose-graph occupancy; no grid registration
   size_m: 30.0              # merged grid extent, metres
   resolution: 0.05
-  start_poses:              # used by merge_mode: static
+  start_poses:              # spawn poses; graph mode does not treat these as merges
     robot_0: {x: -9.0, y: 0.0, yaw: 0.0}
     robot_1: {x: -3.0, y: 0.0, yaw: 0.0}
 alerts:

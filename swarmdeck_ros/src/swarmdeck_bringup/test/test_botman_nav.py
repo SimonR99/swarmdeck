@@ -30,20 +30,25 @@ def test_botman_uses_live_superodom_and_ouster_interfaces():
     assert scan["sensor_frame"] == "os_lidar"
 
 
-def test_botman_params_are_humble_compatible_and_need_no_grid_map():
+def test_botman_params_are_humble_compatible_and_keep_live_local_costmap():
     params = yaml.safe_load(PARAMS.read_text())
     bt = params["bt_navigator"]["ros__parameters"]
     controller = params["controller_server"]["ros__parameters"]
     planner = params["planner_server"]["ros__parameters"]["GridBased"]
     global_map = params["global_costmap"]["global_costmap"]["ros__parameters"]
+    local_map = params["local_costmap"]["local_costmap"]["ros__parameters"]
 
     assert "plugin_lib_names" in bt
     assert "navigators" not in bt
     assert controller["progress_checker_plugin"] == "progress_checker"
     assert planner["plugin"] == "nav2_navfn_planner/NavfnPlanner"
+    # Rolling window keeps Nav2 usable before a collaborative map exists.
     assert global_map["rolling_window"] is True
-    assert "static_layer" not in global_map["plugins"]
-    assert global_map["track_unknown_space"] is False
+    assert "static_layer" in global_map["plugins"]
+    assert global_map["static_layer"]["map_topic"] == "/global_map"
+    # Collision authority stays on live sensors. A foreign map here is a crash.
+    assert "static_layer" not in local_map["plugins"]
+    assert global_map["track_unknown_space"] is True
 
 
 def test_bunker_point_goals_do_not_require_a_final_heading():

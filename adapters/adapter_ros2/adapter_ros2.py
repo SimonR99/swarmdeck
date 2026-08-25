@@ -92,6 +92,7 @@ from adapters.runtime import (
     yaw_of,
 )
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
 
 # Transport quantisation for registered-cloud uploads. One centimetre keeps a
 # normal building-scale map inside int16 while remaining finer than either
@@ -165,6 +166,10 @@ DEFAULTS: dict[str, Any] = {
     "topics": {
         "odom": "odom",
         "map": "map",
+        # OccupancyGrid the collaborative back-end warps into this robot's
+        # map frame. Nav2's global static layer subscribes here. Local
+        # costmaps must not.
+        "nav_map": "/global_map",
         # Registered PointCloud2 for a 3D SLAM stack that does not publish an
         # OccupancyGrid. The backend raytraces a height-filtered XY view into
         # a grid and keeps a coarser XYZ view for the optional 3D panel.
@@ -336,6 +341,7 @@ class HardwareBridge(
             http_url,
             min_period_s=float(rates.get("keyframe_period_s", 2.0)),
         )
+        self._nav_map = NavMapClient(http_url, robot_id)
 
         self.map_frame = cfg["map_frame"]
         self.base_frame = cfg["base_frame"]
@@ -478,6 +484,10 @@ class HardwareBridge(
         self.pub_cmd = (
             node.create_publisher(Twist, topics["cmd_vel"], 10)
             if topics.get("cmd_vel") else None
+        )
+        nav_map_topic = topics.get("nav_map") or "/global_map"
+        self.pub_global_map = node.create_publisher(
+            OccupancyGrid, nav_map_topic, latched
         )
         action_name = cfg.get("actions", {}).get("navigate_to_pose")
         self.nav_client = None
@@ -1392,6 +1402,24 @@ class HardwareBridge(
                 f"[{self.id}] keyframe upload failed: {self._keyframes.last_error}"
             )
 
+    def pull_nav_map(self) -> None:
+        """Publish the merged occupancy in this robot's map frame for Nav2."""
+        client = getattr(self, "_nav_map", None)
+        pub = getattr(self, "pub_global_map", None)
+        if client is None or pub is None:
+            return
+        downloaded = client.poll()
+        if downloaded is None:
+            if client.last_error:
+                self.node.get_logger().warn(
+                    f"[{self.id}] nav map download failed: {client.last_error}"
+                )
+            return
+        grid = OccupancyGrid()
+        apply_to_occupancy_grid(grid, downloaded, self.map_frame)
+        grid.header.stamp = self.node.get_clock().now().to_msg()
+        pub.publish(grid)
+
 
 async def run_until_first_failure(*coros: Any) -> None:
     """Run coroutines together; the first to fail cancels the rest and raises.
@@ -1555,6 +1583,9 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                         upload_kf = getattr(bridge, "upload_keyframe", None)
                         if callable(upload_kf):
                             await loop.run_in_executor(None, upload_kf)
+                        pull_nav = getattr(bridge, "pull_nav_map", None)
+                        if callable(pull_nav):
+                            await loop.run_in_executor(None, pull_nav)
                         if now - last_settings > 5.0:
                             last_settings = now
                             await loop.run_in_executor(None, bridge.refresh_settings)

@@ -190,15 +190,18 @@ control middleware do not need to match; pretending they do is what forced the
 
 ### Phase 4 — Navigation
 
-**Server plans globally, robot executes locally.** The server holds the optimized
-graph and the merged map, computes a route, and hands each robot a waypoint
-sequence of ordinary `navigate_to` goals; each robot does its own local avoidance
-between them.
+**Merged occupancy goes to Nav2's global planner; local costmaps stay live.**
+The pose-graph process renders one grid per multi-robot component. The server
+warps that grid into each robot's own map frame (`GET /api/map/nav/<id>`).
+Adapters publish it as a latched OccupancyGrid on `/<ns>/global_map` (sim) or
+`/global_map` (hardware). Nav2's `static_layer` reads that topic. The local
+costmap still has no static layer — collision authority is live lidar/bumper
+only. Operator `navigate_to` goals are converted with `T_world_map` into the
+robot's frame, same as before.
 
-This needs no new protocol direction, works identically on Nav2 and on tars's
-reactive `local_planner` (which has no global planner at all — `adjacentRange` is
-5 m), and structurally preserves the safety property: the server can only ever
-suggest *where*, never command *how*.
+Sim is wired like hardware: `adapter_sim` streams keyframes from `/scan` (or
+`/scan/points` when the 3D cloud is live), `4robot.yaml` / `2robot.yaml` are
+`merge_mode: graph`, and `make up-sim` starts the slam process.
 
 ### Phase 5 — Legacy removal
 

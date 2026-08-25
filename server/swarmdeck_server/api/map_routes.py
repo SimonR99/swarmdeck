@@ -305,6 +305,37 @@ async def post_slam_update(request: Request) -> Any:
     return {"ok": True, "robots": sorted((payload.get("graphs") or {}).keys())}
 
 
+async def get_nav_map(request: Request, robot_id: str) -> Response:
+    """Merged occupancy warped into this robot's map frame, for Nav2.
+
+    404 until the robot is in a multi-robot component. 304 if the caller
+    already has the current seq. Local costmaps must not subscribe to the
+    OccupancyGrid this becomes.
+    """
+    wanted = request.headers.get("if-none-match")
+    product = map_service.nav_grid(robot_id)
+    if product is None:
+        return JSONResponse({"error": "nav map not available"}, status_code=404)
+    meta, cells, seq = product
+    if wanted is not None and wanted.strip() == str(seq):
+        return Response(status_code=304)
+    body = zlib.compress(np.ascontiguousarray(cells).tobytes())
+    return Response(
+        content=body,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "ETag": str(seq),
+            "X-Map-Seq": str(seq),
+            "X-Map-Resolution": str(meta.resolution),
+            "X-Map-Width": str(meta.width),
+            "X-Map-Height": str(meta.height),
+            "X-Map-Origin-X": str(meta.origin_x),
+            "X-Map-Origin-Y": str(meta.origin_y),
+        },
+    )
+
+
 async def get_cloud() -> Response:
     """Merged 3D cloud for the GUI's optional 3D view."""
     points, indices, names = map_service.merged_cloud()

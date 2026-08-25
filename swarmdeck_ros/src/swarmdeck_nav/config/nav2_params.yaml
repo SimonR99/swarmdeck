@@ -156,6 +156,11 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
+        # Collaborative occupancy, warped into this robot's map_frame by the
+        # adapter. Must not be /<ns>/map: that is the onboard SLAM grid the
+        # operator still sees per-robot, and two publishers on one topic would
+        # flicker Nav2 between unmerged and merged geometry.
+        map_topic: /<robot_namespace>/global_map
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true

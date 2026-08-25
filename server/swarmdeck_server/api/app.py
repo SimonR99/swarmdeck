@@ -831,6 +831,12 @@ async def post_slam_update(request: Request) -> Any:
     return await handler(request)
 
 
+@app.get("/api/map/nav/{robot_id}")
+async def get_nav_map(request: Request, robot_id: str) -> Response:
+    from .map_routes import get_nav_map as handler
+    return await handler(request, robot_id)
+
+
 @app.get("/api/map/cloud")
 async def get_cloud() -> Response:
     from .map_routes import get_cloud as handler

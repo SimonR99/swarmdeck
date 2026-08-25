@@ -99,3 +99,44 @@ def test_isotropic_information_is_the_production_default() -> None:
     # Unit tests keep the Hessian path; production is the documented workaround
     # for the ATE xfail until real Ouster bags exist to calibrate against.
     assert VerifyConfig().information == "hessian"
+
+
+def _thicken_planar(points: np.ndarray) -> np.ndarray:
+    """What adapter_sim does with a 2D lidar: copy the ring at a few heights."""
+    xy = np.asarray(points, dtype=np.float32).copy()
+    xy[:, 2] = 0.0
+    return np.vstack([
+        np.column_stack([xy[:, 0], xy[:, 1], np.full(len(xy), z, dtype=np.float32)])
+        for z in (0.0, 0.12, 0.24)
+    ])
+
+
+def test_planar_thickened_scans_still_merge_two_robots() -> None:
+    """Gazebo's default lidar is one ring. The sim adapter thickens it.
+
+    If this fails, `4robot.yaml` cannot produce a collaborative map until the
+    fleet is switched to a multi-ring lidar; do not "fix" it by lowering
+    verification gates.
+    """
+    _, fleet = synthetic.two_robot_fleet()
+    backend = CollaborativeBackend()
+    keyed = []
+    for robot in fleet:
+        for kf in robot.keyframes:
+            keyed.append(kf)
+    keyed.sort(key=lambda kf: (kf.stamp, kf.id.robot_id, kf.id.seq))
+    for kf in keyed:
+        blob = encode_keyframe(
+            robot_id=kf.id.robot_id,
+            seq=kf.id.seq,
+            stamp=kf.stamp,
+            points=_thicken_planar(kf.points),
+            t_odom_base=quat_xyz_from_se3(kf.t_odom_base),
+        )
+        backend.ingest_packet(decode_keyframe(blob))
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+    assert len(snapshot.optimized.components) == 1
+    grid = majority_component(snapshot)
+    assert grid is not None
+    assert int((grid.cells == 100).sum()) > 0

@@ -254,6 +254,19 @@ Published by the SLAM process, not by robots. Carries per-robot `T_world_map`
 (`origins`), `in_common_frame` membership, and optimized `common_poses`. The
 rendered occupancy still uses `POST /api/adapter/global_map`.
 
+### Nav2 occupancy downlink
+
+```text
+GET /api/map/nav/<robot_id>
+If-None-Match: <seq>
+```
+
+The common-frame grid warped into that robot's own map frame. 404 until the
+robot is in a multi-robot component; 304 if `If-None-Match` matches the current
+seq. Body is zlib(int8 row-major cells); metadata is in `X-Map-*` headers.
+Adapters publish this as a latched OccupancyGrid on `/global_map` (hardware)
+or `/<ns>/global_map` (sim). **Local costmaps must not subscribe.**
+
 ### Camera video
 
 ```text

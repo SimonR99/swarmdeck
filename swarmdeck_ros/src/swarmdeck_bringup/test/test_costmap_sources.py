@@ -71,3 +71,26 @@ def test_the_bumper_accepts_returns_from_its_own_mounting_height():
                 f"{path.name}:{costmap}.proximity_scan accepts {low}..{high} m, "
                 f"which excludes its own {scan_height} m scan plane"
             )
+
+
+def test_global_static_layer_reads_the_collaborative_map():
+    """Nav2's global planner must not subscribe to onboard SLAM's /map.
+
+    That topic is still the per-robot local map the operator looks at. The
+    merged product is published separately so the two cannot fight.
+    """
+    sim = yaml.safe_load(
+        (CONFIG_DIR / "nav2_params.yaml").read_text().replace("<robot_namespace>", "ns")
+    )
+    static = (
+        sim["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
+    )
+    assert static["map_topic"] == "/ns/global_map"
+
+    hardware = yaml.safe_load((CONFIG_DIR / "botman_nav2_params.yaml").read_text())
+    hw_static = (
+        hardware["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
+    )
+    assert hw_static["map_topic"] == "/global_map"
+    local_plugins = hardware["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
+    assert "static_layer" not in local_plugins

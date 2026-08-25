@@ -10,6 +10,8 @@ import pytest
 
 from adapters.keyframe_producer import (
     KeyframeUploader,
+    laser_scan_to_map_points,
+    points_lidar_to_map,
     points_map_to_base,
     pose7_from_xy_yaw,
     voxel_downsample,
@@ -102,3 +104,32 @@ def test_upload_one_posts_the_blob_and_identifies_the_robot():
     header = peek_keyframe_header(captured["body"])
     assert header["robot_id"] == "botman_0"
     assert uploader.pending() == 0
+
+
+def test_lidar_points_land_in_the_map_frame_at_the_sensor_pose():
+    pose = (2.0, 3.0, math.pi / 2)
+    origin = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    mapped = points_lidar_to_map(origin, pose, lidar_x=0.15, lidar_z=0.4)
+    # lidar_x along base x, yaw +90: world +y.
+    np.testing.assert_allclose(mapped[0], [2.0, 3.15, 0.4], atol=1e-5)
+
+
+def test_a_planar_scan_becomes_a_thickened_map_cloud():
+    ranges = np.array([2.0, 2.0, 2.0], dtype=np.float64)
+    points = laser_scan_to_map_points(
+        ranges,
+        angle_min=-0.1,
+        angle_increment=0.1,
+        range_min=0.1,
+        range_max=10.0,
+        pose_xy_yaw=(0.0, 0.0, 0.0),
+        lidar_x=0.0,
+        lidar_z=0.5,
+        z_layers=(0.0, 0.12),
+    )
+    assert points.shape[0] == 6
+    assert points.shape[1] == 3
+    assert np.max(points[:, 0]) > 1.5
+    zs = set(np.round(points[:, 2], 2).tolist())
+    assert any(math.isclose(z, 0.5, abs_tol=0.02) for z in zs)
+    assert any(math.isclose(z, 0.62, abs_tol=0.02) for z in zs)

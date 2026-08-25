@@ -42,7 +42,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from robot_localization.srv import SetPose
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
 
@@ -52,6 +52,13 @@ sys.path.insert(0, str(REPO))
 from adapters.perception.depth_projection import point_for_depth_image
 from adapters.perception.object_detector import ObjectDetector, track_ids
 from adapters.runtime import AdapterSensorMixin, cloud_xyz, stamp_seconds, yaw_of
+from adapters.keyframe_producer import (
+    KeyframeUploader,
+    laser_scan_to_map_points,
+    points_lidar_to_map,
+    pose7_from_xy_yaw,
+)
+from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
 
 # The platform table, imported from the spawner rather than restated here.
 #
@@ -414,6 +421,11 @@ class RobotBridge(AdapterSensorMixin):
         # the only thing that reads it. See camera_point_to_map().
         self.camera_x = spec.camera_x
         self.camera_z = spec.camera_z
+        self.lidar_x = spec.lidar_x
+        self.lidar_z = spec.lidar_z
+        self._keyframes = KeyframeUploader(robot_id, http_url)
+        self._nav_map = NavMapClient(http_url, robot_id)
+        self._scan_cloud_at = 0.0
 
         # Two links of the same TF chain: map_frame -> odom -> base_link. Both
         # come off the robot's namespaced /tf, which is the only place they are
@@ -471,6 +483,18 @@ class RobotBridge(AdapterSensorMixin):
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         node.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, latched)
+        self.pub_global_map = node.create_publisher(
+            OccupancyGrid, f"/{robot_id}/global_map", latched
+        )
+        node.create_subscription(
+            LaserScan, f"/{robot_id}/scan", self._on_scan, qos_profile_sensor_data
+        )
+        node.create_subscription(
+            PointCloud2,
+            f"/{robot_id}/scan/points",
+            self._on_scan_cloud,
+            qos_profile_sensor_data,
+        )
         # RTAB-Map's accumulated 3D map, for the GUI's optional 3D view. This is
         # the assembled map in the robot's own map frame, NOT the raw sensor
         # cloud on scan/points: the view wants what the robot has built, and the
@@ -585,6 +609,85 @@ class RobotBridge(AdapterSensorMixin):
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
         self._grid_dirty = True
+
+    def _pose7(self) -> np.ndarray:
+        pose = self.map_pose()
+        return pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
+
+    def _enqueue_keyframe(self, points_map: np.ndarray, stamp: float) -> None:
+        uploader = getattr(self, "_keyframes", None)
+        if uploader is None or points_map.shape[0] == 0:
+            return
+        try:
+            uploader.consider(points_map, self._pose7(), stamp)
+        except Exception:
+            # Keyframe production must never starve the scan map or Nav2.
+            pass
+
+    def _on_scan(self, msg: LaserScan) -> None:
+        """2D fallback. Ignored while the 3D ``scan/points`` path is alive."""
+        if time.monotonic() - getattr(self, "_scan_cloud_at", 0.0) < 1.0:
+            return
+        pose = self.map_pose()
+        points = laser_scan_to_map_points(
+            np.asarray(msg.ranges, dtype=np.float64),
+            angle_min=float(msg.angle_min),
+            angle_increment=float(msg.angle_increment),
+            range_min=float(msg.range_min),
+            range_max=float(msg.range_max),
+            pose_xy_yaw=(pose["x"], pose["y"], pose["yaw"]),
+            lidar_x=float(getattr(self, "lidar_x", 0.0)),
+            lidar_z=float(getattr(self, "lidar_z", 0.0)),
+        )
+        self._enqueue_keyframe(points, stamp_seconds(msg.header) or time.time())
+
+    def _on_scan_cloud(self, msg: PointCloud2) -> None:
+        self._scan_cloud_at = time.monotonic()
+        points = cloud_xyz(msg)
+        if not len(points):
+            return
+        pose = self.map_pose()
+        mapped = points_lidar_to_map(
+            points,
+            (pose["x"], pose["y"], pose["yaw"]),
+            lidar_x=float(getattr(self, "lidar_x", 0.0)),
+            lidar_z=float(getattr(self, "lidar_z", 0.0)),
+        )
+        self._enqueue_keyframe(mapped, stamp_seconds(msg.header) or time.time())
+
+    def upload_keyframe(self) -> None:
+        uploader = getattr(self, "_keyframes", None)
+        if uploader is None:
+            return
+        if not self._upload_lock.acquire(blocking=False):
+            return
+        try:
+            uploader.upload_one()
+        finally:
+            self._upload_lock.release()
+
+    def pull_nav_map(self) -> None:
+        """Publish the collaborative map in this robot's frame for Nav2."""
+        client = getattr(self, "_nav_map", None)
+        pub = getattr(self, "pub_global_map", None)
+        if client is None or pub is None:
+            return
+        if not self._upload_lock.acquire(blocking=False):
+            return
+        try:
+            downloaded = client.poll()
+        finally:
+            self._upload_lock.release()
+        if downloaded is None:
+            if client.last_error:
+                self.node.get_logger().warn(
+                    f"[{self.id}] nav map download failed: {client.last_error}"
+                )
+            return
+        grid = OccupancyGrid()
+        apply_to_occupancy_grid(grid, downloaded, f"{self.id}/map_frame")
+        grid.header.stamp = self.node.get_clock().now().to_msg()
+        pub.publish(grid)
 
     def cslam_origin(self, graph: dict) -> dict | None:
         """This robot's SLAM map frame expressed in cslam's common frame.
@@ -1405,6 +1508,8 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         if now - last_map > 2.0:
                             last_map = now
                             await loop.run_in_executor(None, bridge.upload_map)
+                            await loop.run_in_executor(None, bridge.upload_keyframe)
+                            await loop.run_in_executor(None, bridge.pull_nav_map)
                         # Slower than the grid: a 3D map changes gradually and
                         # is an order of magnitude more bytes.
                         graph = SLAM_GRAPHS.get(bridge.id)
