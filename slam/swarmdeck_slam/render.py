@@ -274,23 +274,23 @@ def _render_component(
         config.native_map_max_cells,
     )
 
-    # Pass 2: rasterize. `hits`/`free` are transient evidence for this one
-    # render, not a persisted accumulator -- see the module docstring on why
-    # that is the right call for now and what would change to cache it.
-    free = np.zeros((meta.height, meta.width), dtype=bool)
-    hits = np.zeros((meta.height, meta.width), dtype=bool)
+    # Pass 2: rasterize. Log-odds evidence accumulation.
+    # Each hit adds positive evidence (+3), while free-space rays clear negative evidence (-1).
+    free_counts = np.zeros((meta.height, meta.width), dtype=np.int32)
+    hit_counts = np.zeros((meta.height, meta.width), dtype=np.int32)
     for origin_xy, points_world in contributions:
         if config.retain_free_space:
-            _rasterize_free(origin_xy, points_world, meta, free)
+            _rasterize_free(origin_xy, points_world, meta, free_counts)
         if points_world.shape[0] == 0:
             continue
         grid_x, grid_y = _grid_index(points_world, meta)
-        hits[grid_y, grid_x] = True
+        np.add.at(hit_counts, (grid_y, grid_x), 1)
 
     cells = np.full((meta.height, meta.width), UNKNOWN, dtype=np.int8)
     if config.retain_free_space:
-        cells[free] = FREE
-    cells[hits] = OCCUPIED  # occupied always wins: a return is stronger evidence than a pass-through
+        cells[free_counts > 0] = FREE
+    occupied_mask = (hit_counts > 0) & ((hit_counts * 3) >= free_counts)
+    cells[occupied_mask] = OCCUPIED
 
     return RenderedGrid(
         component_id, robots, meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y, cells
@@ -373,4 +373,7 @@ def _rasterize_free(origin_xy: np.ndarray, ends_xy: np.ndarray, meta: _Meta, fre
     grid_y = np.floor(origin_y + t * delta_y[None, :]).astype(np.int64)
     valid &= (grid_x >= 0) & (grid_x < meta.width) & (grid_y >= 0) & (grid_y < meta.height)
 
-    free[grid_y[valid], grid_x[valid]] = True
+    if free.dtype == bool:
+        free[grid_y[valid], grid_x[valid]] = True
+    else:
+        np.add.at(free, (grid_y[valid], grid_x[valid]), 1)

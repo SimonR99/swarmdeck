@@ -23,6 +23,20 @@ FREE_RGB = (255, 255, 255)
 OCCUPIED_RGB = (52, 58, 68)
 
 
+def consolidate_voxel_centroids(points: np.ndarray, voxel_size: float = 0.04) -> np.ndarray:
+    """Downsample and consolidate 3D points onto voxel centroids, denoising planar surfaces."""
+    if points.shape[0] <= 1:
+        return points
+    voxel_coords = np.floor(points / voxel_size).astype(np.int64)
+    _, unique_indices, inverse_indices, counts = np.unique(
+        voxel_coords, axis=0, return_index=True, return_inverse=True, return_counts=True
+    )
+    sum_points = np.zeros((len(unique_indices), 3), dtype=np.float64)
+    np.add.at(sum_points, inverse_indices, points.astype(np.float64))
+    centroids = sum_points / counts[:, None]
+    return centroids.astype(np.float32)
+
+
 def merged_cloud(service: Any, robot_id: str | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return member clouds transformed into the published merged frame, or one robot's cloud."""
     with service._state_lock:
@@ -37,7 +51,7 @@ def merged_cloud(service: Any, robot_id: str | None = None) -> tuple[np.ndarray,
                 np.zeros(0, dtype=np.uint8),
                 [],
             )
-        pts = robot_clouds[robot_id]
+        pts = consolidate_voxel_centroids(robot_clouds[robot_id])
         return pts, np.zeros(len(pts), dtype=np.uint8), [robot_id]
 
     members = service.global_members()
@@ -57,8 +71,9 @@ def merged_cloud(service: Any, robot_id: str | None = None) -> tuple[np.ndarray,
         out[:, 0] = tx + points[:, 0] * c - points[:, 1] * s
         out[:, 1] = ty + points[:, 0] * s + points[:, 1] * c
         out[:, 2] = points[:, 2] + cloud_z_offsets.get(rid, 0.0)
-        chunks.append(out)
-        indices.append(np.full(len(out), len(names), dtype=np.uint8))
+        consolidated = consolidate_voxel_centroids(out)
+        chunks.append(consolidated)
+        indices.append(np.full(len(consolidated), len(names), dtype=np.uint8))
         names.append(rid)
     if not chunks:
         return (
