@@ -136,73 +136,75 @@
 
 {#if open}
   <div
-    class="fixed inset-0 z-[100] grid place-items-center bg-black/20 p-4 backdrop-blur-[2px]"
+    class="fixed inset-0 z-[100] grid place-items-center bg-fg/35 p-4 backdrop-blur-[3px]"
     role="presentation"
     onclick={(event) => event.target === event.currentTarget && onclose()}
   >
     <div
-      class="panel-glow flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-[7px]
-             border border-border bg-surface shadow-2xl"
+      class="panel-glow flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-[--radius-dialog]
+             border border-transparent bg-surface shadow-[0_24px_64px_-20px_rgb(25_32_42/0.48)]"
       role="dialog"
       aria-modal="true"
       aria-labelledby="settings-title"
     >
-      <header class="flex h-12 shrink-0 items-center justify-between border-b border-border px-4">
-        <div class="flex items-center gap-2">
-          <Settings class="h-4 w-4 text-fg-muted" />
-          <h2 id="settings-title" class="text-[13px] font-semibold">System settings</h2>
+      <header class="flex h-[72px] shrink-0 items-center justify-between border-b border-border/70 px-5">
+        <div class="flex items-center gap-3">
+          <span class="grid h-10 w-10 place-items-center rounded-[--radius-control] bg-accent-container text-accent-container-fg">
+            <Settings class="h-[18px] w-[18px]" />
+          </span>
+          <h2 id="settings-title" class="text-sm font-semibold">System settings</h2>
         </div>
-        <button class="grid h-8 w-8 place-items-center rounded-[4px] text-fg-muted hover:bg-surface-2" onclick={onclose}>
-          <X class="h-4 w-4" />
+        <button class="grid h-11 w-11 place-items-center rounded-full text-fg-muted hover:bg-surface-2" onclick={onclose}>
+          <X class="h-5 w-5" />
         </button>
       </header>
 
-      <div class="overflow-y-auto p-4">
+      <div class="overflow-y-auto p-5">
         <div class="grid gap-3 sm:grid-cols-2">
-          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+          <label class="space-y-1.5 text-[11px] font-medium text-fg-muted">
             Usage notification delay
-            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+            <div class="flex items-center rounded-[--radius-control] border border-transparent bg-surface-2 px-2">
               <input
                 type="number"
                 min="10"
                 max="3600"
                 bind:value={draft.unattended_threshold_s}
-                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none"
+                class="h-11 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none"
               />
               <span class="text-fg-dim">seconds</span>
             </div>
           </label>
 
-          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+          <label class="space-y-1.5 text-[11px] font-medium text-fg-muted">
             Alert clear suppress
-            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+            <div class="flex items-center rounded-[--radius-control] border border-transparent bg-surface-2 px-2">
               <input
                 type="number"
                 min="0"
                 max="3600"
                 bind:value={draft.alert_suppress_s}
-                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none"
+                class="h-11 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none"
               />
               <span class="text-fg-dim">seconds</span>
             </div>
           </label>
 
-          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+          <label class="space-y-1.5 text-[11px] font-medium text-fg-muted">
             Expected robots
             <select
               value={draft.robot_count}
               onchange={(event) => resizeRobots(Number(event.currentTarget.value))}
-              class="h-9 w-full rounded-[4px] border border-border bg-surface px-2 text-xs text-fg outline-none"
+              class="h-11 w-full rounded-[--radius-control] border border-transparent bg-surface-2 px-2 text-xs text-fg outline-none"
             >
               {#each [1, 2, 3, 4, 5, 6, 7, 8] as count}<option value={count}>{count}</option>{/each}
             </select>
           </label>
 
-          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+          <label class="space-y-1.5 text-[11px] font-medium text-fg-muted">
             Manual drive control
             <select
               bind:value={draft.drive_control_mode}
-              class="h-9 w-full rounded-[4px] border border-border bg-surface px-2 text-xs text-fg outline-none"
+              class="h-11 w-full rounded-[--radius-control] border border-transparent bg-surface-2 px-2 text-xs text-fg outline-none"
             >
               <option value="arrows">Arrows — one button per direction</option>
               <option value="joystick">Joystick — analogue thumbstick</option>
@@ -224,7 +226,7 @@
             <div class="mt-0.5 text-[10px] text-fg-dim">Runs on RGB frames and is independent of Gazebo.</div>
           </div>
           <button
-            class="h-7 min-w-12 rounded-[4px] border px-2 text-[9px] font-semibold
+            class="h-7 min-w-12 rounded-[--radius-control] border px-2 text-[9px] font-semibold
                    {draft.detection_enabled ? 'border-accent bg-accent/8 text-accent' : 'border-border text-fg-dim'}"
             onclick={() => (draft.detection_enabled = !draft.detection_enabled)}
           >
@@ -238,26 +240,26 @@
         </p>
 
         <div class="mt-3 grid gap-3 sm:grid-cols-2">
-          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+          <label class="space-y-1.5 text-[11px] font-medium text-fg-muted">
             Same object within
-            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+            <div class="flex items-center rounded-[--radius-control] border border-transparent bg-surface-2 px-2">
               <input
                 type="number" min="0.05" max="5" step="0.05"
                 bind:value={draft.detection_same_radius_m}
                 disabled={!draft.detection_enabled}
-                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none disabled:opacity-40"
+                class="h-11 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none disabled:opacity-40"
               />
               <span class="text-fg-dim">m</span>
             </div>
           </label>
-          <label class="space-y-1.5 text-[10px] font-medium text-fg-muted">
+          <label class="space-y-1.5 text-[11px] font-medium text-fg-muted">
             Ask about merges within
-            <div class="flex items-center rounded-[4px] border border-border bg-surface px-2">
+            <div class="flex items-center rounded-[--radius-control] border border-transparent bg-surface-2 px-2">
               <input
                 type="number" min="0.05" max="10" step="0.05"
                 bind:value={draft.detection_ask_radius_m}
                 disabled={!draft.detection_enabled}
-                class="h-9 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none disabled:opacity-40"
+                class="h-11 min-w-0 flex-1 bg-transparent text-xs tabular text-fg outline-none disabled:opacity-40"
               />
               <span class="text-fg-dim">m</span>
             </div>
@@ -269,7 +271,7 @@
           Beyond, it is proposed as a new object.
         </p>
 
-        <div class="mt-3 rounded-[5px] border border-border bg-bg/60 p-2.5">
+        <div class="mt-3 rounded-[--radius-control] border border-border bg-surface-2 p-2.5">
           <div class="mb-2 flex items-center justify-between gap-2">
             <div>
               <div class="text-[10px] font-semibold text-fg">Single detection</div>
@@ -296,7 +298,7 @@
               value={draft.detection_single_color || '#fbbf24'}
               oninput={(e) => (draft.detection_single_color = e.currentTarget.value)}
               disabled={!draft.detection_enabled || !draft.detection_single_mode}
-              class="h-8 w-8 cursor-pointer rounded-[3px] border border-border bg-surface p-0.5 disabled:opacity-40"
+              class="h-10 w-8 cursor-pointer rounded-[--radius-control] border border-transparent bg-surface-2 p-0.5 disabled:opacity-40"
               title="Single detection display colour"
               aria-label="Single detection colour"
             />
@@ -306,7 +308,7 @@
               placeholder="Single detection name (e.g. Target)"
               aria-label="Single detection name"
               disabled={!draft.detection_enabled || !draft.detection_single_mode}
-              class="h-8 min-w-0 rounded-[3px] border border-border bg-surface px-2 text-[10px] text-fg outline-none disabled:opacity-40"
+              class="h-10 min-w-0 rounded-[--radius-control] border border-transparent bg-surface-2 px-2 text-[10px] text-fg outline-none disabled:opacity-40"
             />
           </div>
         </div>
@@ -360,12 +362,12 @@
               {@const floor = floorOf(target.name)}
               {@const catalogFloor = target.min_score ?? 0.25}
               <div
-                class="rounded-[5px] border px-2.5 py-2
-                       {on ? 'border-border bg-bg/60' : 'border-border/70 opacity-60'}"
+                class="rounded-[--radius-control] border px-2.5 py-2
+                       {on ? 'border-border bg-surface-2' : 'border-border/70 opacity-60'}"
               >
                 <div class="flex items-center justify-between gap-2">
                   <button
-                    class="flex min-h-7 items-center gap-1.5 rounded-[4px] px-0.5 text-[10px] font-medium
+                    class="flex min-h-7 items-center gap-1.5 rounded-[--radius-control] px-0.5 text-[10px] font-medium
                            disabled:opacity-40
                            {on ? 'text-fg' : 'text-fg-dim'}"
                     disabled={!draft.detection_enabled}
@@ -432,11 +434,11 @@
         <div class="space-y-2">
           {#each draft.robots.slice(0, draft.robot_count) as robot, index (index)}
             {@const live = fleet.get(robot.id)}
-            <div class="rounded-[5px] border border-border bg-bg/60 p-2">
+            <div class="rounded-[--radius-control] border border-border bg-surface-2 p-2">
               <div class="grid grid-cols-[32px_32px_1fr] gap-2">
                 <button
                   title={robot.enabled ? 'Disable robot' : 'Enable robot'}
-                  class="grid h-8 w-8 place-items-center rounded-[3px] border text-[9px] font-bold
+                  class="grid h-10 w-8 place-items-center rounded-[--radius-control] border text-[9px] font-bold
                          {robot.enabled ? 'border-ok/30 bg-ok/8 text-ok' : 'border-border text-fg-dim'}"
                   onclick={() => (robot.enabled = !robot.enabled)}
                 >{robot.enabled ? 'ON' : 'OFF'}</button>
@@ -444,11 +446,11 @@
                   type="color"
                   value={colorForRobot(robot.id, index, robot.color)}
                   oninput={(e) => (robot.color = e.currentTarget.value)}
-                  class="h-8 w-8 cursor-pointer rounded-[3px] border border-border bg-surface p-0.5"
+                  class="h-10 w-8 cursor-pointer rounded-[--radius-control] border border-transparent bg-surface-2 p-0.5"
                   title="Robot map colour"
                   aria-label="Robot map colour"
                 />
-                <input bind:value={robot.id} aria-label="Robot ID" class="h-8 min-w-0 rounded-[3px] border border-border bg-surface px-2 text-[10px] text-fg outline-none" />
+                <input bind:value={robot.id} aria-label="Robot ID" class="h-10 min-w-0 rounded-[--radius-control] border border-transparent bg-surface-2 px-2 text-[10px] text-fg outline-none" />
               </div>
               <!--
                 Reported, not configured. The adapter declares what it is at
@@ -474,7 +476,7 @@
         {#if error}<div class="mt-3 text-[10px] text-danger">{error}</div>{/if}
       </div>
 
-      <footer class="flex shrink-0 items-center justify-between border-t border-border px-4 py-3">
+      <footer class="flex shrink-0 items-center justify-between border-t border-border/70 px-5 py-4">
         <span class="text-[9px] text-fg-dim">Stored in sessions/settings.json</span>
         <div class="flex gap-2">
           <Button variant="ghost" size="sm" onclick={onclose}>Cancel</Button>

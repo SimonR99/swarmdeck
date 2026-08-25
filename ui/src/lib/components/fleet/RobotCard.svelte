@@ -50,7 +50,7 @@
   interactive
   {selected}
   accent={color}
-  onclick={(e: MouseEvent) => fleet.select(robot.robot_id, e.shiftKey)}
+  onclick={(e: MouseEvent | KeyboardEvent) => fleet.select(robot.robot_id, e.shiftKey)}
   class="pl-4"
 >
   <div class="flex items-start justify-between gap-2">
@@ -113,11 +113,11 @@
   {/if}
 
   {#if selected}
-    <div class="mt-3 flex gap-1.5 border-t border-border pt-2.5">
+    <div class="mt-3 flex gap-2 border-t border-accent/15 pt-3">
       <button
-      class="inline-flex h-9 flex-1 touch-target items-center justify-center gap-1.5 rounded-[--radius-control]
-               border border-border bg-surface text-[11px] font-medium text-fg-muted
-               transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+        class="inline-flex h-10 flex-1 touch-target items-center justify-center gap-1.5 rounded-full
+               border border-transparent bg-accent/10 text-[11px] font-semibold text-accent
+               transition-colors hover:bg-accent/15 disabled:opacity-40"
         disabled={!fleet.can(robot.robot_id, 'camera')}
         onclick={(e) => {
           e.stopPropagation();
@@ -128,9 +128,9 @@
         <Video class="h-3.5 w-3.5" /> View
       </button>
       <button
-        class="inline-flex h-9 flex-1 touch-target items-center justify-center gap-1.5 rounded-[--radius-control]
-               border border-border bg-surface text-[11px] font-medium text-fg-muted
-               transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+        class="inline-flex h-10 flex-1 touch-target items-center justify-center gap-1.5 rounded-full
+               border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
+               transition-colors hover:bg-surface disabled:opacity-40"
         disabled={robot.nav_status !== 'active'}
         onclick={(e) => {
           e.stopPropagation();
@@ -141,11 +141,11 @@
       </button>
     </div>
     {#if fleet.can(robot.robot_id, 'body')}
-      <div class="mt-1.5 grid grid-cols-2 gap-1.5">
+      <div class="mt-2 grid grid-cols-2 gap-2">
         <button
-          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
-                 border border-border bg-surface text-[11px] font-medium text-fg-muted
-                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          class="inline-flex h-10 touch-target items-center justify-center rounded-full
+                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
+                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
             e.stopPropagation();
@@ -155,9 +155,9 @@
           Claim
         </button>
         <button
-          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
-                 border border-border bg-surface text-[11px] font-medium text-fg-muted
-                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          class="inline-flex h-10 touch-target items-center justify-center rounded-full
+                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
+                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
             e.stopPropagation();
@@ -167,9 +167,9 @@
           Release
         </button>
         <button
-          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
-                 border border-border bg-surface text-[11px] font-medium text-fg-muted
-                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          class="inline-flex h-10 touch-target items-center justify-center rounded-full
+                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
+                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
             e.stopPropagation();
@@ -179,9 +179,9 @@
           Sit
         </button>
         <button
-          class="inline-flex h-9 touch-target items-center justify-center rounded-[--radius-control]
-                 border border-border bg-surface text-[11px] font-medium text-fg-muted
-                 transition-colors hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+          class="inline-flex h-10 touch-target items-center justify-center rounded-full
+                 border border-transparent bg-surface/75 text-[11px] font-semibold text-fg-muted
+                 transition-colors hover:bg-surface hover:text-fg disabled:opacity-40"
           disabled={!robot.online}
           onclick={(e) => {
             e.stopPropagation();

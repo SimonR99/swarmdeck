@@ -319,10 +319,10 @@
 </script>
 
 <div
-  class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-border
+  class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent
          bg-surface {expanded ? 'h-full min-h-0' : 'shrink-0'}"
 >
-  <div class="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
+  <div class="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
     <div class="flex min-w-0 items-center gap-2.5">
       <Radio class="h-3.5 w-3.5" style="color:{color}" />
       <span class="truncate text-xs font-semibold" style="color:{color}">
@@ -338,7 +338,7 @@
         <Badge tone="warn">No signal</Badge>
       {/if}
       <button
-        class="grid h-9 w-9 touch-target place-items-center rounded-[--radius-control]
+        class="grid h-10 w-10 touch-target place-items-center rounded-full
                text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
         title={expanded ? 'Restore video' : 'Expand video'}
         aria-label={expanded ? 'Restore video' : 'Expand video'}
@@ -351,7 +351,7 @@
         {/if}
       </button>
       <button
-        class="grid h-9 w-9 touch-target place-items-center rounded-[--radius-control]
+        class="grid h-10 w-10 touch-target place-items-center rounded-full
                text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
         title="Collapse Robot Control panel"
         aria-label="Collapse Robot Control panel"
@@ -363,7 +363,7 @@
   </div>
 
   <div
-    class="relative m-2 mb-0 overflow-hidden rounded-[--radius-control] bg-black
+    class="relative m-3 mb-0 overflow-hidden rounded-[--radius-control] bg-black
            {expanded ? 'min-h-0 flex-1' : 'shrink-0'}"
     style={expanded ? undefined : `aspect-ratio: ${mediaAspect}`}
   >
@@ -439,7 +439,7 @@
     <!-- Live diagnostics overlay: FPS & rolling average ping latency -->
     {#if streamState === 'live'}
       <div
-        class="pointer-events-none absolute bottom-1.5 right-1.5 z-30 flex items-center gap-1.5 rounded-[3px]
+        class="pointer-events-none absolute bottom-1.5 right-1.5 z-30 flex items-center gap-1.5 rounded-[--radius-control]
                border border-white/10 bg-black/65 px-1.5 py-0.5 font-mono text-[10px] font-medium
                tabular-nums text-white/90 shadow-sm backdrop-blur-md"
       >
@@ -454,14 +454,14 @@
   </div>
 
   <!-- camera switcher -->
-  <div class="flex flex-wrap gap-1.5 p-2">
+  <div class="flex flex-wrap gap-2 p-3">
     {#each fleet.robots.filter((r) => r.capabilities?.includes('camera')) as r (r.robot_id)}
       <button
-        class="h-9 touch-target flex-1 rounded-[--radius-control] border px-3 text-[11px] font-semibold
+        class="h-10 touch-target flex-1 rounded-full border px-4 text-[11px] font-semibold
                transition-colors
                {fleet.activeCamera === r.robot_id
-          ? 'border-accent bg-accent/8 text-accent'
-          : 'border-border bg-surface text-fg-muted hover:bg-surface-2'}"
+          ? 'border-transparent bg-accent-container text-accent-container-fg'
+          : 'border-transparent bg-surface-3 text-fg-muted hover:bg-border'}"
         onclick={() => {
           fleet.focus(r.robot_id);
           actions.selectRobots(fleet.selected);
@@ -477,7 +477,7 @@
   </div>
 
   {#if robot}
-    <div class="mt-auto border-t border-border px-3 py-2.5 text-[10px] text-fg-dim">
+    <div class="mt-auto border-t border-border/70 px-4 py-3 text-[10px] text-fg-dim">
       <div class="flex justify-between">
         <span>Detections</span>
         <span class="tabular text-fg-muted">

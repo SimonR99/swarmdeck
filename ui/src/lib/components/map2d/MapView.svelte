@@ -68,8 +68,8 @@
   const trails = new Map<string, { x: number; y: number }[]>();
   const pointers = new Map<number, { x: number; y: number }>();
   let pinchStart = 0;
-  let scaleStart = 1;
   let dragged = false;
+  let lastRenderedInfo: MapInfo | null = null;
 
   /** Screen px per grid cell, then per metre. */
   function screenOf(gx: number, gy: number) {
@@ -236,7 +236,25 @@
     const grid = mapStore.canvas;
     if (!view.initialised && info && fleet.count) {
       view.initialised = true;
+      lastRenderedInfo = info;
       fitMap();
+    } else if (view.initialised && lastRenderedInfo && info) {
+      if (
+        lastRenderedInfo.origin.x !== info.origin.x ||
+        lastRenderedInfo.origin.y !== info.origin.y ||
+        lastRenderedInfo.width !== info.width ||
+        lastRenderedInfo.height !== info.height
+      ) {
+        const offGx = (lastRenderedInfo.origin.x - info.origin.x) / info.resolution;
+        const offGy =
+          (info.height - lastRenderedInfo.height) +
+          (lastRenderedInfo.origin.y - info.origin.y) / info.resolution;
+        view.tx -= offGx * view.scale;
+        view.ty -= offGy * view.scale;
+      }
+      lastRenderedInfo = info;
+    } else if (info) {
+      lastRenderedInfo = info;
     }
     if (follow) centreOnFleet();
 
@@ -338,6 +356,7 @@
     void mapStore.viewMode;
     void mapStore.viewRobot;
     trails.clear();
+    lastRenderedInfo = null;
     view.initialised = false;
   });
 
@@ -470,7 +489,7 @@
   }
 </script>
 
-<div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-panel] border border-border bg-bg">
+<div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-panel] border border-transparent bg-bg">
   <!--
     The 3D view sits over the 2D one rather than replacing it. 2D stays the
     operator's working surface — it is where goals are set and where the fleet
@@ -505,7 +524,7 @@
   <!-- goal hint -->
   {#if navigation.goalMode && canGoal > 0}
     <div
-      class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[4px] border
+      class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border
              border-accent/20 bg-surface/90 px-3 py-1.5 text-[10px] font-medium text-accent
              shadow-sm backdrop-blur-xl"
     >
@@ -518,9 +537,9 @@
   <div class="absolute bottom-3 right-14 z-20">
     <button
       title="Map layers"
-      class="panel-glow flex h-8 items-center gap-1.5 rounded-[4px] border border-border
-             bg-surface/95 px-2.5 text-[10px] font-medium text-fg-muted transition-colors
-             hover:bg-surface-2 {layersOpen ? 'text-accent' : ''}"
+      class="panel-glow flex h-11 items-center gap-2 rounded-full border border-transparent
+             bg-surface/95 px-4 text-[11px] font-semibold text-fg-muted transition-colors
+             hover:bg-surface-2 {layersOpen ? 'bg-accent-container text-accent-container-fg' : ''}"
       onclick={() => (layersOpen = !layersOpen)}
     >
       <Layers3 class="h-3.5 w-3.5" />
@@ -529,28 +548,28 @@
 
     {#if layersOpen}
       <div
-        class="panel-glow absolute bottom-10 right-0 w-56 rounded-[5px] border border-border bg-surface/97 p-2.5
-               text-[10px] shadow-lg backdrop-blur-xl"
+        class="panel-glow absolute bottom-14 right-0 w-64 rounded-[--radius-panel] border border-transparent bg-surface/97 p-4
+               text-[10px] shadow-[0_16px_40px_-18px_rgb(25_32_42/0.42)] backdrop-blur-xl"
       >
         <div class="mb-2 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
           Overlays
         </div>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (showGrid = !showGrid)}
         >
           <span class="flex items-center gap-2"><Grid3X3 class="h-3.5 w-3.5" /> Metric grid</span>
           <span class="font-semibold {showGrid ? 'text-accent' : 'text-fg-dim'}">{showGrid ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (showTrails = !showTrails)}
         >
           <span class="flex items-center gap-2"><Focus class="h-3.5 w-3.5" /> Robot trails</span>
           <span class="font-semibold {showTrails ? 'text-accent' : 'text-fg-dim'}">{showTrails ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           title="Dashed = global planner route; solid = local controller route"
           onclick={() => (showPlans = !showPlans)}
         >
@@ -558,21 +577,21 @@
           <span class="font-semibold {showPlans ? 'text-accent' : 'text-fg-dim'}">{showPlans ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (showLabels = !showLabels)}
         >
           <span class="flex items-center gap-2"><Tags class="h-3.5 w-3.5" /> Robot labels</span>
           <span class="font-semibold {showLabels ? 'text-accent' : 'text-fg-dim'}">{showLabels ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (showSensors = !showSensors)}
         >
           <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Sensors + actual footprint</span>
           <span class="font-semibold {showSensors ? 'text-accent' : 'text-fg-dim'}">{showSensors ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           title="Robot-side Wi-Fi quality on the selected robot's local map"
           onclick={() => (showNetwork = !showNetwork)}
         >
@@ -580,14 +599,14 @@
           <span class="font-semibold {showNetwork ? 'text-accent' : 'text-fg-dim'}">{showNetwork ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="flex h-7 w-full items-center justify-between rounded-[3px] px-1.5 text-fg-muted hover:bg-surface-2"
+          class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (show3D = !show3D)}
         >
           <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D cloud</span>
           <span class="font-semibold {show3D ? 'text-accent' : 'text-fg-dim'}">{show3D ? 'ON' : 'OFF'}</span>
         </button>
         <button
-          class="mt-1 flex h-7 w-full items-center gap-2 rounded-[3px] border-t border-border px-1.5
+          class="mt-1 flex h-9 w-full items-center gap-2 rounded-[--radius-control] border-t border-border px-1.5
                  text-fg-muted hover:bg-surface-2"
           onclick={clearTrails}
         >
@@ -610,7 +629,7 @@
         </div>
         <div class="mb-1 flex gap-1">
           <button
-            class="flex h-7 flex-1 items-center justify-center rounded-[3px] px-1.5
+            class="flex h-9 flex-1 items-center justify-center rounded-[--radius-control] px-1.5
                    {mapStore.mapSource === 'slam'
                      ? 'bg-surface-2 text-fg'
                      : 'text-fg-muted hover:bg-surface-2'}"
@@ -620,7 +639,7 @@
             Robot SLAM
           </button>
           <button
-            class="flex h-7 flex-1 items-center justify-center rounded-[3px] px-1.5
+            class="flex h-9 flex-1 items-center justify-center rounded-[--radius-control] px-1.5
                    {mapStore.mapSource === 'optimized'
                      ? 'bg-surface-2 text-fg'
                      : 'text-fg-muted hover:bg-surface-2'}"
@@ -631,7 +650,7 @@
           </button>
         </div>
         {#if mapStore.unmergedScopes.length}
-          <div class="mb-1 rounded-[3px] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">
+          <div class="mb-1 rounded-[--radius-control] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">
             Not merged into the fleet map:
             <span class="font-medium text-fg-muted">
               {mapStore.unmergedScopes
@@ -647,7 +666,7 @@
           Map data
         </div>
         <button
-          class="flex h-7 w-full items-center gap-2 rounded-[3px] px-1.5 text-fg-muted
+          class="flex h-9 w-full items-center gap-2 rounded-[--radius-control] px-1.5 text-fg-muted
                  hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-35"
           title={resetRobot
             ? resetRobotBlocked
@@ -661,7 +680,7 @@
           {resetPending && resetRobotId ? 'Resetting…' : resetRobotId ? `Reset ${robotDisplayName(resetRobotId)}` : 'Reset selected map'}
         </button>
         <button
-          class="flex h-7 w-full items-center gap-2 rounded-[3px] px-1.5 text-danger
+          class="flex h-9 w-full items-center gap-2 rounded-[--radius-control] px-1.5 text-danger
                  hover:bg-danger/8 disabled:cursor-not-allowed disabled:opacity-35"
           title={resetAllBlocked ? 'Stop all navigating robots before resetting maps' : 'Reset every accumulated map'}
           disabled={resetAllBlocked}
@@ -670,7 +689,7 @@
           <Trash2 class="h-3.5 w-3.5" /> Reset all maps
         </button>
         {#if resetError}
-          <div class="mt-1 rounded-[3px] bg-danger/8 px-1.5 py-1 text-danger">{resetError}</div>
+          <div class="mt-1 rounded-[--radius-control] bg-danger/8 px-1.5 py-1 text-danger">{resetError}</div>
         {/if}
 
         {#if mapStore.status}
@@ -714,7 +733,7 @@
 
   {#if showNetwork && mapStore.viewMode === 'local' && mapStore.networkLayer}
     <div
-      class="pointer-events-none absolute bottom-11 left-3 z-20 rounded-[4px] border border-border
+      class="pointer-events-none absolute bottom-11 left-3 z-20 rounded-[--radius-control] border border-border
              bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
     >
       <div class="mb-1 flex items-center justify-between gap-4">
@@ -732,12 +751,12 @@
   {/if}
 
   <!-- View controls keep the same meaning in 2D and 3D. -->
-  <div class="panel-glow absolute bottom-3 right-3 z-20 flex flex-col overflow-hidden rounded-[4px] border border-border bg-surface/95">
+  <div class="panel-glow absolute bottom-3 right-3 z-20 flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent bg-surface/95 p-1">
     <button
       title="Follow fleet"
-      class="grid h-9 w-9 touch-target place-items-center border-b border-border
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control]
              transition-colors hover:bg-surface-2
-             {follow ? 'bg-accent/8 text-accent' : 'text-fg-muted'}"
+             {follow ? 'bg-accent-container text-accent-container-fg' : 'text-fg-muted'}"
       onclick={toggleFollow}
     >
       <Locate class="h-4 w-4" />
@@ -745,7 +764,7 @@
     <button
       title="Centre selected robots"
       disabled={fleet.selected.length === 0}
-      class="grid h-9 w-9 touch-target place-items-center border-b border-border text-fg-muted
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted
              transition-colors hover:bg-surface-2 disabled:opacity-35"
       onclick={centreSelectedForView}
     >
@@ -753,7 +772,7 @@
     </button>
     <button
       title="Zoom in"
-      class="grid h-9 w-9 touch-target place-items-center border-b border-border text-fg-muted
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted
              transition-colors hover:bg-surface-2"
       onclick={() => zoomForView(1.25)}
     >
@@ -761,7 +780,7 @@
     </button>
     <button
       title="Zoom out"
-      class="grid h-9 w-9 touch-target place-items-center border-b border-border text-fg-muted
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted
              transition-colors hover:bg-surface-2"
       onclick={() => zoomForView(1 / 1.25)}
     >
@@ -769,7 +788,7 @@
     </button>
     <button
       title="Fit fleet"
-      class="grid h-9 w-9 touch-target place-items-center text-fg-muted transition-colors
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted transition-colors
              hover:bg-surface-2"
       onclick={fitView}
     >
@@ -779,9 +798,9 @@
 
   <!-- cursor readout -->
   <div
-    class="pointer-events-none absolute bottom-3 left-3 z-20 flex items-center gap-2 rounded-[4px]
-           border border-border bg-surface/88 px-2.5 py-1 text-[10px] tabular text-fg-dim
-           shadow-sm backdrop-blur-xl"
+    class="pointer-events-none absolute bottom-3 left-3 z-20 flex items-center gap-2 rounded-[--radius-control]
+           border border-transparent bg-surface/92 px-3 py-1.5 text-[10px] tabular text-fg-dim
+           shadow-[0_2px_8px_-5px_rgb(25_32_42/0.35)] backdrop-blur-xl"
   >
     <span>{cursorWorld ? `${cursorWorld.x.toFixed(1)}, ${cursorWorld.y.toFixed(1)} m` : 'Move cursor to inspect'}</span>
     {#if mapStore.info}

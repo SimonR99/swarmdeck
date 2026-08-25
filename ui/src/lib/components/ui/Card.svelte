@@ -14,28 +14,59 @@
     interactive?: boolean;
     selected?: boolean;
     accent?: string;
-    onclick?: (e: MouseEvent) => void;
+    onclick?: (e: MouseEvent | KeyboardEvent) => void;
     children?: Snippet;
     class?: string;
   } = $props();
+
+  function onKeyDown(event: KeyboardEvent) {
+    if (
+      !interactive ||
+      event.target !== event.currentTarget ||
+      (event.key !== 'Enter' && event.key !== ' ')
+    ) return;
+    event.preventDefault();
+    onclick?.(event);
+  }
 </script>
 
-<svelte:element
-  this={interactive ? 'button' : 'div'}
-  role={interactive ? 'button' : undefined}
-  {onclick}
-  style={accent ? `--card-accent:${accent}` : undefined}
-  class="relative w-full overflow-hidden rounded-[--radius-card] border bg-surface text-left
-         shadow-[0_1px_2px_rgb(16_24_40/0.025)] transition-colors duration-150
-         {selected ? 'border-accent bg-accent/5 ring-1 ring-accent/10' : 'border-border'}
-         {interactive ? 'hover:border-border-strong hover:bg-surface-2/40' : ''}
-         {padded ? 'p-3' : ''} {klass}"
->
+{#snippet content()}
   {#if accent}
     <span
       class="absolute inset-y-0 left-0 w-0.5 transition-opacity duration-150"
-      style="background:{accent}; opacity:{selected ? 1 : 0}"
+      style="background:var(--color-accent); opacity:{selected ? 1 : 0}"
     ></span>
   {/if}
   {@render children?.()}
-</svelte:element>
+{/snippet}
+
+{#if interactive}
+  <div
+    role="button"
+    tabindex="0"
+    {onclick}
+    onkeydown={onKeyDown}
+    style={accent ? `--card-accent:${accent}` : undefined}
+    class="relative w-full cursor-pointer overflow-hidden rounded-[--radius-card] border text-left
+           transition-[background,border-color,box-shadow,transform] duration-150
+           {selected
+             ? 'border-accent/25 bg-accent-container shadow-[0_2px_8px_-5px_rgb(47_99_199/0.5)]'
+             : 'border-transparent bg-surface shadow-[0_1px_3px_rgb(25_32_42/0.06)]'}
+           hover:bg-surface-3 active:scale-[0.995]
+           {padded ? 'p-3' : ''} {klass}"
+  >
+    {@render content()}
+  </div>
+{:else}
+  <div
+    style={accent ? `--card-accent:${accent}` : undefined}
+    class="relative w-full overflow-hidden rounded-[--radius-card] border text-left
+           transition-[background,border-color,box-shadow] duration-150
+           {selected
+             ? 'border-accent/25 bg-accent-container shadow-[0_2px_8px_-5px_rgb(47_99_199/0.5)]'
+             : 'border-transparent bg-surface shadow-[0_1px_3px_rgb(25_32_42/0.06)]'}
+           {padded ? 'p-3' : ''} {klass}"
+  >
+    {@render content()}
+  </div>
+{/if}

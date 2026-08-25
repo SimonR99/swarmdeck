@@ -432,7 +432,7 @@
   ></canvas>
 
   <div
-    class="panel-glow pointer-events-none absolute left-3 top-12 z-20 max-w-md rounded-[4px] border border-border
+    class="panel-glow pointer-events-none absolute left-3 top-12 z-20 max-w-md rounded-[--radius-control] border border-transparent
            bg-surface/90 px-2 py-1 text-[10px] text-fg-dim backdrop-blur-xl"
   >
     {#if error}

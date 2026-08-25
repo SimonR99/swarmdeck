@@ -10,16 +10,16 @@
   }: { tone?: Tone; children?: Snippet; class?: string } = $props();
 
   const tones: Record<Tone, string> = {
-    neutral: 'bg-surface-2 text-fg-muted border-border',
-    ok: 'bg-ok/12 text-ok border-ok/30',
-    warn: 'bg-warn/12 text-warn border-warn/30',
-    danger: 'bg-critical/15 text-danger border-critical/35',
-    accent: 'bg-accent/12 text-accent border-accent/30'
+    neutral: 'bg-surface-3 text-fg-muted border-transparent',
+    ok: 'bg-ok/12 text-ok border-transparent',
+    warn: 'bg-warn/12 text-warn border-transparent',
+    danger: 'bg-critical/12 text-danger border-transparent',
+    accent: 'bg-accent-container text-accent-container-fg border-transparent'
   };
 </script>
 
 <span
-  class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5
+  class="inline-flex min-h-6 items-center gap-1 rounded-full border px-2.5 py-0.5
          text-[10px] font-semibold tracking-[0.01em] {tones[tone]} {klass}"
 >
   {@render children?.()}

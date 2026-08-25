@@ -51,15 +51,15 @@
 
 {#if rows.length}
   <button
-    class="panel-glow flex min-h-14 w-full shrink-0 items-center gap-3 rounded-[--radius-panel]
-           border border-border bg-surface px-3 text-left transition-colors
-           hover:border-border-strong hover:bg-surface-2/60"
+    class="panel-glow flex min-h-16 w-full shrink-0 items-center gap-3 rounded-[--radius-panel]
+           border border-transparent bg-surface px-4 text-left transition-[background,box-shadow,transform]
+           hover:bg-surface-2 hover:shadow-md active:scale-[0.99]"
     aria-haspopup="dialog"
     onclick={() => (modalOpen = true)}
   >
     <span
-      class="grid h-8 w-8 shrink-0 place-items-center rounded-[--radius-control]
-             bg-accent/8 text-accent"
+      class="grid h-10 w-10 shrink-0 place-items-center rounded-[--radius-control]
+             bg-accent-container text-accent-container-fg"
     >
       <Share2 class="h-4 w-4" />
     </span>
@@ -80,24 +80,24 @@
 
   {#if modalOpen}
     <div
-      class="fixed inset-0 z-[100] grid place-items-center bg-fg/30 p-4 backdrop-blur-[2px]"
+      class="fixed inset-0 z-[100] grid place-items-center bg-fg/35 p-4 backdrop-blur-[3px]"
       role="presentation"
       onclick={onBackdropClick}
     >
       <div
         class="panel-glow flex max-h-[min(720px,calc(100vh-32px))] w-full max-w-xl
-               flex-col overflow-hidden rounded-[--radius-panel] border border-border bg-surface
+               flex-col overflow-hidden rounded-[--radius-dialog] border border-transparent bg-surface
                shadow-[0_24px_64px_-20px_rgb(16_24_40/0.45)]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="swarm-slam-title"
         tabindex="-1"
       >
-        <header class="flex min-h-16 shrink-0 items-center justify-between border-b border-border px-4">
+        <header class="flex min-h-[72px] shrink-0 items-center justify-between border-b border-border/70 px-5">
           <div class="flex min-w-0 items-center gap-3">
             <span
-              class="grid h-9 w-9 shrink-0 place-items-center rounded-[--radius-control]
-                     bg-accent/8 text-accent"
+              class="grid h-10 w-10 shrink-0 place-items-center rounded-[--radius-control]
+                     bg-accent-container text-accent-container-fg"
             >
               <Share2 class="h-[18px] w-[18px]" />
             </span>
@@ -109,7 +109,7 @@
             </div>
           </div>
           <button
-            class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control]
+            class="grid h-11 w-11 touch-target place-items-center rounded-full
                    text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
             aria-label="Close Swarm SLAM details"
             title="Close"
@@ -119,7 +119,7 @@
           </button>
         </header>
 
-        <div class="grid shrink-0 grid-cols-3 border-b border-border bg-surface-2/50">
+        <div class="grid shrink-0 grid-cols-3 border-b border-border/70 bg-surface-2">
           <div class="px-4 py-3">
             <div class="text-[10px] font-medium text-fg-dim">Robots in frame</div>
             <div class="mt-1 text-lg font-semibold tabular text-fg">{joined}/{rows.length}</div>
@@ -145,7 +145,7 @@
           <div class="flex flex-col gap-2">
             {#each rows as [robotId, graph]}
               {@const check = disagreement[robotId]}
-              <article class="rounded-[--radius-control] border border-border bg-surface p-3">
+              <article class="rounded-[--radius-card] border border-transparent bg-surface-2 p-4">
                 <div class="flex items-start justify-between gap-4">
                   <span class="flex min-w-24 items-center gap-2 text-xs font-semibold text-fg">
                     <i class="h-2.5 w-2.5 rounded-full" style="background:{fleet.colorOf(robotId)}"></i>

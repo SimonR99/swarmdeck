@@ -110,7 +110,7 @@
       <div
         class="pointer-events-auto flex items-center justify-between gap-2 rounded-full border
                border-border bg-surface/95 px-2.5 py-0.5 text-[8px] font-semibold text-fg-muted
-               shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl"
+               shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl"
       >
         <span>
           {review.proposals.length} awaiting review
@@ -141,14 +141,14 @@
         role="group"
         aria-label="Detection proposal"
         class="pointer-events-auto flex items-center gap-1 rounded-full border border-border
-               bg-surface/95 p-1 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl
+               bg-surface/95 p-1 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl
                transition-colors
                {review.selected === p.id || review.focused === p.id ? 'border-accent' : ''}"
         onmouseenter={() => review.focus(p.id)}
         onmouseleave={() => review.focus(null)}
       >
         <button
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-full hover:bg-surface-2"
+          class="grid h-10 w-10 touch-target shrink-0 place-items-center rounded-full hover:bg-surface-2"
           title="{label(p.class)} · {Math.round(p.best_score * 100)}% · {seenBy(p.robot_ids)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'} · {p.position.x.toFixed(1)}, {p.position.y.toFixed(1)} m"
           onclick={() => selectProposal(p)}
         >
@@ -159,7 +159,7 @@
         </button>
 
         <button
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-ok/40
+          class="grid h-10 w-10 touch-target shrink-0 place-items-center rounded-[--radius-control] border border-ok/40
                  bg-ok/8 text-ok hover:bg-ok/15 disabled:opacity-40"
           disabled={settling}
           title={suggested ? 'Separate' : 'Accept'}
@@ -170,7 +170,7 @@
 
         {#if candidates.length}
           <button
-            class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border transition-colors
+            class="grid h-10 w-10 touch-target shrink-0 place-items-center rounded-[--radius-control] border transition-colors
                    {suggested
                      ? 'border-accent bg-accent/10 text-accent hover:bg-accent/20'
                      : 'border-border text-fg-muted hover:bg-surface-2'}
@@ -187,7 +187,7 @@
         {/if}
 
         <button
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-border
+          class="grid h-10 w-10 touch-target shrink-0 place-items-center rounded-[--radius-control] border border-border
                  text-fg-dim hover:bg-surface-2 hover:text-fg disabled:opacity-40"
           disabled={settling}
           title="Ignore this object here, and stop asking about it"
@@ -197,7 +197,7 @@
         </button>
 
         <button
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-[4px] border border-border
+          class="grid h-10 w-10 touch-target shrink-0 place-items-center rounded-[--radius-control] border border-border
                  text-fg-dim hover:bg-danger/10 hover:text-danger disabled:opacity-40"
           disabled={settling}
           title="Delete this proposal"
@@ -208,8 +208,8 @@
       </div>
 
       {#if mergeOpen === p.id}
-        <div class="pointer-events-auto w-48 rounded-[5px] border border-border bg-surface/95
-                    shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl">
+        <div class="pointer-events-auto w-48 rounded-[--radius-control] border border-border bg-surface/95
+                    shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl">
           <div class="px-2 pt-1.5 text-[8px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
             Merge into
           </div>
@@ -220,7 +220,7 @@
                 candidate.position.y - p.position.y
               )}
               <button
-                class="flex items-center justify-between rounded-[3px] border border-border px-1.5 py-0.5
+                class="flex items-center justify-between rounded-[--radius-control] border border-border px-1.5 py-0.5
                        text-[8px] text-fg hover:bg-surface-2"
                 onclick={() => merge(p, candidate.id)}
               >
@@ -259,7 +259,7 @@
     </div>
 
     {#if listOpen && review.entities.length}
-      <div class="pointer-events-auto w-56 rounded-[5px] border border-border bg-surface/95 shadow-[0_8px_20px_-14px_rgb(0_0_0/0.4)] backdrop-blur-xl">
+      <div class="pointer-events-auto w-56 rounded-[--radius-control] border border-border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl">
         <div class="flex items-center justify-between border-b border-border px-2 py-1">
           <span class="text-[8px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
             Confirmed objects
@@ -294,7 +294,7 @@
                 </div>
               </div>
               <button
-                class="grid h-5 w-5 shrink-0 place-items-center rounded-[3px] text-fg-dim
+                class="grid h-8 w-8 shrink-0 place-items-center rounded-[--radius-control] text-fg-dim
                        hover:bg-danger/10 hover:text-danger"
                 title="Remove from the map. Still visible to a robot, it will be proposed again — use Ignore to silence it."
                 onclick={() => actions.forgetDetection(e.id)}

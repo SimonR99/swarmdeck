@@ -350,14 +350,23 @@ export function drawRobots(
     let trail = trails.get(robot.robot_id);
     if (!trail) trails.set(robot.robot_id, (trail = []));
     const last = trail[trail.length - 1];
-    if (!last || Math.hypot(last.x - robot.pose.x, last.y - robot.pose.y) > 0.08) {
+    const distFromLast = last ? Math.hypot(last.x - robot.pose.x, last.y - robot.pose.y) : 0;
+    if (distFromLast > 3.0) {
+      trail.length = 0;
+    }
+    if (!last || distFromLast > 0.08) {
       trail.push({ x: robot.pose.x, y: robot.pose.y });
       if (trail.length > 600) trail.shift();
     }
     if (showTrails && trail.length > 1) {
       ctx.beginPath();
       let started = false;
+      let prevPt: { x: number; y: number } | null = null;
       for (const point of trail) {
+        if (prevPt && Math.hypot(point.x - prevPt.x, point.y - prevPt.y) > 2.0) {
+          started = false;
+        }
+        prevPt = point;
         const ptGrid = mapStore.worldToGrid(point.x, point.y);
         if (!ptGrid) continue;
         const p = screenOf(ptGrid.gx, ptGrid.gy);

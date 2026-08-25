@@ -206,24 +206,28 @@ function toImageData(
   w: number,
   h: number,
   x0 = 0,
-  y0 = 0
+  canvas_y0 = 0
 ): ImageData {
   const img = new ImageData(w, h);
   const px = img.data;
   const stride = canvas?.width ?? w;
-  for (let i = 0; i < cells.length; i++) {
-    const v = cells[i];
-    const isOccupied = v >= 50;
-    const c = v < 0 ? UNKNOWN : isOccupied ? OCCUPIED : FREE;
-    const o = i * 4;
-    px[o] = c[0];
-    px[o + 1] = c[1];
-    px[o + 2] = c[2];
-    px[o + 3] = 255;
-    if (occupied) {
-      const gx = x0 + (i % w);
-      const gy = y0 + ((i / w) | 0);
-      occupied[gy * stride + gx] = isOccupied ? 1 : 0;
+  for (let ry = 0; ry < h; ry++) {
+    const srcRow = (h - 1 - ry) * w;
+    const dstRow = ry * w;
+    const canvasY = canvas_y0 + ry;
+    for (let rx = 0; rx < w; rx++) {
+      const v = cells[srcRow + rx];
+      const isOccupied = v >= 50;
+      const c = v < 0 ? UNKNOWN : isOccupied ? OCCUPIED : FREE;
+      const o = (dstRow + rx) * 4;
+      px[o] = c[0];
+      px[o + 1] = c[1];
+      px[o + 2] = c[2];
+      px[o + 3] = 255;
+      if (occupied) {
+        const gx = x0 + rx;
+        occupied[canvasY * stride + gx] = isOccupied ? 1 : 0;
+      }
     }
   }
   maskDirty = true;
@@ -549,10 +553,11 @@ export const mapStore = {
 
     const raw = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
     const cells = new Int8Array(inflate(raw).buffer);
+    const canvasY0 = patchHeight - patch.y0 - patch.h;
     ctx.putImageData(
-      toImageData(cells, patch.w, patch.h, patch.x0, patch.y0),
+      toImageData(cells, patch.w, patch.h, patch.x0, canvasY0),
       patch.x0,
-      patch.y0
+      canvasY0
     );
 
     state.seq = patch.seq;

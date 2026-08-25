@@ -9,21 +9,21 @@
 
 <aside
   class="panel-glow flex h-full w-full flex-col overflow-hidden rounded-[--radius-panel]
-         border border-border bg-surface"
+         border border-transparent bg-surface-2"
 >
-  <header class="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
+  <header class="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
     <div class="flex min-w-0 items-center gap-2.5">
-      <div class="grid h-7 w-7 shrink-0 place-items-center rounded-[--radius-control] bg-accent/8 text-accent">
+      <div class="grid h-9 w-9 shrink-0 place-items-center rounded-[--radius-control] bg-accent-container text-accent-container-fg">
         <UsersRound class="h-4 w-4" />
       </div>
       <div>
-        <div class="text-xs font-semibold text-fg">Fleet</div>
+        <div class="text-[13px] font-semibold text-fg">Fleet</div>
         <div class="text-[10px] text-fg-dim">{fleet.online} of {fleet.count} online</div>
       </div>
     </div>
     <button
-      class="grid h-9 w-9 touch-target place-items-center rounded-[--radius-control]
-             text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+      class="grid h-10 w-10 touch-target place-items-center rounded-full
+             text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg"
       title="Collapse Fleet panel"
       aria-label="Collapse Fleet panel"
       onclick={oncollapse}

@@ -116,13 +116,16 @@
   }
 </script>
 
-<header class="top-bar flex h-14 shrink-0 items-center gap-3 border-b border-border bg-surface px-4">
+<header
+  class="top-bar relative z-40 flex h-16 shrink-0 items-center gap-3 border-b border-border/70
+         bg-surface/95 px-5 shadow-[0_2px_10px_-8px_rgb(25_32_42/0.4)] backdrop-blur-xl"
+>
   <div class="flex shrink-0 items-center gap-2.5">
     <img src="/logo.png" alt="SwarmDeck Logo" class="h-8 w-auto max-w-[140px] object-contain" />
     <span class="text-sm font-semibold tracking-[-0.015em]">SwarmDeck</span>
   </div>
 
-  <div class="mx-1 h-5 w-px bg-border"></div>
+  <div class="mx-1 h-6 w-px bg-border/80"></div>
 
   <div class="flex shrink-0 items-center gap-2">
     <StatusDot tone={connTone as never} pulse={session.connection === 'connecting'} />
@@ -133,21 +136,21 @@
 
   <Badge tone="neutral" class="hidden md:inline-flex">{fleet.online} of {fleet.count} online</Badge>
 
-  <div class="mx-1 h-5 w-px bg-border"></div>
+  <div class="mx-1 h-6 w-px bg-border/80"></div>
 
   <!--
     Which map is on screen. Both options are always visible, so the view is a
     choice the operator can see rather than a mode they have to discover.
   -->
   <div
-    class="topbar-map flex items-center rounded-[--radius-control] border border-border bg-surface-2 p-1"
+    class="topbar-map flex items-center rounded-full bg-surface-3 p-1"
     role="group"
     aria-label="Map view"
   >
     <button
-      class="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium
+      class="flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold
              transition-colors {!isLocal
-        ? 'bg-surface text-fg shadow-sm'
+        ? 'bg-accent text-white shadow-[0_2px_6px_-4px_rgb(47_99_199/0.8)]'
         : 'text-fg-dim hover:text-fg-muted'}"
       aria-pressed={!isLocal}
       title="The merged fleet map — every registered robot's grid in one frame"
@@ -158,9 +161,9 @@
       <span class="tabular opacity-60">{members}/{fleet.count}</span>
     </button>
     <button
-      class="flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium
+      class="flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold
              transition-colors disabled:opacity-40 {isLocal
-        ? 'bg-surface text-fg shadow-sm'
+        ? 'bg-accent text-white shadow-[0_2px_6px_-4px_rgb(47_99_199/0.8)]'
         : 'text-fg-dim hover:text-fg-muted'}"
       aria-pressed={isLocal}
       disabled={!selected}

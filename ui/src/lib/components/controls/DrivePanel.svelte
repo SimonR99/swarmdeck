@@ -279,8 +279,8 @@
   });
 </script>
 
-<section class="panel-glow flex shrink-0 flex-col rounded-[--radius-panel] border border-border bg-surface">
-  <header class="flex h-12 shrink-0 items-center justify-between border-b border-border px-3">
+<section class="panel-glow flex shrink-0 flex-col rounded-[--radius-panel] border border-transparent bg-surface">
+  <header class="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
     <div>
       <!--
         Name the robot being driven. The controls act on `fleet.selected[0]`, so
@@ -311,7 +311,7 @@
   </header>
 
   {#if robot && activeId}
-    <div class="grid grid-cols-[132px_1fr] gap-3 p-3">
+    <div class="grid grid-cols-[132px_1fr] gap-4 p-4">
       <div>
         <div class="mb-2 flex items-center justify-between">
           <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">Manual</span>
@@ -398,9 +398,9 @@
           type="button"
           aria-label="Stop robot"
           disabled={!canDrive}
-          class="mt-2 flex h-10 w-full items-center justify-center gap-1.5 rounded-[--radius-control] border
-                 border-danger/40 bg-danger/5 text-[11px] font-semibold text-danger transition-colors
-                 hover:bg-danger/10 disabled:opacity-40"
+          class="mt-2 flex h-10 w-full items-center justify-center gap-1.5 rounded-full border
+                 border-transparent bg-danger/10 text-[11px] font-semibold text-danger transition-colors
+                 hover:bg-danger/15 active:scale-[0.98] disabled:opacity-40"
           onclick={hardStop}
         >
           <Octagon class="h-3.5 w-3.5" /> Stop
@@ -440,11 +440,11 @@
         </div>
         <button
           disabled={!canDrive}
-          class="flex h-10 w-full items-center justify-center gap-1.5 rounded-[--radius-control] border text-[11px]
+          class="flex h-10 w-full items-center justify-center gap-1.5 rounded-full border text-[11px]
                  font-semibold transition-colors disabled:opacity-40
                  {navigation.goalMode
-            ? 'border-accent bg-accent text-white'
-            : 'border-border bg-surface text-fg hover:bg-surface-2'}"
+            ? 'border-transparent bg-accent text-white shadow-[0_2px_6px_-4px_rgb(47_99_199/0.8)]'
+            : 'border-transparent bg-accent-container text-accent-container-fg hover:brightness-95'}"
           onclick={() => navigation.toggleGoalMode()}
         >
           <Crosshair class="h-3.5 w-3.5" />
@@ -452,7 +452,7 @@
         </button>
         <button
           disabled={robot.nav_status !== 'active'}
-          class="mt-2 flex h-9 w-full items-center justify-center gap-1 rounded-[--radius-control] border
+          class="mt-2 flex h-10 w-full items-center justify-center gap-1 rounded-full border
                  border-border text-[10px] font-medium text-fg-muted hover:bg-surface-2
                  disabled:opacity-40"
           onclick={() => actions.cancelGoal(activeId)}
@@ -474,21 +474,21 @@
     display: block;
     width: 124px;
     height: 124px;
-    border: 1px solid var(--color-border);
+    border: 1px solid transparent;
     border-radius: 9999px;
     overflow: hidden;
     background:
       linear-gradient(var(--color-border), var(--color-border)) center / 1px 78% no-repeat,
       linear-gradient(90deg, var(--color-border), var(--color-border)) center / 78% 1px no-repeat,
-      radial-gradient(circle, var(--color-surface) 0 47%, var(--color-surface-2) 100%);
-    box-shadow: inset 0 2px 7px rgb(0 0 0 / 0.08);
+      radial-gradient(circle, var(--color-surface) 0 47%, var(--color-surface-3) 100%);
+    box-shadow: inset 0 2px 7px rgb(25 32 42 / 0.08), 0 1px 3px rgb(25 32 42 / 0.08);
     touch-action: none;
     transition: border-color 120ms, box-shadow 120ms;
   }
   .joystick-base:hover:not(:disabled),
   .joystick-active {
-    border-color: var(--color-border-strong);
-    box-shadow: inset 0 2px 7px rgb(0 0 0 / 0.1), 0 0 0 2px rgb(11 92 173 / 0.08);
+    border-color: color-mix(in srgb, var(--color-accent), transparent 65%);
+    box-shadow: inset 0 2px 7px rgb(25 32 42 / 0.1), 0 0 0 4px rgb(47 99 199 / 0.1);
   }
   .joystick-base:disabled {
     opacity: 0.4;
@@ -529,21 +529,21 @@
     display: grid;
     place-items: center;
     height: 38px;
-    border: 1px solid var(--color-border);
+    border: 1px solid transparent;
     border-radius: var(--radius-control);
-    background: var(--color-surface-2);
+    background: var(--color-surface-3);
     color: var(--color-fg);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.3);
+    box-shadow: 0 1px 3px rgb(25 32 42 / 0.06);
     /* A held arrow must not also pan, zoom, or pop a text selection: on a
        tablet those gestures cancel the pointer, which reads as the robot
        stopping for no reason mid-drive. */
     touch-action: none;
     user-select: none;
     -webkit-touch-callout: none;
-    transition: background-color 90ms, border-color 90ms, color 90ms;
+    transition: background-color 90ms, border-color 90ms, color 90ms, transform 90ms;
   }
   .arrow-key:hover:not(:disabled) {
-    border-color: var(--color-border-strong);
+    background: var(--color-border);
   }
   .arrow-key:disabled {
     opacity: 0.4;
@@ -553,6 +553,7 @@
     background: var(--color-accent);
     color: white;
     box-shadow: inset 0 2px 5px rgb(0 0 0 / 0.18);
+    transform: scale(0.97);
   }
   .speed-slider {
     width: 100%;
