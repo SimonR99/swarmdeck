@@ -13,6 +13,7 @@ frame at capture before encoding, which is the wire contract.
 from __future__ import annotations
 
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -24,13 +25,48 @@ import numpy as np
 
 from swarmdeck_protocol import ProtocolError, encode_keyframe
 
-DEFAULT_VOXEL_M = 0.2
+# Matches the occupancy grid's 0.05 m cells. At the previous 0.2 m the cloud
+# arrived FOUR TIMES coarser than the cells it was rasterized into, so a wall
+# could not render sharper than 0.2 m however good the poses were -- which is
+# most of why the optimized single-robot map looked worse than SLAM Toolbox's,
+# and none of it was the optimizer's fault.
+#
+# This is a RENDERING budget, not a registration one: verify.py downsamples both
+# clouds to 0.15 m before GICP, so loop closure sees no extra detail and costs
+# no extra time. What it does cost is wire bytes and memory per keyframe.
+#
+# On hardware, weigh that against the link: an OS1-128 voxelized at 0.05 m is a
+# far larger cloud than this simulated 33-ring unit, and botman's single NIC
+# carries the lidar VLAN as well. Override per robot rather than editing this.
+DEFAULT_VOXEL_M = float(os.environ.get("SWARMDECK_KEYFRAME_VOXEL_M", "0.05"))
 DEFAULT_MIN_TRANSLATION_M = 0.5
 DEFAULT_MIN_YAW_RAD = math.radians(15.0)
 DEFAULT_MIN_PERIOD_S = 2.0
 DEFAULT_QUEUE = 2
 DEFAULT_TIMEOUT_S = 2.0
 DEFAULT_MIN_POINTS = 50
+# Reject a capture taken while turning faster than this.
+#
+# A spinning lidar sweeps over a finite time. Rotate fast enough during one
+# revolution and the returns are stitched across a moving pose, so the cloud is
+# the wrong SHAPE rather than merely noisy -- and a wrong shape is the dangerous
+# kind of error, because registration fits it confidently. Measured on
+# sessions/captures/3d-run-01: keyframes above ~8 deg/s produced loop closures
+# that passed every geometric gate (20 deg yaw deviation, 85% inlier ratio,
+# per-block conditioning) untouched, while the pose graph they fed turned a
+# 3.65 deg front-end yaw error into 7.38 deg. Dropping them inverted that --
+# the same graph then IMPROVED the trajectory, to 3.26 deg.
+#
+# 8 deg/s is where the effect appears; 12 deg/s changed nothing measurable.
+#
+# Sim-specific severity, general mechanism: Gazebo publishes no per-point
+# timestamps, so nothing downstream can de-skew. Real Ouster hardware does stamp
+# points, and a lidar-inertial front end de-skews with them -- so on the robots
+# this gate is a cheap safeguard rather than the only defence, and it can be
+# loosened once de-skewing is actually in the path.
+DEFAULT_MAX_YAW_RATE = math.radians(
+    float(os.environ.get("SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG", "8.0"))
+)
 
 
 def se3_from_quat_xyz(pose7: np.ndarray) -> np.ndarray:
@@ -175,6 +211,7 @@ class KeyframeUploader:
         queue_size: int = DEFAULT_QUEUE,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         min_points: int = DEFAULT_MIN_POINTS,
+        max_yaw_rate: float = DEFAULT_MAX_YAW_RATE,
     ) -> None:
         self.robot_id = robot_id
         self.http_url = http_url.rstrip("/")
@@ -184,6 +221,7 @@ class KeyframeUploader:
         self.min_period_s = min_period_s
         self.timeout_s = timeout_s
         self.min_points = min_points
+        self.max_yaw_rate = max_yaw_rate
         self._queue: deque[bytes] = deque(maxlen=max(1, queue_size))
         self._lock = threading.Lock()
         self._seq = 0
@@ -191,6 +229,12 @@ class KeyframeUploader:
         self._last_at = 0.0
         self.dropped = 0
         self.sent = 0
+        self.spun = 0
+        # Tracked on EVERY consider(), not just accepted keyframes: yaw rate
+        # between two keyframes 2 s apart is an average that hides exactly the
+        # brief fast turns this gate exists to catch.
+        self._prev_yaw: float | None = None
+        self._prev_stamp: float | None = None
         self.last_error = ""
 
     def consider(
@@ -202,6 +246,9 @@ class KeyframeUploader:
         """Non-blocking. Returns True if a keyframe was enqueued."""
         pose = np.asarray(t_map_base, dtype=np.float64).reshape(-1)
         if pose.shape != (7,) or not np.isfinite(pose).all():
+            return False
+        if self._turning_too_fast(pose, float(stamp)):
+            self.spun += 1
             return False
         now = time.monotonic()
         if self._last_pose is not None:
@@ -238,6 +285,28 @@ class KeyframeUploader:
             self._last_pose = pose
             self._last_at = now
         return True
+
+    def _turning_too_fast(self, pose: np.ndarray, stamp: float) -> bool:
+        """Yaw rate since the previous scan, against ``max_yaw_rate``.
+
+        Always records the current sample before returning, so the estimate
+        stays anchored to the most recent scan even when a capture is rejected;
+        otherwise a run of fast frames would be compared against an ever more
+        stale reference and the rate would read low exactly when it is highest.
+        """
+        yaw = math.atan2(
+            2.0 * (pose[6] * pose[5] + pose[3] * pose[4]),
+            1.0 - 2.0 * (pose[4] * pose[4] + pose[5] * pose[5]),
+        )
+        previous_yaw, previous_stamp = self._prev_yaw, self._prev_stamp
+        self._prev_yaw, self._prev_stamp = yaw, stamp
+        if self.max_yaw_rate <= 0.0 or previous_yaw is None or previous_stamp is None:
+            return False
+        dt = stamp - previous_stamp
+        if dt <= 1e-3:
+            return False  # duplicate or out-of-order stamp: no usable rate
+        delta = abs((yaw - previous_yaw + math.pi) % (2 * math.pi) - math.pi)
+        return (delta / dt) > self.max_yaw_rate
 
     def upload_one(self) -> bool:
         """Blocking POST of at most one queued blob. Safe for an executor."""

@@ -93,11 +93,24 @@ def test_snapshot_update_only_flags_merged_robots(shared_snapshot) -> None:
     assert all(update["origins"][rid]["frame"].startswith("component-") for rid in ids)
 
 
-def test_isotropic_information_is_the_production_default() -> None:
+def test_hessian_information_is_the_production_default() -> None:
+    """Production keeps GICP's conditioned Hessian, and no longer discards it.
+
+    This asserted "isotropic" until 2026-08-25. That default was a workaround
+    chosen on the synthetic fixture and explicitly scoped, in this test's own
+    comment, to last only until real data existed to calibrate against. It now
+    does: sessions/captures/3d-run-01 is a two-robot Gazebo run with ground
+    truth, and replaying it (slam/tools/replay.py --ablate) measures hessian
+    better on every scope -- optimized yaw RMSE 9.22 -> 7.38 deg for robot_0 and
+    1.14 -> 0.74 for robot_1, joint ATE 0.6837 -> 0.6604 m and 6.69 -> 5.30 deg.
+
+    Do not revert this to isotropic on synthetic-fixture evidence alone. The
+    fixture is planar and non-repetitive, so it never exercises the degenerate
+    corridor-slide geometry the conditioned Hessian exists to express, and it
+    will keep preferring isotropic for that reason.
+    """
     backend = CollaborativeBackend()
-    assert backend.verify.information == "isotropic"
-    # Unit tests keep the Hessian path; production is the documented workaround
-    # for the ATE xfail until real Ouster bags exist to calibrate against.
+    assert backend.verify.information == "hessian"
     assert VerifyConfig().information == "hessian"
 
 

@@ -28,7 +28,12 @@ from swarmdeck_slam.descriptors import (
     scan_context_descriptor,
 )
 from swarmdeck_slam.graph import GtsamPoseGraph
-from swarmdeck_slam.render import RenderConfig, RenderedGrid, render_occupancy
+from swarmdeck_slam.render import (
+    RenderConfig,
+    RenderedGrid,
+    render_occupancy,
+    render_per_robot,
+)
 from swarmdeck_slam.types import (
     Edge,
     EdgeKind,
@@ -46,11 +51,30 @@ from swarmdeck_slam.verify import VerifyConfig, verify_candidate
 # number, once they exist (Phase 6).
 ODOM_INFORMATION = np.eye(6, dtype=np.float64) * 400.0
 
-# Production verification uses isotropic information: the Hessian weighting is
-# the tracked ATE defect, and isotropic is the setting that actually improves
-# it. Degeneracy gates still run on the Hessian so a single-wall match cannot
-# sneak through just because we threw the matrix away afterwards.
-PRODUCTION_VERIFY = VerifyConfig(information="isotropic", isotropic_scale=400.0)
+# Production verification keeps GICP's conditioned Hessian.
+#
+# This was isotropic (I6 * 400 * fitness) on the strength of the synthetic
+# fixture, where it measured better ATE. Real captured data disagrees. Measured
+# on sessions/captures/3d-run-01 (two robots, 239 keyframes, Gazebo ground
+# truth), optimized yaw error RMSE:
+#
+#                     robot_0   robot_1
+#   isotropic          9.22      1.14      (front end: 3.65 / 1.13)
+#   hessian            7.38      0.74
+#
+# Better on both robots, and hessian is the only setting where the pose graph
+# beats its own front end (robot_1 1.13 -> 0.74) rather than merely surviving.
+# Joint ATE agrees: 0.6837 -> 0.6604 m translation, 6.69 -> 5.30 deg rotation.
+#
+# The reason the fixture preferred isotropic is visible in that table too: the
+# fixture is planar and non-repetitive, so its matches are never the degenerate
+# corridor-slide case the conditioned Hessian exists to describe, and throwing
+# the matrix away costs nothing there. On a real building it costs the
+# optimizer the one signal that says which direction a match does not constrain.
+#
+# Degeneracy gates run on the Hessian either way, so this changes what a
+# surviving edge CLAIMS, not which edges survive.
+PRODUCTION_VERIFY = VerifyConfig(information="hessian")
 
 
 def se2_of(matrix: np.ndarray) -> tuple[float, float, float]:
@@ -91,6 +115,9 @@ class BackendSnapshot:
 
     optimized: OptimizedGraph
     grids: dict[int, RenderedGrid]
+    #: One grid per robot, from the same optimized poses. Lets the operator see
+    #: a robot that merged with nobody, which the merged map deliberately omits.
+    robot_grids: dict[str, RenderedGrid]
     keyframe_counts: dict[str, int]
     accepted_closures: int
     inter_robot_closures: int
@@ -112,6 +139,60 @@ class CollaborativeBackend:
     descriptor_k: int = 3
     temporal_window: int = 5
     min_points: int = 50
+    odom_information_scale: float = 1.0
+    """Multiplies ODOM_INFORMATION on every odometry edge. 1.0 is today's value.
+
+    ODOM_INFORMATION is 400 in all six DoF, constant, whatever the robot was
+    doing. That is a claim that one keyframe hop is known to the same precision
+    while grinding against a wall as while driving clean -- and a differential
+    drive that is wedged keeps turning its wheels, so precisely when the number
+    is most wrong it is asserted most confidently. Its own comment says to
+    calibrate it against real data rather than trust it.
+
+    The cost is paid at loop closure: robot_0 accumulates -15 deg of yaw drift,
+    and when it finally revisits a place the closure must undo all of it against
+    a chain of edges each insisting the drift never happened. The optimizer
+    compromises the only way it can, by smearing the correction along the
+    trajectory -- which is how a graph turns a 3.65 deg front-end error into 9 deg.
+    """
+
+    allow_inter_robot: bool = True
+    """Set False to refuse every inter-robot closure, leaving each robot's own
+    loop closures intact.
+
+    A diagnostic, not a deployment setting: with it off the fleet cannot merge
+    at all, which defeats the point of the system. It exists because "the graph
+    degrades robot_0's yaw" has two very different causes -- its own loop
+    closures, or the ones tying it to robot_1 -- and the two are indistinguishable
+    from the outside. Turning this off isolates them: if the damage survives, it
+    is a single-robot bug that a two-robot run merely revealed.
+    """
+
+    descriptor_ratio: float = 0.0
+    """Reject an ambiguous place match: 0 disables, typical values 0.75-0.9.
+
+    Lowe's ratio test, aimed at the failure the spatial gate could not reach.
+    A merge that starts wrong starts wrong at BOOTSTRAP, before any common frame
+    exists to measure against, so no estimate-based gate can see it. What is
+    visible even then is the descriptor itself: in a distinctive place the best
+    match beats the runner-up clearly, and in a hall of identical corridors it
+    does not.
+
+    "Runner-up" means a candidate from the SAME robot that is far away in that
+    robot's own trajectory (``ambiguity_radius_m``). That restriction is the
+    whole trick. Two adjacent keyframes matching equally well is not ambiguity,
+    it is one place seen twice, and rejecting it would throw away exactly the
+    closures we want. But one robot cannot be in two places at once -- so when
+    two of its keyframes a corridor apart both explain our scan equally well,
+    the scene repeats and the match is a coin flip.
+    """
+
+    ambiguity_radius_m: float = 5.0
+    """How far apart two of one robot's keyframes must be, in its own odometry,
+    before they count as competing PLACES rather than one place seen twice.
+    Comfortably beyond keyframe spacing (0.5 m gated) and inside the building's
+    bay period, so ordinary neighbours never trip the ratio test."""
+
 
     def __post_init__(self) -> None:
         self._graph = GtsamPoseGraph()
@@ -122,6 +203,7 @@ class CollaborativeBackend:
         )
         self._keyframes: dict[KeyframeId, Keyframe] = {}
         self._last_of: dict[str, KeyframeId] = {}
+        self.ambiguous_matches = 0
         self._accepted = 0
         self._inter_robot = 0
         self._dirty = False
@@ -161,7 +243,7 @@ class CollaborativeBackend:
                     src=previous.id,
                     dst=keyframe.id,
                     t_src_dst=se3_relative(previous.t_odom_base, keyframe.t_odom_base),
-                    information=ODOM_INFORMATION,
+                    information=ODOM_INFORMATION * self.odom_information_scale,
                 )
             )
 
@@ -171,11 +253,20 @@ class CollaborativeBackend:
             keyframe.descriptor = descriptor
             keyframe.descriptor_kind = DESCRIPTOR_KIND
 
-        for candidate in self._index.query(
+        candidates = self._index.query(
             descriptor, k=self.descriptor_k, query_id=keyframe.id
-        ):
+        )
+        if self._ambiguous(candidates):
+            self.ambiguous_matches += 1
+            candidates = []
+        for candidate in candidates:
             target = self._keyframes.get(candidate.keyframe_id)
             if target is None:
+                continue
+            if (
+                not self.allow_inter_robot
+                and target.id.robot_id != keyframe.id.robot_id
+            ):
                 continue
             edge = verify_candidate(
                 source=keyframe,
@@ -195,17 +286,53 @@ class CollaborativeBackend:
         self._new_since_optimize += 1
         return True
 
+    def _ambiguous(self, candidates: list) -> bool:
+        """Whether the best match is indistinguishable from a different place.
+
+        Compares the best candidate against the nearest runner-up that is a
+        genuinely different location -- same robot, far apart in that robot's
+        own odometry. Anything else (a different robot, or the same robot's
+        neighbouring keyframe) is not evidence of repetition and is skipped.
+        """
+        if self.descriptor_ratio <= 0.0 or len(candidates) < 2:
+            return False
+        best = candidates[0]
+        best_kf = self._keyframes.get(best.keyframe_id)
+        if best_kf is None:
+            return False
+        for other in candidates[1:]:
+            if other.keyframe_id.robot_id != best.keyframe_id.robot_id:
+                continue
+            other_kf = self._keyframes.get(other.keyframe_id)
+            if other_kf is None:
+                continue
+            separation = float(
+                np.linalg.norm(
+                    best_kf.t_odom_base[:3, 3] - other_kf.t_odom_base[:3, 3]
+                )
+            )
+            if separation < self.ambiguity_radius_m:
+                continue  # one place seen twice, not two places
+            # Both distances are "smaller is better", so a ratio near 1 means
+            # the runner-up explains the scan just as well as the winner.
+            if best.distance >= self.descriptor_ratio * max(other.distance, 1e-9):
+                return True
+            return False
+        return False
+
     def optimize_and_render(self) -> BackendSnapshot | None:
         """Run the solver and rasterize occupancy. None if there is nothing new."""
         if not self._keyframes:
             return None
         optimized = self._graph.optimize()
         grids = render_occupancy(optimized, self._keyframes.values(), self.render)
+        robot_grids = render_per_robot(optimized, self._keyframes.values(), self.render)
         self._dirty = False
         self._new_since_optimize = 0
         return BackendSnapshot(
             optimized=optimized,
             grids=grids,
+            robot_grids=robot_grids,
             keyframe_counts=_counts(self._keyframes),
             accepted_closures=self._accepted,
             inter_robot_closures=self._inter_robot,

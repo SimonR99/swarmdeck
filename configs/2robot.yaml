@@ -7,8 +7,26 @@ fleet:
   robot_prefix: robot_
   # See 4robot.yaml for the full profile list. generic_2d is 1800 samples/rev
   # (0.2 deg), 1 ring, 30 m; generic_32 adds 33 rings for the 3D pipeline.
+  #
+  # generic_32 is the sim stand-in for the fleet's Ouster units: same +/-22.5 deg
+  # vertical FOV and 1024 columns as an OS1, at 33 rings instead of botman's 128.
+  # Matching hardware_botman.yaml matters more than matching the beam count --
+  # collaborative loop closure registers on vertical STRUCTURE, and 33 rings
+  # carry that where a single ring carries none. Range stays 30 m rather than the
+  # OS1's 100 m because the indoor world is ~24 m across, so the extra reach
+  # returns nothing and only makes SLAM Toolbox raytrace free space further.
   lidar:
-    profile: generic_2d
+    profile: generic_32
+    # 512 columns, not the profile's 1024. Measured on this host: at 1024 the
+    # ros_gz_bridge delivered scan/points at 3.6-5.5 Hz against a 10 Hz sensor,
+    # and unevenly between the two robots -- the same starvation spawn_fleet.py
+    # records at 1800. SLAM Toolbox and the EKF consume the sliced scan derived
+    # from this cloud, so a starved bridge degrades odometry, not just the view.
+    # Columns are the right thing to spend: keyframes are motion-gated (0.5 m /
+    # 15 deg / 2 s) so they do not need every revolution, and collaborative loop
+    # closure registers on VERTICAL structure, which lives in the 33 rings that
+    # are kept intact here. Raise this again on a host with headroom.
+    h_samples: 512
 
 map:
   merge_mode: graph         # pose-graph occupancy; no grid registration

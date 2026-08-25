@@ -130,6 +130,34 @@ class _Meta(NamedTuple):
     origin_y: float
 
 
+def render_per_robot(
+    graph: OptimizedGraph,
+    keyframes: Iterable[Keyframe],
+    config: RenderConfig | None = None,
+) -> dict[str, RenderedGrid]:
+    """One grid per robot, each rendered from that robot's keyframes alone.
+
+    Same optimized poses as :func:`render_occupancy`, partitioned by robot
+    instead of by component. This is what an operator needs that the merged map
+    cannot show: a robot in a component of one has no merged map by design
+    (publishing it would look like a merge that has not happened), and a robot
+    inside a larger component contributes to a joint grid where its own
+    coverage is no longer separable.
+
+    Distinct from the local map an adapter uploads, which is that robot's own
+    SLAM package's output in its own frame -- this one is posed by the
+    collaborative solver, so where a merge exists these grids are directly
+    comparable to each other and to the merged map.
+    """
+    config = config or RenderConfig()
+    keyframes_by_id = {kf.id: kf for kf in keyframes}
+    robot_ids = sorted({kf_id.robot_id for kf_id in graph.poses if kf_id in keyframes_by_id})
+    return {
+        robot_id: _render_component(index, {robot_id}, graph, keyframes_by_id, config)
+        for index, robot_id in enumerate(robot_ids)
+    }
+
+
 def render_occupancy(
     graph: OptimizedGraph,
     keyframes: Iterable[Keyframe],
