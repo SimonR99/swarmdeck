@@ -70,11 +70,6 @@
 
   const trails = new Map<string, { x: number; y: number }[]>();
   const pointers = new Map<number, { x: number; y: number }>();
-  let pinchStart = 0;
-  let scaleStart = 1;
-  let angleStart = 0;
-  let rotationStart = 0;
-  let midStart = { x: 0, y: 0 };
   let dragged = false;
   let lastRenderedInfo: MapInfo | null = null;
 
@@ -415,14 +410,6 @@
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     dragged = false;
-    if (pointers.size === 2) {
-      const [a, b] = [...pointers.values()];
-      pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
-      scaleStart = view.scale;
-      angleStart = Math.atan2(b.y - a.y, b.x - a.x);
-      rotationStart = view.rotation;
-      midStart = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    }
   }
 
   function onPointerMove(e: PointerEvent) {
@@ -436,45 +423,63 @@
       return;
     }
     const cur = { x: e.clientX, y: e.clientY };
-    pointers.set(e.pointerId, cur);
 
-    if (pointers.size === 2 && pinchStart > 0 && canvas) {
+    if (pointers.size === 2 && canvas) {
       const rect = canvas.getBoundingClientRect();
-      const [a, b] = [...pointers.values()];
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      const rawMidX = (a.x + b.x) / 2;
-      const rawMidY = (a.y + b.y) / 2;
-      const midX = rawMidX - rect.left;
-      const midY = rawMidY - rect.top;
+      const entries = [...pointers.entries()];
+      const otherEntry = entries.find(([id]) => id !== e.pointerId);
+      if (otherEntry) {
+        const [, otherCur] = otherEntry;
+        const prevA = prev;
+        const prevB = otherCur;
+        const curA = cur;
+        const curB = otherCur;
 
-      // Pinch zoom centered on touch midpoint
-      if (pinchStart > 5) {
-        const targetScale = Math.max(0.12, Math.min(6, (scaleStart * d) / pinchStart));
-        const factor = targetScale / view.scale;
-        zoomBy(factor, midX, midY);
-      }
+        const prevMid = {
+          x: (prevA.x + prevB.x) / 2 - rect.left,
+          y: (prevA.y + prevB.y) / 2 - rect.top
+        };
+        const curMid = {
+          x: (curA.x + curB.x) / 2 - rect.left,
+          y: (curA.y + curB.y) / 2 - rect.top
+        };
 
-      // Two-finger rotate
-      const currentAngle = Math.atan2(b.y - a.y, b.x - a.x);
-      const angleDiff = currentAngle - angleStart;
-      if (Math.abs(angleDiff) > 0.03) {
-        view.rotation = rotationStart + angleDiff;
+        const prevD = Math.hypot(prevA.x - prevB.x, prevA.y - prevB.y);
+        const curD = Math.hypot(curA.x - curB.x, curA.y - curB.y);
+
+        const prevAngle = Math.atan2(prevB.y - prevA.y, prevB.x - prevA.x);
+        const curAngle = Math.atan2(curB.y - curA.y, curB.x - curA.x);
+
+        let angleDelta = curAngle - prevAngle;
+        while (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
+        while (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
+
+        const scaleFactor = prevD > 5 ? curD / prevD : 1.0;
+
+        // 1. Grid coordinate under the touch midpoint before moving
+        const anchorGrid = gridOf(prevMid.x, prevMid.y);
+
+        // 2. Apply scale
+        view.scale = Math.max(0.12, Math.min(6, view.scale * scaleFactor));
+
+        // 3. Apply rotation
+        view.rotation += angleDelta;
         while (view.rotation > Math.PI) view.rotation -= Math.PI * 2;
         while (view.rotation < -Math.PI) view.rotation += Math.PI * 2;
+
+        // 4. Pin the anchor grid coordinate under the new touch midpoint
+        const afterScreen = screenOf(anchorGrid.gx, anchorGrid.gy);
+        view.tx += curMid.x - afterScreen.sx;
+        view.ty += curMid.y - afterScreen.sy;
+
+        pointers.set(e.pointerId, cur);
+        dragged = true;
+        follow = false;
+        return;
       }
-
-      // Two-finger pan
-      const dMidX = rawMidX - midStart.x;
-      const dMidY = rawMidY - midStart.y;
-      view.tx += dMidX;
-      view.ty += dMidY;
-      midStart = { x: rawMidX, y: rawMidY };
-
-      dragged = true;
-      follow = false;
-      return;
     }
 
+    pointers.set(e.pointerId, cur);
     const dx = cur.x - prev.x;
     const dy = cur.y - prev.y;
     if (Math.abs(dx) + Math.abs(dy) > 2) {
@@ -488,9 +493,6 @@
   function onPointerUp(e: PointerEvent) {
     const wasDrag = dragged;
     pointers.delete(e.pointerId);
-    if (pointers.size < 2) {
-      pinchStart = 0;
-    }
     if (wasDrag || !canvas) return;
 
     const rect = canvas.getBoundingClientRect();
