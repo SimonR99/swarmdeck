@@ -155,16 +155,18 @@
           aria-label="Detection proposal"
           onclick={() => selectProposal(p)}
           onkeydown={(ev) => ev.key === 'Enter' && selectProposal(p)}
-          class="pointer-events-auto flex items-center gap-1.5 rounded-full border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl cursor-pointer
-                 transition-all
-                 {review.selected === p.id || review.focused === p.id
-                   ? 'border-accent ring-2 ring-accent/40 scale-[1.08] p-1.5 shadow-2xl bg-surface'
-                   : 'border-border p-1'}"
+          class="pointer-events-auto flex items-center rounded-full border shadow-xl backdrop-blur-xl cursor-pointer
+                 transition-all duration-200
+                 {review.selected === p.id
+                   ? 'border-accent bg-surface ring-4 ring-accent/35 scale-110 p-2 gap-2 shadow-[0_12px_32px_-8px_rgb(47_99_199/0.5)] z-20'
+                   : review.focused === p.id
+                   ? 'border-accent/80 bg-surface/98 ring-2 ring-accent/20 scale-105 p-1.5 gap-1.5'
+                   : 'border-border bg-surface/95 p-1 gap-1'}"
           onmouseenter={() => review.focus(p.id)}
           onmouseleave={() => review.focus(null)}
         >
           <button
-            class="flex items-center gap-1.5 px-1.5 py-1 rounded-full hover:bg-surface-2 transition-colors shrink-0"
+            class="flex items-center gap-1.5 px-2 py-1 rounded-full hover:bg-surface-2 transition-colors shrink-0"
             title="{label(p.class)} · {Math.round(p.best_score * 100)}% · {seenBy(p.robot_ids)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'} · {p.position.x.toFixed(1)}, {p.position.y.toFixed(1)} m"
             onclick={(e) => {
               e.stopPropagation();
@@ -172,20 +174,21 @@
             }}
           >
             <span
-              class="h-3 w-3 rounded-full transition-all shrink-0 {review.selected === p.id ? 'ring-2 ring-accent/50' : ''}"
+              class="rounded-full transition-all shrink-0 {review.selected === p.id ? 'h-3.5 w-3.5 ring-2 ring-accent/50' : 'h-2.5 w-2.5'}"
               style="background:{detectionCatalog.colorOf(p.class)}"
             ></span>
-            <span class="text-[10px] font-semibold text-fg whitespace-nowrap">
+            <span class="text-[11px] font-semibold text-fg whitespace-nowrap">
               {label(p.class)}
               {#if review.selected === p.id}
-                <span class="ml-1 text-[8px] font-normal text-fg-dim">({Math.round(p.best_score * 100)}%)</span>
+                <span class="ml-1 text-[9px] font-normal text-fg-dim">({Math.round(p.best_score * 100)}%)</span>
               {/if}
             </span>
           </button>
 
           <button
-            class="grid h-8 w-8 touch-target shrink-0 place-items-center rounded-full border border-ok/40
-                   bg-ok/8 text-ok hover:bg-ok/15 disabled:opacity-40"
+            class="grid touch-target shrink-0 place-items-center rounded-full border border-ok/40
+                   bg-ok/8 text-ok hover:bg-ok/15 disabled:opacity-40 transition-transform
+                   {review.selected === p.id ? 'h-9 w-9 text-base' : 'h-8 w-8'}"
             disabled={settling}
             title={suggested ? 'Separate' : 'Accept'}
             onclick={(e) => {
@@ -193,12 +196,13 @@
               accept(p);
             }}
           >
-            <Check class="h-3.5 w-3.5" />
+            <Check class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
           </button>
 
           {#if candidates.length}
             <button
-              class="grid h-8 w-8 touch-target shrink-0 place-items-center rounded-full border transition-colors
+              class="grid touch-target shrink-0 place-items-center rounded-full border transition-all
+                     {review.selected === p.id ? 'h-9 w-9' : 'h-8 w-8'}
                      {suggested
                        ? 'border-accent bg-accent/10 text-accent hover:bg-accent/20'
                        : 'border-border text-fg-muted hover:bg-surface-2'}
@@ -212,13 +216,14 @@
                   : (mergeOpen = mergeOpen === p.id ? null : p.id);
               }}
             >
-              <GitMerge class="h-3.5 w-3.5" />
+              <GitMerge class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
             </button>
           {/if}
 
           <button
-            class="grid h-8 w-8 touch-target shrink-0 place-items-center rounded-full border border-border
-                   text-fg-dim hover:bg-surface-2 hover:text-fg disabled:opacity-40"
+            class="grid touch-target shrink-0 place-items-center rounded-full border border-border
+                   text-fg-dim hover:bg-surface-2 hover:text-fg disabled:opacity-40 transition-all
+                   {review.selected === p.id ? 'h-9 w-9' : 'h-8 w-8'}"
             disabled={settling}
             title="Ignore this object here, and stop asking about it"
             onclick={(e) => {
@@ -226,12 +231,13 @@
               ignore(p);
             }}
           >
-            <EyeOff class="h-3.5 w-3.5" />
+            <EyeOff class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
           </button>
 
           <button
-            class="grid h-8 w-8 touch-target shrink-0 place-items-center rounded-full border border-border/80
-                   text-fg-dim hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+            class="grid touch-target shrink-0 place-items-center rounded-full border border-border/80
+                   text-fg-dim hover:bg-danger/10 hover:text-danger disabled:opacity-40 transition-all
+                   {review.selected === p.id ? 'h-9 w-9' : 'h-8 w-8'}"
             disabled={settling}
             title="Delete this proposal"
             onclick={(e) => {
@@ -239,7 +245,7 @@
               forgetProposal(p);
             }}
           >
-            <Trash2 class="h-3.5 w-3.5" />
+            <Trash2 class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
           </button>
         </div>
 
@@ -252,17 +258,17 @@
               <img
                 src={p.image}
                 alt="{label(p.class)} detection crop"
-                class="h-32 w-32 rounded-lg object-cover shadow-sm"
+                class="h-36 w-36 rounded-lg object-cover shadow-sm"
               />
             {:else}
-              <div class="h-28 w-28 rounded-lg bg-surface-2 flex flex-col items-center justify-center p-2 text-center text-[9px] text-fg-dim">
-                <span>No crop image</span>
+              <div class="h-32 w-32 rounded-lg bg-surface-2 flex flex-col items-center justify-center p-2 text-center text-[10px] text-fg-dim">
+                <span class="font-medium text-fg">No crop image</span>
                 <span class="text-[8px] opacity-70 mt-1">Awaiting fresh sighting</span>
               </div>
             {/if}
-            <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
+            <div class="mt-1.5 flex w-full items-center justify-between px-1 text-[10px] font-semibold text-fg">
               <span>{label(p.class)}</span>
-              <span class="font-normal text-fg-dim">{Math.round(p.best_score * 100)}% conf</span>
+              <span class="font-normal text-fg-dim">{Math.round(p.best_score * 100)}%</span>
             </div>
           </div>
         {/if}

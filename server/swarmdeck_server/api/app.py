@@ -1248,6 +1248,7 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                 "camera": camera,
                 "bbox": item.get("bbox"),
                 "polygon": item.get("polygon"),
+                "image": item.get("image"),
                 "map_position": detection_position(
                     rid, item.get("map_position")
                 ),
