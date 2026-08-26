@@ -92,6 +92,7 @@
   function selectProposal(p: DetectionProposal) {
     if (review.selected === p.id) {
       review.select(null);
+      review.focus(null);
     } else {
       review.select(p.id);
       const robotId = p.robot_ids[0];
@@ -102,6 +103,7 @@
   function toggleEntity(entityId: string) {
     if (review.selected === entityId) {
       review.select(null);
+      review.focus(null);
     } else {
       review.select(entityId);
     }

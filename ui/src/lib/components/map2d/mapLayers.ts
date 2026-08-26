@@ -15,7 +15,7 @@ import type { DetectionEntity, DetectionProposal, Footprint } from '$lib/types/p
 
 export type ScreenPoint = { sx: number; sy: number };
 export type GridPoint = { gx: number; gy: number };
-export type Viewport = { scale: number; tx: number; ty: number };
+export type Viewport = { scale: number; tx: number; ty: number; rotation?: number };
 export type ScreenOf = (gx: number, gy: number) => ScreenPoint;
 
 export interface MapRobot {
@@ -548,7 +548,7 @@ export function drawRobots(
       const sensorPx = (2.0 / info.resolution) * view.scale;
       ctx.save();
       ctx.translate(sx, sy);
-      ctx.rotate(-mapStore.worldYawToView(robot.pose.yaw));
+      ctx.rotate(-mapStore.worldYawToView(robot.pose.yaw) + (view.rotation ?? 0));
       ctx.beginPath();
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, sensorPx, -0.6, 0.6);
@@ -648,7 +648,7 @@ export function drawRobots(
 
     ctx.save();
     ctx.translate(sx, sy);
-    ctx.rotate(-mapStore.worldYawToView(robot.pose.yaw));
+    ctx.rotate(-mapStore.worldYawToView(robot.pose.yaw) + (view.rotation ?? 0));
     ctx.beginPath();
     ctx.moveTo(11, 0);
     ctx.lineTo(-7, 7);

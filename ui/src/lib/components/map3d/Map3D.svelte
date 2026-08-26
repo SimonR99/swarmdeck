@@ -399,21 +399,48 @@
     };
   });
 
+  const pointers = new Map<number, { x: number; y: number }>();
+  let pinchStart = 0;
+  let distanceStart = 28;
+
   function onPointerDown(e: PointerEvent) {
-    dragging = true;
-    last = { x: e.clientX, y: e.clientY };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    dragging = true;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
+      distanceStart = distance;
+    }
   }
+
   function onPointerMove(e: PointerEvent) {
-    if (!dragging || !last) return;
-    yaw -= (e.clientX - last.x) * 0.006;
-    pitch = Math.max(0.05, Math.min(1.5, pitch + (e.clientY - last.y) * 0.006));
-    last = { x: e.clientX, y: e.clientY };
+    const prev = pointers.get(e.pointerId);
+    if (!prev) return;
+    const cur = { x: e.clientX, y: e.clientY };
+    pointers.set(e.pointerId, cur);
+
+    if (pointers.size === 2 && pinchStart > 0) {
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (d > 5) {
+        distance = Math.max(3, Math.min(120, (distanceStart * pinchStart) / d));
+      }
+      return;
+    }
+
+    if (pointers.size === 1) {
+      yaw -= (cur.x - prev.x) * 0.006;
+      pitch = Math.max(0.05, Math.min(1.5, pitch + (cur.y - prev.y) * 0.006));
+    }
   }
-  function onPointerUp() {
-    dragging = false;
-    last = null;
+
+  function onPointerUp(e: PointerEvent) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinchStart = 0;
+    if (pointers.size === 0) dragging = false;
   }
+
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     distance = Math.max(3, Math.min(120, distance * (e.deltaY > 0 ? 1.1 : 0.9)));

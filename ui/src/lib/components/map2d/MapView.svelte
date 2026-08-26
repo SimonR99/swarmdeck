@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     Box,
+    Compass,
     Crosshair,
     Focus,
     Grid3X3,
@@ -10,6 +11,7 @@
     Minus,
     Plus,
     RotateCcw,
+    RotateCw,
     Route,
     ScanLine,
     Tags,
@@ -45,7 +47,7 @@
     zoomBy: (factor: number) => void;
     fitCloud: () => void;
   } | null>(null);
-  let view = $state({ scale: 0.55, tx: 0, ty: 0, initialised: false });
+  let view = $state({ scale: 0.55, tx: 0, ty: 0, rotation: 0, initialised: false });
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
@@ -69,16 +71,39 @@
   const trails = new Map<string, { x: number; y: number }[]>();
   const pointers = new Map<number, { x: number; y: number }>();
   let pinchStart = 0;
+  let scaleStart = 1;
+  let angleStart = 0;
+  let rotationStart = 0;
+  let midStart = { x: 0, y: 0 };
   let dragged = false;
   let lastRenderedInfo: MapInfo | null = null;
 
   /** Screen px per grid cell, then per metre. */
   function screenOf(gx: number, gy: number) {
-    return { sx: gx * view.scale + view.tx, sy: gy * view.scale + view.ty };
+    const sx_unrot = gx * view.scale;
+    const sy_unrot = gy * view.scale;
+    if (!view.rotation) {
+      return { sx: sx_unrot + view.tx, sy: sy_unrot + view.ty };
+    }
+    const c = Math.cos(view.rotation);
+    const s = Math.sin(view.rotation);
+    return {
+      sx: sx_unrot * c - sy_unrot * s + view.tx,
+      sy: sx_unrot * s + sy_unrot * c + view.ty
+    };
   }
 
   function gridOf(sx: number, sy: number) {
-    return { gx: (sx - view.tx) / view.scale, gy: (sy - view.ty) / view.scale };
+    const dx = sx - view.tx;
+    const dy = sy - view.ty;
+    if (!view.rotation) {
+      return { gx: dx / view.scale, gy: dy / view.scale };
+    }
+    const c = Math.cos(-view.rotation);
+    const s = Math.sin(-view.rotation);
+    const unrot_x = dx * c - dy * s;
+    const unrot_y = dx * s + dy * c;
+    return { gx: unrot_x / view.scale, gy: unrot_y / view.scale };
   }
 
   function robotsOnMap() {
@@ -185,6 +210,27 @@
     follow = false;
   }
 
+  function rotateBy(angleDelta: number, ax?: number, ay?: number) {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = ax ?? rect.width / 2;
+    const py = ay ?? rect.height / 2;
+    const before = gridOf(px, py);
+    view.rotation += angleDelta;
+    while (view.rotation > Math.PI) view.rotation -= Math.PI * 2;
+    while (view.rotation < -Math.PI) view.rotation += Math.PI * 2;
+    const after = screenOf(before.gx, before.gy);
+    view.tx += px - after.sx;
+    view.ty += py - after.sy;
+    follow = false;
+  }
+
+  function resetRotation() {
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    rotateBy(-view.rotation, rect.width / 2, rect.height / 2);
+  }
+
   function toggleFollow() {
     follow = !follow;
     if (!follow) return;
@@ -262,14 +308,18 @@
     if (grid && info) {
       const gw = info.width * view.scale;
       const gh = info.height * view.scale;
+      ctx.save();
+      ctx.translate(view.tx, view.ty);
+      if (view.rotation) ctx.rotate(view.rotation);
       ctx.imageSmoothingEnabled = view.scale < 1;
-      ctx.drawImage(grid, view.tx, view.ty, gw, gh);
-      drawNetworkHeatmap(ctx, screenOf, view, showNetwork);
+      ctx.drawImage(grid, 0, 0, gw, gh);
       const mask = mapStore.occupancyMask(view.scale);
       if (mask) {
         ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(mask, view.tx, view.ty, gw, gh);
+        ctx.drawImage(mask, 0, 0, gw, gh);
       }
+      ctx.restore();
+      drawNetworkHeatmap(ctx, screenOf, view, showNetwork);
     }
 
     drawMetricGrid(ctx, w, h, info, view, screenOf, showGrid);
@@ -369,6 +419,9 @@
       const [a, b] = [...pointers.values()];
       pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
       scaleStart = view.scale;
+      angleStart = Math.atan2(b.y - a.y, b.x - a.x);
+      rotationStart = view.rotation;
+      midStart = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     }
   }
 
@@ -385,12 +438,40 @@
     const cur = { x: e.clientX, y: e.clientY };
     pointers.set(e.pointerId, cur);
 
-    if (pointers.size === 2 && pinchStart > 0) {
+    if (pointers.size === 2 && pinchStart > 0 && canvas) {
+      const rect = canvas.getBoundingClientRect();
       const [a, b] = [...pointers.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y);
-      const target = Math.max(0.12, Math.min(6, (scaleStart * d) / pinchStart));
-      zoomBy(target / view.scale);
+      const rawMidX = (a.x + b.x) / 2;
+      const rawMidY = (a.y + b.y) / 2;
+      const midX = rawMidX - rect.left;
+      const midY = rawMidY - rect.top;
+
+      // Pinch zoom centered on touch midpoint
+      if (pinchStart > 5) {
+        const targetScale = Math.max(0.12, Math.min(6, (scaleStart * d) / pinchStart));
+        const factor = targetScale / view.scale;
+        zoomBy(factor, midX, midY);
+      }
+
+      // Two-finger rotate
+      const currentAngle = Math.atan2(b.y - a.y, b.x - a.x);
+      const angleDiff = currentAngle - angleStart;
+      if (Math.abs(angleDiff) > 0.03) {
+        view.rotation = rotationStart + angleDiff;
+        while (view.rotation > Math.PI) view.rotation -= Math.PI * 2;
+        while (view.rotation < -Math.PI) view.rotation += Math.PI * 2;
+      }
+
+      // Two-finger pan
+      const dMidX = rawMidX - midStart.x;
+      const dMidY = rawMidY - midStart.y;
+      view.tx += dMidX;
+      view.ty += dMidY;
+      midStart = { x: rawMidX, y: rawMidY };
+
       dragged = true;
+      follow = false;
       return;
     }
 
@@ -407,7 +488,9 @@
   function onPointerUp(e: PointerEvent) {
     const wasDrag = dragged;
     pointers.delete(e.pointerId);
-    if (pointers.size < 2) pinchStart = 0;
+    if (pointers.size < 2) {
+      pinchStart = 0;
+    }
     if (wasDrag || !canvas) return;
 
     const rect = canvas.getBoundingClientRect();
@@ -779,6 +862,29 @@
     >
       <Minus class="h-4 w-4" />
     </button>
+    <button
+      title="Rotate counter-clockwise 45°"
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted transition-colors hover:bg-surface-2"
+      onclick={() => rotateBy(-Math.PI / 4)}
+    >
+      <RotateCcw class="h-4 w-4" />
+    </button>
+    <button
+      title="Rotate clockwise 45°"
+      class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted transition-colors hover:bg-surface-2"
+      onclick={() => rotateBy(Math.PI / 4)}
+    >
+      <RotateCw class="h-4 w-4" />
+    </button>
+    {#if Math.abs(view.rotation) > 0.01}
+      <button
+        title="Reset North orientation"
+        class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-accent transition-colors hover:bg-surface-2"
+        onclick={resetRotation}
+      >
+        <Compass class="h-4 w-4 transition-transform duration-150" style="transform: rotate({-view.rotation * (180 / Math.PI)}deg)" />
+      </button>
+    {/if}
     <button
       title="Fit fleet"
       class="grid h-10 w-10 touch-target place-items-center rounded-[--radius-control] text-fg-muted transition-colors

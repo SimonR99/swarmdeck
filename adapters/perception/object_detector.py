@@ -32,11 +32,11 @@ from adapters.perception.catalog import CALIBRATED_CONFIDENCE, CATALOG, CLASS_NA
 def crop_detection_jpeg_base64(
     image: np.ndarray,
     bbox: Any,
-    margin: float = 0.20,
-    max_dim: int = 240,
+    margin: float = 0.50,
+    max_dim: int = 320,
     jpeg_quality: int = 85,
 ) -> Optional[str]:
-    """Crop detection bounding box with +20% margin and encode to base64 JPEG."""
+    """Crop detection bounding box with +50% margin and encode to base64 JPEG."""
     if image is None or not isinstance(image, np.ndarray) or image.size == 0 or image.ndim != 3:
         return None
     try:
