@@ -151,11 +151,27 @@ global_costmap:
       robot_radius: 0.3
       footprint: "[]"
       resolution: 0.05
-      # Same contract as hardware (botman_nav2_params.yaml): follow the robot
-      # with a large rolling window so Nav2 can plan before a collaborative
-      # map arrives, and after it does, so a pose on the unknown fringe is
-      # not "outside" a static 5 m grid. Local costmaps stay live-sensor only.
-      rolling_window: true
+      # NOT rolling -- same contract as hardware (botman_nav2_params.yaml).
+      #
+      # This used to roll, to "plan before a collaborative map arrives". That
+      # concern is real but it is handled on the server, not here:
+      # MapService.nav_grid falls back to the robot's OWN raytraced grid when
+      # it is unmerged or a singleton, precisely so the static layer
+      # initializes immediately. So a static map is available as soon as the
+      # robot has uploaded anything, merged or not.
+      #
+      # What rolling cost instead was full-map planning. The window follows the
+      # robot, so the planner only ever saw 40 x 40 m -- while the maps being
+      # served measured 66.0 x 58.4 m (botman_0) and 56.9 x 45.6 m (aslan_0)
+      # live on 2026-08-25. Any goal past ~20 m fell outside the costmap and
+      # the global planner returned no path, while the rolling LOCAL costmap
+      # kept working: "local planning works, no full path" exactly.
+      #
+      # With a static_layer and rolling_window false, nav2 resizes the layered
+      # costmap to the incoming map's size, origin and resolution, so the two
+      # values below apply only before the first map arrives. Local costmaps
+      # stay live-sensor only.
+      rolling_window: false
       width: 40
       height: 40
       track_unknown_space: true

@@ -356,11 +356,15 @@ def _prune_optimized_maps(scopes: Any) -> list[str]:
 
 
 async def get_nav_map(request: Request, robot_id: str) -> Response:
-    """Merged occupancy warped into this robot's map frame, for Nav2.
+    """Occupancy in this robot's map frame, for Nav2's global costmap.
 
-    404 until the robot is in a multi-robot component. 304 if the caller
-    already has the current seq. Local costmaps must not subscribe to the
-    OccupancyGrid this becomes.
+    The merged grid warped into that frame once the robot is in a multi-robot
+    component, and the robot's OWN raytraced grid before then -- see
+    ``MapService.nav_grid``, which falls back deliberately so Nav2's static
+    layer initializes without waiting for a merge. 404 only when the robot has
+    no map at all. 304 if the caller already has the current seq.
+
+    Local costmaps must not subscribe to the OccupancyGrid this becomes.
     """
     wanted = request.headers.get("if-none-match")
     product = map_service.nav_grid(robot_id)

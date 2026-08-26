@@ -86,10 +86,10 @@ def test_global_static_layer_reads_the_collaborative_map():
         sim["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
     )
     assert static["map_topic"] == "/ns/global_map"
-    sim_global = sim["global_costmap"]["global_costmap"]["ros__parameters"]
-    assert sim_global["rolling_window"] is True
-    assert sim_global["width"] >= 40
-    assert sim_global["height"] >= 40
+    # rolling_window is asserted by test_global_costmap_is_not_a_rolling_window,
+    # which owns that property and records why it flipped. width/height are no
+    # longer meaningful here: a non-rolling costmap with a static_layer is
+    # resized to the incoming map, so those keys only cover startup.
     assert "static_layer" not in sim["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
 
     hardware = yaml.safe_load((CONFIG_DIR / "botman_nav2_params.yaml").read_text())
@@ -99,3 +99,62 @@ def test_global_static_layer_reads_the_collaborative_map():
     assert hw_static["map_topic"] == "/global_map"
     local_plugins = hardware["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
     assert "static_layer" not in local_plugins
+
+
+def _global_costmap(path: Path) -> dict:
+    raw = path.read_text().replace("<robot_namespace>", "ns")
+    doc = yaml.safe_load(raw) or {}
+    return (doc.get("global_costmap") or {}).get("global_costmap", {}).get(
+        "ros__parameters", {}
+    )
+
+
+def test_global_costmap_is_not_a_rolling_window():
+    """A rolling global costmap silently caps how far Nav2 can plan.
+
+    The window follows the robot, so the planner only ever sees width x height
+    around it no matter how large the map is. Measured live on 2026-08-25, the
+    back-end was serving 66.0 x 58.4 m to botman_0 and 56.9 x 45.6 m to
+    aslan_0 against a 40 x 40 m window: every goal past ~20 m fell outside the
+    costmap and the global planner returned no path.
+
+    The failure is nasty because nothing errors. The map publishes, the static
+    layer subscribes, and the LOCAL costmap (rolling, correctly) keeps planning
+    fine -- so it presents as "local navigation works, I just cannot get a full
+    path", which is a plausible description of about six unrelated bugs.
+
+    MapService.nav_grid serves the robot's own grid while it is unmerged, so a
+    static map exists from the first upload and there is no window during which
+    a non-rolling costmap leaves the planner with nothing.
+    """
+    files = sorted(CONFIG_DIR.glob("*nav2_params.yaml"))
+    assert files, "no nav2 params files found"
+
+    for path in files:
+        params = _global_costmap(path)
+        if not params:
+            continue
+        assert params.get("rolling_window") is False, (
+            f"{path.name}: global_costmap.rolling_window must be false -- a rolling "
+            "global costmap caps planning at its own width/height regardless of map size"
+        )
+        assert "static_layer" in (params.get("plugins") or []), (
+            f"{path.name}: a non-rolling global costmap needs the static_layer that "
+            "resizes it to the incoming map"
+        )
+
+
+def test_global_planner_may_traverse_unknown_space():
+    """The collaborative map is mostly unknown between explored regions.
+
+    With allow_unknown false the planner refuses to cross any of it, which
+    reproduces the same "no full path" symptom as the rolling window and would
+    survive fixing it.
+    """
+    for path in sorted(CONFIG_DIR.glob("*nav2_params.yaml")):
+        doc = yaml.safe_load(path.read_text().replace("<robot_namespace>", "ns")) or {}
+        planner = (doc.get("planner_server") or {}).get("ros__parameters", {})
+        for name in planner.get("planner_plugins") or []:
+            cfg = planner.get(name) or {}
+            if "allow_unknown" in cfg:
+                assert cfg["allow_unknown"] is True, f"{path.name}: {name}.allow_unknown"

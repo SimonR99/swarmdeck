@@ -42,8 +42,17 @@ def test_botman_params_are_humble_compatible_and_keep_live_local_costmap():
     assert "navigators" not in bt
     assert controller["progress_checker_plugin"] == "progress_checker"
     assert planner["plugin"] == "nav2_navfn_planner/NavfnPlanner"
-    # Rolling window keeps Nav2 usable before a collaborative map exists.
-    assert global_map["rolling_window"] is True
+    # NOT rolling. This asserted True until 2026-08-25, on the grounds that a
+    # rolling window "keeps Nav2 usable before a collaborative map exists".
+    # That is handled on the server instead: MapService.nav_grid serves a
+    # robot's OWN raytraced grid while it is unmerged, so the static layer has
+    # a map from the first upload. Verified live -- spot_0, online and in no
+    # component, got HTTP 200 from /api/map/nav/spot_0.
+    #
+    # Rolling cost full-map planning: the window follows the robot, so the
+    # planner saw 40 x 40 m of maps measuring 66.0 x 58.4 m (botman_0) and
+    # 56.9 x 45.6 m (aslan_0). See test_costmap_sources.py.
+    assert global_map["rolling_window"] is False
     assert "static_layer" in global_map["plugins"]
     assert global_map["static_layer"]["map_topic"] == "/global_map"
     # Collision authority stays on live sensors. A foreign map here is a crash.

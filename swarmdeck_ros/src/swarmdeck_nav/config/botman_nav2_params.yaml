@@ -183,14 +183,36 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 2.0
+      # 1 Hz, not 2. Un-rolling this costmap grows it from 400x400 cells to the
+      # size of the whole collaborative map (~1300x1170 at 5 cm), and both
+      # Bunkers run on Jetsons that are already CPU-bound. A static map does not
+      # need 2 Hz; the obstacle layer that does react quickly is on the local
+      # costmap at 5 Hz.
+      update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: os_lidar
-      rolling_window: true
+      # NOT rolling. A rolling global costmap is a window that follows the
+      # robot, so the planner can only ever see 40 x 40 m around it -- and the
+      # collaborative map is much larger than that. Measured live on
+      # 2026-08-25: botman_0's nav map was 66.0 x 58.4 m and aslan_0's
+      # 56.9 x 45.6 m, so a rolling window discarded most of both, and any goal
+      # beyond ~20 m fell outside the costmap entirely. The global planner then
+      # has no cells to search and returns no path, while the LOCAL costmap
+      # (rolling 8 x 8, above) keeps working perfectly -- which is exactly what
+      # "local planning works but I cannot get a full path" looks like.
+      #
+      # With rolling_window false and a static_layer present, nav2's StaticLayer
+      # resizes the whole layered costmap to the incoming map's size, origin AND
+      # resolution, so width/height/resolution below are only the values used
+      # before the first /global_map arrives.
+      rolling_window: false
       width: 40
       height: 40
-      resolution: 0.1
+      # Declared to match what the back-end actually serves (render.py's
+      # native_map_resolution). StaticLayer would override it regardless; saying
+      # 0.1 here only made the config look like it had a choice.
+      resolution: 0.05
       robot_radius: 0.77
       # Required for nav.launch.py to inject the real Bunker polygon. Without
       # this key RewrittenYaml silently leaves Nav2 on the circular fallback.
