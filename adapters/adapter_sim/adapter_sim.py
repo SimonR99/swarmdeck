@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zlib
 from pathlib import Path
@@ -59,6 +60,7 @@ from adapters.keyframe_producer import (
     points_lidar_to_map,
     pose7_from_xy_yaw,
 )
+from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
 
 # The platform table, imported from the spawner rather than restated here.
@@ -457,7 +459,16 @@ class RobotBridge(AdapterSensorMixin):
         self.camera_z = spec.camera_z
         self.lidar_x = spec.lidar_x
         self.lidar_z = spec.lidar_z
-        self._keyframes = KeyframeUploader(robot_id, http_url)
+        self._keyframes = KeyframeUploader(
+            robot_id,
+            http_url,
+            height_band={
+                "floor_z": -float(spec.base_height),
+                "min_z": 0.15,
+                "max_z": 1.8,
+            },
+            lidar_height_m=float(spec.base_height + spec.lidar_z),
+        )
         self._nav_map = NavMapClient(http_url, robot_id)
         self._scan_cloud_at = 0.0
 
@@ -474,6 +485,10 @@ class RobotBridge(AdapterSensorMixin):
         self.mode = "idle"
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
+        self._costmaps: dict[str, CostmapSnapshot] = {}
+        self._costmap_dirty: set[str] = set()
+        self._costmap_lock = threading.Lock()
+        self._costmap_warned_at: dict[str, float] = {}
         self._cloud: PointCloud2 | None = None
         self._cloud_dirty = False
         self._camera_frame: Image | None = None
@@ -518,6 +533,18 @@ class RobotBridge(AdapterSensorMixin):
         )
         node.create_subscription(
             OccupancyGrid, f"/{robot_id}/map", self._on_map, latched
+        )
+        node.create_subscription(
+            OccupancyGrid,
+            f"/{robot_id}/global_costmap/costmap",
+            lambda msg: self._on_costmap(msg, "global"),
+            qos_profile_sensor_data,
+        )
+        node.create_subscription(
+            OccupancyGrid,
+            f"/{robot_id}/local_costmap/costmap",
+            lambda msg: self._on_costmap(msg, "local"),
+            qos_profile_sensor_data,
         )
         self.pub_global_map = node.create_publisher(
             OccupancyGrid, f"/{robot_id}/global_map", latched
@@ -651,6 +678,46 @@ class RobotBridge(AdapterSensorMixin):
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
         self._grid_dirty = True
+
+    def _warn_costmap(self, kind: str, reason: str) -> None:
+        now = time.monotonic()
+        if now - self._costmap_warned_at.get(kind, 0.0) < 10.0:
+            return
+        self._costmap_warned_at[kind] = now
+        self.node.get_logger().warn(
+            f"[{self.id}] {kind} costmap unavailable for overlay: {reason}"
+        )
+
+    def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
+        """Capture Nav2's planner view without changing navigation inputs."""
+        source = str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).lstrip("/")
+        target = f"{self.id}/map_frame"
+        transform = (0.0, 0.0, 0.0)
+        if source and source != target:
+            expected_odom = f"{self.id}/odom"
+            if kind != "local" or source != expected_odom:
+                expected = expected_odom if kind == "local" else target
+                self._warn_costmap(
+                    kind, f"unsupported frame {source!r}; expected {expected!r}"
+                )
+                return
+            transform = (
+                float(self._map_to_odom["x"]),
+                float(self._map_to_odom["y"]),
+                float(self._map_to_odom["yaw"]),
+            )
+        try:
+            snapshot = normalize_costmap(
+                msg, target_frame=target, transform=transform
+            )
+        except (TypeError, ValueError) as exc:
+            self._warn_costmap(kind, str(exc))
+            return
+        with self._costmap_lock:
+            self._costmaps[kind] = snapshot
+            self._costmap_dirty.add(kind)
 
     def _pose7(self) -> np.ndarray:
         pose = self.map_pose()
@@ -1075,12 +1142,12 @@ class RobotBridge(AdapterSensorMixin):
     def _arm_escape(self) -> None:
         """Begin reversing out of a pose Nav2 could not plan from.
 
-        Armed on any aborted goal rather than on a costmap test, because the
-        adapter deliberately holds no costmap: Nav2 owns that, and duplicating
-        its inflation maths here to second-guess it would be a second source of
-        truth to keep in step. Reversing 0.45 m is harmless for the failures
-        this does not apply to, and it is the only thing that helps for the one
-        it does.
+        Armed on any aborted goal rather than on a costmap test, because this
+        adapter's costmap copy is visualization-only: Nav2 owns navigation, and
+        duplicating its inflation maths here to second-guess it would be a
+        second source of truth to keep in step. Reversing 0.45 m is harmless
+        for the failures this does not apply to, and it is the only thing that
+        helps for the one it does.
         """
         pose = self.map_pose()
         self._escape_from = (pose["x"], pose["y"])
@@ -1394,6 +1461,11 @@ class RobotBridge(AdapterSensorMixin):
             # the first detection that can be placed on the new map.
             self._camera_depth = None
             self._detections = None
+            costmap_lock = getattr(self, "_costmap_lock", None)
+            if costmap_lock is not None:
+                with costmap_lock:
+                    self._costmaps.clear()
+                    self._costmap_dirty.clear()
 
         self._reset_report = {
             "type": "reset_done",
@@ -1450,6 +1522,51 @@ class RobotBridge(AdapterSensorMixin):
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
+
+    def upload_costmaps(self) -> None:
+        """Push the newest global/local Nav2 snapshots to the read-only overlay."""
+        if not self._upload_lock.acquire(blocking=False):
+            return
+        try:
+            with self._costmap_lock:
+                pending = [
+                    (kind, self._costmaps[kind])
+                    for kind in tuple(self._costmap_dirty)
+                    if kind in self._costmaps
+                ]
+                for kind, _ in pending:
+                    self._costmap_dirty.discard(kind)
+
+            for kind, snapshot in pending:
+                body = zlib.compress(
+                    np.ascontiguousarray(snapshot.cells, dtype=np.int8).tobytes(), 1
+                )
+                frame = urllib.parse.quote(snapshot.frame_id, safe="")
+                url = (
+                    f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
+                    f"&kind={kind}&resolution={snapshot.resolution}"
+                    f"&width={snapshot.width}&height={snapshot.height}"
+                    f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
+                    f"&frame_id={frame}"
+                )
+                try:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url,
+                            data=body,
+                            headers={"Content-Type": "application/octet-stream"},
+                        ),
+                        timeout=25,
+                    ).read()
+                except Exception as exc:
+                    with self._costmap_lock:
+                        if self._costmaps.get(kind) is snapshot:
+                            self._costmap_dirty.add(kind)
+                    self.node.get_logger().warn(
+                        f"[{self.id}] {kind} costmap upload failed: {exc}"
+                    )
+        finally:
+            self._upload_lock.release()
 
     def process_camera(self) -> None:
         """Run perception on the newest local camera image.
@@ -1592,6 +1709,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         now = time.monotonic()
                         bridge.drive_watchdog()
                         bridge.escape_tick()
+                        await loop.run_in_executor(None, bridge.upload_costmaps)
                         if now - last_map > 2.0:
                             last_map = now
                             await loop.run_in_executor(None, bridge.upload_map)

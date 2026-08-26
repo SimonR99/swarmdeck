@@ -245,18 +245,52 @@ class AdapterSensorMixin:
         self.grid = msg
         self._grid_dirty = True
 
+    @staticmethod
+    def _battery_fraction(value: Any, *, whole_percent: bool = False) -> float | None:
+        """Normalise a battery percentage reported as either 0..1 or 0..100."""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or value < 0.0:
+            # sensor_msgs/BatteryState uses -1 for an unknown percentage.
+            return None
+        if whole_percent or value > 1.0:
+            value /= 100.0
+        return max(0.0, min(1.0, value))
+
     def _on_battery(self, msg) -> None:
+        # Spot publishes one BatteryState per pack inside a BatteryStateArray.
+        # The dashboard has one gauge, so use the lowest valid pack level: it
+        # is the safe whole-robot value when packs are not perfectly balanced.
+        if hasattr(msg, "battery_states"):
+            levels = []
+            for state in (getattr(msg, "battery_states", None) or []):
+                raw = getattr(
+                    state,
+                    "charge_percentage",
+                    getattr(state, "percentage", None),
+                )
+                # Spot's custom `charge_percentage` is explicitly 0..100,
+                # unlike sensor_msgs/BatteryState's 0..1 `percentage`.
+                level = self._battery_fraction(raw, whole_percent=True)
+                if level is not None:
+                    levels.append(level)
+            self.battery = min(levels) if levels else None
+            return
+
         if hasattr(msg, "percentage"):
-            value = float(msg.percentage)
-            if math.isnan(value):
-                self.battery = None
-                return
-            self.battery = value / 100.0 if value > 1.0 else max(0.0, min(1.0, value))
-        elif hasattr(msg, "battery_voltage") or hasattr(msg, "voltage"):
-            voltage = float(
-                getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan")))
-            )
-            if math.isnan(voltage) or voltage <= 0.0:
+            self.battery = self._battery_fraction(msg.percentage)
+            return
+
+        if hasattr(msg, "battery_voltage") or hasattr(msg, "voltage"):
+            try:
+                voltage = float(
+                    getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan")))
+                )
+            except (TypeError, ValueError):
+                voltage = float("nan")
+            if not math.isfinite(voltage) or voltage <= 0.0:
                 self.battery = None
                 return
             min_v = float(self.cfg.get("battery_voltage_min", 23.0))

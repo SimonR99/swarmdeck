@@ -28,6 +28,7 @@ footprint:
 # expects "map". Do not default this back to map/base_link; that pair does not exist here.
 map_frame: odom_lidar
 base_frame: base_link_filtered
+lidar_height_m: 0.575
 
 # Ouster is mounted above base_link_filtered; LVI-SAM's frame origin is roughly
 # the sensor's own start pose. The measured floor reference below is used to
@@ -48,12 +49,12 @@ base_frame: base_link_filtered
 # calibrated reference, not a claim that the floor is perfectly level across
 # the whole accumulated cloud; recalibrate it if the SLAM origin changes.
 #
-# The requested physical band is 0.150..1.000 m: 15 cm above the floor through
-# ~1.0 m obstacle height.
+# The requested physical band is 0.150..1.800 m: 15 cm above the floor through
+# 1.8 m obstacle height.
 map_cloud_height_band:
   floor_z: -0.575
   min_z: 0.150
-  max_z: 1.000
+  max_z: 1.800
 # Projection of map_global into the SwarmDeck OccupancyGrid.
 native_map_resolution: 0.05
 native_map_padding_m: 1.0
@@ -70,6 +71,9 @@ topics:
   # Live registered cloud from LVI-SAM used for raytraced 2D map, 3D keyframes, and 3D visualization.
   map_cloud: /lvi_sam/lidar/mapping/cloud_registered
   map_cloud_global: ""
+  # This ROS 1 profile has no Nav2 costmap publisher.
+  global_costmap: ""
+  local_costmap: ""
   # localPlanner's selected local path — the route it actually intends to drive,
   # ~100 poses at 10 Hz. Published in `chassis_link` (a VEHICLE frame, 0.476 m
   # below os_sensor — the same offset as the planner's own sensorOffsetZ), not

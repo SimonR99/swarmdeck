@@ -252,6 +252,7 @@ def setup(context, *args, **kwargs):
                 "grid_3d": str(grid_3d).lower(),
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
+                "floor_z": f"{-robot.base_height:.4f}",
             }
             slam_launch = "/launch/slam_rtabmap.launch.py"
         else:
@@ -264,6 +265,7 @@ def setup(context, *args, **kwargs):
                 "range_max": str(spec.range_max),
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
+                "floor_z": f"{-robot.base_height:.4f}",
             }
             slam_launch = "/launch/slam.launch.py"
 

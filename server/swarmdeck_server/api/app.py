@@ -29,7 +29,14 @@ from ..mapsvc.service import GridMeta, MapService, map_service
 # constants/helpers from ``api.app``. The route implementation now lives in
 # ``map_routes``; keeping these names here avoids a needless API break while
 # the FastAPI handlers remain thin composition-root wrappers.
-from .map_routes import CLOUD_SCALE, MAX_UPLOAD_BYTES, _inflate
+from .map_routes import (
+    CLOUD_SCALE,
+    MAX_UPLOAD_BYTES,
+    _inflate,
+    costmap_snapshots,
+    reset_costmaps,
+    take_costmap_patches,
+)
 
 # 2 adds one optional adapter message, `slam_graph`, carrying a robot's view of a
 # collaborative pose graph. Purely additive: a protocol-1 adapter never sends it
@@ -51,6 +58,7 @@ async def lifespan(_: FastAPI):
         asyncio.create_task(state_loop()),
         asyncio.create_task(map_loop()),
         asyncio.create_task(network_loop()),
+        asyncio.create_task(costmap_loop()),
         asyncio.create_task(session_loop()),
         # Registration runs here rather than inside each upload — see
         # MapService.registration_worker. Without this task the transforms in
@@ -165,6 +173,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         )
 
     map_service.__dict__.update(new_service.__dict__)
+    reset_costmaps()
     _camera_frames.clear()
     _detections.clear()
     # Deliberately does NOT persist. This runs at startup, before load_review(),
@@ -485,6 +494,14 @@ async def network_loop() -> None:
                 await broadcast(patch)
 
 
+async def costmap_loop() -> None:
+    """Fan out the latest global/local Nav2 costmap snapshots."""
+    while True:
+        await asyncio.sleep(0.5)
+        for patch in take_costmap_patches():
+            await broadcast(patch)
+
+
 async def session_loop() -> None:
     ticks = 0
     while True:
@@ -615,6 +632,8 @@ async def reset_fleet() -> dict[str, Any]:
         from ..mapsvc import graph_bridge
 
         await asyncio.to_thread(graph_bridge.post_reset)
+        reset_costmaps()
+        await broadcast({"type": "costmap_clear", "robot_id": None})
         await broadcast({"type": "network_clear", "robot_id": None})
         _detections.clear()
         # Validated objects describe the world before the reset. Keeping them
@@ -821,9 +840,23 @@ async def get_local_network(robot_id: str) -> Response:
     return await handler(robot_id)
 
 
+@app.get("/api/map/costmap/{robot_id}/{kind}")
+async def get_costmap(robot_id: str, kind: str) -> Response:
+    from .map_routes import get_costmap as handler
+
+    return await handler(robot_id, kind)
+
+
 @app.post("/api/adapter/map")
 async def post_map(request: Request) -> Any:
     from .map_routes import post_map as handler
+
+    return await handler(request)
+
+
+@app.post("/api/adapter/costmap")
+async def post_costmap(request: Request) -> Any:
+    from .map_routes import post_costmap as handler
 
     return await handler(request)
 
@@ -961,6 +994,8 @@ async def gui_socket(ws: WebSocket) -> None:
         await ws.send_json(session_state())
         await ws.send_json({"type": "settings_state", "settings": settings_store.value})
         await ws.send_json(review_state())
+        for costmap in costmap_snapshots():
+            await ws.send_json(costmap)
         for a in _alerts.values():
             await ws.send_json({"type": "alert", "alert": a})
 

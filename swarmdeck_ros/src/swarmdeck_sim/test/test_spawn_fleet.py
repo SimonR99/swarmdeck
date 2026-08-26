@@ -210,6 +210,14 @@ def test_every_robot_scans_for_neighbours_at_the_same_absolute_height(platform):
 
 
 @pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
+def test_every_mapping_lidar_height_is_measured_from_the_ground(platform):
+    """The map/keyframe filter needs the sensor height, not only its mount offset."""
+    spec = robot_spec(platform)
+    assert spec.base_height + spec.lidar_z > spec.base_height
+    assert spec.base_height + spec.lidar_z > 0.15
+
+
+@pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
 def test_the_bumper_scan_starts_outside_the_chassis(platform):
     """Inside it, every scan returns the robot's own body at zero range."""
     spec = robot_spec(platform)

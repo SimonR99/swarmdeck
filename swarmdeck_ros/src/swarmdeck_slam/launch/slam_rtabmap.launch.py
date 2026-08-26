@@ -68,6 +68,7 @@ def generate_launch_description() -> LaunchDescription:
     use_sim = LaunchConfiguration("use_sim_time")
     lidar_x = LaunchConfiguration("lidar_x")
     lidar_z = LaunchConfiguration("lidar_z")
+    floor_z = LaunchConfiguration("floor_z")
     deskew = LaunchConfiguration("deskew")
     use_camera = LaunchConfiguration("use_camera")
     force_3dof = LaunchConfiguration("force_3dof")
@@ -189,7 +190,7 @@ def generate_launch_description() -> LaunchDescription:
         "Grid/CellSize": "0.05",
         "Grid/RangeMax": rtab(range_max),
         "Grid/RayTracing": "true",
-        "Grid/MaxGroundHeight": "0.08",
+        "Grid/MaxGroundHeight": "0.15",
         "Grid/MaxObstacleHeight": "1.80",
         "Grid/NormalsSegmentation": "false",  # plain height split; the robot is planar
         "GridGlobal/MinSize": "30.0",
@@ -232,6 +233,12 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("deskew", default_value="false"),
             DeclareLaunchArgument("lidar_x", default_value="-0.07"),
             DeclareLaunchArgument("lidar_z", default_value="0.402"),
+            DeclareLaunchArgument(
+                "floor_z",
+                default_value="0.0",
+                description="Ground height in base_link for the physical "
+                "0.15..1.80 m obstacle band.",
+            ),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument(
                 "use_camera",
@@ -270,6 +277,7 @@ def generate_launch_description() -> LaunchDescription:
                     "use_sim_time": use_sim,
                     "mode": "flatten",
                     "range_max": range_max,
+                    "floor_z": floor_z,
                 }.items(),
             ),
             # Gazebo names the sensor frame <model>/<link>/<sensor>, which

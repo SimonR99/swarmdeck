@@ -209,6 +209,24 @@ export interface NetworkPatch {
   data: string;
 }
 
+export type CostmapKind = 'global' | 'local';
+
+/** Full read-only Nav2 planner-cost overlay, encoded top-down for canvas blitting. */
+export interface CostmapPatch {
+  type: 'costmap';
+  robot_id: string;
+  kind: CostmapKind;
+  seq: number;
+  resolution: number;
+  origin: Point;
+  width: number;
+  height: number;
+  frame_id?: string;
+  updated_at?: number;
+  /** base64(zlib(int8[])) top-down, -1 unknown / 0 free / 1..100 cost */
+  data: string;
+}
+
 export interface MapRegistration {
   score: number;
   overlap: number;
@@ -386,7 +404,9 @@ export type ServerMessage =
   | RobotState
   | MapPatch
   | NetworkPatch
+  | CostmapPatch
   | { type: 'network_clear'; robot_id: string | null }
+  | { type: 'costmap_clear'; robot_id: string | null }
   | SessionState
   | { type: 'fleet_change'; robots: RobotState[] }
   | { type: 'detection'; detection: Detection }

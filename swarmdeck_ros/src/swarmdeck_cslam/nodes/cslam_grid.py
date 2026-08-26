@@ -80,10 +80,12 @@ class CslamGrid(Node):
         self.declare_parameter("resolution", 0.05)
         self.declare_parameter("size_m", 30.0)
         self.declare_parameter("rebuild_period_s", 3.0)
-        # Only points in this height band become obstacles. Below is floor,
-        # above is ceiling; both would fill the map with false walls.
-        self.declare_parameter("min_height", 0.12)
-        self.declare_parameter("max_height", 1.60)
+        # Only points 0.15..1.80 m above the ground-aligned frame become
+        # obstacles. Below is floor, above is ceiling; both would fill the map
+        # with false walls. Override per robot when cslam's input frame has a
+        # different ground offset.
+        self.declare_parameter("min_height", 0.15)
+        self.declare_parameter("max_height", 1.80)
 
         count = int(self.get_parameter("robots").value)
         self.res = float(self.get_parameter("resolution").value)

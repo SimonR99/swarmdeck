@@ -32,11 +32,13 @@
   import {
     drawLoopClosures,
     drawMetricGrid,
+    drawCostmap,
     drawNetworkHeatmap,
     drawReviewedObjects,
     drawRobots,
     drawScaleBar,
-    hitTestReviewedObject
+    hitTestReviewedObject,
+    type MapInfo
   } from './mapLayers';
 
   let host = $state<HTMLDivElement | null>(null);
@@ -65,6 +67,8 @@
   let showSensors = $state(false);
   let showPlans = $state(true);
   let showNetwork = $state(true);
+  let showCostmap = $state(true);
+  let costmapKind = $state<'global' | 'local'>('global');
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
 
@@ -314,6 +318,7 @@
         ctx.drawImage(mask, 0, 0, gw, gh);
       }
       ctx.restore();
+      drawCostmap(ctx, view, showCostmap, viewedCostmapRobotId, costmapKind);
       drawNetworkHeatmap(ctx, screenOf, view, showNetwork);
     }
 
@@ -360,6 +365,8 @@
     void showSensors;
     void showPlans;
     void showNetwork;
+    void showCostmap;
+    void costmapKind;
     draw();
   });
 
@@ -565,6 +572,14 @@
       ? fleet.get(mapStore.viewRobot)?.network ?? null
       : (fleet.selected[0] ? fleet.get(fleet.selected[0])?.network : fleet.robots[0]?.network) ?? null
   );
+  const viewedCostmapRobotId = $derived(
+    mapStore.viewMode === 'local' && mapStore.viewRobot
+      ? mapStore.viewRobot
+      : fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null
+  );
+  const viewedCostmap = $derived(
+    mapStore.costmapLayer(viewedCostmapRobotId, costmapKind)
+  );
   const resetRobotBlocked = $derived(
     resetPending ||
       !resetRobot ||
@@ -696,6 +711,28 @@
           <span class="flex items-center gap-2"><Wifi class="h-3.5 w-3.5" /> Network heatmap</span>
           <span class="font-semibold {showNetwork ? 'text-accent' : 'text-fg-dim'}">{showNetwork ? 'ON' : 'OFF'}</span>
         </button>
+        <div class="mt-1 rounded-[--radius-control] bg-surface-2/60 px-1.5 py-1">
+          <button
+            class="flex h-8 w-full items-center justify-between rounded-[--radius-control] px-0 text-fg-muted hover:bg-surface-2"
+            title="Read-only Nav2 planner costmap for the selected robot"
+            onclick={() => (showCostmap = !showCostmap)}
+          >
+            <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Navigation costmap</span>
+            <span class="font-semibold {showCostmap ? 'text-accent' : 'text-fg-dim'}">{showCostmap ? 'ON' : 'OFF'}</span>
+          </button>
+          {#if showCostmap}
+            <div class="flex gap-1 border-t border-border pt-1">
+              <button
+                class="h-7 flex-1 rounded-[--radius-control] text-[9px] {costmapKind === 'global' ? 'bg-surface text-fg' : 'text-fg-dim hover:bg-surface'}"
+                onclick={() => (costmapKind = 'global')}
+              >Global</button>
+              <button
+                class="h-7 flex-1 rounded-[--radius-control] text-[9px] {costmapKind === 'local' ? 'bg-surface text-fg' : 'text-fg-dim hover:bg-surface'}"
+                onclick={() => (costmapKind = 'local')}
+              >Local</button>
+            </div>
+          {/if}
+        </div>
         <button
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           onclick={() => (show3D = !show3D)}
@@ -835,6 +872,23 @@
         style="background:linear-gradient(90deg, rgb(210 48 115), rgb(245 190 60), rgb(31 158 137))"
       ></div>
       <div class="mt-0.5 flex justify-between"><span>Poor</span><span>Fair</span><span>Good</span></div>
+    </div>
+  {/if}
+
+  {#if showCostmap && viewedCostmap}
+    <div
+      class="pointer-events-none absolute top-3 right-3 z-20 rounded-[--radius-control] border border-border
+             bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
+    >
+      <div class="mb-1 flex items-center justify-between gap-4">
+        <span class="font-semibold uppercase tracking-[0.07em]">Nav2 {costmapKind} cost</span>
+        <span class="font-mono text-fg-muted">#{viewedCostmap.seq}</span>
+      </div>
+      <div
+        class="h-1.5 w-44 rounded-full"
+        style="background:linear-gradient(90deg, rgb(250 194 55 / 35%), rgb(250 121 41 / 70%), rgb(250 48 27 / 95%))"
+      ></div>
+      <div class="mt-0.5 flex justify-between"><span>Inflation</span><span>Lethal</span></div>
     </div>
   {/if}
 

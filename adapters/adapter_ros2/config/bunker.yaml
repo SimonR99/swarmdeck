@@ -42,16 +42,17 @@ footprint:
 # transform connecting the trees, so os_lidar remains the honest SLAM pose.
 map_frame: map
 base_frame: os_lidar
+lidar_height_m: 0.520
 
 # /registered_scan is already transformed into `map`. SuperOdometry starts the
 # map at the lidar pose (about 0.520 m above the floor). The Bunker's nominal
 # collision height is 0.400 m, so the requested physical obstacle band is
-# 0.150..0.550 m above the floor. With floor_z present, the adapter converts
+# 0.150..1.800 m above the floor. With floor_z present, the adapter converts
 # these physical heights into registered-map Z limits.
 map_cloud_height_band:
   floor_z: -0.520
   min_z: 0.150
-  max_z: 0.550
+  max_z: 1.800
 retain_free_space: true
 
 topics:
@@ -65,6 +66,10 @@ topics:
   # DWB's selected local trajectory; the adapter displays this over the global
   # route because it is the path the controller is currently following.
   local_plan: /botman_0/local_plan
+  # Nav2 costmaps are visualization-only snapshots; the adapter never republishes
+  # them to the planner or merges them into SwarmDeck's occupancy map.
+  global_costmap: /botman_0/global_costmap/costmap
+  local_costmap: /botman_0/local_costmap/costmap
   cmd_vel: /cmd_vel       # bunker_messenger.hpp's absolute subscription
   # The base driver exposes battery_voltage in BunkerStatus, mapped to percentage (23.0V empty -> 29.2V full).
   battery: /bunker_status

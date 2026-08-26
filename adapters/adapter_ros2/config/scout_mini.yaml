@@ -31,15 +31,15 @@ footprint:
 # expects "map". Do not default this back to map/base_link; that pair does not exist here.
 map_frame: odom_lidar
 base_frame: base_link_filtered
+lidar_height_m: 0.575
 
 # LVI-SAM's registered map origin is approximately 0.575 m above the floor
-# (measured on tars). Scout Mini's nominal chassis height is 0.245 m, so keep
-# returns from 0.150..0.395 m above the floor. The adapter converts these
+# (measured on tars). Keep returns from 0.150..1.800 m above the floor. The adapter converts these
 # physical heights through floor_z before filtering the registered cloud.
 map_cloud_height_band:
   floor_z: -0.575
   min_z: 0.150
-  max_z: 0.395
+  max_z: 1.800
 retain_free_space: true
 
 topics:
@@ -68,6 +68,9 @@ topics:
   # would describe topics that do not exist.
   camera_depth: ""
   camera_info: ""
+  # This profile has no Nav2 costmap publisher.
+  global_costmap: ""
+  local_costmap: ""
 
 actions:
   # No move_base or Nav2 action server exists in this stack. tars drives via gbplanner +

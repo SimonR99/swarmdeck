@@ -49,6 +49,7 @@ def generate_launch_description() -> LaunchDescription:
     use_sim = LaunchConfiguration("use_sim_time")
     lidar_x = LaunchConfiguration("lidar_x")
     lidar_z = LaunchConfiguration("lidar_z")
+    floor_z = LaunchConfiguration("floor_z")
     rings = LaunchConfiguration("lidar_rings")
     multi_ring = IfCondition(PythonExpression(['"', rings, '" != "1"']))
     fuse_imu = LaunchConfiguration("fuse_imu")
@@ -72,6 +73,12 @@ def generate_launch_description() -> LaunchDescription:
             # from. See docs/operations/hardware-bringup.md.
             DeclareLaunchArgument("lidar_x", default_value="-0.07"),
             DeclareLaunchArgument("lidar_z", default_value="0.402"),
+            DeclareLaunchArgument(
+                "floor_z",
+                default_value="0.0",
+                description="Ground height in base_link for the physical "
+                "0.15..1.80 m obstacle band.",
+            ),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("lidar_rings", default_value="1"),
             DeclareLaunchArgument(
@@ -219,6 +226,7 @@ def generate_launch_description() -> LaunchDescription:
                     # 2D SLAM needs the horizontal ring itself, not a projection.
                     "mode": "slice",
                     "range_max": range_max,
+                    "floor_z": floor_z,
                 }.items(),
             ),
             Node(

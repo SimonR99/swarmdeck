@@ -118,6 +118,10 @@ def keyframe_from_packet(
         points=np.asarray(packet.points, dtype=np.float32),
         descriptor=descriptor,
         descriptor_kind=kind,
+        ground_z=packet.ground_z,
+        min_height=packet.min_height,
+        max_height=packet.max_height,
+        lidar_height=packet.lidar_height,
     )
 
 

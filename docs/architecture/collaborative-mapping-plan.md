@@ -103,7 +103,7 @@ conventions are stated in every module and guarded by tests that fail on inversi
 | `graph.py` | gtsam pose graph; GNC on loop closures only; PCM pre-filter on inter-robot edges; union-find components; per-component gauge anchor |
 | `descriptors.py` | Scan Context descriptor, rotation-invariant ring key, KD-tree candidate index returning a yaw prior |
 | `verify.py` | GICP geometric verification; hard rejection gates; information matrix from the Hessian |
-| `render.py` | Occupancy rendering from optimized poses; height band; vectorized free-space raytracing; per-component grids |
+| `render.py` | Occupancy rendering from optimized poses; per-keyframe ground-relative height bands; vectorized free-space raytracing; per-component grids |
 | `evaluation.py` | ATE / RPE, inter-robot transform error, component correctness, ablation tabulation |
 
 Structural rules enforced across all five: reuse the shared SE(3) helpers rather

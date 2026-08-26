@@ -55,21 +55,15 @@ from swarmdeck_slam.types import TrajectoryId
 # its -inf/+inf default was harmless only while the fleet was planar.
 #
 # Bounds are read in the KEYFRAME frame, which is base_link -- keyframe_producer
-# transforms map->base at capture. floor_z is therefore minus the platform's
-# base_link height above the floor (scout_mini: 0.1225, see spawn_fleet.py's
-# ROBOT_PROFILES), which puts the band at 0.0275..0.2725 in base_link. The band
-# itself reuses the calibrated hardware vocabulary from
-# adapters/adapter_ros1/config/scout_mini.yaml: 15 cm above the floor through
-# chassis height plus 15 cm.
-#
-# One band serves the whole fleet, which is correct while every robot shares a
-# chassis and wrong the moment a bunker (base_height 0.200) maps alongside a
-# scout_mini. Move it onto the keyframe rather than widening it if that happens:
-# a band wide enough for both admits the taller robot's floor returns.
+# transforms map->base at capture. Current producers carry their own ground
+# plane, lidar height, and physical 0.15..1.80 m band in the keyframe header;
+# the values below are only the compatibility fallback for old packets or a
+# profile without floor calibration. The environment variables remain useful
+# when replaying such legacy captures.
 RENDER = RenderConfig(
     floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "0.0")),
-    min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.08")),
-    max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "2.20")),
+    min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.15")),
+    max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "1.80")),
 )
 
 backend = CollaborativeBackend(render=RENDER)

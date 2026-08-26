@@ -30,12 +30,14 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
-# Nothing below this is an obstacle a robot can hit; it is the floor. Above the
-# lidar's own mount height there is nothing to see either, but a doorframe or a
-# low ceiling fixture is worth marking, so the top of the band is generous.
-FLATTEN_MIN_HEIGHT = 0.12
-FLATTEN_MAX_HEIGHT = 1.60
+# The flattening node targets `base_link`, not the lidar frame. `floor_z` is
+# therefore the ground height in that target frame and is supplied per robot
+# by session.launch.py (`-base_height` in simulation). Keep this physical band
+# identical to the adapter/keyframe map path: 15 cm above ground through 1.8 m.
+FLATTEN_MIN_HEIGHT = 0.15
+FLATTEN_MAX_HEIGHT = 1.80
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -43,6 +45,7 @@ def generate_launch_description() -> LaunchDescription:
     use_sim = LaunchConfiguration("use_sim_time")
     mode = LaunchConfiguration("mode")
     range_max = LaunchConfiguration("range_max")
+    floor_z = LaunchConfiguration("floor_z")
     flatten = IfCondition(PythonExpression(['"', mode, '" == "flatten"']))
     slice_mode = UnlessCondition(PythonExpression(['"', mode, '" == "flatten"']))
 
@@ -77,6 +80,12 @@ def generate_launch_description() -> LaunchDescription:
                 "flatten = project all obstacle heights down for Nav2",
             ),
             DeclareLaunchArgument("range_max", default_value="30.0"),
+            DeclareLaunchArgument(
+                "floor_z",
+                default_value="0.0",
+                description="Ground height in target_frame. For a simulated "
+                "base_link this is -base_height.",
+            ),
             Node(
                 package="pointcloud_to_laserscan",
                 executable="pointcloud_to_laserscan_node",
@@ -131,10 +140,21 @@ def generate_launch_description() -> LaunchDescription:
                     dict(
                         common,
                         # Gravity-aligned, so the band means height above the
-                        # floor rather than height above a tilting sensor.
+                        # floor rather than height above a tilting sensor. The
+                        # target frame's ground offset makes this physical.
                         target_frame=[ns, "/base_link"],
-                        min_height=FLATTEN_MIN_HEIGHT,
-                        max_height=FLATTEN_MAX_HEIGHT,
+                        min_height=ParameterValue(
+                            PythonExpression(
+                                [floor_z, " + ", str(FLATTEN_MIN_HEIGHT)]
+                            ),
+                            value_type=float,
+                        ),
+                        max_height=ParameterValue(
+                            PythonExpression(
+                                [floor_z, " + ", str(FLATTEN_MAX_HEIGHT)]
+                            ),
+                            value_type=float,
+                        ),
                         # A real TF lookup now happens per cloud, so this cannot
                         # be as tight as the in-frame slice above.
                         transform_tolerance=0.1,
