@@ -150,25 +150,37 @@
       {@const candidates = review.mergeCandidates(p)}
       <div animate:flip={{ duration: 250 }} class="relative flex flex-col items-start gap-1">
         <div
-          role="group"
+          role="button"
+          tabindex="0"
           aria-label="Detection proposal"
-          class="pointer-events-auto flex items-center gap-1 rounded-full border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl
+          onclick={() => selectProposal(p)}
+          onkeydown={(ev) => ev.key === 'Enter' && selectProposal(p)}
+          class="pointer-events-auto flex items-center gap-1.5 rounded-full border bg-surface/95 shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl cursor-pointer
                  transition-all
                  {review.selected === p.id || review.focused === p.id
-                   ? 'border-accent ring-2 ring-accent/30 scale-[1.04] p-1.5'
+                   ? 'border-accent ring-2 ring-accent/40 scale-[1.08] p-1.5 shadow-2xl bg-surface'
                    : 'border-border p-1'}"
           onmouseenter={() => review.focus(p.id)}
           onmouseleave={() => review.focus(null)}
         >
           <button
-            class="grid h-8 w-8 touch-target shrink-0 place-items-center rounded-full hover:bg-surface-2"
+            class="flex items-center gap-1.5 px-1.5 py-1 rounded-full hover:bg-surface-2 transition-colors shrink-0"
             title="{label(p.class)} · {Math.round(p.best_score * 100)}% · {seenBy(p.robot_ids)} · {p.observations} viewpoint{p.observations === 1 ? '' : 's'} · {p.position.x.toFixed(1)}, {p.position.y.toFixed(1)} m"
-            onclick={() => selectProposal(p)}
+            onclick={(e) => {
+              e.stopPropagation();
+              selectProposal(p);
+            }}
           >
             <span
-              class="h-2.5 w-2.5 rounded-full"
+              class="h-3 w-3 rounded-full transition-all shrink-0 {review.selected === p.id ? 'ring-2 ring-accent/50' : ''}"
               style="background:{detectionCatalog.colorOf(p.class)}"
             ></span>
+            <span class="text-[10px] font-semibold text-fg whitespace-nowrap">
+              {label(p.class)}
+              {#if review.selected === p.id}
+                <span class="ml-1 text-[8px] font-normal text-fg-dim">({Math.round(p.best_score * 100)}%)</span>
+              {/if}
+            </span>
           </button>
 
           <button
@@ -176,7 +188,10 @@
                    bg-ok/8 text-ok hover:bg-ok/15 disabled:opacity-40"
             disabled={settling}
             title={suggested ? 'Separate' : 'Accept'}
-            onclick={() => accept(p)}
+            onclick={(e) => {
+              e.stopPropagation();
+              accept(p);
+            }}
           >
             <Check class="h-3.5 w-3.5" />
           </button>
@@ -190,10 +205,12 @@
                      disabled:opacity-40"
               disabled={settling}
               title="Merge"
-              onclick={() =>
+              onclick={(e) => {
+                e.stopPropagation();
                 suggested && candidates.length === 1
                   ? merge(p, suggested.id)
-                  : (mergeOpen = mergeOpen === p.id ? null : p.id)}
+                  : (mergeOpen = mergeOpen === p.id ? null : p.id);
+              }}
             >
               <GitMerge class="h-3.5 w-3.5" />
             </button>
@@ -204,7 +221,10 @@
                    text-fg-dim hover:bg-surface-2 hover:text-fg disabled:opacity-40"
             disabled={settling}
             title="Ignore this object here, and stop asking about it"
-            onclick={() => ignore(p)}
+            onclick={(e) => {
+              e.stopPropagation();
+              ignore(p);
+            }}
           >
             <EyeOff class="h-3.5 w-3.5" />
           </button>
@@ -214,22 +234,32 @@
                    text-fg-dim hover:bg-danger/10 hover:text-danger disabled:opacity-40"
             disabled={settling}
             title="Delete this proposal"
-            onclick={() => forgetProposal(p)}
+            onclick={(e) => {
+              e.stopPropagation();
+              forgetProposal(p);
+            }}
           >
             <Trash2 class="h-3.5 w-3.5" />
           </button>
         </div>
 
-        {#if (review.focused === p.id || review.selected === p.id) && p.image}
+        {#if (review.focused === p.id || review.selected === p.id)}
           <div
-            class="pointer-events-none absolute left-full top-0 ml-2 z-50 flex flex-col items-center
+            class="pointer-events-none absolute left-full top-0 ml-3 z-50 flex flex-col items-center
                    overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
           >
-            <img
-              src={p.image}
-              alt="{label(p.class)} detection crop"
-              class="h-28 w-28 rounded-lg object-cover shadow-sm"
-            />
+            {#if p.image}
+              <img
+                src={p.image}
+                alt="{label(p.class)} detection crop"
+                class="h-32 w-32 rounded-lg object-cover shadow-sm"
+              />
+            {:else}
+              <div class="h-28 w-28 rounded-lg bg-surface-2 flex flex-col items-center justify-center p-2 text-center text-[9px] text-fg-dim">
+                <span>No crop image</span>
+                <span class="text-[8px] opacity-70 mt-1">Awaiting fresh sighting</span>
+              </div>
+            {/if}
             <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
               <span>{label(p.class)}</span>
               <span class="font-normal text-fg-dim">{Math.round(p.best_score * 100)}% conf</span>
