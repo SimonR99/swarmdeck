@@ -154,7 +154,28 @@ class VerifyConfig:
     this threshold sits just above that band. It exists because ratio and
     residual don't perfectly co-vary -- a large, sparse, coincidentally
     aligned false match can occasionally reach a passable ratio while
-    still fitting poorly."""
+    still fitting poorly.
+
+    MEASURED ON REAL DATA (2026-08-25, sessions/captures/3d-run-01), and it
+    does not match the fixture. Inter-robot candidates stratified by
+    ground-truth separation:
+
+                        p5     median    p95
+        true  (<8 m)   0.073    0.547   6.052
+        false (>=8 m)  0.083    0.334   7.961
+
+    Two things follow. The 0.15 default sits *below* the median true match on
+    real data, and rejects 52% of all inter-robot candidates. And the gate
+    barely discriminates at all here -- false pairs measured a LOWER median
+    than true ones, the opposite of the fixture's behaviour.
+
+    Relaxing it is measurable but small: ``tools/replay.py --ablate hessian
+    mean-err-0.6`` moves joint ATE 0.6604 -> 0.6526 m and robot_0's
+    inter-robot error 0.2342 -> 0.2238 m, with no false merges; 0.6 and 1.5
+    give identical results, so nothing above 0.6 is being rejected by this
+    gate. Left at 0.15 deliberately: ~1% on one dataset does not justify
+    loosening a gate that guards against false merges fourfold. Revisit with
+    a second ground-truthed capture."""
 
     max_translation_m: float = 15.0
     """Reject if the recovered `t_src_dst` translation exceeds this. A

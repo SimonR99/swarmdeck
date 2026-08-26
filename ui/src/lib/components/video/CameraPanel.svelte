@@ -306,25 +306,11 @@
 </script>
 
 <div
-  class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent
-         bg-surface {expanded ? 'h-full min-h-0' : 'min-h-[180px] flex-1'}"
+  class="panel-glow relative flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent
+         bg-surface-2 {expanded ? 'h-full min-h-0' : 'min-h-[180px] flex-1'}"
 >
-  <div class="flex h-9 shrink-0 items-center justify-between border-b border-border/70 px-3">
-    <div class="flex min-w-0 items-center gap-2">
-      <Radio class="h-3 w-3" style="color:{color}" />
-      <span class="truncate text-xs font-semibold" style="color:{color}">
-        {activeId ? robotDisplayName(activeId) : 'No camera'}
-      </span>
-    </div>
-    {#if streamState === 'connecting'}
-      <Badge tone="accent">Connecting</Badge>
-    {:else if streamState === 'unavailable'}
-      <Badge tone="warn">No signal</Badge>
-    {/if}
-  </div>
-
   <div
-    class="relative m-2 min-h-[100px] flex-1 overflow-hidden rounded-[--radius-control] border border-border/80 bg-surface-2"
+    class="relative h-full w-full flex-1 overflow-hidden"
   >
     <video
       bind:this={video}
