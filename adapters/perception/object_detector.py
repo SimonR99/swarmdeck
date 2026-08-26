@@ -12,6 +12,8 @@ trustworthy: a pool noodle lying diagonally filled 27% of its own bounding box
 in the reference frame, and the rest of that box is floor.
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import math
@@ -19,6 +21,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import Any, Sequence, Tuple, List, Optional, Union
 
 import cv2
 import numpy as np
