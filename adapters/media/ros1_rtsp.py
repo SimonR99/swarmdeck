@@ -96,11 +96,21 @@ class RosJpegRtspPublisher:
             else:
                 rospy.logerr("camera RTSP pipeline ended unexpectedly")
             self._failed.set()
-            rospy.signal_shutdown("RTSP pipeline stopped")
 
     def close(self) -> None:
-        self.source.emit("end-of-stream")
-        self.pipeline.set_state(Gst.State.NULL)
+        try:
+            if hasattr(self, "subscriber"):
+                self.subscriber.unregister()
+        except Exception:
+            pass
+        try:
+            self.source.emit("end-of-stream")
+        except Exception:
+            pass
+        try:
+            self.pipeline.set_state(Gst.State.NULL)
+        except Exception:
+            pass
 
 
 def main() -> None:
@@ -117,20 +127,30 @@ def main() -> None:
     if args.width < 1 or args.height < 1:
         parser.error("--width and --height must be positive")
 
-    rospy.init_node(f"swarmdeck_media_{args.robot_id}", anonymous=False)
-    publisher = RosJpegRtspPublisher(
-        args.topic,
-        args.rtsp_url,
-        args.bitrate_kbps,
-        max(1, args.fps),
-        args.width,
-        args.height,
-    )
-    rospy.loginfo(f"streaming {args.topic} to {args.rtsp_url}")
-    try:
-        rospy.spin()
-    finally:
-        publisher.close()
+    rospy.init_node(f"swarmdeck_media_{args.robot_id}", anonymous=True)
+    rospy.loginfo(f"initializing camera streamer for {args.topic} -> {args.rtsp_url}")
+
+    while not rospy.is_shutdown():
+        publisher = None
+        try:
+            publisher = RosJpegRtspPublisher(
+                args.topic,
+                args.rtsp_url,
+                args.bitrate_kbps,
+                max(1, args.fps),
+                args.width,
+                args.height,
+            )
+            rospy.loginfo(f"streaming {args.topic} to {args.rtsp_url}")
+            while not rospy.is_shutdown() and not publisher._failed.is_set():
+                time.sleep(0.5)
+        except Exception as exc:
+            rospy.logwarn(f"RTSP publisher error: {exc}; retrying in 2s...")
+        finally:
+            if publisher:
+                publisher.close()
+        if not rospy.is_shutdown():
+            time.sleep(2.0)
 
 
 if __name__ == "__main__":

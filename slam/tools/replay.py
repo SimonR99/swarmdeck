@@ -68,6 +68,12 @@ CONFIGS: dict[str, tuple[dict, dict]] = {
     # inter-robot candidates. It also barely discriminates -- false pairs
     # measured a LOWER median (0.334) than true ones. These sweep whether the
     # gate is earning its rejections or just throwing away closures.
+    # Seed GICP with the current estimate instead of yaw + zero translation.
+    # The yaw-only seed caps closure at ~max_correspondence_distance of true
+    # separation; see CollaborativeBackend.use_registration_prior.
+    "prior-none": ({"information": "hessian"}, {"registration_prior": "none"}),
+    "prior-intra": ({"information": "hessian"}, {"registration_prior": "intra"}),
+    "prior-all": ({"information": "hessian"}, {"registration_prior": "all"}),
     "mean-err-0.6": ({"information": "hessian", "max_mean_error": 0.6}, {}),
     "mean-err-1.5": ({"information": "hessian", "max_mean_error": 1.5}, {}),
     "inlier-0.80": ({"information": "hessian", "min_inlier_ratio": 0.80}, {}),

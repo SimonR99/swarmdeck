@@ -39,6 +39,7 @@ from swarmdeck_slam.types import (
     se3_distance,
     se3_from_quat_xyz,
     se3_identity,
+    se3_inverse,
     se3_relative,
 )
 from swarmdeck_slam.verify import VerifyConfig, verify_candidate
@@ -266,6 +267,54 @@ class CollaborativeBackend:
     those thresholds can actually be calibrated.
     """
 
+    registration_prior: str = "intra"
+    """Where to seed GICP with the current estimate of both keyframes, rather
+    than with place recognition's yaw and a zero translation.
+
+    ``"none"`` restores the yaw-only seed everywhere. ``"intra"`` (the
+    default) seeds only same-robot closures. ``"all"`` seeds inter-robot
+    closures too, once the robots share a frame.
+
+    ``"intra"`` rather than ``"all"``, measured on
+    ``sessions/captures/3d-run-01`` (``tools/replay.py --ablate``)::
+
+                        none      intra       all
+        joint ATE      0.6604    0.6501    0.6501   m
+        robot_0 RPE-5    5.92      3.56      3.56   deg
+        inter-robot    0.2342    0.2364    0.3001   m
+        relative pair  0.3977    0.4032    0.5061   m
+        inter closures     91        91        71
+
+    The trajectory gains come entirely from same-robot closures. Seeding
+    inter-robot ones makes the graph *worse* at the one number a
+    collaborative system exists to get right, and the mechanism is a feedback
+    loop: an inter-robot edge seeded from the current inter-robot estimate
+    tends to agree with that estimate, so it reinforces the transform instead
+    of correcting it. The closure count falling 91 -> 71 is the same story --
+    edges that merely echo the estimate stop being independent evidence, and
+    PCM has less genuine cross-checking to work with.
+
+    Same-robot closures are not exposed to this: they are seeded from one
+    robot's own frame, where the transform between two of its keyframes is
+    already pinned by its odometry chain, so the seed adds no information the
+    graph did not have and cannot bias what it does not determine.
+
+    ``verify_candidate``'s zero-translation seed silently caps loop closure at
+    roughly ``max_correspondence_distance`` (1.0 m) of true separation: beyond
+    that no point pair is within range and GICP returns near-identity. On
+    ``sessions/captures/3d-run-01`` the recovered transform error tracked the
+    ground-truth separation almost exactly in every band past 2 m, and 104 of
+    165 genuinely co-located inter-robot pairs were lost that way.
+
+    A prior is only ever used where it means something -- see
+    :meth:`_registration_prior`. Two robots that have not merged have no
+    known relative transform, so composing their frames would produce a
+    confident number with no basis; measured, that seed recovers 0 of 165
+    pairs, which is what an unrelated-frames guess deserves. Bootstrap
+    therefore always runs on the yaw-only path, which suffices because it
+    works where two robots are genuinely at the same spot (92% under 2 m).
+    """
+
     def __post_init__(self) -> None:
         self._graph = GtsamPoseGraph(
             pcm_confidence=self.pcm_confidence,
@@ -281,6 +330,8 @@ class CollaborativeBackend:
         self._last_of: dict[str, KeyframeId] = {}
         self.ambiguous_matches = 0
         self.implausible_hops = 0
+        self.primed_verifications = 0
+        self._last_solved: OptimizedGraph | None = None
         self._accepted = 0
         self._inter_robot = 0
         self._dirty = False
@@ -350,11 +401,14 @@ class CollaborativeBackend:
                 and target.id.robot_id != keyframe.id.robot_id
             ):
                 continue
+            prior = self._registration_prior(keyframe, target)
+            self.primed_verifications += int(prior is not None)
             edge = verify_candidate(
                 source=keyframe,
                 target=target,
                 yaw_prior=candidate.yaw,
                 config=self.verify,
+                t_target_source_prior=prior,
             )
             if edge is None:
                 continue
@@ -367,6 +421,47 @@ class CollaborativeBackend:
         self._dirty = True
         self._new_since_optimize += 1
         return True
+
+    def _registration_prior(
+        self, source: Keyframe, target: Keyframe
+    ) -> np.ndarray | None:
+        """``T_target_source`` from the last solved graph, or None.
+
+        None is returned whenever the estimate cannot actually place the two
+        keyframes in one frame, because a seed built from unrelated frames is
+        worse than no seed: it is a specific, confident wrong answer that GICP
+        will happily converge near. The cases:
+
+        * no solve yet -- nothing to seed from;
+        * ``target`` was not in the last solve;
+        * the two robots are in different components, meaning no verified
+          relative transform exists between them. This is the one that
+          matters. Using ``t_world_map`` across a component boundary would
+          compose two independent gauge choices and call the result a pose.
+
+        ``target`` is read from the solved poses directly. ``source`` is the
+        keyframe being ingested and so is not in the graph yet; it is placed
+        with its robot's ``t_world_map`` correction composed onto its own
+        live pose, which is exactly the use that quantity is documented for.
+        """
+        if self.registration_prior == "none":
+            return None
+        same_robot = source.id.robot_id == target.id.robot_id
+        if not same_robot and self.registration_prior != "all":
+            return None
+        solved = self._last_solved
+        if solved is None:
+            return None
+        target_pose = solved.poses.get(target.id)
+        if target_pose is None:
+            return None
+        if not solved.share_frame(source.id.robot_id, target.id.robot_id):
+            return None
+        correction = solved.t_world_map.get(source.id.robot_id)
+        if correction is None:
+            return None
+        t_world_source = correction @ source.t_odom_base
+        return se3_inverse(target_pose) @ t_world_source
 
     def _implausible_hop(self, t_src_dst: np.ndarray, dt_s: float) -> bool:
         """Whether a consecutive-keyframe transform is a frame discontinuity
@@ -424,6 +519,7 @@ class CollaborativeBackend:
         if not self._keyframes:
             return None
         optimized = self._graph.optimize()
+        self._last_solved = optimized
         grids, robot_grids = render_all(optimized, self._keyframes.values(), self.render)
         self._dirty = False
         self._new_since_optimize = 0
