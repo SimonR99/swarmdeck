@@ -267,7 +267,7 @@ class CollaborativeBackend:
     those thresholds can actually be calibrated.
     """
 
-    registration_prior: str = "intra"
+    registration_prior: str = "none"
     """Where to seed GICP with the current estimate of both keyframes, rather
     than with place recognition's yaw and a zero translation.
 
@@ -292,7 +292,27 @@ class CollaborativeBackend:
         closures (total / inter)   259/ 91   284/ 91   264/ 71
         t_world_map err r0 [m]      0.2342    0.3146    0.3001
 
-    ``"intra"`` because it captures the entire gain -- the two robots land
+    DEFAULTED TO "none" ON REAL DATA, reversing the choice below. The table
+    above is from 3d-run-01, a Gazebo run. On ``sessions/captures/hw-run-01``
+    (real hardware) seeding same-robot closures COSTS long-range loop closures,
+    which are the ones that matter -- aslan_0's closures at a sequence gap of
+    25 or more fell 90 -> 39, and its longest closure 103 -> 60 gaps.
+
+    The mechanism is the feedback loop named below, but it bites precisely
+    where the seed looked safest. A closure spanning a full tour is drifted by
+    exactly the amount that closure exists to correct, so seeding GICP at the
+    current estimate starts it far from the answer and it fails. Short-gap
+    closures, where the estimate is good, survive -- which is why the damage
+    shows up only in the long-gap tail and is invisible in a closure COUNT.
+    "Same-robot seeding cannot bias what odometry already pins" was wrong: the
+    odometry chain pins neighbours, and it is the accumulated drift BETWEEN
+    distant keyframes that a loop closure has to overrule.
+
+    Keep the option -- the cross-robot gain it showed on 3d-run-01 is real --
+    but it needs a gap-aware rule before it can be a default, seeding only
+    where the estimate has not had room to drift.
+
+    ``"intra"`` was chosen because it captures the entire gain -- the two robots land
     35% closer in translation and 58% closer in rotation *relative to each
     other* -- while ``"all"`` adds nothing and costs 20 inter-robot closures
     (91 -> 71). Those closures are what PCM cross-checks against, so trading

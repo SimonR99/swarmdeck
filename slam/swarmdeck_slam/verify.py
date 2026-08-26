@@ -144,7 +144,7 @@ class VerifyConfig:
     poorly-overlapping match is exactly the case that should be dropped
     rather than risk it."""
 
-    max_mean_error: float = 0.15
+    max_mean_error: float = 1.0
     """`result.error / num_inliers`: GICP's per-point Mahalanobis residual,
     averaged. Not directly convertible to metres (GICP's covariance
     weighting divides by the *surface-normal-direction* covariance, which
@@ -169,13 +169,34 @@ class VerifyConfig:
     barely discriminates at all here -- false pairs measured a LOWER median
     than true ones, the opposite of the fixture's behaviour.
 
-    Relaxing it is measurable but small: ``tools/replay.py --ablate hessian
-    mean-err-0.6`` moves joint ATE 0.6604 -> 0.6526 m and robot_0's
-    inter-robot error 0.2342 -> 0.2238 m, with no false merges; 0.6 and 1.5
-    give identical results, so nothing above 0.6 is being rejected by this
-    gate. Left at 0.15 deliberately: ~1% on one dataset does not justify
-    loosening a gate that guards against false merges fourfold. Revisit with
-    a second ground-truthed capture."""
+    RAISED 0.15 -> 1.0 on 2026-08-25, after a second capture showed what the
+    first only hinted at. On ``sessions/captures/hw-run-01`` (two Bunkers, real
+    hardware) botman_0 drove a full tour of a floor and closed ZERO long-range
+    loops -- its map never snapped back into alignment at the door it started
+    from. Place recognition was not at fault: it proposed 76 same-robot
+    candidates at a sequence gap of 25 or more, and this gate rejected 70 of
+    them. Every one. Sweeping it, long-gap closures accepted::
+
+        max_mean_error   botman_0   aslan_0   median |t|   max |t|
+                  0.15          0        90       0.30 m    1.17 m
+                  0.40         10       118       0.30 m    2.62 m
+                  0.60         19       133       0.35 m    2.62 m
+                  1.00         38       146       0.39 m    2.62 m
+                  2.00         45       148       0.40 m    2.62 m
+
+    The recovered transforms stay small and stable across the whole sweep, so
+    what the gate was rejecting was real closures, not garbage: a threshold
+    calibrated on the synthetic fixture (true matches 0.045-0.12) sitting well
+    below the median true match on real sensors (0.547 on 3d-run-01).
+
+    1.0 rather than higher because 0.6 and 1.5 were both validated against
+    GROUND TRUTH on 3d-run-01 -- joint ATE 0.6604 -> 0.6526 m, no false merges
+    -- and 1.0 sits inside that validated band while recovering most of what
+    botman_0 was losing. Note this gate barely discriminates on real data
+    anyway (false pairs measured a LOWER median, 0.334, than true ones), so
+    holding it tight bought recall loss rather than safety. The gates that do
+    the real work are min_inlier_ratio, min_inliers and the degeneracy
+    eigenvalue floors, backed by PCM and GNC in the graph."""
 
     max_translation_m: float = 15.0
     """Reject if the recovered `t_src_dst` translation exceeds this. A
