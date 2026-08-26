@@ -317,6 +317,28 @@ def inter_robot_transform_error(
     absent from the result rather than scored as infinite error -- that
     failure is a *component* failure, and :func:`score_components` is where it
     is counted, so it is not double-charged here.
+
+    CALLER CONTRACT: both frames must already be in the SAME gauge. This
+    compares them directly, with no alignment step, because the synthetic
+    fixture builds truth in the gauge the solver anchors in. Real ground truth
+    is not: it arrives in world coordinates while the graph anchors on one
+    keyframe, so every robot picks up the same rigid offset and this reports
+    it as per-robot error. ``tools/replay.py`` pre-multiplies truth by the
+    inverse of a joint ``align_rigid`` for exactly this reason -- uncorrected,
+    it read ~8.8 m for two robots that were within 0.2 m of each other.
+
+    KNOWN BLIND SPOT, and the reason not to tune against this number alone.
+    ``T_world_map`` is a single rigid frame fitted to a whole trajectory
+    (:meth:`~swarmdeck_slam.graph.GtsamPoseGraph._t_world_map`). When a change
+    improves the trajectory by altering its SHAPE rather than sliding it, the
+    best-fit frame moves as well, and its distance from truth's own best-fit
+    frame can grow while every individual pose gets closer to ground truth.
+    That is not hypothetical: enabling ``CollaborativeBackend``'s registration
+    prior worsens this metric (0.2342 -> 0.3146 m) while cross-robot relative
+    POSE error improves 1.9313 -> 1.2465 m on the same run. When the two
+    disagree, believe the pose-level measurement -- :func:`compute_ate`
+    aligns internally and is immune, and a direct cross-robot relative-pose
+    comparison routes through no summary at all.
     """
     common = sorted(set(estimated) & set(truth))
     if not common:
