@@ -67,9 +67,7 @@ def _spot_driver(context, *args, **kwargs):
 def _spot_camera(context, *args, **kwargs):
     if LaunchConfiguration("start_camera").perform(context) != "true":
         return []
-    overlay = Path(
-        "/app/swarmdeck/adapters/adapter_ros2/config/spot_d435.yaml"
-    )
+    overlay = Path("/app/swarmdeck/adapters/adapter_ros2/config/spot_d435.yaml")
     # Payload D435i color via usb_cam. Not Spot's body cameras — those stay
     # off so this container can be recreated without dropping the lease.
     return [
@@ -114,18 +112,14 @@ def generate_launch_description() -> LaunchDescription:
         package="vectornav",
         executable="vectornav",
         output="screen",
-        parameters=[
-            PathJoinSubstitution([mist_config, "drivers/driver_imu.yaml"])
-        ],
+        parameters=[PathJoinSubstitution([mist_config, "drivers/driver_imu.yaml"])],
         condition=IfCondition(start_slam),
     )
     vn_sensor_msgs = Node(
         package="vectornav",
         executable="vn_sensor_msgs",
         output="screen",
-        parameters=[
-            PathJoinSubstitution([mist_config, "drivers/driver_imu.yaml"])
-        ],
+        parameters=[PathJoinSubstitution([mist_config, "drivers/driver_imu.yaml"])],
         condition=IfCondition(start_slam),
     )
 

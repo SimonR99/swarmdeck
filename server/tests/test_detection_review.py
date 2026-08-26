@@ -217,7 +217,9 @@ def test_a_parked_robot_cannot_own_an_objects_position():
     of error out to 0.39 m. Averaging is supposed to buy accuracy.
     """
     s = store()
-    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    _, proposal = s.observe(
+        "robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0)
+    )
     entity = s.accept(proposal.id)
 
     # Same pose, 500 more frames, each with the same biased estimate.
@@ -231,7 +233,9 @@ def test_a_parked_robot_cannot_own_an_objects_position():
 
 def test_moving_to_a_new_vantage_point_does_count():
     s = store()
-    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    _, proposal = s.observe(
+        "robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0)
+    )
     entity = s.accept(proposal.id)
 
     # Drove around to the far side and saw it again.
@@ -244,7 +248,9 @@ def test_moving_to_a_new_vantage_point_does_count():
 def test_a_second_robot_always_contributes_its_first_look():
     """A different robot is a different viewpoint by definition."""
     s = store()
-    _, proposal = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0))
+    _, proposal = s.observe(
+        "robot_0", "rubber_duck", 0.0, 0.0, 0.9, observer=(2.0, 0.0)
+    )
     entity = s.accept(proposal.id)
 
     # robot_1 happens to be standing exactly where robot_0 is.
@@ -352,8 +358,14 @@ def test_reload_never_reuses_an_id():
 
 def test_unreadable_state_does_not_take_the_store_with_it():
     s = store()
-    for junk in (None, [], {"entities": "nope"}, {"entities": [{"no_id": 1}]},
-                 {"ignored": [{"class": "x"}]}, {"entities": [{"id": "e", "count": 0}]}):
+    for junk in (
+        None,
+        [],
+        {"entities": "nope"},
+        {"entities": [{"no_id": 1}]},
+        {"ignored": [{"class": "x"}]},
+        {"entities": [{"id": "e", "count": 0}]},
+    ):
         s.load_dict(junk)
     assert not s.entities and not s.proposals
 
@@ -382,7 +394,9 @@ def test_forget_proposal_removes_single_proposal_without_ignoring():
 
     assert s.forget_proposal(duck.id) is True
     assert not s.proposals
-    assert not s.ignored, "forgetting a proposal must not add an ignore suppression zone"
+    assert (
+        not s.ignored
+    ), "forgetting a proposal must not add an ignore suppression zone"
     assert s.forget_proposal(duck.id) is False
 
 
@@ -419,7 +433,9 @@ def test_delete_all_clears_both_confirmed_and_proposals():
 
 
 def test_cross_class_merge_folds_within_same_radius():
-    s = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True)
+    s = ReviewStore(
+        same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True
+    )
     _, first = s.observe("robot_0", "rubber_duck", 2.0, 3.0, 0.8)
     entity = s.accept(first.id)
 
@@ -431,7 +447,9 @@ def test_cross_class_merge_folds_within_same_radius():
 
 
 def test_cross_class_merge_suggests_and_merges_different_classes():
-    s = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True)
+    s = ReviewStore(
+        same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True
+    )
     _, first = s.observe("robot_0", "rubber_duck", 0.0, 0.0, 0.9)
     entity = s.accept(first.id)
 
@@ -446,12 +464,12 @@ def test_cross_class_merge_suggests_and_merges_different_classes():
 
 
 def test_cross_class_merge_suppresses_across_classes():
-    s = ReviewStore(same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True)
+    s = ReviewStore(
+        same_radius=0.5, ask_radius=1.5, ignore_radius=1.0, cross_class_merge=True
+    )
     _, proposal = s.observe("robot_0", "rubber_duck", 4.0, 4.0, 0.8)
     assert s.ignore(proposal.id) is True
 
     outcome, target = s.observe("robot_1", "disc_cone", 4.1, 4.05, 0.8)
     assert outcome == "suppressed"
     assert target is None
-
-

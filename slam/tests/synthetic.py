@@ -75,9 +75,15 @@ def make_scene(seed: int = 0, spacing: float = 0.08) -> np.ndarray:
     return scene.astype(np.float64)
 
 
-def observe(scene: np.ndarray, t_world_base: np.ndarray, *, azimuth_bins: int = 720,
-            max_range: float = MAX_RANGE, noise: float = 0.01,
-            rng: np.random.Generator | None = None) -> np.ndarray:
+def observe(
+    scene: np.ndarray,
+    t_world_base: np.ndarray,
+    *,
+    azimuth_bins: int = 720,
+    max_range: float = MAX_RANGE,
+    noise: float = 0.01,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
     """Render a lidar view of ``scene`` from a pose, in the **base frame**.
 
     Keeping only the nearest return per azimuth bin approximates occlusion. Without
@@ -93,7 +99,11 @@ def observe(scene: np.ndarray, t_world_base: np.ndarray, *, azimuth_bins: int = 
         return np.zeros((0, 3), dtype=np.float32)
 
     azimuth = np.arctan2(local[:, 1], local[:, 0])
-    bins = np.clip(((azimuth + np.pi) / (2 * np.pi) * azimuth_bins).astype(int), 0, azimuth_bins - 1)
+    bins = np.clip(
+        ((azimuth + np.pi) / (2 * np.pi) * azimuth_bins).astype(int),
+        0,
+        azimuth_bins - 1,
+    )
     # Nearest-per-bin via a sort on (bin, distance) and taking each bin's first row.
     order = np.lexsort((distance, bins))
     keep = order[np.concatenate([[True], np.diff(bins[order]) != 0])]
@@ -166,7 +176,9 @@ def simulate_robot(
         points = observe(scene, t_world_base, rng=rng)
 
         travelled = 0.0 if i == 0 else float(samples[i] - samples[i - 1])
-        drift += rng.normal(scale=[drift_per_metre * travelled] * 2 + [yaw_drift_per_metre * travelled])
+        drift += rng.normal(
+            scale=[drift_per_metre * travelled] * 2 + [yaw_drift_per_metre * travelled]
+        )
         t_odom_base = yaw_pose(
             float(xs[i] + drift[0]), float(ys[i] + drift[1]), float(yaws[i] + drift[2])
         )
@@ -194,7 +206,10 @@ def two_robot_fleet(seed: int = 0) -> tuple[np.ndarray, list[SyntheticRobot]]:
     """
     scene = make_scene(seed)
     alpha = simulate_robot(
-        scene, "alpha", [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)], seed=seed + 1
+        scene,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        seed=seed + 1,
     )
     beta = simulate_robot(
         scene,
@@ -260,7 +275,9 @@ def restarted_robot(
     """
     scene = make_scene(seed)
     before = simulate_robot(
-        scene, "alpha", [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        scene,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
         seed=seed + 1,
     )
     route = (
@@ -269,7 +286,9 @@ def restarted_robot(
         else [(30.0, 6.0), (36.0, 6.0), (36.0, 20.0), (30.0, 20.0), (30.0, 6.0)]
     )
     after = simulate_robot(
-        scene, "alpha", route,
+        scene,
+        "alpha",
+        route,
         seed=seed + 7,
         session=session,
         # Stamps continue past the first tour: the reboot took a minute, and
@@ -295,12 +314,18 @@ def disjoint_fleet(seed: int = 0) -> tuple[list[np.ndarray], list[SyntheticRobot
     scene_a = make_scene(seed)
     scene_b = make_scene(seed + 500)
     alpha = simulate_robot(
-        scene_a, "alpha", [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
-        seed=seed + 1, scene_id="building_a",
+        scene_a,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        seed=seed + 1,
+        scene_id="building_a",
     )
     beta = simulate_robot(
-        scene_b, "beta", [(30.0, 6.0), (36.0, 6.0), (36.0, 20.0), (30.0, 20.0), (30.0, 6.0)],
-        seed=seed + 2, scene_id="building_b",
+        scene_b,
+        "beta",
+        [(30.0, 6.0), (36.0, 6.0), (36.0, 20.0), (30.0, 20.0), (30.0, 6.0)],
+        seed=seed + 2,
+        scene_id="building_b",
     )
     return [scene_a, scene_b], [alpha, beta]
 

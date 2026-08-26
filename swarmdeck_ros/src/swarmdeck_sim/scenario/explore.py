@@ -75,8 +75,8 @@ from sensor_msgs.msg import LaserScan
 # 0.27 + 1.33 = 1.60 m reproduce the old STOP_DIST and CLEAR_DIST exactly. So a
 # fleet of Duckiebots behaves identically, and an AgileX Bunker (r = 0.64 m)
 # now stops at 1.27 m instead of driving to 0.90 m and wedging its nose.
-STOP_CLEARANCE = 0.63    # metres beyond the chassis: rotate in place below this
-OPEN_CLEARANCE = 1.33    # metres beyond the chassis: considered open
+STOP_CLEARANCE = 0.63  # metres beyond the chassis: rotate in place below this
+OPEN_CLEARANCE = 1.33  # metres beyond the chassis: considered open
 # A robot rotating in place sweeps its circumscribed radius in every direction.
 # Committing to a turn without this much room to the side is how two robots that
 # have already stopped for each other grind together instead of backing off —
@@ -181,18 +181,22 @@ class Explorer(Node):
             # and RTAB-Map reported a one-node map. Nothing logged an error:
             # incompatible QoS is a warning on the PUBLISHER's side.
             self.create_subscription(
-                LaserScan, f"/{rid}/scan",
+                LaserScan,
+                f"/{rid}/scan",
                 (lambda r: lambda m: self.scan.__setitem__(r, m))(rid),
                 qos_profile_sensor_data,
             )
             self.create_subscription(
-                LaserScan, f"/{rid}/proximity_scan",
+                LaserScan,
+                f"/{rid}/proximity_scan",
                 (lambda r: lambda m: self.bumper.__setitem__(r, m))(rid),
                 qos_profile_sensor_data,
             )
             self.create_subscription(
-                Odometry, f"/{rid}/odom",
-                (lambda r: lambda m: self._on_odom(r, m))(rid), 10,
+                Odometry,
+                f"/{rid}/odom",
+                (lambda r: lambda m: self._on_odom(r, m))(rid),
+                10,
             )
             self.pubs[rid] = self.create_publisher(Twist, f"/{rid}/cmd_vel", 10)
             self.turn_dir[rid] = 1.0
@@ -239,7 +243,9 @@ class Explorer(Node):
         """Minimum finite range in an angular sector, metres (inf if empty)."""
         r = np.asarray(scan.ranges, dtype=np.float64)
         ang = scan.angle_min + np.arange(len(r)) * scan.angle_increment
-        lo, hi = math.radians(centre_deg - half_deg), math.radians(centre_deg + half_deg)
+        lo, hi = math.radians(centre_deg - half_deg), math.radians(
+            centre_deg + half_deg
+        )
         sel = (ang >= lo) & (ang <= hi) & np.isfinite(r) & (r > scan.range_min)
         return float(r[sel].min()) if sel.any() else float("inf")
 
@@ -251,7 +257,9 @@ class Explorer(Node):
             default=float("inf"),
         )
 
-    def _error_to(self, rid: str, target: tuple[float, float]) -> tuple[float, float] | None:
+    def _error_to(
+        self, rid: str, target: tuple[float, float]
+    ) -> tuple[float, float] | None:
         """Distance and bearing from a robot to a target in its OWN odom frame."""
         pose = self.pose.get(rid)
         if pose is None:
@@ -523,20 +531,30 @@ def main() -> None:
     ap.add_argument("--prefix", default="robot_")
     ap.add_argument("--seconds", type=float, default=180.0)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--loop-period", type=float, default=90.0,
-                    help="seconds of exploring between legs back to the start "
-                         "pose, which is what guarantees a loop closure per "
-                         "cycle. 0 disables homing and wanders throughout.")
-    ap.add_argument("--start-poses", default="",
-                    help="JSON {robot_id: {x, y, yaw}} of world-frame spawn "
-                         "poses. Enables scheduled pair rendezvous, which is "
-                         "what makes INTER-robot loop closure reliable rather "
-                         "than incidental. Without it only homing runs.")
-    ap.add_argument("--radii", default="",
-                    help="JSON {robot_id: circumscribed_radius_m}. Every "
-                         "clearance this node uses is measured from the "
-                         "chassis, so a mixed fleet needs one per robot. "
-                         "Omitted robots fall back to the Duckiebot's 0.27 m.")
+    ap.add_argument(
+        "--loop-period",
+        type=float,
+        default=90.0,
+        help="seconds of exploring between legs back to the start "
+        "pose, which is what guarantees a loop closure per "
+        "cycle. 0 disables homing and wanders throughout.",
+    )
+    ap.add_argument(
+        "--start-poses",
+        default="",
+        help="JSON {robot_id: {x, y, yaw}} of world-frame spawn "
+        "poses. Enables scheduled pair rendezvous, which is "
+        "what makes INTER-robot loop closure reliable rather "
+        "than incidental. Without it only homing runs.",
+    )
+    ap.add_argument(
+        "--radii",
+        default="",
+        help="JSON {robot_id: circumscribed_radius_m}. Every "
+        "clearance this node uses is measured from the "
+        "chassis, so a mixed fleet needs one per robot. "
+        "Omitted robots fall back to the Duckiebot's 0.27 m.",
+    )
     args = ap.parse_args()
 
     radii: dict[str, float] = {}
@@ -562,7 +580,10 @@ def main() -> None:
     ids = [f"{args.prefix}{i}" for i in range(args.robots)]
     starts = {rid: pose for rid, pose in starts.items() if rid in ids}
     node = Explorer(
-        ids, seed=args.seed, loop_period=args.loop_period, starts=starts,
+        ids,
+        seed=args.seed,
+        loop_period=args.loop_period,
+        starts=starts,
         radii={rid: r for rid, r in radii.items() if rid in ids},
     )
     node._set_rendezvous(node.cycle)

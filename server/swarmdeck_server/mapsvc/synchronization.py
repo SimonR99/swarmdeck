@@ -31,7 +31,9 @@ class PatchCapture:
 class SnapshotStore:
     """Publish and advance map snapshots without exposing mixed state."""
 
-    def __init__(self, meta: GridMeta, merged: np.ndarray, previous: np.ndarray) -> None:
+    def __init__(
+        self, meta: GridMeta, merged: np.ndarray, previous: np.ndarray
+    ) -> None:
         self._lock = threading.Lock()
         self._snapshot = make_snapshot(meta, merged, previous, 0)
 
@@ -43,9 +45,7 @@ class SnapshotStore:
         """Copy one working-map generation and preserve the patch baseline."""
         with self._lock:
             previous = self._snapshot
-            baseline = expand_patch_baseline(
-                previous.patch_prev, previous.meta, meta
-            )
+            baseline = expand_patch_baseline(previous.patch_prev, previous.meta, meta)
             self._snapshot = make_snapshot(meta, merged, baseline, previous.seq)
             return self._snapshot
 

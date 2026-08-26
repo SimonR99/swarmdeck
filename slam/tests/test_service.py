@@ -89,7 +89,8 @@ def _wait_for_ingest(client, segments):
     """
     total = sum(len(robot.keyframes) for robot in segments)
     return _wait_for(
-        client, lambda s: s["keyframes"] == total and s["has_snapshot"] and not s["dirty"]
+        client,
+        lambda s: s["keyframes"] == total and s["has_snapshot"] and not s["dirty"],
     )
 
 
@@ -118,7 +119,9 @@ def test_a_trajectory_can_be_excluded_and_put_back(slam_client) -> None:
     _post_fleet(slam_client, segments)
     _wait_for_ingest(slam_client, segments)
 
-    response = slam_client.post("/trajectories/select", json={"exclude": ["alpha@boot-2"]})
+    response = slam_client.post(
+        "/trajectories/select", json={"exclude": ["alpha@boot-2"]}
+    )
     assert response.status_code == 200, response.text
     assert response.json()["changed"] == 1
 
@@ -132,14 +135,16 @@ def test_a_trajectory_can_be_excluded_and_put_back(slam_client) -> None:
     assert excluded["included"] is False
     assert excluded["keyframes"] == len(segments[1].keyframes), "excluded means stored"
 
-    assert slam_client.post(
-        "/trajectories/select", json={"include": ["alpha@boot-2"]}
-    ).status_code == 200
+    assert (
+        slam_client.post(
+            "/trajectories/select", json={"include": ["alpha@boot-2"]}
+        ).status_code
+        == 200
+    )
     status = _wait_for(
         slam_client,
-        lambda s: s["keyframe_counts"].get("alpha") == sum(
-            len(robot.keyframes) for robot in segments
-        ),
+        lambda s: s["keyframe_counts"].get("alpha")
+        == sum(len(robot.keyframes) for robot in segments),
     )
     assert all(row["included"] for row in status["trajectories"])
 
@@ -162,12 +167,16 @@ def test_selecting_a_subset_rebuilds_the_map_from_it(slam_client) -> None:
 
 def test_a_malformed_selection_is_refused(slam_client) -> None:
     assert slam_client.post("/trajectories/select", json={}).status_code == 400
-    assert slam_client.post(
-        "/trajectories/select", json={"exclude": [3]}
-    ).status_code == 400
-    assert slam_client.post(
-        "/trajectories/select", json={"exclude": ["@nobody"]}
-    ).status_code == 400
+    assert (
+        slam_client.post("/trajectories/select", json={"exclude": [3]}).status_code
+        == 400
+    )
+    assert (
+        slam_client.post(
+            "/trajectories/select", json={"exclude": ["@nobody"]}
+        ).status_code
+        == 400
+    )
 
 
 def test_capture_resumes_instead_of_overwriting(tmp_path, monkeypatch) -> None:
@@ -193,7 +202,9 @@ def test_capture_resumes_instead_of_overwriting(tmp_path, monkeypatch) -> None:
     assert (keyframes / "000008.kf").read_bytes() == b"new-a"
     assert (keyframes / "000009.kf").read_bytes() == b"new-b"
     for i in (0, 1, 2, 7):
-        assert (keyframes / f"{i:06d}.kf").read_bytes() == b"old", "clobbered an existing capture"
+        assert (
+            keyframes / f"{i:06d}.kf"
+        ).read_bytes() == b"old", "clobbered an existing capture"
 
 
 def test_capture_starts_at_zero_in_a_fresh_directory(tmp_path, monkeypatch) -> None:

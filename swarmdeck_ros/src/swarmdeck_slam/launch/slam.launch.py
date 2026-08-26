@@ -78,23 +78,23 @@ def generate_launch_description() -> LaunchDescription:
                 "range_max",
                 default_value="30.0",
                 description="Mapping lidar's maximum range. Passed down from the "
-                            "fleet's lidar profile so SLAM and the sensor agree.",
+                "fleet's lidar profile so SLAM and the sensor agree.",
             ),
             DeclareLaunchArgument(
                 "fuse_covariance",
                 default_value="false",
                 description="Feed the EKF covariance_relay.py's restamped topics "
-                            "instead of Gazebo's all-zero-covariance ones. OFF by "
-                            "default because it was measured to make this filter "
-                            "10x worse; see ekf.yaml.",
+                "instead of Gazebo's all-zero-covariance ones. OFF by "
+                "default because it was measured to make this filter "
+                "10x worse; see ekf.yaml.",
             ),
             DeclareLaunchArgument(
                 "fuse_imu",
                 default_value="true",
                 description="Fuse wheel odometry with the gyro and publish "
-                            "odom -> base_link from the EKF instead of the drive "
-                            "plugin. Wheel odometry alone was measured up to 30 m "
-                            "and 244 deg wrong.",
+                "odom -> base_link from the EKF instead of the drive "
+                "plugin. Wheel odometry alone was measured up to 30 m "
+                "and 244 deg wrong.",
             ),
             # Only started when something on this path actually consumes it.
             # `fuse_covariance` is off by default (see ekf.yaml for the
@@ -153,9 +153,14 @@ def generate_launch_description() -> LaunchDescription:
                 name="lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", lidar_x, "--z", lidar_z,
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/lidar"],
+                    "--x",
+                    lidar_x,
+                    "--z",
+                    lidar_z,
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/lidar"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -173,8 +178,10 @@ def generate_launch_description() -> LaunchDescription:
                 name="imu_tf",
                 namespace=ns,
                 arguments=[
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/imu"],
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/imu"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -185,9 +192,14 @@ def generate_launch_description() -> LaunchDescription:
                 name="proximity_lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", "0.24", "--z", "0.05",
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/proximity_lidar"],
+                    "--x",
+                    "0.24",
+                    "--z",
+                    "0.05",
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/proximity_lidar"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -195,7 +207,10 @@ def generate_launch_description() -> LaunchDescription:
             # A multi-ring lidar's LaserScan is not a planar slice, so derive one.
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_slam"), "/launch/cloud_to_scan.launch.py"]
+                    [
+                        FindPackageShare("swarmdeck_slam"),
+                        "/launch/cloud_to_scan.launch.py",
+                    ]
                 ),
                 condition=multi_ring,
                 launch_arguments={

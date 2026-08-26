@@ -7,7 +7,6 @@ import subprocess
 import threading
 from pathlib import Path
 
-
 REPO = Path(__file__).resolve().parents[2]
 FLEET_ENV = REPO / "deploy/fleet.env"
 PROFILE_DIR = REPO / "deploy/robots"
@@ -75,7 +74,9 @@ def test_deployment_uses_one_repo_key_and_no_separate_media_host():
         for path in root.iterdir()
         if path.is_file()
     )
-    assert not (LEGACY_KEYS & set(re.findall(r"\b[A-Z][A-Z0-9_]*\b", deployment_source)))
+    assert not (
+        LEGACY_KEYS & set(re.findall(r"\b[A-Z][A-Z0-9_]*\b", deployment_source))
+    )
     for compose_name in COMPOSE_BY_PROFILE.values():
         compose = (COMPOSE_DIR / compose_name).read_text()
         assert "BACKEND_HOST" in compose
@@ -184,8 +185,7 @@ def test_deploy_verify_checks_live_backend_registration():
 
 def test_deploy_verify_accepts_running_healthy_containers(tmp_path):
     fake_docker = tmp_path / "docker"
-    fake_docker.write_text(
-        """#!/usr/bin/env bash
+    fake_docker.write_text("""#!/usr/bin/env bash
 set -eu
 [[ $1 == inspect && $2 == -f ]] || exit 2
 case $3 in
@@ -193,8 +193,7 @@ case $3 in
   '{{if .State.Health}}{{.State.Health.Status}}{{end}}') echo healthy ;;
   *) echo "$FAKE_REPO" ;;
 esac
-"""
-    )
+""")
     fake_docker.chmod(0o755)
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FleetHandler)

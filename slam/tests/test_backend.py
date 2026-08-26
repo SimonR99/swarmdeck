@@ -48,7 +48,9 @@ def shared_snapshot():
     return snapshot, fleet
 
 
-def test_robots_sharing_a_building_merge_through_the_online_backend(shared_snapshot) -> None:
+def test_robots_sharing_a_building_merge_through_the_online_backend(
+    shared_snapshot,
+) -> None:
     snapshot, fleet = shared_snapshot
     components = snapshot.optimized.components
     assert len(components) == 1
@@ -122,10 +124,12 @@ def _thicken_planar(points: np.ndarray) -> np.ndarray:
     """What adapter_sim does with a 2D lidar: copy the ring at a few heights."""
     xy = np.asarray(points, dtype=np.float32).copy()
     xy[:, 2] = 0.0
-    return np.vstack([
-        np.column_stack([xy[:, 0], xy[:, 1], np.full(len(xy), z, dtype=np.float32)])
-        for z in (0.0, 0.12, 0.24)
-    ])
+    return np.vstack(
+        [
+            np.column_stack([xy[:, 0], xy[:, 1], np.full(len(xy), z, dtype=np.float32)])
+            for z in (0.0, 0.12, 0.24)
+        ]
+    )
 
 
 def test_planar_thickened_scans_still_merge_two_robots() -> None:
@@ -180,9 +184,9 @@ def test_a_frame_jump_is_down_weighted_not_trusted() -> None:
             kf = replace(kf, t_odom_base=jump @ kf.t_odom_base)
         backend.ingest_keyframe(kf)
 
-    assert backend.implausible_hops == 1, (
-        "exactly the one hop across the injected frame jump should be flagged"
-    )
+    assert (
+        backend.implausible_hops == 1
+    ), "exactly the one hop across the injected frame jump should be flagged"
     odometry = [e for e in backend._graph._edges if e.kind is EdgeKind.ODOMETRY]
     flagged = [e for e in odometry if e.information.max() < ODOM_INFORMATION.max()]
     assert len(flagged) == 1
@@ -272,7 +276,9 @@ def test_registration_prior_scope_controls_inter_robot_seeding() -> None:
             by_robot.setdefault(kf.id.robot_id, []).append(kf)
         a, b = (sorted(v, key=lambda kf: kf.id.seq) for v in by_robot.values())
 
-        assert (backend._registration_prior(a[-1], b[0]) is not None) is expect_inter, scope
+        assert (
+            backend._registration_prior(a[-1], b[0]) is not None
+        ) is expect_inter, scope
         same = backend._registration_prior(a[-1], a[0])
         assert (same is not None) is (scope != "none"), scope
 
@@ -288,7 +294,9 @@ def test_registration_prior_places_the_source_where_the_graph_thinks_it_is() -> 
     backend.optimize_and_render()
     solved = backend._last_solved
 
-    keyframes = sorted(backend._keyframes.values(), key=lambda kf: (kf.id.robot_id, kf.id.seq))
+    keyframes = sorted(
+        backend._keyframes.values(), key=lambda kf: (kf.id.robot_id, kf.id.seq)
+    )
     source, target = keyframes[0], keyframes[-1]
     prior = backend._registration_prior(source, target)
 
@@ -310,5 +318,9 @@ def test_a_seeded_verification_still_has_to_pass_every_gate() -> None:
     src, dst = alpha.keyframes[0], beta.keyframes[0]
     oracle = se3_inverse(beta.truth[dst.id]) @ alpha.truth[src.id]
 
-    assert verify_candidate(source=src, target=dst, yaw_prior=0.0,
-                            t_target_source_prior=oracle) is None
+    assert (
+        verify_candidate(
+            source=src, target=dst, yaw_prior=0.0, t_target_source_prior=oracle
+        )
+        is None
+    )

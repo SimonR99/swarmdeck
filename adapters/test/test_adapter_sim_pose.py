@@ -24,6 +24,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
+
 @pytest.fixture(scope="module")
 def bridge_cls(sim_module):
     # The stub list lives in conftest.py: adapter_sim's ROS imports are a shared
@@ -63,17 +64,25 @@ def tf_message(pairs):
 def test_tf_base_link_wins_over_the_wheel_odometry_topic(bridge_cls):
     """The exact defect: both sources present and disagreeing."""
     bridge = make_bridge(bridge_cls)
-    bridge._on_tf(tf_message([
-        ("robot_0/map_frame", "robot_0/odom", 0.06, -0.12, 0.0),
-        ("robot_0/odom", "robot_0/base_link", 10.56, 0.18, 0.0),
-    ]))
+    bridge._on_tf(
+        tf_message(
+            [
+                ("robot_0/map_frame", "robot_0/odom", 0.06, -0.12, 0.0),
+                ("robot_0/odom", "robot_0/base_link", 10.56, 0.18, 0.0),
+            ]
+        )
+    )
     # The wheel topic says something 0.47 m away, as measured on a live run.
-    bridge._on_odom(types.SimpleNamespace(
-        pose=types.SimpleNamespace(pose=types.SimpleNamespace(
-            position=types.SimpleNamespace(x=10.49, y=0.65, z=0.0),
-            orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
-        ))
-    ))
+    bridge._on_odom(
+        types.SimpleNamespace(
+            pose=types.SimpleNamespace(
+                pose=types.SimpleNamespace(
+                    position=types.SimpleNamespace(x=10.49, y=0.65, z=0.0),
+                    orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+                )
+            )
+        )
+    )
     pose = bridge.map_pose()
     assert pose["x"] == pytest.approx(10.62)
     assert pose["y"] == pytest.approx(0.06)
@@ -83,10 +92,14 @@ def test_composition_applies_the_map_frame_rotation(bridge_cls):
     """map->odom is a full SE(2) transform; a yaw correction must rotate the
     translation, not just add to the heading."""
     bridge = make_bridge(bridge_cls)
-    bridge._on_tf(tf_message([
-        ("robot_0/map_frame", "robot_0/odom", 1.0, 2.0, math.pi / 2),
-        ("robot_0/odom", "robot_0/base_link", 3.0, 0.0, 0.0),
-    ]))
+    bridge._on_tf(
+        tf_message(
+            [
+                ("robot_0/map_frame", "robot_0/odom", 1.0, 2.0, math.pi / 2),
+                ("robot_0/odom", "robot_0/base_link", 3.0, 0.0, 0.0),
+            ]
+        )
+    )
     pose = bridge.map_pose()
     assert pose["x"] == pytest.approx(1.0)
     assert pose["y"] == pytest.approx(5.0)
@@ -95,10 +108,14 @@ def test_composition_applies_the_map_frame_rotation(bridge_cls):
 
 def test_yaw_stays_wrapped(bridge_cls):
     bridge = make_bridge(bridge_cls)
-    bridge._on_tf(tf_message([
-        ("robot_0/map_frame", "robot_0/odom", 0.0, 0.0, 3.0),
-        ("robot_0/odom", "robot_0/base_link", 0.0, 0.0, 3.0),
-    ]))
+    bridge._on_tf(
+        tf_message(
+            [
+                ("robot_0/map_frame", "robot_0/odom", 0.0, 0.0, 3.0),
+                ("robot_0/odom", "robot_0/base_link", 0.0, 0.0, 3.0),
+            ]
+        )
+    )
     assert -math.pi <= bridge.map_pose()["yaw"] <= math.pi
 
 
@@ -106,15 +123,23 @@ def test_falls_back_to_wheel_odometry_but_says_so(bridge_cls):
     """Reporting the map origin forever is worse than reporting a drifting pose,
     so the fallback exists — but it must not be silent."""
     bridge = make_bridge(bridge_cls)
-    bridge._on_tf(tf_message([
-        ("robot_0/map_frame", "robot_0/odom", 0.5, 0.0, 0.0),
-    ]))
-    bridge._on_odom(types.SimpleNamespace(
-        pose=types.SimpleNamespace(pose=types.SimpleNamespace(
-            position=types.SimpleNamespace(x=2.0, y=1.0, z=0.0),
-            orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
-        ))
-    ))
+    bridge._on_tf(
+        tf_message(
+            [
+                ("robot_0/map_frame", "robot_0/odom", 0.5, 0.0, 0.0),
+            ]
+        )
+    )
+    bridge._on_odom(
+        types.SimpleNamespace(
+            pose=types.SimpleNamespace(
+                pose=types.SimpleNamespace(
+                    position=types.SimpleNamespace(x=2.0, y=1.0, z=0.0),
+                    orientation=types.SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+                )
+            )
+        )
+    )
     pose = bridge.map_pose()
     assert pose["x"] == pytest.approx(2.5)
     assert pose["y"] == pytest.approx(1.0)
@@ -125,9 +150,13 @@ def test_transforms_for_other_robots_are_ignored(bridge_cls):
     """One /tf topic per robot, but a shared graph is a normal deployment and a
     neighbour's transform must never be mistaken for this robot's."""
     bridge = make_bridge(bridge_cls)
-    bridge._on_tf(tf_message([
-        ("robot_1/map_frame", "robot_1/odom", 99.0, 99.0, 1.0),
-        ("robot_1/odom", "robot_1/base_link", 99.0, 99.0, 1.0),
-    ]))
+    bridge._on_tf(
+        tf_message(
+            [
+                ("robot_1/map_frame", "robot_1/odom", 99.0, 99.0, 1.0),
+                ("robot_1/odom", "robot_1/base_link", 99.0, 99.0, 1.0),
+            ]
+        )
+    )
     assert bridge._odom_to_base is None
     assert bridge._map_to_odom == {"x": 0.0, "y": 0.0, "yaw": 0.0}

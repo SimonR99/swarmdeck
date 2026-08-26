@@ -140,7 +140,9 @@ def _frame_residual(
     """Translation RMSE of one candidate ``T_world_map`` against the optimized
     poses of the keyframes it is supposed to explain."""
     errors = [
-        np.linalg.norm((t_world_map @ keyframes[k].t_odom_base)[:3, 3] - poses[k][:3, 3])
+        np.linalg.norm(
+            (t_world_map @ keyframes[k].t_odom_base)[:3, 3] - poses[k][:3, 3]
+        )
         for k in kf_ids
     ]
     return float(np.sqrt(np.mean(np.square(errors))))
@@ -214,7 +216,9 @@ def _loop_residual(
     return residual, covariance
 
 
-def _consistent(residual: np.ndarray, covariance: np.ndarray, confidence: float) -> bool:
+def _consistent(
+    residual: np.ndarray, covariance: np.ndarray, confidence: float
+) -> bool:
     mahalanobis_sq = float(residual @ np.linalg.solve(covariance, residual))
     return mahalanobis_sq <= chi2.ppf(confidence, df=_PCM_DOF)
 
@@ -292,7 +296,9 @@ class GtsamPoseGraph:
 
     def add_keyframe(self, keyframe: Keyframe) -> None:
         self._keyframes[keyframe.id] = keyframe
-        self._keys.key(keyframe.id)  # assign its integer key eagerly and deterministically
+        self._keys.key(
+            keyframe.id
+        )  # assign its integer key eagerly and deterministically
 
     def add_edge(self, edge: Edge) -> None:
         self._edges.append(edge)
@@ -350,7 +356,9 @@ class GtsamPoseGraph:
             else:
                 gnc_rejected.append(edge)
 
-        lm_optimizer = gtsam.LevenbergMarquardtOptimizer(refit_graph, gnc_result, self._lm_params)
+        lm_optimizer = gtsam.LevenbergMarquardtOptimizer(
+            refit_graph, gnc_result, self._lm_params
+        )
         final_values = lm_optimizer.optimize()
 
         poses = {
@@ -467,7 +475,9 @@ class GtsamPoseGraph:
                     component_id=component_id,
                     robots=frozenset(t.robot_id for t in members),
                     anchor=KeyframeId(
-                        anchor_trajectory.robot_id, anchor_seq, anchor_trajectory.session
+                        anchor_trajectory.robot_id,
+                        anchor_seq,
+                        anchor_trajectory.session,
                     ),
                     trajectories=frozenset(members),
                 )
@@ -513,9 +523,13 @@ class GtsamPoseGraph:
                     other = second_kf.trajectory
                     if other in init:
                         continue
-                    t_world_first = init[trajectory] @ self._keyframes[first_kf].t_odom_base
+                    t_world_first = (
+                        init[trajectory] @ self._keyframes[first_kf].t_odom_base
+                    )
                     t_world_second = t_world_first @ t_first_second
-                    init[other] = t_world_second @ se3_inverse(self._keyframes[second_kf].t_odom_base)
+                    init[other] = t_world_second @ se3_inverse(
+                        self._keyframes[second_kf].t_odom_base
+                    )
                     frontier.append(other)
         return init
 
@@ -538,7 +552,9 @@ class GtsamPoseGraph:
         pcm_accepted_inter: list[Edge],
         components: list[Component],
         init_t_world_odom: dict[TrajectoryId, np.ndarray],
-    ) -> tuple[gtsam.NonlinearFactorGraph, gtsam.Values, list[int], list[tuple[int, Edge]]]:
+    ) -> tuple[
+        gtsam.NonlinearFactorGraph, gtsam.Values, list[int], list[tuple[int, Edge]]
+    ]:
         """Assemble the graph GNC will see: structural factors (odometry +
         one anchor prior per component, both registered as GNC known-inliers
         so they can never be rejected) plus every loop-closure candidate
@@ -560,10 +576,14 @@ class GtsamPoseGraph:
         for component in components:
             known_inliers.append(graph.size())
             anchor_kf = self._keyframes[component.anchor]
-            anchor_pose = init_t_world_odom[component.anchor.trajectory] @ anchor_kf.t_odom_base
+            anchor_pose = (
+                init_t_world_odom[component.anchor.trajectory] @ anchor_kf.t_odom_base
+            )
             graph.add(
                 gtsam.PriorFactorPose3(
-                    self._keys.key(component.anchor), gtsam.Pose3(anchor_pose), self._anchor_noise
+                    self._keys.key(component.anchor),
+                    gtsam.Pose3(anchor_pose),
+                    self._anchor_noise,
                 )
             )
 
@@ -638,7 +658,9 @@ class GtsamPoseGraph:
         result: dict[TrajectoryId, np.ndarray] = {}
         for trajectory, kf_ids in by_trajectory.items():
             kf_ids.sort(key=lambda kf_id: kf_id.seq)
-            snapshot = poses[kf_ids[-1]] @ se3_inverse(self._keyframes[kf_ids[-1]].t_odom_base)
+            snapshot = poses[kf_ids[-1]] @ se3_inverse(
+                self._keyframes[kf_ids[-1]].t_odom_base
+            )
             result[trajectory] = self._best_t_world_map(kf_ids, poses, snapshot)
         return result
 
@@ -701,7 +723,10 @@ class GtsamPoseGraph:
 
     def _validate_endpoints(self, edges: list[Edge]) -> None:
         missing = {
-            kf_id for edge in edges for kf_id in (edge.src, edge.dst) if kf_id not in self._keyframes
+            kf_id
+            for edge in edges
+            for kf_id in (edge.src, edge.dst)
+            if kf_id not in self._keyframes
         }
         if missing:
             raise ValueError(

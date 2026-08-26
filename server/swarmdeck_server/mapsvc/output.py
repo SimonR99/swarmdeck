@@ -23,7 +23,9 @@ FREE_RGB = (255, 255, 255)
 OCCUPIED_RGB = (52, 58, 68)
 
 
-def consolidate_voxel_centroids(points: np.ndarray, voxel_size: float = 0.04) -> np.ndarray:
+def consolidate_voxel_centroids(
+    points: np.ndarray, voxel_size: float = 0.04
+) -> np.ndarray:
     """Downsample and consolidate 3D points onto voxel centroids, denoising planar surfaces."""
     if points.shape[0] <= 1:
         return points
@@ -37,7 +39,9 @@ def consolidate_voxel_centroids(points: np.ndarray, voxel_size: float = 0.04) ->
     return centroids.astype(np.float32)
 
 
-def merged_cloud(service: Any, robot_id: str | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def merged_cloud(
+    service: Any, robot_id: str | None = None
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return member clouds transformed into the published merged frame, or one robot's cloud."""
     with service._state_lock:
         robot_clouds = dict(service.robot_clouds)
@@ -189,7 +193,9 @@ def local_info(service: Any, robot_id: str) -> dict[str, Any] | None:
             return None
         meta, _ = grid
         revision = service.robot_revisions.get(robot_id, 0)
-        meta = GridMeta(meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y)
+        meta = GridMeta(
+            meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
+        )
     return meta.as_dict(revision)
 
 
@@ -199,6 +205,8 @@ def local_png(service: Any, robot_id: str) -> bytes | None:
         if grid is None:
             return None
         meta, cells = grid
-        meta = GridMeta(meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y)
+        meta = GridMeta(
+            meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
+        )
         cells = np.array(cells, dtype=np.int8, copy=True)
     return grid_png(meta, cells)

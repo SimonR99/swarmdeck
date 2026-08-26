@@ -29,6 +29,7 @@ try:
 except ImportError:
     import sys
     from pathlib import Path
+
     _proto_dir = Path(__file__).resolve().parent / "protocol"
     if _proto_dir.exists() and str(_proto_dir) not in sys.path:
         sys.path.insert(0, str(_proto_dir))
@@ -195,16 +196,21 @@ def laser_scan_to_map_points(
     return np.vstack(layers)
 
 
-def _moved(previous: np.ndarray, current: np.ndarray, min_t: float, min_yaw: float) -> bool:
+def _moved(
+    previous: np.ndarray, current: np.ndarray, min_t: float, min_yaw: float
+) -> bool:
     delta = current[:3] - previous[:3]
     if float(np.linalg.norm(delta)) >= min_t:
         return True
+
     # Yaw from quaternion (z-axis): atan2(2(wz+xy), 1-2(y^2+z^2)) with ROS order.
     def yaw_of(q: np.ndarray) -> float:
         x, y, z, w = q
         return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
-    dyaw = abs((yaw_of(current[3:]) - yaw_of(previous[3:]) + math.pi) % (2 * math.pi) - math.pi)
+    dyaw = abs(
+        (yaw_of(current[3:]) - yaw_of(previous[3:]) + math.pi) % (2 * math.pi) - math.pi
+    )
     return dyaw >= min_yaw
 
 
@@ -296,7 +302,9 @@ class KeyframeUploader:
         if self._last_pose is not None:
             if now - self._last_at < self.min_period_s:
                 return False
-            if not _moved(self._last_pose, pose, self.min_translation_m, self.min_yaw_rad):
+            if not _moved(
+                self._last_pose, pose, self.min_translation_m, self.min_yaw_rad
+            ):
                 return False
         pts = np.asarray(points_map)
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < self.min_points:
@@ -322,7 +330,10 @@ class KeyframeUploader:
         except ProtocolError:
             return False
         with self._lock:
-            if self._queue.maxlen is not None and len(self._queue) >= self._queue.maxlen:
+            if (
+                self._queue.maxlen is not None
+                and len(self._queue) >= self._queue.maxlen
+            ):
                 self.dropped += 1
             self._queue.append(blob)
             self._last_pose = pose

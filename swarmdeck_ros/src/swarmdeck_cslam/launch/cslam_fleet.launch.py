@@ -15,7 +15,11 @@ one channel that cannot observe slip.
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -54,12 +58,14 @@ def setup(context, *args, **kwargs):
             package="swarmdeck_cslam",
             executable="cslam_grid.py",
             name="cslam_grid",
-            parameters=[{
-                "robots": count,
-                "use_sim_time": use_sim == "true",
-                "resolution": 0.05,
-                "size_m": 30.0,
-            }],
+            parameters=[
+                {
+                    "robots": count,
+                    "use_sim_time": use_sim == "true",
+                    "resolution": 0.05,
+                    "size_m": 30.0,
+                }
+            ],
             output="screen",
         ),
         Node(
@@ -68,7 +74,7 @@ def setup(context, *args, **kwargs):
             name="swarmdeck_graph_reporter",
             parameters=[{"robots": count, "use_sim_time": use_sim == "true"}],
             output="screen",
-        )
+        ),
     ]
 
 

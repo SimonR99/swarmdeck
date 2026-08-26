@@ -42,7 +42,12 @@ def organised_cloud(rows: list[list[tuple[float, float, float]]], *, padding: in
             "point_step": point_step,
             "row_step": row_step,
             "is_bigendian": False,
-            "fields": [Field("intensity", 0), Field("x", 4), Field("y", 8), Field("z", 12)],
+            "fields": [
+                Field("intensity", 0),
+                Field("x", 4),
+                Field("y", 8),
+                Field("z", 12),
+            ],
             "data": bytes(data),
         },
     )()
@@ -67,7 +72,9 @@ def test_unorganised_or_sparse_cloud_cannot_claim_a_position():
     cloud = organised_cloud([[(0.0, 0.0, 1.0)] * 8])
     assert point_for_bbox(cloud, (0.0, 0.0, 1.0, 1.0)) is None
 
-    sparse_rows = [list(row) for row in [[(math.nan, math.nan, math.nan)] * 4 for _ in range(4)]]
+    sparse_rows = [
+        list(row) for row in [[(math.nan, math.nan, math.nan)] * 4 for _ in range(4)]
+    ]
     sparse_rows[1][1] = (0.0, 0.0, 1.0)
     sparse = organised_cloud(sparse_rows)
     assert point_for_bbox(sparse, (0.0, 0.0, 1.0, 1.0)) is None
@@ -212,7 +219,12 @@ def test_outline_reads_the_object_where_the_box_reads_the_wall_behind_it():
     info = camera_info(width, height)
     bbox = (1 / 16, 1 / 16, 14 / 16, 14 / 16)
     # A band three pixels wide down the diagonal of its own box.
-    polygon = ((1 / 16, 3 / 16), (3 / 16, 1 / 16), (15 / 16, 13 / 16), (13 / 16, 15 / 16))
+    polygon = (
+        (1 / 16, 3 / 16),
+        (3 / 16, 1 / 16),
+        (15 / 16, 13 / 16),
+        (13 / 16, 15 / 16),
+    )
 
     with_outline = point_for_depth_image(image, info, bbox, polygon=polygon, inset=0.0)
     box_only = point_for_depth_image(image, info, bbox, inset=0.0)
@@ -233,9 +245,9 @@ def test_an_unusable_outline_falls_back_to_the_inset_box():
     baseline = point_for_depth_image(image, info, bbox, inset=0.0)
 
     for unusable in (
-        (),                                        # no outline at all
-        ((0.1, 0.1), (0.2, 0.2)),                  # too few points to be an area
-        ((0.4, 0.4), (0.41, 0.4), (0.41, 0.41)),   # a sliver covering no pixels
+        (),  # no outline at all
+        ((0.1, 0.1), (0.2, 0.2)),  # too few points to be an area
+        ((0.4, 0.4), (0.41, 0.4), (0.41, 0.41)),  # a sliver covering no pixels
         "not a polygon",
     ):
         assert point_for_depth_image(

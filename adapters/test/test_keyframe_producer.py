@@ -22,9 +22,9 @@ from swarmdeck_protocol import decode_keyframe, peek_keyframe_header
 
 def _wall(n: int = 30) -> np.ndarray:
     xs, ys = np.meshgrid(np.linspace(1.0, 5.0, n), np.linspace(-2.0, 2.0, n))
-    return np.stack(
-        [xs.ravel(), ys.ravel(), np.full(xs.size, 0.5)], axis=1
-    ).astype(np.float32)
+    return np.stack([xs.ravel(), ys.ravel(), np.full(xs.size, 0.5)], axis=1).astype(
+        np.float32
+    )
 
 
 def test_peek_header_does_not_require_a_valid_body():
@@ -146,7 +146,9 @@ def test_every_keyframe_of_one_run_carries_the_same_session():
 
     sessions = []
     for i in range(3):
-        assert uploader.consider(_wall(), pose7_from_xy_yaw(float(i), 0.0, 0.0), float(i))
+        assert uploader.consider(
+            _wall(), pose7_from_xy_yaw(float(i), 0.0, 0.0), float(i)
+        )
         sessions.append(peek_keyframe_header(uploader._queue[-1])["session"])
     assert sessions == [uploader.session] * 3
 

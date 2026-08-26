@@ -6,7 +6,6 @@ from adapters.network_quality import (
     read_link_quality,
 )
 
-
 WIRELESS = """Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
  face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
 wlp2s0: 0000   49.  -61.  -256        0      0      0      2      0        0
@@ -59,5 +58,3 @@ def test_read_link_quality_explicit_target():
     assert "quality_pct" in res
     assert "rssi_dbm" in res
     assert "ping_ms" in res
-
-

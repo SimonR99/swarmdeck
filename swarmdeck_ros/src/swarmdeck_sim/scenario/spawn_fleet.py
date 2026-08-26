@@ -30,9 +30,9 @@ COLORS = [
 ]
 # Named hardware robots (and Spot's chassis) keep a stable Gazebo colour.
 IDENTITY_COLORS = {
-    "spot": "0.79 0.63 0.00",    # yellow
+    "spot": "0.79 0.63 0.00",  # yellow
     "botman": "0.00 0.48 1.00",  # blue
-    "aslan": "0.88 0.44 0.00",   # orange
+    "aslan": "0.88 0.44 0.00",  # orange
 }
 TYPE_COLORS = {
     "spot": IDENTITY_COLORS["spot"],
@@ -47,6 +47,7 @@ def color_for(name: str, index: int, profile: str | None = None) -> str:
     if profile in TYPE_COLORS:
         return TYPE_COLORS[profile]
     return COLORS[index % len(COLORS)]
+
 
 HERE = Path(__file__).resolve().parent
 DESCRIPTION = HERE.parent.parent / "swarmdeck_description" / "urdf"
@@ -78,7 +79,7 @@ class LidarSpec:
 
     h_samples: int = 1800
     rings: int = 1
-    vfov: float = 0.0        # half-angle, radians; 0 for a single horizontal ring
+    vfov: float = 0.0  # half-angle, radians; 0 for a single horizontal ring
     range_max: float = 30.0
     rate: float = 10.0
 
@@ -190,16 +191,16 @@ class RobotSpec:
     which is the only way a tall robot and a short one can see each other.
     """
 
-    chassis: str                # chassis/<name>.xml
-    robot_type: str             # reported to the backend at `hello`
-    length: float               # metres, for the record and for footprint maths
+    chassis: str  # chassis/<name>.xml
+    robot_type: str  # reported to the backend at `hello`
+    length: float  # metres, for the record and for footprint maths
     width: float
-    base_height: float          # base_link height above the floor
-    lidar_x: float              # mapping lidar mount, relative to base_link
+    base_height: float  # base_link height above the floor
+    lidar_x: float  # mapping lidar mount, relative to base_link
     lidar_z: float
     camera_x: float
     camera_z: float
-    prox_x: float               # bumper scan, forward of base_link
+    prox_x: float  # bumper scan, forward of base_link
     # The highest thing on the robot's own back that the mapping lidar has to
     # see OVER, and how far it reaches from base_link. A multi-ring lidar sweeps
     # downwards as well as outwards, so a mount that clears the deck at zero
@@ -208,7 +209,7 @@ class RobotSpec:
     deck_half_length: float = 0.0
     prox_range_max: float = 6.0
     prox_samples: int = 181
-    prox_fov: float = math.pi   # total horizontal sweep, radians
+    prox_fov: float = math.pi  # total horizontal sweep, radians
 
     @property
     def footprint_radius(self) -> float:
@@ -261,8 +262,10 @@ class RobotSpec:
         """
         half_l, half_w = self.length / 2.0, self.width / 2.0
         corners = (
-            (half_l, half_w), (half_l, -half_w),
-            (-half_l, -half_w), (-half_l, half_w),
+            (half_l, half_w),
+            (half_l, -half_w),
+            (-half_l, -half_w),
+            (-half_l, half_w),
         )
         return "[" + ",".join(f"[{x:.3f},{y:.3f}]" for x, y in corners) + "]"
 
@@ -305,29 +308,47 @@ ROBOT_PROFILES: dict[str, RobotSpec] = {
     "bunker": RobotSpec(
         chassis="bunker",
         robot_type="agilex_bunker",
-        length=1.023, width=0.778, base_height=0.200,
-        lidar_x=-0.150, lidar_z=0.520,
-        camera_x=0.515, camera_z=0.100,
-        prox_x=0.530, prox_range_max=8.0,
-        deck_top=0.180, deck_half_length=0.450,
+        length=1.023,
+        width=0.778,
+        base_height=0.200,
+        lidar_x=-0.150,
+        lidar_z=0.520,
+        camera_x=0.515,
+        camera_z=0.100,
+        prox_x=0.530,
+        prox_range_max=8.0,
+        deck_top=0.180,
+        deck_half_length=0.450,
     ),
     "scout_mini": RobotSpec(
         chassis="scout_mini",
         robot_type="agilex_scout_mini",
-        length=0.612, width=0.580, base_height=0.1225,
-        lidar_x=-0.080, lidar_z=0.330,
-        camera_x=0.322, camera_z=0.090,
-        prox_x=0.320, prox_range_max=6.0,
-        deck_top=0.121, deck_half_length=0.250,
+        length=0.612,
+        width=0.580,
+        base_height=0.1225,
+        lidar_x=-0.080,
+        lidar_z=0.330,
+        camera_x=0.322,
+        camera_z=0.090,
+        prox_x=0.320,
+        prox_range_max=6.0,
+        deck_top=0.121,
+        deck_half_length=0.250,
     ),
     "spot": RobotSpec(
         chassis="spot",
         robot_type="boston_dynamics_spot",
-        length=1.100, width=0.500, base_height=0.500,
-        lidar_x=-0.180, lidar_z=0.470,
-        camera_x=0.598, camera_z=0.020,
-        prox_x=0.580, prox_range_max=8.0,
-        deck_top=0.120, deck_half_length=0.450,
+        length=1.100,
+        width=0.500,
+        base_height=0.500,
+        lidar_x=-0.180,
+        lidar_z=0.470,
+        camera_x=0.598,
+        camera_z=0.020,
+        prox_x=0.580,
+        prox_range_max=8.0,
+        deck_top=0.120,
+        deck_half_length=0.450,
     ),
 }
 
@@ -345,7 +366,9 @@ def robot_spec(name: str) -> RobotSpec:
     return ROBOT_PROFILES[name]
 
 
-def robot_types(fleet_cfg: Mapping[str, Any] | None, count: int, prefix: str) -> list[str]:
+def robot_types(
+    fleet_cfg: Mapping[str, Any] | None, count: int, prefix: str
+) -> list[str]:
     """Resolve which platform each robot is.
 
     ```yaml
@@ -389,6 +412,7 @@ def chassis_sections(name: str) -> dict[str, str]:
             body = body.split(f"<!-- @{other} -->", 1)[0]
         out[section] = body.rstrip()
     return out
+
 
 _INT_FIELDS = {"h_samples", "rings"}
 _SPEC_FIELDS = {f.name for f in fields(LidarSpec)}
@@ -497,32 +521,50 @@ def spawn(
         path = fh.name
     qz, qw = yaw_quaternion(yaw)
     cmd = [
-        "gz", "service", "-s", f"/world/{world}/create",
-        "--reqtype", "gz.msgs.EntityFactory",
-        "--reptype", "gz.msgs.Boolean",
-        "--timeout", "5000",
+        "gz",
+        "service",
+        "-s",
+        f"/world/{world}/create",
+        "--reqtype",
+        "gz.msgs.EntityFactory",
+        "--reptype",
+        "gz.msgs.Boolean",
+        "--timeout",
+        "5000",
         "--req",
         f'sdf_filename: "{path}", name: "{name}", '
-        f'pose: {{position: {{x: {x}, y: {y}, z: {z}}}, '
-        f'orientation: {{z: {qz:.9f}, w: {qw:.9f}}}}}',
+        f"pose: {{position: {{x: {x}, y: {y}, z: {z}}}, "
+        f"orientation: {{z: {qz:.9f}, w: {qw:.9f}}}}}",
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     ok = "true" in r.stdout.lower()
-    print(f"[spawn] {name} at ({x}, {y}) -> {'ok' if ok else 'FAILED: ' + r.stderr.strip()}")
+    print(
+        f"[spawn] {name} at ({x}, {y}) -> {'ok' if ok else 'FAILED: ' + r.stderr.strip()}"
+    )
     return ok
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--robots", type=int, default=None,
-                    help="override the fleet count from the study config")
+    ap.add_argument(
+        "--robots",
+        type=int,
+        default=None,
+        help="override the fleet count from the study config",
+    )
     ap.add_argument("--world", default="swarmdeck_indoor")
-    ap.add_argument("--dry-run", action="store_true", help="render SDFs without spawning")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="render SDFs without spawning"
+    )
     ap.add_argument("--outdir", default=None, help="write rendered SDFs here")
-    ap.add_argument("--lidar-rings", type=int, default=None,
-                    help="override the ring count from the config; 1 is 2D-only, "
-                         "odd values > 1 also publish a usable 3D cloud")
+    ap.add_argument(
+        "--lidar-rings",
+        type=int,
+        default=None,
+        help="override the ring count from the config; 1 is 2D-only, "
+        "odd values > 1 also publish a usable 3D cloud",
+    )
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -558,8 +600,12 @@ def main() -> int:
 
         if not args.dry_run:
             ok &= spawn(
-                args.world, name, sdf,
-                pose["x"], pose["y"], pose.get("yaw", 0.0),
+                args.world,
+                name,
+                sdf,
+                pose["x"],
+                pose["y"],
+                pose.get("yaw", 0.0),
                 z=robot.spawn_z,
             )
 

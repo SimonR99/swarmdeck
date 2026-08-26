@@ -57,8 +57,8 @@ OCCUPIED = 100
 HIT_GAIN = 3
 MISS_GAIN = 1
 EVIDENCE_CLAMP = 12  # bounds how stubborn any cell can get, both ways
-OCCUPIED_AT = 2      # one hit (+3) is immediately occupied
-FREE_AT = -1         # one pass-through clears, as before — see above
+OCCUPIED_AT = 2  # one hit (+3) is immediately occupied
+FREE_AT = -1  # one pass-through clears, as before — see above
 # Unobserved free space fades toward unknown. Occupied does not: walls are the
 # map, and a 360° lidar re-confirms every currently visible cell every scan, so
 # this only touches cells no current ray crossed — the offset white rectangle
@@ -143,7 +143,7 @@ def _bresenham(x0: int, y0: int, x1: int, y1: int) -> tuple[np.ndarray, np.ndarr
 
 
 MAX_RAY_RANGE_M = 50.0  # Max realistic lidar range; returns beyond this are noise/sky
-EXPAND_CHUNK_M = 5.0    # Margin in metres when expanding the grid bounds
+EXPAND_CHUNK_M = 5.0  # Margin in metres when expanding the grid bounds
 
 
 class ScanGridAccumulator:
@@ -155,14 +155,20 @@ class ScanGridAccumulator:
     """
 
     def __init__(
-        self, origin_x: float, origin_y: float,
-        resolution: float = 0.05, size_m: float = 40.0,
+        self,
+        origin_x: float,
+        origin_y: float,
+        resolution: float = 0.05,
+        size_m: float = 40.0,
         retain_free_space: bool = False,
     ) -> None:
         n = int(size_m / resolution)
         self.meta = GridMeta(
-            resolution=resolution, width=n, height=n,
-            origin_x=origin_x - size_m / 2, origin_y=origin_y - size_m / 2,
+            resolution=resolution,
+            width=n,
+            height=n,
+            origin_x=origin_x - size_m / 2,
+            origin_y=origin_y - size_m / 2,
         )
         self.cells = np.full((n, n), UNKNOWN, dtype=np.int8)
         # A scan-fed map may either behave like a live obstacle view (where
@@ -206,8 +212,12 @@ class ScanGridAccumulator:
         off_x = int(round((cur_min_x - new_min_x) / res))
         off_y = int(round((cur_min_y - new_min_y) / res))
 
-        new_cells[off_y : off_y + self.meta.height, off_x : off_x + self.meta.width] = self.cells
-        new_evidence[off_y : off_y + self.meta.height, off_x : off_x + self.meta.width] = self._evidence
+        new_cells[off_y : off_y + self.meta.height, off_x : off_x + self.meta.width] = (
+            self.cells
+        )
+        new_evidence[
+            off_y : off_y + self.meta.height, off_x : off_x + self.meta.width
+        ] = self._evidence
 
         self.cells = new_cells
         self._evidence = new_evidence
@@ -223,7 +233,11 @@ class ScanGridAccumulator:
         gain constants for why a verdict now needs corroboration in the free
         direction and stays revisable in the occupied one.
         """
-        if points_xy.size == 0 or not math.isfinite(origin_x) or not math.isfinite(origin_y):
+        if (
+            points_xy.size == 0
+            or not math.isfinite(origin_x)
+            or not math.isfinite(origin_y)
+        ):
             return
 
         finite = np.isfinite(points_xy).all(axis=1)
@@ -248,7 +262,12 @@ class ScanGridAccumulator:
         cur_min_y = self.meta.origin_y
         cur_max_y = self.meta.origin_y + self.meta.height * self.meta.resolution
 
-        if req_min_x < cur_min_x or req_max_x >= cur_max_x or req_min_y < cur_min_y or req_max_y >= cur_max_y:
+        if (
+            req_min_x < cur_min_x
+            or req_max_x >= cur_max_x
+            or req_min_y < cur_min_y
+            or req_max_y >= cur_max_y
+        ):
             self._expand(req_min_x, req_max_x, req_min_y, req_max_y)
 
         origin_cell = self._to_cell(origin_x, origin_y)

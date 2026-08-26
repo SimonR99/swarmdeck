@@ -57,7 +57,9 @@ def _ingest(backend: CollaborativeBackend, segments, *, on_wire: bool = True) ->
     landed = 0
     for keyframe, session in keyed:
         if on_wire:
-            landed += int(backend.ingest_packet(decode_keyframe(_blob(keyframe, session))))
+            landed += int(
+                backend.ingest_packet(decode_keyframe(_blob(keyframe, session)))
+            )
         else:
             landed += int(backend.ingest_keyframe(keyframe))
     return landed
@@ -81,6 +83,7 @@ def restarted_snapshot(restarted):
 # --------------------------------------------------------------------------- #
 # Failure 1: the seq collision
 # --------------------------------------------------------------------------- #
+
 
 def test_a_restarted_robot_does_not_collide_with_its_own_history(restarted) -> None:
     """Every keyframe of both runs lands.
@@ -118,6 +121,7 @@ def test_a_genuine_duplicate_is_still_dropped(restarted) -> None:
 # Failure 2: the fabricated odometry edge
 # --------------------------------------------------------------------------- #
 
+
 def test_no_odometry_edge_spans_a_segment_boundary(restarted_snapshot) -> None:
     """An ODOMETRY edge is a GNC known-inlier -- nothing downstream can reject
     one. So the only defence against an edge between two unrelated map frames
@@ -143,6 +147,7 @@ def test_each_segment_is_chained_end_to_end(restarted_snapshot) -> None:
 # The safety property: PCM guards the re-merge
 # --------------------------------------------------------------------------- #
 
+
 def _rigid_closure(kind, src, dst, t_src_dst, weight: float = 400.0) -> Edge:
     return Edge(
         kind=kind,
@@ -167,7 +172,9 @@ def _graph_of(segments, closures, **kwargs) -> tuple[GtsamPoseGraph, list]:
                         kind=EdgeKind.ODOMETRY,
                         src=previous.id,
                         dst=keyframe.id,
-                        t_src_dst=se3_relative(previous.t_odom_base, keyframe.t_odom_base),
+                        t_src_dst=se3_relative(
+                            previous.t_odom_base, keyframe.t_odom_base
+                        ),
                         information=np.eye(6) * 400.0,
                     )
                 )
@@ -224,7 +231,9 @@ def test_corroborated_closures_do_rejoin_a_robot_to_its_own_history(restarted) -
 
     for robot in segments:
         estimated = result.t_world_trajectory[robot.trajectory_id]
-        relative = se3_relative(result.t_world_trajectory[segments[0].trajectory_id], estimated)
+        relative = se3_relative(
+            result.t_world_trajectory[segments[0].trajectory_id], estimated
+        )
         truth = se3_relative(segments[0].t_world_map_true, robot.t_world_map_true)
         translation, rotation = se3_distance(relative, truth)
         assert translation < 0.5, f"{robot.trajectory_id}: {translation:.3f} m"
@@ -245,7 +254,9 @@ def test_two_closures_that_disagree_do_not_rejoin_the_runs(restarted) -> None:
     assert len(result.rejected_edges) == 2
 
 
-def test_rejoining_a_robots_own_history_is_not_counted_as_collaboration(restarted) -> None:
+def test_rejoining_a_robots_own_history_is_not_counted_as_collaboration(
+    restarted,
+) -> None:
     """``is_inter_robot`` stays keyed on the robot id, so a robot meeting its
     own past does not inflate the operator's collaboration counter -- while
     ``is_inter_trajectory`` still routes it through PCM."""
@@ -293,6 +304,7 @@ def test_segments_in_different_places_are_left_unmerged() -> None:
 # Per-segment frames
 # --------------------------------------------------------------------------- #
 
+
 def test_each_segment_gets_its_own_map_frame(restarted_snapshot) -> None:
     """Two frames, not one fitted across the discontinuity. A single rigid fit
     over both runs is a least-squares compromise between two unrelated gauges:
@@ -302,9 +314,9 @@ def test_each_segment_gets_its_own_map_frame(restarted_snapshot) -> None:
     assert set(frames) == {robot.trajectory_id for robot in segments}
     before = frames[segments[0].trajectory_id]
     after = frames[segments[1].trajectory_id]
-    assert np.linalg.norm(before[:3, 3] - after[:3, 3]) > 1.0, (
-        "the two runs' frames came out identical, which cannot be right"
-    )
+    assert (
+        np.linalg.norm(before[:3, 3] - after[:3, 3]) > 1.0
+    ), "the two runs' frames came out identical, which cannot be right"
 
 
 def test_the_robot_level_frame_is_the_newest_segments(restarted_snapshot) -> None:
@@ -335,7 +347,10 @@ def test_a_robot_with_unmerged_segments_appears_once_in_origins() -> None:
 # Selection
 # --------------------------------------------------------------------------- #
 
-def test_excluding_a_segment_removes_it_from_the_solve_and_is_reversible(restarted) -> None:
+
+def test_excluding_a_segment_removes_it_from_the_solve_and_is_reversible(
+    restarted,
+) -> None:
     """Excluded means "not handed to the solver", never "deleted". The
     keyframes, their clouds and every edge that touched them stay, so putting
     the segment back restores exactly the graph that was there before."""
@@ -443,6 +458,7 @@ def test_trajectories_are_listed_with_their_spans(restarted_snapshot) -> None:
 # Scoped grids
 # --------------------------------------------------------------------------- #
 
+
 def test_a_segment_can_be_inspected_on_its_own_scope(restarted_snapshot) -> None:
     """``robot:`` keeps grouping a robot's runs together -- that is still one
     machine's coverage. ``trajectory:`` is added beside it so one run can be
@@ -473,6 +489,7 @@ def test_a_robot_that_never_restarted_gets_no_trajectory_scope() -> None:
 # --------------------------------------------------------------------------- #
 # Backward compatibility
 # --------------------------------------------------------------------------- #
+
 
 def test_keyframe_id_is_still_constructible_positionally() -> None:
     assert KeyframeId("alpha", 3) == KeyframeId("alpha", 3, "")
@@ -532,13 +549,20 @@ def test_trajectory_ids_round_trip_through_their_string_form() -> None:
 # Legacy segmentation
 # --------------------------------------------------------------------------- #
 
+
 def test_a_seq_reset_starts_a_new_legacy_segment() -> None:
     segmenter = LegacySegmenter()
     for seq in range(5):
         assert segmenter.session_for("botman_0", seq, stamp=float(seq)) == ""
-    assert segmenter.session_for("botman_0", 0, stamp=100.0) == f"{LEGACY_SESSION_PREFIX}1"
-    assert segmenter.session_for("botman_0", 1, stamp=101.0) == f"{LEGACY_SESSION_PREFIX}1"
-    assert segmenter.session_for("botman_0", 0, stamp=200.0) == f"{LEGACY_SESSION_PREFIX}2"
+    assert (
+        segmenter.session_for("botman_0", 0, stamp=100.0) == f"{LEGACY_SESSION_PREFIX}1"
+    )
+    assert (
+        segmenter.session_for("botman_0", 1, stamp=101.0) == f"{LEGACY_SESSION_PREFIX}1"
+    )
+    assert (
+        segmenter.session_for("botman_0", 0, stamp=200.0) == f"{LEGACY_SESSION_PREFIX}2"
+    )
     assert segmenter.restarts == 2
 
 
@@ -581,10 +605,20 @@ def test_a_legacy_capture_with_a_reboot_in_it_is_split(restarted) -> None:
     rather than the fix."""
     _, segments = restarted
     backend = CollaborativeBackend()
-    landed = _ingest(backend, [synthetic.SyntheticRobot(
-        robot.robot_id, robot.keyframes, robot.truth, robot.t_world_map_true,
-        robot.scene_id, "",  # session stripped, as a pre-session capture would be
-    ) for robot in segments])
+    landed = _ingest(
+        backend,
+        [
+            synthetic.SyntheticRobot(
+                robot.robot_id,
+                robot.keyframes,
+                robot.truth,
+                robot.t_world_map_true,
+                robot.scene_id,
+                "",  # session stripped, as a pre-session capture would be
+            )
+            for robot in segments
+        ],
+    )
     assert landed == sum(len(robot.keyframes) for robot in segments)
     assert backend.trajectory_ids() == [
         TrajectoryId("alpha", ""),
@@ -597,10 +631,17 @@ def test_legacy_segmentation_can_be_turned_off(restarted) -> None:
     case where the old answer is what you are trying to measure."""
     _, segments = restarted
     backend = CollaborativeBackend(legacy_session_split=False)
-    stripped = [synthetic.SyntheticRobot(
-        robot.robot_id, robot.keyframes, robot.truth, robot.t_world_map_true,
-        robot.scene_id, "",
-    ) for robot in segments]
+    stripped = [
+        synthetic.SyntheticRobot(
+            robot.robot_id,
+            robot.keyframes,
+            robot.truth,
+            robot.t_world_map_true,
+            robot.scene_id,
+            "",
+        )
+        for robot in segments
+    ]
     landed = _ingest(backend, stripped)
     assert landed < sum(len(robot.keyframes) for robot in segments)
     assert backend.trajectory_ids() == [TrajectoryId("alpha", "")]
@@ -619,6 +660,7 @@ def test_a_capture_with_no_reboot_is_untouched_by_segmentation() -> None:
 # --------------------------------------------------------------------------- #
 # Keys
 # --------------------------------------------------------------------------- #
+
 
 def test_the_solver_key_separates_two_runs_of_one_robot() -> None:
     """Keying the solver on the robot hands it one variable for two poses."""

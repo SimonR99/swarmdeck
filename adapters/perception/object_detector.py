@@ -26,7 +26,12 @@ from typing import Any, Sequence, Tuple, List, Optional, Union
 import cv2
 import numpy as np
 
-from adapters.perception.catalog import CALIBRATED_CONFIDENCE, CATALOG, CLASS_NAMES, resolve
+from adapters.perception.catalog import (
+    CALIBRATED_CONFIDENCE,
+    CATALOG,
+    CLASS_NAMES,
+    resolve,
+)
 
 
 def crop_detection_jpeg_base64(
@@ -37,7 +42,12 @@ def crop_detection_jpeg_base64(
     jpeg_quality: int = 85,
 ) -> Optional[str]:
     """Crop detection bounding box with +50% margin and encode to base64 JPEG."""
-    if image is None or not isinstance(image, np.ndarray) or image.size == 0 or image.ndim != 3:
+    if (
+        image is None
+        or not isinstance(image, np.ndarray)
+        or image.size == 0
+        or image.ndim != 3
+    ):
         return None
     try:
         h, w = image.shape[:2]
@@ -76,7 +86,9 @@ def crop_detection_jpeg_base64(
             new_h = max(1, int(round(ch * scale)))
             crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        ok, encoded = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+        ok, encoded = cv2.imencode(
+            ".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+        )
         if not ok:
             return None
 
@@ -103,9 +115,7 @@ def default_class_floors() -> dict[str, float]:
 
 
 def format_class_floors(floors: dict[str, float], classes: tuple[str, ...]) -> str:
-    return ",".join(
-        f"{name}:{floors[name]:.2f}" for name in classes if name in floors
-    )
+    return ",".join(f"{name}:{floors[name]:.2f}" for name in classes if name in floors)
 
 
 def parse_class_floors(header: str | None) -> dict[str, float]:
@@ -302,9 +312,7 @@ class ObjectDetector:
         if not self._classes:
             return []
 
-        ok, encoded = cv2.imencode(
-            ".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 88]
-        )
+        ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
         if not ok:
             return []
 
@@ -363,7 +371,9 @@ class ObjectDetector:
 
     @staticmethod
     def _parse_response(payload: object) -> list[Detection]:
-        if not isinstance(payload, dict) or not isinstance(payload.get("detections"), list):
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("detections"), list
+        ):
             raise ValueError("detector response has no detections list")
 
         parsed: list[Detection] = []

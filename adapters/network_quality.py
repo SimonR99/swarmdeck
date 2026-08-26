@@ -16,7 +16,6 @@ import subprocess
 import threading
 import time
 
-
 # Thread-safe background cache for ping latency probes
 _PING_LOCK = threading.Lock()
 _PING_CACHE: dict[str, tuple[float, dict[str, float | str]]] = {}
@@ -45,7 +44,9 @@ def ping_to_rssi_dbm(quality_pct: float) -> float:
     return round(-90.0 + q * 0.4, 1)
 
 
-def probe_ping_latency(host: str, port: int | None = None, timeout_s: float = 0.25) -> float | None:
+def probe_ping_latency(
+    host: str, port: int | None = None, timeout_s: float = 0.25
+) -> float | None:
     """Measure round-trip time (RTT in ms) to a host via TCP connect or ICMP ping."""
     clean_host = host.strip()
     if not clean_host:
@@ -84,7 +85,9 @@ def probe_ping_latency(host: str, port: int | None = None, timeout_s: float = 0.
     return None
 
 
-def _background_ping_probe(cache_key: str, host: str, port: int | None, iface_name: str) -> None:
+def _background_ping_probe(
+    cache_key: str, host: str, port: int | None, iface_name: str
+) -> None:
     """Asynchronously probe ping latency and update cache."""
     try:
         rtt_ms = probe_ping_latency(host, port)
@@ -186,7 +189,9 @@ def read_link_quality(
     return get_cached_ping_quality(target_host, port, iface_name=iface_name)
 
 
-def parse_link_quality(text: str, interface: str = "auto") -> dict[str, float | str] | None:
+def parse_link_quality(
+    text: str, interface: str = "auto"
+) -> dict[str, float | str] | None:
     """Legacy parser kept for backward compatibility with WEXT /proc/net/wireless fixtures."""
     wanted = interface.strip()
     for line in text.splitlines()[2:]:
@@ -211,12 +216,12 @@ def parse_link_quality(text: str, interface: str = "auto") -> dict[str, float | 
         if 0.0 < link <= 70.0:
             quality_pct = round(max(0.0, min(100.0, link / 70.0 * 100.0)), 1)
         else:
-            quality_pct = round(max(0.0, min(100.0, (level - (-90.0)) / (-50.0 - (-90.0)) * 100.0)), 1)
+            quality_pct = round(
+                max(0.0, min(100.0, (level - (-90.0)) / (-50.0 - (-90.0)) * 100.0)), 1
+            )
         return {
             "interface": name,
             "quality_pct": quality_pct,
             "rssi_dbm": round(level, 1),
         }
     return None
-
-

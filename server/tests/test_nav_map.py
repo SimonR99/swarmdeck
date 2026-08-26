@@ -53,7 +53,10 @@ def test_rotated_warp_round_trips_occupied_cells_to_world():
     dst = _centers(out_meta, out)
     cosine, sine = math.cos(yaw), math.sin(yaw)
     world = np.stack(
-        [tx + dst[:, 0] * cosine - dst[:, 1] * sine, ty + dst[:, 0] * sine + dst[:, 1] * cosine],
+        [
+            tx + dst[:, 0] * cosine - dst[:, 1] * sine,
+            ty + dst[:, 0] * sine + dst[:, 1] * cosine,
+        ],
         axis=1,
     )
     for point in src:
@@ -65,8 +68,16 @@ def _merged_two_robots() -> None:
     meta, cells = _box_grid()
     update = {
         "graphs": {
-            "robot_0": {"keyframes": 8, "in_common_frame": True, "inter_robot": ["robot_1"]},
-            "robot_1": {"keyframes": 7, "in_common_frame": True, "inter_robot": ["robot_0"]},
+            "robot_0": {
+                "keyframes": 8,
+                "in_common_frame": True,
+                "inter_robot": ["robot_1"],
+            },
+            "robot_1": {
+                "keyframes": 7,
+                "in_common_frame": True,
+                "inter_robot": ["robot_0"],
+            },
         },
         "origins": {
             "robot_0": {"x": 0.0, "y": 0.0, "yaw": 0.0, "frame": "component-0"},
@@ -90,7 +101,9 @@ def test_nav_map_is_404_until_the_robot_has_merged():
         ok = client.get("/api/map/nav/robot_0")
         assert ok.status_code == 200
         assert ok.headers["X-Map-Width"]
-        replay = client.get("/api/map/nav/robot_0", headers={"If-None-Match": ok.headers["ETag"]})
+        replay = client.get(
+            "/api/map/nav/robot_0", headers={"If-None-Match": ok.headers["ETag"]}
+        )
         assert replay.status_code == 304
         outsider = client.get("/api/map/nav/robot_9")
         assert outsider.status_code == 404

@@ -23,17 +23,17 @@ from pathlib import Path
 WALL_H = 2.4
 WALL_T = 0.15
 
-HALF = 12.0          # building half-extent, metres
-CORR = 1.8           # corridor half-width
-DOOR = 1.1           # door half-width
+HALF = 12.0  # building half-extent, metres
+CORR = 1.8  # corridor half-width
+DOOR = 1.1  # door half-width
 
 # Room dividers are deliberately IRREGULAR, and differ above vs below the
 # corridor. A symmetric grid of identical rooms is pathological for map
 # registration: shifting by one room width scores almost as well as the true
 # alignment, so the merge locks onto the wrong offset. Asymmetry is what makes
 # the correlation peak unique.
-DIVIDERS_N = (-7.0, -1.0, 4.5)    # rooms above: 5.0, 6.0, 5.5, 7.5 m wide
-DIVIDERS_S = (-4.5, 2.0, 7.0)     # rooms below: 7.5, 6.5, 5.0, 5.0 m wide
+DIVIDERS_N = (-7.0, -1.0, 4.5)  # rooms above: 5.0, 6.0, 5.5, 7.5 m wide
+DIVIDERS_S = (-4.5, 2.0, 7.0)  # rooms below: 7.5, 6.5, 5.0, 5.0 m wide
 
 
 def _segments() -> list[tuple[float, float, float, float]]:
@@ -75,13 +75,13 @@ def _segments() -> list[tuple[float, float, float, float]]:
 
     # Distinctive interior features, all different, so no two regions of the
     # building look alike to the registration correlator.
-    S.append((-10.5, 6.5, -7.0, 6.5 + t))      # alcove, NW room
-    S.append((-1.0, 8.5, 3.0, 8.5 + t))        # partial wall, N room
-    S.append((6.0, 4.0, 6.0 + t, 9.0))         # stub, NE room
-    S.append((-9.0, -6.0, -9.0 + t, -1.8))     # stub, SW room
-    S.append((-2.0, -9.5, 2.0, -9.5 + t))      # partial wall, S room
-    S.append((7.0, -5.0, 11.0, -5.0 + t))      # alcove, SE room
-    S.append((9.0, -5.0, 9.0 + t, -1.8))       # SE subdivision
+    S.append((-10.5, 6.5, -7.0, 6.5 + t))  # alcove, NW room
+    S.append((-1.0, 8.5, 3.0, 8.5 + t))  # partial wall, N room
+    S.append((6.0, 4.0, 6.0 + t, 9.0))  # stub, NE room
+    S.append((-9.0, -6.0, -9.0 + t, -1.8))  # stub, SW room
+    S.append((-2.0, -9.5, 2.0, -9.5 + t))  # partial wall, S room
+    S.append((7.0, -5.0, 11.0, -5.0 + t))  # alcove, SE room
+    S.append((9.0, -5.0, 9.0 + t, -1.8))  # SE subdivision
 
     return S
 
@@ -89,7 +89,13 @@ def _segments() -> list[tuple[float, float, float, float]]:
 LAYOUT = _segments()
 
 # Robot start poses live in the corridor, spaced along it.
-START_POSES = [(-9.0, 0.0, 0.0), (-3.0, 0.0, 0.0), (3.0, 0.0, 3.1416), (9.0, 0.0, 3.1416), (0.0, 0.0, 1.5708)]
+START_POSES = [
+    (-9.0, 0.0, 0.0),
+    (-3.0, 0.0, 0.0),
+    (3.0, 0.0, 3.1416),
+    (9.0, 0.0, 3.1416),
+    (0.0, 0.0, 1.5708),
+]
 
 
 def wall_model(i: int, x0: float, y0: float, x1: float, y1: float) -> str:
@@ -156,10 +162,17 @@ def target_model(i: int, x: float, y: float, yaw: float) -> str:
 
 def table_model(i: int, x: float, y: float, yaw: float = 0.0) -> str:
     parts = []
-    for n, lx, ly in ((0, -0.55, -0.35), (1, -0.55, 0.35), (2, 0.55, -0.35), (3, 0.55, 0.35)):
-        parts.append(f"""
+    for n, lx, ly in (
+        (0, -0.55, -0.35),
+        (1, -0.55, 0.35),
+        (2, 0.55, -0.35),
+        (3, 0.55, 0.35),
+    ):
+        parts.append(
+            f"""
         <collision name="leg_{n}_collision"><pose>{lx} {ly} 0.36 0 0 0</pose><geometry><box><size>0.08 0.08 0.72</size></box></geometry></collision>
-        <visual name="leg_{n}"><pose>{lx} {ly} 0.36 0 0 0</pose><geometry><box><size>0.08 0.08 0.72</size></box></geometry><material><ambient>0.25 0.13 0.06 1</ambient><diffuse>0.42 0.22 0.09 1</diffuse></material></visual>""")
+        <visual name="leg_{n}"><pose>{lx} {ly} 0.36 0 0 0</pose><geometry><box><size>0.08 0.08 0.72</size></box></geometry><material><ambient>0.25 0.13 0.06 1</ambient><diffuse>0.42 0.22 0.09 1</diffuse></material></visual>"""
+        )
     return f"""    <model name="table_{i}"><static>true</static><pose>{x} {y} 0 0 0 {yaw}</pose><link name="link">
         <collision name="top_collision"><pose>0 0 0.76 0 0 0</pose><geometry><box><size>1.3 0.85 0.10</size></box></geometry></collision>
         <visual name="top"><pose>0 0 0.76 0 0 0</pose><geometry><box><size>1.3 0.85 0.10</size></box></geometry><material><ambient>0.34 0.18 0.08 1</ambient><diffuse>0.55 0.30 0.12 1</diffuse></material></visual>{''.join(parts)}
@@ -234,18 +247,25 @@ def main() -> None:
     # Deterministic furniture lives deep inside rooms, leaving the central
     # corridor and robot starts clear. It gives cameras realistic visual
     # structure and gives SLAM non-repetitive landmarks.
-    furniture = "\n".join([
-        table_model(0, -9.2, 8.3, 0.15), table_model(1, -1.8, -7.1, -0.2),
-        table_model(2, 8.2, 7.4, 0.4),
-        chair_model(0, -9.2, 7.25, 1.57), chair_model(1, -9.2, 9.35, -1.57),
-        chair_model(2, -2.8, -7.1, 0.0), chair_model(3, -0.8, -7.1, 3.14159),
-        chair_model(4, 8.2, 6.35, 1.57), chair_model(5, 8.2, 8.45, -1.57),
-        painting_model(0, -9.0, 11.90, 1.35, 0.0, "0.10 0.42 0.72"),
-        painting_model(1, 1.2, -11.90, 1.40, 0.0, "0.78 0.24 0.18"),
-        painting_model(2, 11.90, 7.0, 1.30, 1.5708, "0.24 0.62 0.40"),
-        plant_model(0, -5.7, 10.7), plant_model(1, 4.9, -10.5),
-        plant_model(2, 10.6, 2.8),
-    ])
+    furniture = "\n".join(
+        [
+            table_model(0, -9.2, 8.3, 0.15),
+            table_model(1, -1.8, -7.1, -0.2),
+            table_model(2, 8.2, 7.4, 0.4),
+            chair_model(0, -9.2, 7.25, 1.57),
+            chair_model(1, -9.2, 9.35, -1.57),
+            chair_model(2, -2.8, -7.1, 0.0),
+            chair_model(3, -0.8, -7.1, 3.14159),
+            chair_model(4, 8.2, 6.35, 1.57),
+            chair_model(5, 8.2, 8.45, -1.57),
+            painting_model(0, -9.0, 11.90, 1.35, 0.0, "0.10 0.42 0.72"),
+            painting_model(1, 1.2, -11.90, 1.40, 0.0, "0.78 0.24 0.18"),
+            painting_model(2, 11.90, 7.0, 1.30, 1.5708, "0.24 0.62 0.40"),
+            plant_model(0, -5.7, 10.7),
+            plant_model(1, 4.9, -10.5),
+            plant_model(2, 10.6, 2.8),
+        ]
+    )
 
     tpl = (Path(__file__).parent.parent / "worlds" / "indoor.sdf.jinja").read_text()
     out = Path(args.output)
@@ -254,7 +274,9 @@ def main() -> None:
         .replace("{{FURNITURE}}", furniture)
         .replace("{{TARGETS}}", targets)
     )
-    print(f"[world] seed={args.seed} walls={len(LAYOUT)} targets={len(placed)} -> {out}")
+    print(
+        f"[world] seed={args.seed} walls={len(LAYOUT)} targets={len(placed)} -> {out}"
+    )
 
 
 if __name__ == "__main__":

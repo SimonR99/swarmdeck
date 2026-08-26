@@ -88,7 +88,9 @@ def se2_of(matrix: np.ndarray) -> tuple[float, float, float]:
     )
 
 
-def keyframe_from_packet(packet: KeyframePacket, session: str | None = None) -> Keyframe:
+def keyframe_from_packet(
+    packet: KeyframePacket, session: str | None = None
+) -> Keyframe:
     """Lift a wire packet into a pose-graph node.
 
     The descriptor is computed here when the adapter omitted one: adapters are
@@ -411,7 +413,6 @@ class CollaborativeBackend:
     side actually goes.
     """
 
-
     pcm_confidence: float = 0.99
     min_pcm_clique_size: int = 2
     gnc_weight_threshold: float = 0.5
@@ -624,7 +625,7 @@ class CollaborativeBackend:
                     dst=keyframe.id,
                     t_src_dst=t_src_dst,
                     information=information,
-                )
+                ),
             )
 
         descriptor = keyframe.descriptor
@@ -685,8 +686,7 @@ class CollaborativeBackend:
     ) -> bool:
         excluded = self._excluded if excluded is None else excluded
         return (
-            edge.src.trajectory not in excluded
-            and edge.dst.trajectory not in excluded
+            edge.src.trajectory not in excluded and edge.dst.trajectory not in excluded
         )
 
     def _registration_prior(
@@ -729,7 +729,9 @@ class CollaborativeBackend:
         target_pose = solved.poses.get(target.id)
         if target_pose is None:
             return None
-        if not solved.share_frame_trajectory(source.id.trajectory, target.id.trajectory):
+        if not solved.share_frame_trajectory(
+            source.id.trajectory, target.id.trajectory
+        ):
             return None
         correction = solved.t_world_trajectory.get(source.id.trajectory)
         if correction is None:
@@ -741,7 +743,10 @@ class CollaborativeBackend:
         """Whether a consecutive-keyframe transform is a frame discontinuity
         rather than robot motion. See :attr:`max_plausible_speed_mps`."""
         translation_m, rotation_rad = se3_distance(se3_identity(), t_src_dst)
-        if translation_m < self.min_hop_m and rotation_rad < self.max_plausible_yaw_rate:
+        if (
+            translation_m < self.min_hop_m
+            and rotation_rad < self.max_plausible_yaw_rate
+        ):
             return False
         if dt_s <= 0.0:
             return translation_m > self.fallback_hop_m
@@ -779,9 +784,7 @@ class CollaborativeBackend:
             if other_kf is None:
                 continue
             separation = float(
-                np.linalg.norm(
-                    best_kf.t_odom_base[:3, 3] - other_kf.t_odom_base[:3, 3]
-                )
+                np.linalg.norm(best_kf.t_odom_base[:3, 3] - other_kf.t_odom_base[:3, 3])
             )
             if separation < self.ambiguity_radius_m:
                 continue  # one place seen twice, not two places
@@ -934,11 +937,11 @@ class CollaborativeBackend:
         with self._keyframes_lock:
             keyframes = list(self._keyframes.values())
         included = [
-            keyframe
-            for keyframe in keyframes
-            if keyframe.id.trajectory not in excluded
+            keyframe for keyframe in keyframes if keyframe.id.trajectory not in excluded
         ]
-        grids, robot_grids, trajectory_grids = render_all(optimized, included, self.render)
+        grids, robot_grids, trajectory_grids = render_all(
+            optimized, included, self.render
+        )
         self._dirty = False
         self._new_since_optimize = 0
         # Counted over the INCLUDED edges rather than from the running ingest
@@ -1000,7 +1003,8 @@ def scoped_grids(snapshot: BackendSnapshot) -> list[tuple[str, RenderedGrid]]:
     will again -- and the second failure is silent.
     """
     grids: list[tuple[str, RenderedGrid]] = [
-        (f"robot:{robot_id}", grid) for robot_id, grid in sorted(snapshot.robot_grids.items())
+        (f"robot:{robot_id}", grid)
+        for robot_id, grid in sorted(snapshot.robot_grids.items())
     ]
     # A robot's segments stay grouped under robot:<id> -- that is still one
     # machine's coverage and the operator asked for it by machine. The
@@ -1048,7 +1052,9 @@ def _newest_trajectories(snapshot: BackendSnapshot) -> dict[TrajectoryId, float]
     return {trajectory: stamp for stamp, trajectory in best.values()}
 
 
-def _newest_trajectory_of(snapshot: BackendSnapshot, robot_id: str) -> TrajectoryId | None:
+def _newest_trajectory_of(
+    snapshot: BackendSnapshot, robot_id: str
+) -> TrajectoryId | None:
     return next(
         (t for t in _newest_trajectories(snapshot) if t.robot_id == robot_id), None
     )
@@ -1086,7 +1092,10 @@ def snapshot_update(snapshot: BackendSnapshot) -> dict:
 
     for component in snapshot.optimized.components:
         for robot_id in sorted(component.robots):
-            if current_component.get(robot_id, component.component_id) != component.component_id:
+            if (
+                current_component.get(robot_id, component.component_id)
+                != component.component_id
+            ):
                 continue
             correction = snapshot.optimized.t_world_map.get(robot_id)
             if correction is None:
@@ -1097,7 +1106,9 @@ def snapshot_update(snapshot: BackendSnapshot) -> dict:
                 "x": x,
                 "y": y,
                 "yaw": yaw,
-                "frame": frame if in_majority else f"component-{component.component_id}",
+                "frame": (
+                    frame if in_majority else f"component-{component.component_id}"
+                ),
             }
             # Newest keyframe of the robot's newest trajectory. Not simply
             # the highest seq across the robot: seq restarts at zero, so after

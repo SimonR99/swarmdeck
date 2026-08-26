@@ -50,7 +50,7 @@ def generate_launch_description() -> LaunchDescription:
         "use_sim_time": use_sim,
         "angle_min": -3.14159,
         "angle_max": 3.14159,
-        "angle_increment": 0.0174533,   # 360 bins; a costmap needs no more
+        "angle_increment": 0.0174533,  # 360 bins; a costmap needs no more
         "scan_time": 0.1,
         # Outside the robot's own footprint (0.35 m radius). A 3D lidar mounted
         # on the deck sees the robot it is standing on, and 0.15 m let those
@@ -74,7 +74,7 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="slice",
                 choices=["slice", "flatten"],
                 description="slice = select the horizontal ring for 2D SLAM; "
-                            "flatten = project all obstacle heights down for Nav2",
+                "flatten = project all obstacle heights down for Nav2",
             ),
             DeclareLaunchArgument("range_max", default_value="30.0"),
             Node(

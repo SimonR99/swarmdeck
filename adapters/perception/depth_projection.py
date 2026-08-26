@@ -21,7 +21,11 @@ def _bbox_pixels(
         bx, by, bw, bh = (float(value) for value in bbox)
     except (TypeError, ValueError):
         return None
-    if not all(math.isfinite(value) for value in (bx, by, bw, bh)) or bw <= 0 or bh <= 0:
+    if (
+        not all(math.isfinite(value) for value in (bx, by, bw, bh))
+        or bw <= 0
+        or bh <= 0
+    ):
         return None
     inset = max(0.0, min(0.45, float(inset)))
     x0 = max(0, min(width - 1, int(math.floor((bx + bw * inset) * width))))
@@ -186,10 +190,15 @@ def _point_for_unaligned_depth_image(
     if depth is None:
         return None
     if depth_scale is not None:
-        default = 0.001 if str(getattr(image, "encoding", "")).upper() in (
-            "16UC1",
-            "MONO16",
-        ) else 1.0
+        default = (
+            0.001
+            if str(getattr(image, "encoding", "")).upper()
+            in (
+                "16UC1",
+                "MONO16",
+            )
+            else 1.0
+        )
         if not math.isfinite(depth_scale) or depth_scale <= 0.0:
             return None
         depth *= float(depth_scale) / default
@@ -235,8 +244,12 @@ def _point_for_unaligned_depth_image(
         ui = np.floor(u_c - x0).astype(np.int64)
         vi = np.floor(v_c - y0).astype(np.int64)
         inside = np.zeros(len(u_c), dtype=bool)
-        in_crop = in_box & (ui >= 0) & (vi >= 0) & (ui < interior.shape[1]) & (
-            vi < interior.shape[0]
+        in_crop = (
+            in_box
+            & (ui >= 0)
+            & (vi >= 0)
+            & (ui < interior.shape[1])
+            & (vi < interior.shape[0])
         )
         inside[in_crop] = interior[vi[in_crop], ui[in_crop]]
         in_box = inside
@@ -284,7 +297,9 @@ def point_for_depth_image(
                 (),
                 {
                     "translation": type("V", (), {"x": 0.0, "y": 0.0, "z": 0.0})(),
-                    "rotation": type("Q", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})(),
+                    "rotation": type(
+                        "Q", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                    )(),
                 },
             )()
         return _point_for_unaligned_depth_image(

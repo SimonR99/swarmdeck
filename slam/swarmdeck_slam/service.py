@@ -134,9 +134,7 @@ def _capture(blob: bytes) -> None:
         return
     with _capture_lock:
         if _capture_seq < 0:
-            _capture_seq = _resume_capture_index(
-                os.path.join(CAPTURE_DIR, "keyframes")
-            )
+            _capture_seq = _resume_capture_index(os.path.join(CAPTURE_DIR, "keyframes"))
         index = _capture_seq
         _capture_seq += 1
     try:
@@ -388,7 +386,8 @@ async def post_trajectories_select(request: Request) -> Any:
 
     if only is None and exclude is None and include is None:
         return JSONResponse(
-            {"error": "one of 'only', 'exclude', 'include' is required"}, status_code=400
+            {"error": "one of 'only', 'exclude', 'include' is required"},
+            status_code=400,
         )
 
     changed = 0

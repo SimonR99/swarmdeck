@@ -28,7 +28,9 @@ _BUNKER_FOOTPRINT = (
 )
 # Use the end furthest from the lidar for the fallback circle. With the sensor
 # ahead of centre that is the rear, not the front.
-_BUNKER_RADIUS = f"{(max(abs(_FRONT), abs(_REAR)) ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+_BUNKER_RADIUS = (
+    f"{(max(abs(_FRONT), abs(_REAR)) ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+)
 
 
 def generate_launch_description() -> LaunchDescription:

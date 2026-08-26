@@ -58,7 +58,9 @@ def test_single_ring_with_a_vertical_fov_is_refused():
 
 @pytest.mark.parametrize("rings", [1, 9, 17])
 def test_render_substitutes_every_placeholder(rings):
-    sdf = render("robot_0", "0.2 0.7 0.9", LidarSpec(rings=rings, vfov=0.26 * (rings > 1)))
+    sdf = render(
+        "robot_0", "0.2 0.7 0.9", LidarSpec(rings=rings, vfov=0.26 * (rings > 1))
+    )
     assert "{{" not in sdf, "unsubstituted template placeholder left in the SDF"
     assert "robot_0/scan" in sdf
     assert f"<samples>{rings}</samples>" in sdf
@@ -138,11 +140,12 @@ def test_imu_is_noisy():
     imu = sdf.split('<sensor name="imu"')[1].split("</sensor>")[0]
     for channel in ("angular_velocity", "linear_acceleration"):
         block = imu.split(f"<{channel}>")[1].split(f"</{channel}>")[0]
-        assert block.count('<noise type="gaussian">') == 3, f"{channel}: needs x/y/z noise"
+        assert (
+            block.count('<noise type="gaussian">') == 3
+        ), f"{channel}: needs x/y/z noise"
         assert "<bias_mean>" in block, f"{channel}: needs a bias, not just white noise"
         stddevs = [
-            float(part.split("</stddev>")[0])
-            for part in block.split("<stddev>")[1:]
+            float(part.split("</stddev>")[0]) for part in block.split("<stddev>")[1:]
         ]
         assert all(s > 0.0 for s in stddevs), f"{channel}: zero stddev is no noise"
 
@@ -189,7 +192,9 @@ def test_drive_joints_exist_for_the_joints_the_plugin_names(platform):
     )
     named = {e.text for e in plugin if e.tag in ("left_joint", "right_joint")}
     assert named, "DiffDrive names no joints"
-    assert named <= joints, f"DiffDrive names joints that do not exist: {named - joints}"
+    assert (
+        named <= joints
+    ), f"DiffDrive names joints that do not exist: {named - joints}"
 
 
 @pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
@@ -225,8 +230,10 @@ def test_platforms_are_actually_different_sizes():
 
 
 def test_mixed_fleet_resolves_per_robot_overrides():
-    cfg = {"robot_type": "bunker", "robot_types": {"robot_2": "scout_mini",
-                                                   "robot_3": "spot"}}
+    cfg = {
+        "robot_type": "bunker",
+        "robot_types": {"robot_2": "scout_mini", "robot_3": "spot"},
+    }
     assert robot_types(cfg, 4, "robot_") == ["bunker", "bunker", "scout_mini", "spot"]
 
 

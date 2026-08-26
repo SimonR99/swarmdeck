@@ -28,6 +28,7 @@ Map sharpness proxy: occupied cell count at fixed resolution. A trajectory that
 folds onto itself smears one wall into many, so occupied cells GROW while the
 true structure does not.
 """
+
 import collections
 import pathlib
 import sys
@@ -44,11 +45,15 @@ LAST_N = int(sys.argv[2]) if len(sys.argv) > 2 else 145
 blobs = sorted(pathlib.Path(DATASET, "keyframes").glob("*.kf"))[-LAST_N:]
 packets = []
 for f in blobs:
-    try: packets.append(decode_keyframe(f.read_bytes()))
-    except Exception: pass
+    try:
+        packets.append(decode_keyframe(f.read_bytes()))
+    except Exception:
+        pass
 seqs = [p.seq for p in packets]
-print(f"  {len(packets)} blobs, robots={sorted({p.robot_id for p in packets})}, "
-      f"seq {min(seqs)}..{max(seqs)}")
+print(
+    f"  {len(packets)} blobs, robots={sorted({p.robot_id for p in packets})}, "
+    f"seq {min(seqs)}..{max(seqs)}"
+)
 
 RENDER = RenderConfig(floor_z=0.0, min_z=0.08, max_z=2.20, native_map_resolution=0.05)
 
@@ -77,10 +82,13 @@ def displacement(backend, graph):
 
 
 for mme in (1.0, 0.15):
-    be = CollaborativeBackend(verify=replace(PRODUCTION_VERIFY, max_mean_error=mme), render=RENDER)
+    be = CollaborativeBackend(
+        verify=replace(PRODUCTION_VERIFY, max_mean_error=mme), render=RENDER
+    )
     for i, p in enumerate(packets, 1):
         be.ingest_packet(p)
-        if i % 25 == 0: be.optimize_and_render()
+        if i % 25 == 0:
+            be.optimize_and_render()
     snap = be.optimize_and_render()
     opt = snap.optimized
     kfs = list(be._keyframes.values())
@@ -106,9 +114,15 @@ for mme in (1.0, 0.15):
     o_raw, w2, h2 = occupied(raw, kfs)
     print(f"\n  max_mean_error={mme}")
     print(f"    trajectories         : {[str(t) for t in trajectories]}")
-    print(f"    loop closures        : {nloop}   rejected by graph: {len(opt.rejected_edges)}")
+    print(
+        f"    loop closures        : {nloop}   rejected by graph: {len(opt.rejected_edges)}"
+    )
     for trajectory, n, trans, rot in displacement(be, opt):
-        print(f"    moved {str(trajectory):<24} n={n:>4}  median {np.median(trans):.2f} m / "
-              f"{np.median(rot):.1f} deg, max {max(trans):.2f} m / {max(rot):.1f} deg")
+        print(
+            f"    moved {str(trajectory):<24} n={n:>4}  median {np.median(trans):.2f} m / "
+            f"{np.median(rot):.1f} deg, max {max(trans):.2f} m / {max(rot):.1f} deg"
+        )
     print(f"    occupied cells  RAW  : {o_raw:>7}  ({w2}x{h2})")
-    print(f"    occupied cells  OPT  : {o_opt:>7}  ({w1}x{h1})   ratio {o_opt/max(o_raw,1):.2f}x")
+    print(
+        f"    occupied cells  OPT  : {o_opt:>7}  ({w1}x{h1})   ratio {o_opt/max(o_raw,1):.2f}x"
+    )

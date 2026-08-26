@@ -120,7 +120,13 @@ def setup(context, *args, **kwargs):
         try:
             persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
             count = int(persisted.get("robot_count", count))
-        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
+        except (
+            FileNotFoundError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            OSError,
+        ):
             pass
     count = max(1, min(count, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
@@ -158,16 +164,28 @@ def setup(context, *args, **kwargs):
     actions = [
         # Regenerate the world from the seed so the run is reproducible.
         ExecuteProcess(
-            cmd=["python3", str(scenario / "generate_world.py"),
-                 "--seed", str(seed), "-o", str(world)],
+            cmd=[
+                "python3",
+                str(scenario / "generate_world.py"),
+                "--seed",
+                str(seed),
+                "-o",
+                str(world),
+            ],
             output="screen",
         ),
         TimerAction(
             period=2.0,
             actions=[
                 ExecuteProcess(
-                    cmd=["gz", "sim", "-s" if headless else "", "-r",
-                         "--headless-rendering" if headless else "", str(world)],
+                    cmd=[
+                        "gz",
+                        "sim",
+                        "-s" if headless else "",
+                        "-r",
+                        "--headless-rendering" if headless else "",
+                        str(world),
+                    ],
                     output="screen",
                 )
             ],
@@ -176,9 +194,16 @@ def setup(context, *args, **kwargs):
             period=12.0,
             actions=[
                 ExecuteProcess(
-                    cmd=["python3", str(scenario / "spawn_fleet.py"),
-                         "--config", str(cfg_path), "--robots", str(count),
-                         "--lidar-rings", str(lidar_rings)],
+                    cmd=[
+                        "python3",
+                        str(scenario / "spawn_fleet.py"),
+                        "--config",
+                        str(cfg_path),
+                        "--robots",
+                        str(count),
+                        "--lidar-rings",
+                        str(lidar_rings),
+                    ],
                     output="screen",
                 )
             ],
@@ -307,34 +332,44 @@ def setup(context, *args, **kwargs):
     if explore_seconds > 0:
         actions.append(
             TimerAction(
-                period=(BRINGUP_DELAY + min(count, 5) * ROBOT_STAGGER
-                        + EXPLORE_LEAD_IN),
+                period=(
+                    BRINGUP_DELAY + min(count, 5) * ROBOT_STAGGER + EXPLORE_LEAD_IN
+                ),
                 actions=[
                     ExecuteProcess(
-                        cmd=["python3", str(scenario / "explore.py"),
-                             "--robots", str(min(count, 5)),
-                             "--prefix", prefix,
-                             "--seconds", str(explore_seconds),
-                             "--seed", str(seed),
-                             # Configured spawn poses, so the explorer can send
-                             # scheduled pairs to a shared meeting point. Every
-                             # robot steers in its own odom frame, so without
-                             # these a common rendezvous cannot be expressed and
-                             # inter-robot encounters stay a matter of luck.
-                             "--start-poses", json.dumps(
-                                 cfg.get("map", {}).get("start_poses", {})
-                             ),
-                             # Per-robot chassis size. The explorer's clearances
-                             # were absolute constants tuned on a 0.27 m
-                             # Duckiebot; on a fleet whose largest member is
-                             # 0.64 m they let a Bunker drive to within 0.9 m of
-                             # a neighbour and then rotate into it.
-                             "--radii", json.dumps({
-                                 f"{prefix}{i}": round(
-                                     robot_spec(types[i]).footprint_radius, 3
-                                 )
-                                 for i in range(min(count, 5))
-                             })],
+                        cmd=[
+                            "python3",
+                            str(scenario / "explore.py"),
+                            "--robots",
+                            str(min(count, 5)),
+                            "--prefix",
+                            prefix,
+                            "--seconds",
+                            str(explore_seconds),
+                            "--seed",
+                            str(seed),
+                            # Configured spawn poses, so the explorer can send
+                            # scheduled pairs to a shared meeting point. Every
+                            # robot steers in its own odom frame, so without
+                            # these a common rendezvous cannot be expressed and
+                            # inter-robot encounters stay a matter of luck.
+                            "--start-poses",
+                            json.dumps(cfg.get("map", {}).get("start_poses", {})),
+                            # Per-robot chassis size. The explorer's clearances
+                            # were absolute constants tuned on a 0.27 m
+                            # Duckiebot; on a fleet whose largest member is
+                            # 0.64 m they let a Bunker drive to within 0.9 m of
+                            # a neighbour and then rotate into it.
+                            "--radii",
+                            json.dumps(
+                                {
+                                    f"{prefix}{i}": round(
+                                        robot_spec(types[i]).footprint_radius, 3
+                                    )
+                                    for i in range(min(count, 5))
+                                }
+                            ),
+                        ],
                         output="screen",
                     )
                 ],
@@ -353,36 +388,36 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="toolbox",
                 choices=["toolbox", "rtabmap"],
                 description="toolbox = 2D SLAM Toolbox; rtabmap = 3D cloud + "
-                            "optional visual loop closure (needs a multi-ring "
-                            "fleet.lidar profile)",
+                "optional visual loop closure (needs a multi-ring "
+                "fleet.lidar profile)",
             ),
             DeclareLaunchArgument(
                 "fuse_imu",
                 default_value="true",
                 description="EKF-fuse wheel odometry with the gyro and let it own "
-                            "odom -> base_link, instead of trusting the drive "
-                            "plugin's slip-corrupted heading.",
+                "odom -> base_link, instead of trusting the drive "
+                "plugin's slip-corrupted heading.",
             ),
             DeclareLaunchArgument(
                 "fuse_covariance",
                 default_value="false",
                 description="Feed the EKF real per-measurement covariance from "
-                            "covariance_relay.py. False reproduces the filter as "
-                            "it behaved on Gazebo's all-zero covariance.",
+                "covariance_relay.py. False reproduces the filter as "
+                "it behaved on Gazebo's all-zero covariance.",
             ),
             DeclareLaunchArgument(
                 "grid_3d",
                 default_value="false",
                 description="rtabmap backend only: keep occupancy in 3D so the "
-                            "GUI's 3D view shows real structure instead of a flat "
-                            "plane. Halves the real-time factor.",
+                "GUI's 3D view shows real structure instead of a flat "
+                "plane. Halves the real-time factor.",
             ),
             DeclareLaunchArgument(
                 "explore_seconds",
                 default_value="0",
                 description="Run reactive exploration for this many seconds after "
-                            "startup to bootstrap the maps, then hand control back "
-                            "to Nav2. 0 disables it.",
+                "startup to bootstrap the maps, then hand control back "
+                "to Nav2. 0 disables it.",
             ),
             OpaqueFunction(function=setup),
         ]

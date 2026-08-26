@@ -35,7 +35,11 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from swarmdeck_slam.evaluation import compute_ate, inter_robot_transform_error, score_components
+from swarmdeck_slam.evaluation import (
+    compute_ate,
+    inter_robot_transform_error,
+    score_components,
+)
 from swarmdeck_slam.graph import GtsamPoseGraph
 from swarmdeck_slam.types import (
     Edge,
@@ -79,7 +83,9 @@ def _closure_information(sigma_t: float, sigma_r: float) -> np.ndarray:
     return np.diag([1.0 / sigma_r**2] * 3 + [1.0 / sigma_t**2] * 3)
 
 
-def _odometry_edges(robot: SyntheticRobot, *, margin: float = _ODOM_SIGMA_MARGIN) -> list[Edge]:
+def _odometry_edges(
+    robot: SyntheticRobot, *, margin: float = _ODOM_SIGMA_MARGIN
+) -> list[Edge]:
     """``ODOMETRY`` edges between consecutive keyframes, from the robot's own
     (drifted) ``t_odom_base`` -- exactly what a real front end would report,
     since it never sees ground truth. Sigma is proportional to the step
@@ -122,11 +128,15 @@ def _find_real_closures(
             if robot_a is robot_b and abs(kf_a.id.seq - kf_b.id.seq) < min_index_gap:
                 continue
             distance = float(
-                np.linalg.norm(robot_a.truth[kf_a.id][:3, 3] - robot_b.truth[kf_b.id][:3, 3])
+                np.linalg.norm(
+                    robot_a.truth[kf_a.id][:3, 3] - robot_b.truth[kf_b.id][:3, 3]
+                )
             )
             if distance >= radius:
                 continue
-            t_src_dst_true = se3_relative(robot_a.truth[kf_a.id], robot_b.truth[kf_b.id])
+            t_src_dst_true = se3_relative(
+                robot_a.truth[kf_a.id], robot_b.truth[kf_b.id]
+            )
             t_target_source = se3_inverse(t_src_dst_true)
             yaw_prior = float(np.arctan2(t_target_source[1, 0], t_target_source[0, 0]))
             edge = verify_candidate(kf_a, kf_b, yaw_prior)
@@ -135,7 +145,9 @@ def _find_real_closures(
     return edges
 
 
-def _build_graph(robots: list[SyntheticRobot], closures: list[Edge] = (), **kwargs) -> GtsamPoseGraph:
+def _build_graph(
+    robots: list[SyntheticRobot], closures: list[Edge] = (), **kwargs
+) -> GtsamPoseGraph:
     pose_graph = GtsamPoseGraph(**kwargs)
     for robot in robots:
         for keyframe in robot.keyframes:
@@ -157,10 +169,16 @@ def _drifted_poses(robot: SyntheticRobot) -> dict[KeyframeId, np.ndarray]:
 
 
 def _robot_poses(result: OptimizedGraph, robot_id: str) -> dict[KeyframeId, np.ndarray]:
-    return {kf_id: pose for kf_id, pose in result.poses.items() if kf_id.robot_id == robot_id}
+    return {
+        kf_id: pose
+        for kf_id, pose in result.poses.items()
+        if kf_id.robot_id == robot_id
+    }
 
 
-def _synthetic_fleet(n_robots: int, n_keyframes: int, *, seed: int = 1) -> list[SyntheticRobot]:
+def _synthetic_fleet(
+    n_robots: int, n_keyframes: int, *, seed: int = 1
+) -> list[SyntheticRobot]:
     """An N-robot fleet sharing one scene, all driving the same rectangle from
     different odometry seeds -- for the scaling test, which needs a robot
     count the shared two/disjoint fixtures don't parametrize.
@@ -169,14 +187,21 @@ def _synthetic_fleet(n_robots: int, n_keyframes: int, *, seed: int = 1) -> list[
     waypoints = [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)]
     return [
         simulate_robot(
-            scene, f"r{i}", waypoints, seed=seed + i + 1, n_keyframes=n_keyframes,
-            drift_per_metre=0.03, yaw_drift_per_metre=0.01,
+            scene,
+            f"r{i}",
+            waypoints,
+            seed=seed + i + 1,
+            n_keyframes=n_keyframes,
+            drift_per_metre=0.03,
+            yaw_drift_per_metre=0.01,
         )
         for i in range(n_robots)
     ]
 
 
-def _hand_built_loop_closures(robots: list[SyntheticRobot], *, rng: np.random.Generator) -> list[Edge]:
+def _hand_built_loop_closures(
+    robots: list[SyntheticRobot], *, rng: np.random.Generator
+) -> list[Edge]:
     """Two intra-robot closures per robot, straight from ground truth plus a
     small perturbation -- cheap (no GICP) and gives LM genuine residual to
     work on, which matters for the scaling test: a graph where every closure
@@ -192,7 +217,11 @@ def _hand_built_loop_closures(robots: list[SyntheticRobot], *, rng: np.random.Ge
             t_src_dst = se3_relative(robot.truth[src.id], robot.truth[dst.id])
             perturbation = se3_identity()
             perturbation[:3, 3] = rng.normal(scale=0.02, size=3)
-            edges.append(Edge(EdgeKind.INTRA_LOOP, src.id, dst.id, t_src_dst @ perturbation, info))
+            edges.append(
+                Edge(
+                    EdgeKind.INTRA_LOOP, src.id, dst.id, t_src_dst @ perturbation, info
+                )
+            )
     return edges
 
 
@@ -250,7 +279,9 @@ def test_optimize_reduces_ate_on_drifting_loop(merged_fleet) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_inter_robot_outlier_rejected_by_pcm_without_corrupting_solution(merged_fleet) -> None:
+def test_inter_robot_outlier_rejected_by_pcm_without_corrupting_solution(
+    merged_fleet,
+) -> None:
     """PCM is the only defense that can see an inter-robot outlier (GNC judges
     by residual against the rest of the graph, and a self-consistent outlier
     has a small residual by definition -- see graph.py's module docstring).
@@ -275,12 +306,14 @@ def test_inter_robot_outlier_rejected_by_pcm_without_corrupting_solution(merged_
     for robot in robots:
         clean_ate = compute_ate(_robot_poses(clean_result, robot.robot_id), robot.truth)
         outlier_ate = compute_ate(_robot_poses(result, robot.robot_id), robot.truth)
-        assert outlier_ate.translation_m.rmse == pytest.approx(clean_ate.translation_m.rmse, abs=1e-9), (
-            f"{robot.robot_id}: solution changed after a PCM-rejected outlier was added"
-        )
+        assert outlier_ate.translation_m.rmse == pytest.approx(
+            clean_ate.translation_m.rmse, abs=1e-9
+        ), f"{robot.robot_id}: solution changed after a PCM-rejected outlier was added"
 
 
-def test_intra_robot_outlier_rejected_by_gnc_without_corrupting_solution(merged_fleet) -> None:
+def test_intra_robot_outlier_rejected_by_gnc_without_corrupting_solution(
+    merged_fleet,
+) -> None:
     """Intra-robot closures never reach PCM (there is no second robot to
     cross-check against -- see module docstring), so GNC is the only defense
     available for this case. A confidently-wrong intra-robot closure (claims
@@ -365,7 +398,9 @@ def test_unmerged_robot_still_gets_its_own_component() -> None:
 
     for robot in robots:
         component = result.component_of(robot.robot_id)
-        assert component is not None, f"{robot.robot_id} has keyframes but no Component at all"
+        assert (
+            component is not None
+        ), f"{robot.robot_id} has keyframes but no Component at all"
         assert component.robots == frozenset({robot.robot_id})
 
 
@@ -389,8 +424,12 @@ def test_two_robots_merge_and_recover_relative_transform(merged_fleet) -> None:
         # Generous relative to the measured recovery (~0.07-0.27 m, ~0.3-0.4
         # deg on this fixture) -- tight enough to catch a real mismerge or a
         # sign error, loose enough not to be sensitive to fixture-seed noise.
-        assert error.translation_m < 1.0, f"{robot_id}: recovered T_world_map off by {error.translation_m:.3f} m"
-        assert error.rotation_deg < 5.0, f"{robot_id}: recovered T_world_map off by {error.rotation_deg:.3f} deg"
+        assert (
+            error.translation_m < 1.0
+        ), f"{robot_id}: recovered T_world_map off by {error.translation_m:.3f} m"
+        assert (
+            error.rotation_deg < 5.0
+        ), f"{robot_id}: recovered T_world_map off by {error.rotation_deg:.3f} deg"
 
 
 # --------------------------------------------------------------------------- #
@@ -431,9 +470,9 @@ def test_inverted_edge_direction_is_wrong_or_rejected() -> None:
 
     ate_pre = compute_ate(_drifted_poses(alpha), alpha.truth)
     ate_good = compute_ate(good_result.poses, alpha.truth)
-    assert ate_good.translation_m.rmse < ate_pre.translation_m.rmse, (
-        "positive control failed: the correctly-oriented closure should improve ATE"
-    )
+    assert (
+        ate_good.translation_m.rmse < ate_pre.translation_m.rmse
+    ), "positive control failed: the correctly-oriented closure should improve ATE"
 
     if bad_edge in bad_result.rejected_edges:
         return  # acceptable: the inverted edge was caught and never influenced the solution
@@ -462,7 +501,9 @@ _SCALING_BOUND_S = 1.0
 _SCALING_GROWTH_FACTOR_BOUND = 6.0
 
 
-def _timed_optimize(robots: list[SyntheticRobot], *, rng_seed: int) -> tuple[float, OptimizedGraph]:
+def _timed_optimize(
+    robots: list[SyntheticRobot], *, rng_seed: int
+) -> tuple[float, OptimizedGraph]:
     rng = np.random.default_rng(rng_seed)
     pose_graph = _build_graph(robots, _hand_built_loop_closures(robots, rng=rng))
     start = time.perf_counter()
@@ -474,7 +515,9 @@ def test_optimize_scaling_has_a_measured_bound() -> None:
     robots = _synthetic_fleet(_SCALING_N_ROBOTS, _SCALING_N_KEYFRAMES)
     elapsed, result = _timed_optimize(robots, rng_seed=0)
     assert len(result.poses) == _SCALING_N_ROBOTS * _SCALING_N_KEYFRAMES
-    assert elapsed < _SCALING_BOUND_S, f"optimize() took {elapsed:.3f}s, expected < {_SCALING_BOUND_S}s"
+    assert (
+        elapsed < _SCALING_BOUND_S
+    ), f"optimize() took {elapsed:.3f}s, expected < {_SCALING_BOUND_S}s"
 
 
 def test_optimize_scaling_growth_is_bounded() -> None:
@@ -532,10 +575,14 @@ def test_structural_edges_are_never_rejectable() -> None:
 
     result = pose_graph.optimize()
 
-    assert loop_edge in result.rejected_edges  # the impossible threshold rejects every closure
+    assert (
+        loop_edge in result.rejected_edges
+    )  # the impossible threshold rejects every closure
     assert not any(edge in result.rejected_edges for edge in all_odometry)
     total_keyframes = sum(len(robot.keyframes) for robot in robots)
-    assert len(result.poses) == total_keyframes  # every keyframe still solved: graph stayed connected
+    assert (
+        len(result.poses) == total_keyframes
+    )  # every keyframe still solved: graph stayed connected
 
 
 # --------------------------------------------------------------------------- #
@@ -619,7 +666,9 @@ def _snapshot_t_world_map(result: OptimizedGraph, robot: SyntheticRobot) -> np.n
     return result.poses[latest.id] @ se3_inverse(latest.t_odom_base)
 
 
-def _rebase_from(robot: SyntheticRobot, index: int, shift: np.ndarray) -> SyntheticRobot:
+def _rebase_from(
+    robot: SyntheticRobot, index: int, shift: np.ndarray
+) -> SyntheticRobot:
     """Move every keyframe from ``index`` onward into a shifted source frame.
 
     Stands in for the robot's own SLAM node re-optimizing and moving its map
@@ -662,7 +711,9 @@ def test_t_world_map_beats_the_single_keyframe_snapshot_on_a_drifting_frame() ->
     """
     _scene, robots = two_robot_fleet(seed=3)
     shift = yaw_pose(1.5, -0.8, np.deg2rad(9.0))
-    drifting = [_rebase_from(robot, len(robot.keyframes) // 2, shift) for robot in robots]
+    drifting = [
+        _rebase_from(robot, len(robot.keyframes) // 2, shift) for robot in robots
+    ]
 
     result = _build_graph(drifting, []).optimize()
 
@@ -691,8 +742,12 @@ def test_t_world_map_never_loses_to_the_snapshot_it_replaced() -> None:
     result = _build_graph(robots, _find_real_closures(robots)).optimize()
 
     for robot in robots:
-        published = _t_world_map_residual(result, robot, result.t_world_map[robot.robot_id])
-        snapshot = _t_world_map_residual(result, robot, _snapshot_t_world_map(result, robot))
+        published = _t_world_map_residual(
+            result, robot, result.t_world_map[robot.robot_id]
+        )
+        snapshot = _t_world_map_residual(
+            result, robot, _snapshot_t_world_map(result, robot)
+        )
         assert published <= snapshot + 1e-9, (
             f"{robot.robot_id}: published frame is worse ({published:.4f} m) than the "
             f"single-keyframe snapshot ({snapshot:.4f} m) it replaced"

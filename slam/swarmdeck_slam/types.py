@@ -194,7 +194,9 @@ class KeyRegistry:
     def key(self, keyframe_id: KeyframeId) -> int:
         if not 0 <= keyframe_id.seq < _MAX_SEQ:
             raise ValueError(f"seq {keyframe_id.seq} out of range for {_SEQ_BITS} bits")
-        return (self.trajectory_index(keyframe_id.trajectory) << _SEQ_BITS) | keyframe_id.seq
+        return (
+            self.trajectory_index(keyframe_id.trajectory) << _SEQ_BITS
+        ) | keyframe_id.seq
 
     def unkey(self, key: int) -> KeyframeId:
         index = key >> _SEQ_BITS
@@ -224,6 +226,7 @@ class KeyRegistry:
 # `@`, invert exactly, and print readably -- which matters more than the marginal
 # speed of a quaternion representation at the scale this graph runs at.
 # --------------------------------------------------------------------------- #
+
 
 def se3_identity() -> np.ndarray:
     return np.eye(4, dtype=np.float64)
@@ -370,6 +373,7 @@ def se3_distance(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
 # --------------------------------------------------------------------------- #
 # Graph elements
 # --------------------------------------------------------------------------- #
+
 
 @dataclass(slots=True)
 class Keyframe:

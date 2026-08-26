@@ -37,11 +37,13 @@ def test_stamp_seconds_accepts_both_ros_timestamp_shapes():
 
 
 def test_map_cloud_height_limits_can_be_expressed_above_a_floor():
-    assert map_cloud_height_limits({
-        "floor_z": -0.5,
-        "min_z": 0.15,
-        "max_z": 0.65,
-    }) == pytest.approx((-0.35, 0.15))
+    assert map_cloud_height_limits(
+        {
+            "floor_z": -0.5,
+            "min_z": 0.15,
+            "max_z": 0.65,
+        }
+    ) == pytest.approx((-0.35, 0.15))
 
 
 def test_map_cloud_height_limits_preserves_legacy_map_frame_profiles():
@@ -73,12 +75,18 @@ def test_cloud_xyz_honours_field_offsets_and_drops_nonfinite_rows():
         types.SimpleNamespace(name="z", offset=12),
     ]
     rows = np.zeros((2, 16), dtype=np.uint8)
-    rows[0, 4:16] = np.frombuffer(np.array([1.0, -2.0, 3.0], dtype="<f4").tobytes(), dtype=np.uint8)
-    rows[1, 4:16] = np.frombuffer(np.array([math.inf, 0.0, 1.0], dtype="<f4").tobytes(), dtype=np.uint8)
+    rows[0, 4:16] = np.frombuffer(
+        np.array([1.0, -2.0, 3.0], dtype="<f4").tobytes(), dtype=np.uint8
+    )
+    rows[1, 4:16] = np.frombuffer(
+        np.array([math.inf, 0.0, 1.0], dtype="<f4").tobytes(), dtype=np.uint8
+    )
     msg = types.SimpleNamespace(fields=fields, data=rows.tobytes(), point_step=16)
     np.testing.assert_allclose(cloud_xyz(msg), [[1.0, -2.0, 3.0]])
 
 
 def test_yaw_of_uses_planar_quaternion_component():
-    q = types.SimpleNamespace(w=math.cos(math.pi / 4), z=math.sin(math.pi / 4), x=0.0, y=0.0)
+    q = types.SimpleNamespace(
+        w=math.cos(math.pi / 4), z=math.sin(math.pi / 4), x=0.0, y=0.0
+    )
     assert yaw_of(q) == pytest.approx(math.pi / 2)

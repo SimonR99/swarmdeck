@@ -68,7 +68,13 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from sensor_msgs.msg import BatteryState, CameraInfo, CompressedImage, Image, PointCloud2
+from sensor_msgs.msg import (
+    BatteryState,
+    CameraInfo,
+    CompressedImage,
+    Image,
+    PointCloud2,
+)
 from tf2_ros import Buffer, TransformListener
 
 # Hardware containers run this file directly, so make the repository's shared
@@ -141,12 +147,14 @@ BODY_ACTIONS = ("claim", "release", "sit", "stand")
 # tablet keepalive clear, and the SDK stop used because Clearpath's ROS 2
 # Trajectory server does not honour cancel/preempt.
 BODY_SERVICE_NAMES = (
-    *BODY_ACTIONS, "power_on", "stop", "estop_release", "clear_keepalive",
+    *BODY_ACTIONS,
+    "power_on",
+    "stop",
+    "estop_release",
+    "clear_keepalive",
 )
 # Missing these is normal on non-Spot robots; do not warn.
-OPTIONAL_BODY_SERVICES = frozenset(
-    {"power_on", "estop_release", "clear_keepalive"}
-)
+OPTIONAL_BODY_SERVICES = frozenset({"power_on", "estop_release", "clear_keepalive"})
 
 DEFAULTS: dict[str, Any] = {
     "robot_type": "generic",
@@ -178,7 +186,7 @@ DEFAULTS: dict[str, Any] = {
         "map_cloud": "",
         "plan": "plan",
         "cmd_vel": "cmd_vel",
-        "battery": "",       # empty disables the capability
+        "battery": "",  # empty disables the capability
         "camera": "",
         "camera_compressed": "",
         "camera_depth": "",
@@ -242,7 +250,7 @@ DEFAULTS: dict[str, Any] = {
         "state_hz": 5.0,
         "map_period_s": 2.0,
         "cloud_period_s": 4.0,
-        "camera_period_s": 0.2,   # detection poll; hardware video is H.264/WebRTC
+        "camera_period_s": 0.2,  # detection poll; hardware video is H.264/WebRTC
     },
     "perception": {
         "enabled": True,
@@ -383,7 +391,9 @@ class HardwareBridge(
         perception = cfg.get("perception", {})
         self._detector = None
         self._detection_enabled = bool(perception.get("enabled", True))
-        if self._detection_enabled and (topics.get("camera") or topics.get("camera_compressed")):
+        if self._detection_enabled and (
+            topics.get("camera") or topics.get("camera_compressed")
+        ):
             if ObjectDetector is None:
                 self._detection_enabled = False
                 node.get_logger().warn(
@@ -422,10 +432,14 @@ class HardwareBridge(
                 Odometry, topics["odom"], self._on_odom, qos_profile_sensor_data
             )
         if topics.get("map"):
-            node.create_subscription(OccupancyGrid, topics["map"], self._on_map, latched)
+            node.create_subscription(
+                OccupancyGrid, topics["map"], self._on_map, latched
+            )
         if topics.get("map_cloud"):
             node.create_subscription(
-                PointCloud2, topics["map_cloud"], self._on_map_cloud,
+                PointCloud2,
+                topics["map_cloud"],
+                self._on_map_cloud,
                 qos_profile_sensor_data,
             )
         if topics.get("plan"):
@@ -440,11 +454,15 @@ class HardwareBridge(
             if "bunker_status" in battery_topic:
                 try:
                     from bunker_msgs.msg import BunkerStatus
+
                     msg_cls = BunkerStatus
                 except ImportError:
                     try:
                         from rosidl_runtime_py.utilities import get_message
-                        msg_cls = get_message("bunker_msgs/msg/BunkerStatus") or BatteryState
+
+                        msg_cls = (
+                            get_message("bunker_msgs/msg/BunkerStatus") or BatteryState
+                        )
                     except Exception:
                         pass
             node.create_subscription(
@@ -455,8 +473,10 @@ class HardwareBridge(
         # Frames stay on-robot for detection; the operator picture is WebRTC.
         if topics.get("camera_compressed"):
             node.create_subscription(
-                CompressedImage, topics["camera_compressed"],
-                self._on_camera_compressed, qos_profile_sensor_data,
+                CompressedImage,
+                topics["camera_compressed"],
+                self._on_camera_compressed,
+                qos_profile_sensor_data,
             )
         elif topics.get("camera"):
             node.create_subscription(
@@ -497,7 +517,8 @@ class HardwareBridge(
 
         self.pub_cmd = (
             node.create_publisher(Twist, topics["cmd_vel"], 10)
-            if topics.get("cmd_vel") else None
+            if topics.get("cmd_vel")
+            else None
         )
         nav_map_topic = topics.get("nav_map") or "/global_map"
         self.pub_global_map = node.create_publisher(
@@ -522,9 +543,7 @@ class HardwareBridge(
         max_velocity_name = (cfg.get("services") or {}).get("max_velocity")
         self._velocity_client = None
         if max_velocity_name and SetVelocity is not None:
-            self._velocity_client = node.create_client(
-                SetVelocity, max_velocity_name
-            )
+            self._velocity_client = node.create_client(SetVelocity, max_velocity_name)
 
         # The deadman runs off the ROBOT's clock, not the operator link.
         #
@@ -572,7 +591,9 @@ class HardwareBridge(
             caps.append("navigate")
         if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
             caps.append("map")
-        if self.cfg["topics"].get("camera") or self.cfg["topics"].get("camera_compressed"):
+        if self.cfg["topics"].get("camera") or self.cfg["topics"].get(
+            "camera_compressed"
+        ):
             caps.append("camera")
         if self.cfg["topics"].get("battery"):
             caps.append("battery")
@@ -604,9 +625,7 @@ class HardwareBridge(
             self._cloud_points = points[cloud_keep]
             self._cloud_dirty = True
 
-        min_z, max_z = map_cloud_height_limits(
-            self.cfg.get("map_cloud_height_band")
-        )
+        min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
         xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
         if not len(xy):
             self._scan_points = np.zeros((0, 2), dtype=np.float32)
@@ -665,14 +684,20 @@ class HardwareBridge(
         frame = str(getattr(msg.header, "frame_id", "") or "").lstrip("/")
         if not frame or frame == self.map_frame:
             points = np.array(
-                [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
-                 for ps in msg.poses],
+                [
+                    [ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
+                    for ps in msg.poses
+                ],
                 dtype=np.float64,
             )
         else:
             try:
                 stamp = getattr(msg.header, "stamp", None)
-                tf_time = rclpy.time.Time.from_msg(stamp) if stamp is not None else rclpy.time.Time()
+                tf_time = (
+                    rclpy.time.Time.from_msg(stamp)
+                    if stamp is not None
+                    else rclpy.time.Time()
+                )
                 tf = self.tf_buffer.lookup_transform(self.map_frame, frame, tf_time)
             except Exception as exc:
                 if not self._plan_frame_warned:
@@ -693,8 +718,10 @@ class HardwareBridge(
                 )
                 return
             points = np.array(
-                [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
-                 for ps in msg.poses],
+                [
+                    [ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
+                    for ps in msg.poses
+                ],
                 dtype=np.float64,
             )
             points = transform_points(points, tf.transform)
@@ -718,8 +745,7 @@ class HardwareBridge(
             indices = np.linspace(0, len(points) - 1, max_points, dtype=int)
             points = points[indices]
         path = [
-            {"x": round(float(x), 3), "y": round(float(y), 3)}
-            for x, y in points[:, :2]
+            {"x": round(float(x), 3), "y": round(float(y), 3)} for x, y in points[:, :2]
         ]
         if local:
             self._local_planned_path = path
@@ -845,7 +871,11 @@ class HardwareBridge(
         if depth_image is not None and camera_info is not None:
             depth_header = getattr(depth_image, "header", None)
             depth_time = self._stamp_seconds(depth_header)
-            if image_time is None or depth_time is None or abs(image_time - depth_time) <= max_age:
+            if (
+                image_time is None
+                or depth_time is None
+                or abs(image_time - depth_time) <= max_age
+            ):
                 extra = self._depth_image_kwargs(depth_header)
                 if extra is not None:
                     configured_scale = perception.get("depth_scale")
@@ -856,7 +886,11 @@ class HardwareBridge(
                         polygon=polygon,
                         min_range_m=min_range,
                         max_range_m=max_range,
-                        depth_scale=None if configured_scale is None else float(configured_scale),
+                        depth_scale=(
+                            None
+                            if configured_scale is None
+                            else float(configured_scale)
+                        ),
                         **extra,
                     )
                     source_header = depth_header
@@ -865,7 +899,11 @@ class HardwareBridge(
         if camera_point is None and cloud is not None:
             cloud_header = getattr(cloud, "header", None)
             cloud_time = self._stamp_seconds(cloud_header)
-            if image_time is None or cloud_time is None or abs(image_time - cloud_time) <= max_age:
+            if (
+                image_time is None
+                or cloud_time is None
+                or abs(image_time - cloud_time) <= max_age
+            ):
                 camera_point = point_for_bbox(
                     cloud,
                     bbox,
@@ -900,7 +938,10 @@ class HardwareBridge(
                 map_point = transform_point(camera_point, tf.transform)
             if map_point is None:
                 return None
-            return {"x": round(float(map_point[0]), 3), "y": round(float(map_point[1]), 3)}
+            return {
+                "x": round(float(map_point[0]), 3),
+                "y": round(float(map_point[1]), 3),
+            }
         except Exception as exc:
             now = time.monotonic()
             if now - self._last_depth_warning_at >= 10.0:
@@ -942,9 +983,7 @@ class HardwareBridge(
             if not self._pose_warned:
                 self._pose_warned = True
                 if getattr(self, "_odom_frame", "") == self.map_frame:
-                    detail = (
-                        f"using direct {self.map_frame}-frame odometry instead"
-                    )
+                    detail = f"using direct {self.map_frame}-frame odometry instead"
                 else:
                     detail = (
                         "falling back to raw odometry, which DRIFTS. Check that SLAM "
@@ -964,9 +1003,7 @@ class HardwareBridge(
             )
             t = tf.transform.translation
             q = tf.transform.rotation
-            return np.array(
-                [t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64
-            )
+            return np.array([t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64)
         except Exception:
             stored = getattr(self, "_odom_pose7", None)
             if stored is not None:
@@ -1039,9 +1076,7 @@ class HardwareBridge(
         while not future.done() and time.monotonic() < deadline:
             time.sleep(0.05)
         if not future.done():
-            self.node.get_logger().warn(
-                f"[{self.id}] body service {name!r} timed out"
-            )
+            self.node.get_logger().warn(f"[{self.id}] body service {name!r} timed out")
             return False
         try:
             resp = future.result()
@@ -1058,7 +1093,8 @@ class HardwareBridge(
             )
         else:
             self.node.get_logger().warn(
-                f"[{self.id}] body {name}: refused" + (f" ({message})" if message else "")
+                f"[{self.id}] body {name}: refused"
+                + (f" ({message})" if message else "")
             )
         return ok
 
@@ -1100,9 +1136,7 @@ class HardwareBridge(
 
         self._arm_goal(goal)
         future = self.nav_client.send_goal_async(msg)
-        future.add_done_callback(
-            lambda f, g=generation: self._on_goal_response(f, g)
-        )
+        future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
 
     def _navigate_trajectory(self, goal: dict[str, float]) -> None:
         """Spot click-to-pose: map-frame goal -> body-frame Trajectory.
@@ -1144,9 +1178,7 @@ class HardwareBridge(
         )
         self._arm_goal(goal)
         future = self.traj_client.send_goal_async(msg)
-        future.add_done_callback(
-            lambda f, g=generation: self._on_goal_response(f, g)
-        )
+        future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
 
     def _apply_trajectory_velocity_limit(self) -> bool:
         """Apply Spot's configured mobility limit before accepting a goal.
@@ -1234,9 +1266,7 @@ class HardwareBridge(
                 f"[{self.id}] {self.map_frame} -> {frame} TF failed; goal dropped: {exc}"
             )
             return None
-        xyz = transform_point(
-            (float(goal["x"]), float(goal["y"]), 0.0), tf.transform
-        )
+        xyz = transform_point((float(goal["x"]), float(goal["y"]), 0.0), tf.transform)
         if xyz is None:
             return None
         if "yaw" not in goal or goal["yaw"] is None:
@@ -1249,10 +1279,14 @@ class HardwareBridge(
             yaw = float(goal["yaw"])
             heading = transform_point(
                 (math.cos(yaw), math.sin(yaw), 0.0),
-                type("T", (), {
-                    "rotation": tf.transform.rotation,
-                    "translation": type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})(),
-                })(),
+                type(
+                    "T",
+                    (),
+                    {
+                        "rotation": tf.transform.rotation,
+                        "translation": type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})(),
+                    },
+                )(),
             )
             if heading is None:
                 return None
@@ -1391,9 +1425,7 @@ class HardwareBridge(
         # as permanently occupied and the moving robot paints a trail of itself.
         footprint_radius = max(0.0, float(self.cfg.get("footprint_radius", 0.0)))
         if footprint_radius:
-            offsets = points - np.array(
-                [origin["x"], origin["y"]], dtype=np.float32
-            )
+            offsets = points - np.array([origin["x"], origin["y"]], dtype=np.float32)
             outside_footprint = np.einsum("ij,ij->i", offsets, offsets) > (
                 footprint_radius * footprint_radius
             )
@@ -1410,7 +1442,8 @@ class HardwareBridge(
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
-                    url, data=zlib.compress(quantised.tobytes()),
+                    url,
+                    data=zlib.compress(quantised.tobytes()),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
@@ -1433,7 +1466,8 @@ class HardwareBridge(
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
-                    url, data=zlib.compress(quantised.tobytes(), 1),
+                    url,
+                    data=zlib.compress(quantised.tobytes(), 1),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
@@ -1512,23 +1546,26 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                 ping_interval=float(bridge.cfg["ping_interval_s"]),
                 ping_timeout=float(bridge.cfg["ping_timeout_s"]),
             ) as ws:
-                await ws.send(json.dumps({
-                    "type": "hello",
-                    "protocol": 1,
-                    "robot_id": bridge.id,
-                    "robot_type": bridge.cfg["robot_type"],
-                    "adapter": "adapter_ros2/0.1.0",
-                    "ros": bridge.cfg["ros_distro"],
-                    # `local`: a real robot's pose and grid are in its own
-                    # navigation-map frame. The backend does the merging.
-                    "coordinate_frame": "local",
-                    "capabilities": bridge.capabilities(),
-                    "footprint_radius": bridge.cfg["footprint_radius"],
-                    "footprint": bridge.cfg.get("footprint") or None,
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "hello",
+                            "protocol": 1,
+                            "robot_id": bridge.id,
+                            "robot_type": bridge.cfg["robot_type"],
+                            "adapter": "adapter_ros2/0.1.0",
+                            "ros": bridge.cfg["ros_distro"],
+                            # `local`: a real robot's pose and grid are in its own
+                            # navigation-map frame. The backend does the merging.
+                            "coordinate_frame": "local",
+                            "capabilities": bridge.capabilities(),
+                            "footprint_radius": bridge.cfg["footprint_radius"],
+                            "footprint": bridge.cfg.get("footprint") or None,
+                        }
+                    )
+                )
                 bridge.node.get_logger().info(
-                    f"[{bridge.id}] connected; capabilities="
-                    f"{bridge.capabilities()}"
+                    f"[{bridge.id}] connected; capabilities=" f"{bridge.capabilities()}"
                 )
                 backoff = 1.0
                 bridge.note_link_activity()
@@ -1667,13 +1704,15 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
                             if detections is not None:
-                                await send({
-                                    "type": "detections",
-                                    "robot_id": bridge.id,
-                                    "t_mono": round(now - bridge.t0, 4),
-                                    "camera": "front",
-                                    "items": detections,
-                                })
+                                await send(
+                                    {
+                                        "type": "detections",
+                                        "robot_id": bridge.id,
+                                        "t_mono": round(now - bridge.t0, 4),
+                                        "camera": "front",
+                                        "items": detections,
+                                    }
+                                )
                             last_detect = time.monotonic()
 
                         await asyncio.sleep(tick)
@@ -1714,10 +1753,14 @@ def load_config(path: str | None) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--robot-id", required=True,
-                    help="Stable identity, used as the key everywhere (rule 5)")
-    ap.add_argument("--config", default="",
-                    help="YAML of topics/frames/rates for this robot type")
+    ap.add_argument(
+        "--robot-id",
+        required=True,
+        help="Stable identity, used as the key everywhere (rule 5)",
+    )
+    ap.add_argument(
+        "--config", default="", help="YAML of topics/frames/rates for this robot type"
+    )
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()

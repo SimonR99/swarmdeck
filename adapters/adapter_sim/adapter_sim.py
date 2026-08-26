@@ -69,11 +69,8 @@ from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
 # copy of them would be wrong the first time a chassis changed — the same
 # argument session.launch.py already makes by importing lidar_spec from here
 # instead of re-reading the YAML.
-sys.path.insert(
-    0, str(REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario")
-)
+sys.path.insert(0, str(REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"))
 from spawn_fleet import DEFAULT_ROBOT_PROFILE, robot_spec, robot_types  # noqa: E402
-
 
 # Depth acceptance band for placing a detection on the map, metres. The same
 # figures the hardware adapters default to (`perception.depth_min_m` /
@@ -125,7 +122,6 @@ def resolve_sim_robot_count(
         else:
             count = int(default)
     return max(1, min(count, 5))
-
 
 
 def _on_slam_graph(msg) -> None:
@@ -254,8 +250,8 @@ def camera_point_to_map(
 # the robot's ability to accept the NEXT command is the whole objective, not
 # quietly re-attempting a command that already failed.
 
-ESCAPE_SPEED = -0.15        # m/s, reverse. Slow: this runs without a costmap.
-ESCAPE_DISTANCE = 0.45      # m of retreat before the escape is considered done
+ESCAPE_SPEED = -0.15  # m/s, reverse. Slow: this runs without a costmap.
+ESCAPE_DISTANCE = 0.45  # m of retreat before the escape is considered done
 # Wall-clock, and the retreat happens in simulation time, so this has to allow
 # for the real-time factor as well as for a robot that creeps. Measured on the
 # Scout Mini: 0.15 m/s commanded came out as ~0.046 m/s of ground covered, so 8 s
@@ -396,12 +392,23 @@ def reset_world(logger) -> bool:
             return False
         try:
             done = subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/control",
-                 "--reqtype", "gz.msgs.WorldControl",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "5000",
-                 "--req", "reset: {model_only: true}"],
-                capture_output=True, text=True, timeout=15,
+                [
+                    "gz",
+                    "service",
+                    "-s",
+                    f"/world/{world}/control",
+                    "--reqtype",
+                    "gz.msgs.WorldControl",
+                    "--reptype",
+                    "gz.msgs.Boolean",
+                    "--timeout",
+                    "5000",
+                    "--req",
+                    "reset: {model_only: true}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warn(f"[adapter_sim] world reset failed: {exc}")
@@ -509,7 +516,9 @@ class RobotBridge(AdapterSensorMixin):
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
-        node.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, latched)
+        node.create_subscription(
+            OccupancyGrid, f"/{robot_id}/map", self._on_map, latched
+        )
         self.pub_global_map = node.create_publisher(
             OccupancyGrid, f"/{robot_id}/global_map", latched
         )
@@ -582,9 +591,15 @@ class RobotBridge(AdapterSensorMixin):
                 "y": t.translation.y,
                 "yaw": yaw_of(t.rotation),
             }
-            if stamped.header.frame_id == map_frame and stamped.child_frame_id == odom_frame:
+            if (
+                stamped.header.frame_id == map_frame
+                and stamped.child_frame_id == odom_frame
+            ):
                 self._map_to_odom = value
-            elif stamped.header.frame_id == odom_frame and stamped.child_frame_id == base_frame:
+            elif (
+                stamped.header.frame_id == odom_frame
+                and stamped.child_frame_id == base_frame
+            ):
                 self._odom_to_base = value
 
     @staticmethod
@@ -1016,7 +1031,10 @@ class RobotBridge(AdapterSensorMixin):
             return False
         if now - self._nav_down_since < NAV_READY_GRACE_S:
             return False
-        if self._nav_recovered_at and now - self._nav_recovered_at < NAV_RECOVER_INTERVAL_S:
+        if (
+            self._nav_recovered_at
+            and now - self._nav_recovered_at < NAV_RECOVER_INTERVAL_S
+        ):
             return False
 
         self._nav_recovered_at = now
@@ -1087,7 +1105,9 @@ class RobotBridge(AdapterSensorMixin):
         if self._escape_from is None:
             return
         pose = self.map_pose()
-        moved = math.hypot(pose["x"] - self._escape_from[0], pose["y"] - self._escape_from[1])
+        moved = math.hypot(
+            pose["x"] - self._escape_from[0], pose["y"] - self._escape_from[1]
+        )
         now = time.monotonic()
 
         if moved >= ESCAPE_DISTANCE or now - self._escape_started_at > ESCAPE_TIMEOUT_S:
@@ -1153,7 +1173,9 @@ class RobotBridge(AdapterSensorMixin):
 
     # -- reset ---------------------------------------------------------
 
-    def _call(self, name: str, srv_type, request, timeout_s: float = SERVICE_TIMEOUT_S) -> bool:
+    def _call(
+        self, name: str, srv_type, request, timeout_s: float = SERVICE_TIMEOUT_S
+    ) -> bool:
         """Call a ROS service from a worker thread and say whether it answered.
 
         Polls the future instead of using spin_until_future_complete: rclpy.spin()
@@ -1238,12 +1260,23 @@ class RobotBridge(AdapterSensorMixin):
         )
         try:
             done = subprocess.run(
-                ["gz", "service", "-s", f"/world/{world}/set_pose",
-                 "--reqtype", "gz.msgs.Pose",
-                 "--reptype", "gz.msgs.Boolean",
-                 "--timeout", "5000",
-                 "--req", request],
-                capture_output=True, text=True, timeout=15,
+                [
+                    "gz",
+                    "service",
+                    "-s",
+                    f"/world/{world}/set_pose",
+                    "--reqtype",
+                    "gz.msgs.Pose",
+                    "--reptype",
+                    "gz.msgs.Boolean",
+                    "--timeout",
+                    "5000",
+                    "--req",
+                    request,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             self.node.get_logger().warn(f"[{self.id}] set_pose failed: {exc}")
@@ -1300,9 +1333,14 @@ class RobotBridge(AdapterSensorMixin):
             "global_costmap/clear_entirely_global_costmap",
             "local_costmap/clear_entirely_local_costmap",
         ):
-            ok = self._call(
-                f"/{self.id}/{layer}", ClearEntireCostmap, ClearEntireCostmap.Request()
-            ) and ok
+            ok = (
+                self._call(
+                    f"/{self.id}/{layer}",
+                    ClearEntireCostmap,
+                    ClearEntireCostmap.Request(),
+                )
+                and ok
+            )
         return ok
 
     def reset(self) -> dict[str, bool]:
@@ -1462,7 +1500,9 @@ class RobotBridge(AdapterSensorMixin):
 
             detections = []
             if self._detection_enabled:
-                from adapters.perception.object_detector import crop_detection_jpeg_base64
+                from adapters.perception.object_detector import (
+                    crop_detection_jpeg_base64,
+                )
 
                 for detection, track_id in track_ids(self._detector.detect_bgr(image)):
                     item = detection.as_protocol(track_id)
@@ -1485,7 +1525,9 @@ class RobotBridge(AdapterSensorMixin):
     def refresh_settings(self) -> None:
         """Apply persisted perception settings without coupling to ROS/Gazebo."""
         try:
-            with urllib.request.urlopen(f"{self.http_url}/api/settings", timeout=2) as response:
+            with urllib.request.urlopen(
+                f"{self.http_url}/api/settings", timeout=2
+            ) as response:
                 payload = json.loads(response.read())
             value = payload.get("settings", {})
             self._detection_enabled = bool(value.get("detection_enabled", True))
@@ -1523,7 +1565,9 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                         elif t == "stop":
                             bridge.stop()
                         elif t == "drive":
-                            bridge.drive(msg.get("linear", 0.0), msg.get("angular", 0.0))
+                            bridge.drive(
+                                msg.get("linear", 0.0), msg.get("angular", 0.0)
+                            )
                         elif t == "reset":
                             # Several seconds of blocking service calls. Run it
                             # off the loop and do not await it here, or this
@@ -1563,9 +1607,7 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                                 "robot_id": bridge.id,
                                 "t_mono": round(now - bridge.t0, 4),
                                 "keyframes": graph.get("keyframes", 0),
-                                "in_common_frame": graph.get(
-                                    "in_common_frame", False
-                                ),
+                                "in_common_frame": graph.get("in_common_frame", False),
                                 "residual": graph.get("residual"),
                                 "inter_robot": graph.get("inter_robot", []),
                             }
@@ -1580,7 +1622,9 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             # and the composition is unnecessary once the grid is
                             # cslam's too.
                             common = graph.get("common")
-                            if isinstance(common, dict) and graph.get("in_common_frame"):
+                            if isinstance(common, dict) and graph.get(
+                                "in_common_frame"
+                            ):
                                 payload["common_pose"] = {
                                     "x": float(common.get("x", 0.0)),
                                     "y": float(common.get("y", 0.0)),
@@ -1603,12 +1647,16 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             await loop.run_in_executor(None, bridge.process_camera)
                             detections = bridge.take_detections()
                             if detections is not None:
-                                await ws.send(json.dumps({
-                                    "type": "detections",
-                                    "robot_id": bridge.id,
-                                    "camera": "front",
-                                    "items": detections,
-                                }))
+                                await ws.send(
+                                    json.dumps(
+                                        {
+                                            "type": "detections",
+                                            "robot_id": bridge.id,
+                                            "camera": "front",
+                                            "items": detections,
+                                        }
+                                    )
+                                )
                         if now - last_settings > 5.0:
                             last_settings = now
                             await loop.run_in_executor(None, bridge.refresh_settings)
@@ -1657,8 +1705,12 @@ def create_adapter_node():
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--robots", type=int, default=None,
-                    help="override YAML/SWARMDECK_ROBOT_COUNT fleet size")
+    ap.add_argument(
+        "--robots",
+        type=int,
+        default=None,
+        help="override YAML/SWARMDECK_ROBOT_COUNT fleet size",
+    )
     ap.add_argument("--prefix", default="robot_")
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8080)
@@ -1670,7 +1722,9 @@ def main() -> None:
     fleet_cfg: dict = {}
     try:
         with urllib.request.urlopen(f"{http_url}/api/config", timeout=5) as response:
-            fleet_cfg = (json.loads(response.read()).get("config") or {}).get("fleet", {}) or {}
+            fleet_cfg = (json.loads(response.read()).get("config") or {}).get(
+                "fleet", {}
+            ) or {}
     except Exception as exc:
         print(f"[adapter_sim] fleet config unavailable ({exc})")
     config_count = fleet_cfg.get("robot_count")
@@ -1685,18 +1739,21 @@ def main() -> None:
     )
     node.create_subscription(String, "/swarmdeck/slam_graph", _on_slam_graph, 10)
     node.create_subscription(
-        OccupancyGrid, "/cslam/map", _on_cslam_grid,
-        QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
-                   durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+        OccupancyGrid,
+        "/cslam/map",
+        _on_cslam_grid,
+        QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        ),
     )
     # Platforms from the SAME config the fleet was spawned from, so the
     # adapter cannot describe a different fleet than the one Gazebo built.
     if fleet_cfg:
         platforms = robot_types(fleet_cfg, robot_count, args.prefix)
     else:
-        print(
-            f"[adapter_sim] assuming every robot is a {DEFAULT_ROBOT_PROFILE}"
-        )
+        print(f"[adapter_sim] assuming every robot is a {DEFAULT_ROBOT_PROFILE}")
         platforms = [DEFAULT_ROBOT_PROFILE] * robot_count
 
     bridges = [

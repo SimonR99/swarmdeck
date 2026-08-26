@@ -34,7 +34,13 @@ from swarmdeck_slam.types import (
 
 def _triangle_truth() -> dict[KeyframeId, np.ndarray]:
     """Five non-collinear planar poses: enough to fully determine a 3-D rotation."""
-    points = [(0.0, 0.0, 0.0), (3.0, 0.0, 0.3), (3.0, 4.0, 0.0), (0.0, 4.0, 0.6), (1.0, 2.0, 0.1)]
+    points = [
+        (0.0, 0.0, 0.0),
+        (3.0, 0.0, 0.3),
+        (3.0, 4.0, 0.0),
+        (0.0, 4.0, 0.6),
+        (1.0, 2.0, 0.1),
+    ]
     yaws = [0.0, 0.4, 1.1, -0.6, 2.0]
     truth: dict[KeyframeId, np.ndarray] = {}
     for i, ((x, y, z), yaw) in enumerate(zip(points, yaws)):
@@ -82,7 +88,9 @@ def _offset_transform(dx: float, dy: float, yaw: float) -> np.ndarray:
     return yaw_pose(dx, dy, yaw)
 
 
-def _expected_translation_rotation(dx: float, dy: float, yaw: float) -> tuple[float, float]:
+def _expected_translation_rotation(
+    dx: float, dy: float, yaw: float
+) -> tuple[float, float]:
     return math.hypot(dx, dy), abs(yaw)
 
 
@@ -150,7 +158,9 @@ def test_inter_robot_error_zero_for_exact_ground_truth(fleet_truth) -> None:
 
 
 def test_component_score_perfect_when_grouping_matches(fleet_truth) -> None:
-    component = Component(component_id=0, robots=frozenset(fleet_truth), anchor=KeyframeId("alpha", 0))
+    component = Component(
+        component_id=0, robots=frozenset(fleet_truth), anchor=KeyframeId("alpha", 0)
+    )
     truth_groups = {rid: "scene-0" for rid in fleet_truth}
     score = ev.score_components([component], truth_groups)
     assert score.is_perfect
@@ -165,17 +175,26 @@ def test_evaluate_end_to_end_perfect_graph_is_all_zero(fleet_truth) -> None:
     truth_poses: dict[KeyframeId, np.ndarray] = {}
     for robot in fleet_truth.values():
         truth_poses.update(robot.truth)
-    truth_t_world_map = {rid: robot.t_world_map_true for rid, robot in fleet_truth.items()}
+    truth_t_world_map = {
+        rid: robot.t_world_map_true for rid, robot in fleet_truth.items()
+    }
     truth_groups = {rid: "scene-0" for rid in fleet_truth}
 
     report = ev.evaluate(
-        "perfect", graph, truth_poses, truth_t_world_map, truth_groups, rpe_deltas=(1, 2)
+        "perfect",
+        graph,
+        truth_poses,
+        truth_t_world_map,
+        truth_groups,
+        rpe_deltas=(1, 2),
     )
 
     assert set(report.ate) == {"alpha", "beta", "component:0"}
     for ate in report.ate.values():
         assert ate.translation_m.rmse == pytest.approx(0.0, abs=1e-9)
-        assert ate.rotation_rad.rmse == pytest.approx(0.0, abs=1e-6)  # see roundoff note above
+        assert ate.rotation_rad.rmse == pytest.approx(
+            0.0, abs=1e-6
+        )  # see roundoff note above
     for results in report.rpe.values():
         for rpe in results:
             assert rpe.translation_m.rmse == pytest.approx(0.0, abs=1e-9)
@@ -206,13 +225,18 @@ def test_inter_robot_error_matches_known_offset_exactly(case: str) -> None:
     result = ev.inter_robot_transform_error(estimated_map, true_map)
     expected_t, expected_r = _expected_translation_rotation(dx, dy, yaw)
     assert result["alpha"].translation_m == pytest.approx(expected_t, abs=1e-9)
-    assert result["alpha"].rotation_deg == pytest.approx(math.degrees(expected_r), abs=1e-9)
+    assert result["alpha"].rotation_deg == pytest.approx(
+        math.degrees(expected_r), abs=1e-9
+    )
 
 
 @pytest.mark.parametrize("case", sorted(OFFSET_CASES))
 def test_rpe_matches_known_offset_exactly(case: str) -> None:
     dx, dy, yaw = OFFSET_CASES[case]
-    truth = {KeyframeId("r", 0): yaw_pose(0.0, 0.0, 0.0), KeyframeId("r", 1): yaw_pose(5.0, 0.0, 0.0)}
+    truth = {
+        KeyframeId("r", 0): yaw_pose(0.0, 0.0, 0.0),
+        KeyframeId("r", 1): yaw_pose(5.0, 0.0, 0.0),
+    }
     offset = _offset_transform(dx, dy, yaw)
     estimated = {
         KeyframeId("r", 0): truth[KeyframeId("r", 0)],
@@ -331,7 +355,10 @@ def test_align_rigid_raises_on_disjoint_keys() -> None:
 
 
 def test_compute_rpe_raises_when_no_robot_has_enough_span() -> None:
-    truth = {KeyframeId("r", 0): se3_identity(), KeyframeId("r", 1): yaw_pose(1.0, 0.0, 0.0)}
+    truth = {
+        KeyframeId("r", 0): se3_identity(),
+        KeyframeId("r", 1): yaw_pose(1.0, 0.0, 0.0),
+    }
     with pytest.raises(ValueError, match="no keyframe pairs"):
         ev.compute_rpe(truth, truth, delta=5)
 
@@ -344,7 +371,9 @@ def test_compute_rpe_raises_on_invalid_delta() -> None:
 
 def test_inter_robot_error_raises_on_disjoint_robots() -> None:
     with pytest.raises(ValueError, match="no robots in common"):
-        ev.inter_robot_transform_error({"alpha": se3_identity()}, {"beta": se3_identity()})
+        ev.inter_robot_transform_error(
+            {"alpha": se3_identity()}, {"beta": se3_identity()}
+        )
 
 
 def test_score_components_raises_on_fewer_than_two_robots() -> None:
@@ -367,7 +396,9 @@ def test_ablation_raises_on_duplicate_labels(fleet_truth) -> None:
     truth_poses: dict[KeyframeId, np.ndarray] = {}
     for robot in fleet_truth.values():
         truth_poses.update(robot.truth)
-    truth_t_world_map = {rid: robot.t_world_map_true for rid, robot in fleet_truth.items()}
+    truth_t_world_map = {
+        rid: robot.t_world_map_true for rid, robot in fleet_truth.items()
+    }
     truth_groups = {rid: "scene-0" for rid in fleet_truth}
     report = ev.evaluate("dup", graph, truth_poses, truth_t_world_map, truth_groups)
     with pytest.raises(ValueError, match="unique"):
@@ -381,7 +412,11 @@ def test_ablation_raises_on_duplicate_labels(fleet_truth) -> None:
 
 def test_component_score_detects_false_merge() -> None:
     # alpha and beta wrongly placed in the same component; they do not share a scene.
-    component = Component(component_id=0, robots=frozenset({"alpha", "beta"}), anchor=KeyframeId("alpha", 0))
+    component = Component(
+        component_id=0,
+        robots=frozenset({"alpha", "beta"}),
+        anchor=KeyframeId("alpha", 0),
+    )
     truth_groups = {"alpha": "scene-0", "beta": "scene-1"}
     score = ev.score_components([component], truth_groups)
     assert score.false_merges == (("alpha", "beta"),)
@@ -393,8 +428,12 @@ def test_component_score_detects_false_merge() -> None:
 def test_component_score_detects_missed_merge() -> None:
     # alpha and beta truly share a scene but were kept in separate components.
     components = [
-        Component(component_id=0, robots=frozenset({"alpha"}), anchor=KeyframeId("alpha", 0)),
-        Component(component_id=1, robots=frozenset({"beta"}), anchor=KeyframeId("beta", 0)),
+        Component(
+            component_id=0, robots=frozenset({"alpha"}), anchor=KeyframeId("alpha", 0)
+        ),
+        Component(
+            component_id=1, robots=frozenset({"beta"}), anchor=KeyframeId("beta", 0)
+        ),
     ]
     truth_groups = {"alpha": "scene-0", "beta": "scene-0"}
     score = ev.score_components(components, truth_groups)
@@ -415,8 +454,14 @@ def test_component_score_robot_absent_from_any_component_is_singleton() -> None:
 def test_component_score_distinguishes_both_failure_modes_at_once() -> None:
     # alpha/beta wrongly merged (false); gamma/delta wrongly left apart (missed).
     components = [
-        Component(component_id=0, robots=frozenset({"alpha", "beta"}), anchor=KeyframeId("alpha", 0)),
-        Component(component_id=1, robots=frozenset({"gamma"}), anchor=KeyframeId("gamma", 0)),
+        Component(
+            component_id=0,
+            robots=frozenset({"alpha", "beta"}),
+            anchor=KeyframeId("alpha", 0),
+        ),
+        Component(
+            component_id=1, robots=frozenset({"gamma"}), anchor=KeyframeId("gamma", 0)
+        ),
     ]
     truth_groups = {"alpha": "s0", "beta": "s1", "gamma": "s2", "delta": "s2"}
     score = ev.score_components(components, truth_groups)
@@ -424,7 +469,10 @@ def test_component_score_distinguishes_both_failure_modes_at_once() -> None:
     assert score.missed_merges == (("delta", "gamma"),)
     assert not score.is_perfect
     # The two rates are independent numbers, not blended into one.
-    assert score.false_merge_rate != score.missed_merge_rate or score.n_true_positive_pairs != score.n_true_negative_pairs
+    assert (
+        score.false_merge_rate != score.missed_merge_rate
+        or score.n_true_positive_pairs != score.n_true_negative_pairs
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -439,7 +487,11 @@ def test_error_stats_to_dict_json_round_trip() -> None:
 
 
 def test_component_score_to_dict_json_round_trip() -> None:
-    component = Component(component_id=0, robots=frozenset({"alpha", "beta"}), anchor=KeyframeId("alpha", 0))
+    component = Component(
+        component_id=0,
+        robots=frozenset({"alpha", "beta"}),
+        anchor=KeyframeId("alpha", 0),
+    )
     score = ev.score_components([component], {"alpha": "s0", "beta": "s1"})
     payload = json.loads(json.dumps(score.to_dict()))
     assert payload["false_merges"] == [["alpha", "beta"]]
@@ -451,9 +503,13 @@ def test_report_to_dict_json_round_trip(fleet_truth) -> None:
     truth_poses: dict[KeyframeId, np.ndarray] = {}
     for robot in fleet_truth.values():
         truth_poses.update(robot.truth)
-    truth_t_world_map = {rid: robot.t_world_map_true for rid, robot in fleet_truth.items()}
+    truth_t_world_map = {
+        rid: robot.t_world_map_true for rid, robot in fleet_truth.items()
+    }
     truth_groups = {rid: "scene-0" for rid in fleet_truth}
-    report = ev.evaluate("json-check", graph, truth_poses, truth_t_world_map, truth_groups)
+    report = ev.evaluate(
+        "json-check", graph, truth_poses, truth_t_world_map, truth_groups
+    )
 
     payload = json.loads(json.dumps(report.to_dict()))
     assert payload["label"] == "json-check"
@@ -469,13 +525,19 @@ def test_ablation_to_dict_json_round_trip(fleet_truth) -> None:
     truth_poses: dict[KeyframeId, np.ndarray] = {}
     for robot in fleet_truth.values():
         truth_poses.update(robot.truth)
-    truth_t_world_map = {rid: robot.t_world_map_true for rid, robot in fleet_truth.items()}
+    truth_t_world_map = {
+        rid: robot.t_world_map_true for rid, robot in fleet_truth.items()
+    }
     truth_groups = {rid: "scene-0" for rid in fleet_truth}
 
-    report_a = ev.evaluate("baseline", graph, truth_poses, truth_t_world_map, truth_groups)
+    report_a = ev.evaluate(
+        "baseline", graph, truth_poses, truth_t_world_map, truth_groups
+    )
     # A second "run" that's identical except relabelled, standing in for a
     # different configuration in the ablation ladder.
-    report_b = ev.evaluate("collaborative", graph, truth_poses, truth_t_world_map, truth_groups)
+    report_b = ev.evaluate(
+        "collaborative", graph, truth_poses, truth_t_world_map, truth_groups
+    )
     ablation = ev.Ablation(reports=(report_a, report_b))
 
     rendered = ablation.format()

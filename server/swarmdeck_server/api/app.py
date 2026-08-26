@@ -72,7 +72,12 @@ app = FastAPI(title="SwarmDeck", lifespan=lifespan)
 REPO = Path(__file__).resolve().parents[3]
 settings_store = SettingsStore(REPO / "sessions" / "settings.json")
 CONFIG: dict[str, Any] = {}
-SESSION: dict[str, Any] = {"running": False, "name": None, "started_at": None, "recording": False}
+SESSION: dict[str, Any] = {
+    "running": False,
+    "name": None,
+    "started_at": None,
+    "recording": False,
+}
 
 _gui_clients: set[WebSocket] = set()
 _alerts: dict[str, dict[str, Any]] = {}
@@ -155,7 +160,9 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     # driven through it; `occupied` restores the old any-vote-wins rule.
     new_service.set_conflict_mode(mcfg.get("merge_conflict", "majority"))
     for rid, pose in (mcfg.get("start_poses") or {}).items():
-        new_service.set_transform(rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0))
+        new_service.set_transform(
+            rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0)
+        )
 
     map_service.__dict__.update(new_service.__dict__)
     _camera_frames.clear()
@@ -189,7 +196,9 @@ async def broadcast(msg: dict[str, Any]) -> None:
         _gui_clients.discard(ws)
 
 
-def detection_class_enabled(class_name: Any, settings: dict[str, Any] | None = None) -> bool:
+def detection_class_enabled(
+    class_name: Any, settings: dict[str, Any] | None = None
+) -> bool:
     """Whether a detection class belongs in the current operator view.
 
     Adapters poll settings, so one can still submit a batch made with the old
@@ -428,8 +437,11 @@ async def state_loop() -> None:
             aid = f"unattended_{r.robot_id}"
             if r.online and r.unattended_s > threshold:
                 await raise_alert(
-                    aid, "warn", "unattended",
-                    f"{r.robot_id} unattended for {int(r.unattended_s)} s", r.robot_id,
+                    aid,
+                    "warn",
+                    "unattended",
+                    f"{r.robot_id} unattended for {int(r.unattended_s)} s",
+                    r.robot_id,
                 )
             elif r.unattended_s <= threshold:
                 await clear_alert(aid)
@@ -437,8 +449,11 @@ async def state_loop() -> None:
             did = f"disconnect_{r.robot_id}"
             if not r.online:
                 await raise_alert(
-                    did, "critical", "adapter_disconnect",
-                    f"{r.robot_id} adapter disconnected", r.robot_id,
+                    did,
+                    "critical",
+                    "adapter_disconnect",
+                    f"{r.robot_id} adapter disconnected",
+                    r.robot_id,
                 )
             else:
                 await clear_alert(did)
@@ -560,13 +575,19 @@ async def reset_fleet() -> dict[str, Any]:
         # nicety: `reset` means "teleport to spawn and forget the map", which a
         # physical robot cannot do and must never be asked to do. adapter_ros2
         # does not advertise it. See adapters/protocol/README.md.
-        targets = {rid for rid, r in registry.robots.items() if "reset" in r.capabilities}
+        targets = {
+            rid for rid, r in registry.robots.items() if "reset" in r.capabilities
+        }
         skipped = sorted(set(registry.robots) - targets)
 
         events.log("reset_start", {"robots": sorted(targets), "skipped": skipped})
         await broadcast(
-            {"type": "sim_reset", "phase": "start",
-             "robots": sorted(targets), "skipped": skipped}
+            {
+                "type": "sim_reset",
+                "phase": "start",
+                "robots": sorted(targets),
+                "skipped": skipped,
+            }
         )
 
         _reset_pending.clear()
@@ -640,7 +661,9 @@ async def reset_fleet() -> dict[str, Any]:
         await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
         if failed:
             await raise_alert(
-                "reset_incomplete", "warn", "fault",
+                "reset_incomplete",
+                "warn",
+                "fault",
                 f"Reset not confirmed by {', '.join(failed)} — their map may return",
             )
         return result
@@ -670,185 +693,218 @@ def goal_taken(goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | 
 @app.get("/api/config")
 async def get_config() -> dict[str, Any]:
     from .control_routes import get_config as handler
+
     return await handler()
 
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
     from .control_routes import get_settings as handler
+
     return await handler()
 
 
 @app.get("/api/detection/classes")
 async def get_detection_classes() -> dict[str, Any]:
     from .control_routes import get_detection_classes as handler
+
     return await handler()
 
 
 @app.put("/api/settings")
 async def put_settings(request: Request) -> dict[str, Any]:
     from .control_routes import put_settings as handler
+
     return await handler(request)
 
 
 @app.get("/api/fleet")
 async def get_fleet() -> dict[str, Any]:
     from .control_routes import get_fleet as handler
+
     return await handler()
 
 
 @app.get("/api/session")
 async def get_session() -> dict[str, Any]:
     from .control_routes import get_session as handler
+
     return await handler()
 
 
 @app.post("/api/session/start")
 async def start_session() -> dict[str, Any]:
     from .control_routes import start_session as handler
+
     return await handler()
 
 
 @app.post("/api/session/stop")
 async def stop_session() -> dict[str, Any]:
     from .control_routes import stop_session as handler
+
     return await handler()
 
 
 @app.post("/api/sim/reset")
 async def post_sim_reset() -> dict[str, Any]:
     from .control_routes import post_sim_reset as handler
+
     return await handler()
 
 
 @app.get("/api/map")
 async def get_map() -> Response:
     from .map_routes import get_map as handler
+
     return await handler()
 
 
 @app.get("/api/map/status")
 async def get_map_status() -> dict[str, Any]:
     from .map_routes import get_map_status as handler
+
     return await handler()
 
 
 @app.get("/api/map/info")
 async def get_map_info() -> dict[str, Any]:
     from .map_routes import get_map_info as handler
+
     return await handler()
 
 
 def _robots_blocking_map_reset(robot_id: str | None = None) -> list[str]:
     from .map_routes import _robots_blocking_map_reset as handler
+
     return handler(robot_id)
 
 
 async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Response:
     from .map_routes import _publish_map_reset as handler
+
     return await handler(scope, robot_id)
 
 
 @app.post("/api/map/reset/{robot_id}")
 async def reset_robot_map(robot_id: str) -> Response:
     from .map_routes import reset_robot_map as handler
+
     return await handler(robot_id)
 
 
 @app.post("/api/map/reset")
 async def reset_all_maps() -> Response:
     from .map_routes import reset_all_maps as handler
+
     return await handler()
 
 
 @app.get("/api/map/local/{robot_id}")
 async def get_local_map(robot_id: str) -> Response:
     from .map_routes import get_local_map as handler
+
     return await handler(robot_id)
 
 
 @app.get("/api/map/local/{robot_id}/info")
 async def get_local_map_info(robot_id: str) -> Response:
     from .map_routes import get_local_map_info as handler
+
     return await handler(robot_id)
 
 
 @app.get("/api/map/local/{robot_id}/network")
 async def get_local_network(robot_id: str) -> Response:
     from .map_routes import get_local_network as handler
+
     return await handler(robot_id)
 
 
 @app.post("/api/adapter/map")
 async def post_map(request: Request) -> Any:
     from .map_routes import post_map as handler
+
     return await handler(request)
 
 
 @app.post("/api/adapter/global_map")
 async def post_global_map(request: Request) -> Any:
     from .map_routes import post_global_map as handler
+
     return await handler(request)
 
 
 @app.post("/api/adapter/cloud")
 async def post_cloud(request: Request) -> Any:
     from .map_routes import post_cloud as handler
+
     return await handler(request)
 
 
 @app.post("/api/adapter/scan")
 async def post_scan(request: Request) -> Any:
     from .map_routes import post_scan as handler
+
     return await handler(request)
 
 
 @app.post("/api/adapter/keyframe")
 async def post_keyframe(request: Request) -> Any:
     from .map_routes import post_keyframe as handler
+
     return await handler(request)
 
 
 @app.post("/api/slam/optimized_map")
 async def post_optimized_map(request: Request) -> Any:
     from .map_routes import post_optimized_map as handler
+
     return await handler(request)
 
 
 @app.get("/api/map/optimized")
 async def get_optimized_index() -> dict[str, Any]:
     from .map_routes import get_optimized_index as handler
+
     return await handler()
 
 
 @app.get("/api/map/optimized/{scope}")
 async def get_optimized_map(scope: str) -> Response:
     from .map_routes import get_optimized_map as handler
+
     return await handler(scope)
 
 
 @app.post("/api/slam/update")
 async def post_slam_update(request: Request) -> Any:
     from .map_routes import post_slam_update as handler
+
     return await handler(request)
 
 
 @app.get("/api/map/nav/{robot_id}")
 async def get_nav_map(request: Request, robot_id: str) -> Response:
     from .map_routes import get_nav_map as handler
+
     return await handler(request, robot_id)
 
 
 @app.get("/api/map/cloud")
 async def get_cloud(request: Request) -> Response:
     from .map_routes import get_cloud as handler
+
     return await handler(request)
 
 
 @app.get("/api/map/local/{robot_id}/cloud")
 async def get_local_cloud(robot_id: str) -> Response:
     from .map_routes import get_cloud as handler
-    return await handler(Request(scope={"type": "http", "query_string": f"robot_id={robot_id}".encode()}))
+
+    return await handler(
+        Request(scope={"type": "http", "query_string": f"robot_id={robot_id}".encode()})
+    )
 
 
 @app.post("/api/adapter/camera")
@@ -1001,8 +1057,11 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         taken_by = goal_taken(goal, exclude=rid)
         if taken_by:
             await raise_alert(
-                f"dupgoal_{rid}", "warn", "fault",
-                f"Goal already assigned to {taken_by}", rid,
+                f"dupgoal_{rid}",
+                "warn",
+                "fault",
+                f"Goal already assigned to {taken_by}",
+                rid,
             )
             return
         robot = registry.robots[rid]
@@ -1025,10 +1084,14 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         )
         planned_world = map_service.plan_path(rid, start_pose, world_goal)
         local_planned = (
-            planned_world
-            if robot.coordinate_frame == "merged"
-            else [map_service.world_to_robot(rid, pt) for pt in planned_world]
-        ) if planned_world else []
+            (
+                planned_world
+                if robot.coordinate_frame == "merged"
+                else [map_service.world_to_robot(rid, pt) for pt in planned_world]
+            )
+            if planned_world
+            else []
+        )
 
         sent = await registry.send(
             rid,
@@ -1080,9 +1143,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             return
         if not registry.can(rid, "body"):
             return
-        await registry.send(
-            rid, {"type": "body_command", "action": action, **stamps()}
-        )
+        await registry.send(rid, {"type": "body_command", "action": action, **stamps()})
 
     elif kind == "stop_all":
         # Whether each robot was actually REACHED, not merely addressed. A stop
@@ -1093,11 +1154,15 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             for robot_id in list(registry.robots)
             if not await registry.send(robot_id, {"type": "stop", **stamps()})
         ]
-        await raise_alert("stop_all", "critical", "fault", "STOP ALL issued by operator")
+        await raise_alert(
+            "stop_all", "critical", "fault", "STOP ALL issued by operator"
+        )
         if undelivered:
             events.log("stop_all_undelivered", {"robots": sorted(undelivered)})
             await raise_alert(
-                "stop_all_undelivered", "critical", "fault",
+                "stop_all_undelivered",
+                "critical",
+                "fault",
                 f"STOP did not reach {', '.join(sorted(undelivered))} — "
                 f"they may still be moving",
             )
@@ -1243,15 +1308,15 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                 # The strongest evidence this entity has ever produced, which is
                 # what the operator floor is judged against.  See
                 # detection_hidden().
-                "best_score": max(score, float(previous["best_score"])) if previous else score,
+                "best_score": (
+                    max(score, float(previous["best_score"])) if previous else score
+                ),
                 "robot_id": rid,
                 "camera": camera,
                 "bbox": item.get("bbox"),
                 "polygon": item.get("polygon"),
                 "image": item.get("image"),
-                "map_position": detection_position(
-                    rid, item.get("map_position")
-                ),
+                "map_position": detection_position(rid, item.get("map_position")),
                 "first_seen": previous["first_seen"] if previous else now,
                 "last_seen": now,
                 "observations": (previous["observations"] + 1) if previous else 1,

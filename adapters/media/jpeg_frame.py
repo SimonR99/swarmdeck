@@ -22,16 +22,19 @@ def image_to_jpeg(msg: Any, quality: int = 70) -> bytes | None:
         return None
     encoding = str(getattr(msg, "encoding", "")).lower()
     channels = {
-        "rgb8": 3, "8uc3": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1,
+        "rgb8": 3,
+        "8uc3": 3,
+        "bgr8": 3,
+        "rgba8": 4,
+        "bgra8": 4,
+        "mono8": 1,
     }.get(encoding)
     if channels is None:
         return None
     try:
         step = int(getattr(msg, "step", 0)) or msg.width * channels
         rows = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, step)
-        frame = rows[:, : msg.width * channels].reshape(
-            msg.height, msg.width, channels
-        )
+        frame = rows[:, : msg.width * channels].reshape(msg.height, msg.width, channels)
     except (ValueError, TypeError):
         return None
     if encoding in ("rgb8", "8uc3"):

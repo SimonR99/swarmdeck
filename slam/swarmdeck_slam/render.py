@@ -219,7 +219,9 @@ def render_all(
     graph: OptimizedGraph,
     keyframes: Iterable[Keyframe],
     config: RenderConfig | None = None,
-) -> tuple[dict[int, RenderedGrid], dict[str, RenderedGrid], dict[TrajectoryId, RenderedGrid]]:
+) -> tuple[
+    dict[int, RenderedGrid], dict[str, RenderedGrid], dict[TrajectoryId, RenderedGrid]
+]:
     """Every partition of the same render: ``(per component, per robot, per trajectory)``.
 
     The back-end publishes both on every cycle, and they are the same posed,
@@ -323,11 +325,15 @@ def _partition_robots(
     component instead, with an id past the end of the real ones so it can
     never collide with -- or be confused for -- an actual verified merge.
     """
-    parts = [(component.component_id, component.robots) for component in graph.components]
+    parts = [
+        (component.component_id, component.robots) for component in graph.components
+    ]
     covered = {robot_id for _, robots in parts for robot_id in robots}
     orphans = sorted(robot_ids - covered)
     next_id = max((component_id for component_id, _ in parts), default=-1) + 1
-    parts.extend((next_id + i, frozenset({robot_id})) for i, robot_id in enumerate(orphans))
+    parts.extend(
+        (next_id + i, frozenset({robot_id})) for i, robot_id in enumerate(orphans)
+    )
     return parts
 
 
@@ -376,7 +382,9 @@ def _keyframe_contributions(
         keep = in_band & (planar_range <= config.max_range_m)
 
         if not np.any(keep):
-            contributions[kf_id] = _Contribution(origin_xy, np.zeros((0, 2), dtype=np.float64))
+            contributions[kf_id] = _Contribution(
+                origin_xy, np.zeros((0, 2), dtype=np.float64)
+            )
             continue
         contributions[kf_id] = _Contribution(
             origin_xy, transform_points(pose, points[keep])[:, :2]
@@ -420,7 +428,9 @@ def _render_component(
         # band / range cap: there is nothing to say yet. A 1x1 UNKNOWN grid is
         # an honest statement of that, not an error.
         cells = np.full((1, 1), UNKNOWN, dtype=np.int8)
-        return RenderedGrid(component_id, robots, config.native_map_resolution, 1, 1, 0.0, 0.0, cells)
+        return RenderedGrid(
+            component_id, robots, config.native_map_resolution, 1, 1, 0.0, 0.0, cells
+        )
 
     meta = _fit_grid(
         float(bounds_min[0]),
@@ -451,13 +461,25 @@ def _render_component(
     cells[occupied_mask] = OCCUPIED
 
     return RenderedGrid(
-        component_id, robots, meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y, cells
+        component_id,
+        robots,
+        meta.resolution,
+        meta.width,
+        meta.height,
+        meta.origin_x,
+        meta.origin_y,
+        cells,
     )
 
 
 def _fit_grid(
-    min_x: float, max_x: float, min_y: float, max_y: float,
-    resolution: float, padding_m: float, max_cells: int,
+    min_x: float,
+    max_x: float,
+    min_y: float,
+    max_y: float,
+    resolution: float,
+    padding_m: float,
+    max_cells: int,
 ) -> _Meta:
     """Bounds from content, plus a fixed cell-count cap that degrades by
     coarsening resolution rather than clamping the extent.
@@ -482,21 +504,29 @@ def _fit_grid(
         if width * height <= max_cells:
             return _Meta(res, width, height, min_cell_x * res, min_cell_y * res)
         res *= max(math.sqrt((width * height) / max_cells), 1.01)
-    raise RuntimeError("could not fit render grid within max_cells by coarsening resolution")
+    raise RuntimeError(
+        "could not fit render grid within max_cells by coarsening resolution"
+    )
 
 
 def _grid_index(points_xy: np.ndarray, meta: _Meta) -> tuple[np.ndarray, np.ndarray]:
     """World XY to grid indices. Clip is a defensive no-op in the common case:
     bounds are derived from these same points, so it only fires on the rare
     float boundary that floors to exactly `width`/`height`."""
-    grid_x = np.floor((points_xy[:, 0] - meta.origin_x) / meta.resolution).astype(np.int64)
-    grid_y = np.floor((points_xy[:, 1] - meta.origin_y) / meta.resolution).astype(np.int64)
+    grid_x = np.floor((points_xy[:, 0] - meta.origin_x) / meta.resolution).astype(
+        np.int64
+    )
+    grid_y = np.floor((points_xy[:, 1] - meta.origin_y) / meta.resolution).astype(
+        np.int64
+    )
     np.clip(grid_x, 0, meta.width - 1, out=grid_x)
     np.clip(grid_y, 0, meta.height - 1, out=grid_y)
     return grid_x, grid_y
 
 
-def _rasterize_free(origin_xy: np.ndarray, ends_xy: np.ndarray, meta: _Meta, free: np.ndarray) -> None:
+def _rasterize_free(
+    origin_xy: np.ndarray, ends_xy: np.ndarray, meta: _Meta, free: np.ndarray
+) -> None:
     """Mark every cell strictly between ``origin_xy`` and each row of
     ``ends_xy`` free, for every ray of one keyframe at once.
 
@@ -521,7 +551,9 @@ def _rasterize_free(origin_xy: np.ndarray, ends_xy: np.ndarray, meta: _Meta, fre
     delta_x = end_x - origin_x
     delta_y = end_y - origin_y
 
-    n_steps = np.maximum(1, np.ceil(np.maximum(np.abs(delta_x), np.abs(delta_y))).astype(np.int64))
+    n_steps = np.maximum(
+        1, np.ceil(np.maximum(np.abs(delta_x), np.abs(delta_y))).astype(np.int64)
+    )
 
     # Rays are walked in length-sorted batches, not all at once. The step
     # matrix is (longest ray in the batch) x (rays in the batch), so one 60 m
@@ -545,7 +577,12 @@ def _rasterize_free(origin_xy: np.ndarray, ends_xy: np.ndarray, meta: _Meta, fre
 
         grid_x = np.floor(origin_x + t * delta_x[rays][None, :]).astype(np.int64)
         grid_y = np.floor(origin_y + t * delta_y[rays][None, :]).astype(np.int64)
-        valid &= (grid_x >= 0) & (grid_x < meta.width) & (grid_y >= 0) & (grid_y < meta.height)
+        valid &= (
+            (grid_x >= 0)
+            & (grid_x < meta.width)
+            & (grid_y >= 0)
+            & (grid_y < meta.height)
+        )
         np.add.at(free, (grid_y[valid], grid_x[valid]), 1)
 
 

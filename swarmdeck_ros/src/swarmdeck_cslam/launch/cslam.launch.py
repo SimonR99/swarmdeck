@@ -79,9 +79,9 @@ def generate_launch_description() -> LaunchDescription:
                 "namespace",
                 default_value="r0",
                 description="cslam's own namespace. MUST be r<robot_id> — the C++ "
-                            "back end hardcodes that pattern for its inter-robot "
-                            "topics and will silently never meet the Python nodes "
-                            "otherwise.",
+                "back end hardcodes that pattern for its inter-robot "
+                "topics and will silently never meet the Python nodes "
+                "otherwise.",
             ),
             DeclareLaunchArgument(
                 "sensor_namespace",
@@ -92,8 +92,8 @@ def generate_launch_description() -> LaunchDescription:
                 "robot_id",
                 default_value="0",
                 description="cslam requires integer ids starting at 0 and below "
-                            "max_nb_robots. SwarmDeck's robot_N naming maps "
-                            "straight onto it.",
+                "max_nb_robots. SwarmDeck's robot_N naming maps "
+                "straight onto it.",
             ),
             DeclareLaunchArgument("max_nb_robots", default_value="4"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),

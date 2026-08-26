@@ -41,7 +41,9 @@ def fake_run(recorder, stdout="data: true\n", stderr=""):
     def run(cmd, **kwargs):
         recorder.append(cmd)
         if cmd[:3] == ["gz", "service", "-l"]:
-            return types.SimpleNamespace(stdout=GZ_SERVICE_LISTING, stderr="", returncode=0)
+            return types.SimpleNamespace(
+                stdout=GZ_SERVICE_LISTING, stderr="", returncode=0
+            )
         return types.SimpleNamespace(stdout=stdout, stderr=stderr, returncode=0)
 
     return run
@@ -57,9 +59,13 @@ def test_world_name_ignores_the_playback_control_service(sim, monkeypatch):
 
 
 def test_world_name_is_absent_rather_than_guessed(sim, monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(
-        stdout="/gazebo/resource_paths/get\n", stderr="", returncode=0
-    ))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: types.SimpleNamespace(
+            stdout="/gazebo/resource_paths/get\n", stderr="", returncode=0
+        ),
+    )
     assert sim._gz_world_name(MagicMock()) is None
 
 
@@ -210,8 +216,11 @@ def test_reset_moves_the_robot_before_re_zeroing_what_measures_its_movement(
 
     assert order == ["world", "pose", "odometry", "slam", "costmaps"]
     assert steps == {
-        "world": True, "pose": True, "odometry": True,
-        "slam": True, "costmaps": True,
+        "world": True,
+        "pose": True,
+        "odometry": True,
+        "slam": True,
+        "costmaps": True,
     }
 
 
@@ -276,12 +285,16 @@ def test_set_pose_encodes_yaw_as_a_quaternion(sim, monkeypatch):
     assert "w: 0.000000000" in payload
 
 
-def test_a_robot_with_no_configured_start_pose_is_left_where_it_stands(sim, monkeypatch):
+def test_a_robot_with_no_configured_start_pose_is_left_where_it_stands(
+    sim, monkeypatch
+):
     """Guessing one would teleport it somewhere it was never spawned."""
     bridge = make_bridge(sim)
     bridge._start_pose = None
     monkeypatch.setattr(
-        sim.urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("no backend"))
+        sim.urllib.request,
+        "urlopen",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("no backend")),
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_run(calls))
@@ -380,7 +393,10 @@ def test_a_service_that_never_answers_is_a_failure_not_a_hang(sim, monkeypatch):
     client.call_async.return_value = future
     bridge.node.create_client.return_value = client
 
-    assert bridge._call("/robot_0/set_pose", MagicMock(), MagicMock(), timeout_s=0.05) is False
+    assert (
+        bridge._call("/robot_0/set_pose", MagicMock(), MagicMock(), timeout_s=0.05)
+        is False
+    )
     future.cancel.assert_called_once()
 
 
@@ -390,7 +406,9 @@ def test_a_missing_service_is_reported_rather_than_waited_on(sim):
     client.wait_for_service.return_value = False
     bridge.node.create_client.return_value = client
 
-    assert bridge._call("/robot_0/nope", MagicMock(), MagicMock(), timeout_s=0.01) is False
+    assert (
+        bridge._call("/robot_0/nope", MagicMock(), MagicMock(), timeout_s=0.01) is False
+    )
     client.call_async.assert_not_called()
 
 
@@ -398,7 +416,9 @@ def test_slam_reset_picks_the_back_end_that_is_actually_running(sim):
     """`slam_backend:=rtabmap` swaps the SLAM node out entirely."""
     bridge = make_bridge(sim)
     called: list[str] = []
-    bridge._call = lambda name, srv_type, request, **kw: called.append(name) is None or True
+    bridge._call = (
+        lambda name, srv_type, request, **kw: called.append(name) is None or True
+    )
     bridge.node.get_service_names_and_types.return_value = [
         ("/robot_0/rtabmap/reset", ["std_srvs/srv/Empty"]),
         ("/robot_0/odom", ["nav_msgs/msg/Odometry"]),
@@ -411,7 +431,9 @@ def test_slam_reset_picks_the_back_end_that_is_actually_running(sim):
 def test_slam_reset_prefers_slam_toolbox_when_both_are_advertised(sim):
     bridge = make_bridge(sim)
     called: list[str] = []
-    bridge._call = lambda name, srv_type, request, **kw: called.append(name) is None or True
+    bridge._call = (
+        lambda name, srv_type, request, **kw: called.append(name) is None or True
+    )
     bridge.node.get_service_names_and_types.return_value = [
         ("/robot_0/rtabmap/reset", ["std_srvs/srv/Empty"]),
         ("/robot_0/slam_toolbox/reset", ["slam_toolbox/srv/Reset"]),
@@ -557,8 +579,11 @@ def test_the_escape_stops_once_the_robot_has_retreated_far_enough(sim, twist):
     bridge._finish_goal("failed", bridge._goal_generation)
 
     step = sim.ESCAPE_DISTANCE / 2
-    poses = [{"x": -step, "y": 0.0}, {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
-             {"x": -sim.ESCAPE_DISTANCE, "y": 0.0}]
+    poses = [
+        {"x": -step, "y": 0.0},
+        {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
+        {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
+    ]
     commands = escaping(sim, bridge, poses)
 
     assert commands == [sim.ESCAPE_SPEED, 0.0], "must stop, and stay stopped"
@@ -575,7 +600,7 @@ def test_a_pinned_robot_stops_instead_of_grinding(sim, twist, monkeypatch):
     monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
     bridge._finish_goal("failed", bridge._goal_generation)
 
-    bridge.escape_tick()                       # commanded, no movement yet
+    bridge.escape_tick()  # commanded, no movement yet
     clock[0] += sim.ESCAPE_STALL_S + 0.1
     sent = []
     bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg.linear.x)

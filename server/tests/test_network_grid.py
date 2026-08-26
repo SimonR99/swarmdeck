@@ -91,4 +91,3 @@ def test_network_grid_adapts_to_changed_quality_when_stationary():
 
     # Within 25 samples it should have updated significantly towards 20%
     assert grid.quality_grid()[gy, gx] <= 35
-

@@ -82,11 +82,7 @@ def project_occupied_cloud(
         max_cells = int(max_cells)
     except (TypeError, ValueError):
         return None
-    if (
-        not math.isfinite(resolution)
-        or resolution <= 0.0
-        or max_cells <= 0
-    ):
+    if not math.isfinite(resolution) or resolution <= 0.0 or max_cells <= 0:
         return None
 
     xy = np.asarray(points[:, :2], dtype=np.float64)
@@ -194,9 +190,7 @@ def image_to_bgr(msg):
     try:
         step = int(getattr(msg, "step", 0)) or msg.width * channels
         rows = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, step)
-        frame = rows[:, : msg.width * channels].reshape(
-            msg.height, msg.width, channels
-        )
+        frame = rows[:, : msg.width * channels].reshape(msg.height, msg.width, channels)
     except (ValueError, TypeError):
         return None
     if encoding in ("rgb8", "8uc3"):
@@ -259,7 +253,9 @@ class AdapterSensorMixin:
                 return
             self.battery = value / 100.0 if value > 1.0 else max(0.0, min(1.0, value))
         elif hasattr(msg, "battery_voltage") or hasattr(msg, "voltage"):
-            voltage = float(getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan"))))
+            voltage = float(
+                getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan")))
+            )
             if math.isnan(voltage) or voltage <= 0.0:
                 self.battery = None
                 return
@@ -385,9 +381,8 @@ class AdapterLinkMixin:
             self._last_drive_at = 0.0
 
     def link_ok(self) -> bool:
-        return (
-            time.monotonic() - self._last_link_at
-            <= float(self.cfg["link_timeout_s"])
+        return time.monotonic() - self._last_link_at <= float(
+            self.cfg["link_timeout_s"]
         )
 
     def note_link_activity(self) -> None:

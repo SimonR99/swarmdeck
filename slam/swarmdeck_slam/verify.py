@@ -489,7 +489,9 @@ def verify_candidate(
     else:
         cos_yaw, sin_yaw = math.cos(yaw_prior), math.sin(yaw_prior)
         init_t_target_source = se3_identity()
-        init_t_target_source[:2, :2] = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
+        init_t_target_source[:2, :2] = np.array(
+            [[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]]
+        )
 
     result = small_gicp.align(
         target_points,
@@ -549,7 +551,11 @@ def verify_candidate(
             config.isotropic_scale * max(fitness, 1e-6)
         )
 
-    kind = EdgeKind.INTER_LOOP if source.id.robot_id != target.id.robot_id else EdgeKind.INTRA_LOOP
+    kind = (
+        EdgeKind.INTER_LOOP
+        if source.id.robot_id != target.id.robot_id
+        else EdgeKind.INTRA_LOOP
+    )
     return Edge(
         kind=kind,
         src=source.id,
@@ -620,13 +626,23 @@ def verify_candidates(
         return [
             edge
             for candidate in candidates
-            if (edge := verify_candidate(candidate.source, candidate.target, candidate.yaw_prior, config))
+            if (
+                edge := verify_candidate(
+                    candidate.source, candidate.target, candidate.yaw_prior, config
+                )
+            )
             is not None
         ]
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(verify_candidate, candidate.source, candidate.target, candidate.yaw_prior, config)
+            executor.submit(
+                verify_candidate,
+                candidate.source,
+                candidate.target,
+                candidate.yaw_prior,
+                config,
+            )
             for candidate in candidates
         ]
         return [edge for future in futures if (edge := future.result()) is not None]

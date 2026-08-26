@@ -27,7 +27,9 @@ class MapSnapshot:
 
 
 def copy_meta(meta: GridMeta) -> GridMeta:
-    return GridMeta(meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y)
+    return GridMeta(
+        meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
+    )
 
 
 def expand_patch_baseline(

@@ -96,7 +96,9 @@ async def start_session() -> dict[str, Any]:
     out = app.REPO / "sessions" / name
     app.events.open(out)
     (out / "manifest.json").write_text(
-        json.dumps({"name": name, "config": app.CONFIG, "started": time.time()}, indent=2)
+        json.dumps(
+            {"name": name, "config": app.CONFIG, "started": time.time()}, indent=2
+        )
     )
     app.mark_session_start()
     app.SESSION.update(running=True, name=name, started_at=time.time(), recording=True)

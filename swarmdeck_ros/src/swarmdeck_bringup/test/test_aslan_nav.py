@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 REPO = Path(__file__).resolve().parents[4]
 CONFIG = REPO / "adapters/adapter_ros2/config/aslan_bunker.yaml"
 COMPOSE = REPO / "deploy/compose/docker-compose.robot-aslan.yml"
@@ -117,7 +116,9 @@ def test_aslan_slam_uses_vectornav_imu():
     )
 
     assert 'DeclareLaunchArgument("start_imu", default_value="true")' in source
-    assert 'DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu")' in source
+    assert (
+        'DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu")' in source
+    )
     assert 'executable="vectornav"' in source
     assert 'executable="vn_sensor_msgs"' in source
     assert "imu_preintegration_node" in source

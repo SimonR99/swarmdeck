@@ -17,7 +17,6 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
 
-
 _ADAPTER_CONFIG = Path(__file__).resolve().parents[1] / "config"
 
 

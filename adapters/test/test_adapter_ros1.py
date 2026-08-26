@@ -26,13 +26,21 @@ REPO = Path(__file__).resolve().parents[2]
 _STUBBED = [
     "rospy",
     "actionlib",
-    "move_base_msgs", "move_base_msgs.msg",
-    "actionlib_msgs", "actionlib_msgs.msg",
-    "geometry_msgs", "geometry_msgs.msg",
-    "nav_msgs", "nav_msgs.msg",
-    "sensor_msgs", "sensor_msgs.msg",
-    "std_msgs", "std_msgs.msg",
-    "tf2_ros", "websockets", "cv2",
+    "move_base_msgs",
+    "move_base_msgs.msg",
+    "actionlib_msgs",
+    "actionlib_msgs.msg",
+    "geometry_msgs",
+    "geometry_msgs.msg",
+    "nav_msgs",
+    "nav_msgs.msg",
+    "sensor_msgs",
+    "sensor_msgs.msg",
+    "std_msgs",
+    "std_msgs.msg",
+    "tf2_ros",
+    "websockets",
+    "cv2",
 ]
 
 
@@ -72,7 +80,8 @@ def _bridge(mod, cfg_override=None):
     # over actions.navigate_to_pose (actionlib) when both are configured.
     bridge.nav_client = (
         MagicMock()
-        if bridge.pub_nav_goal is None and cfg.get("actions", {}).get("navigate_to_pose")
+        if bridge.pub_nav_goal is None
+        and cfg.get("actions", {}).get("navigate_to_pose")
         else None
     )
     bridge.mode = "idle"
@@ -114,17 +123,33 @@ def test_config_merge_is_deep_not_shallow(mod):
 
 def test_capabilities_reflect_configuration_only(mod):
     """Protocol rule 4: never advertise a capability you cannot honour."""
-    full = _bridge(mod, {"network_iface": "auto",
-                         "topics": {"battery": "battery_state",
-                                    "camera_compressed": "cam/compressed"}})
+    full = _bridge(
+        mod,
+        {
+            "network_iface": "auto",
+            "topics": {
+                "battery": "battery_state",
+                "camera_compressed": "cam/compressed",
+            },
+        },
+    )
     caps = full.capabilities()
     assert {"navigate", "map", "camera", "battery", "network", "estop"} <= set(caps)
 
-    bare = _bridge(mod, {
-        "topics": {"odom": "odom", "map": "", "cmd_vel": "", "battery": "",
-                   "camera": "", "camera_compressed": ""},
-        "actions": {"navigate_to_pose": ""},
-    })
+    bare = _bridge(
+        mod,
+        {
+            "topics": {
+                "odom": "odom",
+                "map": "",
+                "cmd_vel": "",
+                "battery": "",
+                "camera": "",
+                "camera_compressed": "",
+            },
+            "actions": {"navigate_to_pose": ""},
+        },
+    )
     assert bare.capabilities() == []
 
 
@@ -257,7 +282,10 @@ def test_detection_batch_survives_concurrent_collection(mod):
     bridge._detector = Detector()
     bridge._detect_bgr(MagicMock(), due_checked=True)
 
-    assert [item["id"] for item in bridge.take_detections()] == ["rubber_duck_0", "rubber_duck_1"]
+    assert [item["id"] for item in bridge.take_detections()] == [
+        "rubber_duck_0",
+        "rubber_duck_1",
+    ]
 
 
 def test_battery_normalisation_handles_percent_and_nan(mod):
@@ -321,7 +349,9 @@ def test_goal_done_ignores_stale_generations(mod):
     bridge.goal = {"x": 1.0, "y": 2.0}
 
     bridge._on_goal_done(status=3, generation=1)  # stale (generation 1, current is 2)
-    assert bridge.nav_status == "active", "a stale done_cb must not overwrite newer state"
+    assert (
+        bridge.nav_status == "active"
+    ), "a stale done_cb must not overwrite newer state"
     assert bridge.goal == {"x": 1.0, "y": 2.0}
 
 
@@ -341,18 +371,22 @@ def test_cancel_goal_bumps_generation_and_clears_state(mod):
 def test_nav_goal_topic_takes_priority_over_actionlib(mod):
     """A robot only ever has one real navigation stack — configuring both by
     accident must not silently create two clients fighting over goals."""
-    bridge = _bridge(mod, {
-        "topics": {"nav_goal": "move_base_simple/goal"},
-        "actions": {"navigate_to_pose": "move_base"},
-    })
+    bridge = _bridge(
+        mod,
+        {
+            "topics": {"nav_goal": "move_base_simple/goal"},
+            "actions": {"navigate_to_pose": "move_base"},
+        },
+    )
     assert bridge.pub_nav_goal is not None
     assert bridge.nav_client is None
     assert "navigate" in bridge.capabilities()
 
 
 def test_navigate_to_topic_publishes_pose_and_releases_any_prior_stop(mod):
-    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
-                                       "nav_stop": "stop"}})
+    bridge = _bridge(
+        mod, {"topics": {"nav_goal": "move_base_simple/goal", "nav_stop": "stop"}}
+    )
     bridge._navigate_to_topic({"x": 3.0, "y": -1.0, "yaw": 1.5})
 
     assert bridge.goal == {"x": 3.0, "y": -1.0}
@@ -366,8 +400,10 @@ def test_navigate_to_topic_publishes_pose_and_releases_any_prior_stop(mod):
 
 
 def test_topic_nav_progress_declares_arrival_within_tolerance(mod):
-    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal"},
-                            "nav_goal_tolerance_m": 0.5})
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_goal": "move_base_simple/goal"}, "nav_goal_tolerance_m": 0.5},
+    )
     bridge.goal = {"x": 5.0, "y": 5.0}
     bridge.nav_status = "active"
     bridge.map_pose = lambda: {"x": 5.3, "y": 5.1, "yaw": 0.0}  # 0.32 m away
@@ -379,8 +415,10 @@ def test_topic_nav_progress_declares_arrival_within_tolerance(mod):
 
 
 def test_topic_nav_progress_stays_active_when_far(mod):
-    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal"},
-                            "nav_goal_tolerance_m": 0.5})
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_goal": "move_base_simple/goal"}, "nav_goal_tolerance_m": 0.5},
+    )
     bridge.goal = {"x": 5.0, "y": 5.0}
     bridge.nav_status = "active"
     bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
@@ -391,8 +429,9 @@ def test_topic_nav_progress_stays_active_when_far(mod):
 
 
 def test_cancel_goal_halts_a_topic_based_nav_stack(mod):
-    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
-                                       "nav_stop": "stop"}})
+    bridge = _bridge(
+        mod, {"topics": {"nav_goal": "move_base_simple/goal", "nav_stop": "stop"}}
+    )
     bridge.nav_status = "active"
     bridge.goal = {"x": 1.0, "y": 1.0}
 
@@ -405,8 +444,9 @@ def test_cancel_goal_halts_a_topic_based_nav_stack(mod):
 
 def test_teleop_preempts_an_active_topic_based_nav_goal(mod):
     """Operator input must always win over autonomy sharing the same cmd_vel."""
-    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
-                                       "nav_stop": "stop"}})
+    bridge = _bridge(
+        mod, {"topics": {"nav_goal": "move_base_simple/goal", "nav_stop": "stop"}}
+    )
     bridge.nav_status = "active"
     bridge.goal = {"x": 2.0, "y": 2.0}
 
@@ -420,8 +460,9 @@ def test_teleop_preempts_an_active_topic_based_nav_goal(mod):
 def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
     """drive(0, 0) is sent routinely (deadman, initial state) — it must not
     spuriously cancel a goal that isn't even active."""
-    bridge = _bridge(mod, {"topics": {"nav_goal": "move_base_simple/goal",
-                                       "nav_stop": "stop"}})
+    bridge = _bridge(
+        mod, {"topics": {"nav_goal": "move_base_simple/goal", "nav_stop": "stop"}}
+    )
     bridge.nav_status = "idle"
 
     bridge.drive(0.0, 0.0)
@@ -579,16 +620,20 @@ def _fake_cloud(points, extra_fields=()):
         struct.pack("<%df" % len(field_names), *([0.0] * len(prefix_names)), *p)
         for p in points
     )
-    return type("M", (), {
-        "fields": fields, "point_step": point_step, "data": data,
-    })()
+    return type(
+        "M",
+        (),
+        {
+            "fields": fields,
+            "point_step": point_step,
+            "data": data,
+        },
+    )()
 
 
 def _fake_cloud_with_header(points, frame="odom_lidar", stamp=0.0):
     msg = _fake_cloud(points)
-    msg.header = type(
-        "Header", (), {"frame_id": frame, "stamp": _stamp(stamp)}
-    )()
+    msg.header = type("Header", (), {"frame_id": frame, "stamp": _stamp(stamp)})()
     return msg
 
 
@@ -624,11 +669,13 @@ def test_on_map_cloud_keeps_xyz_for_the_3d_view(mod):
     bridge = _bridge(mod, {"map_cloud_height_band": {"min_z": 0.0, "max_z": 1.0}})
     # First two returns share a 10 cm display voxel; the ceiling return is
     # outside the 2D band but must remain visible in 3D.
-    msg = _fake_cloud([
-        (1.000, 2.000, 0.02),
-        (1.001, 2.001, 0.021),
-        (3.000, 4.000, 2.50),
-    ])
+    msg = _fake_cloud(
+        [
+            (1.000, 2.000, 0.02),
+            (1.001, 2.001, 0.021),
+            (3.000, 4.000, 2.50),
+        ]
+    )
     bridge._on_map_cloud(msg)
 
     assert bridge._cloud_points.shape == (2, 3)
@@ -651,10 +698,10 @@ def test_global_map_cloud_projects_only_the_configured_height_slice(mod):
     bridge._on_global_map_cloud(
         _fake_cloud_with_header(
             [
-                (1.0, 2.0, 0.5),    # retained occupied return
-                (1.1, 2.1, 0.6),    # same 0.5 m cell
-                (4.0, 4.0, 2.0),    # above the requested band
-                (8.0, 8.0, -1.0),   # below the requested band
+                (1.0, 2.0, 0.5),  # retained occupied return
+                (1.1, 2.1, 0.6),  # same 0.5 m cell
+                (4.0, 4.0, 2.0),  # above the requested band
+                (8.0, 8.0, -1.0),  # below the requested band
             ]
         )
     )
@@ -677,9 +724,7 @@ def test_global_map_cloud_drops_a_cloud_in_the_wrong_frame(mod):
         mod,
         {"map_frame": "odom_lidar", "topics": {"map_cloud_global": "map_global"}},
     )
-    bridge._on_global_map_cloud(
-        _fake_cloud_with_header([(1.0, 2.0, 0.5)], frame="map")
-    )
+    bridge._on_global_map_cloud(_fake_cloud_with_header([(1.0, 2.0, 0.5)], frame="map"))
     assert bridge.grid is None
     assert bridge._grid_dirty is False
 
@@ -743,8 +788,13 @@ def test_teleop_preempts_move_base_without_a_nav_stop_topic(mod):
     (which publishes straight to the real cmd_vel) went on fighting teleop for
     the topic. `adapter_ros2.drive` has always cancelled unconditionally.
     """
-    bridge = _bridge(mod, {"topics": {"cmd_vel": "cmd_vel", "nav_stop": ""},
-                           "actions": {"navigate_to_pose": "move_base"}})
+    bridge = _bridge(
+        mod,
+        {
+            "topics": {"cmd_vel": "cmd_vel", "nav_stop": ""},
+            "actions": {"navigate_to_pose": "move_base"},
+        },
+    )
     assert bridge.pub_nav_stop is None, "this is the configuration that regressed"
     bridge.nav_status = "active"
     bridge.goal = {"x": 4.0, "y": 1.0}
@@ -759,8 +809,13 @@ def test_teleop_preempts_move_base_without_a_nav_stop_topic(mod):
 
 def test_teleop_does_not_cancel_when_nothing_is_navigating(mod):
     """Driving an idle robot must not emit a spurious cancellation."""
-    bridge = _bridge(mod, {"topics": {"cmd_vel": "cmd_vel"},
-                           "actions": {"navigate_to_pose": "move_base"}})
+    bridge = _bridge(
+        mod,
+        {
+            "topics": {"cmd_vel": "cmd_vel"},
+            "actions": {"navigate_to_pose": "move_base"},
+        },
+    )
     bridge.drive(0.25, 0.0)
 
     assert bridge.mode == "teleop"
@@ -810,7 +865,7 @@ def test_plan_in_a_vehicle_frame_is_transformed_into_map_frame(mod):
     transform = MagicMock()
     transform.transform.rotation.x = 0.0
     transform.transform.rotation.y = 0.0
-    transform.transform.rotation.z = math.sin(math.pi / 4)   # yaw = +90 deg
+    transform.transform.rotation.z = math.sin(math.pi / 4)  # yaw = +90 deg
     transform.transform.rotation.w = math.cos(math.pi / 4)
     transform.transform.translation.x = 10.0
     transform.transform.translation.y = 5.0
@@ -912,8 +967,10 @@ def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
     """
     bridge = _bridge(
         mod,
-        {"topics": {"nav_cmd_vel": "cmd_vel_nav"},
-         "actions": {"navigate_to_pose": "navigate_to_pose"}},
+        {
+            "topics": {"nav_cmd_vel": "cmd_vel_nav"},
+            "actions": {"navigate_to_pose": "navigate_to_pose"},
+        },
     )
     bridge.nav_status = "active"
     bridge.note_link_activity()
@@ -981,8 +1038,13 @@ def test_a_blocking_upload_does_not_stall_state_or_nav_joy(mod, monkeypatch):
             mod.DEFAULTS,
             # A fast pump and an always-due map upload, so the scenario reaches
             # the blocking call immediately instead of waiting out a real period.
-            {"rates": {"state_hz": 50.0, "map_period_s": 0.0,
-                       "camera_period_s": 3600.0}},
+            {
+                "rates": {
+                    "state_hz": 50.0,
+                    "map_period_s": 0.0,
+                    "camera_period_s": 3600.0,
+                }
+            },
         )
         id = "r0"
         t0 = 0.0
@@ -1079,9 +1141,9 @@ def test_websocket_keepalive_is_tight_enough_to_matter(mod):
     interval = float(cfg["ping_interval_s"])
     timeout = float(cfg["ping_timeout_s"])
 
-    assert interval + timeout <= 8.0, (
-        f"link loss would go undetected for up to {interval + timeout:.0f}s"
-    )
+    assert (
+        interval + timeout <= 8.0
+    ), f"link loss would go undetected for up to {interval + timeout:.0f}s"
     assert interval >= 1.0 and timeout >= 2.0
 
 
@@ -1098,8 +1160,9 @@ def test_connect_actually_passes_the_keepalive_settings(mod, monkeypatch):
         async def __aexit__(self, *_exc):
             return False
 
-    monkeypatch.setattr(mod.websockets, "connect",
-                        lambda url, **kw: (seen.update(kw), _Conn())[1])
+    monkeypatch.setattr(
+        mod.websockets, "connect", lambda url, **kw: (seen.update(kw), _Conn())[1]
+    )
 
     bridge = _bridge(mod)
 

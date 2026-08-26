@@ -133,7 +133,9 @@ class Descriptor:
         if self.data.dtype != np.uint8:
             raise ProtocolError(f"descriptor data must be uint8, got {self.data.dtype}")
         if self.data.ndim != 2:
-            raise ProtocolError(f"descriptor data must be 2-D, got shape {self.data.shape}")
+            raise ProtocolError(
+                f"descriptor data must be 2-D, got shape {self.data.shape}"
+            )
 
 
 @dataclass(frozen=True)
@@ -172,12 +174,16 @@ def _validate_points(points: np.ndarray) -> np.ndarray:
 def _validate_pose(t_odom_base: Any) -> np.ndarray:
     pose = np.asarray(t_odom_base, dtype=np.float64).reshape(-1)
     if pose.shape != (7,):
-        raise ProtocolError(f"t_odom_base must be 7 floats [x,y,z,qx,qy,qz,qw], got {pose.shape}")
+        raise ProtocolError(
+            f"t_odom_base must be 7 floats [x,y,z,qx,qy,qz,qw], got {pose.shape}"
+        )
     if not np.isfinite(pose).all():
         raise ProtocolError("t_odom_base contains non-finite values")
     norm = float(np.linalg.norm(pose[3:]))
     if not 0.9 < norm < 1.1:
-        raise ProtocolError(f"t_odom_base quaternion is not unit length (|q| = {norm:.4f})")
+        raise ProtocolError(
+            f"t_odom_base quaternion is not unit length (|q| = {norm:.4f})"
+        )
     return pose
 
 
@@ -275,7 +281,9 @@ def peek_keyframe_header(blob: bytes) -> dict[str, Any]:
     pipe, not interpret.
     """
     if len(blob) > MAX_KEYFRAME_BYTES:
-        raise ProtocolError(f"keyframe is {len(blob)} bytes, over the {MAX_KEYFRAME_BYTES} limit")
+        raise ProtocolError(
+            f"keyframe is {len(blob)} bytes, over the {MAX_KEYFRAME_BYTES} limit"
+        )
     if len(blob) < _HEADER_STRUCT.size:
         raise ProtocolError("keyframe is too short to contain a header")
 
@@ -321,7 +329,9 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
         scale = float(header["scale"])
         n_points = int(header["n_points"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ProtocolError(f"header is missing or has a malformed field: {exc}") from exc
+        raise ProtocolError(
+            f"header is missing or has a malformed field: {exc}"
+        ) from exc
 
     # Defaulted, never required: every blob in sessions/captures predates the
     # field, and they must keep decoding to exactly what they decoded to before.
@@ -342,7 +352,9 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
         )
 
     points = (
-        np.frombuffer(body, dtype="<i2", count=n_points * 3).reshape(n_points, 3).astype(np.float32)
+        np.frombuffer(body, dtype="<i2", count=n_points * 3)
+        .reshape(n_points, 3)
+        .astype(np.float32)
         * scale
     )
 
@@ -374,7 +386,9 @@ def _decode_descriptor(spec: Any, body: bytes, offset: int) -> Descriptor | None
         raise ProtocolError(f"descriptor header is malformed: {exc}") from exc
 
     if rings <= 0 or sectors <= 0:
-        raise ProtocolError(f"descriptor dimensions must be positive, got {rings}x{sectors}")
+        raise ProtocolError(
+            f"descriptor dimensions must be positive, got {rings}x{sectors}"
+        )
 
     needed = rings * sectors
     if offset + needed > len(body):
@@ -383,5 +397,7 @@ def _decode_descriptor(spec: Any, body: bytes, offset: int) -> Descriptor | None
             f"holds only {len(body) - offset} after the points"
         )
 
-    data = np.frombuffer(body, dtype=np.uint8, count=needed, offset=offset).reshape(rings, sectors)
+    data = np.frombuffer(body, dtype=np.uint8, count=needed, offset=offset).reshape(
+        rings, sectors
+    )
     return Descriptor(kind=kind, data=data, max_range=max_range)

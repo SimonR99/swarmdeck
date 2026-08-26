@@ -80,7 +80,10 @@ class MockRobot:
             return
         if not self.target:
             if random.random() < 0.02:
-                self.target = {"x": random.uniform(-16, 16), "y": random.uniform(-16, 16)}
+                self.target = {
+                    "x": random.uniform(-16, 16),
+                    "y": random.uniform(-16, 16),
+                }
                 self.nav_status, self.mode = "active", "nav"
         else:
             dx, dy = self.target["x"] - self.x, self.target["y"] - self.y
@@ -104,7 +107,11 @@ class MockRobot:
             "type": "robot_state",
             "robot_id": self.id,
             "t_mono": round(time.monotonic() - self.t0, 4),
-            "pose": {"x": round(self.x, 3), "y": round(self.y, 3), "yaw": round(self.yaw, 4)},
+            "pose": {
+                "x": round(self.x, 3),
+                "y": round(self.y, 3),
+                "yaw": round(self.yaw, 4),
+            },
             "battery": round(self.battery, 3),
             "mode": self.mode,
             "nav_status": self.nav_status,
@@ -134,7 +141,9 @@ class MockRobot:
             gap = abs(int(other.split("_")[-1]) - int(self.id.split("_")[-1]))
             count = max(0, int(elapsed / (12.0 * gap)) if gap else 0)
             if count:
-                links.append({"other": other, "count": count, "last_t": round(elapsed, 1)})
+                links.append(
+                    {"other": other, "count": count, "last_t": round(elapsed, 1)}
+                )
         return {
             "type": "slam_graph",
             "robot_id": self.id,
@@ -208,7 +217,12 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                             # Synthetic poses and maps already share one global frame.
                             "coordinate_frame": "merged",
                             "capabilities": [
-                                "navigate", "map", "camera", "battery", "network", "estop"
+                                "navigate",
+                                "map",
+                                "camera",
+                                "battery",
+                                "network",
+                                "estop",
                             ],
                             "footprint_radius": 0.35,
                         }
@@ -248,11 +262,15 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                                         "items": [
                                             {
                                                 "class": "duck",
-                                                "score": round(random.uniform(0.7, 0.98), 3),
+                                                "score": round(
+                                                    random.uniform(0.7, 0.98), 3
+                                                ),
                                                 "bbox": [0.3, 0.3, 0.16, 0.22],
                                                 "map_position": {
-                                                    "x": robot.x + random.uniform(-2, 2),
-                                                    "y": robot.y + random.uniform(-2, 2),
+                                                    "x": robot.x
+                                                    + random.uniform(-2, 2),
+                                                    "y": robot.y
+                                                    + random.uniform(-2, 2),
                                                 },
                                             }
                                         ],

@@ -96,7 +96,14 @@ class ErrorStats:
         )
 
     def to_dict(self) -> dict[str, float | int]:
-        return {"rmse": self.rmse, "mean": self.mean, "median": self.median, "max": self.max, "n": self.n}
+        return {
+            "rmse": self.rmse,
+            "mean": self.mean,
+            "median": self.median,
+            "max": self.max,
+            "n": self.n,
+        }
+
 
 # --------------------------------------------------------------------------- #
 # Rigid alignment (Umeyama / Horn, no scale) and ATE
@@ -127,7 +134,9 @@ def align_rigid(
     then applied to every pose (translation and orientation alike) by
     :func:`compute_ate`.
     """
-    common = tuple(sorted(set(estimated) & set(truth), key=lambda k: (k.robot_id, k.seq)))
+    common = tuple(
+        sorted(set(estimated) & set(truth), key=lambda k: (k.robot_id, k.seq))
+    )
     if len(common) < 2:
         raise ValueError(
             "rigid alignment needs at least 2 common keyframes to determine a rotation; "
@@ -188,7 +197,9 @@ def compute_ate(
     rotation_errors = np.empty(len(common), dtype=np.float64)
     for i, keyframe_id in enumerate(common):
         aligned = alignment @ estimated[keyframe_id]
-        translation_errors[i], rotation_errors[i] = se3_distance(truth[keyframe_id], aligned)
+        translation_errors[i], rotation_errors[i] = se3_distance(
+            truth[keyframe_id], aligned
+        )
     return AteResult(
         translation_m=ErrorStats.from_errors(translation_errors),
         rotation_rad=ErrorStats.from_errors(rotation_errors),
@@ -425,7 +436,9 @@ def score_components(
     """
     robots = sorted(truth_groups)
     if len(robots) < 2:
-        raise ValueError(f"component scoring needs at least 2 robots to form a pair, got {len(robots)}")
+        raise ValueError(
+            f"component scoring needs at least 2 robots to form a pair, got {len(robots)}"
+        )
 
     estimated_group: dict[str, int] = {}
     for component in estimated:
@@ -440,7 +453,9 @@ def score_components(
         for b in robots[i + 1 :]:
             truly_shared = truth_groups[a] == truth_groups[b]
             estimated_shared = (
-                a in estimated_group and b in estimated_group and estimated_group[a] == estimated_group[b]
+                a in estimated_group
+                and b in estimated_group
+                and estimated_group[a] == estimated_group[b]
             )
             if truly_shared:
                 n_true_positive_pairs += 1
@@ -505,7 +520,9 @@ class Report:
 
         lines.append("-- RPE (no alignment; per robot) --")
         if not self.rpe:
-            lines.append("  (no robot had enough common keyframes at any requested delta)")
+            lines.append(
+                "  (no robot had enough common keyframes at any requested delta)"
+            )
         for scope in sorted(self.rpe):
             for rpe in self.rpe[scope]:
                 lines.append(
@@ -517,10 +534,14 @@ class Report:
 
         lines.append("-- Inter-robot T_world_map error --")
         if not self.inter_robot:
-            lines.append("  (no robot had a recovered T_world_map matched to ground truth)")
+            lines.append(
+                "  (no robot had a recovered T_world_map matched to ground truth)"
+            )
         for robot_id in sorted(self.inter_robot):
             err = self.inter_robot[robot_id]
-            lines.append(f"  {robot_id:<16} {err.translation_m:.4f} m, {err.rotation_deg:.4f} deg")
+            lines.append(
+                f"  {robot_id:<16} {err.translation_m:.4f} m, {err.rotation_deg:.4f} deg"
+            )
 
         lines.append("-- Component correctness --")
         lines.append(
@@ -545,8 +566,13 @@ class Report:
         return {
             "label": self.label,
             "ate": {scope: ate.to_dict() for scope, ate in self.ate.items()},
-            "rpe": {scope: [r.to_dict() for r in results] for scope, results in self.rpe.items()},
-            "inter_robot": {robot_id: err.to_dict() for robot_id, err in self.inter_robot.items()},
+            "rpe": {
+                scope: [r.to_dict() for r in results]
+                for scope, results in self.rpe.items()
+            },
+            "inter_robot": {
+                robot_id: err.to_dict() for robot_id, err in self.inter_robot.items()
+            },
             "components": self.components.to_dict(),
         }
 
@@ -578,7 +604,9 @@ def evaluate(
     keyframes to work with; call :func:`compute_ate` / :func:`compute_rpe`
     directly if you want a hard failure on that condition instead.
     """
-    robot_ids = sorted({keyframe_id.robot_id for keyframe_id in graph.poses} | set(truth_t_world_map))
+    robot_ids = sorted(
+        {keyframe_id.robot_id for keyframe_id in graph.poses} | set(truth_t_world_map)
+    )
 
     def _poses_for(
         robot_ids_subset: Sequence[str],
@@ -625,7 +653,9 @@ def evaluate(
         else ComponentScore((), (), 0, 0)
     )
 
-    return Report(label=label, ate=ate, rpe=rpe, inter_robot=inter_robot, components=components)
+    return Report(
+        label=label, ate=ate, rpe=rpe, inter_robot=inter_robot, components=components
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -664,7 +694,9 @@ class Ablation:
                 row = f"  {scope:<16}"
                 for r in self.reports:
                     row += (
-                        f"{r.ate[scope].translation_m.rmse:>16.4f}" if scope in r.ate else f"{'--':>16}"
+                        f"{r.ate[scope].translation_m.rmse:>16.4f}"
+                        if scope in r.ate
+                        else f"{'--':>16}"
                     )
                 lines.append(row)
 
