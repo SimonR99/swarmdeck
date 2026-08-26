@@ -22,6 +22,12 @@ log/
 sessions/*
 !sessions/.gitkeep
 
+# Replay ablation output (slam/tools/replay.py writes replay/<dataset>/ by
+# default). Generated from a capture plus a config name, so it is reproducible
+# rather than worth versioning -- and it lands as a new PNG per ablation run,
+# which is how three of them were committed by accident.
+slam/replay/
+
 # Editors / OS
 .vscode/
 .idea/
