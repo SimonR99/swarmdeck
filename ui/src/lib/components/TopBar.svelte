@@ -140,7 +140,6 @@
 >
   <div class="flex shrink-0 items-center gap-2.5">
     <img src="/logo.png" alt="SwarmDeck Logo" class="h-8 w-auto max-w-[140px] object-contain" />
-    <span class="text-sm font-semibold tracking-[-0.015em]">SwarmDeck</span>
   </div>
 
   <div class="mx-1 h-6 w-px bg-border/80"></div>
@@ -196,12 +195,6 @@
       {/if}
     </button>
   </div>
-
-  {#if selected && !inGlobal}
-    <!-- Not a fault: the merge refused this robot, so the shared map has no
-         place to draw it and its own map is the only truthful view. -->
-    <Badge tone="warn">{robotDisplayName(selected)} not merged</Badge>
-  {/if}
 
   {#if session.recording}
     <Badge tone="danger">
