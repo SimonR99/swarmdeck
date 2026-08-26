@@ -515,6 +515,18 @@ def test_shipped_configs_are_valid_and_disable_what_they_lack(mod):
         assert cfg["rates"]["camera_period_s"] >= 0.2, f"{name} exceeds the 5 Hz cap"
 
 
+def test_hardware_configs_declare_physical_map_height_bands():
+    import yaml
+
+    config = yaml.safe_load(
+        (REPO / "adapters/adapter_ros1/config/scout_mini.yaml").read_text()
+    )
+    band = config["map_cloud_height_band"]
+    assert band["floor_z"] == pytest.approx(-0.575)
+    assert band["min_z"] == pytest.approx(0.150)
+    assert band["max_z"] == pytest.approx(1.000)
+
+
 def test_map_cloud_alone_still_advertises_the_map_capability(mod):
     """A robot with no OccupancyGrid publisher, only a registered cloud, must
     still show up as map-capable — the backend builds the grid server-side."""
