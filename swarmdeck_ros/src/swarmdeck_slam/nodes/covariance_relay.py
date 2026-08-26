@@ -80,12 +80,20 @@ class CovarianceRelay(Node):
 
         big = UNOBSERVED_VAR
         self._pose_cov = _diagonal(
-            value("pose_xy_variance"), value("pose_xy_variance"), big,
-            big, big, value("pose_yaw_variance"),
+            value("pose_xy_variance"),
+            value("pose_xy_variance"),
+            big,
+            big,
+            big,
+            value("pose_yaw_variance"),
         )
         self._twist_cov = _diagonal(
-            value("vx_variance"), value("vy_variance"), big,
-            big, big, value("gyro_variance"),
+            value("vx_variance"),
+            value("vy_variance"),
+            big,
+            big,
+            big,
+            value("gyro_variance"),
         )
         gyro = value("gyro_variance")
         accel = value("accel_variance")

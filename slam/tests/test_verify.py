@@ -48,10 +48,16 @@ _TRANSLATION_TOLERANCE_M = 0.08
 _ROTATION_TOLERANCE_RAD = math.radians(1.5)
 
 
-def _true_relative_pose(source_robot: SyntheticRobot, source_kf: Keyframe,
-                         target_robot: SyntheticRobot, target_kf: Keyframe) -> np.ndarray:
+def _true_relative_pose(
+    source_robot: SyntheticRobot,
+    source_kf: Keyframe,
+    target_robot: SyntheticRobot,
+    target_kf: Keyframe,
+) -> np.ndarray:
     """Exact ``T_source_target`` from ground truth, in this module's own convention."""
-    return se3_relative(source_robot.truth[source_kf.id], target_robot.truth[target_kf.id])
+    return se3_relative(
+        source_robot.truth[source_kf.id], target_robot.truth[target_kf.id]
+    )
 
 
 def _exact_yaw_prior(t_src_dst_truth: np.ndarray) -> float:
@@ -84,7 +90,9 @@ def _closest_pair(
         for j, kf_b in enumerate(b.keyframes):
             if a is b and abs(i - j) < min_index_gap:
                 continue
-            distance = float(np.linalg.norm(a.truth[kf_a.id][:3, 3] - b.truth[kf_b.id][:3, 3]))
+            distance = float(
+                np.linalg.norm(a.truth[kf_a.id][:3, 3] - b.truth[kf_b.id][:3, 3])
+            )
             if best is None or distance < best[0]:
                 best = (distance, kf_a, kf_b)
     assert best is not None
@@ -93,8 +101,14 @@ def _closest_pair(
 
 
 def _make_wall_keyframe(
-    robot_id: str, seq: int, rng: np.random.Generator, *,
-    n: int = 600, length: float = 20.0, height: float = 2.4, noise: float = 0.01,
+    robot_id: str,
+    seq: int,
+    rng: np.random.Generator,
+    *,
+    n: int = 600,
+    length: float = 20.0,
+    height: float = 2.4,
+    noise: float = 0.01,
 ) -> Keyframe:
     """A single flat wall scan: the textbook degenerate GICP geometry.
 
@@ -108,14 +122,17 @@ def _make_wall_keyframe(
     y = np.zeros(n)
     points = np.stack([x, y, z], axis=1) + rng.normal(scale=noise, size=(n, 3))
     return Keyframe(
-        id=KeyframeId(robot_id, seq), stamp=float(seq),
-        t_odom_base=se3_identity(), points=points.astype(np.float32),
+        id=KeyframeId(robot_id, seq),
+        stamp=float(seq),
+        t_odom_base=se3_identity(),
+        points=points.astype(np.float32),
     )
 
 
 # --------------------------------------------------------------------------- #
 # H block ordering -- permanent regression guard
 # --------------------------------------------------------------------------- #
+
 
 def test_hessian_block_ordering_is_rotation_first() -> None:
     """small_gicp's ``.H`` is rotation-first, matching gtsam's TANGENT_ORDER.
@@ -142,25 +159,35 @@ def test_hessian_block_ordering_is_rotation_first() -> None:
     """
     rng = np.random.default_rng(7)
 
-    def make_disk(n: int = 4000, radius: float = 8.0, z_noise: float = 0.01) -> np.ndarray:
+    def make_disk(
+        n: int = 4000, radius: float = 8.0, z_noise: float = 0.01
+    ) -> np.ndarray:
         r = radius * np.sqrt(rng.uniform(0.0, 1.0, n))
         theta = rng.uniform(0.0, 2 * np.pi, n)
         return np.stack(
-            [r * np.cos(theta), r * np.sin(theta), rng.normal(scale=z_noise, size=n)], axis=1
+            [r * np.cos(theta), r * np.sin(theta), rng.normal(scale=z_noise, size=n)],
+            axis=1,
         )
 
     target = make_disk()
     source = make_disk()  # independent sample of the same disk, centred at the origin
 
     result = small_gicp.align(
-        target, source, init_T_target_source=se3_identity(), registration_type="GICP",
-        downsampling_resolution=0.3, max_correspondence_distance=1.0,
-        num_threads=1, max_iterations=50,
+        target,
+        source,
+        init_T_target_source=se3_identity(),
+        registration_type="GICP",
+        downsampling_resolution=0.3,
+        max_correspondence_distance=1.0,
+        num_threads=1,
+        max_iterations=50,
     )
     assert result.converged
 
     hessian = 0.5 * (result.H + result.H.T)
-    block_a = np.linalg.eigvalsh(hessian[0:3, 0:3])  # candidate blocks, order unknown yet
+    block_a = np.linalg.eigvalsh(
+        hessian[0:3, 0:3]
+    )  # candidate blocks, order unknown yet
     block_b = np.linalg.eigvalsh(hessian[3:6, 3:6])
 
     def is_two_strong_one_weak(eigenvalues: np.ndarray) -> bool:
@@ -173,8 +200,12 @@ def test_hessian_block_ordering_is_rotation_first() -> None:
         smallest, middle, largest = np.sort(eigenvalues)
         return largest > 50 * middle and largest > 50 * smallest
 
-    rotation_like_a, translation_like_a = is_two_strong_one_weak(block_a), is_one_strong_two_weak(block_a)
-    rotation_like_b, translation_like_b = is_two_strong_one_weak(block_b), is_one_strong_two_weak(block_b)
+    rotation_like_a, translation_like_a = is_two_strong_one_weak(
+        block_a
+    ), is_one_strong_two_weak(block_a)
+    rotation_like_b, translation_like_b = is_two_strong_one_weak(
+        block_b
+    ), is_one_strong_two_weak(block_b)
 
     # Exactly one block must look like rotation and the other like
     # translation -- if both or neither match, the disk fixture itself
@@ -195,6 +226,7 @@ def test_hessian_block_ordering_is_rotation_first() -> None:
 # --------------------------------------------------------------------------- #
 # True pairs: accepted, and accurate
 # --------------------------------------------------------------------------- #
+
 
 def test_true_intra_robot_pair_is_accepted_and_accurate() -> None:
     """A genuine same-robot revisit is accepted with an accurate relative pose."""
@@ -267,12 +299,16 @@ def test_transform_direction_is_not_inverted() -> None:
     edge = verify_candidate(source_kf, target_kf, yaw_prior)
     assert edge is not None
 
-    correct_translation_error, correct_rotation_error = se3_distance(edge.t_src_dst, truth_src_dst)
+    correct_translation_error, correct_rotation_error = se3_distance(
+        edge.t_src_dst, truth_src_dst
+    )
     assert correct_translation_error < _TRANSLATION_TOLERANCE_M
     assert correct_rotation_error < _ROTATION_TOLERANCE_RAD
 
     inverted = se3_inverse(edge.t_src_dst)
-    wrong_translation_error, wrong_rotation_error = se3_distance(inverted, truth_src_dst)
+    wrong_translation_error, wrong_rotation_error = se3_distance(
+        inverted, truth_src_dst
+    )
     # The source/target pair here is asymmetric (different positions and
     # headings), so the inverted transform is nowhere near ground truth --
     # if it were, this whole test would be vacuous.
@@ -283,6 +319,7 @@ def test_transform_direction_is_not_inverted() -> None:
 # --------------------------------------------------------------------------- #
 # False pairs: rejected. The most important property in this file.
 # --------------------------------------------------------------------------- #
+
 
 def test_disjoint_building_pairs_are_rejected() -> None:
     """Keyframes from two different buildings must never produce an edge.
@@ -350,6 +387,7 @@ def test_disjoint_building_pair_with_generous_thresholds_still_rejected() -> Non
 # Degenerate geometry: rejected, or honestly uncertain -- never confidently wrong
 # --------------------------------------------------------------------------- #
 
+
 def test_degenerate_single_wall_is_rejected_or_inflated() -> None:
     """A featureless single wall must not produce a falsely confident edge.
 
@@ -389,7 +427,10 @@ def test_too_few_points_is_rejected() -> None:
     rng = np.random.default_rng(0)
     tiny_points = rng.normal(size=(10, 3)).astype(np.float32)
     sparse_kf = Keyframe(
-        id=KeyframeId("sparsebot", 0), stamp=0.0, t_odom_base=se3_identity(), points=tiny_points
+        id=KeyframeId("sparsebot", 0),
+        stamp=0.0,
+        t_odom_base=se3_identity(),
+        points=tiny_points,
     )
     _, robots = two_robot_fleet(seed=0)
     normal_kf = robots[0].keyframes[0]
@@ -401,6 +442,7 @@ def test_too_few_points_is_rejected() -> None:
 # --------------------------------------------------------------------------- #
 # Batch entry point
 # --------------------------------------------------------------------------- #
+
 
 def test_verify_candidates_batch_sequential_and_threaded_agree() -> None:
     """The batch entry point drops rejects and keeps accepts, identically either way.
@@ -426,7 +468,9 @@ def test_verify_candidates_batch_sequential_and_threaded_agree() -> None:
     candidates = [Candidate(source_kf, target_kf, good_yaw_prior)]
     for i in range(4):
         candidates.append(
-            Candidate(alpha_false.keyframes[i * 5], beta_false.keyframes[i * 3], 0.4 * i)
+            Candidate(
+                alpha_false.keyframes[i * 5], beta_false.keyframes[i * 3], 0.4 * i
+            )
         )
 
     sequential = verify_candidates(candidates, max_workers=1)

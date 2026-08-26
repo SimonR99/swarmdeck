@@ -97,7 +97,12 @@ def test_graph_mode_adopts_a_slam_update_and_rendered_grid():
                     },
                 },
                 "origins": {
-                    "botman_0": {"x": 0.0, "y": 0.0, "yaw": 0.0, "frame": "component-0"},
+                    "botman_0": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "yaw": 0.0,
+                        "frame": "component-0",
+                    },
                     "tars_0": {"x": 1.5, "y": 0.2, "yaw": 0.1, "frame": "component-0"},
                 },
                 "common_poses": {
@@ -170,8 +175,13 @@ def test_slam_update_drops_scopes_the_backend_stopped_publishing():
         # a and b merged: one component now, and component:1 is gone for good
         r = c.post(
             "/api/slam/update",
-            json={"components": [], "graphs": {}, "origins": {}, "common_poses": {},
-                  "scopes": ["robot:a", "robot:b", "component:0"]},
+            json={
+                "components": [],
+                "graphs": {},
+                "origins": {},
+                "common_poses": {},
+                "scopes": ["robot:a", "robot:b", "component:0"],
+            },
         )
         assert r.status_code == 200
         assert r.json()["dropped_scopes"] == ["component:1"]

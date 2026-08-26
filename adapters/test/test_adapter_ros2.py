@@ -23,15 +23,30 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 _STUBBED = [
-    "rclpy", "rclpy.action", "rclpy.node", "rclpy.qos", "rclpy.time",
-    "geometry_msgs", "geometry_msgs.msg",
-    "nav_msgs", "nav_msgs.msg",
-    "nav2_msgs", "nav2_msgs.action",
-    "sensor_msgs", "sensor_msgs.msg",
-    "action_msgs", "action_msgs.msg",
-    "tf2_ros", "websockets", "cv2",
-    "std_srvs", "std_srvs.srv",
-    "spot_msgs", "spot_msgs.action", "spot_msgs.srv",
+    "rclpy",
+    "rclpy.action",
+    "rclpy.duration",
+    "rclpy.node",
+    "rclpy.qos",
+    "rclpy.time",
+    "geometry_msgs",
+    "geometry_msgs.msg",
+    "nav_msgs",
+    "nav_msgs.msg",
+    "nav2_msgs",
+    "nav2_msgs.action",
+    "sensor_msgs",
+    "sensor_msgs.msg",
+    "action_msgs",
+    "action_msgs.msg",
+    "tf2_ros",
+    "websockets",
+    "cv2",
+    "std_srvs",
+    "std_srvs.srv",
+    "spot_msgs",
+    "spot_msgs.action",
+    "spot_msgs.srv",
 ]
 
 
@@ -65,14 +80,10 @@ def _bridge(mod, cfg_override=None):
     bridge.node = MagicMock()
     bridge.pub_cmd = MagicMock() if cfg["topics"].get("cmd_vel") else None
     bridge.nav_client = (
-        MagicMock()
-        if cfg.get("actions", {}).get("navigate_to_pose")
-        else None
+        MagicMock() if cfg.get("actions", {}).get("navigate_to_pose") else None
     )
     bridge.traj_client = (
-        MagicMock()
-        if cfg.get("actions", {}).get("trajectory")
-        else None
+        MagicMock() if cfg.get("actions", {}).get("trajectory") else None
     )
     bridge.tf_buffer = MagicMock()
     bridge.mode = "idle"
@@ -98,6 +109,11 @@ def _bridge(mod, cfg_override=None):
     bridge._velocity_client = (
         MagicMock() if cfg.get("services", {}).get("max_velocity") else None
     )
+    bridge._camera_depth_image = None
+    bridge._camera_info = None
+    bridge._camera_color_info = None
+    bridge._camera_depth_cloud = None
+    bridge._last_depth_warning_at = 0.0
     return bridge
 
 
@@ -115,17 +131,33 @@ def test_config_merge_is_deep_not_shallow(mod):
 
 def test_capabilities_reflect_configuration_only(mod):
     """Protocol rule 4: never advertise a capability you cannot honour."""
-    full = _bridge(mod, {"network_iface": "auto",
-                         "topics": {"battery": "battery_state",
-                                    "camera_compressed": "cam/compressed"}})
+    full = _bridge(
+        mod,
+        {
+            "network_iface": "auto",
+            "topics": {
+                "battery": "battery_state",
+                "camera_compressed": "cam/compressed",
+            },
+        },
+    )
     caps = full.capabilities()
     assert {"navigate", "map", "camera", "battery", "network", "estop"} <= set(caps)
 
-    bare = _bridge(mod, {
-        "topics": {"odom": "odom", "map": "", "cmd_vel": "", "battery": "",
-                   "camera": "", "camera_compressed": ""},
-        "actions": {"navigate_to_pose": ""},
-    })
+    bare = _bridge(
+        mod,
+        {
+            "topics": {
+                "odom": "odom",
+                "map": "",
+                "cmd_vel": "",
+                "battery": "",
+                "camera": "",
+                "camera_compressed": "",
+            },
+            "actions": {"navigate_to_pose": ""},
+        },
+    )
     assert bare.capabilities() == []
 
 
@@ -133,10 +165,18 @@ def test_body_capability_needs_configured_services(mod):
     """Empty Trigger names must not advertise Claim/Stand the GUI cannot honour."""
     none = _bridge(mod)
     assert "body" not in none.capabilities()
-    spot = _bridge(mod, {"services": {
-        "claim": "/claim", "release": "/release",
-        "sit": "/sit", "stand": "/stand", "power_on": "/power_on",
-    }})
+    spot = _bridge(
+        mod,
+        {
+            "services": {
+                "claim": "/claim",
+                "release": "/release",
+                "sit": "/sit",
+                "stand": "/stand",
+                "power_on": "/power_on",
+            }
+        },
+    )
     assert "body" in spot.capabilities()
 
 
@@ -177,10 +217,18 @@ def _trigger_client(order, name):
 
 def test_body_command_stand_powers_on_first(mod):
     """Clearpath /stand fails if the motors are still off."""
-    bridge = _bridge(mod, {"services": {
-        "claim": "/claim", "release": "/release",
-        "sit": "/sit", "stand": "/stand", "power_on": "/power_on",
-    }})
+    bridge = _bridge(
+        mod,
+        {
+            "services": {
+                "claim": "/claim",
+                "release": "/release",
+                "sit": "/sit",
+                "stand": "/stand",
+                "power_on": "/power_on",
+            }
+        },
+    )
     order: list[str] = []
     bridge._body_clients = {
         name: _trigger_client(order, name)
@@ -197,8 +245,13 @@ def test_body_command_stand_powers_on_first(mod):
 def test_body_command_claim_clears_tablet_keepalive(mod):
     """Tablet Stop leaves a keepalive that blocks /power_on after Claim."""
     names = (
-        "claim", "release", "sit", "stand", "power_on",
-        "estop_release", "clear_keepalive",
+        "claim",
+        "release",
+        "sit",
+        "stand",
+        "power_on",
+        "estop_release",
+        "clear_keepalive",
     )
     bridge = _bridge(mod, {"services": {name: f"/{name}" for name in names}})
     order: list[str] = []
@@ -218,12 +271,16 @@ def _identity_tf():
 
 
 def _yaw_tf(yaw):
-    rot = type("Q", (), {
-        "x": 0.0,
-        "y": 0.0,
-        "z": __import__("math").sin(yaw / 2.0),
-        "w": __import__("math").cos(yaw / 2.0),
-    })()
+    rot = type(
+        "Q",
+        (),
+        {
+            "x": 0.0,
+            "y": 0.0,
+            "z": __import__("math").sin(yaw / 2.0),
+            "w": __import__("math").cos(yaw / 2.0),
+        },
+    )()
     trans = type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})()
     transform = type("X", (), {"rotation": rot, "translation": trans})()
     return type("TF", (), {"transform": transform})()
@@ -233,17 +290,22 @@ def test_trajectory_action_advertises_navigate(mod):
     """Spot has no Nav2 server; /trajectory is what click-to-pose talks to."""
     none = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": ""}})
     assert "navigate" not in none.capabilities()
-    spot = _bridge(mod, {
-        "topics": {"cmd_vel": ""},
-        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
-    })
+    spot = _bridge(
+        mod,
+        {
+            "topics": {"cmd_vel": ""},
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+        },
+    )
     assert "navigate" in spot.capabilities()
     assert "estop" not in spot.capabilities()
 
 
 def test_trajectory_goal_is_transformed_into_body(mod):
     """spot_driver rejects any Trajectory frame_id other than body."""
-    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}})
+    bridge = _bridge(
+        mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}}
+    )
     bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -261,9 +323,9 @@ def test_trajectory_goal_is_transformed_into_body(mod):
 
 def test_trajectory_point_goal_preserves_current_heading(mod):
     """A click without yaw must not silently become absolute map yaw zero."""
-    bridge = _bridge(mod, {
-        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}
-    })
+    bridge = _bridge(
+        mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}}
+    )
     bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.8)
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -275,9 +337,9 @@ def test_trajectory_point_goal_preserves_current_heading(mod):
 
 
 def test_trajectory_explicit_yaw_is_still_honoured(mod):
-    bridge = _bridge(mod, {
-        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}
-    })
+    bridge = _bridge(
+        mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}}
+    )
     bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.8)
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -293,21 +355,33 @@ def test_trajectory_explicit_yaw_is_still_honoured(mod):
 
 
 def test_trajectory_applies_configured_velocity_limit(mod):
-    bridge = _bridge(mod, {
-        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
-        "services": {"max_velocity": "/max_velocity"},
-        "trajectory": {"velocity_limit": {
-            "linear_x": 0.25, "linear_y": 0.2, "angular_z": 0.5,
-        }},
-    })
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "services": {"max_velocity": "/max_velocity"},
+            "trajectory": {
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.2,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
     bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
     bridge.traj_client.server_is_ready.return_value = True
     bridge._velocity_client.wait_for_service.return_value = True
     future = MagicMock()
     future.done.return_value = True
-    future.result.return_value = type("Response", (), {
-        "success": True, "message": "",
-    })()
+    future.result.return_value = type(
+        "Response",
+        (),
+        {
+            "success": True,
+            "message": "",
+        },
+    )()
     bridge._velocity_client.call_async.return_value = future
 
     bridge.navigate_to({"x": 1.0, "y": 2.0})
@@ -320,13 +394,20 @@ def test_trajectory_applies_configured_velocity_limit(mod):
 
 
 def test_trajectory_does_not_run_unlimited_when_limit_service_is_down(mod):
-    bridge = _bridge(mod, {
-        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
-        "services": {"max_velocity": "/max_velocity"},
-        "trajectory": {"velocity_limit": {
-            "linear_x": 0.25, "linear_y": 0.25, "angular_z": 0.5,
-        }},
-    })
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "services": {"max_velocity": "/max_velocity"},
+            "trajectory": {
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.25,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
     bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
     bridge.traj_client.server_is_ready.return_value = True
     bridge._velocity_client.wait_for_service.return_value = False
@@ -377,7 +458,9 @@ def test_hardware_configs_declare_physical_map_height_bands():
 
 
 def test_trajectory_goal_without_tf_is_dropped(mod):
-    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}})
+    bridge = _bridge(
+        mod, {"actions": {"navigate_to_pose": "", "trajectory": "/trajectory"}}
+    )
     bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -389,10 +472,13 @@ def test_trajectory_goal_without_tf_is_dropped(mod):
 
 def test_cancel_trajectory_calls_spot_stop(mod):
     """Clearpath's ROS 2 Trajectory server does not honour cancel/preempt."""
-    bridge = _bridge(mod, {
-        "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
-        "services": {"stop": "/stop"},
-    })
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "services": {"stop": "/stop"},
+        },
+    )
     order: list[str] = []
     bridge._body_clients = {"stop": _trigger_client(order, "stop")}
     handle = MagicMock()
@@ -533,18 +619,23 @@ def test_registered_cloud_uses_declared_offsets_and_height_band(mod):
 
 
 def test_registered_cloud_height_band_can_use_a_map_floor_reference(mod):
-    bridge = _bridge(mod, {
-        "map_cloud_height_band": {
-            "floor_z": -0.4,
-            "min_z": 0.15,
-            "max_z": 0.55,
-        }
-    })
-    msg = _fake_cloud([
-        (1.0, 2.0, -0.2),  # 0.20 m above the floor: keep
-        (3.0, 4.0, 0.1),   # 0.50 m above the floor: keep
-        (5.0, 6.0, 0.2),   # 0.60 m above the floor: drop
-    ])
+    bridge = _bridge(
+        mod,
+        {
+            "map_cloud_height_band": {
+                "floor_z": -0.4,
+                "min_z": 0.15,
+                "max_z": 0.55,
+            }
+        },
+    )
+    msg = _fake_cloud(
+        [
+            (1.0, 2.0, -0.2),  # 0.20 m above the floor: keep
+            (3.0, 4.0, 0.1),  # 0.50 m above the floor: keep
+            (5.0, 6.0, 0.2),  # 0.60 m above the floor: drop
+        ]
+    )
     bridge._on_map_cloud(msg)
 
     assert bridge._scan_points.tolist() == [[1.0, 2.0], [3.0, 4.0]]
@@ -596,9 +687,16 @@ def test_ros2_local_plan_is_preferred_over_the_global_route(mod):
     bridge.battery = None
     bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
     bridge._on_plan(_plan_msg("map", [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)]))
-    bridge._on_local_plan(_plan_msg("map", [
-        (0.0, 0.0, 0.0), (1.0, 0.5, 0.0), (2.0, 1.0, 0.0),
-    ]))
+    bridge._on_local_plan(
+        _plan_msg(
+            "map",
+            [
+                (0.0, 0.0, 0.0),
+                (1.0, 0.5, 0.0),
+                (2.0, 1.0, 0.0),
+            ],
+        )
+    )
 
     assert bridge.planned_path == [
         {"x": 0.0, "y": 0.0},
@@ -717,7 +815,10 @@ def test_detection_batch_survives_concurrent_collection(mod):
     bridge._detector = Detector()
     bridge._detect_bgr(MagicMock(), due_checked=True)
 
-    assert [item["id"] for item in bridge.take_detections()] == ["rubber_duck_0", "rubber_duck_1"]
+    assert [item["id"] for item in bridge.take_detections()] == [
+        "rubber_duck_0",
+        "rubber_duck_1",
+    ]
 
 
 def test_upload_scan_excludes_returns_inside_robot_footprint(mod, monkeypatch):
@@ -858,8 +959,10 @@ def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
     """
     bridge = _bridge(
         mod,
-        {"topics": {"nav_cmd_vel": "cmd_vel_nav"},
-         "actions": {"navigate_to_pose": "navigate_to_pose"}},
+        {
+            "topics": {"nav_cmd_vel": "cmd_vel_nav"},
+            "actions": {"navigate_to_pose": "navigate_to_pose"},
+        },
     )
     bridge.nav_status = "active"
     bridge.note_link_activity()
@@ -904,7 +1007,13 @@ def _link_bridge(mod, hooks):
             mod.DEFAULTS,
             # A fast pump and an always-due map upload, so the scenario reaches
             # the blocking call immediately instead of waiting out a real period.
-            {"rates": {"state_hz": 50.0, "map_period_s": 0.0, "camera_period_s": 3600.0}},
+            {
+                "rates": {
+                    "state_hz": 50.0,
+                    "map_period_s": 0.0,
+                    "camera_period_s": 3600.0,
+                }
+            },
         )
         id = "r0"
         t0 = 0.0
@@ -1035,7 +1144,9 @@ def _settings_response(mod, monkeypatch, settings: dict):
     monkeypatch.setattr(mod.urllib.request, "urlopen", urlopen)
 
 
-def test_refresh_settings_takes_the_capture_floor_not_the_display_floor(mod, monkeypatch):
+def test_refresh_settings_takes_the_capture_floor_not_the_display_floor(
+    mod, monkeypatch
+):
     """The sidecar must keep returning what the operator is currently hiding.
 
     The backend enforces the display floor against stored detections, so the
@@ -1047,15 +1158,19 @@ def test_refresh_settings_takes_the_capture_floor_not_the_display_floor(mod, mon
     bridge.http_url = "http://backend:8080"
     bridge._detection_enabled = True
     bridge._detector = mod.ObjectDetector()
-    _settings_response(mod, monkeypatch, {
-        "detection_enabled": True,
-        "detection_classes": ["rubber_duck"],
-        "detection_class_floors": {"rubber_duck": 0.80},
-        # Deliberately not the catalog default: refresh_settings swallows its
-        # own errors, so a floor that matched the constructor's would let this
-        # pass without the request ever having succeeded.
-        "detection_capture_floors": {"rubber_duck": 0.15},
-    })
+    _settings_response(
+        mod,
+        monkeypatch,
+        {
+            "detection_enabled": True,
+            "detection_classes": ["rubber_duck"],
+            "detection_class_floors": {"rubber_duck": 0.80},
+            # Deliberately not the catalog default: refresh_settings swallows its
+            # own errors, so a floor that matched the constructor's would let this
+            # pass without the request ever having succeeded.
+            "detection_capture_floors": {"rubber_duck": 0.15},
+        },
+    )
 
     bridge.refresh_settings()
 
@@ -1069,11 +1184,15 @@ def test_refresh_settings_falls_back_when_the_backend_is_older(mod, monkeypatch)
     bridge.http_url = "http://backend:8080"
     bridge._detection_enabled = True
     bridge._detector = mod.ObjectDetector()
-    _settings_response(mod, monkeypatch, {
-        "detection_enabled": True,
-        "detection_classes": ["rubber_duck"],
-        "detection_class_floors": {"rubber_duck": 0.80},
-    })
+    _settings_response(
+        mod,
+        monkeypatch,
+        {
+            "detection_enabled": True,
+            "detection_classes": ["rubber_duck"],
+            "detection_class_floors": {"rubber_duck": 0.80},
+        },
+    )
 
     bridge.refresh_settings()
 
@@ -1097,9 +1216,9 @@ def test_websocket_keepalive_is_tight_enough_to_matter(mod):
     timeout = float(cfg["ping_timeout_s"])
 
     # Worst case is interval + timeout: a cut just after a successful pong.
-    assert interval + timeout <= 8.0, (
-        f"link loss would go undetected for up to {interval + timeout:.0f}s"
-    )
+    assert (
+        interval + timeout <= 8.0
+    ), f"link loss would go undetected for up to {interval + timeout:.0f}s"
     # But not so tight that a degraded link reconnects constantly — every
     # reconnect cancels the active goal.
     assert interval >= 1.0 and timeout >= 2.0
@@ -1241,3 +1360,132 @@ def test_latching_still_delivers_normal_teleop(mod):
     # An idle tick actuates nothing rather than re-publishing stale velocity.
     bridge.apply_pending_drive()
     assert bridge.pub_cmd.publish.call_count == 1
+
+
+def _stamp(seconds: float):
+    return type(
+        "Stamp", (), {"sec": int(seconds), "nanosec": int((seconds % 1) * 1e9)}
+    )()
+
+
+def _depth_image(mod, *, stamp: float, frame: str = "map"):
+    values = mod.np.full((8, 8), 2000, dtype="<u2")
+    header = type("Header", (), {"stamp": _stamp(stamp), "frame_id": frame})()
+    return type(
+        "Image",
+        (),
+        {
+            "width": 8,
+            "height": 8,
+            "encoding": "16UC1",
+            "is_bigendian": False,
+            "step": 16,
+            "data": values.tobytes(),
+            "header": header,
+        },
+    )()
+
+
+def test_aligned_depth_detection_becomes_a_map_position(mod):
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0)
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    position = bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header)
+
+    assert position == pytest.approx({"x": 0.0, "y": 0.0}, abs=0.3)
+
+
+def test_stale_depth_is_not_attached_to_a_new_detection(mod):
+    bridge = _bridge(mod, {"perception": {"depth_max_age_s": 0.2}})
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0)
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    image_header = type("Header", (), {"stamp": _stamp(10.5)})()
+
+    assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
+
+
+def test_tf_lookup_falls_back_to_latest_when_exact_stamp_fails(mod):
+    """When TF at the camera timestamp cannot be interpolated, fallback to latest."""
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(
+        mod, stamp=10.0, frame="oak_stereo_camera_optical_frame"
+    )
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    transform = type(
+        "TransformStamped",
+        (),
+        {
+            "transform": type(
+                "Transform",
+                (),
+                {
+                    "translation": type(
+                        "Vector3", (), {"x": 1.0, "y": 2.0, "z": 0.0}
+                    )(),
+                    "rotation": type(
+                        "Quaternion", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+                    )(),
+                },
+            )()
+        },
+    )()
+
+    calls = []
+
+    def lookup_side_effect(target, source, time_val, *args, **kwargs):
+        calls.append((target, source, time_val))
+        if len(calls) == 1:
+            raise RuntimeError("ExtrapolationException: time not in buffer")
+        return transform
+
+    bridge.tf_buffer.lookup_transform.side_effect = lookup_side_effect
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    position = bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header)
+    assert position is not None
+    assert position["x"] == pytest.approx(1.0, abs=0.3)
+    assert position["y"] == pytest.approx(2.0, abs=0.3)
+
+
+def test_unaligned_depth_without_optical_tf_is_not_treated_as_aligned(mod):
+    """A colour box on an unaligned depth image is the wrong pixels.
+
+    If the depth-to-colour TF is missing, skip the pin rather than sampling
+    the depth image as if it were RGB-aligned.
+    """
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0, frame="depth_optical")
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    bridge._camera_color_info = type(
+        "CameraInfo",
+        (),
+        {
+            "header": type("Header", (), {"frame_id": "color_optical"})(),
+            "width": 8,
+            "height": 8,
+            "K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0],
+        },
+    )()
+    bridge.tf_buffer = MagicMock()
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None

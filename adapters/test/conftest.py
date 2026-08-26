@@ -22,6 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 import numpy as np
 
+
 class _Cv2Stub:
     IMWRITE_JPEG_QUALITY = 1
     COLOR_RGB2BGR = 1
@@ -43,17 +44,36 @@ if "cv2" not in sys.modules and importlib.util.find_spec("cv2") is None:
 # Submodules must be listed individually: `from nav2_msgs.srv import X` imports
 # `nav2_msgs.srv`, and a MagicMock parent does not make its children importable.
 STUBBED_ROS_MODULES = [
-    "websockets", "rclpy", "rclpy.action", "rclpy.node", "rclpy.parameter",
+    "websockets",
+    "rclpy",
+    "rclpy.action",
+    "rclpy.node",
+    "rclpy.parameter",
     "rclpy.qos",
-    "action_msgs", "action_msgs.msg", "geometry_msgs", "geometry_msgs.msg",
-    "nav_msgs", "nav_msgs.msg", "nav2_msgs", "nav2_msgs.action", "nav2_msgs.srv",
-    "robot_localization", "robot_localization.srv",
-    "sensor_msgs", "sensor_msgs.msg", "tf2_msgs", "tf2_msgs.msg",
-    "std_msgs", "std_msgs.msg",
+    "action_msgs",
+    "action_msgs.msg",
+    "geometry_msgs",
+    "geometry_msgs.msg",
+    "nav_msgs",
+    "nav_msgs.msg",
+    "nav2_msgs",
+    "nav2_msgs.action",
+    "nav2_msgs.srv",
+    "robot_localization",
+    "robot_localization.srv",
+    "sensor_msgs",
+    "sensor_msgs.msg",
+    "tf2_msgs",
+    "tf2_msgs.msg",
+    "std_msgs",
+    "std_msgs.msg",
     # Not imported at module scope — the SLAM reset resolves whichever back end
     # is running through importlib. Stubbed anyway, because without them that
     # lookup silently finds nothing and the reset "fails" for the wrong reason.
-    "slam_toolbox", "slam_toolbox.srv", "std_srvs", "std_srvs.srv",
+    "slam_toolbox",
+    "slam_toolbox.srv",
+    "std_srvs",
+    "std_srvs.srv",
 ]
 
 

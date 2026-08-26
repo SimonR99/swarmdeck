@@ -1,4 +1,5 @@
 """Entry point: python -m swarmdeck_server [--config configs/4robot.yaml]"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +17,9 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    print(f"[swarmdeck] config: {cfg.get('name', '(none)')}  robots={cfg.get('fleet', {}).get('robot_count')}")
+    print(
+        f"[swarmdeck] config: {cfg.get('name', '(none)')}  robots={cfg.get('fleet', {}).get('robot_count')}"
+    )
     print(f"[swarmdeck] http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

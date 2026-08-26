@@ -13,6 +13,14 @@ the graph the live run would have produced under whichever config you ask for.
 
     python -m tools.replay --dataset runs/3d-01 --config isotropic
     python -m tools.replay --dataset runs/3d-01 --ablate isotropic hessian
+    python -m tools.replay --dataset runs/hw-02 --list-trajectories
+    python -m tools.replay --dataset runs/hw-02 --only botman_0@restart-2
+
+The last two are the offline half of trajectory selection. A capture that
+spans a reboot holds several independent trajectories per robot, and
+`--only` / `--exclude` rebuild the map from a chosen set of them -- after
+ingest, so the segments left out are still stored and the selection is the
+same reversible one the service exposes.
 
 `--ablate` is the point of the tool: identical input, differing only in the
 setting under test, tabulated by `evaluation.Ablation`. Scores come from
@@ -38,7 +46,7 @@ from swarmdeck_protocol import decode_keyframe
 from swarmdeck_slam.backend import PRODUCTION_VERIFY, CollaborativeBackend
 from swarmdeck_slam.evaluation import Ablation, Report, align_rigid, evaluate
 from swarmdeck_slam.render import RenderConfig, RenderedGrid
-from swarmdeck_slam.types import KeyframeId, se3_from_quat_xyz
+from swarmdeck_slam.types import KeyframeId, TrajectoryId, se3_from_quat_xyz
 
 # Named configs under test. Each is a (verify, render) override pair applied to
 # the production defaults, so a variant states only what it changes and the
@@ -58,8 +66,20 @@ CONFIGS: dict[str, tuple[dict, dict]] = {
     # 35 deg of yaw slack is generous against 15 deg of accumulated drift: it
     # leaves GICP room to walk to a shifted minimum one corridor over and still
     # be accepted.
-    "yaw-20": ({"information": "hessian", "max_yaw_deviation_from_prior_rad": math.radians(20.0)}, {}),
-    "yaw-12": ({"information": "hessian", "max_yaw_deviation_from_prior_rad": math.radians(12.0)}, {}),
+    "yaw-20": (
+        {
+            "information": "hessian",
+            "max_yaw_deviation_from_prior_rad": math.radians(20.0),
+        },
+        {},
+    ),
+    "yaw-12": (
+        {
+            "information": "hessian",
+            "max_yaw_deviation_from_prior_rad": math.radians(12.0),
+        },
+        {},
+    ),
     # max_mean_error was calibrated on tests/synthetic.py, where true matches
     # measured 0.045-0.12. Real captured data is an order of magnitude higher:
     # on 3d-run-01, inter-robot candidates whose ground-truth separation is
@@ -212,11 +232,15 @@ def run_config(
     render_config: RenderConfig,
     max_gap_s: float,
     optimize_every: int,
+    only: list[TrajectoryId] | None = None,
+    exclude: list[TrajectoryId] | None = None,
+    legacy_session_split: bool = True,
 ) -> tuple[Report, RenderedGrid | None, dict]:
     verify_overrides, backend_overrides = CONFIGS[name]
     backend = CollaborativeBackend(
         verify=replace(PRODUCTION_VERIFY, **verify_overrides),
         render=render_config,
+        legacy_session_split=legacy_session_split,
         **backend_overrides,
     )
     # Optimize DURING ingest, not only at the end. The live service solves every
@@ -229,6 +253,16 @@ def run_config(
         backend.ingest_packet(packet)
         if index % optimize_every == 0:
             backend.optimize_and_render()
+    # Re-optimize over a chosen SUBSET, the offline half of the operator's
+    # selection. Done after ingest rather than by filtering packets, and the
+    # difference is the point: the segments left out are still stored, so this
+    # is the same reversible selection the service exposes, replayed. Filtering
+    # the packets instead would also change which closures were ever found.
+    if only is not None:
+        backend.include_only(only)
+    for trajectory in exclude or []:
+        backend.set_included(trajectory, False)
+
     snapshot = backend.optimize_and_render()
     if snapshot is None:
         raise SystemExit(f"{name}: nothing ingested")
@@ -298,15 +332,20 @@ def run_config(
     report = evaluate(
         name, graph, truth_poses, truth_t_world_map, truth_groups, rpe_deltas=(1, 5)
     )
-    grid = max(
-        snapshot.grids.values(), key=lambda g: (len(g.robots), g.width * g.height)
-    ) if snapshot.grids else None
+    grid = (
+        max(snapshot.grids.values(), key=lambda g: (len(g.robots), g.width * g.height))
+        if snapshot.grids
+        else None
+    )
     stats = {
         "keyframes": len(backend._keyframes),
+        "trajectories": [t.to_dict() for t in snapshot.trajectories],
         "accepted_closures": snapshot.accepted_closures,
         "inter_robot_closures": snapshot.inter_robot_closures,
         "residual": graph.final_error,
-        "components": [sorted(c.robots) for c in graph.components],
+        "components": [
+            sorted(str(t) for t in c.trajectories) for c in graph.components
+        ],
         "scored_keyframes": len(truth_poses),
         "ambiguous_matches": backend.ambiguous_matches,
         "relative_pair_error": _relative_pair_error(
@@ -331,7 +370,7 @@ def _relative_pair_error(
     out: dict[str, str] = {}
     common = sorted(set(estimated) & set(truth))
     for i, a in enumerate(common):
-        for b in common[i + 1:]:
+        for b in common[i + 1 :]:
             rel_est = np.linalg.inv(estimated[a]) @ estimated[b]
             rel_true = np.linalg.inv(truth[a]) @ truth[b]
             delta = np.linalg.inv(rel_true) @ rel_est
@@ -342,27 +381,54 @@ def _relative_pair_error(
     return out
 
 
+def list_trajectories(packets: list, legacy_session_split: bool) -> int:
+    """Ingest only, then print what segments the capture actually contains.
+
+    Cheap (no solve) and the first thing to run against an unfamiliar capture:
+    a recording that spans a reboot looks like one continuous run until
+    something counts the seq resets.
+    """
+    backend = CollaborativeBackend(legacy_session_split=legacy_session_split)
+    landed = sum(int(backend.ingest_packet(packet)) for packet in packets)
+    print(
+        f"{landed} of {len(packets)} packets ingested "
+        f"({len(packets) - landed} dropped as duplicates)"
+    )
+    print(f"{'trajectory':<32}{'keyframes':>10}{'seq span':>14}{'seconds':>12}")
+    for summary in backend.trajectory_summaries():
+        span = f"{summary.first_seq}..{summary.last_seq}"
+        print(
+            f"{str(summary.trajectory_id):<32}{summary.keyframes:>10}{span:>14}"
+            f"{summary.last_stamp - summary.first_stamp:>12.1f}"
+        )
+    return 0
+
+
 def write_png(grid: RenderedGrid, path: pathlib.Path) -> None:
     """8-bit greyscale PNG, no image library.
 
     The slam venv is pinned hard (gtsam / numpy 1.26) and the server's Pillow
     is not in it; a occupancy dump is not worth widening that pin for.
     """
-    lut = np.full(256, 200, dtype=np.uint8)          # -1 unknown -> grey
-    lut[0] = 255                                      # 0 free     -> white
-    lut[100] = 0                                      # 100 occupied -> black
+    lut = np.full(256, 200, dtype=np.uint8)  # -1 unknown -> grey
+    lut[0] = 255  # 0 free     -> white
+    lut[100] = 0  # 100 occupied -> black
     pixels = lut[grid.cells.astype(np.uint8)]
     raw = b"".join(b"\x00" + row.tobytes() for row in pixels)
 
     def chunk(tag: bytes, payload: bytes) -> bytes:
         body = tag + payload
-        return struct.pack(">I", len(payload)) + body + struct.pack(
-            ">I", zlib.crc32(body) & 0xFFFFFFFF
+        return (
+            struct.pack(">I", len(payload))
+            + body
+            + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
         )
 
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", grid.width, grid.height, 8, 0, 0, 0, 0))
+        + chunk(
+            b"IHDR", struct.pack(">IIBBBBB", grid.width, grid.height, 8, 0, 0, 0, 0)
+        )
         + chunk(b"IDAT", zlib.compress(raw, 6))
         + chunk(b"IEND", b"")
     )
@@ -372,16 +438,49 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=pathlib.Path)
     parser.add_argument("--config", default="isotropic", choices=sorted(CONFIGS))
-    parser.add_argument("--ablate", nargs="+", metavar="CONFIG", choices=sorted(CONFIGS))
+    parser.add_argument(
+        "--ablate", nargs="+", metavar="CONFIG", choices=sorted(CONFIGS)
+    )
     parser.add_argument("--out", type=pathlib.Path, default=None)
     parser.add_argument("--max-gap-s", type=float, default=0.5)
-    parser.add_argument("--max-turn-rate", type=float, default=0.0,
-                        help="drop keyframes rotating faster than this (deg/s); 0 keeps all")
+    parser.add_argument(
+        "--max-turn-rate",
+        type=float,
+        default=0.0,
+        help="drop keyframes rotating faster than this (deg/s); 0 keeps all",
+    )
     # Matches SWARMDECK_SLAM_OPTIMIZE_EVERY in the live service.
     parser.add_argument("--optimize-every", type=int, default=5)
     parser.add_argument("--floor-z", type=float, default=-0.1225)
     parser.add_argument("--min-z", type=float, default=0.150)
     parser.add_argument("--max-z", type=float, default=0.395)
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        metavar="TRAJECTORY",
+        default=None,
+        help="rebuild the map from exactly these trajectories "
+        "(robot_id, or robot_id@session); everything else is excluded",
+    )
+    parser.add_argument(
+        "--exclude",
+        nargs="+",
+        metavar="TRAJECTORY",
+        default=None,
+        help="drop these trajectories from the solve, keeping the rest",
+    )
+    parser.add_argument(
+        "--no-legacy-split",
+        action="store_true",
+        help="do not recover trajectory boundaries from seq resets in a "
+        "capture that predates the session field -- reproduces a "
+        "pre-trajectory replay, silently dropped keyframes and all",
+    )
+    parser.add_argument(
+        "--list-trajectories",
+        action="store_true",
+        help="ingest, print the trajectory table, and stop",
+    )
     args = parser.parse_args()
 
     dataset = args.dataset
@@ -389,11 +488,17 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     packets = load_packets(dataset)
+    only = [TrajectoryId.parse(t) for t in args.only] if args.only else None
+    exclude = [TrajectoryId.parse(t) for t in args.exclude] if args.exclude else None
+    if args.list_trajectories:
+        return list_trajectories(packets, not args.no_legacy_split)
     if args.max_turn_rate > 0:
         before = len(packets)
         packets = filter_by_turn_rate(packets, args.max_turn_rate)
-        print(f"turn-rate filter {args.max_turn_rate} deg/s: "
-              f"{before} -> {len(packets)} keyframes")
+        print(
+            f"turn-rate filter {args.max_turn_rate} deg/s: "
+            f"{before} -> {len(packets)} keyframes"
+        )
     truth = load_ground_truth(dataset / "ground_truth.csv")
     render_config = RenderConfig(
         floor_z=args.floor_z, min_z=args.min_z, max_z=args.max_z
@@ -408,7 +513,15 @@ def main() -> int:
     reports: list[Report] = []
     for name in names:
         report, grid, stats = run_config(
-            name, packets, truth, render_config, args.max_gap_s, args.optimize_every
+            name,
+            packets,
+            truth,
+            render_config,
+            args.max_gap_s,
+            args.optimize_every,
+            only=only,
+            exclude=exclude,
+            legacy_session_split=not args.no_legacy_split,
         )
         reports.append(report)
         print(f"\n=== {name} ===")

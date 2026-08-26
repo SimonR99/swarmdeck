@@ -105,7 +105,9 @@ def scan_context_descriptor(
     if max_range <= 0.0:
         raise ValueError(f"max_range must be positive, got {max_range}")
     if height_max <= height_min:
-        raise ValueError(f"height_max ({height_max}) must exceed height_min ({height_min})")
+        raise ValueError(
+            f"height_max ({height_max}) must exceed height_min ({height_min})"
+        )
     pts = np.asarray(points)
     if pts.ndim != 2 or pts.shape[1] != 3:
         raise ValueError(f"points must be [n, 3], got {pts.shape}")
@@ -205,10 +207,14 @@ def best_alignment(candidate: np.ndarray, query: np.ndarray) -> tuple[int, float
     returned shift.
     """
     if candidate.shape != query.shape:
-        raise ValueError(f"shape mismatch: candidate {candidate.shape} vs query {query.shape}")
+        raise ValueError(
+            f"shape mismatch: candidate {candidate.shape} vs query {query.shape}"
+        )
     sectors = candidate.shape[1]
     shifts, distances = _column_shift_search(
-        candidate[None, ...].astype(np.float64), query.astype(np.float64), sectors=sectors
+        candidate[None, ...].astype(np.float64),
+        query.astype(np.float64),
+        sectors=sectors,
     )
     return int(shifts[0]), float(distances[0])
 
@@ -275,9 +281,13 @@ class ScanContextIndex:
 
     def __init__(self, *, rings: int, sectors: int, temporal_window: int = 5) -> None:
         if rings <= 0 or sectors <= 0:
-            raise ValueError(f"rings and sectors must be positive, got {rings}x{sectors}")
+            raise ValueError(
+                f"rings and sectors must be positive, got {rings}x{sectors}"
+            )
         if temporal_window < 0:
-            raise ValueError(f"temporal_window must be non-negative, got {temporal_window}")
+            raise ValueError(
+                f"temporal_window must be non-negative, got {temporal_window}"
+            )
         self._rings = rings
         self._sectors = sectors
         self._temporal_window = temporal_window
@@ -343,7 +353,9 @@ class ScanContextIndex:
         if kept.shape[0] == 0:
             return []
 
-        candidates = np.stack([self._descriptors[i] for i in kept], axis=0).astype(np.float64)
+        candidates = np.stack([self._descriptors[i] for i in kept], axis=0).astype(
+            np.float64
+        )
         shifts, distances = _column_shift_search(
             candidates, descriptor.astype(np.float64), sectors=self._sectors
         )
@@ -373,7 +385,9 @@ class ScanContextIndex:
         self._seqs = np.array([kid.seq for kid in self._ids], dtype=np.int64)
         self._tree = cKDTree(self._ring_key_matrix)
 
-    def _exclusion_mask(self, idx: np.ndarray, query_id: KeyframeId | None) -> np.ndarray:
+    def _exclusion_mask(
+        self, idx: np.ndarray, query_id: KeyframeId | None
+    ) -> np.ndarray:
         if query_id is None:
             return np.ones(idx.shape[0], dtype=bool)
         same_robot = self._robot_ids[idx] == query_id.robot_id

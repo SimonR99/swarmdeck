@@ -50,7 +50,9 @@ class Robot:
     # Optional polygon in the robot's reported base_frame, x forward / y left.
     footprint: list[list[float]] | None = None
 
-    pose: dict[str, float] = field(default_factory=lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0})
+    pose: dict[str, float] = field(
+        default_factory=lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    )
     battery: float | None = None
     mode: str = "idle"
     nav_status: str = "idle"
@@ -149,9 +151,7 @@ class Registry:
         if "goal" in msg:
             r.goal = msg["goal"]
         is_nav_active = r.nav_status in ("active", "nav") or bool(r.goal)
-        split_paths = (
-            "global_planned_path" in msg or "local_planned_path" in msg
-        )
+        split_paths = "global_planned_path" in msg or "local_planned_path" in msg
         if is_nav_active:
             if "global_planned_path" in msg and msg["global_planned_path"]:
                 r.global_planned_path = list(msg["global_planned_path"] or [])[:200]
@@ -213,12 +213,17 @@ class Registry:
             self.disconnect(robot_id)
             return False
 
-    def goal_taken(self, goal: dict[str, float], exclude: str, tol: float = 0.5) -> str | None:
+    def goal_taken(
+        self, goal: dict[str, float], exclude: str, tol: float = 0.5
+    ) -> str | None:
         """FR-N3: reject assigning the same goal to two robots."""
         for rid, r in self.robots.items():
             if rid == exclude or not r.goal:
                 continue
-            if abs(r.goal["x"] - goal["x"]) < tol and abs(r.goal["y"] - goal["y"]) < tol:
+            if (
+                abs(r.goal["x"] - goal["x"]) < tol
+                and abs(r.goal["y"] - goal["y"]) < tol
+            ):
                 return rid
         return None
 

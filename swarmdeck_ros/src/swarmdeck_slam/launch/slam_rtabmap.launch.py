@@ -242,16 +242,16 @@ def generate_launch_description() -> LaunchDescription:
                 "force_3dof",
                 default_value="true",
                 description="constrain the estimate to x/y/yaw. Correct for this "
-                            "fleet, which drives on a flat floor; set false for a "
-                            "platform that genuinely leaves the plane.",
+                "fleet, which drives on a flat floor; set false for a "
+                "platform that genuinely leaves the plane.",
             ),
             DeclareLaunchArgument(
                 "grid_3d",
                 default_value="false",
                 description="Keep RTAB-Map's occupancy in 3D so cloud_map carries "
-                            "real structure for the GUI's 3D view. Halves the "
-                            "real-time factor (0.54 -> 0.25 measured); the 2D map "
-                            "is unaffected either way.",
+                "real structure for the GUI's 3D view. Halves the "
+                "real-time factor (0.54 -> 0.25 measured); the 2D map "
+                "is unaffected either way.",
             ),
             DeclareLaunchArgument("range_max", default_value="30.0"),
             # Nav2's costmap observation sources are LaserScan topics, so
@@ -260,7 +260,10 @@ def generate_launch_description() -> LaunchDescription:
             # and a costmap wants the nearest obstacle at any height.
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_slam"), "/launch/cloud_to_scan.launch.py"]
+                    [
+                        FindPackageShare("swarmdeck_slam"),
+                        "/launch/cloud_to_scan.launch.py",
+                    ]
                 ),
                 launch_arguments={
                     "namespace": ns,
@@ -277,9 +280,14 @@ def generate_launch_description() -> LaunchDescription:
                 name="lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", lidar_x, "--z", lidar_z,
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/lidar"],
+                    "--x",
+                    lidar_x,
+                    "--z",
+                    lidar_z,
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/lidar"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=tf_remap,
@@ -292,8 +300,10 @@ def generate_launch_description() -> LaunchDescription:
                 name="imu_tf",
                 namespace=ns,
                 arguments=[
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/imu"],
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/imu"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=tf_remap,
@@ -305,9 +315,14 @@ def generate_launch_description() -> LaunchDescription:
                 namespace=ns,
                 condition=visual,
                 arguments=[
-                    "--x", "0.162", "--z", "0.292",
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/camera"],
+                    "--x",
+                    "0.162",
+                    "--z",
+                    "0.292",
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/camera"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=tf_remap,

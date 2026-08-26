@@ -52,6 +52,7 @@ def plan_global_path(
     if clearance_px > 1 and np.any(occupied_mask):
         try:
             from scipy.ndimage import binary_dilation
+
             occupied_mask = binary_dilation(occupied_mask, iterations=clearance_px)
         except ImportError:
             pass
@@ -60,8 +61,14 @@ def plan_global_path(
 
     # 8-connectivity
     neighbors = [
-        (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-        (-1, -1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (1, 1, 1.414),
+        (-1, 0, 1.0),
+        (1, 0, 1.0),
+        (0, -1, 1.0),
+        (0, 1, 1.0),
+        (-1, -1, 1.414),
+        (-1, 1, 1.414),
+        (1, -1, 1.414),
+        (1, 1, 1.414),
     ]
 
     open_set: list[tuple[float, float, int, int]] = [(0.0, 0.0, sx, sy)]

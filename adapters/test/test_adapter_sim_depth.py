@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-
 # The scout_mini mount, from spawn_fleet.ROBOT_PROFILES. Restated as a literal
 # rather than imported, so that a change to the profile has to be acknowledged
 # here instead of silently changing what these tests assert.
@@ -145,8 +144,12 @@ def test_the_marker_is_offset_by_where_the_robot_actually_is(sim_module):
 def test_a_non_finite_depth_sample_is_refused_rather_than_placed(sim_module):
     """Gazebo returns +inf where a ray hits nothing, and inf is not a location."""
     pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-    assert sim_module.camera_point_to_map((0.0, 0.0, math.inf), pose, CAM_X, CAM_Z) is None
-    assert sim_module.camera_point_to_map((math.nan, 0.0, 2.0), pose, CAM_X, CAM_Z) is None
+    assert (
+        sim_module.camera_point_to_map((0.0, 0.0, math.inf), pose, CAM_X, CAM_Z) is None
+    )
+    assert (
+        sim_module.camera_point_to_map((math.nan, 0.0, 2.0), pose, CAM_X, CAM_Z) is None
+    )
 
 
 # ------------------------------------------------------- end to end, in metres
@@ -232,9 +235,10 @@ def test_a_frozen_depth_stream_stops_producing_positions(sim_module, bridge):
 
     # The colour frame moves on; the depth frame stays where it stopped.
     stale_by = sim_module.DEPTH_MAX_AGE_S + 0.2
-    assert bridge._depth_map_position(
-        bbox, header(sec=10, nanosec=int(stale_by * 1e9))
-    ) is None
+    assert (
+        bridge._depth_map_position(bbox, header(sec=10, nanosec=int(stale_by * 1e9)))
+        is None
+    )
 
 
 def test_a_duck_beyond_the_usable_depth_range_is_not_placed(bridge):
@@ -244,7 +248,9 @@ def test_a_duck_beyond_the_usable_depth_range_is_not_placed(bridge):
     bridge._camera_depth = depth_image(depth)
     bridge._camera_info = camera_info()
 
-    assert bridge._depth_map_position((28 / 64, 20 / 48, 8 / 64, 8 / 48), header()) is None
+    assert (
+        bridge._depth_map_position((28 / 64, 20 / 48, 8 / 64, 8 / 48), header()) is None
+    )
 
 
 def test_open_sky_pixels_never_become_a_position(bridge):
@@ -263,7 +269,9 @@ def test_the_operator_is_told_why_markers_are_missing_but_not_flooded(bridge):
     assert bridge.node.get_logger().warn.call_count == 1
 
 
-def test_camera_processing_still_detects_without_a_preview_upload(sim_module, monkeypatch):
+def test_camera_processing_still_detects_without_a_preview_upload(
+    sim_module, monkeypatch
+):
     """Perception stays local and never posts a JPEG preview."""
     import threading
     from unittest.mock import MagicMock
@@ -300,7 +308,8 @@ def test_camera_processing_still_detects_without_a_preview_upload(sim_module, mo
 
     posted = []
     monkeypatch.setattr(
-        sim_module.urllib.request, "urlopen",
+        sim_module.urllib.request,
+        "urlopen",
         lambda *a, **k: posted.append(a) or MagicMock(),
     )
 
@@ -308,6 +317,6 @@ def test_camera_processing_still_detects_without_a_preview_upload(sim_module, mo
 
     assert posted == [], "an unwatched robot must not upload the JPEG"
     detections = bridge.take_detections()
-    assert detections and detections[0]["class"] == "rubber_duck", (
-        "detection must still run for an unwatched camera"
-    )
+    assert (
+        detections and detections[0]["class"] == "rubber_duck"
+    ), "detection must still run for an unwatched camera"

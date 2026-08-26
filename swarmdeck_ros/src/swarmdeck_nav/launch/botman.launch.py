@@ -36,7 +36,9 @@ _BUNKER_FOOTPRINT = (
 # Circumscribed from the lidar, used only if the polygon fails to parse. Take
 # whichever end is FURTHER from the sensor: with the lidar forward of centre that
 # is the rear, and using _FRONT alone would understate the radius by 0.24 m.
-_BUNKER_RADIUS = f"{(max(abs(_FRONT), abs(_REAR)) ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+_BUNKER_RADIUS = (
+    f"{(max(abs(_FRONT), abs(_REAR)) ** 2 + _BUNKER_HALF_W ** 2) ** 0.5:.3f}"
+)
 
 
 def generate_launch_description() -> LaunchDescription:

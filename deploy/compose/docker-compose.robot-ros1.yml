@@ -20,10 +20,12 @@ services:
       # for every robot instead of four. Without it a one-line change here needs
       # an image rebuild on the Jetson.
       - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+      - ${SCOUT_CATKIN_WS:-/ssd/catkin_ws}:/catkin_ws:ro
+      - ${SCOUT_MIST_WS:-/ssd/mist_ws}:/mist_ws:ro
     environment:
       ROS_MASTER_URI: http://127.0.0.1:11311
       ROS_IP: "${ROBOT_IP:?set ROBOT_IP to this robot's LAN address}"
-      PYTHONPATH: "/opt/ros/noetic/lib/python3/dist-packages:/app/swarmdeck/adapters/protocol:/app/swarmdeck:/app/adapters/protocol:/app"
+      PYTHONPATH: "/catkin_ws/devel/lib/python3/dist-packages:/mist_ws/devel/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages:/app/swarmdeck/adapters/protocol:/app/swarmdeck:/app/adapters/protocol:/app"
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3

@@ -250,52 +250,7 @@
             </button>
           </div>
 
-          <!-- Expanded Image View directly within selected proposal card -->
-          {#if review.selected === p.id}
-            <div class="mt-1 flex flex-col items-center overflow-hidden rounded-xl bg-surface-2 p-1.5 border border-border/70">
-              {#if p.image}
-                <img
-                  src={p.image}
-                  alt="{label(p.class)} detection crop"
-                  class="h-44 w-full max-w-[240px] rounded-lg object-contain bg-black/20 shadow-sm"
-                />
-              {:else}
-                <div class="flex h-28 w-full flex-col items-center justify-center p-2 text-center text-[11px] text-fg-dim">
-                  <span class="font-medium text-fg">No crop image</span>
-                  <span class="text-[9px] opacity-70 mt-1">Awaiting fresh sighting</span>
-                </div>
-              {/if}
-              <div class="mt-1.5 flex w-full items-center justify-between px-1 text-[11px]">
-                <span class="font-medium text-fg">{seenBy(p.robot_ids)}</span>
-                <span class="text-fg-muted font-mono">{p.position.x.toFixed(2)}, {p.position.y.toFixed(2)} m</span>
-              </div>
-            </div>
-          {/if}
         </div>
-
-        {#if (review.focused === p.id && review.selected !== p.id)}
-          <div
-            class="pointer-events-none absolute left-full top-0 ml-3 z-50 flex flex-col items-center
-                   overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
-          >
-            {#if p.image}
-              <img
-                src={p.image}
-                alt="{label(p.class)} detection crop"
-                class="h-36 w-36 rounded-lg object-contain bg-black/20 shadow-sm"
-              />
-            {:else}
-              <div class="h-32 w-32 rounded-lg bg-surface-2 flex flex-col items-center justify-center p-2 text-center text-[10px] text-fg-dim">
-                <span class="font-medium text-fg">No crop image</span>
-                <span class="text-[8px] opacity-70 mt-1">Awaiting fresh sighting</span>
-              </div>
-            {/if}
-            <div class="mt-1.5 flex w-full items-center justify-between px-1 text-[10px] font-semibold text-fg">
-              <span>{label(p.class)}</span>
-              <span class="font-normal text-fg-dim">{Math.round(p.best_score * 100)}%</span>
-            </div>
-          </div>
-        {/if}
 
         {#if mergeOpen === p.id}
           <div class="pointer-events-auto w-48 rounded-[--radius-control] border border-border bg-surface/95

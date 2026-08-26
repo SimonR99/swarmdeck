@@ -109,9 +109,11 @@ class Accumulator:
 
         if observer is not None:
             previous = self.viewpoints.get(sample.robot_id)
-            if previous is not None and math.hypot(
-                observer[0] - previous[0], observer[1] - previous[1]
-            ) < MIN_VIEWPOINT_MOVE_M:
+            if (
+                previous is not None
+                and math.hypot(observer[0] - previous[0], observer[1] - previous[1])
+                < MIN_VIEWPOINT_MOVE_M
+            ):
                 return False
             self.viewpoints[sample.robot_id] = observer
 
@@ -238,10 +240,15 @@ def _acc_from_dict(raw: dict[str, Any]) -> Accumulator:
             continue
     for item in (raw.get("samples") or [])[-MAX_SAMPLES:]:
         try:
-            acc.samples.append(Sample(
-                str(item["robot_id"]), float(item["x"]), float(item["y"]),
-                float(item.get("score", 0.0)), float(item.get("t", 0.0)),
-            ))
+            acc.samples.append(
+                Sample(
+                    str(item["robot_id"]),
+                    float(item["x"]),
+                    float(item["y"]),
+                    float(item.get("score", 0.0)),
+                    float(item.get("t", 0.0)),
+                )
+            )
         except (KeyError, TypeError, ValueError):
             continue
     # A record claiming evidence it cannot show is not usable: the centroid
@@ -260,7 +267,9 @@ class IgnoreZone:
     radius: float
 
     def contains(self, cls: str, x: float, y: float, cross_class: bool = False) -> bool:
-        return (cross_class or cls == self.cls) and math.hypot(x - self.x, y - self.y) <= self.radius
+        return (cross_class or cls == self.cls) and math.hypot(
+            x - self.x, y - self.y
+        ) <= self.radius
 
 
 class ReviewStore:
@@ -287,7 +296,9 @@ class ReviewStore:
         self._next_id += 1
         return value
 
-    def _nearest_entity(self, cls: str, x: float, y: float) -> tuple[Entity | None, float]:
+    def _nearest_entity(
+        self, cls: str, x: float, y: float
+    ) -> tuple[Entity | None, float]:
         best: Entity | None = None
         best_d = math.inf
         for entity in self.entities.values():
@@ -298,7 +309,9 @@ class ReviewStore:
                 best, best_d = entity, d
         return best, best_d
 
-    def _nearest_proposal(self, cls: str, x: float, y: float) -> tuple[Proposal | None, float]:
+    def _nearest_proposal(
+        self, cls: str, x: float, y: float
+    ) -> tuple[Proposal | None, float]:
         best: Proposal | None = None
         best_d = math.inf
         for proposal in self.proposals.values():
@@ -381,7 +394,10 @@ class ReviewStore:
         if proposal is None:
             return None
         entity = Entity(
-            id=self._mint("ent"), cls=proposal.cls, acc=proposal.acc, image=proposal.image
+            id=self._mint("ent"),
+            cls=proposal.cls,
+            acc=proposal.acc,
+            image=proposal.image,
         )
         self.entities[entity.id] = entity
         return entity
@@ -547,11 +563,14 @@ class ReviewStore:
             if not isinstance(item, dict):
                 continue
             try:
-                self.ignored.append(IgnoreZone(
-                    str(item.get("class", "object")),
-                    float(item["x"]), float(item["y"]),
-                    float(item.get("radius", self.ignore_radius)),
-                ))
+                self.ignored.append(
+                    IgnoreZone(
+                        str(item.get("class", "object")),
+                        float(item["x"]),
+                        float(item["y"]),
+                        float(item.get("radius", self.ignore_radius)),
+                    )
+                )
             except (KeyError, TypeError, ValueError):
                 continue
         # Never reuse an id: a stale dashboard holding an old proposal id must

@@ -66,7 +66,14 @@ class NavMapClient:
                 return None
             self.last_error = str(exc)
             return None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError, zlib.error, KeyError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            zlib.error,
+            KeyError,
+        ) as exc:
             self.last_error = str(exc)
             return None
         cells = np.frombuffer(raw, dtype=np.int8)
@@ -119,7 +126,7 @@ def clear_robot_disc(
     cols = np.arange(c0, c1, dtype=np.float64)
     rows = np.arange(r0, r1, dtype=np.float64)
     cc, rr = np.meshgrid(cols, rows)
-    inside = (cc + 0.5 - col) ** 2 + (rr + 0.5 - row) ** 2 <= rad ** 2
+    inside = (cc + 0.5 - col) ** 2 + (rr + 0.5 - row) ** 2 <= rad**2
     cells[r0:r1, c0:c1][inside] = np.int8(0)
 
 

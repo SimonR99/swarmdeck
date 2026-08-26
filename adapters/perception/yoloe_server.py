@@ -24,7 +24,6 @@ from adapters.perception.object_detector import (
     suppress_overlaps,
 )
 
-
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
 
@@ -217,7 +216,10 @@ class DetectorHandler(BaseHTTPRequestHandler):
                             "bbox": [round(value, 6) for value in detection.bbox],
                             "score": round(detection.score, 6),
                             "polygon": (
-                                [[round(x, 5), round(y, 5)] for x, y in detection.polygon]
+                                [
+                                    [round(x, 5), round(y, 5)]
+                                    for x, y in detection.polygon
+                                ]
                                 if detection.polygon
                                 else None
                             ),

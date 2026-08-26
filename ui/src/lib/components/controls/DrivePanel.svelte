@@ -50,9 +50,18 @@
     right: null
   });
 
-  // Multiple keyboard inputs can be active at once, so diagonal WASD driving
-  // remains available alongside whichever on-screen control is shown.
-  const keyDirs = new Set<Direction>();
+  // Track active keyboard inputs reactively so keys (WASD / arrows) provide
+  // the exact same visual feedback as on-screen pointer holds.
+  let keyDirs = $state<Record<Direction, boolean>>({
+    up: false,
+    down: false,
+    left: false,
+    right: false
+  });
+
+  function isHeld(direction: Direction): boolean {
+    return padPointers[direction] !== null || keyDirs[direction];
+  }
 
   function stopTimer() {
     if (driveTimer !== null) window.clearInterval(driveTimer);
@@ -98,12 +107,35 @@
 
   /** Keyboard and arrow pad share one set, so a key and a button add up. */
   function heldDirs(): Set<Direction> {
-    const dirs = new Set(keyDirs);
+    const dirs = new Set<Direction>();
     for (const direction of DIRECTIONS) {
-      if (padPointers[direction] !== null) dirs.add(direction);
+      if (isHeld(direction)) dirs.add(direction);
     }
     return dirs;
   }
+
+  const displayedJoystick = $derived.by(() => {
+    if (joystickPointer !== null) {
+      return { x: joystickX, y: joystickY, active: true };
+    }
+    const dirs = heldDirs();
+    if (dirs.size === 0) {
+      return { x: 0, y: 0, active: false };
+    }
+    let x = 0;
+    let y = 0;
+    if (dirs.has('up') && !dirs.has('down')) y -= 1;
+    else if (dirs.has('down') && !dirs.has('up')) y += 1;
+    if (dirs.has('left') && !dirs.has('right')) x -= 1;
+    else if (dirs.has('right') && !dirs.has('left')) x += 1;
+
+    const dist = Math.hypot(x, y);
+    if (dist > 0) {
+      x = x / dist;
+      y = y / dist;
+    }
+    return { x, y, active: true };
+  });
 
   function currentVector(): [number, number] {
     if (joystickPointer !== null) return joystickVector();
@@ -136,8 +168,12 @@
     }, 120);
   }
 
+  function resetKeys() {
+    for (const direction of DIRECTIONS) keyDirs[direction] = false;
+  }
+
   function hardStop() {
-    keyDirs.clear();
+    resetKeys();
     resetJoystick();
     resetPad();
     stopDrive(true);
@@ -171,11 +207,23 @@
     for (const direction of DIRECTIONS) padPointers[direction] = null;
   }
 
-  function keyDirection(key: string): Direction | null {
-    if (key === 'ArrowUp' || key.toLowerCase() === 'w') return 'up';
-    if (key === 'ArrowDown' || key.toLowerCase() === 's') return 'down';
-    if (key === 'ArrowLeft' || key.toLowerCase() === 'a') return 'left';
-    if (key === 'ArrowRight' || key.toLowerCase() === 'd') return 'right';
+  function isTypingTarget(target: EventTarget | null): boolean {
+    if (!target || !(target instanceof HTMLElement)) return false;
+    return (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement ||
+      target.isContentEditable
+    );
+  }
+
+  function keyDirection(event: KeyboardEvent): Direction | null {
+    const key = event.key;
+    const code = event.code;
+    if (key === 'ArrowUp' || key.toLowerCase() === 'w' || code === 'KeyW' || code === 'ArrowUp') return 'up';
+    if (key === 'ArrowDown' || key.toLowerCase() === 's' || code === 'KeyS' || code === 'ArrowDown') return 'down';
+    if (key === 'ArrowLeft' || key.toLowerCase() === 'a' || code === 'KeyA' || code === 'ArrowLeft') return 'left';
+    if (key === 'ArrowRight' || key.toLowerCase() === 'd' || code === 'KeyD' || code === 'ArrowRight') return 'right';
     return null;
   }
 
@@ -223,6 +271,7 @@
     untrack(() => {
       resetJoystick();
       resetPad();
+      resetKeys();
       stopDrive();
     });
   });
@@ -230,17 +279,18 @@
   $effect(() => {
     const id = activeId;
     const down = (event: KeyboardEvent) => {
-      if (event.repeat || event.target instanceof HTMLInputElement) return;
-      const direction = keyDirection(event.key);
+      if (event.repeat || isTypingTarget(event.target)) return;
+      const direction = keyDirection(event);
       if (!direction) return;
       event.preventDefault();
-      keyDirs.add(direction);
+      keyDirs[direction] = true;
       updateDrive();
     };
     const up = (event: KeyboardEvent) => {
-      const direction = keyDirection(event.key);
+      if (isTypingTarget(event.target)) return;
+      const direction = keyDirection(event);
       if (!direction) return;
-      keyDirs.delete(direction);
+      keyDirs[direction] = false;
       updateDrive();
     };
     // Listening on the window, not the controls: a pointer released outside the
@@ -253,7 +303,7 @@
       updateDrive();
     };
     const clearAll = () => {
-      keyDirs.clear();
+      resetKeys();
       resetJoystick();
       resetPad();
       stopDrive();
@@ -267,7 +317,7 @@
       stopTimer();
       if (id && driving) actions.drive(id, 0, 0);
       driving = false;
-      keyDirs.clear();
+      resetKeys();
       resetJoystick();
       resetPad();
       window.removeEventListener('keydown', down);
@@ -325,7 +375,7 @@
               type="button"
               aria-label="Drive joystick. Push up or down to drive and left or right to turn."
               disabled={!canDrive}
-              class:joystick-active={joystickPointer !== null}
+              class:joystick-active={displayedJoystick.active}
               class="joystick-base"
               onpointerdown={startJoystick}
               onpointermove={updateJoystick}
@@ -334,7 +384,7 @@
               <span class="joystick-reverse" aria-hidden="true">REV</span>
               <span
                 class="joystick-thumb"
-                style="transform: translate({joystickX * JOYSTICK_RADIUS}px, {joystickY * JOYSTICK_RADIUS}px)"
+                style="transform: translate({displayedJoystick.x * JOYSTICK_RADIUS}px, {displayedJoystick.y * JOYSTICK_RADIUS}px)"
                 aria-hidden="true"
               ></span>
             </button>
@@ -350,10 +400,10 @@
             <button
               type="button"
               aria-label="Drive forward"
-              aria-pressed={padPointers.up !== null}
+              aria-pressed={isHeld('up')}
               disabled={!canDrive}
               class="arrow-key col-span-2"
-              class:arrow-held={padPointers.up !== null}
+              class:arrow-held={isHeld('up')}
               onpointerdown={(event) => pressArrow(event, 'up')}
             >
               <ArrowUp class="h-4 w-4" />
@@ -361,10 +411,10 @@
             <button
               type="button"
               aria-label="Turn left"
-              aria-pressed={padPointers.left !== null}
+              aria-pressed={isHeld('left')}
               disabled={!canDrive}
               class="arrow-key"
-              class:arrow-held={padPointers.left !== null}
+              class:arrow-held={isHeld('left')}
               onpointerdown={(event) => pressArrow(event, 'left')}
             >
               <ArrowLeft class="h-4 w-4" />
@@ -372,10 +422,10 @@
             <button
               type="button"
               aria-label="Turn right"
-              aria-pressed={padPointers.right !== null}
+              aria-pressed={isHeld('right')}
               disabled={!canDrive}
               class="arrow-key"
-              class:arrow-held={padPointers.right !== null}
+              class:arrow-held={isHeld('right')}
               onpointerdown={(event) => pressArrow(event, 'right')}
             >
               <ArrowRight class="h-4 w-4" />
@@ -383,10 +433,10 @@
             <button
               type="button"
               aria-label="Drive in reverse"
-              aria-pressed={padPointers.down !== null}
+              aria-pressed={isHeld('down')}
               disabled={!canDrive}
               class="arrow-key col-span-2"
-              class:arrow-held={padPointers.down !== null}
+              class:arrow-held={isHeld('down')}
               onpointerdown={(event) => pressArrow(event, 'down')}
             >
               <ArrowDown class="h-4 w-4" />

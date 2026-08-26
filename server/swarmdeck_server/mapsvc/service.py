@@ -445,8 +445,11 @@ class MapService:
         init_n = int(self._initial_size_m / self._initial_resolution)
 
         self.meta = GridMeta(
-            self._initial_resolution, init_n, init_n,
-            -self._initial_size_m / 2, -self._initial_size_m / 2
+            self._initial_resolution,
+            init_n,
+            init_n,
+            -self._initial_size_m / 2,
+            -self._initial_size_m / 2,
         )
         self.merged = np.full((init_n, init_n), UNKNOWN, dtype=np.int8)
 
@@ -511,7 +514,9 @@ class MapService:
         )
         return [rid for rid in candidates if rid in grid_ids]
 
-    def set_cloud(self, robot_id: str, points: np.ndarray, *, register: bool = True) -> None:
+    def set_cloud(
+        self, robot_id: str, points: np.ndarray, *, register: bool = True
+    ) -> None:
         """Store a cloud and refresh cloud-assisted registration when applicable."""
         # Keep caller-owned buffers out of the worker/read path. Adapters reuse
         # their upload arrays and a mutable reference here would defeat the
@@ -542,39 +547,49 @@ class MapService:
         for rid in targets:
             self._mark_registration_due(rid)
 
-    def merged_cloud(self, robot_id: str | None = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    def merged_cloud(
+        self, robot_id: str | None = None
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Every member robot's cloud transformed into the merged frame, or one robot's cloud."""
         from .output import merged_cloud
+
         return merged_cloud(self, robot_id=robot_id)
 
     def set_common_pose(self, robot_id: str, pose: dict[str, float]) -> None:
         from .cslam import set_common_pose
+
         set_common_pose(self, robot_id, pose)
 
     def _common_to_world(self) -> tuple[float, float, float]:
         from .cslam import common_to_world
+
         return common_to_world(self)
 
     def common_pose(self, robot_id: str) -> dict[str, float] | None:
         from .cslam import common_pose
+
         return common_pose(self, robot_id)
 
     def set_global_grid(self, meta: GridMeta, cells: np.ndarray) -> None:
         from .cslam import set_global_grid
+
         set_global_grid(self, meta, cells)
 
     def set_cslam_origin(
         self, robot_id: str, x: float, y: float, yaw: float, frame: str
     ) -> None:
         from .cslam import set_cslam_origin
+
         set_cslam_origin(self, robot_id, x, y, yaw, frame)
 
     def cslam_majority_frame(self) -> str | None:
         from .cslam import majority_frame
+
         return majority_frame(self)
 
     def set_slam_graph(self, robot_id: str, graph: dict[str, Any]) -> None:
         from .cslam import set_slam_graph
+
         set_slam_graph(self, robot_id, graph)
 
     def apply_slam_update(self, payload: dict[str, Any]) -> None:
@@ -618,10 +633,17 @@ class MapService:
         from .nav_map import warp_to_robot_frame
 
         with self._state_lock:
-            if robot_id in self._global_members_unlocked() and self.global_grid is not None:
+            if (
+                robot_id in self._global_members_unlocked()
+                and self.global_grid is not None
+            ):
                 meta, cells = self.global_grid
                 stored_meta = GridMeta(
-                    meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
+                    meta.resolution,
+                    meta.width,
+                    meta.height,
+                    meta.origin_x,
+                    meta.origin_y,
                 )
                 stored_cells = np.array(cells, dtype=np.int8, copy=True)
                 tf = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
@@ -633,7 +655,11 @@ class MapService:
             if local_grid is not None:
                 meta, cells = local_grid
                 stored_meta = GridMeta(
-                    meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
+                    meta.resolution,
+                    meta.width,
+                    meta.height,
+                    meta.origin_x,
+                    meta.origin_y,
                 )
                 stored_cells = np.array(cells, dtype=np.int8, copy=True)
                 seq = int(self.robot_revisions.get(robot_id, 0))
@@ -699,7 +725,9 @@ class MapService:
             meta, cells = local_grid
             local_start = self.world_to_robot(robot_id, start_world)
             local_goal = self.world_to_robot(robot_id, goal_world)
-            local_path = plan_global_path(cells, meta, local_start, local_goal, clearance_m)
+            local_path = plan_global_path(
+                cells, meta, local_start, local_goal, clearance_m
+            )
             return [self.robot_to_world(robot_id, pt) for pt in local_path]
 
         return [
@@ -743,7 +771,9 @@ class MapService:
                 self._cslam_check(robot_id)
         self._remerge()
 
-    async def ingest_async(self, robot_id: str, meta: GridMeta, cells: np.ndarray) -> None:
+    async def ingest_async(
+        self, robot_id: str, meta: GridMeta, cells: np.ndarray
+    ) -> None:
         """Ingest without stalling the event loop OR the uploading adapter.
 
         Storing is cheap; registering is not. Doing both here made a robot's
@@ -976,8 +1006,10 @@ class MapService:
             window = PRIOR_WINDOW_DEG
 
         grid_result = register(
-            ref_cells, (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
-            mov_cells, (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
+            ref_cells,
+            (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
+            mov_cells,
+            (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
             yaw_prior=yaw_prior,
             yaw_window_deg=window,
         )
@@ -1019,22 +1051,16 @@ class MapService:
                 support=support,
             )
             cloud_unambiguous = (
-                cloud.ratio <= 0.80
-                and cloud.yaw_ratio <= 0.80
-                and cloud.overlap >= 40
+                cloud.ratio <= 0.80 and cloud.yaw_ratio <= 0.80 and cloud.overlap >= 40
             )
             # 2D may veto only when it has seen enough of the same place to
             # have an opinion. Low support means the accumulated grids are
             # not about this room; they must not block a live-cloud lock.
-            grid_vetoes = support >= MIN_SUPPORT and (
-                overlap < 80 or score < 0.20
-            )
+            grid_vetoes = support >= MIN_SUPPORT and (overlap < 80 or score < 0.20)
             use_cloud = cloud_unambiguous and not grid_vetoes
             if use_cloud:
                 result = cloud_validated
-                source = (
-                    "pointcloud+grid" if support >= MIN_SUPPORT else "pointcloud"
-                )
+                source = "pointcloud+grid" if support >= MIN_SUPPORT else "pointcloud"
 
         with self._state_lock:
             self.registrations[robot_id] = result
@@ -1055,11 +1081,7 @@ class MapService:
                 misses = self.registration_misses.get(robot_id, 0) + 1
                 self.registration_misses[robot_id] = misses
             held = self.transforms.get(robot_id)
-            if (
-                cloud is not None
-                and cloud_unambiguous
-                and held is not None
-            ):
+            if cloud is not None and cloud_unambiguous and held is not None:
                 cloud_world_yaw = self._wrap_yaw(ryaw + cloud.dyaw)
                 cloud_vs_hold = abs(
                     self._wrap_yaw(cloud_world_yaw - held[2])
@@ -1081,9 +1103,11 @@ class MapService:
                 self.registration_rejections[robot_id] = (
                     "grid/cloud yaw disagreement"
                     if grid_blocked or cloud_vs_hold
-                    else "ambiguous grid and point-cloud match"
-                    if cloud is not None
-                    else "ambiguous occupancy match"
+                    else (
+                        "ambiguous grid and point-cloud match"
+                        if cloud is not None
+                        else "ambiguous occupancy match"
+                    )
                 )
                 self.registered.discard(robot_id)
                 self.registration_misses[robot_id] = 0
@@ -1172,12 +1196,8 @@ class MapService:
         # Both clouds need one common raster extent.  Derive it from their local
         # metric coordinates instead of the merged-map origin: independent SLAM
         # frames can have very different origins even when the rooms overlap.
-        xy_lo = np.minimum(
-            ref_points[:, :2].min(axis=0), mov_points[:, :2].min(axis=0)
-        )
-        xy_hi = np.maximum(
-            ref_points[:, :2].max(axis=0), mov_points[:, :2].max(axis=0)
-        )
+        xy_lo = np.minimum(ref_points[:, :2].min(axis=0), mov_points[:, :2].min(axis=0))
+        xy_hi = np.maximum(ref_points[:, :2].max(axis=0), mov_points[:, :2].max(axis=0))
         resolution = self.meta.resolution
         origin = np.floor((xy_lo - 0.5) / resolution) * resolution
         size = np.ceil((xy_hi + 0.5 - origin) / resolution).astype(int) + 1
@@ -1210,6 +1230,7 @@ class MapService:
 
     def in_common_frame(self, robot_id: str) -> bool:
         from .cslam import in_common_frame
+
         return in_common_frame(self, robot_id)
 
     def _cslam_check(self, robot_id: str) -> None:
@@ -1234,8 +1255,10 @@ class MapService:
         ref_meta, ref_cells = ref
         mov_meta, mov_cells = mov
         result = register(
-            ref_cells, (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
-            mov_cells, (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
+            ref_cells,
+            (ref_meta.resolution, ref_meta.origin_x, ref_meta.origin_y),
+            mov_cells,
+            (mov_meta.resolution, mov_meta.origin_x, mov_meta.origin_y),
             yaw_prior=0.0,
             yaw_window_deg=LOCKED_WINDOW_DEG,
         )
@@ -1306,32 +1329,34 @@ class MapService:
             # has two unrelated frames, and overlaying them would place robots
             # confidently in the wrong building.
             majority = self.cslam_majority_frame()
-            return self._without_excluded({
-                rid
-                for rid in self.robot_grids
-                if self.in_common_frame(rid)
-                and (majority is None or self.cslam_frames.get(rid) == majority)
-            })
+            return self._without_excluded(
+                {
+                    rid
+                    for rid in self.robot_grids
+                    if self.in_common_frame(rid)
+                    and (majority is None or self.cslam_frames.get(rid) == majority)
+                }
+            )
         if self.merge_mode == "graph":
             # Same rule as cslam, but robots do not need a local grid on file
             # -- the merged product is the rendered pose-graph occupancy, and
             # a robot that has only streamed keyframes is still a member.
             majority = self.cslam_majority_frame()
             known = set(self.robot_grids) | set(self.slam_graphs)
-            return self._without_excluded({
-                rid
-                for rid in known
-                if self.in_common_frame(rid)
-                and majority is not None
-                and self.cslam_frames.get(rid) == majority
-            })
+            return self._without_excluded(
+                {
+                    rid
+                    for rid in known
+                    if self.in_common_frame(rid)
+                    and majority is not None
+                    and self.cslam_frames.get(rid) == majority
+                }
+            )
         # `registered`, not the latest result's `confident` flag: a robot that has
         # been accepted keeps its place through a few ambiguous frames, and the
         # merged map it contributes to must not blink out under it meanwhile.
         accepted = {
-            rid
-            for rid in self.registered
-            if rid not in self.registration_rejections
+            rid for rid in self.registered if rid not in self.registration_rejections
         }
         if not accepted or self.reference is None:
             return set()
@@ -1342,8 +1367,9 @@ class MapService:
         with self._state_lock:
             return self._global_members_unlocked()
 
-    def _warp(self, meta: GridMeta, cells: np.ndarray,
-              tf: tuple[float, float, float]) -> np.ndarray:
+    def _warp(
+        self, meta: GridMeta, cells: np.ndarray, tf: tuple[float, float, float]
+    ) -> np.ndarray:
         """Backward-warp one robot grid into the merged frame (nearest neighbour).
 
         For every world cell we compute the source cell, rather than scattering
@@ -1365,7 +1391,8 @@ class MapService:
         return out
 
     def _ensure_extent_for_members(
-        self, member_items: list[tuple[GridMeta, np.ndarray, tuple[float, float, float]]]
+        self,
+        member_items: list[tuple[GridMeta, np.ndarray, tuple[float, float, float]]],
     ) -> None:
         """Expand merged grid extent if member grids extend outside current meta."""
         if not member_items:
@@ -1395,7 +1422,12 @@ class MapService:
         cur_min_y = self.meta.origin_y
         cur_max_y = self.meta.origin_y + self.meta.height * res
 
-        if min_x < cur_min_x or max_x > cur_max_x or min_y < cur_min_y or max_y > cur_max_y:
+        if (
+            min_x < cur_min_x
+            or max_x > cur_max_x
+            or min_y < cur_min_y
+            or max_y > cur_max_y
+        ):
             CHUNK_M = 5.0
             new_min_x = math.floor((min_x - CHUNK_M) / res) * res
             new_max_x = math.ceil((max_x + CHUNK_M) / res) * res
@@ -1468,10 +1500,7 @@ class MapService:
             return
 
         self._ensure_extent_for_members(items)
-        warped_grids = [
-            self._warp(meta, cells, tf)
-            for meta, cells, tf in items
-        ]
+        warped_grids = [self._warp(meta, cells, tf) for meta, cells, tf in items]
 
         if self.merge_conflict == "occupied":
             out = np.full_like(self.merged, UNKNOWN)
@@ -1527,14 +1556,17 @@ class MapService:
 
     def network_robot_ids(self) -> list[str]:
         from .output import network_robot_ids
+
         return network_robot_ids(self)
 
     def take_network_patch(self, robot_id: str) -> dict[str, Any] | None:
         from .output import take_network_patch
+
         return take_network_patch(self, robot_id)
 
     def network_snapshot(self, robot_id: str) -> dict[str, Any] | None:
         from .output import network_snapshot
+
         return network_snapshot(self, robot_id)
 
     # Keep the palette and renderer entry point available for callers that used
@@ -1544,6 +1576,7 @@ class MapService:
     @classmethod
     def _grid_png(cls, meta: GridMeta, cells: np.ndarray) -> bytes:
         from .output import grid_png
+
         return grid_png(meta, cells)
 
     def as_png(self) -> bytes:
@@ -1556,10 +1589,12 @@ class MapService:
 
     def local_info(self, robot_id: str) -> dict[str, Any] | None:
         from .output import local_info
+
         return local_info(self, robot_id)
 
     def local_png(self, robot_id: str) -> bytes | None:
         from .output import local_png
+
         return local_png(self, robot_id)
 
     def status(self) -> dict[str, Any]:
@@ -1617,12 +1652,9 @@ class MapService:
             "map": snapshot.meta.as_dict(snapshot.seq),
             # Display-only vertical corrections. Surfaced rather than applied
             # silently: a large value here is a pose bug worth seeing.
-            "z_offsets": {
-                k: round(v, 3) for k, v in sorted(cloud_z_offsets.items())
-            },
+            "z_offsets": {k: round(v, 3) for k, v in sorted(cloud_z_offsets.items())},
             "view_by_robot": {
-                rid: "global" if rid in members else "local"
-                for rid in robot_ids
+                rid: "global" if rid in members else "local" for rid in robot_ids
             },
             "slam_graphs": slam_graphs,
             # cslam mode only. Grid correlation no longer produces the transform,

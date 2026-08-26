@@ -139,7 +139,9 @@ def free_points(cells: np.ndarray, res: float, ox: float, oy: float) -> np.ndarr
 
 def _rotate(pts: np.ndarray, yaw: float) -> np.ndarray:
     c, s = math.cos(yaw), math.sin(yaw)
-    return np.column_stack([pts[:, 0] * c - pts[:, 1] * s, pts[:, 0] * s + pts[:, 1] * c])
+    return np.column_stack(
+        [pts[:, 0] * c - pts[:, 1] * s, pts[:, 0] * s + pts[:, 1] * c]
+    )
 
 
 def _rasterize(pts: np.ndarray, res: float, n: int, org: float) -> np.ndarray:
@@ -555,7 +557,10 @@ HEIGHT_BANDS = ((0.10, 0.55), (0.55, 1.10), (1.10, 1.80))
 
 
 def height_band_grid(
-    points: np.ndarray, band: tuple[float, float], res: float, meta: tuple[int, int, float, float]
+    points: np.ndarray,
+    band: tuple[float, float],
+    res: float,
+    meta: tuple[int, int, float, float],
 ) -> np.ndarray:
     """Rasterise one height slice of a cloud into an occupancy grid.
 
@@ -608,9 +613,12 @@ def register_3d(
             continue
         results.append(
             register(
-                ref_grid, (res, meta[2], meta[3]),
-                mov_grid, (res, meta[2], meta[3]),
-                yaw_prior=yaw_prior, yaw_window_deg=yaw_window_deg,
+                ref_grid,
+                (res, meta[2], meta[3]),
+                mov_grid,
+                (res, meta[2], meta[3]),
+                yaw_prior=yaw_prior,
+                yaw_window_deg=yaw_window_deg,
             )
         )
 
@@ -631,13 +639,9 @@ def register_3d(
     # information a single flattened grid cannot produce at all.
     yaws = np.array([_wrap(r.dyaw - best.dyaw) for r in voting])
     spread = float(np.abs(yaws).max())
-    translation_spread = max(
-        math.hypot(r.dx - best.dx, r.dy - best.dy) for r in voting
-    )
+    translation_spread = max(math.hypot(r.dx - best.dx, r.dy - best.dy) for r in voting)
     agree = (
-        bool(informative)
-        and spread < math.radians(6.0)
-        and translation_spread < 0.75
+        bool(informative) and spread < math.radians(6.0) and translation_spread < 0.75
     )
 
     return Registration(

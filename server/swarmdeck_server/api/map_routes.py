@@ -286,7 +286,11 @@ async def post_keyframe(request: Request) -> Any:
     mismatch between the query-string robot_id and the blob's own robot_id is
     rejected so one robot cannot inject another robot's trajectory.
     """
-    from swarmdeck_protocol import MAX_KEYFRAME_BYTES, ProtocolError, peek_keyframe_header
+    from swarmdeck_protocol import (
+        MAX_KEYFRAME_BYTES,
+        ProtocolError,
+        peek_keyframe_header,
+    )
 
     from ..mapsvc import graph_bridge
 
@@ -466,7 +470,9 @@ async def get_optimized_map(scope: str) -> Response:
     with _optimized_lock:
         entry = _optimized.get(scope)
     if entry is None:
-        return JSONResponse({"error": f"no optimized map for {scope!r}"}, status_code=404)
+        return JSONResponse(
+            {"error": f"no optimized map for {scope!r}"}, status_code=404
+        )
     meta, cells, _robots = entry
     from ..mapsvc.output import grid_png
 

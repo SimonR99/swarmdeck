@@ -50,7 +50,9 @@ OCCUPIED = 100
 
 
 def yaw_of(q) -> float:
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    return math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    )
 
 
 def cloud_xyz(msg) -> np.ndarray:
@@ -99,24 +101,31 @@ class CslamGrid(Node):
 
         for i in range(count):
             self.create_subscription(
-                VizPointCloud, f"/r{i}/cslam/viz/keyframe_pointcloud",
-                self._on_cloud, 100,
+                VizPointCloud,
+                f"/r{i}/cslam/viz/keyframe_pointcloud",
+                self._on_cloud,
+                100,
             )
-        self.create_subscription(VizPointCloud, "/cslam/viz/keyframe_pointcloud",
-                                 self._on_cloud, 100)
-        self.create_subscription(PoseGraph, "/cslam/viz/pose_graph",
-                                 self._on_graph, 10)
+        self.create_subscription(
+            VizPointCloud, "/cslam/viz/keyframe_pointcloud", self._on_cloud, 100
+        )
+        self.create_subscription(PoseGraph, "/cslam/viz/pose_graph", self._on_graph, 10)
         self.create_subscription(PoseGraph, "/cslam/pose_graph", self._on_graph, 10)
 
         # Latched, like every other map topic here: a late subscriber gets the
         # current map instead of waiting for the next rebuild.
         self.pub = self.create_publisher(
-            OccupancyGrid, "/cslam/map",
-            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
-                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+            OccupancyGrid,
+            "/cslam/map",
+            QoSProfile(
+                depth=1,
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            ),
         )
-        self.create_timer(float(self.get_parameter("rebuild_period_s").value),
-                          self._rebuild)
+        self.create_timer(
+            float(self.get_parameter("rebuild_period_s").value), self._rebuild
+        )
         self.get_logger().info(
             f"building a cslam-native grid for {count} robots "
             f"({self.n}x{self.n} @ {self.res} m)"

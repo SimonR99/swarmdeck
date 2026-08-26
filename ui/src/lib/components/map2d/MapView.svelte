@@ -561,7 +561,9 @@
   const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
   const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);
   const viewedNetwork = $derived(
-    mapStore.viewRobot ? fleet.get(mapStore.viewRobot)?.network ?? null : null
+    mapStore.viewRobot
+      ? fleet.get(mapStore.viewRobot)?.network ?? null
+      : (fleet.selected[0] ? fleet.get(fleet.selected[0])?.network : fleet.robots[0]?.network) ?? null
   );
   const resetRobotBlocked = $derived(
     resetPending ||
@@ -817,15 +819,15 @@
     {/if}
   </div>
 
-  {#if showNetwork && mapStore.viewMode === 'local' && mapStore.networkLayer}
+  {#if showNetwork && (mapStore.networkLayers.length > 0 || viewedNetwork)}
     <div
       class="pointer-events-none absolute top-3 left-3 z-20 rounded-[--radius-control] border border-border
              bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
     >
       <div class="mb-1 flex items-center justify-between gap-4">
-        <span class="font-semibold uppercase tracking-[0.07em]">Wi-Fi quality</span>
+        <span class="font-semibold uppercase tracking-[0.07em]">{viewedNetwork?.interface === 'ping' ? 'Network latency' : 'Wi-Fi quality'}</span>
         <span class="font-mono text-fg-muted">
-          {viewedNetwork ? `${Math.round(viewedNetwork.quality_pct)}% · ${Math.round(viewedNetwork.rssi_dbm)} dBm` : 'history'}
+          {viewedNetwork ? `${viewedNetwork.ssid ? viewedNetwork.ssid + ' · ' : ''}${Math.round(viewedNetwork.quality_pct)}% · ${Math.round(viewedNetwork.rssi_dbm)} dBm${viewedNetwork.ping_ms !== undefined ? ' · ' + Math.round(viewedNetwork.ping_ms) + 'ms' : ''}` : 'history'}
         </span>
       </div>
       <div
@@ -907,16 +909,24 @@
 
   {#if review.selected || review.focused}
     {@const activeDetectionId = review.selected ?? review.focused}
-    {@const activeObj = activeDetectionId ? (review.proposalOf(activeDetectionId) ?? review.entityOf(activeDetectionId)) : null}
-    {@const activeGrid = activeObj ? mapStore.worldToGrid(activeObj.position.x, activeObj.position.y) : null}
+    {@const activeObj = activeDetectionId
+      ? (review.proposalOf(activeDetectionId) ?? review.entityOf(activeDetectionId))
+      : null}
+    {@const activeGrid = activeObj
+      ? mapStore.worldToGrid(activeObj.position.x, activeObj.position.y)
+      : null}
     {@const activeScreen = activeGrid ? screenOf(activeGrid.gx, activeGrid.gy) : null}
 
     {#if activeObj && activeObj.image && activeScreen && activeScreen.sx >= -50 && activeScreen.sx <= (host?.clientWidth ?? 0) + 50 && activeScreen.sy >= -50 && activeScreen.sy <= (host?.clientHeight ?? 0) + 50}
       <div
-        class="pointer-events-none absolute z-25 flex flex-col items-center -translate-x-1/2 -translate-y-full pb-3.5"
+        class="pointer-events-none absolute z-25 flex -translate-x-1/2 -translate-y-full
+               flex-col items-center pb-3.5"
         style="left: {activeScreen.sx}px; top: {activeScreen.sy}px;"
       >
-        <div class="overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl flex flex-col items-center">
+        <div
+          class="flex flex-col items-center overflow-hidden rounded-xl border border-border/80
+                 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
+        >
           <img
             src={activeObj.image}
             alt="{detectionCatalog.labelOf(activeObj.class)} detection crop"
@@ -925,11 +935,13 @@
           <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
             <span>{detectionCatalog.labelOf(activeObj.class)}</span>
             <span class="font-normal text-fg-dim">
-              {'best_score' in activeObj ? `${Math.round(activeObj.best_score * 100)}%` : `${activeObj.observations} views`}
+              {'best_score' in activeObj
+                ? `${Math.round(activeObj.best_score * 100)}%`
+                : `${activeObj.observations} views`}
             </span>
           </div>
         </div>
-        <div class="h-2 w-2 rotate-45 border-b border-r border-border/80 bg-surface -mt-1 shadow-sm"></div>
+        <div class="-mt-1 h-2 w-2 rotate-45 border-b border-r border-border/80 bg-surface shadow-sm"></div>
       </div>
     {/if}
   {/if}

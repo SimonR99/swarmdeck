@@ -169,13 +169,70 @@ class VerifyConfig:
     barely discriminates at all here -- false pairs measured a LOWER median
     than true ones, the opposite of the fixture's behaviour.
 
-    Relaxing it is measurable but small: ``tools/replay.py --ablate hessian
-    mean-err-0.6`` moves joint ATE 0.6604 -> 0.6526 m and robot_0's
-    inter-robot error 0.2342 -> 0.2238 m, with no false merges; 0.6 and 1.5
-    give identical results, so nothing above 0.6 is being rejected by this
-    gate. Left at 0.15 deliberately: ~1% on one dataset does not justify
-    loosening a gate that guards against false merges fourfold. Revisit with
-    a second ground-truthed capture."""
+    REVERTED TO 0.15 ON 2026-08-25, HOURS AFTER RAISING IT. Read the whole of
+    this before touching it again.
+
+    It was raised to 1.0 because botman_0 closed zero long-range loops and this
+    gate was rejecting 70 of its 76 long-gap candidates. That diagnosis was
+    correct. The fix was not, and the way it was validated is the lesson: the
+    sweep below counted how many closures each threshold ACCEPTED and checked
+    their translation magnitudes looked plausible. It never checked whether the
+    accepted closures were RIGHT. On hardware they were not.
+
+    Measured on the new botman_0 tour in ``sessions/captures/hw-run-02``,
+    comparing optimized poses against the robot's own SuperOdometry solution --
+    which the operator describes as almost perfect::
+
+        max_mean_error   closures   optimizer moved poses (median / max)
+                  1.00        246    10.56 m / 34.9 deg   22.69 m / 123.6 deg
+                  0.15         62     1.52 m /  4.2 deg    3.18 m /   7.7 deg
+
+    Ten metres of median displacement from a good solution is not a better map,
+    it is a destroyed one. GNC rejected 182 of the 246, and the survivors were
+    still enough to wreck it.
+
+    Why it passed review: this gate does not discriminate true from false on
+    real data (3d-run-01: true median 0.547, FALSE median 0.334 -- false pairs
+    score LOWER). Relaxing it therefore admits false matches at least as
+    readily as true ones. And with one robot, PCM does nothing -- it only
+    cross-checks INTER-robot closures -- so intra-robot false closures face GNC
+    alone. Validating on 3d-run-01, a two-robot run where PCM was active,
+    hid exactly that.
+
+    Botman's missing loop closures are still a real, open problem. The answer
+    is not this threshold. It needs a gate that actually separates true from
+    false on real sensors -- inlier ratio and the degeneracy eigenvalues are
+    the candidates -- validated against POSE ERROR, never against closure
+    count.
+
+    Historical sweep, kept because the recall numbers are real even though the
+    conclusion drawn from them was wrong. On ``sessions/captures/hw-run-01`` (two Bunkers, real
+    hardware) botman_0 drove a full tour of a floor and closed ZERO long-range
+    loops -- its map never snapped back into alignment at the door it started
+    from. Place recognition was not at fault: it proposed 76 same-robot
+    candidates at a sequence gap of 25 or more, and this gate rejected 70 of
+    them. Every one. Sweeping it, long-gap closures accepted::
+
+        max_mean_error   botman_0   aslan_0   median |t|   max |t|
+                  0.15          0        90       0.30 m    1.17 m
+                  0.40         10       118       0.30 m    2.62 m
+                  0.60         19       133       0.35 m    2.62 m
+                  1.00         38       146       0.39 m    2.62 m
+                  2.00         45       148       0.40 m    2.62 m
+
+    The recovered transforms stay small and stable across the whole sweep, so
+    what the gate was rejecting was real closures, not garbage: a threshold
+    calibrated on the synthetic fixture (true matches 0.045-0.12) sitting well
+    below the median true match on real sensors (0.547 on 3d-run-01).
+
+    1.0 rather than higher because 0.6 and 1.5 were both validated against
+    GROUND TRUTH on 3d-run-01 -- joint ATE 0.6604 -> 0.6526 m, no false merges
+    -- and 1.0 sits inside that validated band while recovering most of what
+    botman_0 was losing. Note this gate barely discriminates on real data
+    anyway (false pairs measured a LOWER median, 0.334, than true ones), so
+    holding it tight bought recall loss rather than safety. The gates that do
+    the real work are min_inlier_ratio, min_inliers and the degeneracy
+    eigenvalue floors, backed by PCM and GNC in the graph."""
 
     max_translation_m: float = 15.0
     """Reject if the recovered `t_src_dst` translation exceeds this. A
@@ -432,7 +489,9 @@ def verify_candidate(
     else:
         cos_yaw, sin_yaw = math.cos(yaw_prior), math.sin(yaw_prior)
         init_t_target_source = se3_identity()
-        init_t_target_source[:2, :2] = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
+        init_t_target_source[:2, :2] = np.array(
+            [[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]]
+        )
 
     result = small_gicp.align(
         target_points,
@@ -492,7 +551,11 @@ def verify_candidate(
             config.isotropic_scale * max(fitness, 1e-6)
         )
 
-    kind = EdgeKind.INTER_LOOP if source.id.robot_id != target.id.robot_id else EdgeKind.INTRA_LOOP
+    kind = (
+        EdgeKind.INTER_LOOP
+        if source.id.robot_id != target.id.robot_id
+        else EdgeKind.INTRA_LOOP
+    )
     return Edge(
         kind=kind,
         src=source.id,
@@ -563,13 +626,23 @@ def verify_candidates(
         return [
             edge
             for candidate in candidates
-            if (edge := verify_candidate(candidate.source, candidate.target, candidate.yaw_prior, config))
+            if (
+                edge := verify_candidate(
+                    candidate.source, candidate.target, candidate.yaw_prior, config
+                )
+            )
             is not None
         ]
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(verify_candidate, candidate.source, candidate.target, candidate.yaw_prior, config)
+            executor.submit(
+                verify_candidate,
+                candidate.source,
+                candidate.target,
+                candidate.yaw_prior,
+                config,
+            )
             for candidate in candidates
         ]
         return [edge for future in futures if (edge := future.result()) is not None]

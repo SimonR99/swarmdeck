@@ -82,30 +82,35 @@ def test_global_static_layer_reads_the_collaborative_map():
     sim = yaml.safe_load(
         (CONFIG_DIR / "nav2_params.yaml").read_text().replace("<robot_namespace>", "ns")
     )
-    static = (
-        sim["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
-    )
+    static = sim["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
     assert static["map_topic"] == "/ns/global_map"
     # rolling_window is asserted by test_global_costmap_is_not_a_rolling_window,
     # which owns that property and records why it flipped. width/height are no
     # longer meaningful here: a non-rolling costmap with a static_layer is
     # resized to the incoming map, so those keys only cover startup.
-    assert "static_layer" not in sim["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
+    assert (
+        "static_layer"
+        not in sim["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
+    )
 
     hardware = yaml.safe_load((CONFIG_DIR / "botman_nav2_params.yaml").read_text())
-    hw_static = (
-        hardware["global_costmap"]["global_costmap"]["ros__parameters"]["static_layer"]
-    )
+    hw_static = hardware["global_costmap"]["global_costmap"]["ros__parameters"][
+        "static_layer"
+    ]
     assert hw_static["map_topic"] == "/global_map"
-    local_plugins = hardware["local_costmap"]["local_costmap"]["ros__parameters"]["plugins"]
+    local_plugins = hardware["local_costmap"]["local_costmap"]["ros__parameters"][
+        "plugins"
+    ]
     assert "static_layer" not in local_plugins
 
 
 def _global_costmap(path: Path) -> dict:
     raw = path.read_text().replace("<robot_namespace>", "ns")
     doc = yaml.safe_load(raw) or {}
-    return (doc.get("global_costmap") or {}).get("global_costmap", {}).get(
-        "ros__parameters", {}
+    return (
+        (doc.get("global_costmap") or {})
+        .get("global_costmap", {})
+        .get("ros__parameters", {})
     )
 
 
@@ -157,4 +162,6 @@ def test_global_planner_may_traverse_unknown_space():
         for name in planner.get("planner_plugins") or []:
             cfg = planner.get(name) or {}
             if "allow_unknown" in cfg:
-                assert cfg["allow_unknown"] is True, f"{path.name}: {name}.allow_unknown"
+                assert (
+                    cfg["allow_unknown"] is True
+                ), f"{path.name}: {name}.allow_unknown"

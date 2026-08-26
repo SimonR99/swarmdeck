@@ -90,7 +90,9 @@ def main() -> int:
             super().__init__("spot_clear_keepalive")
             self.create_service(Trigger, "clear_keepalive", self._on_clear)
 
-        def _on_clear(self, _req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
+        def _on_clear(
+            self, _req: Trigger.Request, resp: Trigger.Response
+        ) -> Trigger.Response:
             try:
                 ok, message = _clear_once(hostname, username, password)
             except Exception as exc:

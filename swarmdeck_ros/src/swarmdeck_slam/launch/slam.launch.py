@@ -108,53 +108,53 @@ def generate_launch_description() -> LaunchDescription:
                 "range_max",
                 default_value="30.0",
                 description="Mapping lidar's maximum range. Passed down from the "
-                            "fleet's lidar profile so SLAM and the sensor agree.",
+                "fleet's lidar profile so SLAM and the sensor agree.",
             ),
             DeclareLaunchArgument(
                 "fuse_covariance",
                 default_value="false",
                 description="Feed the EKF covariance_relay.py's restamped topics "
-                            "instead of Gazebo's all-zero-covariance ones. OFF by "
-                            "default because it was measured to make this filter "
-                            "10x worse; see ekf.yaml.",
+                "instead of Gazebo's all-zero-covariance ones. OFF by "
+                "default because it was measured to make this filter "
+                "10x worse; see ekf.yaml.",
             ),
             DeclareLaunchArgument(
                 "odometry_source",
                 default_value="external",
                 choices=["external", "ekf"],
                 description="external = the bridge publishes an already-fused "
-                            "pose and owns odom -> base_link (ARGoS + "
-                            "Ultra-Fusion); ekf = robot_localization fuses "
-                            "wheel odometry with the gyro (legacy Gazebo).",
+                "pose and owns odom -> base_link (ARGoS + "
+                "Ultra-Fusion); ekf = robot_localization fuses "
+                "wheel odometry with the gyro (legacy Gazebo).",
             ),
             DeclareLaunchArgument(
                 "proximity_from_cloud",
                 default_value="false",
                 description="Derive <ns>/proximity_scan from the 3D cloud as a "
-                            "second flattened projection, for fleets with no "
-                            "dedicated bumper lidar.",
+                "second flattened projection, for fleets with no "
+                "dedicated bumper lidar.",
             ),
             DeclareLaunchArgument(
                 "proximity_range_max",
                 default_value="8.0",
                 description="Range limit for the derived bumper scan; the "
-                            "costmap raytraces it to 4 m either way.",
+                "costmap raytraces it to 4 m either way.",
             ),
             DeclareLaunchArgument(
                 "base_height",
                 default_value="0.0",
                 description="How far base_link floats above the floor, from "
-                            "RobotSpec. Used to turn the derived bumper scan's "
-                            "height band from base_link-relative into "
-                            "floor-relative; see the include below.",
+                "RobotSpec. Used to turn the derived bumper scan's "
+                "height band from base_link-relative into "
+                "floor-relative; see the include below.",
             ),
             DeclareLaunchArgument(
                 "fuse_imu",
                 default_value="true",
                 description="Fuse wheel odometry with the gyro and publish "
-                            "odom -> base_link from the EKF instead of the drive "
-                            "plugin. Wheel odometry alone was measured up to 30 m "
-                            "and 244 deg wrong.",
+                "odom -> base_link from the EKF instead of the drive "
+                "plugin. Wheel odometry alone was measured up to 30 m "
+                "and 244 deg wrong.",
             ),
             # Only started when something on this path actually consumes it.
             # `fuse_covariance` is off by default (see ekf.yaml for the
@@ -166,9 +166,11 @@ def generate_launch_description() -> LaunchDescription:
                 executable="covariance_relay.py",
                 name="covariance_relay",
                 namespace=ns,
-                condition=IfCondition(PythonExpression(
-                    ['"', odom_source, '" == "ekf" and "', fuse_cov, '" == "true"']
-                )),
+                condition=IfCondition(
+                    PythonExpression(
+                        ['"', odom_source, '" == "ekf" and "', fuse_cov, '" == "true"']
+                    )
+                ),
                 parameters=[{"use_sim_time": use_sim}],
                 output="screen",
             ),
@@ -182,9 +184,11 @@ def generate_launch_description() -> LaunchDescription:
                 # Both gates: `ekf` selects the legacy Gazebo path at all,
                 # and `fuse_imu` is that path's own switch for reproducing what
                 # unfused wheel odometry does to a map.
-                condition=IfCondition(PythonExpression(
-                    ['"', odom_source, '" == "ekf" and "', fuse_imu, '" == "true"']
-                )),
+                condition=IfCondition(
+                    PythonExpression(
+                        ['"', odom_source, '" == "ekf" and "', fuse_imu, '" == "true"']
+                    )
+                ),
                 parameters=[
                     ekf_params,
                     {
@@ -220,9 +224,14 @@ def generate_launch_description() -> LaunchDescription:
                 name="lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", lidar_x, "--z", lidar_z,
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/lidar"],
+                    "--x",
+                    lidar_x,
+                    "--z",
+                    lidar_z,
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/lidar"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -240,8 +249,10 @@ def generate_launch_description() -> LaunchDescription:
                 name="imu_tf",
                 namespace=ns,
                 arguments=[
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/imu"],
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/imu"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -252,9 +263,14 @@ def generate_launch_description() -> LaunchDescription:
                 name="proximity_lidar_tf",
                 namespace=ns,
                 arguments=[
-                    "--x", "0.24", "--z", "0.05",
-                    "--frame-id", [ns, "/base_link"],
-                    "--child-frame-id", [ns, "/base_link/proximity_lidar"],
+                    "--x",
+                    "0.24",
+                    "--z",
+                    "0.05",
+                    "--frame-id",
+                    [ns, "/base_link"],
+                    "--child-frame-id",
+                    [ns, "/base_link/proximity_lidar"],
                 ],
                 parameters=[{"use_sim_time": use_sim}],
                 remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -280,54 +296,67 @@ def generate_launch_description() -> LaunchDescription:
             # name and published no <ns>/scan at all. 2D SLAM and both costmaps
             # sit waiting on a topic with no publisher, and the only symptom is
             # a fleet that never moves.
-            GroupAction(scoped=True, actions=[
-              IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_slam"),
-                     "/launch/cloud_to_scan.launch.py"]
-                ),
-                condition=IfCondition(proximity),
-                launch_arguments={
-                    "namespace": ns,
-                    "use_sim_time": use_sim,
-                    "mode": "flatten",
-                    "range_max": prox_range,
-                    "output_topic": "proximity_scan",
-                    "node_name": "cloud_to_proximity_scan",
-                    # The band is subtracted back to the floor, because
-                    # pointcloud_to_laserscan filters in `target_frame` and
-                    # that frame is base_link, which floats. Left
-                    # base_link-relative, Spot's band would start 0.62 m above
-                    # the floor (its base_link is at 0.50) and miss a Scout
-                    # Mini, which is 0.245 m tall, entirely. That is precisely
-                    # the failure PROXIMITY_SCAN_HEIGHT existed to prevent on
-                    # the Gazebo fleet: a tall robot has to be able to see a
-                    # short one.
-                    "min_height": PythonExpression(
-                        [str(FLATTEN_MIN_HEIGHT), " - ", base_height]),
-                    "max_height": PythonExpression(
-                        [str(FLATTEN_MAX_HEIGHT), " - ", base_height]),
-                }.items(),
-              ),
-            ]),
+            GroupAction(
+                scoped=True,
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            [
+                                FindPackageShare("swarmdeck_slam"),
+                                "/launch/cloud_to_scan.launch.py",
+                            ]
+                        ),
+                        condition=IfCondition(proximity),
+                        launch_arguments={
+                            "namespace": ns,
+                            "use_sim_time": use_sim,
+                            "mode": "flatten",
+                            "range_max": prox_range,
+                            "output_topic": "proximity_scan",
+                            "node_name": "cloud_to_proximity_scan",
+                            # The band is subtracted back to the floor, because
+                            # pointcloud_to_laserscan filters in `target_frame` and
+                            # that frame is base_link, which floats. Left
+                            # base_link-relative, Spot's band would start 0.62 m above
+                            # the floor (its base_link is at 0.50) and miss a Scout
+                            # Mini, which is 0.245 m tall, entirely. That is precisely
+                            # the failure PROXIMITY_SCAN_HEIGHT existed to prevent on
+                            # the Gazebo fleet: a tall robot has to be able to see a
+                            # short one.
+                            "min_height": PythonExpression(
+                                [str(FLATTEN_MIN_HEIGHT), " - ", base_height]
+                            ),
+                            "max_height": PythonExpression(
+                                [str(FLATTEN_MAX_HEIGHT), " - ", base_height]
+                            ),
+                        }.items(),
+                    ),
+                ],
+            ),
             # A multi-ring lidar's LaserScan is not a planar slice, so derive one.
-            GroupAction(scoped=True, actions=[
-              IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    [FindPackageShare("swarmdeck_slam"), "/launch/cloud_to_scan.launch.py"]
-                ),
-                condition=multi_ring,
-                launch_arguments={
-                    "namespace": ns,
-                    "use_sim_time": use_sim,
-                    # 2D SLAM needs the horizontal ring itself, not a projection.
-                    "mode": "slice",
-                    "output_topic": "scan",
-                    "node_name": "cloud_to_scan",
-                    "range_max": range_max,
-                }.items(),
-              ),
-            ]),
+            GroupAction(
+                scoped=True,
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            [
+                                FindPackageShare("swarmdeck_slam"),
+                                "/launch/cloud_to_scan.launch.py",
+                            ]
+                        ),
+                        condition=multi_ring,
+                        launch_arguments={
+                            "namespace": ns,
+                            "use_sim_time": use_sim,
+                            # 2D SLAM needs the horizontal ring itself, not a projection.
+                            "mode": "slice",
+                            "output_topic": "scan",
+                            "node_name": "cloud_to_scan",
+                            "range_max": range_max,
+                        }.items(),
+                    ),
+                ],
+            ),
             Node(
                 package="slam_toolbox",
                 executable="async_slam_toolbox_node",

@@ -42,7 +42,7 @@ topics:
   # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /aslan_0/local_plan
   cmd_vel: /cmd_vel
-  battery: ""
+  battery: /bunker_status
   # OAK-D on USB (03e7:2485). The default camera service runs the RGB-D profile
   # so detections can be projected onto the map. The aligned stereo stream and
   # its CameraInfo share the RGB pixel grid; the mount TF is published by the
@@ -58,6 +58,9 @@ topics:
 actions:
   navigate_to_pose: /aslan_0/navigate_to_pose
 
+perception:
+  depth_max_age_s: 1.0
+
 # Under merge_mode: graph, the server performs trajectory-based pose-graph SLAM
 # from 3D keyframe uploads rather than synchronous 2D grid image registration.
 rates:
@@ -68,3 +71,5 @@ rates:
   keyframe_period_s: 2.0
 
 drive_timeout_s: 0.45
+battery_voltage_min: 23.0
+battery_voltage_max: 29.2

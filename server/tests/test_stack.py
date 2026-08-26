@@ -210,7 +210,9 @@ def test_reset_all_maps_api_clears_every_robot_product():
 def test_camera_preview_roundtrip():
     frame = b"\xff\xd8preview\xff\xd9"
     with TestClient(app) as c:
-        missing_id = c.post("/api/adapter/camera", content=frame, headers={"content-type": "image/jpeg"})
+        missing_id = c.post(
+            "/api/adapter/camera", content=frame, headers={"content-type": "image/jpeg"}
+        )
         assert missing_id.status_code == 400
 
         uploaded = c.post(
@@ -231,7 +233,8 @@ def test_camera_preview_roundtrip():
 def test_registry_capabilities_and_neglect():
     reg = Registry()
     reg.hello(
-        {"robot_id": "r0", "robot_type": "spot", "capabilities": ["navigate", "map"]}, sink=None
+        {"robot_id": "r0", "robot_type": "spot", "capabilities": ["navigate", "map"]},
+        sink=None,
     )
     assert reg.can("r0", "navigate")
     assert not reg.can("r0", "camera")
@@ -261,12 +264,21 @@ def test_robot_state_network_sample_is_stored_at_the_same_pose():
     map_service.reset_robot()
     try:
         app_registry.hello({"robot_id": "r0", "capabilities": ["network"]}, sink=None)
-        asyncio.run(handle_adapter_message({
-            "type": "robot_state",
-            "robot_id": "r0",
-            "pose": {"x": 2.5, "y": -3.0, "yaw": 0.1},
-            "network": {"interface": "wlan0", "quality_pct": 42.0, "rssi_dbm": -69.0},
-        }, None))
+        asyncio.run(
+            handle_adapter_message(
+                {
+                    "type": "robot_state",
+                    "robot_id": "r0",
+                    "pose": {"x": 2.5, "y": -3.0, "yaw": 0.1},
+                    "network": {
+                        "interface": "wlan0",
+                        "quality_pct": 42.0,
+                        "rssi_dbm": -69.0,
+                    },
+                },
+                None,
+            )
+        )
 
         state = app_registry.robots["r0"].to_state()
         assert state["network"]["rssi_dbm"] == -69.0
@@ -350,7 +362,9 @@ def test_a_batch_retracts_the_boxes_it_no_longer_contains():
     app_registry.robots.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 ad.send_json(
                     {
                         "type": "hello",
@@ -403,7 +417,9 @@ def test_retraction_is_scoped_to_the_camera_that_reported_it():
     app_registry.robots.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 ad.send_json(
                     {
                         "type": "hello",
@@ -460,7 +476,9 @@ def test_saving_detection_categories_deletes_old_map_entities_and_rejects_late_b
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 ad.send_json(
                     {
                         "type": "hello",
@@ -566,8 +584,12 @@ def test_back_to_back_duplicate_goal_is_reserved_immediately():
         app_registry.hello({"robot_id": "r0", "capabilities": ["navigate"]}, first)
         app_registry.hello({"robot_id": "r1", "capabilities": ["navigate"]}, second)
         goal = {"x": 2.0, "y": 3.0}
-        asyncio.run(handle_gui_message({"type": "set_goal", "robot_id": "r0", "payload": goal}))
-        asyncio.run(handle_gui_message({"type": "set_goal", "robot_id": "r1", "payload": goal}))
+        asyncio.run(
+            handle_gui_message({"type": "set_goal", "robot_id": "r0", "payload": goal})
+        )
+        asyncio.run(
+            handle_gui_message({"type": "set_goal", "robot_id": "r1", "payload": goal})
+        )
 
         assert len(first.messages) == 1
         assert first.messages[0]["type"] == "navigate_to"
@@ -645,8 +667,14 @@ def test_auto_mode_locks_on_and_stops_searching_all_rotations():
     def fake_register(*_args, **kwargs):
         calls.append(kwargs)
         return Registration(
-            dx=0.0, dy=0.0, dyaw=0.2, score=0.9, overlap=500,
-            ratio=0.1, yaw_ratio=0.2, support=0.9,
+            dx=0.0,
+            dy=0.0,
+            dyaw=0.2,
+            score=0.9,
+            overlap=500,
+            ratio=0.1,
+            yaw_ratio=0.2,
+            support=0.9,
         )
 
     original = service_module.register
@@ -742,12 +770,8 @@ def test_goal_routing_converts_shared_coordinates_to_robot_frame():
         assert robot_state(robot)["planned_path"][1] == pytest.approx(
             {"x": 3.0, "y": 1.0}
         )
-        robot.global_planned_path = [
-            {"x": 2.0, "y": 1.0}, {"x": 2.0, "y": 2.0}
-        ]
-        robot.local_planned_path = [
-            {"x": 2.0, "y": 1.0}, {"x": 3.0, "y": 1.0}
-        ]
+        robot.global_planned_path = [{"x": 2.0, "y": 1.0}, {"x": 2.0, "y": 2.0}]
+        robot.local_planned_path = [{"x": 2.0, "y": 1.0}, {"x": 3.0, "y": 1.0}]
         split_state = robot_state(robot)
         assert split_state["global_planned_path"][0] == pytest.approx(
             {"x": 3.0, "y": 0.0}
@@ -793,10 +817,22 @@ def test_disabled_robots_cannot_be_driven_or_given_goals(monkeypatch):
     monkeypatch.setattr(
         settings_store,
         "value",
-        {"robots": [{"id": "r0", "enabled": False, "type": "ros2", "endpoint": "", "color": "#000"}]},
+        {
+            "robots": [
+                {
+                    "id": "r0",
+                    "enabled": False,
+                    "type": "ros2",
+                    "endpoint": "",
+                    "color": "#000",
+                }
+            ]
+        },
     )
     try:
-        app_registry.hello({"robot_id": "r0", "capabilities": ["navigate", "body"]}, sink=sink)
+        app_registry.hello(
+            {"robot_id": "r0", "capabilities": ["navigate", "body"]}, sink=sink
+        )
         asyncio.run(
             handle_gui_message(
                 {"type": "set_goal", "robot_id": "r0", "payload": {"x": 1.0, "y": 1.0}}
@@ -804,7 +840,11 @@ def test_disabled_robots_cannot_be_driven_or_given_goals(monkeypatch):
         )
         asyncio.run(
             handle_gui_message(
-                {"type": "drive", "robot_id": "r0", "payload": {"linear": 0.2, "angular": 0.0}}
+                {
+                    "type": "drive",
+                    "robot_id": "r0",
+                    "payload": {"linear": 0.2, "angular": 0.0},
+                }
             )
         )
         assert sink.messages == []
@@ -887,13 +927,15 @@ def test_body_command_requires_the_body_capability():
 def _plan_grid(n: int) -> np.ndarray:
     """A small asymmetric floor plan, so registration has something to lock on."""
     cells = np.full((n, n), -1, dtype=np.int8)
-    cells[5:n - 5, 5:n - 5] = 0
-    cells[5, 5:n - 5] = 100
-    cells[n - 6, 5:n - 5] = 100
-    cells[5:n - 5, 5] = 100
-    cells[5:n - 5, n - 6] = 100
-    cells[5:n // 2, n // 3] = 100          # an interior wall, off centre
-    cells[n // 2 + 4, n // 3:n - 8] = 100  # and a second, so the plan is not symmetric
+    cells[5 : n - 5, 5 : n - 5] = 0
+    cells[5, 5 : n - 5] = 100
+    cells[n - 6, 5 : n - 5] = 100
+    cells[5 : n - 5, 5] = 100
+    cells[5 : n - 5, n - 6] = 100
+    cells[5 : n // 2, n // 3] = 100  # an interior wall, off centre
+    cells[n // 2 + 4, n // 3 : n - 8] = (
+        100  # and a second, so the plan is not symmetric
+    )
     return cells
 
 
@@ -924,15 +966,22 @@ def test_cslam_excludes_a_robot_that_has_not_joined_the_common_frame():
     svc, meta, cells = _cslam_service()
     svc.ingest("r0", meta, cells)
     svc.ingest("r1", meta, cells)
-    assert svc.global_members() == {"r0"}          # r0 is the reference
+    assert svc.global_members() == {"r0"}  # r0 is the reference
     assert svc.status()["view_by_robot"]["r1"] == "local"
 
 
 def test_cslam_admits_a_robot_once_its_graph_says_so():
     svc, meta, cells = _cslam_service()
     svc.ingest("r0", meta, cells)
-    svc.set_slam_graph("r1", {"keyframes": 40, "in_common_frame": True,
-                              "residual": 0.02, "inter_robot": [{"other": "r0", "count": 3}]})
+    svc.set_slam_graph(
+        "r1",
+        {
+            "keyframes": 40,
+            "in_common_frame": True,
+            "residual": 0.02,
+            "inter_robot": [{"other": "r0", "count": 3}],
+        },
+    )
     svc.ingest("r1", meta, cells)
     assert svc.global_members() == {"r0", "r1"}
 
@@ -961,7 +1010,7 @@ def test_cslam_disagreement_is_visible_when_the_alignment_is_wrong():
     svc.ingest("r0", meta, cells)
     svc.set_slam_graph("r1", {"keyframes": 40, "in_common_frame": True})
     shifted = np.full_like(cells, -1)
-    shifted[:, 6:] = cells[:, :-6]          # 6 cells = 0.6 m of error
+    shifted[:, 6:] = cells[:, :-6]  # 6 cells = 0.6 m of error
     svc.ingest("r1", meta, shifted)
 
     disagreement = svc.status()["cslam_disagreement"]
@@ -971,8 +1020,14 @@ def test_cslam_disagreement_is_visible_when_the_alignment_is_wrong():
 
 def test_slam_graph_survives_into_status_in_every_mode():
     svc = MapService()
-    svc.set_slam_graph("r0", {"keyframes": 12, "in_common_frame": True,
-                              "inter_robot": [{"other": "r1", "count": 2}]})
+    svc.set_slam_graph(
+        "r0",
+        {
+            "keyframes": 12,
+            "in_common_frame": True,
+            "inter_robot": [{"other": "r1", "count": 2}],
+        },
+    )
     assert svc.status()["slam_graphs"]["r0"]["keyframes"] == 12
 
 
@@ -1062,8 +1117,9 @@ def test_cloud_endpoints_roundtrip():
     # endpoints these assertions are about.
     map_service.set_mode("static")
     n = 40
-    map_service.ingest("robot_0", GridMeta(0.1, n, n, -2.0, -2.0),
-                       np.full((n, n), -1, np.int8))
+    map_service.ingest(
+        "robot_0", GridMeta(0.1, n, n, -2.0, -2.0), np.full((n, n), -1, np.int8)
+    )
     with TestClient(app) as c:
         assert c.post("/api/adapter/cloud", content=body).status_code == 400
         posted = c.post("/api/adapter/cloud?robot_id=robot_0", content=body)
@@ -1078,8 +1134,12 @@ def test_cloud_endpoints_roundtrip():
 
 def test_malformed_cloud_is_refused_not_crashed():
     with TestClient(app) as c:
-        assert c.post("/api/adapter/cloud?robot_id=r0", content=b"not zlib").status_code == 400
+        assert (
+            c.post("/api/adapter/cloud?robot_id=r0", content=b"not zlib").status_code
+            == 400
+        )
         import zlib
+
         odd = zlib.compress(np.zeros(4, dtype=np.int16).tobytes())  # not a triple
         assert c.post("/api/adapter/cloud?robot_id=r0", content=odd).status_code == 400
 
@@ -1110,13 +1170,18 @@ def test_scan_endpoint_builds_a_local_map_for_a_robot_with_no_native_grid():
 def test_malformed_scan_is_refused_not_crashed():
     with TestClient(app) as c:
         assert (
-            c.post("/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0",
-                   content=b"not zlib").status_code == 400
+            c.post(
+                "/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0",
+                content=b"not zlib",
+            ).status_code
+            == 400
         )
         odd = zlib.compress(np.zeros(3, dtype=np.int16).tobytes())  # not a pair
         assert (
-            c.post("/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0",
-                   content=odd).status_code == 400
+            c.post(
+                "/api/adapter/scan?robot_id=r0&origin_x=0&origin_y=0", content=odd
+            ).status_code
+            == 400
         )
 
 
@@ -1128,8 +1193,11 @@ def _grid(svc, rid, transform=(0.0, 0.0, 0.0)):
     cells = np.full((n, n), -1, dtype=np.int8)
     cells[10:30, 10:30] = 0
     svc.set_transform(rid, *transform)
-    svc.ingest(rid, GridMeta(svc.meta.resolution, n, n,
-                             svc.meta.origin_x, svc.meta.origin_y), cells)
+    svc.ingest(
+        rid,
+        GridMeta(svc.meta.resolution, n, n, svc.meta.origin_x, svc.meta.origin_y),
+        cells,
+    )
 
 
 def test_cslam_origin_replaces_the_registration_transform():
@@ -1138,7 +1206,9 @@ def test_cslam_origin_replaces_the_registration_transform():
     svc.set_mode("cslam")
     _grid(svc, "r0")
     _grid(svc, "r1")
-    svc.set_slam_graph("r1", {"in_common_frame": True, "inter_robot": [{"other": "r0"}]})
+    svc.set_slam_graph(
+        "r1", {"in_common_frame": True, "inter_robot": [{"other": "r0"}]}
+    )
     svc.set_cslam_origin("r1", 2.0, -1.0, math.pi / 2, "robot0_map")
     assert svc.transforms["r1"] == pytest.approx((2.0, -1.0, math.pi / 2))
 
@@ -1162,8 +1232,9 @@ def test_disjoint_cslam_clusters_are_not_overlaid():
     svc.set_mode("cslam")
     for rid in ("r0", "r1", "r2"):
         _grid(svc, rid)
-        svc.set_slam_graph(rid, {"in_common_frame": True,
-                                 "inter_robot": [{"other": "other"}]})
+        svc.set_slam_graph(
+            rid, {"in_common_frame": True, "inter_robot": [{"other": "other"}]}
+        )
     # r0 and r1 met each other; r2 is its own island.
     svc.set_cslam_origin("r0", 0.0, 0.0, 0.0, "robot0_map")
     svc.set_cslam_origin("r1", 1.0, 0.0, 0.0, "robot0_map")
@@ -1179,7 +1250,9 @@ def test_cslam_membership_still_requires_a_loop_closure():
     svc.set_mode("cslam")
     _grid(svc, "r0")
     _grid(svc, "r1")
-    svc.set_slam_graph("r0", {"in_common_frame": True, "inter_robot": [{"other": "r1"}]})
+    svc.set_slam_graph(
+        "r0", {"in_common_frame": True, "inter_robot": [{"other": "r1"}]}
+    )
     svc.set_slam_graph("r1", {"in_common_frame": False, "inter_robot": []})
     svc.set_cslam_origin("r0", 0.0, 0.0, 0.0, "robot0_map")
     svc.set_cslam_origin("r1", 3.0, 0.0, 0.0, "robot0_map")
@@ -1350,9 +1423,9 @@ def test_reset_waits_for_adapters_before_clearing_the_map():
                     break
             assert app_module._reset_pending == {"r0"}
             assert any(m["type"] == "reset" for m in sink.messages)
-            assert "r0" in map_service.robot_grids, (
-                "map cleared before the adapter confirmed — this is the race"
-            )
+            assert (
+                "r0" in map_service.robot_grids
+            ), "map cleared before the adapter confirmed — this is the race"
 
             # Now the adapter reports in, exactly as adapter_sim does.
             app_module._reset_pending.discard("r0")
@@ -1403,9 +1476,9 @@ def test_reset_is_never_sent_to_a_robot_without_the_capability():
 
         result = asyncio.run(scenario())
 
-        assert [m["type"] for m in hardware.messages] == [], (
-            "a hardware adapter was sent a reset"
-        )
+        assert [
+            m["type"] for m in hardware.messages
+        ] == [], "a hardware adapter was sent a reset"
         assert any(m["type"] == "reset" for m in sim.messages)
         assert result["skipped"] == ["duckie_0"]
     finally:
@@ -1586,7 +1659,9 @@ def test_raising_a_floor_hides_existing_markers_and_lowering_it_brings_them_back
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 ad.send_json(
                     {
                         "type": "hello",
@@ -1625,7 +1700,9 @@ def test_a_per_robot_floor_leaves_the_rest_of_the_fleet_alone():
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 for robot_id in ("r0", "r1"):
                     ad.send_json(
                         {
@@ -1658,7 +1735,9 @@ def test_visibility_is_judged_on_best_score_not_the_latest_one():
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 ad.send_json(
                     {
                         "type": "hello",
@@ -1694,7 +1773,11 @@ def test_a_frozen_camera_is_reported_while_the_robot_is_still_online():
     """
     import time
 
-    from swarmdeck_server.api.app import CAMERA_STALE_S, _camera_frames, frozen_camera_message
+    from swarmdeck_server.api.app import (
+        CAMERA_STALE_S,
+        _camera_frames,
+        frozen_camera_message,
+    )
 
     app_registry.robots.clear()
     _camera_frames.clear()
@@ -1726,7 +1809,10 @@ def test_camera_uploads_follow_whoever_is_watching():
     """Camera frames are ~73 KB against 0.4 KB of telemetry, and at most one
     robot is ever on screen. Robots are told when nobody is looking."""
     from swarmdeck_server.api.app import (
-        _camera_watchers, camera_is_watched, handle_gui_message, set_camera_watch,
+        _camera_watchers,
+        camera_is_watched,
+        handle_gui_message,
+        set_camera_watch,
     )
 
     class Sink:
@@ -1794,8 +1880,12 @@ def test_a_reconnecting_adapter_is_told_nobody_is_watching():
         with TestClient(app) as c:
             with c.websocket_connect("/adapter") as ad:
                 ad.send_json(
-                    {"type": "hello", "protocol": 2, "robot_id": "r0",
-                     "coordinate_frame": "merged"}
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
                 )
                 seen = [ad.receive_json() for _ in range(2)]
                 interest = [m for m in seen if m.get("type") == "camera_interest"]
@@ -1817,22 +1907,34 @@ def test_a_located_detection_reaches_the_operators_review_queue():
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 # Every GUI socket is handed a review snapshot on connect;
                 # swallow it so the assertions below read the ingest broadcast.
                 assert _drain_for(gui, "detection_review")["proposals"] == []
                 ad.send_json(
-                    {"type": "hello", "protocol": 2, "robot_id": "r0",
-                     "coordinate_frame": "merged"}
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
                 )
                 ad.send_json(
                     {
-                        "type": "detections", "robot_id": "r0", "camera": "front",
-                        "items": [{
-                            "id": "rubber_duck_0", "class": "rubber_duck", "score": 0.9,
-                            "bbox": [0.1, 0.2, 0.3, 0.4],
-                            "map_position": {"x": 2.0, "y": 1.0},
-                        }],
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "rubber_duck_0",
+                                "class": "rubber_duck",
+                                "score": 0.9,
+                                "bbox": [0.1, 0.2, 0.3, 0.4],
+                                "map_position": {"x": 2.0, "y": 1.0},
+                            }
+                        ],
                     }
                 )
                 state = _drain_for(gui, "detection_review")
@@ -1843,7 +1945,9 @@ def test_a_located_detection_reaches_the_operators_review_queue():
                 assert proposal["position"] == {"x": 2.0, "y": 1.0}
                 assert proposal["robot_ids"] == ["r0"]
 
-                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                gui.send_json(
+                    {"type": "detection_accept", "proposal_id": proposal["id"]}
+                )
                 after = _drain_for(gui, "detection_review")
                 assert not after["proposals"]
                 assert len(after["entities"]) == 1
@@ -1860,48 +1964,96 @@ def test_an_accepted_object_stops_asking_and_recentres_on_new_evidence():
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 assert _drain_for(gui, "detection_review")["proposals"] == []
                 ad.send_json(
-                    {"type": "hello", "protocol": 2, "robot_id": "r0",
-                     "coordinate_frame": "merged"}
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
                 )
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "front",
-                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.9,
-                                "map_position": {"x": 0.0, "y": 0.0}}]}
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "d0",
+                                "class": "rubber_duck",
+                                "score": 0.9,
+                                "map_position": {"x": 0.0, "y": 0.0},
+                            }
+                        ],
+                    }
                 )
                 proposal = _drain_for(gui, "detection_review")["proposals"][0]
-                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                gui.send_json(
+                    {"type": "detection_accept", "proposal_id": proposal["id"]}
+                )
                 _drain_for(gui, "detection_review")
 
                 # Seen again from the SAME pose. Inside `same_radius`, so it is
                 # folded rather than queued — but it is the same measurement
                 # repeated, so it must not drag the centroid.
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "rear",
-                     "items": [{"id": "d9", "class": "rubber_duck", "score": 0.8,
-                                "map_position": {"x": 0.4, "y": 0.0}}]}
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "rear",
+                        "items": [
+                            {
+                                "id": "d9",
+                                "class": "rubber_duck",
+                                "score": 0.8,
+                                "map_position": {"x": 0.4, "y": 0.0},
+                            }
+                        ],
+                    }
                 )
                 _drain_for(gui, "detection")  # the raw track still flows
 
                 held = review_store.snapshot()["entities"][0]
-                assert held["position"] == {"x": 0.0, "y": 0.0}, "a parked robot moved it"
+                assert held["position"] == {
+                    "x": 0.0,
+                    "y": 0.0,
+                }, "a parked robot moved it"
                 assert held["observations"] == 1 and held["sightings"] == 2
 
                 # Now the robot has driven somewhere else and looked again.
                 # That is a genuinely new viewpoint and does refine the position.
-                ad.send_json({"type": "robot_state", "robot_id": "r0",
-                              "pose": {"x": 3.0, "y": 0.0, "yaw": 0.0}})
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "front",
-                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.8,
-                                "map_position": {"x": 0.4, "y": 0.0}}]}
+                    {
+                        "type": "robot_state",
+                        "robot_id": "r0",
+                        "pose": {"x": 3.0, "y": 0.0, "yaw": 0.0},
+                    }
+                )
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "d0",
+                                "class": "rubber_duck",
+                                "score": 0.8,
+                                "map_position": {"x": 0.4, "y": 0.0},
+                            }
+                        ],
+                    }
                 )
                 _drain_for(gui, "detection")
 
                 snapshot = review_store.snapshot()
-                assert not snapshot["proposals"], "an object on the map must not ask again"
+                assert not snapshot[
+                    "proposals"
+                ], "an object on the map must not ask again"
                 assert len(snapshot["entities"]) == 1
                 # Mean of the two distinct viewpoints, not of every frame.
                 assert snapshot["entities"][0]["position"] == {"x": 0.2, "y": 0.0}
@@ -1927,17 +2079,37 @@ def test_confirmed_objects_survive_a_restart(tmp_path, monkeypatch):
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 _drain_for(gui, "detection_review")
-                ad.send_json({"type": "hello", "protocol": 2, "robot_id": "r0",
-                              "coordinate_frame": "merged"})
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "front",
-                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.9,
-                                "map_position": {"x": 4.0, "y": -2.0}}]}
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "d0",
+                                "class": "rubber_duck",
+                                "score": 0.9,
+                                "map_position": {"x": 4.0, "y": -2.0},
+                            }
+                        ],
+                    }
                 )
                 proposal = _drain_for(gui, "detection_review")["proposals"][0]
-                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                gui.send_json(
+                    {"type": "detection_accept", "proposal_id": proposal["id"]}
+                )
                 accepted = _drain_for(gui, "detection_review")["entities"][0]
 
         assert (tmp_path / "detections.json").exists(), "accept did not persist"
@@ -1966,17 +2138,37 @@ def test_deleting_a_confirmed_object_is_persisted_immediately(tmp_path, monkeypa
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 _drain_for(gui, "detection_review")
-                ad.send_json({"type": "hello", "protocol": 2, "robot_id": "r0",
-                              "coordinate_frame": "merged"})
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "front",
-                     "items": [{"id": "d0", "class": "rubber_duck", "score": 0.9,
-                                "map_position": {"x": 1.0, "y": 1.0}}]}
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "d0",
+                                "class": "rubber_duck",
+                                "score": 0.9,
+                                "map_position": {"x": 1.0, "y": 1.0},
+                            }
+                        ],
+                    }
                 )
                 proposal = _drain_for(gui, "detection_review")["proposals"][0]
-                gui.send_json({"type": "detection_accept", "proposal_id": proposal["id"]})
+                gui.send_json(
+                    {"type": "detection_accept", "proposal_id": proposal["id"]}
+                )
                 entity = _drain_for(gui, "detection_review")["entities"][0]
 
                 gui.send_json({"type": "detection_forget", "entity_id": entity["id"]})
@@ -1999,22 +2191,46 @@ def test_clearing_proposals_and_deleting_all_via_websocket(tmp_path, monkeypatch
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect("/adapter") as ad:
+            with c.websocket_connect("/ws") as gui, c.websocket_connect(
+                "/adapter"
+            ) as ad:
                 _drain_for(gui, "detection_review")
-                ad.send_json({"type": "hello", "protocol": 2, "robot_id": "r0",
-                              "coordinate_frame": "merged"})
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "front",
-                     "items": [
-                         {"id": "d0", "class": "rubber_duck", "score": 0.9, "map_position": {"x": 1.0, "y": 1.0}},
-                         {"id": "d1", "class": "wooden_block", "score": 0.9, "map_position": {"x": 5.0, "y": 5.0}},
-                     ]}
+                    {
+                        "type": "hello",
+                        "protocol": 2,
+                        "robot_id": "r0",
+                        "coordinate_frame": "merged",
+                    }
+                )
+                ad.send_json(
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "d0",
+                                "class": "rubber_duck",
+                                "score": 0.9,
+                                "map_position": {"x": 1.0, "y": 1.0},
+                            },
+                            {
+                                "id": "d1",
+                                "class": "wooden_block",
+                                "score": 0.9,
+                                "map_position": {"x": 5.0, "y": 5.0},
+                            },
+                        ],
+                    }
                 )
                 props = _drain_for(gui, "detection_review")["proposals"]
                 assert len(props) == 2
 
                 # Accept first proposal
-                gui.send_json({"type": "detection_accept", "proposal_id": props[0]["id"]})
+                gui.send_json(
+                    {"type": "detection_accept", "proposal_id": props[0]["id"]}
+                )
                 rev = _drain_for(gui, "detection_review")
                 assert len(rev["entities"]) == 1
                 assert len(rev["proposals"]) == 1
@@ -2027,8 +2243,19 @@ def test_clearing_proposals_and_deleting_all_via_websocket(tmp_path, monkeypatch
 
                 # Send a fresh detection
                 ad.send_json(
-                    {"type": "detections", "robot_id": "r0", "camera": "front",
-                     "items": [{"id": "d2", "class": "disc_cone", "score": 0.85, "map_position": {"x": 8.0, "y": 8.0}}]}
+                    {
+                        "type": "detections",
+                        "robot_id": "r0",
+                        "camera": "front",
+                        "items": [
+                            {
+                                "id": "d2",
+                                "class": "disc_cone",
+                                "score": 0.85,
+                                "map_position": {"x": 8.0, "y": 8.0},
+                            }
+                        ],
+                    }
                 )
                 rev = _drain_for(gui, "detection_review")
                 assert len(rev["entities"]) == 1
@@ -2121,9 +2348,9 @@ def test_exploration_is_never_sent_to_a_robot_without_the_capability():
     try:
         asyncio.run(app_module.handle_gui_message({"type": "start_explore"}))
 
-        assert [m["type"] for m in hardware.messages] == [], (
-            "a hardware adapter was asked to explore"
-        )
+        assert [
+            m["type"] for m in hardware.messages
+        ] == [], "a hardware adapter was asked to explore"
         explore = [m for m in sim.messages if m["type"] == "explore"]
         assert len(explore) == 1
         assert explore[0]["enabled"] is True

@@ -16,7 +16,6 @@ from .detection import (
 )
 from ..detect.review import DEFAULT_ASK_RADIUS_M, DEFAULT_SAME_RADIUS_M
 
-
 MAX_ROBOTS = 8
 # How the dashboard draws its manual-drive control.  "arrows" is a four-button
 # pad, one direction per button, which is what a gloved finger on a tablet can
@@ -25,8 +24,14 @@ MAX_ROBOTS = 8
 DRIVE_CONTROL_MODES = ("arrows", "joystick")
 DEFAULT_DRIVE_CONTROL_MODE = "arrows"
 DEFAULT_COLORS = [
-    "#007aff", "#8944ab", "#008f87", "#c93400",
-    "#d30f72", "#b26a00", "#5865f2", "#2d8a3f",
+    "#007aff",
+    "#8944ab",
+    "#008f87",
+    "#c93400",
+    "#d30f72",
+    "#b26a00",
+    "#5865f2",
+    "#2d8a3f",
 ]
 # Named hardware robots get a stable DEFAULT colour regardless of list index,
 # so `aslan_0` is the same orange on every deployment without anyone choosing
@@ -69,7 +74,9 @@ def disabled_robot_ids(settings: dict[str, Any]) -> set[str]:
     return {
         str(robot["id"])
         for robot in settings.get("robots") or []
-        if isinstance(robot, dict) and robot.get("id") and not robot.get("enabled", True)
+        if isinstance(robot, dict)
+        and robot.get("id")
+        and not robot.get("enabled", True)
     }
 
 
@@ -159,10 +166,20 @@ class SettingsStore:
         # `ask` must stay at or above `same`, or the ambiguous band inverts and
         # every sighting past the fold-in radius looks like a brand new object.
         try:
-            same = max(0.05, min(5.0, float(
-                source.get("detection_same_radius_m", DEFAULT_SAME_RADIUS_M))))
-            ask = max(0.05, min(10.0, float(
-                source.get("detection_ask_radius_m", DEFAULT_ASK_RADIUS_M))))
+            same = max(
+                0.05,
+                min(
+                    5.0,
+                    float(source.get("detection_same_radius_m", DEFAULT_SAME_RADIUS_M)),
+                ),
+            )
+            ask = max(
+                0.05,
+                min(
+                    10.0,
+                    float(source.get("detection_ask_radius_m", DEFAULT_ASK_RADIUS_M)),
+                ),
+            )
             base["detection_same_radius_m"] = round(same, 2)
             base["detection_ask_radius_m"] = round(max(same, ask), 2)
         except (TypeError, ValueError):
@@ -202,11 +219,13 @@ class SettingsStore:
                 # nothing. Adapters dial the backend and declare what they are
                 # at `hello`, so both were a second source of truth that could
                 # only ever disagree with the robot. Dropped rather than wired.
-                clean.append({
-                    "id": robot_id,
-                    "enabled": bool(item.get("enabled", True)),
-                    "color": color,
-                })
+                clean.append(
+                    {
+                        "id": robot_id,
+                        "enabled": bool(item.get("enabled", True)),
+                        "color": color,
+                    }
+                )
             if clean:
                 base["robots"] = clean
                 base["robot_count"] = min(base["robot_count"], len(clean))
@@ -214,11 +233,13 @@ class SettingsStore:
         # Grow sequential defaults when the requested count exceeds the list.
         while len(base["robots"]) < base["robot_count"]:
             index = len(base["robots"])
-            base["robots"].append({
-                "id": f"robot_{index}",
-                "enabled": True,
-                "color": default_color(f"robot_{index}", index),
-            })
+            base["robots"].append(
+                {
+                    "id": f"robot_{index}",
+                    "enabled": True,
+                    "color": default_color(f"robot_{index}", index),
+                }
+            )
         return base
 
     def save(self, raw: Any) -> dict[str, Any]:

@@ -37,9 +37,7 @@ class OdometryTfBridge(Node):
         self._parent_frame = str(self.get_parameter("parent_frame").value)
         self._child_frame = str(self.get_parameter("child_frame").value)
         self._planar = bool(self.get_parameter("planar").value)
-        self._use_receive_time = bool(
-            self.get_parameter("use_receive_time").value
-        )
+        self._use_receive_time = bool(self.get_parameter("use_receive_time").value)
         self._broadcaster = TransformBroadcaster(self)
         self.create_subscription(
             Odometry,

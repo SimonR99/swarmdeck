@@ -73,3 +73,21 @@ def test_map_service_network_grid_follows_map_reset():
     service.ingest_network_sample("r0", 0.0, 0.0, 50.0)
     service.reset_robot("r0")
     assert service.network_snapshot("r0") is None
+
+
+def test_network_grid_adapts_to_changed_quality_when_stationary():
+    grid = NetworkGridAccumulator(0.0, 0.0, resolution=0.5, size_m=4.0, radius_m=0.6)
+    # Simulate stationary robot receiving 100 samples at 90% quality
+    for _ in range(100):
+        grid.integrate(0.0, 0.0, 90.0)
+
+    gx = int((0.0 - grid.meta.origin_x) / grid.meta.resolution)
+    gy = int((0.0 - grid.meta.origin_y) / grid.meta.resolution)
+    assert grid.quality_grid()[gy, gx] == 90
+
+    # Signal degrades to 20%; thanks to weight clamping, the grid converges quickly
+    for _ in range(25):
+        grid.integrate(0.0, 0.0, 20.0)
+
+    # Within 25 samples it should have updated significantly towards 20%
+    assert grid.quality_grid()[gy, gx] <= 35

@@ -10,6 +10,7 @@ import pytest
 
 from adapters.keyframe_producer import (
     KeyframeUploader,
+    mint_session,
     laser_scan_to_map_points,
     points_lidar_to_map,
     points_map_to_base,
@@ -21,9 +22,9 @@ from swarmdeck_protocol import decode_keyframe, peek_keyframe_header
 
 def _wall(n: int = 30) -> np.ndarray:
     xs, ys = np.meshgrid(np.linspace(1.0, 5.0, n), np.linspace(-2.0, 2.0, n))
-    return np.stack(
-        [xs.ravel(), ys.ravel(), np.full(xs.size, 0.5)], axis=1
-    ).astype(np.float32)
+    return np.stack([xs.ravel(), ys.ravel(), np.full(xs.size, 0.5)], axis=1).astype(
+        np.float32
+    )
 
 
 def test_peek_header_does_not_require_a_valid_body():
@@ -133,3 +134,68 @@ def test_a_planar_scan_becomes_a_thickened_map_cloud():
     zs = set(np.round(points[:, 2], 2).tolist())
     assert any(math.isclose(z, 0.5, abs_tol=0.02) for z in zs)
     assert any(math.isclose(z, 0.62, abs_tol=0.02) for z in zs)
+
+
+def test_every_keyframe_of_one_run_carries_the_same_session():
+    """``seq`` alone cannot identify a keyframe -- it restarts at zero every
+    time this process does, and the back-end drops the repeats as duplicates.
+    The session is what makes ``(robot_id, session, seq)`` unique, so it has to
+    be minted once and then never move for the life of the uploader."""
+    uploader = KeyframeUploader("botman_0", "http://backend", min_period_s=0.0)
+    assert uploader.session
+
+    sessions = []
+    for i in range(3):
+        assert uploader.consider(
+            _wall(), pose7_from_xy_yaw(float(i), 0.0, 0.0), float(i)
+        )
+        sessions.append(peek_keyframe_header(uploader._queue[-1])["session"])
+    assert sessions == [uploader.session] * 3
+
+    seqs = [decode_keyframe(blob).seq for blob in uploader._queue]
+    assert seqs == sorted(set(seqs)), "seq must stay unique inside one session"
+
+
+def test_a_restarted_uploader_mints_a_different_session():
+    """The reboot case, which is the whole point: same robot, same seq
+    counter starting again from zero, and the only thing that says so is this
+    field."""
+    first = KeyframeUploader("botman_0", "http://backend", min_period_s=0.0)
+    assert first.consider(_wall(), pose7_from_xy_yaw(0.0, 0.0, 0.0), 0.0)
+    second = KeyframeUploader("botman_0", "http://backend", min_period_s=0.0)
+    assert second.consider(_wall(), pose7_from_xy_yaw(0.0, 0.0, 0.0), 100.0)
+
+    a, b = decode_keyframe(first._queue[0]), decode_keyframe(second._queue[0])
+    assert a.seq == b.seq == 0
+    assert a.robot_id == b.robot_id
+    assert a.session != b.session
+    assert a.trajectory != b.trajectory
+
+
+def test_a_minted_session_is_wire_legal():
+    """It ends up in query strings and scope names, so the protocol restricts
+    the characters -- an id this function minted must always pass."""
+    from swarmdeck_protocol import MAX_SESSION_CHARS, encode_keyframe
+
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    for _ in range(5):
+        session = mint_session()
+        assert len(session) <= MAX_SESSION_CHARS
+        assert not set(session) - allowed
+        encode_keyframe(
+            robot_id="botman_0",
+            seq=0,
+            stamp=0.0,
+            points=_wall(),
+            t_odom_base=pose7_from_xy_yaw(0.0, 0.0, 0.0),
+            session=session,
+        )
+    assert len({mint_session() for _ in range(50)}) == 50
+
+
+def test_an_explicit_session_overrides_the_minted_one():
+    uploader = KeyframeUploader(
+        "botman_0", "http://backend", min_period_s=0.0, session="named-run"
+    )
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0.0, 0.0, 0.0), 0.0)
+    assert decode_keyframe(uploader._queue[0]).session == "named-run"

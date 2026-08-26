@@ -56,7 +56,9 @@ ODOM_INFORMATION = np.eye(6) * 400.0
 SAME_PLACE_M = 4.0
 
 
-def _run_pipeline(fleet: list[synthetic.SyntheticRobot]) -> tuple[OptimizedGraph, list[Keyframe], int, int]:
+def _run_pipeline(
+    fleet: list[synthetic.SyntheticRobot],
+) -> tuple[OptimizedGraph, list[Keyframe], int, int]:
     """Drive the full stack over a fleet; return the result and closure counts.
 
     Descriptors are added to the index *after* each keyframe is queried, which is
@@ -87,7 +89,9 @@ def _run_pipeline(fleet: list[synthetic.SyntheticRobot]) -> tuple[OptimizedGraph
         descriptor = scan_context_descriptor(keyframe.points)
         for candidate in index.query(descriptor, k=3, query_id=keyframe.id):
             target = next(k for k in keyframes if k.id == candidate.keyframe_id)
-            edge = verify_candidate(source=keyframe, target=target, yaw_prior=candidate.yaw)
+            edge = verify_candidate(
+                source=keyframe, target=target, yaw_prior=candidate.yaw
+            )
             if edge is None:
                 continue
             graph.add_edge(edge)
@@ -99,7 +103,9 @@ def _run_pipeline(fleet: list[synthetic.SyntheticRobot]) -> tuple[OptimizedGraph
 
 
 @pytest.fixture(scope="module")
-def shared_building() -> tuple[OptimizedGraph, list[Keyframe], list[synthetic.SyntheticRobot]]:
+def shared_building() -> (
+    tuple[OptimizedGraph, list[Keyframe], list[synthetic.SyntheticRobot]]
+):
     _, fleet = synthetic.two_robot_fleet()
     optimized, keyframes, _, _ = _run_pipeline(fleet)
     return optimized, keyframes, fleet
@@ -180,7 +186,9 @@ def test_optimization_does_not_catastrophically_diverge(shared_building) -> None
 
     before = ev.compute_ate(odometry, truth).translation_m.rmse
     after = ev.compute_ate(optimized.poses, truth).translation_m.rmse
-    assert after < before * 3.0, f"ATE degraded {after / before:.1f}x -- solver divergence, not miscalibration"
+    assert (
+        after < before * 3.0
+    ), f"ATE degraded {after / before:.1f}x -- solver divergence, not miscalibration"
 
 
 def test_true_correspondences_are_recovered_to_centimetres() -> None:
@@ -198,17 +206,26 @@ def test_true_correspondences_are_recovered_to_centimetres() -> None:
 
     errors = []
     for keyframe in beta.keyframes:
-        for candidate in index.query(scan_context_descriptor(keyframe.points), k=3, query_id=keyframe.id):
+        for candidate in index.query(
+            scan_context_descriptor(keyframe.points), k=3, query_id=keyframe.id
+        ):
             target = next(k for k in alpha.keyframes if k.id == candidate.keyframe_id)
-            if se3_distance(beta.truth[keyframe.id], alpha.truth[target.id])[0] >= SAME_PLACE_M:
+            if (
+                se3_distance(beta.truth[keyframe.id], alpha.truth[target.id])[0]
+                >= SAME_PLACE_M
+            ):
                 continue
-            edge = verify_candidate(source=keyframe, target=target, yaw_prior=candidate.yaw)
+            edge = verify_candidate(
+                source=keyframe, target=target, yaw_prior=candidate.yaw
+            )
             if edge is None:
                 continue
             expected = se3_relative(beta.truth[edge.src], alpha.truth[edge.dst])
             errors.append(se3_distance(edge.t_src_dst, expected)[0])
 
-    assert len(errors) >= 10, "fixture should produce a usable number of true correspondences"
+    assert (
+        len(errors) >= 10
+    ), "fixture should produce a usable number of true correspondences"
     accurate = [e for e in errors if e < 0.30]
     # Not all of them: Scan Context aliases a corridor viewed from opposite ends,
     # which yields an occasional 180-degree flip. That is a real property of the
@@ -249,4 +266,6 @@ def test_unmerged_robots_render_to_separate_grids() -> None:
 
     assert len(grids) == 2
     for grid in grids.values():
-        assert (grid.cells == 100).any(), "each component must render real occupied cells"
+        assert (
+            grid.cells == 100
+        ).any(), "each component must render real occupied cells"

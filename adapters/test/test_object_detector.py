@@ -60,9 +60,21 @@ def test_yoloe_client_posts_jpeg_and_suppresses_duplicate_boxes(monkeypatch):
         return Response(
             {
                 "detections": [
-                    {"class": "rubber_duck", "bbox": [0.10, 0.20, 0.20, 0.30], "score": 0.91},
-                    {"class": "rubber_duck", "bbox": [0.105, 0.205, 0.195, 0.295], "score": 0.72},
-                    {"class": "wooden_block", "bbox": [0.60, 0.50, 0.15, 0.20], "score": 0.84},
+                    {
+                        "class": "rubber_duck",
+                        "bbox": [0.10, 0.20, 0.20, 0.30],
+                        "score": 0.91,
+                    },
+                    {
+                        "class": "rubber_duck",
+                        "bbox": [0.105, 0.205, 0.195, 0.295],
+                        "score": 0.72,
+                    },
+                    {
+                        "class": "wooden_block",
+                        "bbox": [0.60, 0.50, 0.15, 0.20],
+                        "score": 0.84,
+                    },
                 ]
             }
         )
@@ -75,9 +87,9 @@ def test_yoloe_client_posts_jpeg_and_suppresses_duplicate_boxes(monkeypatch):
     assert [item.label for item in detections] == ["rubber_duck", "wooden_block"]
     assert captured["request"].full_url == "http://detector:8091/detect"
     assert captured["request"].headers["Content-type"] == "image/jpeg"
-    assert float(captured["request"].headers["X-swarmdeck-confidence"]) == pytest.approx(
-        0.2475
-    )
+    assert float(
+        captured["request"].headers["X-swarmdeck-confidence"]
+    ) == pytest.approx(0.2475)
     assert captured["request"].headers["X-swarmdeck-classes"] == ",".join(CLASS_NAMES)
     floors_header = captured["request"].headers["X-swarmdeck-class-floors"]
     assert floors_header == format_class_floors(default_class_floors(), CLASS_NAMES)
@@ -151,8 +163,16 @@ def test_unknown_classes_from_the_sidecar_are_dropped(monkeypatch):
         lambda *_a, **_k: Response(
             {
                 "detections": [
-                    {"class": "loch_ness_monster", "bbox": [0.1, 0.1, 0.2, 0.2], "score": 0.99},
-                    {"class": "pool_noodle", "bbox": [0.5, 0.5, 0.2, 0.2], "score": 0.60},
+                    {
+                        "class": "loch_ness_monster",
+                        "bbox": [0.1, 0.1, 0.2, 0.2],
+                        "score": 0.99,
+                    },
+                    {
+                        "class": "pool_noodle",
+                        "bbox": [0.5, 0.5, 0.2, 0.2],
+                        "score": 0.60,
+                    },
                 ]
             }
         ),

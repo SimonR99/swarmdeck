@@ -53,7 +53,9 @@ def _truth_poses(robots):
 
 def _drifted_poses(robots):
     return {
-        kf.id: robot.t_world_map_true @ kf.t_odom_base for robot in robots for kf in robot.keyframes
+        kf.id: robot.t_world_map_true @ kf.t_odom_base
+        for robot in robots
+        for kf in robot.keyframes
     }
 
 
@@ -144,7 +146,9 @@ def test_drifted_odometry_blurs_the_wall(fleet, truth_grid):
     _, robots = fleet
     graph = _graph(robots, _drifted_poses(robots), _merged_component(robots))
     cfg = RenderConfig(native_map_resolution=RESOLUTION)
-    drift_grid = next(iter(render_occupancy(graph, _all_keyframes(robots), cfg).values()))
+    drift_grid = next(
+        iter(render_occupancy(graph, _all_keyframes(robots), cfg).values())
+    )
 
     def wall_x_dispersion(grid: RenderedGrid) -> tuple[float, int]:
         xs = grid.origin_x + (np.arange(grid.width) + 0.5) * grid.resolution
@@ -153,13 +157,21 @@ def test_drifted_odometry_blurs_the_wall(fleet, truth_grid):
         occupied = grid.cells == OCCUPIED
         # A band around the true wall (x=0), away from corners where two
         # walls' returns would legitimately mix.
-        band = occupied & (x_grid >= -1.0) & (x_grid <= 1.0) & (y_grid >= 2.0) & (y_grid <= 22.0)
+        band = (
+            occupied
+            & (x_grid >= -1.0)
+            & (x_grid <= 1.0)
+            & (y_grid >= 2.0)
+            & (y_grid <= 22.0)
+        )
         return float(x_grid[band].std()), int(band.sum())
 
     truth_std, truth_count = wall_x_dispersion(truth_grid)
     drift_std, drift_count = wall_x_dispersion(drift_grid)
 
-    assert truth_std <= 0.5 * RESOLUTION + 1e-9  # ground truth: essentially one cell wide
+    assert (
+        truth_std <= 0.5 * RESOLUTION + 1e-9
+    )  # ground truth: essentially one cell wide
     assert drift_std > 2.5 * truth_std  # drifted: measurably smeared across many
     assert drift_count > 1.5 * truth_count  # more cells lit up painting the same wall
 
@@ -177,9 +189,13 @@ def test_height_band_excludes_returns_outside_it(fleet):
     graph = _graph(robots, _truth_poses(robots), _merged_component(robots))
     keyframes = _all_keyframes(robots)
 
-    full_band = RenderConfig(min_z=0.0, max_z=WALL_HEIGHT, native_map_resolution=RESOLUTION)
+    full_band = RenderConfig(
+        min_z=0.0, max_z=WALL_HEIGHT, native_map_resolution=RESOLUTION
+    )
     narrow_band = RenderConfig(min_z=0.05, max_z=0.15, native_map_resolution=RESOLUTION)
-    outside_band = RenderConfig(min_z=10.0, max_z=20.0, native_map_resolution=RESOLUTION)
+    outside_band = RenderConfig(
+        min_z=10.0, max_z=20.0, native_map_resolution=RESOLUTION
+    )
 
     full_grid = next(iter(render_occupancy(graph, keyframes, full_band).values()))
     narrow_grid = next(iter(render_occupancy(graph, keyframes, narrow_band).values()))
@@ -206,7 +222,12 @@ def test_floor_z_offsets_the_band(fleet):
     keyframes = _all_keyframes(robots)
 
     baseline = RenderConfig(min_z=0.05, max_z=0.15, native_map_resolution=RESOLUTION)
-    offset = RenderConfig(floor_z=1.0, min_z=0.05 - 1.0, max_z=0.15 - 1.0, native_map_resolution=RESOLUTION)
+    offset = RenderConfig(
+        floor_z=1.0,
+        min_z=0.05 - 1.0,
+        max_z=0.15 - 1.0,
+        native_map_resolution=RESOLUTION,
+    )
 
     baseline_grid = next(iter(render_occupancy(graph, keyframes, baseline).values()))
     offset_grid = next(iter(render_occupancy(graph, keyframes, offset).values()))
@@ -254,7 +275,9 @@ def test_max_cells_cap_coarsens_resolution_not_bounds(fleet):
     graph = _graph(robots, _truth_poses(robots), _merged_component(robots))
     keyframes = _all_keyframes(robots)
 
-    uncapped = RenderConfig(native_map_resolution=RESOLUTION, native_map_max_cells=8_000_000)
+    uncapped = RenderConfig(
+        native_map_resolution=RESOLUTION, native_map_max_cells=8_000_000
+    )
     capped = RenderConfig(native_map_resolution=0.01, native_map_max_cells=2_000)
 
     uncapped_grid = next(iter(render_occupancy(graph, keyframes, uncapped).values()))
@@ -285,12 +308,19 @@ def test_render_scales_to_a_realistic_keyframe_count():
     """
     scene = make_scene(0)
     alpha = simulate_robot(
-        scene, "alpha", [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
-        seed=1, n_keyframes=150,
+        scene,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        seed=1,
+        n_keyframes=150,
     )
     beta = simulate_robot(
-        scene, "beta", [(6.0, 12.0), (20.0, 12.0), (22.0, 20.0), (8.0, 18.0), (6.0, 12.0)],
-        seed=2, n_keyframes=150, start_in_world=yaw_pose(0.0, 0.0, 0.0),
+        scene,
+        "beta",
+        [(6.0, 12.0), (20.0, 12.0), (22.0, 20.0), (8.0, 18.0), (6.0, 12.0)],
+        seed=2,
+        n_keyframes=150,
+        start_in_world=yaw_pose(0.0, 0.0, 0.0),
     )
     robots = [alpha, beta]
     keyframes = _all_keyframes(robots)

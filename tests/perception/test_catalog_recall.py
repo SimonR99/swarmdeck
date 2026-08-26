@@ -28,14 +28,15 @@ from pathlib import Path
 
 import pytest
 
-cv2 = pytest.importorskip("cv2", reason="OpenCV is required only inside the duck-detector image")
+cv2 = pytest.importorskip(
+    "cv2", reason="OpenCV is required only inside the duck-detector image"
+)
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from adapters.perception import catalog  # noqa: E402
 from adapters.perception.yoloe_server import YoloeModel  # noqa: E402
-
 
 FIXTURES = REPO / "tests" / "perception" / "fixtures"
 
@@ -73,9 +74,8 @@ def test_reference_photograph_yields_its_own_class(model, frames, stem, expected
     detections = model.detect(frames[stem], scale=1.0, classes=catalog.CLASS_NAMES)
     found = {item.label for item in detections}
 
-    assert expected in found, (
-        f"{stem}.jpg: expected {expected}, got "
-        + (", ".join(f"{d.label}@{d.score:.2f}" for d in detections) or "nothing")
+    assert expected in found, f"{stem}.jpg: expected {expected}, got " + (
+        ", ".join(f"{d.label}@{d.score:.2f}" for d in detections) or "nothing"
     )
 
 
@@ -90,7 +90,9 @@ def test_detections_carry_a_usable_outline(model, frames, stem, expected):
     assert detections, f"{stem}.jpg produced no {expected}"
 
     best = max(detections, key=lambda item: item.score)
-    assert len(best.polygon) >= 3, f"{stem}.jpg: {expected} came back without an outline"
+    assert (
+        len(best.polygon) >= 3
+    ), f"{stem}.jpg: {expected} came back without an outline"
     assert all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in best.polygon)
 
 

@@ -47,7 +47,7 @@ def build_plan() -> np.ndarray:
     g = np.full((N, N), -1, np.int8)
     rect = _rect_fn(g)
     _shell(rect)
-    rect(-2, -8, -1.8, 2)      # asymmetric interior
+    rect(-2, -8, -1.8, 2)  # asymmetric interior
     rect(3, -1, 3.2, 8)
     rect(-8, 3, -2, 3.2)
     rect(4.5, -5, 7.8, -4.8)
@@ -85,7 +85,14 @@ def reframe(g: np.ndarray, dx: float, dy: float, dyaw: float) -> np.ndarray:
 
 @pytest.mark.parametrize(
     "dx,dy,dyaw_deg",
-    [(0, 0, 0), (2.0, -1.5, 0), (0, 0, 35), (3.0, 2.0, -60), (-1.5, 4.0, 120), (2.5, -3.0, 175)],
+    [
+        (0, 0, 0),
+        (2.0, -1.5, 0),
+        (0, 0, 35),
+        (3.0, 2.0, -60),
+        (-1.5, 4.0, 120),
+        (2.5, -3.0, 175),
+    ],
 )
 def test_register_recovers_transform(dx, dy, dyaw_deg):
     ref = build_plan()
@@ -102,7 +109,9 @@ def test_register_recovers_transform(dx, dy, dyaw_deg):
 # yaw is under a degree wide, so a coarse pass that samples on this grid without
 # blurring first misses the true peak entirely and locks onto the square shell's
 # 90 deg symmetry — reporting high confidence and a 90 deg error.
-@pytest.mark.parametrize("dyaw_deg", [2.0, 17.0, 30.0, 45.0, 58.0, 93.0, 137.0, -26.0, -110.0])
+@pytest.mark.parametrize(
+    "dyaw_deg", [2.0, 17.0, 30.0, 45.0, 58.0, 93.0, 137.0, -26.0, -110.0]
+)
 def test_register_survives_yaw_off_the_coarse_grid(dyaw_deg):
     assert not np.any(
         np.isclose(np.arange(-180.0, 180.0, COARSE_STEP), dyaw_deg)
@@ -147,7 +156,7 @@ def test_register_refuses_when_coverage_barely_overlaps():
     ref = build_plan()
     mov = reframe(ref, 0.0, 0.0, math.radians(20.0))
     west = ref.copy()
-    west[:, int((-4.0 - OX) / RES):] = -1
+    west[:, int((-4.0 - OX) / RES) :] = -1
     east = mov.copy()
     east[:, : int((4.0 - OX) / RES)] = -1
 
@@ -207,11 +216,21 @@ def test_the_answer_does_not_depend_on_the_prior_it_was_given():
     # the lock is a previous answer, refined to a fraction of a degree, so a
     # sweep anchored to it lands nowhere near the sweep that produced it.
     distinct = {
-        (round(r.dyaw, 9), round(r.dx, 9), round(r.dy, 9), round(r.ratio, 9), r.confident)
+        (
+            round(r.dyaw, 9),
+            round(r.dx, 9),
+            round(r.dy, 9),
+            round(r.ratio, 9),
+            r.confident,
+        )
         for r in (
             register(
-                ref, (RES, OX, OY), mov, (RES, OX, OY),
-                yaw_prior=math.radians(prior_deg), yaw_window_deg=8.0,
+                ref,
+                (RES, OX, OY),
+                mov,
+                (RES, OX, OY),
+                yaw_prior=math.radians(prior_deg),
+                yaw_window_deg=8.0,
             )
             for prior_deg in (0.0, -0.38, 0.62, 1.7, -2.4, 3.9)
         )
@@ -411,12 +430,24 @@ def test_unambiguous_cloud_places_robot_when_accumulated_grids_barely_overlap(
     import swarmdeck_server.mapsvc.service as service_module
 
     ambiguous = Registration(
-        dx=4.0, dy=4.0, dyaw=math.pi, score=0.1, overlap=20,
-        ratio=0.95, yaw_ratio=0.95, support=0.2,
+        dx=4.0,
+        dy=4.0,
+        dyaw=math.pi,
+        score=0.1,
+        overlap=20,
+        ratio=0.95,
+        yaw_ratio=0.95,
+        support=0.2,
     )
     cloud_proposal = Registration(
-        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
-        ratio=0.3, yaw_ratio=0.3, support=0.2,
+        dx=0.0,
+        dy=0.0,
+        dyaw=0.0,
+        score=0.4,
+        overlap=120,
+        ratio=0.3,
+        yaw_ratio=0.3,
+        support=0.2,
     )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
     monkeypatch.setattr(
@@ -444,12 +475,24 @@ def test_unambiguous_cloud_overrides_a_confident_grid_180_alias(monkeypatch):
     import swarmdeck_server.mapsvc.service as service_module
 
     grid_alias = Registration(
-        dx=4.0, dy=4.0, dyaw=math.pi, score=0.5, overlap=300,
-        ratio=0.4, yaw_ratio=0.2, support=0.85,
+        dx=4.0,
+        dy=4.0,
+        dyaw=math.pi,
+        score=0.5,
+        overlap=300,
+        ratio=0.4,
+        yaw_ratio=0.2,
+        support=0.85,
     )
     cloud_proposal = Registration(
-        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
-        ratio=0.3, yaw_ratio=0.2, support=0.2,
+        dx=0.0,
+        dy=0.0,
+        dyaw=0.0,
+        score=0.4,
+        overlap=120,
+        ratio=0.3,
+        yaw_ratio=0.2,
+        support=0.2,
     )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: grid_alias)
     monkeypatch.setattr(
@@ -479,12 +522,24 @@ def test_grid_alias_is_refused_when_cloud_disagrees_and_2d_vetoes(monkeypatch):
     import swarmdeck_server.mapsvc.service as service_module
 
     grid_alias = Registration(
-        dx=4.0, dy=4.0, dyaw=math.pi, score=0.5, overlap=300,
-        ratio=0.4, yaw_ratio=0.2, support=0.85,
+        dx=4.0,
+        dy=4.0,
+        dyaw=math.pi,
+        score=0.5,
+        overlap=300,
+        ratio=0.4,
+        yaw_ratio=0.2,
+        support=0.85,
     )
     cloud_proposal = Registration(
-        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
-        ratio=0.3, yaw_ratio=0.2, support=0.2,
+        dx=0.0,
+        dy=0.0,
+        dyaw=0.0,
+        score=0.4,
+        overlap=120,
+        ratio=0.3,
+        yaw_ratio=0.2,
+        support=0.2,
     )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: grid_alias)
     monkeypatch.setattr(
@@ -512,8 +567,14 @@ def test_held_180_lock_is_dropped_when_cloud_points_the_other_way(monkeypatch):
     import swarmdeck_server.mapsvc.service as service_module
 
     accepted = Registration(
-        dx=4.0, dy=4.0, dyaw=math.pi, score=0.8, overlap=200,
-        ratio=0.2, yaw_ratio=0.2, support=0.9,
+        dx=4.0,
+        dy=4.0,
+        dyaw=math.pi,
+        score=0.8,
+        overlap=200,
+        ratio=0.2,
+        yaw_ratio=0.2,
+        support=0.9,
     )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: accepted)
 
@@ -524,12 +585,24 @@ def test_held_180_lock_is_dropped_when_cloud_points_the_other_way(monkeypatch):
     assert abs(abs(svc.transforms["r1"][2]) - math.pi) < 0.05
 
     ambiguous = Registration(
-        dx=4.0, dy=4.0, dyaw=math.pi, score=0.17, overlap=90,
-        ratio=0.82, yaw_ratio=0.0, support=0.22,
+        dx=4.0,
+        dy=4.0,
+        dyaw=math.pi,
+        score=0.17,
+        overlap=90,
+        ratio=0.82,
+        yaw_ratio=0.0,
+        support=0.22,
     )
     cloud_proposal = Registration(
-        dx=0.0, dy=0.0, dyaw=0.0, score=0.4, overlap=120,
-        ratio=0.3, yaw_ratio=0.2, support=0.2,
+        dx=0.0,
+        dy=0.0,
+        dyaw=0.0,
+        score=0.4,
+        overlap=120,
+        ratio=0.3,
+        yaw_ratio=0.2,
+        support=0.2,
     )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
     monkeypatch.setattr(
@@ -544,7 +617,9 @@ def test_held_180_lock_is_dropped_when_cloud_points_the_other_way(monkeypatch):
     svc.ingest("r1", meta, cells.copy())
 
     status = svc.status()
-    assert "r1" not in status["global_members"], "180 deg hold must not survive a cloud veto"
+    assert (
+        "r1" not in status["global_members"]
+    ), "180 deg hold must not survive a cloud veto"
     assert status["registrations"]["r1"]["rejection"] == "grid/cloud yaw disagreement"
 
 
@@ -553,7 +628,9 @@ def test_registration_cannot_override_configured_prior(monkeypatch):
     from swarmdeck_server.mapsvc.registration import Registration
     import swarmdeck_server.mapsvc.service as service_module
 
-    wrong = Registration(dx=0.0, dy=0.0, dyaw=math.pi, score=0.6, overlap=300, ratio=0.5)
+    wrong = Registration(
+        dx=0.0, dy=0.0, dyaw=math.pi, score=0.6, overlap=300, ratio=0.5
+    )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: wrong)
 
     svc = MapService(resolution=0.1, size_m=20.0)
@@ -635,10 +712,26 @@ def test_a_marginal_frame_does_not_evict_a_registered_robot(monkeypatch):
     from swarmdeck_server.mapsvc.registration import Registration
     import swarmdeck_server.mapsvc.service as service_module
 
-    wide = Registration(dx=0, dy=0, dyaw=0, score=0.33, overlap=138, ratio=0.679,
-                        yaw_ratio=0.073, support=0.402)
-    narrow = Registration(dx=0, dy=0, dyaw=0, score=0.29, overlap=126, ratio=0.895,
-                          yaw_ratio=0.0, support=0.402)
+    wide = Registration(
+        dx=0,
+        dy=0,
+        dyaw=0,
+        score=0.33,
+        overlap=138,
+        ratio=0.679,
+        yaw_ratio=0.073,
+        support=0.402,
+    )
+    narrow = Registration(
+        dx=0,
+        dy=0,
+        dyaw=0,
+        score=0.29,
+        overlap=126,
+        ratio=0.895,
+        yaw_ratio=0.0,
+        support=0.402,
+    )
     monkeypatch.setattr(
         service_module,
         "register",
@@ -670,8 +763,16 @@ def test_a_robot_that_keeps_matching_ambiguously_is_dropped(monkeypatch):
     from swarmdeck_server.mapsvc.registration import Registration
     import swarmdeck_server.mapsvc.service as service_module
 
-    accepted = Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200, ratio=0.2,
-                            yaw_ratio=0.2, support=0.9)
+    accepted = Registration(
+        dx=0,
+        dy=0,
+        dyaw=0,
+        score=0.8,
+        overlap=200,
+        ratio=0.2,
+        yaw_ratio=0.2,
+        support=0.9,
+    )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: accepted)
 
     svc = MapService(resolution=0.1, size_m=20.0)
@@ -684,13 +785,23 @@ def test_a_robot_that_keeps_matching_ambiguously_is_dropped(monkeypatch):
     svc.ingest("r1", meta, cells)
     assert svc.status()["global_members"] == ["r0", "r1"]
 
-    ambiguous = Registration(dx=0, dy=0, dyaw=0, score=0.1, overlap=20, ratio=0.95,
-                             yaw_ratio=0.95, support=0.2)
+    ambiguous = Registration(
+        dx=0,
+        dy=0,
+        dyaw=0,
+        score=0.1,
+        overlap=20,
+        ratio=0.95,
+        yaw_ratio=0.95,
+        support=0.2,
+    )
     monkeypatch.setattr(service_module, "register", lambda *args, **kwargs: ambiguous)
 
     for _ in range(service_module.REGISTRATION_MISS_LIMIT - 1):
         svc.ingest("r1", meta, cells)
-        assert svc.status()["registrations"]["r1"]["accepted"] is True, "held, not dropped"
+        assert (
+            svc.status()["registrations"]["r1"]["accepted"] is True
+        ), "held, not dropped"
 
     svc.ingest("r1", meta, cells)
     status = svc.status()
@@ -727,8 +838,16 @@ def test_an_upload_does_not_wait_for_registration(monkeypatch):
     import swarmdeck_server.mapsvc.service as service_module
     from swarmdeck_server.mapsvc.registration import Registration
 
-    accepted = Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200,
-                            ratio=0.2, yaw_ratio=0.2, support=0.9)
+    accepted = Registration(
+        dx=0,
+        dy=0,
+        dyaw=0,
+        score=0.8,
+        overlap=200,
+        ratio=0.2,
+        yaw_ratio=0.2,
+        support=0.9,
+    )
 
     def slow_register(*_args, **_kwargs):
         time.sleep(0.5)  # stands in for the real FFT
@@ -789,8 +908,16 @@ def test_a_burst_of_uploads_collapses_to_one_registration(monkeypatch):
 
     def counting_register(*_args, **_kwargs):
         calls.append(1)
-        return Registration(dx=0, dy=0, dyaw=0, score=0.8, overlap=200,
-                            ratio=0.2, yaw_ratio=0.2, support=0.9)
+        return Registration(
+            dx=0,
+            dy=0,
+            dyaw=0,
+            score=0.8,
+            overlap=200,
+            ratio=0.2,
+            yaw_ratio=0.2,
+            support=0.9,
+        )
 
     monkeypatch.setattr(service_module, "register", counting_register)
 
@@ -847,8 +974,16 @@ def test_an_accepted_transform_is_eased_in_once_registered(monkeypatch):
     moved = {"dx": 0.0}
 
     def shifting_register(*_args, **_kwargs):
-        return Registration(dx=moved["dx"], dy=0.0, dyaw=0.0, score=0.8,
-                            overlap=200, ratio=0.2, yaw_ratio=0.2, support=0.9)
+        return Registration(
+            dx=moved["dx"],
+            dy=0.0,
+            dyaw=0.0,
+            score=0.8,
+            overlap=200,
+            ratio=0.2,
+            yaw_ratio=0.2,
+            support=0.9,
+        )
 
     monkeypatch.setattr(service_module, "register", shifting_register)
 
@@ -882,11 +1017,13 @@ def test_z_offset_recovers_a_known_vertical_shift():
 
     rng = np.random.default_rng(0)
     # A floor band, a furniture band and a ceiling band — a real height signature.
-    ref = np.concatenate([
-        rng.normal(-0.6, 0.02, 4000),
-        rng.normal(0.5, 0.15, 3000),
-        rng.normal(2.0, 0.03, 3000),
-    ]).astype(np.float32)
+    ref = np.concatenate(
+        [
+            rng.normal(-0.6, 0.02, 4000),
+            rng.normal(0.5, 0.15, 3000),
+            rng.normal(2.0, 0.03, 3000),
+        ]
+    ).astype(np.float32)
 
     for truth in (-0.25, 0.0, 0.4):
         assert estimate_z_offset(ref, ref - truth) == pytest.approx(

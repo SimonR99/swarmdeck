@@ -20,6 +20,7 @@ import numpy as np
 from swarmdeck_slam.types import (
     Keyframe,
     KeyframeId,
+    TrajectoryId,
     se3_from_quat_xyz,
     se3_identity,
     se3_inverse,
@@ -74,9 +75,15 @@ def make_scene(seed: int = 0, spacing: float = 0.08) -> np.ndarray:
     return scene.astype(np.float64)
 
 
-def observe(scene: np.ndarray, t_world_base: np.ndarray, *, azimuth_bins: int = 720,
-            max_range: float = MAX_RANGE, noise: float = 0.01,
-            rng: np.random.Generator | None = None) -> np.ndarray:
+def observe(
+    scene: np.ndarray,
+    t_world_base: np.ndarray,
+    *,
+    azimuth_bins: int = 720,
+    max_range: float = MAX_RANGE,
+    noise: float = 0.01,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
     """Render a lidar view of ``scene`` from a pose, in the **base frame**.
 
     Keeping only the nearest return per azimuth bin approximates occlusion. Without
@@ -92,7 +99,11 @@ def observe(scene: np.ndarray, t_world_base: np.ndarray, *, azimuth_bins: int = 
         return np.zeros((0, 3), dtype=np.float32)
 
     azimuth = np.arctan2(local[:, 1], local[:, 0])
-    bins = np.clip(((azimuth + np.pi) / (2 * np.pi) * azimuth_bins).astype(int), 0, azimuth_bins - 1)
+    bins = np.clip(
+        ((azimuth + np.pi) / (2 * np.pi) * azimuth_bins).astype(int),
+        0,
+        azimuth_bins - 1,
+    )
     # Nearest-per-bin via a sort on (bin, distance) and taking each bin's first row.
     order = np.lexsort((distance, bins))
     keep = order[np.concatenate([[True], np.diff(bins[order]) != 0])]
@@ -113,6 +124,14 @@ class SyntheticRobot:
     #: scenes must NEVER be, and scoring that distinction needs the truth stated
     #: rather than inferred from whether the optimizer happened to merge them.
     scene_id: str = "default"
+    #: Which run of that robot this is. Two entries with the same ``robot_id``
+    #: and different sessions are one machine before and after a reboot -- one
+    #: physical robot, two trajectories, two unrelated map frames.
+    session: str = ""
+
+    @property
+    def trajectory_id(self) -> TrajectoryId:
+        return TrajectoryId(self.robot_id, self.session)
 
 
 def simulate_robot(
@@ -126,6 +145,9 @@ def simulate_robot(
     yaw_drift_per_metre: float = 0.004,
     start_in_world: np.ndarray | None = None,
     scene_id: str = "default",
+    session: str = "",
+    first_seq: int = 0,
+    stamp_offset: float = 0.0,
 ) -> SyntheticRobot:
     """Drive a robot along ``waypoints``, emitting keyframes with drifting odometry.
 
@@ -154,18 +176,25 @@ def simulate_robot(
         points = observe(scene, t_world_base, rng=rng)
 
         travelled = 0.0 if i == 0 else float(samples[i] - samples[i - 1])
-        drift += rng.normal(scale=[drift_per_metre * travelled] * 2 + [yaw_drift_per_metre * travelled])
+        drift += rng.normal(
+            scale=[drift_per_metre * travelled] * 2 + [yaw_drift_per_metre * travelled]
+        )
         t_odom_base = yaw_pose(
             float(xs[i] + drift[0]), float(ys[i] + drift[1]), float(yaws[i] + drift[2])
         )
 
-        keyframe_id = KeyframeId(robot_id, i)
+        keyframe_id = KeyframeId(robot_id, first_seq + i, session)
         keyframes.append(
-            Keyframe(id=keyframe_id, stamp=float(i), t_odom_base=t_odom_base, points=points)
+            Keyframe(
+                id=keyframe_id,
+                stamp=stamp_offset + float(i),
+                t_odom_base=t_odom_base,
+                points=points,
+            )
         )
         truth[keyframe_id] = t_world_base
 
-    return SyntheticRobot(robot_id, keyframes, truth, t_world_map, scene_id)
+    return SyntheticRobot(robot_id, keyframes, truth, t_world_map, scene_id, session)
 
 
 def two_robot_fleet(seed: int = 0) -> tuple[np.ndarray, list[SyntheticRobot]]:
@@ -177,7 +206,10 @@ def two_robot_fleet(seed: int = 0) -> tuple[np.ndarray, list[SyntheticRobot]]:
     """
     scene = make_scene(seed)
     alpha = simulate_robot(
-        scene, "alpha", [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)], seed=seed + 1
+        scene,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        seed=seed + 1,
     )
     beta = simulate_robot(
         scene,
@@ -187,6 +219,83 @@ def two_robot_fleet(seed: int = 0) -> tuple[np.ndarray, list[SyntheticRobot]]:
         start_in_world=yaw_pose(0.0, 0.0, 0.0),
     )
     return scene, [alpha, beta]
+
+
+def reframe(robot: SyntheticRobot, t_newmap_oldmap: np.ndarray) -> SyntheticRobot:
+    """Re-express a robot's REPORTED poses in a different map frame.
+
+    Ground truth (where the robot physically is, and what it sees) is
+    untouched; only ``t_odom_base`` moves. That is precisely what a SLAM node
+    restart does -- the building did not move, the frame the robot describes it
+    in did -- and it is what makes ``t_world_map_true`` the answer the
+    optimizer has to recover rather than something the fixture handed it.
+    """
+    keyframes = [
+        Keyframe(
+            id=kf.id,
+            stamp=kf.stamp,
+            t_odom_base=t_newmap_oldmap @ kf.t_odom_base,
+            points=kf.points,
+            descriptor=kf.descriptor,
+            descriptor_kind=kf.descriptor_kind,
+        )
+        for kf in robot.keyframes
+    ]
+    return SyntheticRobot(
+        robot.robot_id,
+        keyframes,
+        robot.truth,
+        robot.t_world_map_true @ se3_inverse(t_newmap_oldmap),
+        robot.scene_id,
+        robot.session,
+    )
+
+
+def restarted_robot(
+    seed: int = 0, session: str = "boot-2", overlap: bool = True
+) -> tuple[np.ndarray, list[SyntheticRobot]]:
+    """ONE robot, twice: a tour, a power cycle, and a second tour.
+
+    Both entries carry ``robot_id == "alpha"``, so anything keyed on the robot
+    sees a single continuous stream -- which is exactly the illusion that made
+    the pre-session back-end fabricate an odometry edge across the reboot and
+    drop the second tour's first keyframes as duplicate ``seq`` values. The
+    ``seq`` counter restarts at 0 in the second entry for the same reason: that
+    is what the producer does.
+
+    The second tour reports its poses in a DIFFERENT map frame, because a
+    restarted SLAM node starts a fresh frame wherever the robot happens to be
+    standing. Recovering the transform between the two frames is the whole job,
+    and it has to come from place recognition rather than be assumed from the
+    matching robot id.
+
+    ``overlap=False`` sends the second tour through a different part of the
+    building, so the two segments genuinely cannot be related -- the fixture
+    for "declining to merge is correct".
+    """
+    scene = make_scene(seed)
+    before = simulate_robot(
+        scene,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        seed=seed + 1,
+    )
+    route = (
+        [(3.0, 4.0), (9.0, 4.0), (9.0, 19.0), (3.0, 19.0), (3.0, 4.0)]
+        if overlap
+        else [(30.0, 6.0), (36.0, 6.0), (36.0, 20.0), (30.0, 20.0), (30.0, 6.0)]
+    )
+    after = simulate_robot(
+        scene,
+        "alpha",
+        route,
+        seed=seed + 7,
+        session=session,
+        # Stamps continue past the first tour: the reboot took a minute, and
+        # "which segment is the robot in NOW" is answered by the clock.
+        stamp_offset=100.0,
+    )
+    return scene, [before, reframe(after, yaw_pose(-6.0, 2.5, 0.7))]
 
 
 def disjoint_fleet(seed: int = 0) -> tuple[list[np.ndarray], list[SyntheticRobot]]:
@@ -205,12 +314,18 @@ def disjoint_fleet(seed: int = 0) -> tuple[list[np.ndarray], list[SyntheticRobot
     scene_a = make_scene(seed)
     scene_b = make_scene(seed + 500)
     alpha = simulate_robot(
-        scene_a, "alpha", [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
-        seed=seed + 1, scene_id="building_a",
+        scene_a,
+        "alpha",
+        [(3.0, 3.0), (9.0, 3.0), (9.0, 20.0), (3.0, 20.0), (3.0, 3.0)],
+        seed=seed + 1,
+        scene_id="building_a",
     )
     beta = simulate_robot(
-        scene_b, "beta", [(30.0, 6.0), (36.0, 6.0), (36.0, 20.0), (30.0, 20.0), (30.0, 6.0)],
-        seed=seed + 2, scene_id="building_b",
+        scene_b,
+        "beta",
+        [(30.0, 6.0), (36.0, 6.0), (36.0, 20.0), (30.0, 20.0), (30.0, 6.0)],
+        seed=seed + 2,
+        scene_id="building_b",
     )
     return [scene_a, scene_b], [alpha, beta]
 

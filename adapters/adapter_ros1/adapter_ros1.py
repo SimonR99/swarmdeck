@@ -40,6 +40,7 @@ import sys
 import signal
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zlib
 from pathlib import Path
@@ -51,7 +52,14 @@ import websockets
 import yaml
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from sensor_msgs.msg import BatteryState, CameraInfo, CompressedImage, Image, Joy, PointCloud2
+from sensor_msgs.msg import (
+    BatteryState,
+    CameraInfo,
+    CompressedImage,
+    Image,
+    Joy,
+    PointCloud2,
+)
 from std_msgs.msg import Int8
 from tf2_ros import Buffer, TransformListener
 
@@ -152,7 +160,7 @@ DEFAULTS: dict[str, Any] = {
         "map_cloud_global": "",
         "plan": "plan",
         "cmd_vel": "cmd_vel",
-        "battery": "",       # empty disables the capability
+        "battery": "",  # empty disables the capability
         "camera": "",
         "camera_compressed": "",
         # RGB-aligned depth image and its CameraInfo. Preferred over a point
@@ -239,7 +247,7 @@ DEFAULTS: dict[str, Any] = {
         "state_hz": 5.0,
         "map_period_s": 2.0,
         "cloud_period_s": 4.0,
-        "camera_period_s": 0.2,   # detection poll; hardware video is WebRTC
+        "camera_period_s": 0.2,  # detection poll; hardware video is WebRTC
     },
     "perception": {
         "enabled": True,
@@ -357,7 +365,9 @@ class HardwareBridge(
         perception = cfg.get("perception", {})
         self._detector = None
         self._detection_enabled = bool(perception.get("enabled", True))
-        if self._detection_enabled and (topics.get("camera") or topics.get("camera_compressed")):
+        if self._detection_enabled and (
+            topics.get("camera") or topics.get("camera_compressed")
+        ):
             if ObjectDetector is None:
                 self._detection_enabled = False
                 rospy.logwarn(
@@ -399,14 +409,33 @@ class HardwareBridge(
         if topics.get("plan"):
             rospy.Subscriber(topics["plan"], NavPath, self._on_plan, queue_size=10)
         if topics.get("battery"):
-            rospy.Subscriber(topics["battery"], BatteryState, self._on_battery, queue_size=10)
+            battery_topic = topics["battery"]
+            msg_cls = BatteryState
+            if "scout_status" in battery_topic:
+                try:
+                    from scout_msgs.msg import ScoutStatus
+
+                    msg_cls = ScoutStatus
+                except ImportError:
+                    try:
+                        import roslib.message
+
+                        msg_cls = (
+                            roslib.message.get_message_class("scout_msgs/ScoutStatus")
+                            or BatteryState
+                        )
+                    except Exception:
+                        pass
+            rospy.Subscriber(battery_topic, msg_cls, self._on_battery, queue_size=10)
         # Prefer compressed: a raw camera stream at full rate is the single most
         # expensive thing an adapter can subscribe to over a robot's network.
         # Frames stay on-robot for detection; the operator picture is WebRTC.
         if topics.get("camera_compressed"):
             rospy.Subscriber(
-                topics["camera_compressed"], CompressedImage,
-                self._on_camera_compressed, queue_size=1,
+                topics["camera_compressed"],
+                CompressedImage,
+                self._on_camera_compressed,
+                queue_size=1,
             )
         elif topics.get("camera"):
             rospy.Subscriber(topics["camera"], Image, self._on_camera_raw, queue_size=1)
@@ -439,7 +468,8 @@ class HardwareBridge(
 
         self.pub_cmd = (
             rospy.Publisher(topics["cmd_vel"], Twist, queue_size=10)
-            if topics.get("cmd_vel") else None
+            if topics.get("cmd_vel")
+            else None
         )
         nav_map_topic = topics.get("nav_map") or "/global_map"
         self.pub_global_map = rospy.Publisher(
@@ -447,15 +477,18 @@ class HardwareBridge(
         )
         self.pub_nav_goal = (
             rospy.Publisher(topics["nav_goal"], PoseStamped, queue_size=1)
-            if topics.get("nav_goal") else None
+            if topics.get("nav_goal")
+            else None
         )
         self.pub_nav_stop = (
             rospy.Publisher(topics["nav_stop"], Int8, queue_size=1)
-            if topics.get("nav_stop") else None
+            if topics.get("nav_stop")
+            else None
         )
         self.pub_nav_joy = (
             rospy.Publisher(topics["nav_joy"], Joy, queue_size=1)
-            if topics.get("nav_joy") else None
+            if topics.get("nav_joy")
+            else None
         )
         self._nav_joy_throttle = float(cfg.get("nav_joy_throttle", 0.5))
 
@@ -484,7 +517,19 @@ class HardwareBridge(
 
     def _network_quality(self, iface: str):
         # Keep the legacy module-level seam available to offline callers/tests.
-        return read_link_quality(iface)
+        host = getattr(self, "_server_host", None)
+        port = getattr(self, "_server_port", None)
+        if not host and getattr(self, "http_url", None):
+            try:
+                parsed = urllib.parse.urlparse(self.http_url)
+                host = parsed.hostname
+                port = parsed.port
+            except Exception:
+                pass
+        try:
+            return read_link_quality(iface, host=host, port=port)
+        except TypeError:
+            return read_link_quality(iface)
 
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""
@@ -497,7 +542,9 @@ class HardwareBridge(
             or self.cfg["topics"].get("map_cloud_global")
         ):
             caps.append("map")
-        if self.cfg["topics"].get("camera") or self.cfg["topics"].get("camera_compressed"):
+        if self.cfg["topics"].get("camera") or self.cfg["topics"].get(
+            "camera_compressed"
+        ):
             caps.append("camera")
         if self.cfg["topics"].get("battery"):
             caps.append("battery")
@@ -552,9 +599,7 @@ class HardwareBridge(
         # when the next display sample is due; the 2D scan below remains live.
         self._prepare_display_cloud(points)
 
-        min_z, max_z = map_cloud_height_limits(
-            self.cfg.get("map_cloud_height_band")
-        )
+        min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
         xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
         if not len(xy):
             self._scan_points = np.zeros((0, 2), dtype=np.float32)
@@ -612,12 +657,8 @@ class HardwareBridge(
         # topic.
         self._prepare_display_cloud(points)
 
-        min_z, max_z = map_cloud_height_limits(
-            self.cfg.get("map_cloud_height_band")
-        )
-        slice_points = points[
-            (points[:, 2] >= min_z) & (points[:, 2] <= max_z)
-        ]
+        min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
+        slice_points = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)]
         projected = project_occupied_cloud(
             slice_points[:, :2],
             resolution=self.cfg.get("native_map_resolution", 0.05),
@@ -681,7 +722,9 @@ class HardwareBridge(
             elif hasattr(stamp_val, "to_sec"):
                 stamp = stamp_val if stamp_val.to_sec() > 0 else rospy.Time(0)
             elif isinstance(stamp_val, (int, float)):
-                stamp = rospy.Time.from_sec(stamp_val) if stamp_val > 0 else rospy.Time(0)
+                stamp = (
+                    rospy.Time.from_sec(stamp_val) if stamp_val > 0 else rospy.Time(0)
+                )
             else:
                 stamp = stamp_val
             tf = self.tf_buffer.lookup_transform(
@@ -702,8 +745,10 @@ class HardwareBridge(
             return
 
         points = np.array(
-            [[ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
-             for ps in msg.poses],
+            [
+                [ps.pose.position.x, ps.pose.position.y, ps.pose.position.z]
+                for ps in msg.poses
+            ],
             dtype=np.float64,
         )
         mapped = transform_points(points, tf.transform)
@@ -783,9 +828,14 @@ class HardwareBridge(
             return {"color_camera_info": color_info}
         try:
             stamp = getattr(depth_header, "stamp", rospy.Time(0))
-            tf = self.tf_buffer.lookup_transform(
-                color_frame, depth_frame, stamp, rospy.Duration(0.1)
-            )
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    color_frame, depth_frame, stamp, rospy.Duration(0.1)
+                )
+            except Exception:
+                tf = self.tf_buffer.lookup_transform(
+                    color_frame, depth_frame, rospy.Time(0)
+                )
             return {
                 "color_camera_info": color_info,
                 "depth_to_color": tf.transform,
@@ -802,7 +852,7 @@ class HardwareBridge(
     ) -> dict[str, float] | None:
         perception = self.cfg.get("perception", {})
         image_time = self._stamp_seconds(image_header)
-        max_age = float(perception.get("depth_max_age_s", 0.35))
+        max_age = float(perception.get("depth_max_age_s", 1.0))
         min_range = float(perception.get("depth_min_m", 0.15))
         max_range = float(perception.get("depth_max_m", 8.0))
         camera_point = None
@@ -813,7 +863,11 @@ class HardwareBridge(
         if depth_image is not None and camera_info is not None:
             depth_header = getattr(depth_image, "header", None)
             depth_time = self._stamp_seconds(depth_header)
-            if image_time is None or depth_time is None or abs(image_time - depth_time) <= max_age:
+            if (
+                image_time is None
+                or depth_time is None
+                or abs(image_time - depth_time) <= max_age
+            ):
                 extra = self._depth_image_kwargs(depth_header)
                 if extra is not None:
                     configured_scale = perception.get("depth_scale")
@@ -824,7 +878,11 @@ class HardwareBridge(
                         polygon=polygon,
                         min_range_m=min_range,
                         max_range_m=max_range,
-                        depth_scale=None if configured_scale is None else float(configured_scale),
+                        depth_scale=(
+                            None
+                            if configured_scale is None
+                            else float(configured_scale)
+                        ),
                         **extra,
                     )
                     source_header = depth_header
@@ -833,7 +891,11 @@ class HardwareBridge(
         if camera_point is None and cloud is not None:
             cloud_header = getattr(cloud, "header", None)
             cloud_time = self._stamp_seconds(cloud_header)
-            if image_time is None or cloud_time is None or abs(image_time - cloud_time) <= max_age:
+            if (
+                image_time is None
+                or cloud_time is None
+                or abs(image_time - cloud_time) <= max_age
+            ):
                 camera_point = point_for_bbox(
                     cloud,
                     bbox,
@@ -852,13 +914,21 @@ class HardwareBridge(
                 map_point = camera_point
             else:
                 stamp = getattr(source_header, "stamp", rospy.Time(0))
-                tf = self.tf_buffer.lookup_transform(
-                    self.map_frame, frame_id, stamp, rospy.Duration(0.1)
-                )
+                try:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.map_frame, frame_id, stamp, rospy.Duration(0.1)
+                    )
+                except Exception:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.map_frame, frame_id, rospy.Time(0)
+                    )
                 map_point = transform_point(camera_point, tf.transform)
             if map_point is None:
                 return None
-            return {"x": round(float(map_point[0]), 3), "y": round(float(map_point[1]), 3)}
+            return {
+                "x": round(float(map_point[0]), 3),
+                "y": round(float(map_point[1]), 3),
+            }
         except Exception as exc:
             rospy.logwarn_throttle(
                 10.0,
@@ -910,9 +980,7 @@ class HardwareBridge(
             )
             t = tf.transform.translation
             q = tf.transform.rotation
-            return np.array(
-                [t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64
-            )
+            return np.array([t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64)
         except Exception:
             stored = getattr(self, "_odom_pose7", None)
             if stored is not None:
@@ -987,7 +1055,8 @@ class HardwareBridge(
         # already-superseded goal can still arrive — the generation guard below
         # is what `adapter_ros2` does for the same reason with action futures.
         self.nav_client.send_goal(
-            msg, done_cb=lambda status, result, g=generation: self._on_goal_done(status, g)
+            msg,
+            done_cb=lambda status, result, g=generation: self._on_goal_done(status, g),
         )
 
     def _on_goal_done(self, status: int, generation: int) -> None:
@@ -1031,7 +1100,11 @@ class HardwareBridge(
     def _check_topic_nav_progress(self) -> None:
         """Declare arrival once close enough — the only "done" signal a
         topic-based nav stack gives this adapter."""
-        if self.pub_nav_goal is None or self.nav_status != "active" or self.goal is None:
+        if (
+            self.pub_nav_goal is None
+            or self.nav_status != "active"
+            or self.goal is None
+        ):
             return
         pose = self.map_pose()
         dist = math.hypot(pose["x"] - self.goal["x"], pose["y"] - self.goal["y"])
@@ -1070,7 +1143,9 @@ class HardwareBridge(
             waypoints = getattr(self, "_nav_waypoints", None)
             if waypoints:
                 while len(waypoints) > 1:
-                    d = math.hypot(waypoints[0]["x"] - pose["x"], waypoints[0]["y"] - pose["y"])
+                    d = math.hypot(
+                        waypoints[0]["x"] - pose["x"], waypoints[0]["y"] - pose["y"]
+                    )
                     if d < 0.6:
                         waypoints.pop(0)
                     else:
@@ -1176,7 +1251,8 @@ class HardwareBridge(
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
-                    url, data=zlib.compress(quantised.tobytes()),
+                    url,
+                    data=zlib.compress(quantised.tobytes()),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
@@ -1204,7 +1280,8 @@ class HardwareBridge(
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
-                    url, data=zlib.compress(quantised.tobytes(), 1),
+                    url,
+                    data=zlib.compress(quantised.tobytes(), 1),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
@@ -1283,23 +1360,26 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                 ping_interval=float(bridge.cfg["ping_interval_s"]),
                 ping_timeout=float(bridge.cfg["ping_timeout_s"]),
             ) as ws:
-                await ws.send(json.dumps({
-                    "type": "hello",
-                    "protocol": 1,
-                    "robot_id": bridge.id,
-                    "robot_type": bridge.cfg["robot_type"],
-                    "adapter": "adapter_ros1/0.1.0",
-                    "ros": "noetic",
-                    # `local`: a real robot's pose and grid are in its own
-                    # navigation-map frame. The backend does the merging.
-                    "coordinate_frame": "local",
-                    "capabilities": bridge.capabilities(),
-                    "footprint_radius": bridge.cfg["footprint_radius"],
-                    "footprint": bridge.cfg.get("footprint") or None,
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "hello",
+                            "protocol": 1,
+                            "robot_id": bridge.id,
+                            "robot_type": bridge.cfg["robot_type"],
+                            "adapter": "adapter_ros1/0.1.0",
+                            "ros": "noetic",
+                            # `local`: a real robot's pose and grid are in its own
+                            # navigation-map frame. The backend does the merging.
+                            "coordinate_frame": "local",
+                            "capabilities": bridge.capabilities(),
+                            "footprint_radius": bridge.cfg["footprint_radius"],
+                            "footprint": bridge.cfg.get("footprint") or None,
+                        }
+                    )
+                )
                 rospy.loginfo(
-                    f"[{bridge.id}] connected; capabilities="
-                    f"{bridge.capabilities()}"
+                    f"[{bridge.id}] connected; capabilities=" f"{bridge.capabilities()}"
                 )
                 backoff = 1.0
                 bridge.note_link_activity()
@@ -1434,13 +1514,15 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             await loop.run_in_executor(None, bridge.run_detection)
                             detections = bridge.take_detections()
                             if detections is not None:
-                                await send({
-                                    "type": "detections",
-                                    "robot_id": bridge.id,
-                                    "t_mono": round(now - bridge.t0, 4),
-                                    "camera": "front",
-                                    "items": detections,
-                                })
+                                await send(
+                                    {
+                                        "type": "detections",
+                                        "robot_id": bridge.id,
+                                        "t_mono": round(now - bridge.t0, 4),
+                                        "camera": "front",
+                                        "items": detections,
+                                    }
+                                )
                             last_cam = time.monotonic()
                         await asyncio.sleep(tick)
 
@@ -1451,7 +1533,9 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                 # with it.
                 await run_until_first_failure(rx(), tx_state(), tx_maps(), tx_camera())
         except Exception as exc:
-            rospy.logwarn(f"[{bridge.id}] disconnected ({exc}); retrying in {backoff:.0f}s")
+            rospy.logwarn(
+                f"[{bridge.id}] disconnected ({exc}); retrying in {backoff:.0f}s"
+            )
             # Stop the robot on link loss. A robot that keeps driving after
             # losing its operator is the failure that hurts someone.
             #
@@ -1477,10 +1561,14 @@ def load_config(path: str | None) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--robot-id", required=True,
-                    help="Stable identity, used as the key everywhere (rule 5)")
-    ap.add_argument("--config", default="",
-                    help="YAML of topics/frames/rates for this robot type")
+    ap.add_argument(
+        "--robot-id",
+        required=True,
+        help="Stable identity, used as the key everywhere (rule 5)",
+    )
+    ap.add_argument(
+        "--config", default="", help="YAML of topics/frames/rates for this robot type"
+    )
     ap.add_argument("--host", default="localhost")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
@@ -1492,7 +1580,9 @@ def main() -> None:
     # disable_signals: we drive our own asyncio.run() as the process's main
     # loop and handle KeyboardInterrupt ourselves, same shape as adapter_ros2's
     # rclpy.init()/rclpy.shutdown() bracketing.
-    rospy.init_node(f"swarmdeck_adapter_{args.robot_id}", anonymous=False, disable_signals=True)
+    rospy.init_node(
+        f"swarmdeck_adapter_{args.robot_id}", anonymous=False, disable_signals=True
+    )
     bridge = HardwareBridge(args.robot_id, cfg, http_url)
 
     # Unlike rclpy, rospy dispatches subscriber/action callbacks on its own

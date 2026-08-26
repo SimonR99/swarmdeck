@@ -54,7 +54,9 @@ def test_a_dense_scan_clears_its_neighbourhood_in_one_pass():
     """
     acc = ScanGridAccumulator(origin_x=0.0, origin_y=0.0, resolution=0.05, size_m=10.0)
     angles = np.linspace(-np.pi, np.pi, 360, endpoint=False)
-    points = np.column_stack([3.0 * np.cos(angles), 3.0 * np.sin(angles)]).astype(np.float32)
+    points = np.column_stack([3.0 * np.cos(angles), 3.0 * np.sin(angles)]).astype(
+        np.float32
+    )
     acc.integrate(0.0, 0.0, points)
 
     ox, oy = acc._to_cell(0.0, 0.0)
@@ -190,7 +192,9 @@ def test_ingest_scan_feeds_the_same_pipeline_a_native_grid_uses():
     """A scan-built grid must be indistinguishable, downstream, from a robot
     that publishes its own OccupancyGrid — same merge/registration path."""
     svc = MapService(resolution=0.05, size_m=10.0)
-    points = np.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]], dtype=np.float32)
+    points = np.array(
+        [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]], dtype=np.float32
+    )
     svc.ingest_scan("r0", 0.0, 0.0, points)
 
     assert "r0" in svc.robot_grids
@@ -227,7 +231,9 @@ def test_reset_forgets_the_accumulated_scan_grid():
     service = MapService(resolution=0.05, size_m=40.0)
     service.set_mode("static")
     service.ingest_scan(
-        "botman_0", 0.0, 0.0,
+        "botman_0",
+        0.0,
+        0.0,
         np.array([[1.0, 0.0], [1.0, 0.1], [1.0, 0.2]], dtype=np.float32),
     )
     assert int((service.merged >= 50).sum()) == 3
@@ -237,9 +243,7 @@ def test_reset_forgets_the_accumulated_scan_grid():
     assert "botman_0" not in service._scan_grids
 
     # One new return must produce exactly one occupied cell, not four.
-    service.ingest_scan(
-        "botman_0", 0.0, 0.0, np.array([[2.0, 0.0]], dtype=np.float32)
-    )
+    service.ingest_scan("botman_0", 0.0, 0.0, np.array([[2.0, 0.0]], dtype=np.float32))
     assert int((service.merged >= 50).sum()) == 1
 
 
@@ -270,16 +274,18 @@ def test_a_stray_return_is_dropped_but_a_sparse_far_wall_is_kept():
     # A sparsely-but-evenly sampled wall at 15 m: every point is far from every
     # other in metres (0.26 m apart), yet none of them is a stray.
     far = np.column_stack([15.0 * np.cos(ang), 15.0 * np.sin(ang)]).astype(np.float32)
-    assert len(drop_range_outliers(0.0, 0.0, far)) == len(far), (
-        "a sparse but coherent far wall must survive intact"
-    )
+    assert len(drop_range_outliers(0.0, 0.0, far)) == len(
+        far
+    ), "a sparse but coherent far wall must survive intact"
 
     # Now push three returns 5 m out beyond their angular neighbours.
     strays = far.copy()
     for i in (10, 100, 250):
         strays[i] = far[i] * (20.0 / 15.0)
     kept = drop_range_outliers(0.0, 0.0, strays)
-    assert len(kept) == len(far) - 3, f"expected 3 strays dropped, got {len(far) - len(kept)}"
+    assert (
+        len(kept) == len(far) - 3
+    ), f"expected 3 strays dropped, got {len(far) - len(kept)}"
 
     # A return NEARER than its neighbours is an obstacle in front of a wall and
     # must never be discarded — that is the one error that could hide a hazard.

@@ -40,7 +40,10 @@ def test_extent_expansion_publishes_coherent_snapshot_to_readers():
             # patch metadata must each come from one published generation.
             assert service.as_png().startswith(b"\x89PNG")
             status = service.status()
-            assert status["map"]["width"] == snapshot.meta.width or status["map"]["width"] >= 20
+            assert (
+                status["map"]["width"] == snapshot.meta.width
+                or status["map"]["width"] >= 20
+            )
             observations += 1
             await asyncio.sleep(0)
         await writer

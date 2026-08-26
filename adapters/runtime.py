@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import time
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -81,11 +82,7 @@ def project_occupied_cloud(
         max_cells = int(max_cells)
     except (TypeError, ValueError):
         return None
-    if (
-        not math.isfinite(resolution)
-        or resolution <= 0.0
-        or max_cells <= 0
-    ):
+    if not math.isfinite(resolution) or resolution <= 0.0 or max_cells <= 0:
         return None
 
     xy = np.asarray(points[:, :2], dtype=np.float64)
@@ -193,9 +190,7 @@ def image_to_bgr(msg):
     try:
         step = int(getattr(msg, "step", 0)) or msg.width * channels
         rows = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, step)
-        frame = rows[:, : msg.width * channels].reshape(
-            msg.height, msg.width, channels
-        )
+        frame = rows[:, : msg.width * channels].reshape(msg.height, msg.width, channels)
     except (ValueError, TypeError):
         return None
     if encoding in ("rgb8", "8uc3"):
@@ -251,11 +246,26 @@ class AdapterSensorMixin:
         self._grid_dirty = True
 
     def _on_battery(self, msg) -> None:
-        value = float(msg.percentage)
-        if math.isnan(value):
-            self.battery = None
-            return
-        self.battery = value / 100.0 if value > 1.0 else value
+        if hasattr(msg, "percentage"):
+            value = float(msg.percentage)
+            if math.isnan(value):
+                self.battery = None
+                return
+            self.battery = value / 100.0 if value > 1.0 else max(0.0, min(1.0, value))
+        elif hasattr(msg, "battery_voltage") or hasattr(msg, "voltage"):
+            voltage = float(
+                getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan")))
+            )
+            if math.isnan(voltage) or voltage <= 0.0:
+                self.battery = None
+                return
+            min_v = float(self.cfg.get("battery_voltage_min", 23.0))
+            max_v = float(self.cfg.get("battery_voltage_max", 29.2))
+            if max_v > min_v:
+                pct = (voltage - min_v) / (max_v - min_v)
+                self.battery = max(0.0, min(1.0, pct))
+            else:
+                self.battery = None
 
     def _on_camera_depth_cloud(self, msg) -> None:
         self._camera_depth_cloud = msg
@@ -371,9 +381,8 @@ class AdapterLinkMixin:
             self._last_drive_at = 0.0
 
     def link_ok(self) -> bool:
-        return (
-            time.monotonic() - self._last_link_at
-            <= float(self.cfg["link_timeout_s"])
+        return time.monotonic() - self._last_link_at <= float(
+            self.cfg["link_timeout_s"]
         )
 
     def note_link_activity(self) -> None:
@@ -408,7 +417,19 @@ class AdapterTelemetryMixin:
     """Protocol state envelope shared by ROS 1 and ROS 2 adapters."""
 
     def _network_quality(self, iface: str):
-        return read_link_quality(iface)
+        host = getattr(self, "_server_host", None)
+        port = getattr(self, "_server_port", None)
+        if not host and getattr(self, "http_url", None):
+            try:
+                parsed = urllib.parse.urlparse(self.http_url)
+                host = parsed.hostname
+                port = parsed.port
+            except Exception:
+                pass
+        try:
+            return read_link_quality(iface, host=host, port=port)
+        except TypeError:
+            return read_link_quality(iface)
 
     def state(self) -> dict[str, Any]:
         planned_path = list(getattr(self, "planned_path", []) or [])

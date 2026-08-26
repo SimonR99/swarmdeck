@@ -16,10 +16,16 @@ fleet map: it is usually *locally self-consistent* (a real registration
 result, just against the wrong place), so nothing about the edge itself looks
 wrong. Two independent checks run in sequence:
 
-1. **PCM** (:func:`GtsamPoseGraph._pcm_filter`) checks inter-robot closures
-   for pairwise agreement *before* they ever reach the solver: two closures
-   between the same pair of robots are consistent only if composing them
-   around the loop (through each robot's own odometry) returns near-identity.
+1. **PCM** (:func:`GtsamPoseGraph._pcm_filter`) checks closures that span two
+   TRAJECTORIES for pairwise agreement *before* they ever reach the solver:
+   two closures between the same pair of trajectories are consistent only if
+   composing them around the loop (through each trajectory's own odometry)
+   returns near-identity. "Two trajectories" and not "two robots": a robot
+   that reboots comes back with a fresh map frame and no known transform to
+   its own history, so rejoining that history has to clear the same bar as
+   meeting a stranger. Nothing enforced that before trajectories existed --
+   the two segments were simply assumed to be one, on the strength of a
+   matching name.
    This is the primary defense, because it is the only one of the two that
    can catch an outlier that fits its own local neighbourhood perfectly --
    GNC below cannot, since GNC judges factors by residual against the rest of
@@ -30,8 +36,8 @@ wrong. Two independent checks run in sequence:
 
 2. **GNC** (``gtsam.GncLMOptimizer``, Graduated Non-Convexity with a
    truncated-least-squares loss) runs over everything that survives PCM, plus
-   all intra-robot loop closures (which PCM never sees -- there is no second
-   robot to cross-check against). It catches the closures that are
+   all within-trajectory loop closures (which PCM never sees -- there is no
+   second frame to cross-check against). It catches the closures that are
    individually plausible but a poor fit against the *rest* of the optimized
    graph, which is exactly what PCM's pairwise, odometry-only check cannot
    see. ``ODOMETRY`` and the anchor priors this class adds are registered as
@@ -41,7 +47,7 @@ wrong. Two independent checks run in sequence:
 
 Components and gauge freedom
 -----------------------------
-Connectivity (which robots share a frame at all) is decided once, by PCM,
+Connectivity (which TRAJECTORIES share a frame at all) is decided once, by PCM,
 before the solver runs -- see :func:`GtsamPoseGraph._components`. GNC's later
 down-weighting of an individual edge changes how much that edge influences
 the *solution*; it never retroactively un-merges a component. This keeps
@@ -49,8 +55,9 @@ anchor placement (which must happen before optimization, since it fixes
 gauge) well-defined: exactly one prior per PCM-derived component, on a
 deterministically chosen anchor keyframe. A component that PCM never
 connects to another gets its own anchor and is reported as its own
-:class:`~swarmdeck_slam.types.Component`, never overlaid onto another robot's
-frame on assumption.
+:class:`~swarmdeck_slam.types.Component`, never overlaid onto another
+trajectory's frame on assumption -- including when the other trajectory
+belongs to the same robot.
 
 Scalability
 -----------
@@ -74,6 +81,7 @@ rather than a guess.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict, deque
 from typing import Final
 
@@ -89,6 +97,7 @@ from swarmdeck_slam.types import (
     KeyframeId,
     KeyRegistry,
     OptimizedGraph,
+    TrajectoryId,
     se3_identity,
     se3_inverse,
     se3_kabsch,
@@ -131,26 +140,38 @@ def _frame_residual(
     """Translation RMSE of one candidate ``T_world_map`` against the optimized
     poses of the keyframes it is supposed to explain."""
     errors = [
-        np.linalg.norm((t_world_map @ keyframes[k].t_odom_base)[:3, 3] - poses[k][:3, 3])
+        np.linalg.norm(
+            (t_world_map @ keyframes[k].t_odom_base)[:3, 3] - poses[k][:3, 3]
+        )
         for k in kf_ids
     ]
     return float(np.sqrt(np.mean(np.square(errors))))
 
 
-def _canonical_pair(edge: Edge) -> frozenset[str]:
-    """Group key for two candidate closures spanning the same pair of robots."""
-    return frozenset((edge.src.robot_id, edge.dst.robot_id))
+def _canonical_pair(edge: Edge) -> frozenset[TrajectoryId]:
+    """Group key for two candidate closures spanning the same pair of TRAJECTORIES.
+
+    Trajectories, not robots, because of what :func:`_loop_residual` does with
+    the group: it bridges each side's two keyframes through that side's own
+    odometry. Grouping by robot would put a pre-reboot closure and a
+    post-reboot closure in one group and then compose across the reboot -- two
+    unrelated map frames, subtracted -- producing a residual that is a number
+    about nothing. Whichever way that test then fell, it would be by accident.
+    """
+    return frozenset((edge.src.trajectory, edge.dst.trajectory))
 
 
-def _orient(edge: Edge, first_robot: str) -> tuple[KeyframeId, KeyframeId, np.ndarray]:
+def _orient(
+    edge: Edge, first_trajectory: TrajectoryId
+) -> tuple[KeyframeId, KeyframeId, np.ndarray]:
     """Re-express ``edge`` as ``(first_kf, second_kf, T_first_second)`` with
-    ``first_kf`` on ``first_robot``, whichever side of the edge that was.
+    ``first_kf`` on ``first_trajectory``, whichever side of the edge that was.
 
     PCM has to compare two closures that may have been discovered with either
-    robot as ``src``; without this, every composition below would need a case
-    split on which endpoint belongs to which robot.
+    side as ``src``; without this, every composition below would need a case
+    split on which endpoint belongs to which trajectory.
     """
-    if edge.src.robot_id == first_robot:
+    if edge.src.trajectory == first_trajectory:
         return edge.src, edge.dst, edge.t_src_dst
     return edge.dst, edge.src, se3_inverse(edge.t_src_dst)
 
@@ -161,6 +182,10 @@ def _loop_residual(
     """Compose the four-hop loop ``src_i -> src_j -> dst_j -> dst_i -> src_i``
     formed by two candidate closures over the same robot pair, using each
     robot's own odometry to bridge between its two keyframes.
+
+    Both keyframes on each side belong to ONE trajectory (guaranteed by
+    :func:`_canonical_pair`), which is what makes the two odometry bridges
+    below real transforms rather than differences of unrelated map frames.
 
     Returns ``(residual_tangent, covariance)`` where ``residual_tangent`` is
     the composed loop's ``gtsam.Pose3.Logmap`` (rotation-first, matching
@@ -178,9 +203,9 @@ def _loop_residual(
     from-scratch PCM implementation that needs tighter bounds should replace
     this with adjoint-propagated covariance (Mangelson et al., 2018).
     """
-    robot_a = edge_i.src.robot_id
-    a_i, b_i, t_a_b_i = _orient(edge_i, robot_a)
-    a_j, b_j, t_a_b_j = _orient(edge_j, robot_a)
+    trajectory_a = edge_i.src.trajectory
+    a_i, b_i, t_a_b_i = _orient(edge_i, trajectory_a)
+    a_j, b_j, t_a_b_j = _orient(edge_j, trajectory_a)
 
     t_a_i_a_j = se3_relative(keyframes[a_i].t_odom_base, keyframes[a_j].t_odom_base)
     t_b_j_b_i = se3_relative(keyframes[b_j].t_odom_base, keyframes[b_i].t_odom_base)
@@ -191,7 +216,9 @@ def _loop_residual(
     return residual, covariance
 
 
-def _consistent(residual: np.ndarray, covariance: np.ndarray, confidence: float) -> bool:
+def _consistent(
+    residual: np.ndarray, covariance: np.ndarray, confidence: float
+) -> bool:
     mahalanobis_sq = float(residual @ np.linalg.solve(covariance, residual))
     return mahalanobis_sq <= chi2.ppf(confidence, df=_PCM_DOF)
 
@@ -269,7 +296,9 @@ class GtsamPoseGraph:
 
     def add_keyframe(self, keyframe: Keyframe) -> None:
         self._keyframes[keyframe.id] = keyframe
-        self._keys.key(keyframe.id)  # assign its integer key eagerly and deterministically
+        self._keys.key(
+            keyframe.id
+        )  # assign its integer key eagerly and deterministically
 
     def add_edge(self, edge: Edge) -> None:
         self._edges.append(edge)
@@ -279,16 +308,26 @@ class GtsamPoseGraph:
             return OptimizedGraph()
 
         odometry = [e for e in self._edges if e.kind is EdgeKind.ODOMETRY]
-        intra_loop = [e for e in self._edges if e.kind is EdgeKind.INTRA_LOOP]
-        inter_loop = [e for e in self._edges if e.kind is EdgeKind.INTER_LOOP]
-        self._validate_endpoints(odometry + intra_loop + inter_loop)
+        loops = [e for e in self._edges if e.kind.is_loop_closure]
+        self._validate_endpoints(odometry + loops)
 
-        pcm_accepted, pcm_rejected = self._pcm_filter(inter_loop)
+        # Split on is_inter_trajectory, NOT on the INTRA_LOOP/INTER_LOOP label.
+        # The label answers "was this collaboration?" and belongs to the
+        # operator's counters. What decides whether PCM has to cross-check a
+        # closure is whether its two endpoints already share a frame -- and a
+        # robot rejoining its own pre-reboot segment does not, however much it
+        # is "the same robot". Keying this on the label would let a single
+        # uncorroborated closure re-merge a robot's history, which is precisely
+        # the merge PCM exists to make earn its place.
+        inter_trajectory = [e for e in loops if e.is_inter_trajectory]
+        intra_trajectory = [e for e in loops if not e.is_inter_trajectory]
+
+        pcm_accepted, pcm_rejected = self._pcm_filter(inter_trajectory)
         components = self._components(pcm_accepted)
         init_t_world_odom = self._initial_t_world_odom(components, pcm_accepted)
 
         graph, initial, known_inliers, loop_factors = self._build_factors(
-            odometry, intra_loop, pcm_accepted, components, init_t_world_odom
+            odometry, intra_trajectory, pcm_accepted, components, init_t_world_odom
         )
 
         gnc_params = gtsam.GncLMParams()
@@ -317,20 +356,24 @@ class GtsamPoseGraph:
             else:
                 gnc_rejected.append(edge)
 
-        lm_optimizer = gtsam.LevenbergMarquardtOptimizer(refit_graph, gnc_result, self._lm_params)
+        lm_optimizer = gtsam.LevenbergMarquardtOptimizer(
+            refit_graph, gnc_result, self._lm_params
+        )
         final_values = lm_optimizer.optimize()
 
         poses = {
             kf_id: final_values.atPose3(self._keys.key(kf_id)).matrix()
             for kf_id in self._keyframes
         }
+        t_world_trajectory = self._t_world_trajectory(poses)
         return OptimizedGraph(
             poses=poses,
-            t_world_map=self._t_world_map(poses),
+            t_world_map=self._current_t_world_map(t_world_trajectory),
             components=components,
             rejected_edges=[*pcm_rejected, *gnc_rejected],
             iterations=lm_optimizer.iterations(),
             final_error=lm_optimizer.error(),
+            t_world_trajectory=t_world_trajectory,
         )
 
     # ------------------------------------------------------------------ #
@@ -338,12 +381,12 @@ class GtsamPoseGraph:
     # ------------------------------------------------------------------ #
 
     def _pcm_filter(self, candidates: list[Edge]) -> tuple[list[Edge], list[Edge]]:
-        """Split candidate inter-robot closures into accepted/rejected.
+        """Split candidate inter-TRAJECTORY closures into accepted/rejected.
 
-        Candidates are grouped by the (unordered) pair of robots they span,
-        since consistency is only checkable between closures that could
-        plausibly contradict each other -- a closure between robots A/B has
-        nothing to compose against a closure between A/C. Within each group,
+        Candidates are grouped by the (unordered) pair of trajectories they
+        span, since consistency is only checkable between closures that could
+        plausibly contradict each other -- a closure between A/B has nothing to
+        compose against a closure between A/C. Within each group,
         a consistency graph is built from the pairwise chi-squared test
         (:func:`_consistent`) and the kept set is a greedy clique
         (:func:`_greedy_max_clique`) of size at least
@@ -353,7 +396,7 @@ class GtsamPoseGraph:
         ``optimize()`` output does not depend on ``PYTHONHASHSEED`` --
         required for this class's determinism guarantee.
         """
-        groups: dict[frozenset[str], list[Edge]] = defaultdict(list)
+        groups: dict[frozenset[TrajectoryId], list[Edge]] = defaultdict(list)
         for edge in candidates:
             groups[_canonical_pair(edge)].append(edge)
 
@@ -383,85 +426,110 @@ class GtsamPoseGraph:
     # ------------------------------------------------------------------ #
 
     def _components(self, accepted_inter: list[Edge]) -> list[Component]:
-        """Union-find over robots joined by PCM-accepted inter-robot closures.
+        """Union-find over TRAJECTORIES joined by PCM-accepted closures.
 
-        This is the sole authority on which robots share a frame -- decided
-        once, before the solver runs, and never revised by GNC's later
-        per-edge weighting (see module docstring). A robot with no accepted
-        inter-robot closure at all is still a valid, singleton component: an
+        This is the sole authority on which trajectories share a frame --
+        decided once, before the solver runs, and never revised by GNC's later
+        per-edge weighting (see module docstring). A trajectory with no
+        accepted closure to any other is still a valid, singleton component: an
         unmerged map is a correct statement of ignorance.
-        """
-        robots = sorted({kf_id.robot_id for kf_id in self._keyframes})
-        parent = {r: r for r in robots}
 
-        def find(r: str) -> str:
-            while parent[r] != r:
-                parent[r] = parent[parent[r]]
-                r = parent[r]
-            return r
+        Over trajectories rather than robots, and that is the safety property
+        this whole change exists for. A rebooted robot's two segments enter
+        here as two nodes with no edge between them, so they are two components
+        and two anchors until PCM accepts enough corroborated closures to join
+        them -- exactly the bar a stranger has to clear. Union-find over robots
+        would instead have welded them together on the strength of the shared
+        name alone, which is not evidence of anything: the robot may have been
+        carried to another floor while it was off.
+        """
+        trajectories = sorted({kf_id.trajectory for kf_id in self._keyframes})
+        parent = {t: t for t in trajectories}
+
+        def find(t: TrajectoryId) -> TrajectoryId:
+            while parent[t] != t:
+                parent[t] = parent[parent[t]]
+                t = parent[t]
+            return t
 
         for edge in accepted_inter:
-            root_a, root_b = find(edge.src.robot_id), find(edge.dst.robot_id)
+            root_a, root_b = find(edge.src.trajectory), find(edge.dst.trajectory)
             if root_a != root_b:
                 parent[max(root_a, root_b)] = min(root_a, root_b)
 
-        groups: dict[str, set[str]] = defaultdict(set)
-        for robot in robots:
-            groups[find(robot)].add(robot)
+        groups: dict[TrajectoryId, set[TrajectoryId]] = defaultdict(set)
+        for trajectory in trajectories:
+            groups[find(trajectory)].add(trajectory)
 
         components: list[Component] = []
         for component_id, root in enumerate(sorted(groups)):
             members = groups[root]
-            anchor_robot = min(members)
+            anchor_trajectory = min(members)
             anchor_seq = min(
-                kf_id.seq for kf_id in self._keyframes if kf_id.robot_id == anchor_robot
+                kf_id.seq
+                for kf_id in self._keyframes
+                if kf_id.trajectory == anchor_trajectory
             )
             components.append(
                 Component(
                     component_id=component_id,
-                    robots=frozenset(members),
-                    anchor=KeyframeId(anchor_robot, anchor_seq),
+                    robots=frozenset(t.robot_id for t in members),
+                    anchor=KeyframeId(
+                        anchor_trajectory.robot_id,
+                        anchor_seq,
+                        anchor_trajectory.session,
+                    ),
+                    trajectories=frozenset(members),
                 )
             )
         return components
 
     def _initial_t_world_odom(
         self, components: list[Component], accepted_inter: list[Edge]
-    ) -> dict[str, np.ndarray]:
-        """Seed every robot's ``T_world_odom`` for the LM initial guess.
+    ) -> dict[TrajectoryId, np.ndarray]:
+        """Seed every trajectory's ``T_world_odom`` for the LM initial guess.
 
-        Each component's anchor robot starts at identity (its odom frame
+        Each component's anchor trajectory starts at identity (its odom frame
         *is* the component's arbitrary gauge choice for "world"). Every other
-        robot in the component gets an estimate propagated by BFS over the
+        trajectory in the component gets an estimate propagated by BFS over the
         PCM-accepted closures that connect it back to the anchor, composing
         one closure's measured transform with both endpoints' own odometry.
         A good initial guess matters here specifically because Pose3's SO(3)
-        component is non-convex: a merged robot starting from an arbitrary
+        component is non-convex: a merged trajectory starting from an arbitrary
         offset risks LM converging to a local optimum with the wrong
         rotation instead of the true relative transform.
-        """
-        adjacency: dict[str, list[Edge]] = defaultdict(list)
-        for edge in accepted_inter:
-            adjacency[edge.src.robot_id].append(edge)
-            adjacency[edge.dst.robot_id].append(edge)
 
-        init: dict[str, np.ndarray] = {}
+        Per trajectory rather than per robot for the same reason as everywhere
+        else in this class: a robot's post-reboot segment needs its own seed,
+        and seeding it with the pre-reboot one places its whole cloud metres
+        from where it belongs before LM has taken a single step.
+        """
+        adjacency: dict[TrajectoryId, list[Edge]] = defaultdict(list)
+        for edge in accepted_inter:
+            adjacency[edge.src.trajectory].append(edge)
+            adjacency[edge.dst.trajectory].append(edge)
+
+        init: dict[TrajectoryId, np.ndarray] = {}
         for component in components:
-            anchor_robot = component.anchor.robot_id
-            if anchor_robot in init:
+            anchor_trajectory = component.anchor.trajectory
+            if anchor_trajectory in init:
                 continue
-            init[anchor_robot] = se3_identity()
-            frontier = deque([anchor_robot])
+            init[anchor_trajectory] = se3_identity()
+            frontier = deque([anchor_trajectory])
             while frontier:
-                robot = frontier.popleft()
-                for edge in adjacency[robot]:
-                    first_kf, second_kf, t_first_second = _orient(edge, robot)
-                    other = second_kf.robot_id
+                trajectory = frontier.popleft()
+                for edge in adjacency[trajectory]:
+                    first_kf, second_kf, t_first_second = _orient(edge, trajectory)
+                    other = second_kf.trajectory
                     if other in init:
                         continue
-                    t_world_first = init[robot] @ self._keyframes[first_kf].t_odom_base
+                    t_world_first = (
+                        init[trajectory] @ self._keyframes[first_kf].t_odom_base
+                    )
                     t_world_second = t_world_first @ t_first_second
-                    init[other] = t_world_second @ se3_inverse(self._keyframes[second_kf].t_odom_base)
+                    init[other] = t_world_second @ se3_inverse(
+                        self._keyframes[second_kf].t_odom_base
+                    )
                     frontier.append(other)
         return init
 
@@ -480,20 +548,22 @@ class GtsamPoseGraph:
     def _build_factors(
         self,
         odometry: list[Edge],
-        intra_loop: list[Edge],
+        intra_trajectory_loops: list[Edge],
         pcm_accepted_inter: list[Edge],
         components: list[Component],
-        init_t_world_odom: dict[str, np.ndarray],
-    ) -> tuple[gtsam.NonlinearFactorGraph, gtsam.Values, list[int], list[tuple[int, Edge]]]:
+        init_t_world_odom: dict[TrajectoryId, np.ndarray],
+    ) -> tuple[
+        gtsam.NonlinearFactorGraph, gtsam.Values, list[int], list[tuple[int, Edge]]
+    ]:
         """Assemble the graph GNC will see: structural factors (odometry +
         one anchor prior per component, both registered as GNC known-inliers
         so they can never be rejected) plus every loop-closure candidate
-        (intra-robot, and inter-robot closures that survived PCM) as
+        (within one trajectory, and across trajectories where PCM approved) as
         ordinary, non-robust factors for GNC to weight.
         """
         initial = gtsam.Values()
         for kf_id, keyframe in self._keyframes.items():
-            guess = init_t_world_odom[kf_id.robot_id] @ keyframe.t_odom_base
+            guess = init_t_world_odom[kf_id.trajectory] @ keyframe.t_odom_base
             initial.insert(self._keys.key(kf_id), gtsam.Pose3(guess))
 
         graph = gtsam.NonlinearFactorGraph()
@@ -506,15 +576,19 @@ class GtsamPoseGraph:
         for component in components:
             known_inliers.append(graph.size())
             anchor_kf = self._keyframes[component.anchor]
-            anchor_pose = init_t_world_odom[component.anchor.robot_id] @ anchor_kf.t_odom_base
+            anchor_pose = (
+                init_t_world_odom[component.anchor.trajectory] @ anchor_kf.t_odom_base
+            )
             graph.add(
                 gtsam.PriorFactorPose3(
-                    self._keys.key(component.anchor), gtsam.Pose3(anchor_pose), self._anchor_noise
+                    self._keys.key(component.anchor),
+                    gtsam.Pose3(anchor_pose),
+                    self._anchor_noise,
                 )
             )
 
         loop_factors: list[tuple[int, Edge]] = []
-        for edge in [*intra_loop, *pcm_accepted_inter]:
+        for edge in [*intra_trajectory_loops, *pcm_accepted_inter]:
             idx = graph.size()
             graph.add(self._between_factor(edge))
             loop_factors.append((idx, edge))
@@ -525,10 +599,12 @@ class GtsamPoseGraph:
     # Output assembly
     # ------------------------------------------------------------------ #
 
-    def _t_world_map(self, poses: dict[KeyframeId, np.ndarray]) -> dict[str, np.ndarray]:
-        """Per-robot ``T_world_map``: the rigid transform carrying that robot's
-        own SLAM frame into the fleet frame, least-squares fitted over its
-        WHOLE trajectory.
+    def _t_world_trajectory(
+        self, poses: dict[KeyframeId, np.ndarray]
+    ) -> dict[TrajectoryId, np.ndarray]:
+        """Per-trajectory ``T_world_map``: the rigid transform carrying that
+        trajectory's own SLAM frame into the fleet frame, least-squares fitted
+        over the WHOLE of that trajectory.
 
         Every keyframe supplies one independent estimate of this transform
         (``poses[k] @ inverse(keyframe.t_odom_base)``). Reading only the
@@ -557,6 +633,15 @@ class GtsamPoseGraph:
         summarize the *truth* side of that comparison, for the identical
         stated reason; it just was never applied to the estimated side.
 
+        Fitted per TRAJECTORY rather than per robot. Both are "one rigid frame
+        over a whole trajectory" -- the difference is what counts as one. A
+        reboot starts a fresh map frame unrelated to the previous one, so a
+        single fit across the discontinuity is a least-squares compromise
+        between two unrelated gauges: it explains neither segment, and the
+        residual check below cannot rescue it, because the snapshot it falls
+        back to is a read of whichever frame the newest keyframe was in. The
+        same 6.5 m failure as before, from a different direction.
+
         The fit is over translations, which is what ``origins`` positions and
         what an operator sees. It needs at least
         :data:`_MIN_FIT_KEYFRAMES` keyframes to be better determined than the
@@ -566,16 +651,52 @@ class GtsamPoseGraph:
         about the travel axis, falls back to the single-keyframe read rather
         than to an arbitrary rotation.
         """
-        by_robot: dict[str, list[KeyframeId]] = defaultdict(list)
+        by_trajectory: dict[TrajectoryId, list[KeyframeId]] = defaultdict(list)
         for kf_id in self._keyframes:
-            by_robot[kf_id.robot_id].append(kf_id)
+            by_trajectory[kf_id.trajectory].append(kf_id)
 
-        result: dict[str, np.ndarray] = {}
-        for robot_id, kf_ids in by_robot.items():
+        result: dict[TrajectoryId, np.ndarray] = {}
+        for trajectory, kf_ids in by_trajectory.items():
             kf_ids.sort(key=lambda kf_id: kf_id.seq)
-            snapshot = poses[kf_ids[-1]] @ se3_inverse(self._keyframes[kf_ids[-1]].t_odom_base)
-            result[robot_id] = self._best_t_world_map(kf_ids, poses, snapshot)
+            snapshot = poses[kf_ids[-1]] @ se3_inverse(
+                self._keyframes[kf_ids[-1]].t_odom_base
+            )
+            result[trajectory] = self._best_t_world_map(kf_ids, poses, snapshot)
         return result
+
+    def _current_t_world_map(
+        self, t_world_trajectory: dict[TrajectoryId, np.ndarray]
+    ) -> dict[str, np.ndarray]:
+        """Project the per-trajectory fits onto one frame per ROBOT: its newest.
+
+        ``origins``, navigation goals, and every consumer that says "where is
+        robot X" mean the frame that robot is publishing in *now*, which is its
+        latest trajectory and no other. For a robot that never restarted this
+        is the only trajectory it has, so this reproduces the previous
+        behaviour byte for byte on every existing capture.
+
+        Newest by the latest keyframe STAMP, not by session id or insertion
+        order: a session id is a boot clock that a robot without an RTC repeats
+        verbatim on every boot, and insertion order is arrival order, which the
+        service's bounded queue is allowed to disturb. Ties break on the
+        trajectory id purely so the result is deterministic.
+        """
+        latest_stamp: dict[TrajectoryId, float] = {}
+        for kf_id, keyframe in self._keyframes.items():
+            trajectory = kf_id.trajectory
+            if keyframe.stamp > latest_stamp.get(trajectory, -math.inf):
+                latest_stamp[trajectory] = keyframe.stamp
+
+        best: dict[str, tuple[float, TrajectoryId]] = {}
+        for trajectory in t_world_trajectory:
+            rank = (latest_stamp.get(trajectory, -math.inf), trajectory)
+            current = best.get(trajectory.robot_id)
+            if current is None or rank > current:
+                best[trajectory.robot_id] = rank
+        return {
+            robot_id: t_world_trajectory[trajectory]
+            for robot_id, (_stamp, trajectory) in best.items()
+        }
 
     def _best_t_world_map(
         self,
@@ -584,7 +705,8 @@ class GtsamPoseGraph:
         snapshot: np.ndarray,
     ) -> np.ndarray:
         """Whichever of the trajectory fit and the single-keyframe snapshot
-        explains this robot's optimized poses better. See :meth:`_t_world_map`."""
+        explains these keyframes' optimized poses better. See
+        :meth:`_t_world_trajectory`."""
         if len(kf_ids) < _MIN_FIT_KEYFRAMES:
             return snapshot
         source = np.array([self._keyframes[k].t_odom_base[:3, 3] for k in kf_ids])
@@ -601,7 +723,10 @@ class GtsamPoseGraph:
 
     def _validate_endpoints(self, edges: list[Edge]) -> None:
         missing = {
-            kf_id for edge in edges for kf_id in (edge.src, edge.dst) if kf_id not in self._keyframes
+            kf_id
+            for edge in edges
+            for kf_id in (edge.src, edge.dst)
+            if kf_id not in self._keyframes
         }
         if missing:
             raise ValueError(

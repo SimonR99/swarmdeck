@@ -68,7 +68,10 @@ class GraphReporter(Node):
         # One shared topic for the whole fleet — cslam publishes inter-robot
         # closures globally, not per robot.
         self.create_subscription(
-            InterRobotLoopClosure, "/cslam/inter_robot_loop_closure", self._on_closure, 100
+            InterRobotLoopClosure,
+            "/cslam/inter_robot_loop_closure",
+            self._on_closure,
+            100,
         )
         self.pub = self.create_publisher(String, "/swarmdeck/slam_graph", 10)
         self.create_timer(period, self._publish)
@@ -76,8 +79,9 @@ class GraphReporter(Node):
 
     @staticmethod
     def _yaw_of(q) -> float:
-        return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        return math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        )
 
     def _on_pose(self, robot: int, msg: PoseStamped) -> None:
         self.common_pose[robot] = {

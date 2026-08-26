@@ -48,14 +48,12 @@ base_frame: base_link_filtered
 # calibrated reference, not a claim that the floor is perfectly level across
 # the whole accumulated cloud; recalibrate it if the SLAM origin changes.
 #
-# The requested physical band is 0.150..0.395 m: 15 cm above the floor through
-# the Scout Mini's nominal 0.245 m chassis height plus 15 cm.
-cloud_z_offset: -1.25
-
+# The requested physical band is 0.150..1.000 m: 15 cm above the floor through
+# ~1.0 m obstacle height.
 map_cloud_height_band:
-  floor_z: 1.000
-  min_z: 0.100
-  max_z: 3.500
+  floor_z: -0.575
+  min_z: 0.150
+  max_z: 1.000
 # Projection of map_global into the SwarmDeck OccupancyGrid.
 native_map_resolution: 0.05
 native_map_padding_m: 1.0
@@ -83,9 +81,8 @@ topics:
   # scout_messenger.cpp subscribes "/cmd_vel" with a leading slash, so it is the global
   # topic regardless of any namespace scout_base.launch wraps the node in.
   cmd_vel: /cmd_vel
-  # Published by rover_scout_adapter.py (control/adapters/scripts/rover_scout_adapter.py)
-  # from the driver's ScoutStatus message, not by scout_base_node itself.
-  battery: /robot_battery
+  # Published by scout_base_node as ScoutStatus (or rover_scout_adapter as BatteryState).
+  battery: /scout_status
   camera: ""
   # Colour is the operator's drive camera. Launch it through
   # launch/scout_camera_low_latency.launch — NOT rover_launch/rs_d400.launch,
@@ -163,3 +160,5 @@ rates:
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45   # SwarmDeck protocol default — scout_base_node's own cmd_vel watchdog behavior (if any) was not inspected
+battery_voltage_min: 23.0
+battery_voltage_max: 29.2

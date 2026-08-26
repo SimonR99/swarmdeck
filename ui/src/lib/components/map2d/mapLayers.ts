@@ -305,27 +305,71 @@ export function drawNetworkHeatmap(
   view: Viewport,
   showNetwork: boolean
 ) {
-  const layer = mapStore.networkLayer;
-  if (
-    !showNetwork ||
-    mapStore.viewMode !== 'local' ||
-    !layer ||
-    layer.robotId !== mapStore.viewRobot
-  ) return;
+  if (!showNetwork || !mapStore.info) return;
 
-  const maxY = layer.info.origin.y + layer.info.height * layer.info.resolution;
-  const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
-  if (!topLeft) return;
-  const screen = screenOf(topLeft.gx, topLeft.gy);
-  const width =
-    (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
-  const height =
-    (layer.info.height * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
-  ctx.save();
-  ctx.globalAlpha = 0.62;
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(layer.canvas, screen.sx, screen.sy, width, height);
-  ctx.restore();
+  if (mapStore.viewMode === 'local') {
+    const layer = mapStore.networkLayer;
+    if (!layer || layer.robotId !== mapStore.viewRobot) return;
+
+    const maxY = layer.info.origin.y + layer.info.height * layer.info.resolution;
+    const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
+    if (!topLeft) return;
+    const width =
+      (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
+    const height =
+      (layer.info.height * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
+    const gx = topLeft.gx * view.scale;
+    const gy = topLeft.gy * view.scale;
+
+    ctx.save();
+    ctx.translate(view.tx, view.ty);
+    if (view.rotation) ctx.rotate(view.rotation);
+    ctx.globalAlpha = 0.62;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(layer.canvas, gx, gy, width, height);
+    ctx.restore();
+    return;
+  }
+
+  // Global map mode: render network heatmaps for all active robots
+  for (const layer of mapStore.networkLayers) {
+    if (!fleet.isEnabled(layer.robotId)) continue;
+    const tf = mapStore.status?.transforms[layer.robotId];
+    const width =
+      (layer.info.width * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
+    const height =
+      (layer.info.height * layer.info.resolution / (mapStore.info?.resolution ?? 1)) * view.scale;
+    const maxY = layer.info.origin.y + layer.info.height * layer.info.resolution;
+
+    ctx.save();
+    ctx.translate(view.tx, view.ty);
+    if (view.rotation) ctx.rotate(view.rotation);
+    ctx.globalAlpha = 0.62;
+    ctx.imageSmoothingEnabled = true;
+
+    if (tf) {
+      const originGrid = mapStore.viewToGrid(tf.x, tf.y);
+      if (originGrid) {
+        ctx.translate(originGrid.gx * view.scale, originGrid.gy * view.scale);
+        if (tf.yaw) ctx.rotate(-tf.yaw);
+        const localGx = (layer.info.origin.x / (mapStore.info?.resolution ?? 1)) * view.scale;
+        const localGy = (-(maxY / (mapStore.info?.resolution ?? 1))) * view.scale;
+        ctx.drawImage(layer.canvas, localGx, localGy, width, height);
+      }
+    } else {
+      const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
+      if (topLeft) {
+        ctx.drawImage(
+          layer.canvas,
+          topLeft.gx * view.scale,
+          topLeft.gy * view.scale,
+          width,
+          height
+        );
+      }
+    }
+    ctx.restore();
+  }
 }
 
 export interface RobotLayerOptions {

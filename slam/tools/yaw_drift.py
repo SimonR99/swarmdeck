@@ -55,17 +55,25 @@ def main() -> int:
     parser.add_argument("--max-gap-s", type=float, default=0.5)
     parser.add_argument("--optimize-every", type=int, default=5)
     parser.add_argument("--jump-deg", type=float, default=3.0)
-    parser.add_argument("--configs", nargs="+", default=["isotropic"], choices=sorted(CONFIGS))
-    parser.add_argument("--max-turn-rate", type=float, default=0.0,
-                        help="drop keyframes rotating faster than this (deg/s); 0 keeps all")
+    parser.add_argument(
+        "--configs", nargs="+", default=["isotropic"], choices=sorted(CONFIGS)
+    )
+    parser.add_argument(
+        "--max-turn-rate",
+        type=float,
+        default=0.0,
+        help="drop keyframes rotating faster than this (deg/s); 0 keeps all",
+    )
     args = parser.parse_args()
 
     packets = load_packets(args.dataset)
     if args.max_turn_rate > 0:
         before = len(packets)
         packets = filter_by_turn_rate(packets, args.max_turn_rate)
-        print(f"turn-rate filter {args.max_turn_rate} deg/s: "
-              f"{before} -> {len(packets)} keyframes ({before - len(packets)} dropped)")
+        print(
+            f"turn-rate filter {args.max_turn_rate} deg/s: "
+            f"{before} -> {len(packets)} keyframes ({before - len(packets)} dropped)"
+        )
     truth = load_ground_truth(args.dataset / "ground_truth.csv")
 
     summary: dict[str, dict[str, float]] = {}
@@ -83,9 +91,7 @@ def main() -> int:
             raise SystemExit("nothing ingested")
         solved = snapshot.optimized.poses
         print(f"\n######## config: {config_name} ########")
-        summary[config_name] = _report(
-            backend, truth, solved, args, robot_stats=True
-        )
+        summary[config_name] = _report(backend, truth, solved, args, robot_stats=True)
 
     if len(summary) > 1:
         robots = sorted({r for v in summary.values() for r in v})
@@ -94,7 +100,10 @@ def main() -> int:
         for robot_id in robots:
             print(
                 f"  {robot_id:<10}"
-                + "".join(f"{summary[c].get(robot_id, float('nan')):>22.2f}" for c in args.configs)
+                + "".join(
+                    f"{summary[c].get(robot_id, float('nan')):>22.2f}"
+                    for c in args.configs
+                )
             )
     return 0
 
@@ -105,7 +114,9 @@ def _report(backend, truth, solved, args, robot_stats: bool) -> dict[str, float]
     for kf_id, keyframe in sorted(
         backend._keyframes.items(), key=lambda kv: (kv[0].robot_id, kv[0].seq)
     ):
-        true_pose = truth_at(truth, kf_id.robot_id, float(keyframe.stamp), args.max_gap_s)
+        true_pose = truth_at(
+            truth, kf_id.robot_id, float(keyframe.stamp), args.max_gap_s
+        )
         if true_pose is None or kf_id not in solved:
             continue
         per_robot.setdefault(kf_id.robot_id, []).append(
@@ -131,7 +142,10 @@ def _report(backend, truth, solved, args, robot_stats: bool) -> dict[str, float]
 
         deg = np.degrees
         print(f"\n=== {robot_id} ({len(rows)} keyframes) ===")
-        for label, err in (("raw (front end)", raw_err), ("optimized (graph)", opt_err)):
+        for label, err in (
+            ("raw (front end)", raw_err),
+            ("optimized (graph)", opt_err),
+        ):
             print(
                 f"  {label:<20} yaw err  rmse={deg(np.sqrt(np.mean(err**2))):6.2f}  "
                 f"mean|.|={deg(np.mean(np.abs(err))):6.2f}  "
@@ -141,7 +155,9 @@ def _report(backend, truth, solved, args, robot_stats: bool) -> dict[str, float]
         # Where does raw yaw error step? A slip event is a jump, drift is a ramp.
         steps = np.abs(deg(np.diff(raw_err)))
         big = np.where(steps > args.jump_deg)[0]
-        print(f"  raw-yaw steps > {args.jump_deg} deg between consecutive keyframes: {len(big)}")
+        print(
+            f"  raw-yaw steps > {args.jump_deg} deg between consecutive keyframes: {len(big)}"
+        )
         for i in big[:8]:
             print(
                 f"    seq {seqs[i]:>4} -> {seqs[i+1]:<4}  "

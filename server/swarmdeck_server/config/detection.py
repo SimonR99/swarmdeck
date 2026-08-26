@@ -17,7 +17,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 # Resolved from this file rather than the working directory: the backend runs
 # from the repo root in Docker and from ``server/`` under pytest, and the
 # catalog has to be the same one either way.
@@ -70,7 +69,11 @@ def validate_classes(raw: Any) -> list[str]:
     dashboard shows.
     """
     if not DETECTION_CLASS_NAMES:
-        return [str(name).strip()[:48] for name in raw][:32] if isinstance(raw, list) else []
+        return (
+            [str(name).strip()[:48] for name in raw][:32]
+            if isinstance(raw, list)
+            else []
+        )
     if not isinstance(raw, list):
         return list(DETECTION_CLASS_NAMES)
     requested = {str(name).strip() for name in raw}

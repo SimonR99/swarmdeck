@@ -18,7 +18,9 @@ def test_tablet_policy_ids_drops_spotapp_and_keeps_autopolicy():
     statuses = [
         SimpleNamespace(
             policy_id=1,
-            policy=SimpleNamespace(name="tablet-stop", user_id="bosdyn.android.spotapp abc"),
+            policy=SimpleNamespace(
+                name="tablet-stop", user_id="bosdyn.android.spotapp abc"
+            ),
         ),
         SimpleNamespace(
             policy_id=2,
@@ -38,13 +40,17 @@ def test_tablet_policy_ids_drops_spotapp_and_keeps_autopolicy():
 
 def test_load_spot_login_reads_mist_ros_parameters(tmp_path):
     path = tmp_path / "spot.yaml"
-    path.write_text(yaml.safe_dump({
-        "/**": {
-            "ros__parameters": {
-                "hostname": "192.168.50.3",
-                "username": "mistlab",
-                "password": "secret",
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "/**": {
+                    "ros__parameters": {
+                        "hostname": "192.168.50.3",
+                        "username": "mistlab",
+                        "password": "secret",
+                    }
+                }
             }
-        }
-    }))
+        )
+    )
     assert load_spot_login(path) == ("192.168.50.3", "mistlab", "secret")

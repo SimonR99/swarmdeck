@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { Battery, ScanSearch, SlidersHorizontal, Video, TriangleAlert, X } from 'lucide-svelte';
+  import { ScanSearch, SlidersHorizontal, Video, TriangleAlert, X } from 'lucide-svelte';
   import Card from '../ui/Card.svelte';
   import Badge from '../ui/Badge.svelte';
-  import Meter from '../ui/Meter.svelte';
+  import BatteryIndicator from '../ui/BatteryIndicator.svelte';
   import StatusDot from '../ui/StatusDot.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { actions } from '$lib/api/connection';
@@ -103,7 +103,8 @@
       </div>
     </div>
 
-    <div class="flex shrink-0 items-center gap-1">
+    <div class="flex shrink-0 items-center gap-1.5">
+      <BatteryIndicator value={robot.battery} />
       {#if stale}
         <span title="Unattended {Math.round(robot.unattended_s)}s">
           <TriangleAlert class="h-3.5 w-3.5 text-warn" />
@@ -147,16 +148,6 @@
         </button>
       {/if}
     </div>
-
-    {#if robot.battery !== null}
-      <div class="flex items-center gap-1.5">
-        <Battery class="h-3 w-3 shrink-0 text-fg-dim" />
-        <Meter value={robot.battery} class="w-12" />
-        <span class="text-[10px] tabular font-medium text-fg-muted">
-          {Math.round(robot.battery * 100)}%
-        </span>
-      </div>
-    {/if}
   </div>
 </Card>
 
