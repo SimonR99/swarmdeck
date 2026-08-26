@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Battery, ScanSearch, Video, TriangleAlert } from 'lucide-svelte';
+  import { Battery, ScanSearch, SlidersHorizontal, Video, TriangleAlert, X } from 'lucide-svelte';
   import Card from '../ui/Card.svelte';
   import Badge from '../ui/Badge.svelte';
   import Meter from '../ui/Meter.svelte';
@@ -12,6 +12,8 @@
 
   let { robot, unattendedThreshold = 45 }: { robot: RobotState; unattendedThreshold?: number } =
     $props();
+
+  let bodyModalOpen = $state(false);
 
   const color = $derived(fleet.colorOf(robot.robot_id));
   const selected = $derived(fleet.isSelected(robot.robot_id));
@@ -121,6 +123,19 @@
       {#if !robot.online}
         <Badge tone="danger">OFFLINE</Badge>
       {/if}
+      {#if fleet.can(robot.robot_id, 'body')}
+        <button
+          class="inline-flex h-5 items-center gap-1 rounded-full bg-surface-3 px-2 text-[9px] font-semibold text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg active:scale-95"
+          title="Open {shortName} body actions"
+          onclick={(e) => {
+            e.stopPropagation();
+            bodyModalOpen = true;
+          }}
+        >
+          <SlidersHorizontal class="h-2.5 w-2.5" />
+          Actions
+        </button>
+      {/if}
     </div>
 
     {#if robot.battery !== null}
@@ -133,49 +148,87 @@
       </div>
     {/if}
   </div>
+</Card>
 
-  {#if selected && fleet.can(robot.robot_id, 'body')}
+{#if bodyModalOpen}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm"
+    role="presentation"
+    onclick={(e) => {
+      e.stopPropagation();
+      if (e.target === e.currentTarget) bodyModalOpen = false;
+    }}
+  >
     <div
-      class="mt-2 border-t border-border/60 pt-2"
-      role="group"
-      aria-label="Body control"
+      class="panel-glow w-full max-w-xs flex flex-col overflow-hidden rounded-[--radius-dialog] border border-border/80 bg-surface shadow-2xl"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="body-dialog-title"
       onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
     >
-      <div class="mb-1.5 flex items-center justify-between text-[9px] font-semibold uppercase tracking-wider text-fg-dim">
-        <span>Body actions</span>
-        <span class="h-1.5 w-1.5 rounded-full {robot.online ? 'bg-ok' : 'bg-danger'}"></span>
-      </div>
-      <div class="grid grid-cols-4 gap-1">
+      <header class="flex h-12 shrink-0 items-center justify-between border-b border-border/70 px-4">
+        <div class="flex items-center gap-2">
+          <span class="h-2 w-2 rounded-full {robot.online ? 'bg-ok' : 'bg-danger'}"></span>
+          <h3 id="body-dialog-title" class="text-xs font-semibold text-fg">
+            {shortName} Actions
+          </h3>
+        </div>
         <button
-          class="inline-flex h-7 items-center justify-center rounded-md bg-accent-container px-1 text-[10px] font-semibold text-accent-container-fg hover:brightness-95 active:scale-95 disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={() => actions.bodyCommand(robot.robot_id, 'claim')}
+          class="grid h-8 w-8 place-items-center rounded-full text-fg-muted hover:bg-surface-2 hover:text-fg"
+          onclick={() => (bodyModalOpen = false)}
         >
-          Claim
+          <X class="h-4 w-4" />
         </button>
-        <button
-          class="inline-flex h-7 items-center justify-center rounded-md bg-surface-3 px-1 text-[10px] font-semibold text-fg-muted hover:bg-border active:scale-95 disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={() => actions.bodyCommand(robot.robot_id, 'release')}
-        >
-          Release
-        </button>
-        <button
-          class="inline-flex h-7 items-center justify-center rounded-md bg-surface-3 px-1 text-[10px] font-semibold text-fg-muted hover:bg-border active:scale-95 disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={() => actions.bodyCommand(robot.robot_id, 'sit')}
-        >
-          Sit
-        </button>
-        <button
-          class="inline-flex h-7 items-center justify-center rounded-md bg-surface-3 px-1 text-[10px] font-semibold text-fg-muted hover:bg-border active:scale-95 disabled:opacity-40"
-          disabled={!robot.online}
-          onclick={() => actions.bodyCommand(robot.robot_id, 'stand')}
-        >
-          Stand
-        </button>
+      </header>
+
+      <div class="p-4 flex flex-col gap-3">
+        <div class="text-[11px] text-fg-dim">
+          Direct quadruped posture and control commands for <strong class="text-fg">{shortName}</strong>.
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 mt-0.5">
+          <button
+            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
+            disabled={!robot.online}
+            onclick={() => {
+              actions.bodyCommand(robot.robot_id, 'claim');
+              bodyModalOpen = false;
+            }}
+          >
+            Claim
+          </button>
+          <button
+            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+            disabled={!robot.online}
+            onclick={() => {
+              actions.bodyCommand(robot.robot_id, 'release');
+              bodyModalOpen = false;
+            }}
+          >
+            Release
+          </button>
+          <button
+            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+            disabled={!robot.online}
+            onclick={() => {
+              actions.bodyCommand(robot.robot_id, 'sit');
+              bodyModalOpen = false;
+            }}
+          >
+            Sit
+          </button>
+          <button
+            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+            disabled={!robot.online}
+            onclick={() => {
+              actions.bodyCommand(robot.robot_id, 'stand');
+              bodyModalOpen = false;
+            }}
+          >
+            Stand
+          </button>
+        </div>
       </div>
     </div>
-  {/if}
-</Card>
+  </div>
+{/if}

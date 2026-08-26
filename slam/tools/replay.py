@@ -60,6 +60,16 @@ CONFIGS: dict[str, tuple[dict, dict]] = {
     # be accepted.
     "yaw-20": ({"information": "hessian", "max_yaw_deviation_from_prior_rad": math.radians(20.0)}, {}),
     "yaw-12": ({"information": "hessian", "max_yaw_deviation_from_prior_rad": math.radians(12.0)}, {}),
+    # max_mean_error was calibrated on tests/synthetic.py, where true matches
+    # measured 0.045-0.12. Real captured data is an order of magnitude higher:
+    # on 3d-run-01, inter-robot candidates whose ground-truth separation is
+    # under 8 m have a MEDIAN mean_error of 0.547 (p5 0.073, p95 6.05), so the
+    # 0.15 default sits below the typical true match and rejects 52% of all
+    # inter-robot candidates. It also barely discriminates -- false pairs
+    # measured a LOWER median (0.334) than true ones. These sweep whether the
+    # gate is earning its rejections or just throwing away closures.
+    "mean-err-0.6": ({"information": "hessian", "max_mean_error": 0.6}, {}),
+    "mean-err-1.5": ({"information": "hessian", "max_mean_error": 1.5}, {}),
     "inlier-0.80": ({"information": "hessian", "min_inlier_ratio": 0.80}, {}),
     "inlier-0.90": ({"information": "hessian", "min_inlier_ratio": 0.90}, {}),
     "strict": (
