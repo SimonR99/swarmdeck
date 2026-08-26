@@ -40,7 +40,7 @@
     </button>
   </header>
 
-  <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2">
+  <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
     {#each fleet.robots as robot (robot.robot_id)}
       <RobotCard {robot} unattendedThreshold={settings.value.unattended_threshold_s} />
     {/each}

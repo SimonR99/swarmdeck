@@ -811,7 +811,7 @@
 
   {#if showNetwork && mapStore.viewMode === 'local' && mapStore.networkLayer}
     <div
-      class="pointer-events-none absolute bottom-11 left-3 z-20 rounded-[--radius-control] border border-border
+      class="pointer-events-none absolute top-3 left-3 z-20 rounded-[--radius-control] border border-border
              bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
     >
       <div class="mb-1 flex items-center justify-between gap-4">
