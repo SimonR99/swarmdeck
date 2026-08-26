@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import deque
 from typing import Any
 
@@ -207,6 +208,31 @@ def _moved(previous: np.ndarray, current: np.ndarray, min_t: float, min_yaw: flo
     return dyaw >= min_yaw
 
 
+def mint_session() -> str:
+    """A fresh boot id for one adapter process.
+
+    ``seq`` restarts at zero every time this process does, so on its own it
+    cannot identify a keyframe: the back-end keys nodes by ``(robot_id, seq)``
+    and drops a repeat as a duplicate. After a reboot that silently discards
+    the robot's first N keyframes, where N is however many it had sent before
+    -- observed live as aslan_0 losing ~97 m of driving with an empty
+    ``last_error`` throughout.
+
+    Minting this ONCE, at construction, is the whole contract: every packet
+    from one run of this process carries the same value, so
+    ``(robot_id, session, seq)`` is unique and ``(robot_id, session)`` names
+    one continuous trajectory in one map frame. Re-minting per keyframe would
+    be worse than not having it -- every keyframe would become its own
+    trajectory and no odometry edge would ever be built.
+
+    Wall-clock seconds first so the ids sort chronologically in an operator's
+    trajectory list, then random bytes because two robots can boot inside the
+    same second (and a robot with no RTC boots at the same fake second every
+    time). Only characters ``swarmdeck_protocol`` allows in a session.
+    """
+    return f"{int(time.time()):010d}-{uuid.uuid4().hex[:8]}"
+
+
 class KeyframeUploader:
     """Motion-gated producer with a bounded drop-oldest upload queue."""
 
@@ -223,8 +249,13 @@ class KeyframeUploader:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         min_points: int = DEFAULT_MIN_POINTS,
         max_yaw_rate: float = DEFAULT_MAX_YAW_RATE,
+        session: str | None = None,
     ) -> None:
         self.robot_id = robot_id
+        #: Minted once per process. See :func:`mint_session`. Passing one in is
+        #: for tests and for a supervisor that wants to name the run itself; it
+        #: must never change while this object lives.
+        self.session = mint_session() if session is None else session
         self.http_url = http_url.rstrip("/")
         self.voxel_m = voxel_m
         self.min_translation_m = min_translation_m
@@ -286,6 +317,7 @@ class KeyframeUploader:
                 stamp=float(stamp),
                 points=base_points,
                 t_odom_base=pose,
+                session=self.session,
             )
         except ProtocolError:
             return False

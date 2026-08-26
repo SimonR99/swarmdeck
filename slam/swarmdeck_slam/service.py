@@ -44,6 +44,7 @@ from swarmdeck_slam.backend import (
     snapshot_update,
 )
 from swarmdeck_slam.render import RenderConfig
+from swarmdeck_slam.types import TrajectoryId
 
 # Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
 # dump of every point. With a single-ring lidar the distinction is invisible --
@@ -261,9 +262,6 @@ def _worker_loop() -> None:
         with _queue_lock:
             while _queue:
                 blobs.append(_queue.popleft())
-        if not blobs:
-            _stop.wait(0.05)
-            continue
         for blob in blobs:
             try:
                 backend.ingest_packet(decode_keyframe(blob))
@@ -271,6 +269,13 @@ def _worker_loop() -> None:
                 _last_error = str(exc)
                 continue
             _ingested += 1
+        if not blobs:
+            # An idle pass still falls through to the due check below, because
+            # a new keyframe is no longer the only thing that can dirty the
+            # graph: changing which trajectories are included does too, and
+            # returning here meant that selection sat unapplied until the next
+            # blob happened to arrive -- forever, on a fleet that has stopped.
+            _stop.wait(0.05)
         now = time.monotonic()
         due = (
             backend.new_since_optimize >= OPTIMIZE_EVERY_N
@@ -330,8 +335,95 @@ def status() -> dict[str, Any]:
         "inter_robot_closures": (
             snapshot.inter_robot_closures if snapshot is not None else 0
         ),
+        # Read off the back-end, not off the snapshot, so a trajectory that
+        # arrived (or was excluded) since the last solve is already listed. The
+        # component column is the only part that needs a solve, and it is None
+        # until there is one.
+        "trajectories": [
+            t.to_dict()
+            for t in backend.trajectory_summaries(
+                snapshot.optimized if snapshot is not None else None
+            )
+        ],
         "server_url": SERVER_URL,
     }
+
+
+@app.post("/trajectories/select")
+async def post_trajectories_select(request: Request) -> Any:
+    """Choose which trajectories the next optimization is built from.
+
+    Three shapes, all naming trajectories as ``robot_id`` or
+    ``robot_id@session``::
+
+        {"only":    ["botman_0@1787715679-a1b2c3d4"]}   # exactly these
+        {"exclude": ["botman_0"]}                        # drop these
+        {"include": ["botman_0"]}                        # put these back
+
+    ``exclude`` and ``include`` may be sent together and are applied in that
+    order. An excluded trajectory is still stored and still listed by
+    ``/status``; it contributes no keyframe and no edge to the solve, so it
+    gets no pose and appears in no grid, and including it again restores every
+    edge it had. That is what makes rebuilding a map from a chosen subset a
+    selection rather than a destructive filter.
+
+    Returns immediately with the new selection. The worker picks the
+    re-optimization up on its next pass, because the selection change marks the
+    back-end dirty -- this endpoint never runs the solver on the HTTP thread,
+    for the same reason ``/keyframe`` does not.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "JSON object required"}, status_code=400)
+
+    try:
+        only = _parse_trajectories(payload.get("only"))
+        exclude = _parse_trajectories(payload.get("exclude"))
+        include = _parse_trajectories(payload.get("include"))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if only is None and exclude is None and include is None:
+        return JSONResponse(
+            {"error": "one of 'only', 'exclude', 'include' is required"}, status_code=400
+        )
+
+    changed = 0
+    if only is not None:
+        before = {t for t in backend.trajectory_ids() if backend.is_included(t)}
+        backend.include_only(only)
+        after = {t for t in backend.trajectory_ids() if backend.is_included(t)}
+        changed = len(before ^ after)
+    for trajectory in exclude or []:
+        changed += int(backend.set_included(trajectory, False))
+    for trajectory in include or []:
+        changed += int(backend.set_included(trajectory, True))
+
+    return {
+        "ok": True,
+        "changed": changed,
+        "trajectories": [t.to_dict() for t in backend.trajectory_summaries()],
+    }
+
+
+def _parse_trajectories(value: Any) -> list[TrajectoryId] | None:
+    """``["robot@session", ...]`` to trajectory ids. None when the key is absent.
+
+    An unknown trajectory is accepted rather than rejected: the operator is
+    naming a selection, and refusing the whole request because one segment has
+    not arrived yet would make the endpoint depend on ingest timing.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("trajectory selection must be a list of strings")
+    try:
+        return [TrajectoryId.parse(v) for v in value]
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 @app.post("/keyframe")

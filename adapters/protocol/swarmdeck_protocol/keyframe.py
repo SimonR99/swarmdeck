@@ -33,6 +33,30 @@ Conventions that the rest of the system depends on:
   the sensor extrinsic applied. Rendering a keyframe is then exactly
   ``T_world_base @ points``, with no per-robot extrinsic lookup at render time.
 * ``stamp`` is UNIX seconds as a float.
+
+``session``: what makes ``seq`` mean something
+-----------------------------------------------
+``seq`` counts from zero and is minted by the producer, which restarts at zero
+every time the adapter process does. ``robot_id`` alone therefore cannot
+identify a keyframe: after a reboot a robot re-emits ``seq`` 0, 1, 2 ... for a
+completely different stretch of driving, in a *different map frame*, and the
+back-end's ``(robot_id, seq)`` key collides with the pre-reboot keyframes it
+already holds -- which it drops as duplicates, silently.
+
+``session`` is a boot id the producer mints once at startup and stamps on every
+packet it sends, so ``(robot_id, session, seq)`` is unique for the life of the
+fleet and ``(robot_id, session)`` names one *continuous* trajectory. It is a
+header field, not a wire-version bump, precisely so the two directions of
+mismatch both degrade gracefully:
+
+* a new reader against an old packet sees no ``session`` and defaults it to
+  ``""`` -- one trajectory per robot, exactly the pre-session behaviour, which
+  is what keeps every recorded capture in ``sessions/captures`` replayable;
+* an old reader against a new packet ignores the field it does not know.
+
+Bumping ``KEYFRAME_WIRE_VERSION`` would have broken both, because
+:func:`peek_keyframe_header` rejects any version it does not recognize -- an
+un-upgraded robot would have had every keyframe refused at the door.
 """
 
 from __future__ import annotations
@@ -59,6 +83,32 @@ MAX_DECOMPRESSED_BYTES: Final = 64 * 1024 * 1024
 
 _HEADER_STRUCT: Final = struct.Struct("<4sHI")
 _INT16_LIMIT: Final = 32767
+
+#: A session id ends up in HTTP query strings (``scope=trajectory:<robot>@<session>``),
+#: in filenames, and in operator-facing tables, so it is restricted to characters
+#: that survive all three without quoting, and bounded so a hostile producer
+#: cannot bloat every header. The empty string is the legacy "no session
+#: declared" value and is always accepted.
+MAX_SESSION_CHARS: Final = 64
+_SESSION_ALLOWED: Final = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+
+
+def _validate_session(session: Any) -> str:
+    """Normalize and check a session id. ``None``/missing becomes ``""``."""
+    if session is None:
+        return ""
+    if not isinstance(session, str):
+        raise ProtocolError(f"session must be a string, got {type(session).__name__}")
+    if len(session) > MAX_SESSION_CHARS:
+        raise ProtocolError(
+            f"session is {len(session)} chars, over the {MAX_SESSION_CHARS} limit"
+        )
+    bad = sorted(set(session) - _SESSION_ALLOWED)
+    if bad:
+        raise ProtocolError(f"session contains disallowed characters: {bad}")
+    return session
 
 
 class ProtocolError(ValueError):
@@ -96,10 +146,18 @@ class KeyframePacket:
     points: np.ndarray  # float32 [n, 3], base frame at capture
     t_odom_base: np.ndarray  # float64 [7] -> x, y, z, qx, qy, qz, qw
     descriptor: Descriptor | None
+    #: Producer boot id; ``""`` for a packet recorded before the field existed.
+    #: See this module's docstring -- ``seq`` is only unique within one session.
+    session: str = ""
 
     @property
     def n_points(self) -> int:
         return int(self.points.shape[0])
+
+    @property
+    def trajectory(self) -> tuple[str, str]:
+        """``(robot_id, session)`` -- the continuous trajectory this belongs to."""
+        return (self.robot_id, self.session)
 
 
 def _validate_points(points: np.ndarray) -> np.ndarray:
@@ -132,6 +190,7 @@ def encode_keyframe(
     t_odom_base: Any,
     descriptor: Descriptor | None = None,
     scale: float = 0.01,
+    session: str = "",
 ) -> bytes:
     """Serialize one keyframe. Raises :class:`ProtocolError` on invalid input.
 
@@ -147,6 +206,7 @@ def encode_keyframe(
 
     pts = _validate_points(points)
     pose = _validate_pose(t_odom_base)
+    session = _validate_session(session)
 
     quantized = np.rint(pts / scale)
     in_range = (np.abs(quantized) <= _INT16_LIMIT).all(axis=1)
@@ -162,6 +222,12 @@ def encode_keyframe(
         "t_odom_base": pose.tolist(),
         "descriptor": None,
     }
+    # Omitted entirely when empty, so a producer that declares no session emits
+    # exactly the bytes it emitted before this field existed. Nothing downstream
+    # can then tell "old encoder" from "new encoder, no session", which is the
+    # point: both mean one trajectory per robot.
+    if session:
+        header["session"] = session
 
     body = quantized.tobytes(order="C")
     if descriptor is not None:
@@ -257,6 +323,10 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
     except (KeyError, TypeError, ValueError) as exc:
         raise ProtocolError(f"header is missing or has a malformed field: {exc}") from exc
 
+    # Defaulted, never required: every blob in sessions/captures predates the
+    # field, and they must keep decoding to exactly what they decoded to before.
+    session = _validate_session(header.get("session"))
+
     if not robot_id:
         raise ProtocolError("robot_id must be non-empty")
     if scale <= 0.0:
@@ -286,6 +356,7 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
         points=points,
         t_odom_base=pose,
         descriptor=descriptor,
+        session=session,
     )
 
 

@@ -15,6 +15,14 @@ cannot be a wrong one, because two robots are only ever poured into the same
 grid when :class:`~swarmdeck_slam.types.OptimizedGraph` has already proven
 they share a frame.
 
+Three partitions of one render
+-------------------------------
+The same posed points are grouped three ways: per component (the merged map),
+per robot (that machine's whole coverage), and per trajectory (one unbroken
+stretch of driving, for a robot that has restarted). :func:`render_all`
+computes the poses once and groups them three times; the per-trajectory
+partition is empty unless some robot actually restarted.
+
 Per-component isolation
 ------------------------
 :attr:`OptimizedGraph.components` partitions robots by verified relative
@@ -51,7 +59,13 @@ from typing import Final, Iterable, NamedTuple
 
 import numpy as np
 
-from swarmdeck_slam.types import Keyframe, KeyframeId, OptimizedGraph, transform_points
+from swarmdeck_slam.types import (
+    Keyframe,
+    KeyframeId,
+    OptimizedGraph,
+    TrajectoryId,
+    transform_points,
+)
 
 # Occupancy wire format fixed by adapters/protocol/README.md: int8, row-major,
 # -1 unknown / 0 free / 100 occupied. The browser UI already renders exactly
@@ -177,12 +191,36 @@ def render_occupancy(
     return _component_grids(graph, contributions, config)
 
 
+def render_per_trajectory(
+    graph: OptimizedGraph,
+    keyframes: Iterable[Keyframe],
+    config: RenderConfig | None = None,
+) -> dict[TrajectoryId, RenderedGrid]:
+    """One grid per trajectory, for a robot that has more than one.
+
+    A robot that reboots contributes several independent stretches of driving,
+    and :func:`render_per_robot` pours all of them into one grid -- correct,
+    because they are one machine's coverage, and useless for the question an
+    operator actually has after a reboot, which is whether the two segments
+    agree about the building. Rendering a segment alone answers it: two
+    trajectory grids that look like the same corridor at the same coordinates
+    are a merge that worked.
+
+    Only robots with more than one trajectory get grids here. For a robot with
+    exactly one, this grid and its ``robot:`` grid are pixel-identical renders
+    of the same keyframes, and the ray walk that dominates a render is not
+    worth paying twice to publish the same picture under two names.
+    """
+    config = config or RenderConfig()
+    return _trajectory_grids(_contributions_of(graph, keyframes, config), config)
+
+
 def render_all(
     graph: OptimizedGraph,
     keyframes: Iterable[Keyframe],
     config: RenderConfig | None = None,
-) -> tuple[dict[int, RenderedGrid], dict[str, RenderedGrid]]:
-    """Both partitions of the same render: ``(per component, per robot)``.
+) -> tuple[dict[int, RenderedGrid], dict[str, RenderedGrid], dict[TrajectoryId, RenderedGrid]]:
+    """Every partition of the same render: ``(per component, per robot, per trajectory)``.
 
     The back-end publishes both on every cycle, and they are the same posed,
     height-filtered, range-capped points grouped two different ways. Calling
@@ -200,13 +238,22 @@ def render_all(
     decomposition the module docstring already describes for a future
     incremental renderer -- not a speedup.
 
-    :func:`render_occupancy` and :func:`render_per_robot` remain as
-    single-partition wrappers for callers (tests, tools) that want only one,
-    and neither pays for the partition it did not ask for.
+    :func:`render_occupancy`, :func:`render_per_robot` and
+    :func:`render_per_trajectory` remain as single-partition wrappers for
+    callers (tests, tools) that want only one, and none pays for a partition it
+    did not ask for.
+
+    The third partition is usually empty and usually free: a trajectory grid is
+    only produced for a robot that has restarted, because for every other robot
+    it would be an identical copy of that robot's own grid.
     """
     config = config or RenderConfig()
     contributions = _contributions_of(graph, keyframes, config)
-    return _component_grids(graph, contributions, config), _robot_grids(contributions, config)
+    return (
+        _component_grids(graph, contributions, config),
+        _robot_grids(contributions, config),
+        _trajectory_grids(contributions, config),
+    )
 
 
 def _contributions_of(
@@ -234,6 +281,30 @@ def _robot_grids(
     return {
         robot_id: _render_component(index, frozenset({robot_id}), contributions, config)
         for index, robot_id in enumerate(robot_ids)
+    }
+
+
+def _trajectory_grids(
+    contributions: dict[KeyframeId, _Contribution], config: RenderConfig
+) -> dict[TrajectoryId, RenderedGrid]:
+    """One grid per trajectory, skipping robots that only have one.
+
+    See :func:`render_per_trajectory` for why the single-trajectory case is
+    skipped rather than rendered and thrown away.
+    """
+    trajectories = sorted({kf_id.trajectory for kf_id in contributions})
+    per_robot: dict[str, int] = {}
+    for trajectory in trajectories:
+        per_robot[trajectory.robot_id] = per_robot.get(trajectory.robot_id, 0) + 1
+    return {
+        trajectory: _render_component(
+            index,
+            frozenset({trajectory.robot_id}),
+            {k: v for k, v in contributions.items() if k.trajectory == trajectory},
+            config,
+        )
+        for index, trajectory in enumerate(trajectories)
+        if per_robot[trajectory.robot_id] > 1
     }
 
 
