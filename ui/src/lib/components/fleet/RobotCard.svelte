@@ -62,31 +62,31 @@
   {selected}
   accent={color}
   onclick={chooseRobot}
-  class="pl-4"
+  class="pl-3.5 pr-3 py-2.5"
 >
   <div class="flex items-start justify-between gap-2">
     <div class="min-w-0">
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5">
         <StatusDot tone={statusTone as never} pulse={robot.nav_status === 'active'} />
-        <span class="truncate text-[13px] font-semibold tracking-tight" style="color:{color}">
+        <span class="truncate text-[12.5px] font-semibold tracking-tight" style="color:{color}">
           {shortName}
         </span>
         <span
-          class="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-surface-3 px-1.5
-                 text-[9px] font-semibold tabular text-fg-muted"
+          class="inline-flex h-4.5 shrink-0 items-center gap-1 rounded-full bg-surface-3 px-1.5
+                 text-[8.5px] font-semibold tabular text-fg-muted"
           title="{detectionCount} detection{detectionCount === 1 ? '' : 's'} from {shortName}"
           aria-label="{detectionCount} detection{detectionCount === 1 ? '' : 's'}"
         >
-          <ScanSearch class="h-3 w-3" />
+          <ScanSearch class="h-2.5 w-2.5" />
           {detectionCount}
         </span>
         {#if robot.robot_type !== 'diffdrive'}
-          <span class="truncate text-[10px] font-medium tracking-wide text-fg-dim">
+          <span class="truncate text-[9.5px] font-medium tracking-wide text-fg-dim">
             {robot.robot_type}
           </span>
         {/if}
       </div>
-      <div class="mt-1 text-[10px] tabular text-fg-dim">
+      <div class="mt-0.5 text-[9.5px] tabular text-fg-dim">
         {robot.pose.x.toFixed(1)}, {robot.pose.y.toFixed(1)} m
       </div>
     </div>
@@ -94,42 +94,88 @@
     <div class="flex shrink-0 items-center gap-1">
       {#if stale}
         <span title="Unattended {Math.round(robot.unattended_s)}s">
-          <TriangleAlert class="h-4 w-4 text-warn" />
+          <TriangleAlert class="h-3.5 w-3.5 text-warn" />
         </span>
       {/if}
       {#if isCamera}
-        <Video class="h-4 w-4 text-accent" />
+        <Video class="h-3.5 w-3.5 text-accent" />
       {/if}
     </div>
   </div>
 
-  <div class="mt-2.5 flex items-center gap-2">
-    <Badge
-      tone={robot.mode === 'estop'
-        ? 'danger'
-        : robot.mode === 'recover'
-          ? 'warn'
-          : robot.nav_status === 'active'
-            ? 'accent'
-            : robot.nav_status === 'failed'
-              ? 'warn'
-              : 'neutral'}
-    >
-      {modeLabel}
-    </Badge>
-    {#if !robot.online}
-      <Badge tone="danger">OFFLINE</Badge>
+  <div class="mt-1.5 flex items-center justify-between gap-2">
+    <div class="flex items-center gap-1.5">
+      <Badge
+        tone={robot.mode === 'estop'
+          ? 'danger'
+          : robot.mode === 'recover'
+            ? 'warn'
+            : robot.nav_status === 'active'
+              ? 'accent'
+              : robot.nav_status === 'failed'
+                ? 'warn'
+                : 'neutral'}
+      >
+        {modeLabel}
+      </Badge>
+      {#if !robot.online}
+        <Badge tone="danger">OFFLINE</Badge>
+      {/if}
+    </div>
+
+    {#if robot.battery !== null}
+      <div class="flex items-center gap-1.5">
+        <Battery class="h-3 w-3 shrink-0 text-fg-dim" />
+        <Meter value={robot.battery} class="w-12" />
+        <span class="text-[10px] tabular font-medium text-fg-muted">
+          {Math.round(robot.battery * 100)}%
+        </span>
+      </div>
     {/if}
   </div>
 
-  {#if robot.battery !== null}
-    <div class="mt-2.5 flex items-center gap-2">
-      <Battery class="h-3.5 w-3.5 shrink-0 text-fg-dim" />
-      <Meter value={robot.battery} />
-      <span class="w-8 shrink-0 text-right text-[11px] tabular text-fg-muted">
-        {Math.round(robot.battery * 100)}%
-      </span>
+  {#if selected && fleet.can(robot.robot_id, 'body')}
+    <div
+      class="mt-2 border-t border-border/60 pt-2"
+      role="group"
+      aria-label="Body control"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
+    >
+      <div class="mb-1.5 flex items-center justify-between text-[9px] font-semibold uppercase tracking-wider text-fg-dim">
+        <span>Body actions</span>
+        <span class="h-1.5 w-1.5 rounded-full {robot.online ? 'bg-ok' : 'bg-danger'}"></span>
+      </div>
+      <div class="grid grid-cols-4 gap-1">
+        <button
+          class="inline-flex h-7 items-center justify-center rounded-md bg-accent-container px-1 text-[10px] font-semibold text-accent-container-fg hover:brightness-95 active:scale-95 disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={() => actions.bodyCommand(robot.robot_id, 'claim')}
+        >
+          Claim
+        </button>
+        <button
+          class="inline-flex h-7 items-center justify-center rounded-md bg-surface-3 px-1 text-[10px] font-semibold text-fg-muted hover:bg-border active:scale-95 disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={() => actions.bodyCommand(robot.robot_id, 'release')}
+        >
+          Release
+        </button>
+        <button
+          class="inline-flex h-7 items-center justify-center rounded-md bg-surface-3 px-1 text-[10px] font-semibold text-fg-muted hover:bg-border active:scale-95 disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={() => actions.bodyCommand(robot.robot_id, 'sit')}
+        >
+          Sit
+        </button>
+        <button
+          class="inline-flex h-7 items-center justify-center rounded-md bg-surface-3 px-1 text-[10px] font-semibold text-fg-muted hover:bg-border active:scale-95 disabled:opacity-40"
+          disabled={!robot.online}
+          onclick={() => actions.bodyCommand(robot.robot_id, 'stand')}
+        >
+          Stand
+        </button>
+      </div>
     </div>
   {/if}
-
 </Card>
