@@ -98,9 +98,33 @@ _worker: threading.Thread | None = None
 # Never let capture break ingestion: a full disk must cost a dataset, not the
 # live map.
 CAPTURE_DIR = os.environ.get("SWARMDECK_SLAM_CAPTURE_DIR", "")
-_capture_seq = 0
+#: -1 until the first capture, when it resumes past whatever is already on disk.
+_capture_seq = -1
 _capture_lock = threading.Lock()
 _capture_failed = False
+
+
+def _resume_capture_index(directory: str) -> int:
+    """Next free index in ``directory``, so a restart appends instead of
+    overwriting.
+
+    Filenames are the arrival index alone, and the counter lives in module
+    state, so a restarted service would begin again at 000000 and silently
+    overwrite an existing dataset from the beginning -- losing exactly the
+    capture someone had been collecting, with no error anywhere. Resuming past
+    the highest file on disk keeps a restarted session appending to the same
+    dataset, which also preserves the arrival order that makes a replay
+    reproduce the live graph.
+    """
+    try:
+        existing = [
+            int(name[:-3])
+            for name in os.listdir(directory)
+            if name.endswith(".kf") and name[:-3].isdigit()
+        ]
+    except OSError:
+        return 0
+    return max(existing) + 1 if existing else 0
 
 
 def _capture(blob: bytes) -> None:
@@ -108,6 +132,10 @@ def _capture(blob: bytes) -> None:
     if not CAPTURE_DIR or _capture_failed:
         return
     with _capture_lock:
+        if _capture_seq < 0:
+            _capture_seq = _resume_capture_index(
+                os.path.join(CAPTURE_DIR, "keyframes")
+            )
         index = _capture_seq
         _capture_seq += 1
     try:
