@@ -32,6 +32,9 @@ actions:
   # convention, the way `navigate_to_pose` is the ROS 2/Nav2 one.
   navigate_to_pose: move_base
 
+perception:
+  depth_max_age_s: 1.0
+
 rates:
   state_hz: 5.0
   map_period_s: 2.0

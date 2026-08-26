@@ -252,11 +252,24 @@ class AdapterSensorMixin:
         self._grid_dirty = True
 
     def _on_battery(self, msg) -> None:
-        value = float(msg.percentage)
-        if math.isnan(value):
-            self.battery = None
-            return
-        self.battery = value / 100.0 if value > 1.0 else value
+        if hasattr(msg, "percentage"):
+            value = float(msg.percentage)
+            if math.isnan(value):
+                self.battery = None
+                return
+            self.battery = value / 100.0 if value > 1.0 else max(0.0, min(1.0, value))
+        elif hasattr(msg, "battery_voltage") or hasattr(msg, "voltage"):
+            voltage = float(getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan"))))
+            if math.isnan(voltage) or voltage <= 0.0:
+                self.battery = None
+                return
+            min_v = float(self.cfg.get("battery_voltage_min", 23.0))
+            max_v = float(self.cfg.get("battery_voltage_max", 29.2))
+            if max_v > min_v:
+                pct = (voltage - min_v) / (max_v - min_v)
+                self.battery = max(0.0, min(1.0, pct))
+            else:
+                self.battery = None
 
     def _on_camera_depth_cloud(self, msg) -> None:
         self._camera_depth_cloud = msg

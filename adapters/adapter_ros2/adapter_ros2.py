@@ -59,6 +59,7 @@ import yaml
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import (
     QoSDurabilityPolicy,
@@ -434,8 +435,20 @@ class HardwareBridge(
                 NavPath, topics["local_plan"], self._on_local_plan, 10
             )
         if topics.get("battery"):
+            battery_topic = topics["battery"]
+            msg_cls = BatteryState
+            if "bunker_status" in battery_topic:
+                try:
+                    from bunker_msgs.msg import BunkerStatus
+                    msg_cls = BunkerStatus
+                except ImportError:
+                    try:
+                        from rosidl_runtime_py.utilities import get_message
+                        msg_cls = get_message("bunker_msgs/msg/BunkerStatus") or BatteryState
+                    except Exception:
+                        pass
             node.create_subscription(
-                BatteryState, topics["battery"], self._on_battery, qos_profile_sensor_data
+                msg_cls, battery_topic, self._on_battery, qos_profile_sensor_data
             )
         # Prefer compressed: a raw camera stream at full rate is the single most
         # expensive thing an adapter can subscribe to over a robot's network.
@@ -795,7 +808,14 @@ class HardwareBridge(
                 if stamp_msg is not None
                 else rclpy.time.Time()
             )
-            tf = self.tf_buffer.lookup_transform(color_frame, depth_frame, stamp)
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    color_frame, depth_frame, stamp, timeout=Duration(seconds=0.1)
+                )
+            except Exception:
+                tf = self.tf_buffer.lookup_transform(
+                    color_frame, depth_frame, rclpy.time.Time()
+                )
             return {
                 "color_camera_info": color_info,
                 "depth_to_color": tf.transform,
@@ -814,7 +834,7 @@ class HardwareBridge(
     ) -> dict[str, float] | None:
         perception = self.cfg.get("perception", {})
         image_time = self._stamp_seconds(image_header)
-        max_age = float(perception.get("depth_max_age_s", 0.35))
+        max_age = float(perception.get("depth_max_age_s", 1.0))
         min_range = float(perception.get("depth_min_m", 0.15))
         max_range = float(perception.get("depth_max_m", 8.0))
         camera_point = None
@@ -869,7 +889,14 @@ class HardwareBridge(
                     if stamp_msg is not None
                     else rclpy.time.Time()
                 )
-                tf = self.tf_buffer.lookup_transform(self.map_frame, frame_id, stamp)
+                try:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.map_frame, frame_id, stamp, timeout=Duration(seconds=0.1)
+                    )
+                except Exception:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.map_frame, frame_id, rclpy.time.Time()
+                    )
                 map_point = transform_point(camera_point, tf.transform)
             if map_point is None:
                 return None

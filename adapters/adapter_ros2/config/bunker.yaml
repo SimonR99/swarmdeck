@@ -66,9 +66,8 @@ topics:
   # route because it is the path the controller is currently following.
   local_plan: /botman_0/local_plan
   cmd_vel: /cmd_vel       # bunker_messenger.hpp's absolute subscription
-  # The driver exposes battery_voltage in custom BunkerStatus, not a
-  # sensor_msgs/BatteryState percentage, so do not advertise battery yet.
-  battery: ""
+  # The base driver exposes battery_voltage in BunkerStatus, mapped to percentage (23.0V empty -> 29.2V full).
+  battery: /bunker_status
   camera: ""
   # Botman's camera is an OAK-D Pro (MXID 1844301041D4AB0F00), not a V4L2
   # webcam, so it deliberately has no /dev/video0.  The SwarmDeck-owned
@@ -104,6 +103,9 @@ topics:
 actions:
   navigate_to_pose: /botman_0/navigate_to_pose
 
+perception:
+  depth_max_age_s: 1.0
+
 # Under merge_mode: graph, the server performs trajectory-based pose-graph SLAM
 # from 3D keyframe uploads rather than synchronous 2D grid image registration.
 # Keyframes stream at ~0.5 Hz (keyframe_period_s: 2.0 or motion triggers);
@@ -116,3 +118,5 @@ rates:
   keyframe_period_s: 2.0
 
 drive_timeout_s: 0.45
+battery_voltage_min: 23.0
+battery_voltage_max: 29.2

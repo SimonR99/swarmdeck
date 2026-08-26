@@ -400,7 +400,19 @@ class HardwareBridge(
         if topics.get("plan"):
             rospy.Subscriber(topics["plan"], NavPath, self._on_plan, queue_size=10)
         if topics.get("battery"):
-            rospy.Subscriber(topics["battery"], BatteryState, self._on_battery, queue_size=10)
+            battery_topic = topics["battery"]
+            msg_cls = BatteryState
+            if "scout_status" in battery_topic:
+                try:
+                    from scout_msgs.msg import ScoutStatus
+                    msg_cls = ScoutStatus
+                except ImportError:
+                    try:
+                        import roslib.message
+                        msg_cls = roslib.message.get_message_class("scout_msgs/ScoutStatus") or BatteryState
+                    except Exception:
+                        pass
+            rospy.Subscriber(battery_topic, msg_cls, self._on_battery, queue_size=10)
         # Prefer compressed: a raw camera stream at full rate is the single most
         # expensive thing an adapter can subscribe to over a robot's network.
         # Frames stay on-robot for detection; the operator picture is WebRTC.
@@ -796,9 +808,14 @@ class HardwareBridge(
             return {"color_camera_info": color_info}
         try:
             stamp = getattr(depth_header, "stamp", rospy.Time(0))
-            tf = self.tf_buffer.lookup_transform(
-                color_frame, depth_frame, stamp, rospy.Duration(0.1)
-            )
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    color_frame, depth_frame, stamp, rospy.Duration(0.1)
+                )
+            except Exception:
+                tf = self.tf_buffer.lookup_transform(
+                    color_frame, depth_frame, rospy.Time(0)
+                )
             return {
                 "color_camera_info": color_info,
                 "depth_to_color": tf.transform,
@@ -815,7 +832,7 @@ class HardwareBridge(
     ) -> dict[str, float] | None:
         perception = self.cfg.get("perception", {})
         image_time = self._stamp_seconds(image_header)
-        max_age = float(perception.get("depth_max_age_s", 0.35))
+        max_age = float(perception.get("depth_max_age_s", 1.0))
         min_range = float(perception.get("depth_min_m", 0.15))
         max_range = float(perception.get("depth_max_m", 8.0))
         camera_point = None
@@ -865,9 +882,14 @@ class HardwareBridge(
                 map_point = camera_point
             else:
                 stamp = getattr(source_header, "stamp", rospy.Time(0))
-                tf = self.tf_buffer.lookup_transform(
-                    self.map_frame, frame_id, stamp, rospy.Duration(0.1)
-                )
+                try:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.map_frame, frame_id, stamp, rospy.Duration(0.1)
+                    )
+                except Exception:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.map_frame, frame_id, rospy.Time(0)
+                    )
                 map_point = transform_point(camera_point, tf.transform)
             if map_point is None:
                 return None

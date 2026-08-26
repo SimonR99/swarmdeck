@@ -273,6 +273,17 @@ def test_battery_normalisation_handles_percent_and_nan(mod):
     bridge._on_battery(type("M", (), {"percentage": float("nan")})())
     assert bridge.battery is None, "NaN must not be reported as a real level"
 
+    bridge.cfg["battery_voltage_min"] = 23.0
+    bridge.cfg["battery_voltage_max"] = 29.2
+    bridge._on_battery(type("M", (), {"battery_voltage": 26.1})())
+    assert bridge.battery == pytest.approx(0.5, abs=0.01)
+
+    bridge._on_battery(type("M", (), {"battery_voltage": 23.0})())
+    assert bridge.battery == pytest.approx(0.0)
+
+    bridge._on_battery(type("M", (), {"battery_voltage": 30.0})())
+    assert bridge.battery == pytest.approx(1.0)
+
 
 def test_drive_watchdog_stops_a_robot_whose_operator_vanished(mod):
     """The failure this prevents is a robot that keeps driving after link loss."""

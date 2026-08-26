@@ -221,10 +221,14 @@ services:
       # to update. The deployment helper rsyncs the source and recreates the
       # mounted services after the image build.
       - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
+      LD_LIBRARY_PATH: "/workspace/install/bunker_msgs/lib:/workspace/install/super_odometry_msgs/lib:${LD_LIBRARY_PATH:-}"
+      PYTHONPATH: "/workspace/install/bunker_msgs/local/lib/python3.10/dist-packages:/workspace/install/super_odometry_msgs/local/lib/python3.10/dist-packages:/app/swarmdeck/adapters/protocol:/app/swarmdeck:/app/adapters/protocol:/app"
+      AMENT_PREFIX_PATH: "/workspace/install/bunker_msgs:/workspace/install/super_odometry_msgs:/opt/ros/humble"
     command:
       - python3
       - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py

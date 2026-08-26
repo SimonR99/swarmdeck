@@ -81,9 +81,8 @@ topics:
   # scout_messenger.cpp subscribes "/cmd_vel" with a leading slash, so it is the global
   # topic regardless of any namespace scout_base.launch wraps the node in.
   cmd_vel: /cmd_vel
-  # Published by rover_scout_adapter.py (control/adapters/scripts/rover_scout_adapter.py)
-  # from the driver's ScoutStatus message, not by scout_base_node itself.
-  battery: /robot_battery
+  # Published by scout_base_node as ScoutStatus (or rover_scout_adapter as BatteryState).
+  battery: /scout_status
   camera: ""
   # Colour is the operator's drive camera. Launch it through
   # launch/scout_camera_low_latency.launch — NOT rover_launch/rs_d400.launch,
@@ -161,3 +160,5 @@ rates:
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45   # SwarmDeck protocol default — scout_base_node's own cmd_vel watchdog behavior (if any) was not inspected
+battery_voltage_min: 23.0
+battery_voltage_max: 29.2

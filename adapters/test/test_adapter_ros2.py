@@ -23,7 +23,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 _STUBBED = [
-    "rclpy", "rclpy.action", "rclpy.node", "rclpy.qos", "rclpy.time",
+    "rclpy", "rclpy.action", "rclpy.duration", "rclpy.node", "rclpy.qos", "rclpy.time",
     "geometry_msgs", "geometry_msgs.msg",
     "nav_msgs", "nav_msgs.msg",
     "nav2_msgs", "nav2_msgs.action",
@@ -98,6 +98,11 @@ def _bridge(mod, cfg_override=None):
     bridge._velocity_client = (
         MagicMock() if cfg.get("services", {}).get("max_velocity") else None
     )
+    bridge._camera_depth_image = None
+    bridge._camera_info = None
+    bridge._camera_color_info = None
+    bridge._camera_depth_cloud = None
+    bridge._last_depth_warning_at = 0.0
     return bridge
 
 
@@ -1241,3 +1246,123 @@ def test_latching_still_delivers_normal_teleop(mod):
     # An idle tick actuates nothing rather than re-publishing stale velocity.
     bridge.apply_pending_drive()
     assert bridge.pub_cmd.publish.call_count == 1
+
+
+def _stamp(seconds: float):
+    return type("Stamp", (), {"sec": int(seconds), "nanosec": int((seconds % 1) * 1e9)})()
+
+
+def _depth_image(mod, *, stamp: float, frame: str = "map"):
+    values = mod.np.full((8, 8), 2000, dtype="<u2")
+    header = type("Header", (), {"stamp": _stamp(stamp), "frame_id": frame})()
+    return type(
+        "Image",
+        (),
+        {
+            "width": 8,
+            "height": 8,
+            "encoding": "16UC1",
+            "is_bigendian": False,
+            "step": 16,
+            "data": values.tobytes(),
+            "header": header,
+        },
+    )()
+
+
+def test_aligned_depth_detection_becomes_a_map_position(mod):
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0)
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    position = bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header)
+
+    assert position == pytest.approx({"x": 0.0, "y": 0.0}, abs=0.3)
+
+
+def test_stale_depth_is_not_attached_to_a_new_detection(mod):
+    bridge = _bridge(mod, {"perception": {"depth_max_age_s": 0.2}})
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0)
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    image_header = type("Header", (), {"stamp": _stamp(10.5)})()
+
+    assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
+
+def test_tf_lookup_falls_back_to_latest_when_exact_stamp_fails(mod):
+    """When TF at the camera timestamp cannot be interpolated, fallback to latest."""
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0, frame="oak_stereo_camera_optical_frame")
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    transform = type(
+        "TransformStamped",
+        (),
+        {
+            "transform": type(
+                "Transform",
+                (),
+                {
+                    "translation": type("Vector3", (), {"x": 1.0, "y": 2.0, "z": 0.0})(),
+                    "rotation": type("Quaternion", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})(),
+                },
+            )()
+        },
+    )()
+
+    calls = []
+
+    def lookup_side_effect(target, source, time_val, *args, **kwargs):
+        calls.append((target, source, time_val))
+        if len(calls) == 1:
+            raise RuntimeError("ExtrapolationException: time not in buffer")
+        return transform
+
+    bridge.tf_buffer.lookup_transform.side_effect = lookup_side_effect
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    position = bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header)
+    assert position is not None
+    assert position["x"] == pytest.approx(1.0, abs=0.3)
+    assert position["y"] == pytest.approx(2.0, abs=0.3)
+
+
+def test_unaligned_depth_without_optical_tf_is_not_treated_as_aligned(mod):
+    """A colour box on an unaligned depth image is the wrong pixels.
+
+    If the depth-to-colour TF is missing, skip the pin rather than sampling
+    the depth image as if it were RGB-aligned.
+    """
+    bridge = _bridge(mod)
+    bridge._camera_depth_image = _depth_image(mod, stamp=10.0, frame="depth_optical")
+    bridge._camera_info = type(
+        "CameraInfo",
+        (),
+        {"K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0]},
+    )()
+    bridge._camera_color_info = type(
+        "CameraInfo",
+        (),
+        {
+            "header": type("Header", (), {"frame_id": "color_optical"})(),
+            "width": 8,
+            "height": 8,
+            "K": [4.0, 0.0, 3.5, 0.0, 4.0, 3.5, 0.0, 0.0, 1.0],
+        },
+    )()
+    bridge.tf_buffer = MagicMock()
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
+    image_header = type("Header", (), {"stamp": _stamp(10.1)})()
+
+    assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
