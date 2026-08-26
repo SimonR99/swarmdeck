@@ -144,7 +144,7 @@ class VerifyConfig:
     poorly-overlapping match is exactly the case that should be dropped
     rather than risk it."""
 
-    max_mean_error: float = 1.0
+    max_mean_error: float = 0.15
     """`result.error / num_inliers`: GICP's per-point Mahalanobis residual,
     averaged. Not directly convertible to metres (GICP's covariance
     weighting divides by the *surface-normal-direction* covariance, which
@@ -169,8 +169,44 @@ class VerifyConfig:
     barely discriminates at all here -- false pairs measured a LOWER median
     than true ones, the opposite of the fixture's behaviour.
 
-    RAISED 0.15 -> 1.0 on 2026-08-25, after a second capture showed what the
-    first only hinted at. On ``sessions/captures/hw-run-01`` (two Bunkers, real
+    REVERTED TO 0.15 ON 2026-08-25, HOURS AFTER RAISING IT. Read the whole of
+    this before touching it again.
+
+    It was raised to 1.0 because botman_0 closed zero long-range loops and this
+    gate was rejecting 70 of its 76 long-gap candidates. That diagnosis was
+    correct. The fix was not, and the way it was validated is the lesson: the
+    sweep below counted how many closures each threshold ACCEPTED and checked
+    their translation magnitudes looked plausible. It never checked whether the
+    accepted closures were RIGHT. On hardware they were not.
+
+    Measured on the new botman_0 tour in ``sessions/captures/hw-run-02``,
+    comparing optimized poses against the robot's own SuperOdometry solution --
+    which the operator describes as almost perfect::
+
+        max_mean_error   closures   optimizer moved poses (median / max)
+                  1.00        246    10.56 m / 34.9 deg   22.69 m / 123.6 deg
+                  0.15         62     1.52 m /  4.2 deg    3.18 m /   7.7 deg
+
+    Ten metres of median displacement from a good solution is not a better map,
+    it is a destroyed one. GNC rejected 182 of the 246, and the survivors were
+    still enough to wreck it.
+
+    Why it passed review: this gate does not discriminate true from false on
+    real data (3d-run-01: true median 0.547, FALSE median 0.334 -- false pairs
+    score LOWER). Relaxing it therefore admits false matches at least as
+    readily as true ones. And with one robot, PCM does nothing -- it only
+    cross-checks INTER-robot closures -- so intra-robot false closures face GNC
+    alone. Validating on 3d-run-01, a two-robot run where PCM was active,
+    hid exactly that.
+
+    Botman's missing loop closures are still a real, open problem. The answer
+    is not this threshold. It needs a gate that actually separates true from
+    false on real sensors -- inlier ratio and the degeneracy eigenvalues are
+    the candidates -- validated against POSE ERROR, never against closure
+    count.
+
+    Historical sweep, kept because the recall numbers are real even though the
+    conclusion drawn from them was wrong. On ``sessions/captures/hw-run-01`` (two Bunkers, real
     hardware) botman_0 drove a full tour of a floor and closed ZERO long-range
     loops -- its map never snapped back into alignment at the door it started
     from. Place recognition was not at fault: it proposed 76 same-robot
