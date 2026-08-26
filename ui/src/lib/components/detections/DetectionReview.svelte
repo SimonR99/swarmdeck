@@ -397,23 +397,6 @@
                 </div>
               </div>
 
-              {#if (review.focused === e.id || review.selected === e.id) && e.image}
-                <div
-                  class="pointer-events-none absolute left-full top-0 ml-2 z-50 flex flex-col items-center
-                         overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
-                >
-                  <img
-                    src={e.image}
-                    alt="{label(e.class)} detection crop"
-                    class="h-28 w-28 rounded-lg object-cover shadow-sm"
-                  />
-                  <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
-                    <span>{label(e.class)}</span>
-                    <span class="font-normal text-fg-dim">{e.observations} views</span>
-                  </div>
-                </div>
-              {/if}
-
               <button
                 class="grid h-7 w-7 shrink-0 place-items-center rounded-full text-fg-dim hover:bg-danger/10 hover:text-danger"
                 title="Remove from the map. Still visible to a robot, it will be proposed again — use Ignore to silence it."

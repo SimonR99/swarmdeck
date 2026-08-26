@@ -227,33 +227,6 @@ export function drawReviewedObjects(ctx: CanvasRenderingContext2D, screenOf: Scr
     ctx.fillStyle = color;
     ctx.fill();
     ctx.globalAlpha = 1;
-
-    if (focused) {
-      const labelText = `${detectionCatalog.labelOf(proposal.class)} · ${Math.round(proposal.best_score * 100)}%`;
-      ctx.font = '600 11px ui-sans-serif, system-ui';
-      const textMetrics = ctx.measureText(labelText);
-      const pillW = textMetrics.width + 16;
-      const pillH = 22;
-      const pillX = sx - pillW / 2;
-      const pillY = sy - 30;
-
-      ctx.fillStyle = 'rgba(25, 32, 42, 0.92)';
-      ctx.beginPath();
-      if (typeof ctx.roundRect === 'function') {
-        ctx.roundRect(pillX, pillY, pillW, pillH, 11);
-      } else {
-        ctx.rect(pillX, pillY, pillW, pillH);
-      }
-      ctx.fill();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(labelText, sx, pillY + pillH / 2);
-    }
   }
 
   // Draw unselected entities first, then selected on top
@@ -284,33 +257,6 @@ export function drawReviewedObjects(ctx: CanvasRenderingContext2D, screenOf: Scr
     ctx.lineWidth = focused ? 2.5 : 1.5;
     ctx.strokeStyle = color;
     ctx.stroke();
-
-    if (focused) {
-      const labelText = detectionCatalog.labelOf(entity.class);
-      ctx.font = '600 11px ui-sans-serif, system-ui';
-      const textMetrics = ctx.measureText(labelText);
-      const pillW = textMetrics.width + 16;
-      const pillH = 22;
-      const pillX = sx - pillW / 2;
-      const pillY = sy - 30;
-
-      ctx.fillStyle = 'rgba(25, 32, 42, 0.92)';
-      ctx.beginPath();
-      if (typeof ctx.roundRect === 'function') {
-        ctx.roundRect(pillX, pillY, pillW, pillH, 11);
-      } else {
-        ctx.rect(pillX, pillY, pillW, pillH);
-      }
-      ctx.fill();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(labelText, sx, pillY + pillH / 2);
-    }
   }
   ctx.restore();
 }
