@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import synthetic
 
 from swarmdeck_protocol import encode_keyframe, decode_keyframe
 from swarmdeck_slam.backend import (
+    ODOM_INFORMATION,
     CollaborativeBackend,
     majority_component,
+    scoped_grids,
     snapshot_update,
 )
-from swarmdeck_slam.types import quat_xyz_from_se3
+from swarmdeck_slam.types import EdgeKind, quat_xyz_from_se3
 from swarmdeck_slam.verify import VerifyConfig
 
 
@@ -196,3 +200,31 @@ def test_ordinary_motion_is_never_flagged_as_a_frame_jump() -> None:
     for kf in fleet[0].keyframes[::3]:  # every third keyframe: a 3x stretched hop
         backend.ingest_keyframe(kf)
     assert backend.implausible_hops == 0
+
+
+def test_published_scopes_match_the_grids_that_get_published(shared_snapshot) -> None:
+    """The server drops any scope missing from this list, so it must name
+    exactly what ``_publish_snapshot`` actually POSTs -- otherwise the server
+    garbage-collects a grid the service just sent, or keeps one forever."""
+    snapshot, fleet = shared_snapshot
+    scopes = [scope for scope, _grid in scoped_grids(snapshot)]
+
+    assert snapshot_update(snapshot)["scopes"] == scopes
+    assert len(set(scopes)) == len(scopes), "scope names must be unique"
+    for robot in fleet:
+        assert f"robot:{robot.robot_id}" in scopes
+    for component in snapshot.optimized.components:
+        assert f"component:{component.component_id}" in scopes
+
+
+def test_hop_guard_falls_back_to_distance_when_the_clock_is_unusable() -> None:
+    """Stamps come off a ROS header and are not guaranteed monotonic. With no
+    usable ``dt`` the speed test is undefined, so the weaker absolute-distance
+    gate stands in rather than the guard silently switching itself off."""
+    backend = CollaborativeBackend()
+    huge = synthetic.yaw_pose(40.0, 0.0, 0.0)
+    ordinary = synthetic.yaw_pose(0.8, 0.0, 0.0)
+
+    assert backend._implausible_hop(huge, dt_s=0.0) is True
+    assert backend._implausible_hop(ordinary, dt_s=0.0) is False
+    assert backend._implausible_hop(ordinary, dt_s=-5.0) is False

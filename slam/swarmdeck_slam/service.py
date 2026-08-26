@@ -40,6 +40,7 @@ from swarmdeck_slam.backend import (
     BackendSnapshot,
     CollaborativeBackend,
     majority_component,
+    scoped_grids,
     snapshot_update,
 )
 from swarmdeck_slam.render import RenderConfig
@@ -103,7 +104,7 @@ _capture_failed = False
 
 
 def _capture(blob: bytes) -> None:
-    global _capture_seq, _capture_failed
+    global _capture_seq, _capture_failed, _last_error
     if not CAPTURE_DIR or _capture_failed:
         return
     with _capture_lock:
@@ -116,7 +117,7 @@ def _capture(blob: bytes) -> None:
             handle.write(blob)
     except OSError as exc:
         _capture_failed = True
-        globals()["_last_error"] = f"keyframe capture disabled: {exc}"
+        _last_error = f"keyframe capture disabled: {exc}"
 
 
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "").rstrip("/")
@@ -152,12 +153,8 @@ def _publish_snapshot(snapshot: BackendSnapshot) -> None:
     # unable to see a robot that merged with nobody -- exactly the case worth
     # looking at. These scoped grids fill that gap without weakening the rule:
     # each is a separate, separately-labelled map, never overlaid.
-    for robot_id, grid in sorted(snapshot.robot_grids.items()):
-        _publish_grid(f"robot:{robot_id}", grid)
-    for component in snapshot.optimized.components:
-        grid = snapshot.grids.get(component.component_id)
-        if grid is not None:
-            _publish_grid(f"component:{component.component_id}", grid)
+    for scope, grid in scoped_grids(snapshot):
+        _publish_grid(scope, grid)
 
     grid = majority_component(snapshot)
     if grid is None:
@@ -215,24 +212,37 @@ def _publish_grid(scope: str, grid: Any) -> None:
 
 
 def _worker_loop() -> None:
+    """Drain everything queued, then optimize once over the lot.
+
+    Ingest is milliseconds; optimize+render is seconds and grows with graph
+    size (a 240-keyframe two-robot fleet measured ~7 s per cycle before the
+    render was deduplicated). Optimizing after *each* blob meant a worker that
+    had fallen behind spent its way further behind -- 64 queued keyframes cost
+    64 full re-solves to produce 64 snapshots, 63 of which nobody would ever
+    see, while the queue kept overflowing and dropping real keyframes.
+
+    Draining first costs nothing when keeping up (the queue holds one blob, so
+    this is still optimize-per-keyframe at ``OPTIMIZE_EVERY_N=1``) and degrades
+    into "solve the newest state, once" exactly when that is the only thing
+    that can catch up.
+    """
+    global _ingested, _last_error
     last_optimize = 0.0
     while not _stop.is_set():
-        blob: bytes | None = None
+        blobs: list[bytes] = []
         with _queue_lock:
-            if _queue:
-                blob = _queue.popleft()
-        if blob is None:
+            while _queue:
+                blobs.append(_queue.popleft())
+        if not blobs:
             _stop.wait(0.05)
             continue
-        try:
-            packet = decode_keyframe(blob)
-            backend.ingest_packet(packet)
-        except (ProtocolError, ValueError) as exc:
-            global _last_error
-            _last_error = str(exc)
-            continue
-        global _ingested
-        _ingested += 1
+        for blob in blobs:
+            try:
+                backend.ingest_packet(decode_keyframe(blob))
+            except (ProtocolError, ValueError) as exc:
+                _last_error = str(exc)
+                continue
+            _ingested += 1
         now = time.monotonic()
         due = (
             backend.new_since_optimize >= OPTIMIZE_EVERY_N

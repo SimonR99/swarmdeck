@@ -617,16 +617,6 @@
 
         <div class="my-2 border-t border-border"></div>
         <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
-          Occupancy
-        </div>
-        <div class="flex items-center gap-3 px-1 py-1 text-fg-dim">
-          <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 border border-border bg-white"></i> Free</span>
-          <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#343a44]"></i> Wall</span>
-          <span class="flex items-center gap-1"><i class="h-2.5 w-2.5 bg-[#d6dae0]"></i> Unknown</span>
-        </div>
-
-        <div class="my-2 border-t border-border"></div>
-        <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
           Map estimate
         </div>
         <div class="mb-1 flex gap-1">

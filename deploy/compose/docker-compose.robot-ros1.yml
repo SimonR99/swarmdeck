@@ -23,6 +23,7 @@ services:
     environment:
       ROS_MASTER_URI: http://127.0.0.1:11311
       ROS_IP: "${ROBOT_IP:?set ROBOT_IP to this robot's LAN address}"
+      PYTHONPATH: "/opt/ros/noetic/lib/python3/dist-packages:/app/adapters/protocol:/app:/app/swarmdeck/adapters/protocol:/app/swarmdeck"
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
       - python3
@@ -48,6 +49,7 @@ services:
     environment:
       ROS_MASTER_URI: http://127.0.0.1:11311
       ROS_IP: "${ROBOT_IP:?set ROBOT_IP to this robot's LAN address}"
+      PYTHONPATH: "/opt/ros/noetic/lib/python3/dist-packages:/app/adapters/protocol:/app:/app/swarmdeck/adapters/protocol:/app/swarmdeck"
     command:
       - python3
       - /app/swarmdeck/adapters/media/ros1_rtsp.py

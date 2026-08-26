@@ -244,18 +244,27 @@ class VerifyConfig:
     information: str = "hessian"
     """How a surviving match's information matrix is built.
 
-    ``hessian`` (the default, and what every unit test uses) scales GICP's
-    Gauss-Newton Hessian. That Hessian arrives with roughly a 30:1
-    rotation-to-translation ratio, which over-constrains orientation and is
-    why optimizing with real closures currently *raises* translation ATE
-    (see ``test_optimized_poses_beat_raw_odometry``, a strict xfail).
+    ``hessian`` (the default, and what the live back-end runs -- see
+    ``backend.PRODUCTION_VERIFY``) scales GICP's Gauss-Newton Hessian.
 
     ``isotropic`` replaces the Hessian, after the degeneracy gates have
-    already passed, with ``I_6 * isotropic_scale * fitness``. Integration
-    tests show that this is the weighting that actually *improves* ATE
-    (0.93x vs raw odometry). The live back-end uses it until a real Ouster
-    noise model exists to calibrate the Hessian against -- fitting the
-    synthetic fixture would just memorize the fixture.
+    already passed, with ``I_6 * isotropic_scale * fitness``.
+
+    The default was ``isotropic`` until 2026-08-25, on the strength of the
+    synthetic fixture, where it improves ATE and ``hessian`` does not. Real
+    captured data reverses that: replaying ``sessions/captures/3d-run-01``
+    (``tools/replay.py --ablate isotropic hessian``) measures ``hessian``
+    better on every scope. ``backend.PRODUCTION_VERIFY`` carries the table.
+    Do not revert on fixture evidence alone -- the fixture is planar and
+    non-repetitive, so it never exercises the degenerate corridor-slide
+    geometry the conditioned Hessian exists to express, and it will keep
+    preferring isotropic for that reason.
+
+    Either way the synthetic fixture's ATE still degrades under optimization
+    (``test_optimized_poses_beat_raw_odometry``, a strict xfail): GICP's
+    Hessian arrives with roughly a 30:1 rotation-to-translation ratio, which
+    over-constrains orientation, and no overall rescaling recovers it. That
+    needs a real sensor noise model, not a tuned constant.
     """
 
     isotropic_scale: float = 400.0

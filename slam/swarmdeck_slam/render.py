@@ -36,8 +36,8 @@ only the final accumulation step (``_rasterize_free`` / cell indexing) touches
 shared state. A future incremental renderer can exploit that structure directly:
 cache each keyframe's contribution keyed by ``(KeyframeId, pose)``, and on the
 next render only recompute keyframes whose optimized pose actually moved,
-subtracting the stale contribution from integer evidence accumulators (not the
-transient bool arrays used here) before adding the new one. This module always
+subtracting the stale contribution from the integer evidence accumulators
+before adding the new one. This module always
 renders from scratch -- proving the trajectory-fixes-the-map premise requires a
 real from-scratch render, not a cached approximation of one -- but nothing here
 would need to change shape to grow that cache later.
@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, NamedTuple
+from typing import Final, Iterable, NamedTuple
 
 import numpy as np
 
@@ -59,6 +59,13 @@ from swarmdeck_slam.types import Keyframe, KeyframeId, OptimizedGraph, transform
 UNKNOWN = -1
 FREE = 0
 OCCUPIED = 100
+
+#: Cap on ``steps x rays`` per batch in :func:`_rasterize_free`. At float64 this
+#: is ~32 MB per intermediate buffer and a handful of buffers live at once, so
+#: peak stays in the low hundreds of MB regardless of cloud density or range --
+#: the property that matters, since the previous unbatched walk scaled with the
+#: single longest ray in a keyframe and reached 1.58 GB on a realistic one.
+_RAY_BATCH_ELEMENTS: Final[int] = 4_000_000
 
 
 @dataclass(slots=True, frozen=True)
@@ -150,12 +157,7 @@ def render_per_robot(
     comparable to each other and to the merged map.
     """
     config = config or RenderConfig()
-    keyframes_by_id = {kf.id: kf for kf in keyframes}
-    robot_ids = sorted({kf_id.robot_id for kf_id in graph.poses if kf_id in keyframes_by_id})
-    return {
-        robot_id: _render_component(index, {robot_id}, graph, keyframes_by_id, config)
-        for index, robot_id in enumerate(robot_ids)
-    }
+    return _robot_grids(_contributions_of(graph, keyframes, config), config)
 
 
 def render_occupancy(
@@ -171,12 +173,67 @@ def render_occupancy(
     replaces grid-registration entirely rather than complementing it.
     """
     config = config or RenderConfig()
-    keyframes_by_id = {kf.id: kf for kf in keyframes}
-    robot_ids = {kf_id.robot_id for kf_id in graph.poses if kf_id in keyframes_by_id}
-    parts = _partition_robots(graph, robot_ids)
+    contributions = _contributions_of(graph, keyframes, config)
+    return _component_grids(graph, contributions, config)
+
+
+def render_all(
+    graph: OptimizedGraph,
+    keyframes: Iterable[Keyframe],
+    config: RenderConfig | None = None,
+) -> tuple[dict[int, RenderedGrid], dict[str, RenderedGrid]]:
+    """Both partitions of the same render: ``(per component, per robot)``.
+
+    The back-end publishes both on every cycle, and they are the same posed,
+    height-filtered, range-capped points grouped two different ways. Calling
+    :func:`render_occupancy` and :func:`render_per_robot` separately poses and
+    filters every keyframe twice; this poses them once and groups them twice.
+
+    Worth measuring before assuming it is a large win -- it is not. On a
+    240-keyframe two-robot fleet the two separate calls take 4.04 s against
+    3.79 s here, about 6%. The duplicated pass was the cheap one: what
+    dominates a render is the ray walk in :func:`_rasterize_free`, and that is
+    genuinely per-grid work, since a robot inside a merged component has to be
+    rasterized into the component grid *and* into its own. No grouping can
+    share that. The reason to prefer this entry point is that it states the
+    relationship between the two partitions in one place, and it is the
+    decomposition the module docstring already describes for a future
+    incremental renderer -- not a speedup.
+
+    :func:`render_occupancy` and :func:`render_per_robot` remain as
+    single-partition wrappers for callers (tests, tools) that want only one,
+    and neither pays for the partition it did not ask for.
+    """
+    config = config or RenderConfig()
+    contributions = _contributions_of(graph, keyframes, config)
+    return _component_grids(graph, contributions, config), _robot_grids(contributions, config)
+
+
+def _contributions_of(
+    graph: OptimizedGraph, keyframes: Iterable[Keyframe], config: RenderConfig
+) -> dict[KeyframeId, _Contribution]:
+    return _keyframe_contributions(graph, {kf.id: kf for kf in keyframes}, config)
+
+
+def _component_grids(
+    graph: OptimizedGraph,
+    contributions: dict[KeyframeId, _Contribution],
+    config: RenderConfig,
+) -> dict[int, RenderedGrid]:
+    robot_ids = {kf_id.robot_id for kf_id in contributions}
     return {
-        component_id: _render_component(component_id, robots, graph, keyframes_by_id, config)
-        for component_id, robots in parts
+        component_id: _render_component(component_id, robots, contributions, config)
+        for component_id, robots in _partition_robots(graph, robot_ids)
+    }
+
+
+def _robot_grids(
+    contributions: dict[KeyframeId, _Contribution], config: RenderConfig
+) -> dict[str, RenderedGrid]:
+    robot_ids = sorted({kf_id.robot_id for kf_id in contributions})
+    return {
+        robot_id: _render_component(index, frozenset({robot_id}), contributions, config)
+        for index, robot_id in enumerate(robot_ids)
     }
 
 
@@ -203,38 +260,37 @@ def _partition_robots(
     return parts
 
 
-def _render_component(
-    component_id: int,
-    robots: frozenset[str],
+class _Contribution(NamedTuple):
+    """One keyframe's finished input to any grid it belongs in.
+
+    Computed once per keyframe per render (see :func:`_keyframe_contributions`)
+    and reused by every partition that includes it, because the posed points do
+    not depend on which grouping is being drawn.
+    """
+
+    origin_xy: np.ndarray
+    points_world: np.ndarray  # [n, 2] world XY, already filtered
+
+
+def _keyframe_contributions(
     graph: OptimizedGraph,
     keyframes_by_id: dict[KeyframeId, Keyframe],
     config: RenderConfig,
-) -> RenderedGrid:
+) -> dict[KeyframeId, _Contribution]:
+    """Pose and filter every solved keyframe once, in world frame.
+
+    Keyframes with no optimized pose (not yet solved) are skipped rather than
+    guessed at.
+    """
     min_z, max_z = config.height_limits()
+    contributions: dict[KeyframeId, _Contribution] = {}
 
-    kf_ids = sorted(
-        (kf_id for kf_id in graph.poses if kf_id.robot_id in robots and kf_id in keyframes_by_id),
-        key=lambda kf_id: (kf_id.robot_id, kf_id.seq),
-    )
-
-    # Pass 1: pose and filter every keyframe once, in world frame, and track
-    # the bounds those points (and every sensor origin, so an entirely-empty
-    # keyframe still contributes its trajectory position) actually need.
-    # Bounds come from content, not a fixed size -- see the module docstring's
-    # "render as a rendering" framing: an unexplored robot doesn't get a 40x24m
-    # grid just because that's what some other component happened to need.
-    contributions: list[tuple[np.ndarray, np.ndarray]] = []
-    bounds_min = np.array([math.inf, math.inf])
-    bounds_max = np.array([-math.inf, -math.inf])
-
-    for kf_id in kf_ids:
-        keyframe = keyframes_by_id[kf_id]
-        pose = graph.poses[kf_id]
+    for kf_id, pose in graph.poses.items():
+        keyframe = keyframes_by_id.get(kf_id)
+        if keyframe is None:
+            continue
         points = keyframe.points.astype(np.float64, copy=False)
-
         origin_xy = pose[:2, 3]
-        bounds_min = np.minimum(bounds_min, origin_xy)
-        bounds_max = np.maximum(bounds_max, origin_xy)
 
         # Height band and range are evaluated in the BASE frame at capture,
         # before the world transform: floor_z is a per-robot sensor-mount
@@ -249,13 +305,44 @@ def _render_component(
         keep = in_band & (planar_range <= config.max_range_m)
 
         if not np.any(keep):
-            contributions.append((origin_xy, np.zeros((0, 2), dtype=np.float64)))
+            contributions[kf_id] = _Contribution(origin_xy, np.zeros((0, 2), dtype=np.float64))
             continue
+        contributions[kf_id] = _Contribution(
+            origin_xy, transform_points(pose, points[keep])[:, :2]
+        )
+    return contributions
 
-        points_world = transform_points(pose, points[keep])[:, :2]
-        bounds_min = np.minimum(bounds_min, points_world.min(axis=0))
-        bounds_max = np.maximum(bounds_max, points_world.max(axis=0))
-        contributions.append((origin_xy, points_world))
+
+def _render_component(
+    component_id: int,
+    robots: frozenset[str],
+    all_contributions: dict[KeyframeId, _Contribution],
+    config: RenderConfig,
+) -> RenderedGrid:
+    kf_ids = sorted(
+        (kf_id for kf_id in all_contributions if kf_id.robot_id in robots),
+        key=lambda kf_id: (kf_id.robot_id, kf_id.seq),
+    )
+
+    # Pass 1: bounds from the content this grid will actually hold -- every
+    # sensor origin (so an entirely-empty keyframe still contributes its
+    # trajectory position) plus every kept point. Bounds come from content, not
+    # a fixed size: see the module docstring's "render as a rendering" framing,
+    # an unexplored robot doesn't get a 40x24m grid just because that's what
+    # some other component happened to need.
+    contributions: list[_Contribution] = []
+    bounds_min = np.array([math.inf, math.inf])
+    bounds_max = np.array([-math.inf, -math.inf])
+
+    for kf_id in kf_ids:
+        origin_xy, points_world = all_contributions[kf_id]
+        bounds_min = np.minimum(bounds_min, origin_xy)
+        bounds_max = np.maximum(bounds_max, origin_xy)
+
+        if points_world.shape[0]:
+            bounds_min = np.minimum(bounds_min, points_world.min(axis=0))
+            bounds_max = np.maximum(bounds_max, points_world.max(axis=0))
+        contributions.append(_Contribution(origin_xy, points_world))
 
     if not contributions or not np.all(np.isfinite(bounds_min)):
         # No keyframe, or every keyframe's returns fell outside the height
@@ -364,16 +451,48 @@ def _rasterize_free(origin_xy: np.ndarray, ends_xy: np.ndarray, meta: _Meta, fre
     delta_y = end_y - origin_y
 
     n_steps = np.maximum(1, np.ceil(np.maximum(np.abs(delta_x), np.abs(delta_y))).astype(np.int64))
-    max_steps = int(n_steps.max())
-    step_index = np.arange(max_steps, dtype=np.float64)[:, None]  # (max_steps, 1)
-    valid = step_index < n_steps[None, :]  # (max_steps, n_rays)
-    t = step_index / n_steps[None, :].astype(np.float64)
 
-    grid_x = np.floor(origin_x + t * delta_x[None, :]).astype(np.int64)
-    grid_y = np.floor(origin_y + t * delta_y[None, :]).astype(np.int64)
-    valid &= (grid_x >= 0) & (grid_x < meta.width) & (grid_y >= 0) & (grid_y < meta.height)
+    # Rays are walked in length-sorted batches, not all at once. The step
+    # matrix is (longest ray in the batch) x (rays in the batch), so one 60 m
+    # return in a keyframe otherwise sizes the whole matrix: 40k points at 5 cm
+    # measured 1.71 s and 1.58 GB of peak allocation for a SINGLE keyframe,
+    # against a render that walks every keyframe of every robot from scratch
+    # on every optimize. Sorting first means each batch's longest ray is close
+    # to its own rays' lengths, so the padding that dominated that number is
+    # gone as well.
+    order = np.argsort(n_steps, kind="stable")
+    start = 0
+    while start < order.shape[0]:
+        end = _batch_end(order, n_steps, start)
+        rays = order[start:end]
+        start = end
 
-    if free.dtype == bool:
-        free[grid_y[valid], grid_x[valid]] = True
-    else:
+        batch_steps = n_steps[rays]
+        step_index = np.arange(int(batch_steps[-1]), dtype=np.float64)[:, None]
+        valid = step_index < batch_steps[None, :]
+        t = step_index / batch_steps[None, :].astype(np.float64)
+
+        grid_x = np.floor(origin_x + t * delta_x[rays][None, :]).astype(np.int64)
+        grid_y = np.floor(origin_y + t * delta_y[rays][None, :]).astype(np.int64)
+        valid &= (grid_x >= 0) & (grid_x < meta.width) & (grid_y >= 0) & (grid_y < meta.height)
         np.add.at(free, (grid_y[valid], grid_x[valid]), 1)
+
+
+def _batch_end(order: np.ndarray, n_steps: np.ndarray, start: int) -> int:
+    """Largest ``end`` whose batch fits :data:`_RAY_BATCH_ELEMENTS`.
+
+    ``order`` is sorted ascending by ``n_steps``, so the batch's element count
+    ``(end - start) * n_steps[order[end - 1]]`` is a product of two
+    non-decreasing sequences and therefore monotone in ``end`` -- which is what
+    makes a binary search valid here. Always returns at least ``start + 1`` so
+    a single ray longer than the whole budget still makes progress instead of
+    looping forever.
+    """
+    lo, hi = start + 1, order.shape[0]
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if (mid - start) * int(n_steps[order[mid - 1]]) <= _RAY_BATCH_ELEMENTS:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo

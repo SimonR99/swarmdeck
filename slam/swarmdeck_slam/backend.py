@@ -29,12 +29,7 @@ from swarmdeck_slam.descriptors import (
     scan_context_descriptor,
 )
 from swarmdeck_slam.graph import GtsamPoseGraph
-from swarmdeck_slam.render import (
-    RenderConfig,
-    RenderedGrid,
-    render_occupancy,
-    render_per_robot,
-)
+from swarmdeck_slam.render import RenderConfig, RenderedGrid, render_all
 from swarmdeck_slam.types import (
     Edge,
     EdgeKind,
@@ -196,9 +191,9 @@ class CollaborativeBackend:
     Comfortably beyond keyframe spacing (0.5 m gated) and inside the building's
     bay period, so ordinary neighbours never trip the ratio test."""
 
-    max_plausible_hop_m: float = 5.0
-    """Translation between consecutive keyframes above which the hop is treated
-    as a frame discontinuity rather than as robot motion.
+    max_plausible_speed_mps: float = 5.0
+    """Implied speed between consecutive keyframes above which the hop is
+    treated as a frame discontinuity rather than as robot motion.
 
     An ODOMETRY edge is a GNC known-inlier: neither PCM nor GNC is allowed to
     reject it, because rejecting one would disconnect the graph. That makes a
@@ -210,18 +205,40 @@ class CollaborativeBackend:
     between one keyframe and the next. The hop that straddles that is not a
     measurement of anything.
 
-    5 m is far above real motion at this cadence and far below a frame jump:
-    the producer gates keyframes at >=0.5 m, and the largest hop measured
-    across both robots of ``sessions/captures/3d-run-01`` is 2.30 m (1.5 m/s
-    over 1.5 s). Queue drops in the service legitimately stretch a hop to a
-    few keyframe spacings, which is why the threshold sits well clear of them.
+    Speed, not distance, because distance alone cannot tell a frame jump from
+    a long hop. The service's bounded queue drops blobs under load, and a
+    dropped keyframe legitimately stretches the next hop to several keyframe
+    spacings -- but it stretches the elapsed time by exactly as much, so the
+    implied speed is unchanged. A frame jump is instantaneous by definition
+    and shows up as a speed nothing on this fleet can reach.
+
+    5 m/s is over 3x the fastest hop measured across both robots of
+    ``sessions/captures/3d-run-01`` (2.30 m in 1.50 s = 1.5 m/s) and well
+    above the platforms' own top speeds (Scout Mini ~1.5 m/s, Spot ~1.6 m/s),
+    while a frame jump lands one to two orders of magnitude above it.
     """
 
-    max_plausible_hop_rad: float = math.radians(150.0)
-    """Rotation counterpart to :attr:`max_plausible_hop_m`. Deliberately close
-    to a half turn: the producer already refuses keyframes captured while
-    spinning fast, so anything approaching a reversal between two accepted
-    keyframes is a frame change rather than a turn."""
+    max_plausible_yaw_rate: float = math.radians(90.0)
+    """Rotation counterpart to :attr:`max_plausible_speed_mps`, in rad/s. An
+    order of magnitude above the 8 deg/s the producer already gates keyframe
+    capture on (``keyframe_producer.DEFAULT_MAX_YAW_RATE``), so a robot that
+    turned hard between two accepted keyframes is never mistaken for a frame
+    that rotated."""
+
+    min_hop_m: float = 1.0
+    """Floor below which a hop is never flagged, whatever speed it implies.
+
+    Stamps come off a ROS message header and are not guaranteed sane; a
+    near-zero or backwards ``dt`` would otherwise turn every ordinary
+    half-metre step into an infinite-speed "jump". Well above the producer's
+    0.5 m capture gate, so a normal hop can never be flagged on a bad clock
+    alone, and far below any real discontinuity."""
+
+    fallback_hop_m: float = 5.0
+    """Absolute distance gate used when the stamps cannot give a usable ``dt``
+    (non-monotonic clock, replayed capture, duplicate stamps). Distance is the
+    weaker test -- it is the one that cannot distinguish a queue-drop-stretched
+    hop from a jump -- so it is the fallback rather than the rule."""
 
     implausible_hop_information_scale: float = 1e-4
     """What an implausible hop's information is multiplied by.
@@ -236,8 +253,25 @@ class CollaborativeBackend:
     """
 
 
+    pcm_confidence: float = 0.99
+    min_pcm_clique_size: int = 2
+    gnc_weight_threshold: float = 0.5
+    """PCM/GNC knobs, forwarded to :class:`~swarmdeck_slam.graph.GtsamPoseGraph`.
+
+    Defaults repeat that class's own, which is where each one is documented.
+    They are surfaced here because the graph was previously constructed with
+    no arguments at all, which left the fleet's entire outlier-rejection
+    policy unreachable from the service, from ``tools/replay.py``, and from
+    any test that wanted to sweep it against a recorded run -- the one place
+    those thresholds can actually be calibrated.
+    """
+
     def __post_init__(self) -> None:
-        self._graph = GtsamPoseGraph()
+        self._graph = GtsamPoseGraph(
+            pcm_confidence=self.pcm_confidence,
+            min_pcm_clique_size=self.min_pcm_clique_size,
+            gnc_weight_threshold=self.gnc_weight_threshold,
+        )
         self._index = ScanContextIndex(
             rings=DEFAULT_RINGS,
             sectors=DEFAULT_SECTORS,
@@ -282,7 +316,7 @@ class CollaborativeBackend:
             previous = self._keyframes[previous_id]
             t_src_dst = se3_relative(previous.t_odom_base, keyframe.t_odom_base)
             information = ODOM_INFORMATION * self.odom_information_scale
-            if self._implausible_hop(t_src_dst):
+            if self._implausible_hop(t_src_dst, keyframe.stamp - previous.stamp):
                 information = information * self.implausible_hop_information_scale
                 self.implausible_hops += 1
             self._graph.add_edge(
@@ -334,13 +368,17 @@ class CollaborativeBackend:
         self._new_since_optimize += 1
         return True
 
-    def _implausible_hop(self, t_src_dst: np.ndarray) -> bool:
+    def _implausible_hop(self, t_src_dst: np.ndarray, dt_s: float) -> bool:
         """Whether a consecutive-keyframe transform is a frame discontinuity
-        rather than robot motion. See :attr:`max_plausible_hop_m`."""
+        rather than robot motion. See :attr:`max_plausible_speed_mps`."""
         translation_m, rotation_rad = se3_distance(se3_identity(), t_src_dst)
+        if translation_m < self.min_hop_m and rotation_rad < self.max_plausible_yaw_rate:
+            return False
+        if dt_s <= 0.0:
+            return translation_m > self.fallback_hop_m
         return (
-            translation_m > self.max_plausible_hop_m
-            or rotation_rad > self.max_plausible_hop_rad
+            translation_m / dt_s > self.max_plausible_speed_mps
+            or rotation_rad / dt_s > self.max_plausible_yaw_rate
         )
 
     def _ambiguous(self, candidates: list[PlaceCandidate]) -> bool:
@@ -378,12 +416,15 @@ class CollaborativeBackend:
         return False
 
     def optimize_and_render(self) -> BackendSnapshot | None:
-        """Run the solver and rasterize occupancy. None if there is nothing new."""
+        """Run the solver and rasterize occupancy. None if nothing is ingested yet.
+
+        Renders both partitions through :func:`render_all`, which poses and
+        filters each keyframe once for the two groupings rather than twice.
+        """
         if not self._keyframes:
             return None
         optimized = self._graph.optimize()
-        grids = render_occupancy(optimized, self._keyframes.values(), self.render)
-        robot_grids = render_per_robot(optimized, self._keyframes.values(), self.render)
+        grids, robot_grids = render_all(optimized, self._keyframes.values(), self.render)
         self._dirty = False
         self._new_since_optimize = 0
         return BackendSnapshot(
@@ -420,6 +461,26 @@ def majority_component(snapshot: BackendSnapshot) -> RenderedGrid | None:
     if not multi:
         return None
     return max(multi, key=lambda grid: (len(grid.robots), grid.width * grid.height))
+
+
+def scoped_grids(snapshot: BackendSnapshot) -> list[tuple[str, RenderedGrid]]:
+    """Every ``(scope, grid)`` the service publishes for one snapshot.
+
+    The scope names live here, in one place, because two things have to agree
+    on them exactly: the service that POSTs each grid, and the ``scopes`` list
+    in :func:`snapshot_update` that tells the server which scopes are still
+    live so it can drop the rest. If those two ever disagree, the server
+    garbage-collects a grid the service just published, or keeps one it never
+    will again -- and the second failure is silent.
+    """
+    grids: list[tuple[str, RenderedGrid]] = [
+        (f"robot:{robot_id}", grid) for robot_id, grid in sorted(snapshot.robot_grids.items())
+    ]
+    for component in snapshot.optimized.components:
+        grid = snapshot.grids.get(component.component_id)
+        if grid is not None:
+            grids.append((f"component:{component.component_id}", grid))
+    return grids
 
 
 def snapshot_update(snapshot: BackendSnapshot) -> dict:
@@ -475,6 +536,13 @@ def snapshot_update(snapshot: BackendSnapshot) -> dict:
             }
             for c in snapshot.optimized.components
         ],
+        # Every scope that is still live. Component ids are positional over
+        # sorted union-find roots, so they are NOT stable: when two robots
+        # merge, the component count drops and the highest id stops being
+        # published -- while the server, which only ever learns about a scope
+        # by being handed one, would serve that dead grid forever. Naming the
+        # live set on every update lets it drop the rest.
+        "scopes": [scope for scope, _grid in scoped_grids(snapshot)],
         "origins": origins,
         "common_poses": common_poses,
         "graphs": graphs,

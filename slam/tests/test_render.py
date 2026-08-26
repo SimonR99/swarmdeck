@@ -19,17 +19,22 @@ Two pose sets are built from the same fixture and compared throughout:
 from __future__ import annotations
 
 import time
+import tracemalloc
+from unittest import mock
 
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
+from swarmdeck_slam import render
 from swarmdeck_slam.render import (
     FREE,
     OCCUPIED,
     UNKNOWN,
     RenderConfig,
     RenderedGrid,
+    _Meta,
+    _rasterize_free,
     render_occupancy,
 )
 from swarmdeck_slam.types import Component, OptimizedGraph
@@ -307,3 +312,57 @@ def test_render_scales_to_a_realistic_keyframe_count():
     # reintroduction of a per-ray or per-cell Python loop, which is orders of
     # magnitude slower than this at the same scale.
     assert elapsed < 15.0
+
+
+def test_dense_long_range_keyframe_does_not_blow_up_memory():
+    """A single keyframe must not size its ray matrix by its longest return.
+
+    ``_rasterize_free`` walks every ray of a keyframe as one
+    ``(steps, rays)`` matrix. Unbatched, ``steps`` is set by the single
+    longest ray, so one 60 m return makes every short ray in the keyframe pay
+    1200 rows of padding: 40k points at 5 cm measured 1.58 GB of peak
+    allocation and 1.71 s for ONE keyframe, against a render that walks every
+    keyframe of every robot from scratch on every optimize.
+
+    Length-sorted batching bounds that regardless of density or range. This
+    asserts the property (bounded peak), not the measured number -- the point
+    is that peak stops tracking cloud size, so the bound is set well above
+    what batching costs and far below what the unbatched walk did.
+    """
+    n_points = 40_000
+    rng = np.random.default_rng(0)
+    theta = rng.uniform(0.0, 2.0 * np.pi, n_points)
+    radius = rng.uniform(1.0, 60.0, n_points)
+    ends = np.stack([radius * np.cos(theta), radius * np.sin(theta)], axis=1)
+    meta = _Meta(0.05, 4000, 4000, -100.0, -100.0)
+    free = np.zeros((meta.height, meta.width), dtype=np.int32)
+
+    tracemalloc.start()
+    try:
+        _rasterize_free(np.array([0.0, 0.0]), ends, meta, free)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert free.sum() > 0, "the walk must actually mark free cells"
+    assert peak < 400e6, f"peak allocation {peak / 1e6:.0f} MB for one keyframe"
+
+
+def test_batched_rays_mark_the_same_cells_as_a_single_batch():
+    """Batching is an allocation strategy, not a change of result.
+
+    Verified by shrinking the batch budget to a handful of elements, which
+    forces many batches over the same rays, and requiring an identical grid.
+    """
+    rng = np.random.default_rng(7)
+    ends = rng.uniform(-8.0, 8.0, size=(400, 2))
+    meta = _Meta(0.1, 200, 200, -10.0, -10.0)
+    origin = np.array([0.5, -0.5])
+
+    one_batch = np.zeros((meta.height, meta.width), dtype=np.int32)
+    many_batches = np.zeros((meta.height, meta.width), dtype=np.int32)
+    _rasterize_free(origin, ends, meta, one_batch)
+    with mock.patch.object(render, "_RAY_BATCH_ELEMENTS", 64):
+        _rasterize_free(origin, ends, meta, many_batches)
+
+    assert np.array_equal(one_batch, many_batches)

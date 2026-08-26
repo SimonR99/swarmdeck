@@ -34,8 +34,11 @@ CLOUD_SCALE = 0.01
 # alongside the authoritative merged grid would invite exactly the confusion
 # the rule prevents.
 #
-# Bounded by fleet size (one entry per robot plus one per component), and each
-# scope is overwritten in place on every publish, so this does not grow.
+# Bounded by fleet size (one entry per robot plus one per component). Each scope
+# is overwritten in place on every publish, and scopes the back-end has stopped
+# publishing are dropped by _prune_optimized_maps -- without that, a retired
+# component id would be served from here forever, because a scope only ever
+# arrives and nothing else could tell a live one from a dead one.
 _optimized: dict[str, tuple[GridMeta, np.ndarray, tuple[str, ...]]] = {}
 _optimized_lock = threading.Lock()
 
@@ -106,6 +109,10 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
     if robot_id is None:
         from ..mapsvc import graph_bridge
 
+        # The scoped grids are rendered from the pose graph, so they die with
+        # it. Without this they outlived every reset -- reset_optimized_maps
+        # existed for exactly this and was never called from anywhere.
+        reset_optimized_maps()
         await asyncio.to_thread(graph_bridge.post_reset)
     await broadcast({"type": "network_clear", "robot_id": robot_id})
     patch = map_service.take_patch()
@@ -317,7 +324,35 @@ async def post_slam_update(request: Request) -> Any:
         map_service.apply_slam_update(payload)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    return {"ok": True, "robots": sorted((payload.get("graphs") or {}).keys())}
+    dropped = _prune_optimized_maps(payload.get("scopes"))
+    return {
+        "ok": True,
+        "robots": sorted((payload.get("graphs") or {}).keys()),
+        "dropped_scopes": dropped,
+    }
+
+
+def _prune_optimized_maps(scopes: Any) -> list[str]:
+    """Forget every scoped grid the back-end no longer publishes.
+
+    Scoped grids only ever arrive; nothing here could tell a live scope from a
+    dead one on its own. ``component:<n>`` ids are positional over the
+    back-end's sorted union-find roots, so merging two robots drops the
+    component count and permanently retires the highest id -- and that grid,
+    a snapshot of a merge that no longer describes the fleet, would otherwise
+    be served from ``/api/map/optimized`` forever.
+
+    A back-end that sends no ``scopes`` key (an older one) prunes nothing, so
+    this cannot empty the store by accident.
+    """
+    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+        return []
+    live = set(scopes)
+    with _optimized_lock:
+        dead = sorted(set(_optimized) - live)
+        for scope in dead:
+            del _optimized[scope]
+    return dead
 
 
 async def get_nav_map(request: Request, robot_id: str) -> Response:

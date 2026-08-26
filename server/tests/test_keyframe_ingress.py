@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import zlib
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from swarmdeck_protocol import encode_keyframe
 from swarmdeck_server.api.app import app, load_config, map_service
+from swarmdeck_server.api.map_routes import reset_optimized_maps
 from swarmdeck_server.mapsvc.service import GridMeta
 
 
 @pytest.fixture(autouse=True)
 def _reset_maps():
+    # reset_optimized_maps too: the scoped-grid store is module-global and
+    # load_config does not touch it, so without this a scope published by one
+    # test is still there for the next one.
     load_config()
+    reset_optimized_maps()
     yield
     load_config()
+    reset_optimized_maps()
 
 
 def _blob(robot_id: str = "botman_0", seq: int = 1) -> bytes:
@@ -130,3 +138,63 @@ def test_graph_mode_does_not_overlay_unmerged_robots():
         )
         members = c.get("/api/map/status").json()["global_members"]
         assert "botman_0" not in members
+
+
+def _post_scoped_grid(client: TestClient, scope: str, robots: str = "") -> None:
+    cells = np.full((4, 4), -1, dtype=np.int8)
+    client.post(
+        f"/api/slam/optimized_map?scope={scope}&resolution=0.05&width=4&height=4"
+        f"&origin_x=0&origin_y=0&robots={robots}",
+        content=zlib.compress(cells.tobytes()),
+    )
+
+
+def _scopes(client: TestClient) -> set[str]:
+    return {m["scope"] for m in client.get("/api/map/optimized").json()["maps"]}
+
+
+def test_slam_update_drops_scopes_the_backend_stopped_publishing():
+    """A retired ``component:<n>`` must not be served forever.
+
+    Component ids are positional over the back-end's sorted union-find roots,
+    so two robots merging drops the component count and permanently retires the
+    highest id. Scoped grids only ever arrive here, so without the back-end
+    naming its live set the server has no way to tell a dead scope from one
+    that simply has not been republished yet.
+    """
+    with TestClient(app) as c:
+        for scope in ("robot:a", "robot:b", "component:0", "component:1"):
+            _post_scoped_grid(c, scope)
+        assert _scopes(c) == {"robot:a", "robot:b", "component:0", "component:1"}
+
+        # a and b merged: one component now, and component:1 is gone for good
+        r = c.post(
+            "/api/slam/update",
+            json={"components": [], "graphs": {}, "origins": {}, "common_poses": {},
+                  "scopes": ["robot:a", "robot:b", "component:0"]},
+        )
+        assert r.status_code == 200
+        assert r.json()["dropped_scopes"] == ["component:1"]
+        assert _scopes(c) == {"robot:a", "robot:b", "component:0"}
+
+
+def test_slam_update_without_scopes_prunes_nothing():
+    """An older back-end that sends no ``scopes`` key must not empty the store."""
+    with TestClient(app) as c:
+        _post_scoped_grid(c, "component:0")
+        r = c.post(
+            "/api/slam/update",
+            json={"components": [], "graphs": {}, "origins": {}, "common_poses": {}},
+        )
+        assert r.status_code == 200
+        assert r.json()["dropped_scopes"] == []
+        assert _scopes(c) == {"component:0"}
+
+
+def test_fleet_map_reset_clears_optimized_scopes():
+    """Scoped grids are rendered from the pose graph, so they die with it."""
+    with TestClient(app) as c:
+        _post_scoped_grid(c, "component:0")
+        assert _scopes(c) == {"component:0"}
+        assert c.post("/api/map/reset").status_code == 200
+        assert _scopes(c) == set()
