@@ -23,6 +23,7 @@
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { review } from '$lib/stores/review.svelte';
+  import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { MapRegistration } from '$lib/types/protocol';
@@ -787,6 +788,35 @@
       <Maximize2 class="h-4 w-4" />
     </button>
   </div>
+
+  {#if review.selected || review.focused}
+    {@const activeDetectionId = review.selected ?? review.focused}
+    {@const activeObj = activeDetectionId ? (review.proposalOf(activeDetectionId) ?? review.entityOf(activeDetectionId)) : null}
+    {@const activeGrid = activeObj ? mapStore.worldToGrid(activeObj.position.x, activeObj.position.y) : null}
+    {@const activeScreen = activeGrid ? screenOf(activeGrid.gx, activeGrid.gy) : null}
+
+    {#if activeObj && activeObj.image && activeScreen && activeScreen.sx >= -50 && activeScreen.sx <= (host?.clientWidth ?? 0) + 50 && activeScreen.sy >= -50 && activeScreen.sy <= (host?.clientHeight ?? 0) + 50}
+      <div
+        class="pointer-events-none absolute z-25 flex flex-col items-center -translate-x-1/2 -translate-y-full pb-3.5"
+        style="left: {activeScreen.sx}px; top: {activeScreen.sy}px;"
+      >
+        <div class="overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl flex flex-col items-center">
+          <img
+            src={activeObj.image}
+            alt="{detectionCatalog.labelOf(activeObj.class)} detection crop"
+            class="h-32 w-32 rounded-lg object-cover shadow-sm"
+          />
+          <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
+            <span>{detectionCatalog.labelOf(activeObj.class)}</span>
+            <span class="font-normal text-fg-dim">
+              {'best_score' in activeObj ? `${Math.round(activeObj.best_score * 100)}%` : `${activeObj.observations} views`}
+            </span>
+          </div>
+        </div>
+        <div class="h-2 w-2 rotate-45 border-b border-r border-border/80 bg-surface -mt-1 shadow-sm"></div>
+      </div>
+    {/if}
+  {/if}
 
   <!-- cursor readout -->
   <div

@@ -148,7 +148,7 @@
     {#each shown as p (p.id)}
       {@const suggested = review.entityOf(p.suggested_entity_id)}
       {@const candidates = review.mergeCandidates(p)}
-      <div animate:flip={{ duration: 250 }} class="flex flex-col items-start gap-1">
+      <div animate:flip={{ duration: 250 }} class="relative flex flex-col items-start gap-1">
         <div
           role="group"
           aria-label="Detection proposal"
