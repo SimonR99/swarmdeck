@@ -133,17 +133,42 @@ services:
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
-    command: ["ros2", "launch", "swarmdeck_nav", "aslan.launch.py"]
+    # publish_odom_tf:=false because the odom_tf service above already
+    # broadcasts map -> os_lidar. Same split as Botman: keep one bridge
+    # independent of Nav2 so costmaps still get a pose if Nav2 restarts,
+    # and keep Nav2 from starting a second broadcaster for that same edge.
+    command:
+      - ros2
+      - launch
+      - swarmdeck_nav
+      - aslan.launch.py
+      - publish_odom_tf:=false
+    # Every ros2 CLI call is wrapped in `timeout`, and the interval is well
+    # clear of it. Without that this healthcheck LEAKS: `ros2 action list` and
+    # `ros2 lifecycle get` hang indefinitely against a busy ROS graph instead
+    # of exiting -- one was observed alive for 14m16s -- and each hung call
+    # holds an open DDS participant. Measured on aslan_0 on 2026-08-26: ~5
+    # leaked ros2/grep pairs per minute, load climbing 7.9 -> 24.3 in 17
+    # minutes, and /ouster/points collapsing from its configured 10 Hz to
+    # 2.96 Hz with gaps up to 2.9 s. SuperOdometry dead-reckons between scans
+    # and snaps when a late one lands, so the visible symptom was odometry
+    # jitter that worsened with uptime; the robot eventually stopped answering
+    # SSH entirely and needed a physical power cycle.
+    #
+    # The hang is not specific to these two subcommands -- a plain `ros2 param
+    # get` was seen hanging the same way -- so bounding the call is the fix,
+    # not choosing a different query. `interval: 5s` against `timeout: 4s` also
+    # left almost no margin, so a slow probe overlapped the next one.
     healthcheck:
       test:
         - CMD-SHELL
         - >-
           . /opt/ros/humble/setup.sh &&
           . /nav_ws/install/setup.sh &&
-          ros2 action list | grep -qx '/aslan_0/navigate_to_pose' &&
-          ros2 lifecycle get /aslan_0/bt_navigator | grep -q '^active'
-      interval: 5s
-      timeout: 4s
+          timeout 5 ros2 action list | grep -qx '/aslan_0/navigate_to_pose' &&
+          timeout 5 ros2 lifecycle get /aslan_0/bt_navigator | grep -q '^active'
+      interval: 20s
+      timeout: 12s
       retries: 12
       start_period: 20s
     restart: unless-stopped

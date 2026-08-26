@@ -64,6 +64,35 @@ def test_aslan_nav_namespace_and_tf_bridge_are_distinct():
     assert '"inflation_radius": "0.50"' in source
 
 
+def test_aslan_runs_exactly_one_map_to_os_lidar_broadcaster():
+    """Compose already runs odom_tf; Nav2 must not start a second copy.
+
+    Both bridges relay the same /laser_odometry pose and both stamp it with
+    their own receipt time, so leaving both alive publishes every pose twice
+    under two timestamps. Measured on the robot 2026-08-25 with both running:
+    12.95 Hz of map -> os_lidar against a 7.04 Hz odometry source, 49% of
+    broadcasts an identical pose re-sent up to 26 ms later, and 7.8% of stamps
+    out of order -- a later stamp carrying an earlier pose. Parked, that is
+    invisible, because duplicating an unchanging pose changes nothing. In
+    motion every tf2 lookup interpolates across an inverted pair.
+
+    Botman has always passed publish_odom_tf:=false; aslan.launch.py simply
+    never grew the argument, so aslan's odom_tf service was additive.
+    """
+    source = LAUNCH.read_text()
+    compose = yaml.safe_load(COMPOSE.read_text())
+    nav2_command = compose["services"]["nav2"]["command"]
+
+    assert 'DeclareLaunchArgument("publish_odom_tf", default_value="true")' in source
+    assert "condition=IfCondition(publish_odom_tf)" in source
+    assert "from launch.conditions import IfCondition" in source
+    assert "publish_odom_tf:=false" in nav2_command
+    # The standalone bridge is the one that must survive a Nav2 restart.
+    odom_tf_command = compose["services"]["odom_tf"]["command"]
+    assert "__node:=aslan_odom_to_tf_host" in odom_tf_command
+    assert "child_frame:=os_lidar" in odom_tf_command
+
+
 def test_aslan_uses_the_same_bunker_footprint_radius():
     config = yaml.safe_load(CONFIG.read_text())
 
