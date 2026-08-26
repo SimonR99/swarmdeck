@@ -16,6 +16,7 @@ import importlib
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -298,10 +299,106 @@ NAV_READY_GRACE_S = 30.0
 # leave real time between attempts rather than hammering the service.
 NAV_RECOVER_INTERVAL_S = 30.0
 
+# ------------------------------------------------------------- exploration
+#
+# The reactive bootstrap that drives the fleet before anyone sends a goal.
+# It used to be launched by session.launch.py for a fixed window; the operator
+# now starts and stops it, so ONE owner has to hold the process.
+#
+# That owner is here rather than in the launch file for a specific reason:
+# `explore.py` and Nav2 both publish `<ns>/cmd_vel`, and two owners means two
+# processes able to start it. A robot receiving two exploration streams plus
+# Nav2's follows none of them, which is the failure this adapter's operator
+# commands exist to make impossible rather than merely unlikely.
+#
+# Every robot has its own websocket connection, so a fleet-wide command arrives
+# once per robot. Everything below is therefore idempotent and lock-guarded.
+
+EXPLORE_SCRIPT = (
+    REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario" / "explore.py"
+)
+# Long enough that an operator-started run does not quietly expire mid-session.
+# `explore.py` bounds itself in WALL-CLOCK seconds by design (it exists to bound
+# how long an operator waits), and an operator-driven run is bounded by the
+# operator instead.
+EXPLORE_MAX_SECONDS = 86400.0
+
+
+class Exploration:
+    """The fleet's exploration process, and whether it is running."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._argv: list[str] | None = None
+
+    def configure(self, argv: list[str]) -> None:
+        """Record how to launch it. Called once, when the fleet is known."""
+        with self._lock:
+            self._argv = argv
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return self._proc is not None and self._proc.poll() is None
+
+    def start(self, logger) -> bool:
+        with self._lock:
+            if self._argv is None:
+                logger.warn("[adapter_sim] exploration is not configured")
+                return False
+            if self._proc is not None and self._proc.poll() is None:
+                return True  # already exploring; a second operator click
+            try:
+                self._proc = subprocess.Popen(self._argv)
+            except OSError as exc:
+                logger.warn(f"[adapter_sim] cannot start exploration: {exc}")
+                self._proc = None
+                return False
+            logger.info(f"[adapter_sim] exploration started (pid {self._proc.pid})")
+            return True
+
+    def stop(self, logger) -> bool:
+        """Stop it, and let it stop the robots on the way out.
+
+        SIGINT rather than SIGKILL: `explore.py`'s halt() publishes a zero
+        Twist to every robot it still owns, and killing it outright leaves the
+        fleet driving on its last command until something else claims cmd_vel.
+        """
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+        if proc is None or proc.poll() is not None:
+            return True
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warn("[adapter_sim] exploration ignored SIGINT; killing it")
+            proc.kill()
+            proc.wait(timeout=5)
+        logger.info("[adapter_sim] exploration stopped")
+        return True
+
+
+EXPLORATION = Exploration()
+
+
 # ------------------------------------------------------------------- reset
 #
-# A reset is fleet-wide in Gazebo and per-robot in ROS, while the protocol
-# addresses one robot at a time. The world reset is therefore coalesced here.
+# A reset is fleet-wide in the simulator and per-robot in ROS, while the
+# protocol addresses one robot at a time. The world reset is therefore
+# coalesced here.
+#
+# The two backends need different calls, and neither can be probed for cheaply:
+# a service that is absent and a service that is merely slow look identical
+# from here. The entrypoint knows which simulator it started, so it says so.
+SIM_BACKEND = os.environ.get("SWARMDECK_SIM_BACKEND", "argos").strip().lower()
+
+# The ARGoS bridge's fleet-wide reset. Unlike Gazebo's, this one DOES move the
+# robots: the loop function owns the entities it was given and teleports each
+# one back to the pose it was constructed at (ResetAllRobots).
+ARGOS_RESET_WORLD_SERVICE = "/swarmdeck_sim/reset_world"
 
 # Seconds within which a second robot's reset reuses the first one's world reset.
 # Longer than a fleet-wide reset takes to fan out, shorter than any interval an
@@ -365,8 +462,39 @@ def _gz_world_name(logger) -> str | None:
     return None
 
 
-def reset_world(logger) -> bool:
-    """Put the *scenery* back where it started. Once per fleet-wide reset.
+def reset_world(bridge) -> bool:
+    """Put the world back where it started. Once per fleet-wide reset.
+
+    On the ARGoS backend this is one `std_srvs/Trigger` call to the bridge,
+    which forwards a flag on the command channel; the loop function teleports
+    every robot to its spawn pose and the static scenery never moved, being a
+    collision mesh rather than a pile of loose models. `RobotBridge._reset_pose`
+    is therefore a no-op there.
+
+    On Gazebo it is the long way round, described below.
+    """
+    logger = bridge.node.get_logger()
+    if SIM_BACKEND == "argos":
+        global _world_reset_at
+        with _WORLD_RESET_LOCK:
+            if time.monotonic() - _world_reset_at < WORLD_RESET_COALESCE_S:
+                return True
+            trigger = _srv_type("std_srvs.srv", "Trigger")
+            if trigger is None:
+                logger.warn("[adapter_sim] std_srvs is not installed")
+                return False
+            if not bridge._call(ARGOS_RESET_WORLD_SERVICE, trigger,
+                                trigger.Request()):
+                return False
+            _world_reset_at = time.monotonic()
+            CSLAM_GRID.clear()
+            SLAM_GRAPHS.clear()
+            return True
+    return _reset_world_gazebo(logger)
+
+
+def _reset_world_gazebo(logger) -> bool:
+    """Put the *scenery* back where it started, on the legacy backend.
 
     This restores the chairs, tables, plants and rubber ducks that make up the
     generated world, which robots push around as they drive.
@@ -893,10 +1021,30 @@ class RobotBridge(AdapterSensorMixin):
             "ros": "jazzy",
             # `reset` is simulation-only and must stay that way — it means
             # teleport to spawn and forget the map. See the protocol README.
-            "capabilities": ["navigate", "map", "camera", "battery", "estop", "reset"],
+            # `explore` joins `reset` as a SIMULATION-ONLY capability: it starts
+            # a process that drives the whole fleet reactively, which is not a
+            # thing to offer for real hardware. Hardware adapters must never
+            # advertise it. The dashboard shows its controls only to fleets
+            # that do.
+            "capabilities": [
+                "navigate", "map", "camera", "battery", "estop", "reset", "explore",
+            ],
             "footprint_radius": self.footprint_radius,
             "footprint": self.footprint,
         }
+
+    def effective_mode(self) -> str:
+        """What this robot is doing, with exploration folded in.
+
+        Only ever replaces `idle`. A robot under an operator goal is
+        navigating, a teleoperated one is being driven, and an e-stopped one is
+        stopped, whatever the fleet-wide bootstrap is doing: `explore.py`
+        yields cmd_vel to Nav2 per robot (see its module docstring), so those
+        robots genuinely are not exploring.
+        """
+        if self.mode == "idle" and EXPLORATION.running:
+            return "explore"
+        return self.mode
 
     def state(self) -> dict:
         return {
@@ -905,7 +1053,7 @@ class RobotBridge(AdapterSensorMixin):
             "t_mono": round(time.monotonic() - self.t0, 4),
             "pose": self.map_pose(),
             "battery": None,  # simulation has no battery model
-            "mode": self.mode,
+            "mode": self.effective_mode(),
             "nav_status": self.nav_status,
             "goal": self.goal,
             "planned_path": self.planned_path,
@@ -1222,7 +1370,14 @@ class RobotBridge(AdapterSensorMixin):
         Explicit, because a Gazebo world reset does not do it: the fleet is
         created in a running world, and a reset only restores what the world SDF
         declared. See reset_world().
+
+        The ARGoS bridge's world reset already teleported every robot, so there
+        is nothing left to do there. Sending a second teleport would not be
+        harmless: it would arrive a tick or two later and re-apply the velocity
+        transient that WORLD_SETTLE_S exists to let pass.
         """
+        if SIM_BACKEND == "argos":
+            return True
         pose = self._configured_start_pose()
         if pose is None:
             return False
@@ -1267,6 +1422,19 @@ class RobotBridge(AdapterSensorMixin):
         has settled so the teleport's velocity transient is not what gets
         integrated into the fresh estimate.
         """
+        if SIM_BACKEND == "argos":
+            # There is no filter to re-zero: the pose comes from Ultra-Fusion,
+            # running outside ARGoS, and it has no reset input. Its frame simply
+            # carries on from wherever it had drifted to, and the teleport shows
+            # up in it as a discontinuity.
+            #
+            # That is survivable, and this is why: SLAM Toolbox is reset in the
+            # next step and starts a fresh map anchored at whatever odom reads
+            # then, so the offset is absorbed into map -> odom rather than
+            # accumulating. What would NOT be survivable is faking a re-zero
+            # here, which would put a step in odom that the estimator does not
+            # know about and SLAM would integrate as motion.
+            return True
         request = SetPose.Request()
         request.pose.header.frame_id = f"{self.id}/odom"
         request.pose.header.stamp = self.node.get_clock().now().to_msg()
@@ -1335,7 +1503,7 @@ class RobotBridge(AdapterSensorMixin):
             # Scenery first, then this robot. Two calls because a world reset
             # restores only what the world SDF declared, and the fleet was
             # spawned into a world that was already running.
-            steps["world"] = reset_world(self.node.get_logger())
+            steps["world"] = reset_world(self)
             steps["pose"] = self._reset_pose()
             time.sleep(WORLD_SETTLE_S)
             steps["odometry"] = self._reset_odometry()
@@ -1524,6 +1692,14 @@ async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
                             bridge.stop()
                         elif t == "drive":
                             bridge.drive(msg.get("linear", 0.0), msg.get("angular", 0.0))
+                        elif t == "explore":
+                            # Fleet-wide, but delivered once per robot because
+                            # every robot has its own connection. Both calls
+                            # are idempotent.
+                            if msg.get("enabled"):
+                                EXPLORATION.start(bridge.node.get_logger())
+                            else:
+                                EXPLORATION.stop(bridge.node.get_logger())
                         elif t == "reset":
                             # Several seconds of blocking service calls. Run it
                             # off the loop and do not await it here, or this
@@ -1655,6 +1831,20 @@ def create_adapter_node():
     )
 
 
+def _explore_on_start_seconds() -> float:
+    """Whether to bootstrap exploration the moment the fleet connects.
+
+    Kept as a duration rather than a flag so `EXPLORE_SECONDS` keeps meaning
+    what it did in Compose, even though the operator now decides when it ends.
+    Any positive value starts it; the process itself is bounded by
+    EXPLORE_MAX_SECONDS and by the operator pressing Stop.
+    """
+    try:
+        return float(os.environ.get("EXPLORE_SECONDS", "0") or 0)
+    except ValueError:
+        return 0.0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--robots", type=int, default=None,
@@ -1709,6 +1899,40 @@ def main() -> None:
             f"({bridge.robot_type}, r={bridge.footprint_radius} m)"
         )
 
+    # Teach the exploration controller how to launch itself. The arguments come
+    # from the same places the fleet does: the platform table for footprints,
+    # the backend's config for spawn poses and seed. session.launch.py used to
+    # build this list and own the process; it no longer starts it at all, so
+    # there is exactly one thing that can.
+    try:
+        with urllib.request.urlopen(f"{http_url}/api/config", timeout=5) as response:
+            session_cfg = json.loads(response.read()).get("config") or {}
+    except Exception as exc:  # noqa: BLE001 - the fleet still runs without it
+        print(f"[adapter_sim] session config unavailable ({exc})")
+        session_cfg = {}
+    EXPLORATION.configure([
+        "python3", str(EXPLORE_SCRIPT),
+        "--robots", str(robot_count),
+        "--prefix", args.prefix,
+        "--seconds", str(EXPLORE_MAX_SECONDS),
+        "--seed", str(session_cfg.get("seed", 20260801)),
+        # Spawn poses let the explorer send scheduled pairs to a shared meeting
+        # point; every robot steers in its own odom frame, so without these a
+        # rendezvous cannot be expressed and encounters stay a matter of luck.
+        "--start-poses", json.dumps((session_cfg.get("map") or {}).get("start_poses", {})),
+        # Per-robot chassis size. The explorer's clearances are measured from
+        # the chassis, and the fleet is not one size.
+        "--radii", json.dumps({
+            bridge.id: round(bridge.footprint_radius, 3) for bridge in bridges
+        }),
+    ])
+
+    # The startup bootstrap, unchanged in effect: maps need some coverage before
+    # a goal is worth issuing, and Nav2 driving against an empty map jams robots
+    # into walls. Zero leaves the fleet still until an operator presses Explore.
+    if _explore_on_start_seconds() > 0:
+        EXPLORATION.start(node.get_logger())
+
     # ROS spins in its own thread; asyncio owns the protocol side.
     threading.Thread(target=lambda: rclpy.spin(node), daemon=True).start()
     try:
@@ -1716,6 +1940,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # The fleet must not keep driving on this adapter's last command.
+        EXPLORATION.stop(node.get_logger())
         rclpy.shutdown()
 
 

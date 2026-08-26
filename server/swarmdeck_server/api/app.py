@@ -1102,6 +1102,41 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 f"they may still be moving",
             )
 
+    elif kind in ("start_explore", "stop_explore"):
+        # Fleet-wide, but sent per robot because that is the only channel the
+        # protocol has. Only robots that advertise `explore` are addressed:
+        # exploration starts a process that drives the whole fleet reactively,
+        # and a hardware adapter must never be asked to do that. `registry.can`
+        # is the same gate `navigate` and `reset` use.
+        enabled = kind == "start_explore"
+        targets = [
+            robot_id for robot_id in list(registry.robots)
+            if registry.can(robot_id, "explore")
+        ]
+        if not targets:
+            await raise_alert(
+                "explore_unsupported", "warn", "fault",
+                "No connected robot supports exploration",
+            )
+        else:
+            undelivered = [
+                robot_id for robot_id in targets
+                if not await registry.send(
+                    robot_id, {"type": "explore", "enabled": enabled, **stamps()}
+                )
+            ]
+            events.log(kind, {"robots": sorted(targets),
+                              "undelivered": sorted(undelivered)})
+            # Stop is the direction worth alerting on. A start that did not
+            # arrive shows up immediately as robots that do not move; a stop
+            # that did not arrive leaves them driving, which is the same class
+            # of problem stop_all names its failures for.
+            if undelivered and not enabled:
+                await raise_alert(
+                    "stop_explore_undelivered", "warn", "fault",
+                    f"Stop exploration did not reach {', '.join(sorted(undelivered))}",
+                )
+
     elif kind == "reset_sim":
         # Fire-and-forget: reset_fleet() waits on every adapter, and awaiting it
         # here would stall this socket's receive loop for as long as that takes,

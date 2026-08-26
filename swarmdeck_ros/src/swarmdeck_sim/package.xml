@@ -2,10 +2,22 @@
 <package format="3">
   <name>swarmdeck_sim</name>
   <version>0.1.0</version>
-  <description>SwarmDeck Gazebo world and fleet spawning</description>
+  <description>SwarmDeck simulation: the ARGoS bridge node, world and experiment
+  generation, the shared fleet spec tables, and the legacy Gazebo world</description>
   <maintainer email="swarmdeck@mistlab.ca">SwarmDeck</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <!-- The ARGoS bridge publishes these; ARGoS itself is not a ROS package and
+       runs in its own container, so nothing here depends on it. -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <!-- Legacy Gazebo backend only. -->
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <export><build_type>ament_cmake</build_type></export>

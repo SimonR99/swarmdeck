@@ -6,7 +6,7 @@ camera streams, detections, and alerts in one browser UI.
 
 The FastAPI backend has no ROS dependency. Each robot connects through the
 [adapter protocol](adapters/protocol/README.md), allowing ROS 1, ROS 2, vendor
-SDK, Gazebo, and synthetic robots in the same fleet.
+SDK, simulated, and synthetic robots in the same fleet.
 
 ## What is implemented
 
@@ -17,7 +17,10 @@ SDK, Gazebo, and synthetic robots in the same fleet.
 - 2D occupancy maps, network-quality heatmaps, and an optional WebGL2 3D cloud.
 - WHEP/WebRTC video with a throttled JPEG fallback.
 - YOLOE detections, RGB-D map projection, operator review, and persistence.
-- Mock, Gazebo, ROS 1, and ROS 2 adapters.
+- Photorealistic ARGoS3 simulation (Filament/Vulkan rendering, Jolt physics,
+  and Ultra-Fusion lidar-inertial odometry), with the Gazebo backend kept as
+  an A/B control.
+- Mock, simulation, ROS 1, and ROS 2 adapters.
 - Session manifests and timestamped JSONL operator events.
 
 MCAP capture, complete session replay, authentication, and production
@@ -28,23 +31,26 @@ and the [roadmap](docs/architecture/roadmap.md) for the intended scope.
 
 ### Docker simulation
 
-With an NVIDIA container runtime:
+Portable, on the software Vulkan rasterizer:
 
 ```bash
-make docker-up-gpu
+make up-argos
 ```
 
-Portable/software rendering:
+On a GPU (`up-argos-dri` for Intel/AMD, `up-argos-gpu` for an NVIDIA runtime):
 
 ```bash
-docker compose -f deploy/compose/docker-compose.yml \
-  --profile gazebo up --build -d
+make up-argos-dri
 ```
 
 Open <http://localhost:5173>. The API is at <http://localhost:8080>; robots can
-take about one minute to appear. Stop the stack with `make docker-down`.
+take about 90 seconds to appear. Stop the stack with `make docker-down`.
 
-Use a synthetic fleet when Gazebo and ROS are unnecessary:
+The first build is long: the `argos` image compiles the ARGoS fork against the
+Filament SDK. See [simulation](docs/architecture/simulation.md) for what the
+three simulation services do and why they are three.
+
+Use a synthetic fleet when the simulator and ROS are unnecessary:
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml \
@@ -78,10 +84,15 @@ The UI-only fallback is <http://localhost:5173/?mock=1&robots=4>.
 ### Collaborative SLAM
 
 ```bash
-make up-sim            # Server + UI + SLAM back-end + Gazebo simulation
+make up-argos          # Server + UI + SLAM back-end + ARGoS simulation
 ```
 
-Gazebo adapters stream keyframes to `swarmdeck-slam` on port 8090, which optimizes a joint GTSAM pose graph and renders the merged occupancy grid.
+The simulation adapter streams keyframes to `swarmdeck-slam` on port 8090, which
+optimizes a joint GTSAM pose graph and renders the merged occupancy grid. Under
+ARGoS the per-robot odometry it is given comes from Ultra-Fusion, a real
+lidar-inertial front-end running outside the simulator, so the drift the
+back-end has to absorb is drift something actually made rather than Gaussian
+noise added to ground truth.
 
 ## Physical robots
 
@@ -135,7 +146,8 @@ flowchart LR
 | `server/swarmdeck_server/mapsvc/` | Map state, immutable publication snapshots, rendering/output, and collaborative-SLAM collaborators. |
 | `ui/` | Svelte 5 dashboard. |
 | `ui/src/lib/components/map2d/` | Map interaction in `MapView.svelte`; canvas layers live in `mapLayers.ts`. |
-| `swarmdeck_ros/src/` | Gazebo, SLAM, Nav2, and collaborative-SLAM packages. |
+| `argos/` | ARGoS controller, bridge loop function, and detection-target models. |
+| `swarmdeck_ros/src/` | Simulation, SLAM, Nav2, and collaborative-SLAM packages. |
 | `configs/` | Simulation and backend session configuration. |
 | `deploy/` | Docker, operator services, and physical-robot Compose files. |
 | `scripts/` | Deployment, bring-up, networking, and utility commands. |
@@ -164,13 +176,13 @@ Auto-registration needs overlapping observations and may refuse ambiguous maps.
 Use the UI's local-map view and `GET /api/map/status` to distinguish a bad local
 map from a rejected merge. Details are in [collaborative SLAM plan](docs/architecture/collaborative-mapping-plan.md).
 
-Simulation supports SLAM Toolbox with a planar lidar (`SLAM_BACKEND=toolbox`,
-default) or RTAB-Map with a multi-ring lidar:
+Simulation supports SLAM Toolbox (`SLAM_BACKEND=toolbox`, default) or RTAB-Map
+on the 3D cloud:
 
 ```bash
 SLAM_BACKEND=rtabmap \
 SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml \
-make docker-up-gpu
+make up-argos
 ```
 
 `GRID_3D=true` retains height in RTAB-Map's cloud but substantially increases
@@ -210,8 +222,14 @@ see [`deploy/robots/README.md`](deploy/robots/README.md).
 ```bash
 make test
 make docker-test-launch
+make visual-test          # per-robot RGB, depth and lidar frames as PNGs
 bash tests/integration/test_sim_headless.sh
 ```
+
+`make visual-test` is the check that the photorealistic path is wired end to
+end. Everything it catches fails silently otherwise: a robot with no glTF
+descriptor is invisible to its neighbours' lidar, and a camera whose frames
+never arrive publishes black.
 
 For manual integration debugging:
 
@@ -224,8 +242,9 @@ bash tests/integration/stop_stack.sh
 ## Dependencies and safety
 
 Docker is the supported path. Host simulation development uses ROS 2 Jazzy,
-Gazebo Harmonic, Nav2, SLAM Toolbox, `robot_localization`, and optionally
-RTAB-Map. ROS 1 Noetic is EOL and must remain in the robot's own environment or
+Nav2, SLAM Toolbox, optionally RTAB-Map, and the ARGoS3 fork built against the
+Filament SDK — see [simulation](docs/architecture/simulation.md). The legacy
+Gazebo backend additionally needs Gazebo Harmonic and `robot_localization`. ROS 1 Noetic is EOL and must remain in the robot's own environment or
 container; the backend does not need a ROS bridge.
 
 `make tunnel` exposes the UI through ngrok or Cloudflare. The generated URL has

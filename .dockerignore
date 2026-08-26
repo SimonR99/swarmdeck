@@ -14,6 +14,12 @@
 swarmdeck_ros/build
 swarmdeck_ros/install
 swarmdeck_ros/log
+# A host CMake build tree copied into the image carries a CMakeCache.txt full
+# of host-absolute paths, and the in-image configure then refuses:
+#   "The current CMakeCache.txt directory ... is different than the directory
+#    /home/<user>/... where CMakeCache.txt was created"
+# It is also pure weight in the build context.
+argos/build
 sessions/*
 !sessions/.gitkeep
 docs

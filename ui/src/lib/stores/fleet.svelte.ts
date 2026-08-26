@@ -29,6 +29,18 @@ export const fleet = {
   get online() {
     return this.robots.filter((robot) => robot.online).length;
   },
+  /** Fleets that can run the reactive bootstrap. Simulation only. */
+  get canExplore() {
+    return this.robots.some((robot) => robot.capabilities?.includes('explore'));
+  },
+  /**
+   * Whether the fleet is exploring right now, as REPORTED by the robots rather
+   * than remembered from the button that was pressed. A start that never
+   * reached the adapter must not leave the dashboard claiming otherwise.
+   */
+  get exploring() {
+    return this.robots.some((robot) => robot.online && robot.mode === 'explore');
+  },
 
   get(id: string): RobotState | undefined {
     return state.robots[id];

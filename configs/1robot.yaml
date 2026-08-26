@@ -7,8 +7,10 @@ fleet:
   robot_prefix: robot_
   # See 4robot.yaml for the full profile list. generic_2d is 1800 samples/rev
   # (0.2 deg), 1 ring, 30 m; generic_32 adds 33 rings for the 3D pipeline.
+  # vlp16 rather than generic_2d: the ARGoS backend's Ultra-Fusion odometry is
+  # lidar-inertial and refuses a planar scan. See configs/4robot.yaml.
   lidar:
-    profile: generic_2d
+    profile: vlp16
 
 map:
   merge_mode: auto          # static | auto

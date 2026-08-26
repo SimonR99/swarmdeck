@@ -1,0 +1,83 @@
+# SwarmDeck ROS 2 image: the ARGoS bridge, SLAM, Nav2 and the simulation adapter.
+#
+# This is Dockerfile.gazebo with `ros_gz` taken out and nothing put in its
+# place: the simulator lives in the `argos` service now, and the only thing
+# crossing between them is a Unix socket on the shared runtime volume.
+#
+# The legacy Gazebo path keeps its own image (Dockerfile.gazebo), because
+# carrying Gazebo Harmonic here for a backend that is off by default would
+# double this image for nothing.
+FROM ros:jazzy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ROS_DOMAIN_ID=42
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl \
+      python3-pip \
+      python3-numpy \
+      python3-yaml \
+      python3-opencv \
+      python3-colcon-common-extensions \
+      ros-jazzy-slam-toolbox \
+      ros-jazzy-navigation2 \
+      ros-jazzy-nav2-bringup \
+      ros-jazzy-nav2-msgs \
+      ros-jazzy-pointcloud-to-laserscan \
+      ros-jazzy-robot-localization \
+      ros-jazzy-rtabmap-odom \
+      ros-jazzy-rtabmap-slam \
+      ros-jazzy-rtabmap-util \
+      ros-jazzy-tf2-ros \
+      ros-jazzy-tf2-tools \
+      # GStreamer, for adapters/media/ros2_rtsp.py. The simulated fleet's
+      # camera reaches the dashboard exactly the way a real robot's does:
+      # H.264 to MediaMTX over RTSP, then WHEP to the browser. adapter_sim
+      # never sends images over the adapter connection (it only runs the
+      # detector on them), so without this the camera panel has no source at
+      # all. Same package set as Dockerfile.robot-ros2.
+      gir1.2-gstreamer-1.0 \
+      gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad \
+      gstreamer1.0-plugins-ugly \
+      gstreamer1.0-rtsp \
+      gstreamer1.0-tools \
+      python3-gi \
+    && rm -rf /var/lib/apt/lists/*
+
+# Adapter protocol deps (system Python; the ROS image is not PEP 668 gated the
+# same way).
+RUN pip3 install --break-system-packages --no-cache-dir websockets
+
+WORKDIR /app
+COPY swarmdeck_ros /app/swarmdeck_ros
+COPY adapters /app/adapters
+COPY configs /app/configs
+# The prop models are referenced by the generated experiment; this container
+# writes that experiment, so it needs the paths to exist here as well as in the
+# argos image, at the SAME path. They are the same repo, mounted the same way.
+COPY argos /app/argos
+# The hardware compose files, for the bringup tests only. test_aslan_nav.py and
+# test_botman_nav.py assert real invariants over them (that autonomous velocity
+# reaches a driver only through the adapter, that each robot's services share
+# one ROS_DOMAIN_ID), and without these they fail on FileNotFoundError rather
+# than skipping, which is why `make docker-test-launch` never passed. Nothing
+# at runtime reads them: the simulated fleet has no hardware profile.
+COPY deploy/compose /app/deploy/compose
+RUN pip3 install --break-system-packages --no-cache-dir -e /app/adapters/protocol
+RUN ln -s /app/configs /app/study
+COPY deploy/docker/sim-entrypoint.sh /usr/local/bin/sim-entrypoint.sh
+RUN chmod +x /usr/local/bin/sim-entrypoint.sh \
+    && mkdir -p /app/sessions /run/swarmdeck
+
+# Symlink-install keeps launch-file REPO = parents[4] pointing at /app.
+WORKDIR /app/swarmdeck_ros
+RUN . /opt/ros/jazzy/setup.sh \
+    && colcon build --symlink-install --packages-select \
+         swarmdeck_description swarmdeck_sim swarmdeck_slam swarmdeck_nav swarmdeck_bringup
+
+WORKDIR /app
+ENTRYPOINT ["/usr/local/bin/sim-entrypoint.sh"]

@@ -19,7 +19,14 @@ COPY adapters /app/adapters
 RUN mkdir -p /models
 WORKDIR /models
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=12 --start-period=90s \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=2).read()"
+# The timeout is generous on purpose. This asks "is the server alive and
+# serving", not "is it fast", and the answer arrives behind whatever inference
+# is already in flight. Once the container is CPU-capped (see the `cpus` limit
+# on the service in docker-compose.yml) a 3s/2s budget starts failing on a
+# detector that is answering every real /detect request with a 200: the
+# container is marked unhealthy, and `depends_on: service_healthy` then refuses
+# to start the simulation at all.
+HEALTHCHECK --interval=10s --timeout=15s --retries=12 --start-period=120s \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=12).read()"
 
 ENTRYPOINT ["python3", "/app/adapters/perception/yoloe_server.py"]

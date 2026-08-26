@@ -18,12 +18,18 @@ export type Capability =
   | 'network'
   | 'estop'
   | 'reset'
+  | 'explore'
   | 'body';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 // `recover` is the adapter reversing a robot out of a pose Nav2 could not plan
 // from. It moves on its own, briefly and without an operator command, so it has
 // to be a mode the GUI can name rather than an unexplained lurch.
-export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover';
+//
+// `explore` is the same argument for the reactive bootstrap: the robot is
+// driving itself, and an operator who sees IDLE next to a moving robot has been
+// told something false. Only a robot that would otherwise be idle reports it,
+// so a robot under an operator goal still reads as navigating.
+export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover' | 'explore';
 export type AlertLevel = 'info' | 'warn' | 'critical';
 
 export interface Pose {
@@ -407,6 +413,8 @@ export type ClientMessage =
   | { type: 'report_target'; robot_id: string; payload: Point }
   | { type: 'stop_all' }
   | { type: 'reset_sim' }
+  | { type: 'start_explore' }
+  | { type: 'stop_explore' }
   | { type: 'body_command'; robot_id: string; action: 'claim' | 'release' | 'sit' | 'stand' }
   | { type: 'detection_accept'; proposal_id: string }
   | { type: 'detection_ignore'; proposal_id: string }

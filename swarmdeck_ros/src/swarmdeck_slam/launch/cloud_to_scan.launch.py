@@ -23,6 +23,13 @@ Those two facts are easy to conflate. The truncation argument above is about
 recovering a *planar slice* from tilted rings, and it is correct: no band and no
 choice of frame can do that. It says nothing about flattening 3D structure into
 an obstacle scan, which is a different operation with a different answer.
+
+`output_topic` exists because the ARGoS backend needs `flatten` twice. Gazebo
+carried a second, dedicated bumper lidar at a fixed 0.15 m for
+`<ns>/proximity_scan`; ARGoS robots have one lidar each, so the bumper scan is
+a second flattened projection of the same cloud with a short range instead. The
+costmap parameters in `swarmdeck_nav/config/nav2_params.yaml` are unchanged and
+still name both sources.
 """
 
 from launch import LaunchDescription
@@ -34,6 +41,11 @@ from launch_ros.actions import Node
 # Nothing below this is an obstacle a robot can hit; it is the floor. Above the
 # lidar's own mount height there is nothing to see either, but a doorframe or a
 # low ceiling fixture is worth marking, so the top of the band is generous.
+#
+# These are heights above the FLOOR, and the defaults assume `target_frame` sits
+# on it. It does not: base_link floats `base_height` above the floor, by as much
+# as 0.50 m on a Spot. Callers with a heterogeneous fleet subtract that
+# themselves and pass min_height/max_height; slam.launch.py does.
 FLATTEN_MIN_HEIGHT = 0.12
 FLATTEN_MAX_HEIGHT = 1.60
 
@@ -43,6 +55,10 @@ def generate_launch_description() -> LaunchDescription:
     use_sim = LaunchConfiguration("use_sim_time")
     mode = LaunchConfiguration("mode")
     range_max = LaunchConfiguration("range_max")
+    output_topic = LaunchConfiguration("output_topic")
+    node_name = LaunchConfiguration("node_name")
+    min_height = LaunchConfiguration("min_height")
+    max_height = LaunchConfiguration("max_height")
     flatten = IfCondition(PythonExpression(['"', mode, '" == "flatten"']))
     slice_mode = UnlessCondition(PythonExpression(['"', mode, '" == "flatten"']))
 
@@ -77,10 +93,25 @@ def generate_launch_description() -> LaunchDescription:
                             "flatten = project all obstacle heights down for Nav2",
             ),
             DeclareLaunchArgument("range_max", default_value="30.0"),
+            DeclareLaunchArgument(
+                "output_topic",
+                default_value="scan",
+                description="Where the derived LaserScan is published, "
+                            "relative to the namespace. The ARGoS backend "
+                            "runs a second flatten instance on "
+                            "proximity_scan.",
+            ),
+            DeclareLaunchArgument("node_name", default_value="cloud_to_scan"),
+            DeclareLaunchArgument(
+                "min_height", default_value=str(FLATTEN_MIN_HEIGHT)
+            ),
+            DeclareLaunchArgument(
+                "max_height", default_value=str(FLATTEN_MAX_HEIGHT)
+            ),
             Node(
                 package="pointcloud_to_laserscan",
                 executable="pointcloud_to_laserscan_node",
-                name="cloud_to_scan",
+                name=node_name,
                 namespace=ns,
                 condition=slice_mode,
                 # The /tf remaps are load-bearing in `flatten` mode and inert in
@@ -91,7 +122,7 @@ def generate_launch_description() -> LaunchDescription:
                 # reports only "queue is full", never "no such transform".
                 remappings=[
                     ("cloud_in", "scan/points"),
-                    ("scan", "scan"),
+                    ("scan", output_topic),
                     ("/tf", "tf"),
                     ("/tf_static", "tf_static"),
                 ],
@@ -112,7 +143,7 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package="pointcloud_to_laserscan",
                 executable="pointcloud_to_laserscan_node",
-                name="cloud_to_scan",
+                name=node_name,
                 namespace=ns,
                 condition=flatten,
                 # The /tf remaps are load-bearing in `flatten` mode and inert in
@@ -123,7 +154,7 @@ def generate_launch_description() -> LaunchDescription:
                 # reports only "queue is full", never "no such transform".
                 remappings=[
                     ("cloud_in", "scan/points"),
-                    ("scan", "scan"),
+                    ("scan", output_topic),
                     ("/tf", "tf"),
                     ("/tf_static", "tf_static"),
                 ],
@@ -133,8 +164,8 @@ def generate_launch_description() -> LaunchDescription:
                         # Gravity-aligned, so the band means height above the
                         # floor rather than height above a tilting sensor.
                         target_frame=[ns, "/base_link"],
-                        min_height=FLATTEN_MIN_HEIGHT,
-                        max_height=FLATTEN_MAX_HEIGHT,
+                        min_height=min_height,
+                        max_height=max_height,
                         # A real TF lookup now happens per cloud, so this cannot
                         # be as tight as the in-frame slice above.
                         transform_tolerance=0.1,

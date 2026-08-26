@@ -191,6 +191,70 @@ def plant_model(i: int, x: float, y: float) -> str:
       </link></model>"""
 
 
+_FURNITURE_EMITTERS = {
+    "table": lambda i, *a: table_model(i, *a),
+    "chair": lambda i, *a: chair_model(i, *a),
+    "painting": lambda i, *a: painting_model(i, *a),
+    "plant": lambda i, *a: plant_model(i, *a),
+}
+
+
+# Deterministic furniture, deep inside rooms so the central corridor and the
+# robot start poses stay clear. It gives the cameras realistic visual structure
+# and gives SLAM non-repetitive landmarks.
+#
+# A table of (kind, index, args) rather than a list of rendered SDF, because
+# the ARGoS backend builds the same furniture as glTF geometry
+# (scenario/make_argos_world.py). Two hand-maintained copies of a floor plan is
+# how the two backends stop being comparable.
+FURNITURE: list[tuple[str, int, tuple]] = [
+    ("table", 0, (-9.2, 8.3, 0.15)),
+    ("table", 1, (-1.8, -7.1, -0.2)),
+    ("table", 2, (8.2, 7.4, 0.4)),
+    ("chair", 0, (-9.2, 7.25, 1.57)),
+    ("chair", 1, (-9.2, 9.35, -1.57)),
+    ("chair", 2, (-2.8, -7.1, 0.0)),
+    ("chair", 3, (-0.8, -7.1, 3.14159)),
+    ("chair", 4, (8.2, 6.35, 1.57)),
+    ("chair", 5, (8.2, 8.45, -1.57)),
+    ("painting", 0, (-9.0, 11.90, 1.35, 0.0, "0.10 0.42 0.72")),
+    ("painting", 1, (1.2, -11.90, 1.40, 0.0, "0.78 0.24 0.18")),
+    ("painting", 2, (11.90, 7.0, 1.30, 1.5708, "0.24 0.62 0.40")),
+    ("plant", 0, (-5.7, 10.7)),
+    ("plant", 1, (4.9, -10.5)),
+    ("plant", 2, (10.6, 2.8)),
+]
+
+
+def place_targets(seed: int, count: int) -> list[tuple[float, float, float]]:
+    """Seeded detection-target poses, as (x, y, yaw).
+
+    The first one is deliberately in robot_0's opening field of view, which is
+    what makes the whole camera -> detector -> adapter -> UI path testable
+    without driving anywhere; the rest are scattered through the rooms so that
+    finding them requires exploring.
+
+    Shared with the ARGoS backend, which places the same positions as
+    photorealism props. Both backends must agree, or a detection scored
+    against one world is being compared with a run of a different one.
+    """
+    rng = random.Random(seed)
+    placed: list[tuple[float, float]] = [(-7.45, 0.45)] if count > 0 else []
+    guard = 0
+    while len(placed) < count and guard < 20000:
+        guard += 1
+        x, y = rng.uniform(-HALF + 1, HALF - 1), rng.uniform(-HALF + 1, HALF - 1)
+        if blocked(x, y):
+            continue
+        if any((x - px) ** 2 + (y - py) ** 2 < 6 for px, py in placed):
+            continue
+        placed.append((x, y))
+    return [
+        (x, y, 3.14159 if i == 0 else rng.uniform(-3.14159, 3.14159))
+        for i, (x, y) in enumerate(placed)
+    ]
+
+
 def blocked(x: float, y: float, margin: float = 0.7) -> bool:
     for x0, y0, x1, y1 in LAYOUT:
         if x0 - margin <= x <= x1 + margin and y0 - margin <= y <= y1 + margin:
@@ -205,47 +269,15 @@ def main() -> None:
     ap.add_argument("-o", "--output", default="indoor.sdf")
     args = ap.parse_args()
 
-    rng = random.Random(args.seed)
     walls = "\n".join(wall_model(i, *w) for i, w in enumerate(LAYOUT))
-
-    # One duck is intentionally visible to robot_0 at startup. This makes the
-    # complete camera -> detector -> adapter -> UI path immediately testable;
-    # the remaining ducks are seeded around the rooms for exploration.
-    placed: list[tuple[float, float]] = [(-7.45, 0.45)] if args.targets > 0 else []
-    guard = 0
-    while len(placed) < args.targets and guard < 20000:
-        guard += 1
-        x, y = rng.uniform(-HALF + 1, HALF - 1), rng.uniform(-HALF + 1, HALF - 1)
-        if blocked(x, y):
-            continue
-        if any((x - px) ** 2 + (y - py) ** 2 < 6 for px, py in placed):
-            continue
-        placed.append((x, y))
+    placed = place_targets(args.seed, args.targets)
     targets = "\n".join(
-        target_model(
-            i,
-            x,
-            y,
-            3.14159 if i == 0 else rng.uniform(-3.14159, 3.14159),
-        )
-        for i, (x, y) in enumerate(placed)
+        target_model(i, x, y, yaw) for i, (x, y, yaw) in enumerate(placed)
     )
 
-    # Deterministic furniture lives deep inside rooms, leaving the central
-    # corridor and robot starts clear. It gives cameras realistic visual
-    # structure and gives SLAM non-repetitive landmarks.
-    furniture = "\n".join([
-        table_model(0, -9.2, 8.3, 0.15), table_model(1, -1.8, -7.1, -0.2),
-        table_model(2, 8.2, 7.4, 0.4),
-        chair_model(0, -9.2, 7.25, 1.57), chair_model(1, -9.2, 9.35, -1.57),
-        chair_model(2, -2.8, -7.1, 0.0), chair_model(3, -0.8, -7.1, 3.14159),
-        chair_model(4, 8.2, 6.35, 1.57), chair_model(5, 8.2, 8.45, -1.57),
-        painting_model(0, -9.0, 11.90, 1.35, 0.0, "0.10 0.42 0.72"),
-        painting_model(1, 1.2, -11.90, 1.40, 0.0, "0.78 0.24 0.18"),
-        painting_model(2, 11.90, 7.0, 1.30, 1.5708, "0.24 0.62 0.40"),
-        plant_model(0, -5.7, 10.7), plant_model(1, 4.9, -10.5),
-        plant_model(2, 10.6, 2.8),
-    ])
+    furniture = "\n".join(
+        _FURNITURE_EMITTERS[kind](i, *args) for kind, i, args in FURNITURE
+    )
 
     tpl = (Path(__file__).parent.parent / "worlds" / "indoor.sdf.jinja").read_text()
     out = Path(args.output)

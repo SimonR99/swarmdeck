@@ -1,0 +1,34 @@
+# Intel / AMD GPU overlay for the ARGoS simulator.
+#
+#   docker compose -f deploy/compose/docker-compose.yml \
+#                  -f deploy/compose/docker-compose.dri.yml \
+#                  --profile argos up --build -d
+#   make up-argos-dri
+#
+# Separate from docker-compose.gpu.yml because the two are not the same
+# mechanism. NVIDIA needs a container runtime that injects its driver; Mesa
+# needs nothing but the render node, and the `mesa-vulkan-drivers` already in
+# the image find the device on their own. Passing /dev/dri on a machine that
+# has none fails at `up`, which is why this is not the default either.
+#
+# The photorealism medium was benchmarked on an Intel Iris Xe iGPU: 50
+# simultaneous 128x128 RGB+depth+segmentation cameras at ~82 ms/tick with
+# shadows on. SwarmDeck's four 320x240 RGB-D cameras are a much smaller load.
+
+services:
+  argos:
+    environment:
+      SWARMDECK_SOFTWARE_RENDER: "false"
+    devices:
+      - /dev/dri:/dev/dri
+    # No `group_add`. The render node is root:render 0660 on the host, but this
+    # container runs as root and so opens it regardless of group membership.
+    #
+    # Adding the groups by NAME actively breaks it: Docker resolves group names
+    # against the CONTAINER's /etc/group, and the ubuntu:24.04 base has `video`
+    # but no `render` at all, so the container refuses to start with
+    # "Unable to find group render: no matching entries in group file".
+    #
+    # If this image ever gains a non-root USER, the render node's group has to
+    # be granted as the host's NUMERIC gid (`stat -c %g /dev/dri/renderD128`),
+    # because the name will still not resolve inside the container.

@@ -195,6 +195,15 @@ class RobotSpec:
     length: float               # metres, for the record and for footprint maths
     width: float
     base_height: float          # base_link height above the floor
+    # Wheel/track separation, metres. NOT derivable from `width`: a Scout
+    # Mini's wheels sit 0.45 m apart inside a 0.58 m body, and Spot's legs
+    # 0.50 m apart inside a 0.50 m one. It is the number that turns a
+    # commanded (v, omega) into left/right wheel speeds, so it must equal the
+    # TRACK_GAUGE constant in the matching ARGoS entity plugin
+    # (argos3/src/plugins/robots/<name>/simulator/<name>_entity.cpp). If the
+    # two disagree, every commanded turn rate is scaled wrong and the robot
+    # quietly under- or over-steers.
+    track_gauge: float
     lidar_x: float              # mapping lidar mount, relative to base_link
     lidar_z: float
     camera_x: float
@@ -306,6 +315,7 @@ ROBOT_PROFILES: dict[str, RobotSpec] = {
         chassis="bunker",
         robot_type="agilex_bunker",
         length=1.023, width=0.778, base_height=0.200,
+        track_gauge=0.620,
         lidar_x=-0.150, lidar_z=0.520,
         camera_x=0.515, camera_z=0.100,
         prox_x=0.530, prox_range_max=8.0,
@@ -315,6 +325,7 @@ ROBOT_PROFILES: dict[str, RobotSpec] = {
         chassis="scout_mini",
         robot_type="agilex_scout_mini",
         length=0.612, width=0.580, base_height=0.1225,
+        track_gauge=0.450,
         lidar_x=-0.080, lidar_z=0.330,
         camera_x=0.322, camera_z=0.090,
         prox_x=0.320, prox_range_max=6.0,
@@ -324,6 +335,7 @@ ROBOT_PROFILES: dict[str, RobotSpec] = {
         chassis="spot",
         robot_type="boston_dynamics_spot",
         length=1.100, width=0.500, base_height=0.500,
+        track_gauge=0.500,
         lidar_x=-0.180, lidar_z=0.470,
         camera_x=0.598, camera_z=0.020,
         prox_x=0.580, prox_range_max=8.0,

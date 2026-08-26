@@ -1,10 +1,22 @@
 # SwarmDeck Docker stack
 #
-# Default (full sim):  docker compose --profile gazebo up --build -d
-#
+# Full sim (ARGoS):    docker compose --profile argos up --build -d
+# Legacy sim (Gazebo): docker compose --profile gazebo up --build -d
 # Mock fleet only:     docker compose --profile mock up --build -d
 #
 # UI: http://localhost:5173   API: http://localhost:8080
+#
+# The ARGoS profile is three services around one volume:
+#
+#   argos        physics, Filament rendering and sensors. No ROS at all.
+#   sim          the ROS 2 Jazzy side: bridge, SLAM Toolbox, Nav2, adapter_sim.
+#   ultrafusion  the odometry front-end, on ROS 2 Humble, in its own DDS domain.
+#
+# They talk over Unix sockets on `swarmdeck_runtime`, mounted at /run/swarmdeck
+# in all three, which also carries the generated world and experiment. Sockets
+# rather than DDS because Humble and Jazzy do not have to interoperate this
+# way: Ultra-Fusion's estimate returns through ARGoS as an ordinary odometry
+# sensor reading, and its own ROS traffic never leaves its container.
 
 # Keep the project identity stable when this file is invoked from the repository
 # root, from deploy/compose, or through the Makefile. Without this, Compose
@@ -122,7 +134,138 @@ services:
       - "8189:8189/tcp" # WebRTC ICE fallback
     restart: unless-stopped
 
-  # Full simulated fleet + 2D SLAM + Nav2 + simulation adapter.
+  # --- ARGoS profile ------------------------------------------------------
+
+  # The simulator. Everything photorealistic happens here.
+  argos:
+    profiles: ["argos"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.argos
+      args:
+        # Pinned: a moving simulator is not a baseline. Bump deliberately, and
+        # only together with whatever in swarmdeck_sim needs the new commit.
+        ARGOS_REF: "${ARGOS_REF:-da70805238285772405b4a4315e65970b69857ce}"
+    image: swarmdeck-argos:local
+    depends_on:
+      # Both of ARGoS's sockets are bound by other containers, and it dials
+      # them. It also waits for the experiment file, so `service_started` is
+      # enough; the entrypoint does the real waiting.
+      sim:
+        condition: service_started
+      ultrafusion:
+        condition: service_started
+    environment:
+      RUNTIME_DIR: /run/swarmdeck
+      # The portable default. `make up-argos-gpu` turns it off and hands the
+      # container a real device; measured at 0.93x real time on lavapipe with
+      # four robots, a 17-ring lidar and 320x240 RGB-D cameras.
+      SWARMDECK_SOFTWARE_RENDER: "${SWARMDECK_SOFTWARE_RENDER:-true}"
+    volumes:
+      - swarmdeck_runtime:/run/swarmdeck
+    # A blown-out render or a diverged estimator is not fixed by restarting
+    # into the same state, and a restart loop hides the log that says why.
+    restart: "no"
+
+  # ROS 2 Jazzy: the bridge ARGoS dials, per-robot SLAM and Nav2, adapter_sim.
+  sim:
+    profiles: ["argos"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.sim
+    image: swarmdeck-sim:local
+    depends_on:
+      server:
+        condition: service_healthy
+      slam:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+      duck_detector:
+        condition: service_healthy
+    environment:
+      BACKEND_HOST: server
+      BACKEND_PORT: "8080"
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
+      SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
+      SWARMDECK_SIM_BACKEND: argos
+      RUNTIME_DIR: /run/swarmdeck
+      ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
+      SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
+      GRID_3D: "${GRID_3D:-false}"
+      # Detection targets scattered through the world, classes assigned round
+      # robin from adapters/perception/catalog.py.
+      SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
+      # Bootstrap the maps by exploring, then stop and hand the fleet to the
+      # operator. Without this nothing drives, and goals issued against an empty
+      # map jam robots into walls where wheel slip destroys their odometry.
+      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
+      SWARMDECK_KEYFRAME_VOXEL_M: "${SWARMDECK_KEYFRAME_VOXEL_M:-0.05}"
+      SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
+      ROS_DOMAIN_ID: "42"
+      SWARMDECK_DETECTOR_URL: http://duck_detector:8091
+    volumes:
+      - ../../sessions:/app/sessions
+      - ../../configs:/app/configs:ro
+      - swarmdeck_runtime:/run/swarmdeck
+    shm_size: "2gb"
+    restart: unless-stopped
+
+  # Ultra-Fusion: lidar-wheel-inertial odometry, on ROS 2 Humble.
+  #
+  # This is what makes the simulated fleet's drift real rather than modelled.
+  # ARGoS's own <odometry implementation="drift"> perturbs ground-truth motion
+  # with Gaussian noise: it cannot slip a wheel against an obstacle, lose a
+  # scan to geometric degeneracy, or fail to converge. Ultra-Fusion can, because
+  # it is really estimating from the simulated sensors, which is the problem
+  # swarmdeck-slam exists to solve.
+  ultrafusion:
+    profiles: ["argos"]
+    build:
+      context: ./../docker/ultrafusion
+      dockerfile: Dockerfile
+    image: swarmdeck-ultrafusion:local
+    environment:
+      # lwio = LiDAR-Wheel-Inertial Odometry, which is what the generated
+      # experiment's `channels="imu,lidar,wheels"` streams. Changing one
+      # without the other withholds a channel the mode fuses.
+      MODE: "${UF_MODE:-lwio}"
+      RUNTIME_DIR: /run/swarmdeck
+      SOCK: /run/swarmdeck/uf.sock
+      RESULTS: /results
+      FASTRTPS_DEFAULT_PROFILES_FILE: /tools/fastdds_large.xml
+      # Its own domain. The estimator's ROS traffic is internal to this
+      # container and must not land in the Jazzy graph on domain 42.
+      ROS_DOMAIN_ID: "43"
+    # NO sysctls here, and that is not an oversight. net.core.rmem_max is a
+    # global kernel setting, not a per-network-namespace one: a container
+    # inherits the host's value, cannot raise it, and Docker refuses to create
+    # the container at all if you ask it to ("open sysctl
+    # net.core.rmem_default file: permission denied"). The buffer this service
+    # actually needs is therefore a HOST requirement, checked and reported at
+    # startup by run_uf.sh:
+    #
+    #     sudo sysctl -w net.core.rmem_max=8388608
+    #
+    # It matters because one VLP-16 revolution is ~630 KB, larger than the
+    # stock 208 KB socket buffer, so the fragments overflow and the message is
+    # never reassembled. The publisher reports success and nothing logs an
+    # error; the only symptom is the estimator appearing to diverge.
+    volumes:
+      - ../../deploy/docker/ultrafusion:/tools:ro
+      - ../../sessions/ultrafusion:/results
+      - swarmdeck_runtime:/run/swarmdeck
+    command: ["bash", "-c", "exec bash /tools/run_uf.sh"]
+    restart: "no"
+
+  # --- legacy Gazebo profile ----------------------------------------------
+  #
+  # Kept runnable as an A/B control against the ARGoS stack, and only for
+  # that: it renders with `gpu_lidar` raytracing on the CPU at roughly 0.58x
+  # real time, and its odometry is an EKF over simulated wheels and gyro
+  # rather than a real front-end. `configs/4robot.yaml` now selects a 17-ring
+  # lidar for the ARGoS estimator, which is expensive here; use
+  # SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml for the cheap one.
   gazebo:
     profiles: ["gazebo"]
     build:
@@ -183,15 +326,27 @@ services:
   # camera transport and protocol publication; this sidecar only maps pixels
   # to YOLOE boxes. Hardware compose files use the matching JetPack image.
   duck_detector:
-    profiles: ["gazebo"]
+    profiles: ["argos", "gazebo"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: "${ULTRALYTICS_IMAGE:-ultralytics/ultralytics:8.4.14-cpu}"
     image: swarmdeck-duck-detector:cpu
+    # Bounded, because nothing in torch bounds it. Measured unrestricted on a
+    # 20-core host: 727% CPU for a best-effort perception sidecar, which
+    # starved the estimator and the simulator sharing the machine and dropped
+    # the simulation's real-time factor by 2.4x. The detector runs at 5 Hz on
+    # 320x240 frames; it does not need seven cores to do that.
+    cpus: "3.0"
     environment:
       SWARMDECK_YOLO_DEVICE: cpu
+      # torch and OpenCV each default to one thread per core and multiply.
+      # `cpus` alone would cap the total but leave them thrashing over it.
+      OMP_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      MKL_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      OPENBLAS_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      NUMEXPR_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
     volumes:
       - duck_detector_models:/models
     restart: unless-stopped
@@ -221,3 +376,8 @@ services:
 
 volumes:
   duck_detector_models:
+  # Two Unix sockets, the generated world glTF and the generated
+  # experiment, shared by argos, sim and ultrafusion. A named volume
+  # rather than a bind mount because the path has to be identical and
+  # SHORT in all three: a Unix socket path over 107 bytes fails to bind.
+  swarmdeck_runtime:

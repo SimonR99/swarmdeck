@@ -32,11 +32,19 @@
           ? 'warn'
           : robot.nav_status === 'active'
             ? 'ok'
-            : 'idle'
+            : robot.mode === 'explore'
+              ? 'ok'
+              : 'idle'
   );
 
   // `recover` outranks the nav_status it follows: the goal has already failed,
   // and what the operator needs to see is that the robot is moving right now.
+  //
+  // `explore` sits BELOW the nav_status checks on purpose. The adapter only
+  // reports it for a robot that would otherwise be idle, and exploration yields
+  // cmd_vel per robot to Nav2, so a robot with a live goal is navigating even
+  // while the rest of the fleet explores. Ordering it above would label that
+  // robot EXPLORING while it drove an operator's path.
   const modeLabel = $derived(
     robot.mode === 'estop'
       ? 'E-STOP'
@@ -46,7 +54,9 @@
           ? 'NAVIGATING'
           : robot.nav_status === 'failed'
             ? 'NAV FAILED'
-            : robot.mode.toUpperCase()
+            : robot.mode === 'explore'
+              ? 'EXPLORING'
+              : robot.mode.toUpperCase()
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));

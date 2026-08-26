@@ -5,6 +5,7 @@ Start with the root [README](../README.md) for setup and package structure.
 | Topic | Document |
 |---|---|
 | Components, data flow, and frames | [Architecture](architecture/overview.md) |
+- [Simulation](architecture/simulation.md) — the ARGoS backend: photorealistic rendering, Jolt physics, and Ultra-Fusion odometry.
 | Pose-graph collaborative SLAM design | [Collaborative mapping plan](architecture/collaborative-mapping-plan.md) |
 | Legacy grid-registration & Swarm-SLAM analysis | [Collaborative SLAM](architecture/collaborative-slam.md) |
 | Detection and operator review | [Perception](architecture/perception.md) |
