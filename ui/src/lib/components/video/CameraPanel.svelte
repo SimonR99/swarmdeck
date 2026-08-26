@@ -309,39 +309,22 @@
   class="panel-glow flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent
          bg-surface {expanded ? 'h-full min-h-0' : 'min-h-[180px] flex-1'}"
 >
-  <div class="flex h-14 shrink-0 items-center justify-between border-b border-border/70 px-4">
-    <div class="flex min-w-0 items-center gap-2.5">
-      <Radio class="h-3.5 w-3.5" style="color:{color}" />
+  <div class="flex h-9 shrink-0 items-center justify-between border-b border-border/70 px-3">
+    <div class="flex min-w-0 items-center gap-2">
+      <Radio class="h-3 w-3" style="color:{color}" />
       <span class="truncate text-xs font-semibold" style="color:{color}">
         {activeId ? robotDisplayName(activeId) : 'No camera'}
       </span>
     </div>
-    <div class="flex items-center gap-1">
-      {#if streamState === 'live'}
-        <Badge tone="ok">Live H.264</Badge>
-      {:else if streamState === 'connecting'}
-        <Badge tone="accent">Connecting</Badge>
-      {:else if streamState === 'unavailable'}
-        <Badge tone="warn">No signal</Badge>
-      {/if}
-      <button
-        class="grid h-10 w-10 touch-target place-items-center rounded-full
-               text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-        title={expanded ? 'Restore video' : 'Expand video'}
-        aria-label={expanded ? 'Restore video' : 'Expand video'}
-        onclick={ontoggleexpand}
-      >
-        {#if expanded}
-          <Minimize2 class="h-4 w-4" />
-        {:else}
-          <Maximize2 class="h-4 w-4" />
-        {/if}
-      </button>
-    </div>
+    {#if streamState === 'connecting'}
+      <Badge tone="accent">Connecting</Badge>
+    {:else if streamState === 'unavailable'}
+      <Badge tone="warn">No signal</Badge>
+    {/if}
   </div>
 
   <div
-    class="relative m-3 min-h-[100px] flex-1 overflow-hidden rounded-[--radius-control] border border-border/80 bg-surface-2"
+    class="relative m-2 min-h-[100px] flex-1 overflow-hidden rounded-[--radius-control] border border-border/80 bg-surface-2"
   >
     <video
       bind:this={video}
@@ -410,6 +393,22 @@
       {/each}
     </div>
 
+    <!-- Resize button on bottom-left of video -->
+    <button
+      class="absolute bottom-1.5 left-1.5 z-30 grid h-6 w-6 place-items-center rounded-[--radius-control]
+             border border-white/10 bg-black/65 text-white/80 shadow-sm backdrop-blur-md
+             transition-colors hover:bg-black/85 hover:text-white active:scale-95"
+      title={expanded ? 'Restore video' : 'Expand video'}
+      aria-label={expanded ? 'Restore video' : 'Expand video'}
+      onclick={ontoggleexpand}
+    >
+      {#if expanded}
+        <Minimize2 class="h-3 w-3" />
+      {:else}
+        <Maximize2 class="h-3 w-3" />
+      {/if}
+    </button>
+
     <!-- Live diagnostics overlay: FPS & rolling average ping latency -->
     {#if streamState === 'live'}
       <div
@@ -426,5 +425,4 @@
       </div>
     {/if}
   </div>
-
 </div>
