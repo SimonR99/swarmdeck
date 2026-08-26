@@ -612,7 +612,18 @@ def evaluate(
             ate[f"component:{component.component_id}"] = compute_ate(est, true)
 
     inter_robot = inter_robot_transform_error(graph.t_world_map, truth_t_world_map)
-    components = score_components(graph.components, truth_groups)
+    # A scope holding one robot has no pair to get right or wrong, so component
+    # correctness is NOT APPLICABLE rather than perfect or failed -- and an
+    # empty score reads as both zero rates, which is what "no pairs" means.
+    # :func:`score_components` still refuses that input: a direct caller
+    # handing it one robot has made a mistake, whereas here it is the ordinary
+    # consequence of scoring a run rebuilt from a selected subset of
+    # trajectories (``tools/replay.py --only``).
+    components = (
+        score_components(graph.components, truth_groups)
+        if len(truth_groups) >= 2
+        else ComponentScore((), (), 0, 0)
+    )
 
     return Report(label=label, ate=ate, rpe=rpe, inter_robot=inter_robot, components=components)
 

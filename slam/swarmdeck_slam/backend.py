@@ -13,6 +13,7 @@ is not. So this module is imported only by the SLAM service, never by FastAPI.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -533,7 +534,22 @@ class CollaborativeBackend:
         #: between two unrelated map frames an odometry measurement -- an edge
         #: GNC is structurally forbidden from rejecting.
         self._last_of: dict[TrajectoryId, KeyframeId] = {}
-        self._excluded: set[TrajectoryId] = set()
+        #: Replaced wholesale, never mutated in place, so a reader can take a
+        #: local reference and be sure the set it filters keyframes by is the
+        #: same one it filters edges by. The selection arrives on the HTTP
+        #: thread while the worker thread is ingesting.
+        self._excluded: frozenset[TrajectoryId] = frozenset()
+        #: Set when the selection changes; consumed by the worker thread at
+        #: the top of the next optimize. Rebuilding the solver where the
+        #: selection is CHANGED would do it on the HTTP thread, concurrently
+        #: with an ingest that is halfway through adding a keyframe and its
+        #: edge -- which is how a graph ends up holding an edge whose endpoint
+        #: it never received.
+        self._graph_stale = False
+        #: Guards insertion into ``_keyframes`` against the snapshot that
+        #: ``trajectory_summaries`` takes for ``/status``. Microseconds, and
+        #: nothing slow is ever done while holding it.
+        self._keyframes_lock = threading.Lock()
         self._segmenter = LegacySegmenter()
         self.ambiguous_matches = 0
         self.implausible_hops = 0
@@ -578,18 +594,30 @@ class CollaborativeBackend:
         if keyframe.points.shape[0] < self.min_points:
             return False
 
+        # One read of the selection for the whole call: taking it twice could
+        # add the keyframe under one answer and skip its edges under the other,
+        # leaving the solver a variable no factor touches.
+        excluded = self._excluded
         previous_id = self._last_of.get(keyframe.id.trajectory)
-        self._graph.add_keyframe(keyframe)
-        self._keyframes[keyframe.id] = keyframe
+        if keyframe.id.trajectory not in excluded:
+            self._graph.add_keyframe(keyframe)
+        with self._keyframes_lock:
+            self._keyframes[keyframe.id] = keyframe
 
-        if previous_id is not None:
-            previous = self._keyframes[previous_id]
+        # ``.get``, not ``[]``: /reset swaps the whole keyframe store out from
+        # under the worker thread, so a keyframe already halfway through this
+        # method can find its predecessor gone. Losing one odometry edge across
+        # a reset is nothing; killing the worker thread with a KeyError takes
+        # the map down until the process restarts.
+        previous = None if previous_id is None else self._keyframes.get(previous_id)
+        if previous is not None:
             t_src_dst = se3_relative(previous.t_odom_base, keyframe.t_odom_base)
             information = ODOM_INFORMATION * self.odom_information_scale
             if self._implausible_hop(t_src_dst, keyframe.stamp - previous.stamp):
                 information = information * self.implausible_hop_information_scale
                 self.implausible_hops += 1
             self._add_edge(
+                excluded,
                 Edge(
                     kind=EdgeKind.ODOMETRY,
                     src=previous.id,
@@ -623,7 +651,7 @@ class CollaborativeBackend:
             # An excluded trajectory is not in the graph, so an edge to it
             # would reference a keyframe the solver has never been given.
             # Skipping the verification also saves the GICP run.
-            if target.id.trajectory in self._excluded:
+            if target.id.trajectory in excluded:
                 continue
             prior = self._registration_prior(keyframe, target)
             self.primed_verifications += int(prior is not None)
@@ -636,7 +664,7 @@ class CollaborativeBackend:
             )
             if edge is None:
                 continue
-            self._add_edge(edge)
+            self._add_edge(excluded, edge)
             self._accepted += 1
             self._inter_robot += int(edge.is_inter_robot)
 
@@ -646,16 +674,19 @@ class CollaborativeBackend:
         self._new_since_optimize += 1
         return True
 
-    def _add_edge(self, edge: Edge) -> None:
+    def _add_edge(self, excluded: frozenset[TrajectoryId], edge: Edge) -> None:
         """Record an edge, and hand it to the solver unless it is excluded."""
         self._edges.append(edge)
-        if self._edge_included(edge):
+        if self._edge_included(edge, excluded):
             self._graph.add_edge(edge)
 
-    def _edge_included(self, edge: Edge) -> bool:
+    def _edge_included(
+        self, edge: Edge, excluded: frozenset[TrajectoryId] | None = None
+    ) -> bool:
+        excluded = self._excluded if excluded is None else excluded
         return (
-            edge.src.trajectory not in self._excluded
-            and edge.dst.trajectory not in self._excluded
+            edge.src.trajectory not in excluded
+            and edge.dst.trajectory not in excluded
         )
 
     def _registration_prior(
@@ -785,11 +816,10 @@ class CollaborativeBackend:
         """
         if included == self.is_included(trajectory):
             return False
-        if included:
-            self._excluded.discard(trajectory)
-        else:
-            self._excluded.add(trajectory)
-        self._rebuild_graph()
+        self._excluded = (
+            self._excluded - {trajectory} if included else self._excluded | {trajectory}
+        )
+        self._mark_selection_changed()
         return True
 
     def include_only(self, trajectories: Iterable[TrajectoryId]) -> None:
@@ -802,8 +832,21 @@ class CollaborativeBackend:
         session.
         """
         wanted = set(trajectories)
-        self._excluded = {t for t in self.trajectory_ids() if t not in wanted}
-        self._rebuild_graph()
+        self._excluded = frozenset(t for t in self.trajectory_ids() if t not in wanted)
+        self._mark_selection_changed()
+
+    def _mark_selection_changed(self) -> None:
+        """Ask for a rebuild, and for a re-solve, without doing either here.
+
+        Called from whichever thread the operator's request landed on. The
+        rebuild itself is the worker's job -- see :attr:`_graph_stale`.
+        """
+        self._graph_stale = True
+        self._dirty = True
+        # The last solve described a different selection; seeding registration
+        # priors from it would place a keyframe using a component membership
+        # that no longer holds.
+        self._last_solved = None
 
     def _rebuild_graph(self) -> None:
         """Re-seed the solver from the included keyframes and edges alone.
@@ -818,30 +861,33 @@ class CollaborativeBackend:
         Keyframes go in in ingest order and edges after them, so the rebuilt
         graph is the one that would have existed had the excluded trajectories
         never arrived.
+
+        The stale flag is cleared BEFORE the rebuild, not after: a selection
+        that arrives while this is running has to be honoured on the next pass,
+        and clearing afterwards would swallow it.
         """
+        self._graph_stale = False
+        excluded = self._excluded
         self._graph = GtsamPoseGraph(
             pcm_confidence=self.pcm_confidence,
             min_pcm_clique_size=self.min_pcm_clique_size,
             gnc_weight_threshold=self.gnc_weight_threshold,
         )
-        for keyframe in self._keyframes.values():
-            if keyframe.id.trajectory not in self._excluded:
+        for keyframe in list(self._keyframes.values()):
+            if keyframe.id.trajectory not in excluded:
                 self._graph.add_keyframe(keyframe)
-        for edge in self._edges:
-            if self._edge_included(edge):
+        for edge in list(self._edges):
+            if self._edge_included(edge, excluded):
                 self._graph.add_edge(edge)
-        # The last solve described a different selection; seeding registration
-        # priors from it would place a keyframe using a component membership
-        # that no longer holds.
-        self._last_solved = None
-        self._dirty = True
 
     def trajectory_summaries(
         self, optimized: OptimizedGraph | None = None
     ) -> list[TrajectorySummary]:
         """One row per trajectory held, for the operator's selection list."""
+        with self._keyframes_lock:
+            keyframes = list(self._keyframes.values())
         by_trajectory: dict[TrajectoryId, list[Keyframe]] = {}
-        for keyframe in self._keyframes.values():
+        for keyframe in keyframes:
             by_trajectory.setdefault(keyframe.id.trajectory, []).append(keyframe)
 
         summaries: list[TrajectorySummary] = []
@@ -880,12 +926,17 @@ class CollaborativeBackend:
         """
         if not self._keyframes:
             return None
+        if self._graph_stale:
+            self._rebuild_graph()
+        excluded = self._excluded
         optimized = self._graph.optimize()
         self._last_solved = optimized
+        with self._keyframes_lock:
+            keyframes = list(self._keyframes.values())
         included = [
             keyframe
-            for keyframe in self._keyframes.values()
-            if keyframe.id.trajectory not in self._excluded
+            for keyframe in keyframes
+            if keyframe.id.trajectory not in excluded
         ]
         grids, robot_grids, trajectory_grids = render_all(optimized, included, self.render)
         self._dirty = False
@@ -897,8 +948,8 @@ class CollaborativeBackend:
         # nothing is excluded, which is the ordinary case.
         loops = [
             edge
-            for edge in self._edges
-            if edge.kind.is_loop_closure and self._edge_included(edge)
+            for edge in list(self._edges)
+            if edge.kind.is_loop_closure and self._edge_included(edge, excluded)
         ]
         return BackendSnapshot(
             optimized=optimized,
