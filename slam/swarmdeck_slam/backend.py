@@ -275,44 +275,42 @@ class CollaborativeBackend:
     default) seeds only same-robot closures. ``"all"`` seeds inter-robot
     closures too, once the robots share a frame.
 
-    ``"intra"`` rather than ``"all"``, measured on
-    ``sessions/captures/3d-run-01`` (``tools/replay.py --ablate``)::
-
-                        none      intra       all
-        joint ATE      0.6604    0.6501    0.6501   m
-        robot_0 RPE-5    5.92      3.56      3.56   deg
-        inter-robot    0.2342    0.2364    0.3001   m
-        relative pair  0.3977    0.4032    0.5061   m
-        inter closures     91        91        71
-
-    The trajectory gains come entirely from same-robot closures. Seeding
-    inter-robot ones makes the graph *worse* at the one number a
-    collaborative system exists to get right, and the mechanism is a feedback
-    loop: an inter-robot edge seeded from the current inter-robot estimate
-    tends to agree with that estimate, so it reinforces the transform instead
-    of correcting it. The closure count falling 91 -> 71 is the same story --
-    edges that merely echo the estimate stop being independent evidence, and
-    PCM has less genuine cross-checking to work with.
-
-    Same-robot closures are not exposed to this: they are seeded from one
-    robot's own frame, where the transform between two of its keyframes is
-    already pinned by its odometry chain, so the seed adds no information the
-    graph did not have and cannot bias what it does not determine.
-
     ``verify_candidate``'s zero-translation seed silently caps loop closure at
     roughly ``max_correspondence_distance`` (1.0 m) of true separation: beyond
     that no point pair is within range and GICP returns near-identity. On
     ``sessions/captures/3d-run-01`` the recovered transform error tracked the
-    ground-truth separation almost exactly in every band past 2 m, and 104 of
-    165 genuinely co-located inter-robot pairs were lost that way.
+    ground-truth separation almost exactly in every band past 2 m.
 
-    A prior is only ever used where it means something -- see
-    :meth:`_registration_prior`. Two robots that have not merged have no
-    known relative transform, so composing their frames would produce a
-    confident number with no basis; measured, that seed recovers 0 of 165
-    pairs, which is what an unrelated-frames guess deserves. Bootstrap
-    therefore always runs on the yaw-only path, which suffices because it
-    works where two robots are genuinely at the same spot (92% under 2 m).
+    Measured (``tools/replay.py --ablate prior-none prior-intra prior-all``)::
+
+                                     none      intra       all
+        cross-robot rel pose [m]    1.9313    1.2465    1.2449
+        cross-robot rel pose [deg]   8.443     3.580     3.646
+        joint ATE [m]               0.6604    0.6503    0.6501
+        robot_0 ATE [m]             0.5325    0.5097    0.5114
+        robot_0 RPE-5 [deg]           5.92      3.56      3.56
+        closures (total / inter)   259/ 91   284/ 91   264/ 71
+        t_world_map err r0 [m]      0.2342    0.3146    0.3001
+
+    ``"intra"`` because it captures the entire gain -- the two robots land
+    35% closer in translation and 58% closer in rotation *relative to each
+    other* -- while ``"all"`` adds nothing and costs 20 inter-robot closures
+    (91 -> 71). Those closures are what PCM cross-checks against, so trading
+    them for no accuracy is a bad deal, and an inter-robot edge seeded from
+    the current inter-robot estimate is the one case where the seed could
+    plausibly bias the quantity it is supposed to measure. Same-robot seeding
+    cannot: within one robot's own frame the transform between two of its
+    keyframes is already pinned by its odometry chain.
+
+    READ THE LAST ROW WITH CARE, and do not tune against it. ``t_world_map``
+    error gets *worse* while every direct measure of the trajectory gets
+    better, and the direct measures are the ones to believe.
+    ``t_world_map`` is a single rigid frame fitted to a whole trajectory, so
+    when better closures change that trajectory's SHAPE the best-fit frame
+    moves too -- and its distance from truth's own best-fit frame can grow
+    even as every pose in it gets closer to ground truth. The cross-robot
+    relative pose above never routes through that summary, which is exactly
+    why it was the measurement that settled this.
     """
 
     def __post_init__(self) -> None:

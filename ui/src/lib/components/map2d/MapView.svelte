@@ -406,10 +406,15 @@
     view.initialised = false;
   });
 
+  let pointerDownPos: { x: number; y: number } | null = null;
+
   function onPointerDown(e: PointerEvent) {
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    dragged = false;
+    if (pointers.size === 1) {
+      pointerDownPos = { x: e.clientX, y: e.clientY };
+      dragged = false;
+    }
   }
 
   function onPointerMove(e: PointerEvent) {
@@ -452,7 +457,7 @@
 
         let angleDelta = curAngle - prevAngle;
         while (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
-        while (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
+        while (angleDelta < -Math.PI) angleDelta -= Math.PI * 2;
 
         const scaleFactor = prevD > 5 ? curD / prevD : 1.0;
 
@@ -482,7 +487,7 @@
     pointers.set(e.pointerId, cur);
     const dx = cur.x - prev.x;
     const dy = cur.y - prev.y;
-    if (Math.abs(dx) + Math.abs(dy) > 2) {
+    if (pointerDownPos && Math.hypot(cur.x - pointerDownPos.x, cur.y - pointerDownPos.y) > 6) {
       dragged = true;
       follow = false;
     }
@@ -493,6 +498,9 @@
   function onPointerUp(e: PointerEvent) {
     const wasDrag = dragged;
     pointers.delete(e.pointerId);
+    if (pointers.size === 0) {
+      pointerDownPos = null;
+    }
     if (wasDrag || !canvas) return;
 
     const rect = canvas.getBoundingClientRect();

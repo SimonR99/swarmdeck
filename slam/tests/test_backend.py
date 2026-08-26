@@ -16,8 +16,8 @@ from swarmdeck_slam.backend import (
     scoped_grids,
     snapshot_update,
 )
-from swarmdeck_slam.types import EdgeKind, quat_xyz_from_se3
-from swarmdeck_slam.verify import VerifyConfig
+from swarmdeck_slam.types import EdgeKind, quat_xyz_from_se3, se3_inverse
+from swarmdeck_slam.verify import VerifyConfig, verify_candidate
 
 
 def _ingest_fleet(backend: CollaborativeBackend, fleet) -> None:
@@ -228,3 +228,87 @@ def test_hop_guard_falls_back_to_distance_when_the_clock_is_unusable() -> None:
     assert backend._implausible_hop(huge, dt_s=0.0) is True
     assert backend._implausible_hop(ordinary, dt_s=0.0) is False
     assert backend._implausible_hop(ordinary, dt_s=-5.0) is False
+
+
+def test_registration_prior_is_withheld_across_a_component_boundary() -> None:
+    """Two robots that have not merged have NO known relative transform.
+
+    Seeding GICP by composing their two frames anyway would hand it a
+    specific, confident, baseless guess -- and GICP converges near whatever it
+    is given. Measured on real data, exactly that seed recovers 0 of 165
+    genuinely co-located pairs. Bootstrap must stay on the yaw-only path.
+    """
+    _, fleet = synthetic.disjoint_fleet()
+    backend = CollaborativeBackend(registration_prior="all")
+    _ingest_fleet(backend, fleet)
+    backend.optimize_and_render()
+
+    solved = backend._last_solved
+    assert len(solved.components) == 2, "fixture must leave the robots unmerged"
+    alpha = next(kf for kf in backend._keyframes.values() if kf.id.robot_id == "alpha")
+    beta = next(kf for kf in backend._keyframes.values() if kf.id.robot_id == "beta")
+
+    assert backend._registration_prior(alpha, beta) is None
+    assert backend._registration_prior(beta, alpha) is None
+    # ...while a same-robot pair, which shares a frame by construction, is seeded.
+    alpha_other = max(
+        (kf for kf in backend._keyframes.values() if kf.id.robot_id == "alpha"),
+        key=lambda kf: kf.id.seq,
+    )
+    assert backend._registration_prior(alpha, alpha_other) is not None
+
+
+def test_registration_prior_scope_controls_inter_robot_seeding() -> None:
+    """``intra`` seeds only same-robot pairs; ``all`` also seeds merged robots."""
+    _, fleet = synthetic.two_robot_fleet()
+    for scope, expect_inter in (("none", False), ("intra", False), ("all", True)):
+        backend = CollaborativeBackend(registration_prior=scope)
+        _ingest_fleet(backend, fleet)
+        backend.optimize_and_render()
+        assert len(backend._last_solved.components) == 1, "fixture must merge"
+
+        by_robot = {}
+        for kf in backend._keyframes.values():
+            by_robot.setdefault(kf.id.robot_id, []).append(kf)
+        a, b = (sorted(v, key=lambda kf: kf.id.seq) for v in by_robot.values())
+
+        assert (backend._registration_prior(a[-1], b[0]) is not None) is expect_inter, scope
+        same = backend._registration_prior(a[-1], a[0])
+        assert (same is not None) is (scope != "none"), scope
+
+
+def test_registration_prior_places_the_source_where_the_graph_thinks_it_is() -> None:
+    """The seed is ``T_target_source``, and the source keyframe is NOT yet in
+    the graph -- it is the one being ingested. It has to be placed with its
+    robot's ``t_world_map`` correction composed onto its own pose, which is
+    precisely what that quantity is documented for."""
+    _, fleet = synthetic.two_robot_fleet()
+    backend = CollaborativeBackend(registration_prior="all")
+    _ingest_fleet(backend, fleet)
+    backend.optimize_and_render()
+    solved = backend._last_solved
+
+    keyframes = sorted(backend._keyframes.values(), key=lambda kf: (kf.id.robot_id, kf.id.seq))
+    source, target = keyframes[0], keyframes[-1]
+    prior = backend._registration_prior(source, target)
+
+    expected = se3_inverse(solved.poses[target.id]) @ (
+        solved.t_world_map[source.id.robot_id] @ source.t_odom_base
+    )
+    assert np.allclose(prior, expected)
+
+
+def test_a_seeded_verification_still_has_to_pass_every_gate() -> None:
+    """A seed must not become a way to launder an unverified match.
+
+    Two keyframes from genuinely different buildings, handed the strongest
+    possible seed (their true relative transform), must still be rejected --
+    the gates measure geometric support, not agreement with the seed.
+    """
+    _, fleet = synthetic.disjoint_fleet()
+    alpha, beta = fleet
+    src, dst = alpha.keyframes[0], beta.keyframes[0]
+    oracle = se3_inverse(beta.truth[dst.id]) @ alpha.truth[src.id]
+
+    assert verify_candidate(source=src, target=dst, yaw_prior=0.0,
+                            t_target_source_prior=oracle) is None

@@ -54,6 +54,10 @@ export const review = {
     return id ? state.entities.find((e) => e.id === id) : undefined;
   },
 
+  proposalOf(id: string | null): DetectionProposal | undefined {
+    return id ? state.proposals.find((p) => p.id === id) : undefined;
+  },
+
   /**
    * Other confirmed objects of the same class (or all objects when cross-class
    * merging is active), nearest first — the candidates a merge could target
