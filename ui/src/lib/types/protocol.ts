@@ -131,6 +131,7 @@ export interface DetectionEntity {
   robot_ids: string[];
   first_seen: number;
   last_seen: number;
+  image?: string | null;
   samples: DetectionSample[];
 }
 
@@ -145,6 +146,7 @@ export interface DetectionProposal {
   robot_ids: string[];
   first_seen: number;
   last_seen: number;
+  image?: string | null;
   /** Set when an existing entity is close enough to be plausibly the same. */
   suggested_entity_id: string | null;
   suggested_distance: number | null;

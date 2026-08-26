@@ -220,6 +220,23 @@
           </button>
         </div>
 
+        {#if (review.focused === p.id || review.selected === p.id) && p.image}
+          <div
+            class="pointer-events-none absolute left-full top-0 ml-2 z-50 flex flex-col items-center
+                   overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
+          >
+            <img
+              src={p.image}
+              alt="{label(p.class)} detection crop"
+              class="h-28 w-28 rounded-lg object-cover shadow-sm"
+            />
+            <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
+              <span>{label(p.class)}</span>
+              <span class="font-normal text-fg-dim">{Math.round(p.best_score * 100)}% conf</span>
+            </div>
+          </div>
+        {/if}
+
         {#if mergeOpen === p.id}
           <div class="pointer-events-auto w-48 rounded-[--radius-control] border border-border bg-surface/95
                       shadow-[0_8px_24px_-14px_rgb(25_32_42/0.4)] backdrop-blur-xl">
@@ -297,7 +314,9 @@
               tabindex="0"
               onclick={() => toggleEntity(e.id)}
               onkeydown={(ev) => ev.key === 'Enter' && toggleEntity(e.id)}
-              class="cursor-pointer flex items-center gap-2 border-b border-border/60 px-2 py-1.5 last:border-b-0 transition-all
+              onmouseenter={() => review.focus(e.id)}
+              onmouseleave={() => review.focus(null)}
+              class="relative cursor-pointer flex items-center gap-2 border-b border-border/60 px-2 py-1.5 last:border-b-0 transition-all
                      {review.selected === e.id ? 'bg-accent/15 ring-1 ring-accent/40 rounded-[--radius-control] my-0.5' : 'hover:bg-surface-2'}"
             >
               <span
@@ -317,6 +336,24 @@
                   {seenBy(e.robot_ids)}
                 </div>
               </div>
+
+              {#if (review.focused === e.id || review.selected === e.id) && e.image}
+                <div
+                  class="pointer-events-none absolute left-full top-0 ml-2 z-50 flex flex-col items-center
+                         overflow-hidden rounded-xl border border-border/80 bg-surface/95 p-1.5 shadow-2xl backdrop-blur-xl"
+                >
+                  <img
+                    src={e.image}
+                    alt="{label(e.class)} detection crop"
+                    class="h-28 w-28 rounded-lg object-cover shadow-sm"
+                  />
+                  <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
+                    <span>{label(e.class)}</span>
+                    <span class="font-normal text-fg-dim">{e.observations} views</span>
+                  </div>
+                </div>
+              {/if}
+
               <button
                 class="grid h-7 w-7 shrink-0 place-items-center rounded-full text-fg-dim hover:bg-danger/10 hover:text-danger"
                 title="Remove from the map. Still visible to a robot, it will be proposed again — use Ignore to silence it."

@@ -24,6 +24,7 @@ from swarmdeck_slam.descriptors import (
     DEFAULT_RINGS,
     DEFAULT_SECTORS,
     DESCRIPTOR_KIND,
+    PlaceCandidate,
     ScanContextIndex,
     scan_context_descriptor,
 )
@@ -40,7 +41,9 @@ from swarmdeck_slam.types import (
     Keyframe,
     KeyframeId,
     OptimizedGraph,
+    se3_distance,
     se3_from_quat_xyz,
+    se3_identity,
     se3_relative,
 )
 from swarmdeck_slam.verify import VerifyConfig, verify_candidate
@@ -193,6 +196,45 @@ class CollaborativeBackend:
     Comfortably beyond keyframe spacing (0.5 m gated) and inside the building's
     bay period, so ordinary neighbours never trip the ratio test."""
 
+    max_plausible_hop_m: float = 5.0
+    """Translation between consecutive keyframes above which the hop is treated
+    as a frame discontinuity rather than as robot motion.
+
+    An ODOMETRY edge is a GNC known-inlier: neither PCM nor GNC is allowed to
+    reject it, because rejecting one would disconnect the graph. That makes a
+    wrong odometry edge the only input to this system with no defense behind
+    it, and there is a real way to produce one. What arrives in
+    ``t_odom_base`` is the robot's own SLAM map pose (see ``types.py``), and
+    the adapter falls back to an odom-frame pose when its TF lookup fails, so
+    a stream can switch frames -- or absorb a local SLAM re-optimization --
+    between one keyframe and the next. The hop that straddles that is not a
+    measurement of anything.
+
+    5 m is far above real motion at this cadence and far below a frame jump:
+    the producer gates keyframes at >=0.5 m, and the largest hop measured
+    across both robots of ``sessions/captures/3d-run-01`` is 2.30 m (1.5 m/s
+    over 1.5 s). Queue drops in the service legitimately stretch a hop to a
+    few keyframe spacings, which is why the threshold sits well clear of them.
+    """
+
+    max_plausible_hop_rad: float = math.radians(150.0)
+    """Rotation counterpart to :attr:`max_plausible_hop_m`. Deliberately close
+    to a half turn: the producer already refuses keyframes captured while
+    spinning fast, so anything approaching a reversal between two accepted
+    keyframes is a frame change rather than a turn."""
+
+    implausible_hop_information_scale: float = 1e-4
+    """What an implausible hop's information is multiplied by.
+
+    Down-weighted, never dropped. Dropping the edge would split that robot's
+    chain into two subgraphs with no constraint between them, and a component
+    is anchored once -- so the far side would be gauge-free and the solver
+    would place it arbitrarily. That turns a bad edge into a broken graph,
+    which is worse. Keeping it at ~1e-4 of normal weight leaves the graph
+    connected while letting the loop closures around it decide where the far
+    side actually goes.
+    """
+
 
     def __post_init__(self) -> None:
         self._graph = GtsamPoseGraph()
@@ -204,6 +246,7 @@ class CollaborativeBackend:
         self._keyframes: dict[KeyframeId, Keyframe] = {}
         self._last_of: dict[str, KeyframeId] = {}
         self.ambiguous_matches = 0
+        self.implausible_hops = 0
         self._accepted = 0
         self._inter_robot = 0
         self._dirty = False
@@ -237,13 +280,18 @@ class CollaborativeBackend:
 
         if previous_id is not None:
             previous = self._keyframes[previous_id]
+            t_src_dst = se3_relative(previous.t_odom_base, keyframe.t_odom_base)
+            information = ODOM_INFORMATION * self.odom_information_scale
+            if self._implausible_hop(t_src_dst):
+                information = information * self.implausible_hop_information_scale
+                self.implausible_hops += 1
             self._graph.add_edge(
                 Edge(
                     kind=EdgeKind.ODOMETRY,
                     src=previous.id,
                     dst=keyframe.id,
-                    t_src_dst=se3_relative(previous.t_odom_base, keyframe.t_odom_base),
-                    information=ODOM_INFORMATION * self.odom_information_scale,
+                    t_src_dst=t_src_dst,
+                    information=information,
                 )
             )
 
@@ -286,7 +334,16 @@ class CollaborativeBackend:
         self._new_since_optimize += 1
         return True
 
-    def _ambiguous(self, candidates: list) -> bool:
+    def _implausible_hop(self, t_src_dst: np.ndarray) -> bool:
+        """Whether a consecutive-keyframe transform is a frame discontinuity
+        rather than robot motion. See :attr:`max_plausible_hop_m`."""
+        translation_m, rotation_rad = se3_distance(se3_identity(), t_src_dst)
+        return (
+            translation_m > self.max_plausible_hop_m
+            or rotation_rad > self.max_plausible_hop_rad
+        )
+
+    def _ambiguous(self, candidates: list[PlaceCandidate]) -> bool:
         """Whether the best match is indistinguishable from a different place.
 
         Compares the best candidate against the nearest runner-up that is a

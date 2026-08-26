@@ -296,12 +296,15 @@ class AdapterDetectionMixin:
         tracker = self._TRACK_IDS
         if tracker is None or self._detector is None:
             return
+        from adapters.perception.object_detector import crop_detection_jpeg_base64
+
         detections = []
         for detection, track_id in tracker(self._detector.detect_bgr(frame)):
             item = detection.as_protocol(track_id)
             item["map_position"] = self._depth_map_position(
                 detection.bbox, image_header, detection.polygon
             )
+            item["image"] = crop_detection_jpeg_base64(frame, detection.bbox)
             detections.append(item)
         self._detections = detections
 

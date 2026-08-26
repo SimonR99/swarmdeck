@@ -151,6 +151,7 @@ class Entity:
     id: str
     cls: str
     acc: Accumulator
+    image: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -165,6 +166,7 @@ class Entity:
             "robot_ids": sorted(self.acc.robots),
             "first_seen": self.acc.first_seen,
             "last_seen": self.acc.last_seen,
+            "image": self.image,
             "samples": [s.as_dict() for s in self.acc.samples],
         }
 
@@ -178,6 +180,7 @@ class Proposal:
     acc: Accumulator
     suggested_entity_id: str | None = None
     suggested_distance: float | None = None
+    image: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -190,6 +193,7 @@ class Proposal:
             "robot_ids": sorted(self.acc.robots),
             "first_seen": self.acc.first_seen,
             "last_seen": self.acc.last_seen,
+            "image": self.image,
             "suggested_entity_id": self.suggested_entity_id,
             "suggested_distance": (
                 round(self.suggested_distance, 3)
@@ -327,6 +331,7 @@ class ReviewStore:
         score: float,
         now: float | None = None,
         observer: tuple[float, float] | None = None,
+        image: str | None = None,
     ) -> tuple[Outcome, Entity | Proposal | None]:
         """Route one located sighting to the map, the queue, or the bin.
 
@@ -344,6 +349,8 @@ class ReviewStore:
         entity, distance = self._nearest_entity(cls, x, y)
         if entity is not None and distance <= self.same_radius:
             entity.acc.add(sample, observer)
+            if image:
+                entity.image = image
             return "folded", entity
 
         proposal, pdist = self._nearest_proposal(cls, x, y)
@@ -351,12 +358,14 @@ class ReviewStore:
             # Repeat sightings strengthen one pending item rather than filling
             # the queue with near-duplicates of the same question.
             proposal.acc.add(sample, observer)
+            if image:
+                proposal.image = image
             if entity is not None and distance <= self.ask_radius:
                 proposal.suggested_entity_id = entity.id
                 proposal.suggested_distance = distance
             return "updated", proposal
 
-        fresh = Proposal(id=self._mint("prop"), cls=cls, acc=Accumulator())
+        fresh = Proposal(id=self._mint("prop"), cls=cls, acc=Accumulator(), image=image)
         fresh.acc.add(sample, observer)
         if entity is not None and distance <= self.ask_radius:
             fresh.suggested_entity_id = entity.id
@@ -371,7 +380,9 @@ class ReviewStore:
         proposal = self.proposals.pop(proposal_id, None)
         if proposal is None:
             return None
-        entity = Entity(id=self._mint("ent"), cls=proposal.cls, acc=proposal.acc)
+        entity = Entity(
+            id=self._mint("ent"), cls=proposal.cls, acc=proposal.acc, image=proposal.image
+        )
         self.entities[entity.id] = entity
         return entity
 
@@ -384,6 +395,8 @@ class ReviewStore:
             return None
         self.proposals.pop(proposal_id, None)
         entity.acc.absorb(proposal.acc)
+        if proposal.image:
+            entity.image = proposal.image
         return entity
 
     def ignore(self, proposal_id: str) -> bool:
@@ -471,13 +484,14 @@ class ReviewStore:
             "next_id": self._next_id,
             "cross_class_merge": self.cross_class_merge,
             "entities": [
-                {"id": e.id, "class": e.cls, **_acc_to_dict(e.acc)}
+                {"id": e.id, "class": e.cls, "image": e.image, **_acc_to_dict(e.acc)}
                 for e in self.entities.values()
             ],
             "proposals": [
                 {
                     "id": p.id,
                     "class": p.cls,
+                    "image": p.image,
                     "suggested_entity_id": p.suggested_entity_id,
                     "suggested_distance": p.suggested_distance,
                     **_acc_to_dict(p.acc),
@@ -512,6 +526,7 @@ class ReviewStore:
                 id=str(item["id"]),
                 cls=str(item.get("class", "object")),
                 acc=acc,
+                image=item.get("image"),
             )
         for item in raw.get("proposals") or []:
             if not isinstance(item, dict) or not item.get("id"):
@@ -526,6 +541,7 @@ class ReviewStore:
                 acc=acc,
                 suggested_entity_id=item.get("suggested_entity_id"),
                 suggested_distance=float(distance) if distance is not None else None,
+                image=item.get("image"),
             )
         for item in raw.get("ignored") or []:
             if not isinstance(item, dict):

@@ -237,7 +237,12 @@
 
   .fleet-panel {
     left: 12px;
+    z-index: 51;
     width: min(320px, calc(100vw - 32px));
+  }
+
+  .panel-tab-left {
+    z-index: 52;
   }
 
   .control-panel {

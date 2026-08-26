@@ -12,8 +12,7 @@ trustworthy: a pool noodle lying diagonally filled 27% of its own bounding box
 in the reference frame, and the rest of that box is floor.
 """
 
-from __future__ import annotations
-
+import base64
 import json
 import math
 import os
@@ -25,6 +24,63 @@ import cv2
 import numpy as np
 
 from adapters.perception.catalog import CALIBRATED_CONFIDENCE, CATALOG, CLASS_NAMES, resolve
+
+
+def crop_detection_jpeg_base64(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float] | list[float],
+    margin: float = 0.20,
+    max_dim: int = 240,
+    jpeg_quality: int = 85,
+) -> str | None:
+    """Crop detection bounding box with +20% margin and encode to base64 JPEG."""
+    if image is None or not isinstance(image, np.ndarray) or image.size == 0 or image.ndim != 3:
+        return None
+    try:
+        h, w = image.shape[:2]
+        if w <= 0 or h <= 0:
+            return None
+        bx, by, bw, bh = bbox
+        if bw <= 0 or bh <= 0:
+            return None
+
+        cx = bx + bw / 2.0
+        cy = by + bh / 2.0
+        exp_w = bw * (1.0 + margin)
+        exp_h = bh * (1.0 + margin)
+
+        nx0 = max(0.0, cx - exp_w / 2.0)
+        ny0 = max(0.0, cy - exp_h / 2.0)
+        nx1 = min(1.0, cx + exp_w / 2.0)
+        ny1 = min(1.0, cy + exp_h / 2.0)
+
+        px0 = int(round(nx0 * w))
+        py0 = int(round(ny0 * h))
+        px1 = int(round(nx1 * w))
+        py1 = int(round(ny1 * h))
+
+        if px1 <= px0 or py1 <= py0:
+            return None
+
+        crop = image[py0:py1, px0:px1]
+        ch, cw = crop.shape[:2]
+        if ch == 0 or cw == 0:
+            return None
+
+        if max(ch, cw) > max_dim:
+            scale = max_dim / float(max(ch, cw))
+            new_w = max(1, int(round(cw * scale)))
+            new_h = max(1, int(round(ch * scale)))
+            crop = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        ok, encoded = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+        if not ok:
+            return None
+
+        b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception:
+        return None
 
 
 DEFAULT_DETECTOR_URL = "http://127.0.0.1:8091"

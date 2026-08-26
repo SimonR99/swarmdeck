@@ -10,10 +10,9 @@
   import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
   import { startConnection, teardown } from '$lib/api/connection';
   import { fleet } from '$lib/stores/fleet.svelte';
-  import { PanelLeftOpen, PanelRightOpen } from 'lucide-svelte';
+  import { PanelLeftOpen } from 'lucide-svelte';
 
   let fleetOpen = $state(true);
-  let controlsOpen = $state(true);
   let videoExpanded = $state(false);
   let compactLayout = $state(false);
   let responsiveLayoutInitialised = false;
@@ -22,32 +21,17 @@
 
   function openFleet() {
     fleetOpen = true;
-    if (compactLayout) {
-      controlsOpen = false;
-      videoExpanded = false;
-    }
-  }
-
-  function openControls() {
-    controlsOpen = true;
-    if (compactLayout) fleetOpen = false;
-  }
-
-  function closeControls() {
-    videoExpanded = false;
-    controlsOpen = false;
+    if (compactLayout) videoExpanded = false;
   }
 
   function toggleVideoExpanded() {
     videoExpanded = !videoExpanded;
-    controlsOpen = true;
     if (videoExpanded && compactLayout) fleetOpen = false;
   }
 
   function dismissOverlayPanels() {
     if (!compactLayout) return;
     fleetOpen = false;
-    controlsOpen = false;
     videoExpanded = false;
   }
 
@@ -56,19 +40,15 @@
     return () => teardown();
   });
 
-  // Tablets start map-first. Panels remain one tap away without squeezing the
-  // operational canvas into a narrow strip. After initialisation, the operator
-  // remains in control of which panel is open.
+  // Tablets start with Fleet retracted, while Robot Control remains available
+  // at all times. After initialisation, the operator controls Fleet visibility.
   $effect(() => {
     const media = window.matchMedia('(max-width: 1180px)');
     const syncLayout = () => {
       compactLayout = media.matches;
       if (!responsiveLayoutInitialised) {
         responsiveLayoutInitialised = true;
-        if (media.matches) {
-          fleetOpen = false;
-          controlsOpen = false;
-        }
+        if (media.matches) fleetOpen = false;
       }
     };
 
@@ -95,7 +75,7 @@
   />
 
   <main class="workspace">
-    {#if compactLayout && (fleetOpen || controlsOpen)}
+    {#if compactLayout && fleetOpen}
       <button
         class="workspace-scrim"
         aria-label="Close open panel"
@@ -121,31 +101,16 @@
       <DetectionReview />
     </section>
 
-    {#if controlsOpen}
-      <aside
-        class="side-panel control-panel"
-        class:video-expanded={videoExpanded}
-        aria-label="Robot control panel"
-      >
-        <CameraPanel
-          expanded={videoExpanded}
-          ontoggleexpand={toggleVideoExpanded}
-          oncollapse={closeControls}
-        />
-        {#if !videoExpanded}
-          <DrivePanel />
-        {/if}
-      </aside>
-    {:else}
-      <button
-        class="panel-tab panel-tab-right"
-        aria-label="Show Robot Control panel"
-        onclick={openControls}
-      >
-        <PanelRightOpen class="h-4 w-4" />
-        <span>Controls</span>
-      </button>
-    {/if}
+    <aside
+      class="side-panel control-panel"
+      class:video-expanded={videoExpanded}
+      aria-label="Robot control panel"
+    >
+      <CameraPanel expanded={videoExpanded} ontoggleexpand={toggleVideoExpanded} />
+      {#if !videoExpanded}
+        <DrivePanel />
+      {/if}
+    </aside>
   </main>
 </div>
 

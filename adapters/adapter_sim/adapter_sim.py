@@ -1462,6 +1462,8 @@ class RobotBridge(AdapterSensorMixin):
 
             detections = []
             if self._detection_enabled:
+                from adapters.perception.object_detector import crop_detection_jpeg_base64
+
                 for detection, track_id in track_ids(self._detector.detect_bgr(image)):
                     item = detection.as_protocol(track_id)
                     # The detector is RGB-only; the depth half of the same frame
@@ -1469,6 +1471,7 @@ class RobotBridge(AdapterSensorMixin):
                     item["map_position"] = self._depth_map_position(
                         detection.bbox, msg.header, detection.polygon
                     )
+                    item["image"] = crop_detection_jpeg_base64(image, detection.bbox)
                     detections.append(item)
             self._detections = detections
         except Exception as exc:

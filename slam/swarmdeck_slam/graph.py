@@ -91,6 +91,7 @@ from swarmdeck_slam.types import (
     OptimizedGraph,
     se3_identity,
     se3_inverse,
+    se3_kabsch,
     se3_relative,
 )
 
@@ -111,6 +112,29 @@ _DEFAULT_GNC_WEIGHT_THRESHOLD: Final = 0.5
 # SE(3) tangent space is 6-dimensional; the PCM consistency test below treats
 # a composed loop's residual as a single chi-squared statistic over all 6.
 _PCM_DOF: Final = 6
+
+# Fewest keyframes before a robot's T_world_map is fitted over its trajectory
+# rather than read off its latest keyframe (see
+# GtsamPoseGraph._t_world_map). Two points determine a rigid fit exactly and
+# tell you nothing about whether it generalizes -- the residual check that
+# guards the fit is vacuous at n == 2, because a 2-point Kabsch fit always has
+# zero residual while leaving rotation about the line between them free.
+_MIN_FIT_KEYFRAMES: Final = 3
+
+
+def _frame_residual(
+    t_world_map: np.ndarray,
+    kf_ids: list[KeyframeId],
+    keyframes: dict[KeyframeId, Keyframe],
+    poses: dict[KeyframeId, np.ndarray],
+) -> float:
+    """Translation RMSE of one candidate ``T_world_map`` against the optimized
+    poses of the keyframes it is supposed to explain."""
+    errors = [
+        np.linalg.norm((t_world_map @ keyframes[k].t_odom_base)[:3, 3] - poses[k][:3, 3])
+        for k in kf_ids
+    ]
+    return float(np.sqrt(np.mean(np.square(errors))))
 
 
 def _canonical_pair(edge: Edge) -> frozenset[str]:
@@ -502,28 +526,78 @@ class GtsamPoseGraph:
     # ------------------------------------------------------------------ #
 
     def _t_world_map(self, poses: dict[KeyframeId, np.ndarray]) -> dict[str, np.ndarray]:
-        """Per-robot ``T_world_odom`` correction, from each robot's most
-        recently optimized keyframe.
+        """Per-robot ``T_world_map``: the rigid transform carrying that robot's
+        own SLAM frame into the fleet frame, least-squares fitted over its
+        WHOLE trajectory.
 
-        This is deliberately a snapshot, not a continuously maintained
-        quantity: it is exact at the stamp of that keyframe and only
-        approximate for a fresher odometry reading applied against it
-        afterwards (exactly the classic ROS ``map -> odom`` correction
-        published by a SLAM node, which is why a controller consuming raw
-        ``odom`` never has to block on the next optimization to keep
-        running). Callers that need the current best estimate for a robot
-        that has moved since its last keyframe should compose this with that
-        robot's live odometry, not wait for another ``optimize()`` call.
+        Every keyframe supplies one independent estimate of this transform
+        (``poses[k] @ inverse(keyframe.t_odom_base)``). Reading only the
+        latest one -- which this did until 2026-08-25 -- is exact if and only
+        if the robot's source frame is rigid with respect to the optimized
+        solution. It is not. What arrives in ``Keyframe.t_odom_base`` is the
+        robot's own SLAM ``T_map_base`` (see that field's docstring), and a
+        SLAM node moves its map frame every time it re-optimizes, so a
+        single-keyframe read samples wherever that frame happened to sit at
+        one instant.
+
+        Measured on ``sessions/captures/3d-run-01``, against each robot's own
+        optimized keyframe poses::
+
+                          single keyframe        whole-trajectory fit
+            robot_0    2.761 m RMSE / 6.42 max      0.567 m RMSE
+            robot_1    0.215 m RMSE                 0.188 m RMSE
+
+        Those 6.5 m are not a solver error -- joint ATE over the same run is
+        0.66 m -- they were an artefact of the estimator, published straight
+        into the operator's fleet view as ``origins`` (see
+        ``backend.snapshot_update``). The same run's inter-robot transform
+        error fell from 6.36 m to 0.23 m on this change alone.
+
+        This is the identical Kabsch fit ``tools/replay.py`` already used to
+        summarize the *truth* side of that comparison, for the identical
+        stated reason; it just was never applied to the estimated side.
+
+        The fit is over translations, which is what ``origins`` positions and
+        what an operator sees. It needs at least
+        :data:`_MIN_FIT_KEYFRAMES` keyframes to be better determined than the
+        snapshot it replaces, and it is only accepted if it actually explains
+        that robot's poses at least as well -- so a robot that has driven too
+        little, or straight down a corridor where the fit is free to rotate
+        about the travel axis, falls back to the single-keyframe read rather
+        than to an arbitrary rotation.
         """
-        latest: dict[str, KeyframeId] = {}
+        by_robot: dict[str, list[KeyframeId]] = defaultdict(list)
         for kf_id in self._keyframes:
-            current = latest.get(kf_id.robot_id)
-            if current is None or kf_id.seq > current.seq:
-                latest[kf_id.robot_id] = kf_id
-        return {
-            robot_id: poses[kf_id] @ se3_inverse(self._keyframes[kf_id].t_odom_base)
-            for robot_id, kf_id in latest.items()
-        }
+            by_robot[kf_id.robot_id].append(kf_id)
+
+        result: dict[str, np.ndarray] = {}
+        for robot_id, kf_ids in by_robot.items():
+            kf_ids.sort(key=lambda kf_id: kf_id.seq)
+            snapshot = poses[kf_ids[-1]] @ se3_inverse(self._keyframes[kf_ids[-1]].t_odom_base)
+            result[robot_id] = self._best_t_world_map(kf_ids, poses, snapshot)
+        return result
+
+    def _best_t_world_map(
+        self,
+        kf_ids: list[KeyframeId],
+        poses: dict[KeyframeId, np.ndarray],
+        snapshot: np.ndarray,
+    ) -> np.ndarray:
+        """Whichever of the trajectory fit and the single-keyframe snapshot
+        explains this robot's optimized poses better. See :meth:`_t_world_map`."""
+        if len(kf_ids) < _MIN_FIT_KEYFRAMES:
+            return snapshot
+        source = np.array([self._keyframes[k].t_odom_base[:3, 3] for k in kf_ids])
+        target = np.array([poses[k][:3, 3] for k in kf_ids])
+        try:
+            fitted = se3_kabsch(source, target)
+        except ValueError:  # pragma: no cover - guarded by _MIN_FIT_KEYFRAMES
+            return snapshot
+        if _frame_residual(fitted, kf_ids, self._keyframes, poses) <= _frame_residual(
+            snapshot, kf_ids, self._keyframes, poses
+        ):
+            return fitted
+        return snapshot
 
     def _validate_endpoints(self, edges: list[Edge]) -> None:
         missing = {

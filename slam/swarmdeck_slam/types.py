@@ -27,6 +27,37 @@ its own SLAM solution lives, and ``T_world_map`` is what the optimizer estimates
 for it. ``odom`` is the robot's continuous, non-jumping odometry frame; the
 optimizer never touches it, which is what lets the controller keep running
 through a loop closure that moves the whole trajectory.
+
+What actually arrives, and why the odom name is a lie
+------------------------------------------------------
+``Keyframe.t_odom_base`` -- and the wire field of the same name in
+``swarmdeck_protocol`` -- does **not** carry ``T_odom_base``. Both adapters look
+up ``map_frame -> base_frame`` and send that (``adapter_ros2.pose7``, whose own
+docstring says ``T_map_base``), so what the graph receives is the robot's own
+SLAM-corrected pose in its own ``map`` frame.
+
+The name is kept because changing it is a wire-protocol change across both
+adapters, the protocol package, and every recorded capture in
+``sessions/captures``; the correction is written down here instead. Two
+consequences follow, and both are load-bearing:
+
+* **That frame is not continuous.** A SLAM node moves its map frame every time
+  it re-optimizes. Anything that samples the frame at one instant is sampling a
+  moving target -- which is why ``GtsamPoseGraph._t_world_map`` fits
+  ``T_world_map`` over a robot's whole trajectory rather than reading it off
+  the newest keyframe, and why doing the latter published a 6.5 m error into
+  the operator's fleet view until 2026-08-25.
+* **It can change frames mid-session.** ``pose7`` falls back to an odometry
+  pose when the TF lookup fails, so a single robot's keyframe stream can switch
+  frames between one keyframe and the next. The relative transform across that
+  switch is meaningless, and it becomes an ``ODOMETRY`` edge, which GNC is
+  structurally forbidden from rejecting (see ``graph.py``). ``CollaborativeBackend``
+  guards this by down-weighting implausibly large hops rather than trusting them.
+
+Relative transforms between keyframes are unaffected by which of the two frames
+is in use, as long as both endpoints agree -- which is why the pose graph works
+at all despite the above, and why the guard targets the hop that *straddles* a
+change rather than the frame choice itself.
 """
 
 from __future__ import annotations
@@ -203,6 +234,49 @@ def transform_points(matrix: np.ndarray, points: np.ndarray) -> np.ndarray:
     return pts @ rotation.T + translation
 
 
+def se3_kabsch(source_points: np.ndarray, target_points: np.ndarray) -> np.ndarray:
+    """Best-fit rigid ``T_target_source`` between two corresponding point sets.
+
+    Kabsch's algorithm via SVD of the cross-covariance: the closed-form
+    least-squares rotation and translation carrying ``source_points`` onto
+    ``target_points``. Scale is fixed at 1 and never fitted -- lidar SLAM is
+    metric, so a scale error is a real error in the map and a fit that could
+    absorb it would report a perfect frame for a map 5% too big.
+
+    The reflection correction keeps ``det(R) == +1`` even when the SVD alone
+    would hand back a mirror, which is what makes this exact (no NaN, no
+    divide-by-zero) on rank-deficient input -- a robot that has only ever
+    driven a straight corridor is collinear, and that is a real trajectory
+    shape rather than a degenerate one. Note that a collinear fit leaves
+    rotation about the travel axis unconstrained: the result is *a* best fit,
+    not a unique one, so callers that care should check the residual.
+
+    Raises ``ValueError`` for fewer than 2 points, where there is nothing to
+    determine a rotation from.
+    """
+    source = np.asarray(source_points, dtype=np.float64)
+    target = np.asarray(target_points, dtype=np.float64)
+    if source.shape != target.shape or source.ndim != 2 or source.shape[1] != 3:
+        raise ValueError(
+            f"need two matching [n, 3] point sets, got {source.shape} and {target.shape}"
+        )
+    if source.shape[0] < 2:
+        raise ValueError(f"rigid fit needs at least 2 points, got {source.shape[0]}")
+
+    source_mean = source.mean(axis=0)
+    target_mean = target.mean(axis=0)
+    covariance = (source - source_mean).T @ (target - target_mean)
+    u, _, vt = np.linalg.svd(covariance)
+    det = float(np.linalg.det(vt.T @ u.T))
+    correction = np.diag([1.0, 1.0, 1.0 if det >= 0.0 else -1.0])
+    rotation = vt.T @ correction @ u.T
+
+    out = se3_identity()
+    out[:3, :3] = rotation
+    out[:3, 3] = target_mean - rotation @ source_mean
+    return out
+
+
 def se3_distance(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     """``(translation_m, rotation_rad)`` between two poses. For gating and tests."""
     delta = se3_relative(a, b)
@@ -221,7 +295,10 @@ class Keyframe:
 
     id: KeyframeId
     stamp: float
-    t_odom_base: np.ndarray  # 4x4
+    #: 4x4. Named for the odom frame, but production adapters send the robot's
+    #: own SLAM ``T_map_base`` here -- see this module's docstring, which
+    #: explains why the name stays and what depends on the difference.
+    t_odom_base: np.ndarray
     points: np.ndarray  # float32 [n, 3] in the base frame at capture
     descriptor: np.ndarray | None = None  # uint8 [rings, sectors]
     descriptor_kind: str = ""

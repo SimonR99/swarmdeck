@@ -49,6 +49,7 @@ from swarmdeck_slam.types import (
     OptimizedGraph,
     se3_distance,
     se3_identity,
+    se3_kabsch,
     se3_relative,
 )
 
@@ -137,26 +138,12 @@ def align_rigid(
     if not (np.all(np.isfinite(est_pos)) and np.all(np.isfinite(true_pos))):
         raise ValueError("cannot align: input poses contain non-finite translations")
 
-    est_mean = est_pos.mean(axis=0)
-    true_mean = true_pos.mean(axis=0)
-    est_centred = est_pos - est_mean
-    true_centred = true_pos - true_mean
-
-    # Kabsch: covariance of (source, target) centred coordinates, corrected for
-    # reflection so det(R) == +1 even when the SVD alone would hand back a
-    # mirror. This correction is what keeps rank-deficient (collinear) inputs
-    # from producing an improper "rotation" instead of raising or NaN-ing.
-    covariance = est_centred.T @ true_centred
-    u, _, vt = np.linalg.svd(covariance)
-    det = float(np.linalg.det(vt.T @ u.T))
-    correction = np.diag([1.0, 1.0, 1.0 if det >= 0.0 else -1.0])
-    rotation = vt.T @ correction @ u.T
-    translation = true_mean - rotation @ est_mean
-
-    alignment = se3_identity()
-    alignment[:3, :3] = rotation
-    alignment[:3, 3] = translation
-    return alignment, common
+    # The Kabsch fit itself lives in types.py, because graph.py needs exactly
+    # the same computation to estimate each robot's T_world_map (see
+    # GtsamPoseGraph._t_world_map). Two copies of a rigid fit is two places for
+    # a reflection-correction bug to hide, and this module and that one are
+    # scored against each other.
+    return se3_kabsch(est_pos, true_pos), common
 
 
 @dataclass(frozen=True, slots=True)

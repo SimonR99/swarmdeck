@@ -1279,6 +1279,7 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                         if observer is not None
                         else None
                     ),
+                    image=det.get("image"),
                 )
                 # A new question goes out at once — the operator is waiting on
                 # it. Folds and updates only shift a centroid, arrive at frame

@@ -153,3 +153,46 @@ def test_planar_thickened_scans_still_merge_two_robots() -> None:
     grid = majority_component(snapshot)
     assert grid is not None
     assert int((grid.cells == 100).sum()) > 0
+
+
+def test_a_frame_jump_is_down_weighted_not_trusted() -> None:
+    """An ODOMETRY edge is a GNC known-inlier, so nothing downstream can reject
+    one. That makes a wrong odometry edge the only input with no defense behind
+    it -- and ``t_odom_base`` really carries the robot's own SLAM map pose (see
+    ``types.py``), which jumps when that SLAM re-optimizes and can switch to an
+    odom-frame pose entirely when the adapter's TF lookup fails.
+
+    The hop straddling such a change is not a measurement. It must stay in the
+    graph -- dropping it would leave the far side of the chain gauge-free -- but
+    it must not be asserted at full confidence.
+    """
+    _, fleet = synthetic.two_robot_fleet()
+    alpha = fleet[0]
+    jump = synthetic.yaw_pose(25.0, -13.0, np.deg2rad(70.0))
+
+    backend = CollaborativeBackend()
+    for position, kf in enumerate(alpha.keyframes):
+        if position >= len(alpha.keyframes) // 2:
+            kf = replace(kf, t_odom_base=jump @ kf.t_odom_base)
+        backend.ingest_keyframe(kf)
+
+    assert backend.implausible_hops == 1, (
+        "exactly the one hop across the injected frame jump should be flagged"
+    )
+    odometry = [e for e in backend._graph._edges if e.kind is EdgeKind.ODOMETRY]
+    flagged = [e for e in odometry if e.information.max() < ODOM_INFORMATION.max()]
+    assert len(flagged) == 1
+    assert flagged[0].information.max() == pytest.approx(
+        ODOM_INFORMATION.max() * backend.implausible_hop_information_scale
+    )
+    assert len(odometry) == len(alpha.keyframes) - 1, "the edge is kept, never dropped"
+
+
+def test_ordinary_motion_is_never_flagged_as_a_frame_jump() -> None:
+    """The guard must not fire on real driving, including the multi-keyframe
+    hops that a service queue drop legitimately produces."""
+    _, fleet = synthetic.two_robot_fleet()
+    backend = CollaborativeBackend()
+    for kf in fleet[0].keyframes[::3]:  # every third keyframe: a 3x stretched hop
+        backend.ingest_keyframe(kf)
+    assert backend.implausible_hops == 0

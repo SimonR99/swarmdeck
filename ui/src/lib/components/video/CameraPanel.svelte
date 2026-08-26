@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Maximize2, Minimize2, PanelRightClose, Radio, VideoOff } from 'lucide-svelte';
+  import { Maximize2, Minimize2, Radio, VideoOff } from 'lucide-svelte';
   import Badge from '../ui/Badge.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { session } from '$lib/stores/session.svelte';
@@ -10,12 +10,10 @@
 
   let {
     expanded = false,
-    ontoggleexpand = () => {},
-    oncollapse = () => {}
+    ontoggleexpand = () => {}
   }: {
     expanded?: boolean;
     ontoggleexpand?: () => void;
-    oncollapse?: () => void;
   } = $props();
 
   /**
@@ -338,15 +336,6 @@
         {:else}
           <Maximize2 class="h-4 w-4" />
         {/if}
-      </button>
-      <button
-        class="grid h-10 w-10 touch-target place-items-center rounded-full
-               text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-        title="Collapse Robot Control panel"
-        aria-label="Collapse Robot Control panel"
-        onclick={oncollapse}
-      >
-        <PanelRightClose class="h-4 w-4" />
       </button>
     </div>
   </div>

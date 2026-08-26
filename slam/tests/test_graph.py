@@ -30,6 +30,7 @@ way while writing this file (see the ATE test's docstring).
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -39,6 +40,7 @@ from swarmdeck_slam.graph import GtsamPoseGraph
 from swarmdeck_slam.types import (
     Edge,
     EdgeKind,
+    Keyframe,
     KeyframeId,
     OptimizedGraph,
     se3_identity,
@@ -590,3 +592,141 @@ def test_edge_referencing_unknown_keyframe_raises() -> None:
     )
     with pytest.raises(ValueError):
         pose_graph.optimize()
+
+
+# --------------------------------------------------------------------------- #
+# 8. T_world_map is fitted over the trajectory, not sampled from one keyframe
+# --------------------------------------------------------------------------- #
+
+
+def _t_world_map_residual(
+    result: OptimizedGraph, robot: SyntheticRobot, t_world_map: np.ndarray
+) -> float:
+    """Translation RMSE of a candidate ``T_world_map`` against the optimized
+    poses it claims to explain -- the same measure ``graph.py`` selects on."""
+    errors = [
+        np.linalg.norm(
+            (t_world_map @ kf.t_odom_base)[:3, 3] - result.poses[kf.id][:3, 3]
+        )
+        for kf in robot.keyframes
+    ]
+    return float(np.sqrt(np.mean(np.square(errors))))
+
+
+def _snapshot_t_world_map(result: OptimizedGraph, robot: SyntheticRobot) -> np.ndarray:
+    """What ``_t_world_map`` used to publish: read off the latest keyframe alone."""
+    latest = max(robot.keyframes, key=lambda kf: kf.id.seq)
+    return result.poses[latest.id] @ se3_inverse(latest.t_odom_base)
+
+
+def _rebase_from(robot: SyntheticRobot, index: int, shift: np.ndarray) -> SyntheticRobot:
+    """Move every keyframe from ``index`` onward into a shifted source frame.
+
+    Stands in for the robot's own SLAM node re-optimizing and moving its map
+    frame mid-run, which is what really arrives in ``t_odom_base`` (see that
+    field's docstring). The keyframes still describe the same physical
+    trajectory; only the frame they are expressed in jumps.
+    """
+    moved = []
+    for position, keyframe in enumerate(robot.keyframes):
+        if position < index:
+            moved.append(keyframe)
+            continue
+        moved.append(
+            Keyframe(
+                id=keyframe.id,
+                stamp=keyframe.stamp,
+                t_odom_base=shift @ keyframe.t_odom_base,
+                points=keyframe.points,
+                descriptor=keyframe.descriptor,
+                descriptor_kind=keyframe.descriptor_kind,
+            )
+        )
+    return replace(robot, keyframes=moved)
+
+
+def test_t_world_map_beats_the_single_keyframe_snapshot_on_a_drifting_frame() -> None:
+    """The regression that shipped a 6.5 m error into the operator's fleet view.
+
+    ``t_odom_base`` carries the robot's own SLAM ``T_map_base``, and a SLAM
+    node moves its map frame every time it re-optimizes. Reading
+    ``T_world_map`` off the newest keyframe therefore samples wherever that
+    frame happened to sit at one instant. Measured on
+    ``sessions/captures/3d-run-01``, that put robot_0's published frame 6.57 m
+    and 15.4 deg from the whole-trajectory fit, on a run whose joint ATE was
+    0.66 m -- two numbers that cannot both be true.
+
+    Here the frame jump is injected deliberately so the fixture has a known
+    answer: the published transform must explain the WHOLE trajectory
+    better than the last keyframe alone does.
+    """
+    _scene, robots = two_robot_fleet(seed=3)
+    shift = yaw_pose(1.5, -0.8, np.deg2rad(9.0))
+    drifting = [_rebase_from(robot, len(robot.keyframes) // 2, shift) for robot in robots]
+
+    result = _build_graph(drifting, []).optimize()
+
+    for robot in drifting:
+        published = result.t_world_map[robot.robot_id]
+        snapshot = _snapshot_t_world_map(result, robot)
+        fitted_rmse = _t_world_map_residual(result, robot, published)
+        snapshot_rmse = _t_world_map_residual(result, robot, snapshot)
+        assert fitted_rmse < snapshot_rmse * 0.75, (
+            f"{robot.robot_id}: published T_world_map explains the trajectory with "
+            f"rmse {fitted_rmse:.3f} m vs {snapshot_rmse:.3f} m for the single-keyframe "
+            "snapshot -- the fit is not being used"
+        )
+
+
+def test_t_world_map_never_loses_to_the_snapshot_it_replaced() -> None:
+    """The fit is accepted only when it actually explains the poses better.
+
+    A trajectory-wide fit is the right default but not unconditionally
+    better: a robot that has barely moved, or driven straight down a
+    corridor, leaves the fit free to rotate about the travel axis. Selecting
+    on residual means this change can never be a regression for any fixture,
+    which is what makes it safe to apply to every robot unconditionally.
+    """
+    _scene, robots = two_robot_fleet(seed=3)
+    result = _build_graph(robots, _find_real_closures(robots)).optimize()
+
+    for robot in robots:
+        published = _t_world_map_residual(result, robot, result.t_world_map[robot.robot_id])
+        snapshot = _t_world_map_residual(result, robot, _snapshot_t_world_map(result, robot))
+        assert published <= snapshot + 1e-9, (
+            f"{robot.robot_id}: published frame is worse ({published:.4f} m) than the "
+            f"single-keyframe snapshot ({snapshot:.4f} m) it replaced"
+        )
+
+
+def test_t_world_map_falls_back_for_a_robot_with_too_few_keyframes() -> None:
+    """Two keyframes fit a rigid transform exactly and prove nothing.
+
+    A 2-point Kabsch fit always has zero residual while leaving rotation
+    about the line between the points completely free, so the residual guard
+    is vacuous there -- the keyframe-count floor is what stops an arbitrary
+    rotation being published as a robot's frame.
+    """
+    _scene, robots = two_robot_fleet(seed=3)
+    short = replace(
+        robots[0],
+        robot_id="stub",
+        keyframes=[
+            Keyframe(
+                id=KeyframeId("stub", kf.id.seq),
+                stamp=kf.stamp,
+                t_odom_base=kf.t_odom_base,
+                points=kf.points,
+            )
+            for kf in robots[0].keyframes[:2]
+        ],
+    )
+
+    result = _build_graph([short], []).optimize()
+
+    published = result.t_world_map["stub"]
+    snapshot = _snapshot_t_world_map(result, short)
+    assert np.allclose(published, snapshot), (
+        "a 2-keyframe robot must fall back to the single-keyframe read rather than "
+        "publish an under-determined fit"
+    )
