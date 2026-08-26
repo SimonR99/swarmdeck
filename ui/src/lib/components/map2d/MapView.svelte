@@ -561,7 +561,9 @@
   const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
   const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);
   const viewedNetwork = $derived(
-    mapStore.viewRobot ? fleet.get(mapStore.viewRobot)?.network ?? null : null
+    mapStore.viewRobot
+      ? fleet.get(mapStore.viewRobot)?.network ?? null
+      : (fleet.selected[0] ? fleet.get(fleet.selected[0])?.network : fleet.robots[0]?.network) ?? null
   );
   const resetRobotBlocked = $derived(
     resetPending ||
@@ -817,15 +819,15 @@
     {/if}
   </div>
 
-  {#if showNetwork && mapStore.viewMode === 'local' && mapStore.networkLayer}
+  {#if showNetwork && (mapStore.networkLayers.length > 0 || viewedNetwork)}
     <div
       class="pointer-events-none absolute top-3 left-3 z-20 rounded-[--radius-control] border border-border
              bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
     >
       <div class="mb-1 flex items-center justify-between gap-4">
-        <span class="font-semibold uppercase tracking-[0.07em]">Wi-Fi quality</span>
+        <span class="font-semibold uppercase tracking-[0.07em]">{viewedNetwork?.interface === 'ping' ? 'Network latency' : 'Wi-Fi quality'}</span>
         <span class="font-mono text-fg-muted">
-          {viewedNetwork ? `${Math.round(viewedNetwork.quality_pct)}% · ${Math.round(viewedNetwork.rssi_dbm)} dBm` : 'history'}
+          {viewedNetwork ? `${viewedNetwork.ssid ? viewedNetwork.ssid + ' · ' : ''}${Math.round(viewedNetwork.quality_pct)}% · ${Math.round(viewedNetwork.rssi_dbm)} dBm${viewedNetwork.ping_ms !== undefined ? ' · ' + Math.round(viewedNetwork.ping_ms) + 'ms' : ''}` : 'history'}
         </span>
       </div>
       <div

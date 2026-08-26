@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import time
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -408,7 +409,19 @@ class AdapterTelemetryMixin:
     """Protocol state envelope shared by ROS 1 and ROS 2 adapters."""
 
     def _network_quality(self, iface: str):
-        return read_link_quality(iface)
+        host = getattr(self, "_server_host", None)
+        port = getattr(self, "_server_port", None)
+        if not host and getattr(self, "http_url", None):
+            try:
+                parsed = urllib.parse.urlparse(self.http_url)
+                host = parsed.hostname
+                port = parsed.port
+            except Exception:
+                pass
+        try:
+            return read_link_quality(iface, host=host, port=port)
+        except TypeError:
+            return read_link_quality(iface)
 
     def state(self) -> dict[str, Any]:
         planned_path = list(getattr(self, "planned_path", []) or [])

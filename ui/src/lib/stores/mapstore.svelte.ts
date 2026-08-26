@@ -1,4 +1,5 @@
 import { inflate } from 'pako';
+import { fleet } from '$lib/stores/fleet.svelte';
 import type { MapInfo, MapPatch, MapStatus, NetworkPatch, SlamGraph } from '$lib/types/protocol';
 
 /** One entry from GET /api/map/optimized: a grid the collaborative solver posed. */
@@ -65,11 +66,14 @@ const state = $state({
 
 let canvas: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
-let networkCanvas: HTMLCanvasElement | null = null;
-let networkCtx: CanvasRenderingContext2D | null = null;
-let networkInfo: MapInfo | null = null;
-let networkRobot: string | null = null;
-let networkSeq = -1;
+export interface NetworkLayerEntry {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  info: MapInfo;
+  robotId: string;
+  seq: number;
+}
+const networkLayers = new Map<string, NetworkLayerEntry>();
 let statusLoading = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
@@ -173,12 +177,12 @@ function networkImageData(values: Uint8Array, width: number, height: number): Im
   return image;
 }
 
-function clearNetworkLayer() {
-  networkCanvas = null;
-  networkCtx = null;
-  networkInfo = null;
-  networkRobot = null;
-  networkSeq = -1;
+function clearNetworkLayer(robotId: string | null = null) {
+  if (robotId) {
+    networkLayers.delete(robotId);
+  } else {
+    networkLayers.clear();
+  }
 }
 
 function ensureCanvas(w: number, h: number) {
@@ -397,16 +401,25 @@ export const mapStore = {
   get canvas() {
     return canvas;
   },
-  get networkLayer() {
+  get networkLayers(): NetworkLayerEntry[] {
+    void state.revision;
+    return Array.from(networkLayers.values());
+  },
+  get networkLayer(): NetworkLayerEntry | null {
     // Canvas objects are deliberately module-local; revision makes this getter
     // reactive for the legend while the draw loop reads the same live object.
     void state.revision;
-    if (!networkCanvas || !networkInfo || !networkRobot) return null;
-    return { canvas: networkCanvas, info: networkInfo, robotId: networkRobot, seq: networkSeq };
+    if (state.viewMode === 'local' && state.viewRobot) {
+      return networkLayers.get(state.viewRobot) ?? null;
+    }
+    const selected = fleet.selected[0] ?? fleet.robots[0]?.robot_id;
+    if (selected) {
+      return networkLayers.get(selected) ?? null;
+    }
+    return networkLayers.values().next().value ?? null;
   },
   clearNetwork(robotId: string | null = null) {
-    if (robotId !== null && networkRobot !== robotId) return;
-    clearNetworkLayer();
+    clearNetworkLayer(robotId);
     state.revision++;
   },
 
@@ -469,6 +482,9 @@ export const mapStore = {
       state.seq = seq;
       state.ready = true;
       state.revision++;
+      for (const robot of fleet.robots) {
+        void this.loadNetworkSnapshot(robot.robot_id, generation);
+      }
     } catch (error) {
       // The built-in mock has no HTTP map endpoint; its patches still populate
       // the canvas. A real backend reconnect will retry on the next socket.
@@ -564,10 +580,8 @@ export const mapStore = {
     state.revision++;
   },
 
-  /** Incremental per-robot Wi-Fi overlay, retained only for the local map on screen. */
+  /** Incremental per-robot Wi-Fi/network overlay. */
   applyNetworkPatch(patch: NetworkPatch) {
-    if (state.viewMode !== 'local' || state.viewRobot !== patch.robot_id) return;
-    if (networkRobot === patch.robot_id && patch.seq < networkSeq) return;
     let values: Uint8Array;
     try {
       const compressed = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
@@ -581,44 +595,54 @@ export const mapStore = {
       return;
     }
 
+    let entry = networkLayers.get(patch.robot_id);
+    if (entry && patch.seq < entry.seq) return;
+
     const dimensionsChanged =
-      networkRobot !== patch.robot_id ||
-      !networkInfo ||
-      networkInfo.origin.x !== patch.origin.x ||
-      networkInfo.origin.y !== patch.origin.y ||
-      networkInfo.resolution !== patch.resolution ||
-      networkInfo.width !== patch.width ||
-      networkInfo.height !== patch.height;
+      !entry ||
+      entry.info.origin.x !== patch.origin.x ||
+      entry.info.origin.y !== patch.origin.y ||
+      entry.info.resolution !== patch.resolution ||
+      entry.info.width !== patch.width ||
+      entry.info.height !== patch.height;
 
     if (dimensionsChanged) {
-      const oldCanvas = networkCanvas;
-      const oldInfo = networkInfo;
-      const keepOld = networkRobot === patch.robot_id && oldCanvas && oldInfo;
-      networkCanvas = document.createElement('canvas');
-      networkCanvas.width = patch.width;
-      networkCanvas.height = patch.height;
-      networkCtx = networkCanvas.getContext('2d');
-      networkCtx?.clearRect(0, 0, patch.width, patch.height);
-      if (keepOld && networkCtx) {
+      const oldCanvas = entry?.canvas;
+      const oldInfo = entry?.info;
+      const canvas = document.createElement('canvas');
+      canvas.width = patch.width;
+      canvas.height = patch.height;
+      const ctx = canvas.getContext('2d');
+      ctx?.clearRect(0, 0, patch.width, patch.height);
+      if (oldCanvas && oldInfo && ctx) {
         const offX = Math.round((oldInfo.origin.x - patch.origin.x) / patch.resolution);
         const offY = Math.round(
           patch.height - oldInfo.height - (oldInfo.origin.y - patch.origin.y) / patch.resolution
         );
-        networkCtx.drawImage(oldCanvas, offX, offY);
+        ctx.drawImage(oldCanvas, offX, offY);
+      }
+      if (ctx) {
+        entry = {
+          canvas,
+          ctx,
+          info: {
+            resolution: patch.resolution,
+            width: patch.width,
+            height: patch.height,
+            origin: patch.origin,
+            seq: patch.seq
+          },
+          robotId: patch.robot_id,
+          seq: patch.seq
+        };
+        networkLayers.set(patch.robot_id, entry);
       }
     }
 
-    networkInfo = {
-      resolution: patch.resolution,
-      width: patch.width,
-      height: patch.height,
-      origin: patch.origin,
-      seq: patch.seq
-    };
-    networkRobot = patch.robot_id;
-    networkSeq = patch.seq;
-    if (!networkCtx) return;
-    networkCtx.putImageData(networkImageData(values, patch.w, patch.h), patch.x0, patch.y0);
+    if (!entry || !entry.ctx) return;
+    entry.info.seq = patch.seq;
+    entry.seq = patch.seq;
+    entry.ctx.putImageData(networkImageData(values, patch.w, patch.h), patch.x0, patch.y0);
     state.revision++;
   },
 
@@ -633,11 +657,7 @@ export const mapStore = {
         throw new Error(`network heatmap ${response.status}`);
       }
       const patch = (await response.json()) as NetworkPatch;
-      if (
-        generation !== loadGeneration ||
-        state.viewMode !== 'local' ||
-        state.viewRobot !== robotId
-      ) return;
+      if (generation !== loadGeneration) return;
       this.applyNetworkPatch(patch);
     } catch (error) {
       console.warn('[swarmdeck] network heatmap restore failed', error);
@@ -725,7 +745,6 @@ export const mapStore = {
 
     if (state.viewMode !== desiredMode || state.viewRobot !== desiredRobot) {
       loadGeneration++;
-      clearNetworkLayer();
       state.viewMode = desiredMode;
       state.viewRobot = desiredRobot;
       state.seq = -1;

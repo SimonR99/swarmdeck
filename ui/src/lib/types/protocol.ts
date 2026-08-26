@@ -77,6 +77,9 @@ export interface RobotState extends Stamps {
     interface: string;
     quality_pct: number;
     rssi_dbm: number;
+    ssid?: string;
+    bssid?: string;
+    ping_ms?: number;
   } | null;
 }
 

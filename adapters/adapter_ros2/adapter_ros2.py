@@ -46,6 +46,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zlib
 from pathlib import Path
@@ -537,7 +538,19 @@ class HardwareBridge(
 
     def _network_quality(self, iface: str):
         # Keep the legacy module-level seam available to offline callers/tests.
-        return read_link_quality(iface)
+        host = getattr(self, "_server_host", None)
+        port = getattr(self, "_server_port", None)
+        if not host and getattr(self, "http_url", None):
+            try:
+                parsed = urllib.parse.urlparse(self.http_url)
+                host = parsed.hostname
+                port = parsed.port
+            except Exception:
+                pass
+        try:
+            return read_link_quality(iface, host=host, port=port)
+        except TypeError:
+            return read_link_quality(iface)
 
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""

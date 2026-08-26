@@ -12,6 +12,7 @@ from .grid_meta import GridMeta
 NO_DATA = 255
 EXPAND_MARGIN_M = 3.0
 MAX_SIDE_M = 400.0
+MAX_CELL_WEIGHT = 6.0
 
 
 class NetworkGridAccumulator:
@@ -111,6 +112,11 @@ class NetworkGridAccumulator:
         target_weight = self._weight[gy0:gy1, gx0:gx1]
         target_sum += kernel * quality_pct
         target_weight += kernel
+        overflow = target_weight > MAX_CELL_WEIGHT
+        if overflow.any():
+            scale = np.where(overflow, MAX_CELL_WEIGHT / np.maximum(target_weight, 1e-6), 1.0).astype(np.float32)
+            target_sum *= scale
+            target_weight *= scale
         self.revision += 1
         return True
 

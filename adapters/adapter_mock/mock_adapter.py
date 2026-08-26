@@ -112,7 +112,9 @@ class MockRobot:
             "network": {
                 "interface": "mock-wlan0",
                 "quality_pct": round(quality, 1),
-                "rssi_dbm": round(-90.0 + quality * 0.5, 1),
+                "rssi_dbm": round(-90.0 + quality * 0.4, 1),
+                "ssid": "SwarmFleet-AP1",
+                "ping_ms": round(8.0 + (100.0 - quality) * 0.8, 1),
             },
         }
 
