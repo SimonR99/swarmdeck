@@ -172,6 +172,37 @@ robot has one lidar, so the bumper scan is a second `pointcloud_to_laserscan`
 instance in `flatten` mode over the same cloud, range-limited. The costmap
 parameters are unchanged and still name both sources.
 
+## Developing against it
+
+`make up-argos-dev` is the configuration to work against. Measured on a 20-core
+laptop with the Intel iGPU:
+
+| Configuration | Real-time factor |
+|---|---|
+| 4 robots, Ultra-Fusion, unbounded detector | 0.023x |
+| 4 robots, Ultra-Fusion, detector capped | 0.089x |
+| **3 robots, drift odometry** | **0.694x** |
+
+Two independent savings. Almost all of the cost is per robot (a SLAM Toolbox
+instance, a Nav2 stack, an odometry estimator and a set of rendered sensors
+each), and `odometry:=drift` takes Ultra-Fusion out of the lockstep exchange
+entirely, so the `ultrafusion` service is not started at all.
+
+`configs/3robot.yaml` keeps one of every platform rather than dropping a robot
+from `4robot.yaml`, which would drop the Spot and leave two Bunkers and a Scout
+Mini. The platforms differ in footprint and in mapping-lidar height, and a
+fleet of similar robots hides every problem that causes.
+
+**What drift odometry costs.** It perturbs ground-truth motion with Gaussian
+noise. It cannot slip a wheel against an obstacle, lose a scan to geometric
+degeneracy, or fail to converge, and those are the failures `swarmdeck-slam`
+exists to survive. A map made this way says the pipeline runs; it does not say
+the pipeline works. Use `make up-argos` before believing anything about mapping
+quality.
+
+Ground truth is on `/<ns>/ground_truth` in both modes, so the two can be scored
+against the same reference.
+
 ## Exploration and operator goals
 
 `EXPLORE_SECONDS` (600 by default) drives the fleet reactively to bootstrap the

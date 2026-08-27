@@ -1,6 +1,6 @@
 .PHONY: help install ui ui-build server mock sim test clean tunnel \
         build-server up-server down-server \
-        build-argos up-argos down-argos up-argos-gpu up-argos-dri \
+        build-argos up-argos down-argos up-argos-gpu up-argos-dri up-argos-dev \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
         build-deploy up-deploy down-deploy \
@@ -21,6 +21,7 @@ help:
 	@echo "  make [build|up|down]-argos   Docker: ARGoS + Ultra-Fusion + SLAM/Nav2/adapter_sim"
 	@echo "  make up-argos-gpu    as up-argos, rendering on an NVIDIA GPU"
 	@echo "  make up-argos-dri    as up-argos, rendering on an Intel/AMD GPU"
+	@echo "  make up-argos-dev    FAST: 3 robots, drift odometry, no estimator"
 	@echo "  make [build|up|down]-sim     Docker: LEGACY Gazebo/SLAM/Nav2/adapter_sim"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
@@ -154,6 +155,33 @@ up-argos:
 	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Fleet:            ARGoS + Ultra-Fusion (allow ~90s for robots to appear)"
 	@echo "Rendering:        software Vulkan; use up-argos-gpu or up-argos-dri for a device"
+
+# --- development fleet: three robots, synthetic drift odometry, no estimator.
+#
+# The configuration to work against. Two independent savings, both real and
+# both measured:
+#
+#   3 robots instead of 4   almost all the cost is per robot (a SLAM Toolbox
+#                           instance, a Nav2 stack, an estimator and a set of
+#                           rendered sensors each), and configs/3robot.yaml
+#                           keeps one of every platform rather than dropping
+#                           the Spot.
+#   odometry:=drift         ~4x, measured 0.230x against 0.056x real time. It
+#                           takes Ultra-Fusion out of the lockstep exchange,
+#                           and the ultrafusion service is not started at all.
+#
+# What it costs: the drift model perturbs ground-truth motion with Gaussian
+# noise. It cannot slip a wheel against an obstacle or lose a scan to
+# degeneracy, which are the failures swarmdeck-slam exists to survive. Use this
+# to develop; use `make up-argos` to judge whether mapping actually works.
+up-argos-dev:
+	SWARMDECK_CONFIG=/app/configs/3robot.yaml \
+	SWARMDECK_ODOMETRY=drift \
+	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos \
+	    up --build -d server ui slam duck_detector mediamtx sim argos
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "Fleet:            3 robots, drift odometry, no Ultra-Fusion"
+	@echo "Fidelity:         development only -- see docs/architecture/simulation.md"
 
 DRI_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
 up-argos-dri:

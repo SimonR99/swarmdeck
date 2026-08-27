@@ -220,6 +220,50 @@ def test_the_estimator_is_not_handed_the_answer(tree):
     assert tree.find("./media/external_estimator").get("alignment") == "none"
 
 
+def test_the_development_config_keeps_one_of_every_platform():
+    """Dropping a robot for speed must not drop a platform.
+
+    The three differ in footprint and in mapping-lidar height, so the merged
+    map is built from robots seeing the building from different heights. Simply
+    running 4robot.yaml with three robots would drop robot_3, the Spot, and
+    leave two Bunkers and a Scout Mini.
+    """
+    dev = REPO / "configs" / "3robot.yaml"
+    cfg = yaml.safe_load(dev.read_text())
+    fleet = cfg["fleet"]
+    types = spawn_fleet.robot_types(
+        fleet, int(fleet["robot_count"]), fleet.get("robot_prefix", "robot_")
+    )
+    assert sorted(types) == ["bunker", "scout_mini", "spot"]
+
+    arena = ElementTree.fromstring(mas.generate_argos_xml(dev)).find("arena")
+    for platform in types:
+        assert arena.findall(f"./{platform}"), platform
+
+
+def test_the_development_config_starts_every_robot_it_declares():
+    """A start pose missing from the config puts that robot at a fallback
+    position nothing else in the stack knows about."""
+    cfg = yaml.safe_load((REPO / "configs" / "3robot.yaml").read_text())
+    fleet = cfg["fleet"]
+    prefix = fleet.get("robot_prefix", "robot_")
+    expected = {f"{prefix}{i}" for i in range(int(fleet["robot_count"]))}
+    assert set(cfg["map"]["start_poses"]) == expected
+
+
+def test_drift_odometry_drops_the_estimator_entirely(tree):
+    """`--odometry drift` must not leave a dangling medium="uf" reference: the
+    sensor would fail to resolve its medium and ARGoS would refuse to start."""
+    diag = ElementTree.fromstring(
+        mas.generate_argos_xml(CONFIG, estimator=False)
+    )
+    assert diag.find("./media/external_estimator") is None
+    for block in controllers(diag).values():
+        odometry = block.find("./sensors/odometry")
+        assert odometry.get("implementation") == "drift"
+        assert odometry.get("medium") is None
+
+
 def test_diagnostics_mode_drops_the_estimator_entirely(tree):
     """`--no-estimator` is for frame capture and CI, and must not leave a
     dangling `medium="uf"` reference behind."""

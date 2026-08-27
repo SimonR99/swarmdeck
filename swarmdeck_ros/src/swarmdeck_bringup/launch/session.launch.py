@@ -110,7 +110,7 @@ def bridge_args(ns: str, lidar_rings: int = 1, fuse_imu: bool = True) -> list[st
 
 
 def argos_actions(context, cfg_path, count, prefix, seed, runtime_dir,
-                  headless, launch_argos, targets):
+                  headless, launch_argos, targets, odometry):
     """Generate the ARGoS world and experiment, then start the bridge.
 
     Order matters. The bridge BINDS the socket and ARGoS DIALS it, so the
@@ -148,7 +148,8 @@ def argos_actions(context, cfg_path, count, prefix, seed, runtime_dir,
                  "--props-dir", str(props),
                  "--targets", str(targets),
                  "--socket", str(socket),
-                 "--uf-socket", str(uf_socket)]
+                 "--uf-socket", str(uf_socket),
+                 "--odometry", odometry]
                 + ([] if headless else ["--gui"]),
             output="screen",
         ),
@@ -245,6 +246,7 @@ def setup(context, *args, **kwargs):
     runtime_dir = LaunchConfiguration("runtime_dir").perform(context)
     launch_argos = LaunchConfiguration("launch_argos").perform(context).lower() == "true"
     targets = int(LaunchConfiguration("targets").perform(context))
+    odometry = LaunchConfiguration("odometry").perform(context).lower()
 
     cfg_path = Path(cfg_arg)
     if not cfg_path.is_absolute():
@@ -296,7 +298,7 @@ def setup(context, *args, **kwargs):
     argos = backend == "argos"
     if argos:
         actions = argos_actions(context, cfg_path, count, prefix, seed,
-                                runtime_dir, headless, launch_argos, targets)
+                                runtime_dir, headless, launch_argos, targets, odometry)
     else:
         actions = gazebo_actions(context, cfg_path, count, seed, headless,
                                  lidar_rings)
@@ -455,6 +457,19 @@ def generate_launch_description() -> LaunchDescription:
                             "file, for host development. Under Compose the "
                             "`argos` service owns the simulator, because it is "
                             "the container with Vulkan and no ROS.",
+            ),
+            DeclareLaunchArgument(
+                "odometry",
+                default_value="external",
+                choices=["external", "drift"],
+                description="ARGoS backend only. external = Ultra-Fusion, a "
+                            "real lidar-inertial front-end running outside the "
+                            "simulator. drift = ARGoS's synthetic drift model, "
+                            "roughly 4x faster because it takes the estimator "
+                            "out of the lockstep exchange, and correspondingly "
+                            "less faithful: a Gaussian cannot slip a wheel or "
+                            "lose a scan. For development, not for judging "
+                            "mapping quality.",
             ),
             DeclareLaunchArgument(
                 "targets",

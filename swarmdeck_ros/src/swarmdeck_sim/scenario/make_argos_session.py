@@ -399,15 +399,22 @@ def main() -> int:
     ap.add_argument("--socket", default=f"{RUNTIME_DIR}/argos.sock")
     ap.add_argument("--uf-socket", default=f"{RUNTIME_DIR}/uf.sock")
     ap.add_argument("--headless", action="store_true", default=True)
-    ap.add_argument("--no-estimator", dest="estimator", action="store_false",
-                    default=True,
-                    help="DIAGNOSTICS ONLY. Drop the Ultra-Fusion medium and "
-                         "fall back to ARGoS's synthetic <odometry "
-                         "implementation=\"drift\"> so the render, physics and "
-                         "bridge can be exercised without the estimator "
-                         "sidecar. The launch path never passes this: a drift "
-                         "model cannot slip a wheel or lose a scan, which is "
-                         "the entire reason the estimator is there.")
+    ap.add_argument("--odometry", choices=("external", "drift"), default="external",
+                    help="external (default): Ultra-Fusion, a real "
+                         "lidar-inertial front-end running outside ARGoS, so "
+                         "the drift is drift something actually made. "
+                         "drift: ARGoS's synthetic <odometry "
+                         "implementation=\"drift\">, which perturbs "
+                         "ground-truth motion with Gaussian noise. About 4x "
+                         "faster, because it removes the estimator from the "
+                         "lockstep exchange, and correspondingly less "
+                         "faithful: a Gaussian cannot slip a wheel against an "
+                         "obstacle or lose a scan to degeneracy, which are the "
+                         "failures swarmdeck-slam exists to survive. For "
+                         "development and for frame capture, not for judging "
+                         "mapping quality.")
+    ap.add_argument("--no-estimator", dest="odometry", action="store_const",
+                    const="drift", help="Deprecated alias for --odometry drift.")
     ap.add_argument("--gui", dest="headless", action="store_false",
                     help="Add the interactive Filament viewer")
     args = ap.parse_args()
@@ -425,7 +432,7 @@ def main() -> int:
         uf_socket_path=args.uf_socket,
         targets=args.targets,
         headless=args.headless,
-        estimator=args.estimator,
+        estimator=args.odometry == "external",
     )
 
     out = Path(args.output)

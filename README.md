@@ -43,6 +43,14 @@ On a GPU (`up-argos-dri` for Intel/AMD, `up-argos-gpu` for an NVIDIA runtime):
 make up-argos-dri
 ```
 
+For development, three robots and a synthetic drift model instead of the
+estimator, which is about thirty times faster and correspondingly less faithful
+(see [simulation](docs/architecture/simulation.md)):
+
+```bash
+make up-argos-dev
+```
+
 Open <http://localhost:5173>. The API is at <http://localhost:8080>; robots can
 take about 90 seconds to appear. Stop the stack with `make docker-down`.
 

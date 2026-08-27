@@ -26,6 +26,11 @@ ADAPTER_DELAY="${ADAPTER_DELAY:-60}"
 SLAM_BACKEND="${SLAM_BACKEND:-toolbox}"
 GRID_3D="${GRID_3D:-false}"
 TARGETS="${SWARMDECK_TARGETS:-10}"
+# external = Ultra-Fusion. drift = ARGoS's synthetic model, ~4x faster and
+# correspondingly less faithful; see docs/architecture/simulation.md. With
+# drift the generated experiment declares no <external_estimator>, so the
+# ultrafusion service is simply not needed.
+ODOMETRY="${SWARMDECK_ODOMETRY:-external}"
 # Seconds of reactive exploration after startup, to bootstrap the maps before
 # the operator takes over. 0 leaves the fleet stationary until a goal arrives
 # or the operator presses Explore. Read by adapter_sim, which owns the process;
@@ -35,6 +40,18 @@ export EXPLORE_SECONDS
 
 mkdir -p /app/sessions "${RUNTIME_DIR}"
 
+# Clear the previous run's generated experiment BEFORE anything regenerates it.
+#
+# The runtime directory is a named volume and outlives the containers, and the
+# argos service waits for session.argos to exist and then reads it. Left in
+# place, a stale file is one it can read and act on before this launch has
+# rewritten it: switching to `odometry:=drift` left ARGoS waiting on the
+# estimator socket named in the PREVIOUS run's experiment, which nothing was
+# ever going to bind. Any change of robot count, world seed or fleet config has
+# the same hazard.
+rm -f "${RUNTIME_DIR}/session.argos" "${RUNTIME_DIR}/indoor.gltf" \
+      "${RUNTIME_DIR}/indoor.bin"
+
 echo "[sim] launching session config=${CONFIG} backend=${SIM_BACKEND}" \
      "slam_backend=${SLAM_BACKEND} explore_seconds=${EXPLORE_SECONDS}"
 ros2 launch swarmdeck_bringup session.launch.py \
@@ -43,6 +60,7 @@ ros2 launch swarmdeck_bringup session.launch.py \
   "runtime_dir:=${RUNTIME_DIR}" \
   "launch_argos:=false" \
   "targets:=${TARGETS}" \
+  "odometry:=${ODOMETRY}" \
   "headless:=true" \
   "slam_backend:=${SLAM_BACKEND}" \
   "grid_3d:=${GRID_3D}" \

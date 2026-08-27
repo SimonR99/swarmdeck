@@ -19,6 +19,26 @@ if [ ! -f "${EXPERIMENT}" ]; then
   exit 1
 fi
 
+# Ultra-Fusion binds its socket and ARGoS dials it, so with an external
+# estimator this container must not start first. Waiting is conditional on the
+# experiment actually declaring one: under `odometry:=drift` there is no
+# <external_estimator> at all, the ultrafusion service is not started, and
+# waiting for a socket nobody will ever bind would burn the whole timeout
+# before failing.
+if grep -q "<external_estimator" "${EXPERIMENT}"; then
+  UF_SOCKET="$(sed -n 's/.*<external_estimator[^>]*socket="\([^"]*\)".*/\1/p' \
+                 "${EXPERIMENT}" | head -1)"
+  UF_SOCKET="${UF_SOCKET:-$RUNTIME_DIR/uf.sock}"
+  echo "[argos] waiting for the estimator on ${UF_SOCKET}"
+  for _ in $(seq "${WAIT_SECONDS:-300}"); do
+    [ -S "${UF_SOCKET}" ] && break
+    sleep 1
+  done
+  [ -S "${UF_SOCKET}" ] || echo "[argos] no estimator socket yet; ARGoS will retry" >&2
+else
+  echo "[argos] experiment declares no external estimator (drift odometry)"
+fi
+
 # Headless Vulkan. On a machine with a usable GPU the device ICD is present in
 # /usr/share/vulkan/icd.d and is chosen; VK_DRIVER_FILES is set only to force
 # the software rasterizer, which is what CI and GPU-less workstations get.

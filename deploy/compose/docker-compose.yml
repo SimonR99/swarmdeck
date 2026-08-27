@@ -148,12 +148,15 @@ services:
         ARGOS_REF: "${ARGOS_REF:-da70805238285772405b4a4315e65970b69857ce}"
     image: swarmdeck-argos:local
     depends_on:
-      # Both of ARGoS's sockets are bound by other containers, and it dials
-      # them. It also waits for the experiment file, so `service_started` is
-      # enough; the entrypoint does the real waiting.
+      # `sim` only, deliberately. Both of ARGoS's sockets are bound by other
+      # containers and it dials them, but the entrypoint does the real waiting:
+      # first for the generated experiment, then for the estimator socket ONLY
+      # when that experiment declares an <external_estimator>.
+      #
+      # Naming ultrafusion here as well would drag it into every `up`, and the
+      # development path (`make up-argos-dev`, odometry:=drift) has no
+      # estimator to wait for and no reason to pay for one.
       sim:
-        condition: service_started
-      ultrafusion:
         condition: service_started
     environment:
       RUNTIME_DIR: /run/swarmdeck
@@ -196,6 +199,10 @@ services:
       # Detection targets scattered through the world, classes assigned round
       # robin from adapters/perception/catalog.py.
       SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
+      # external = Ultra-Fusion. drift = ARGoS's synthetic model, roughly 4x
+      # faster because it leaves the lockstep exchange, and correspondingly
+      # less faithful. `make up-argos-dev` sets drift; nothing else should.
+      SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-external}"
       # Bootstrap the maps by exploring, then stop and hand the fleet to the
       # operator. Without this nothing drives, and goals issued against an empty
       # map jam robots into walls where wheel slip destroys their odometry.

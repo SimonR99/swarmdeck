@@ -16,7 +16,7 @@ picture.
     python3 tests/integration/run_visual_test.py
     python3 tests/integration/run_visual_test.py --config configs/2robot.yaml
 
-Runs with `--no-estimator`, so it needs no Ultra-Fusion sidecar: sensor frames
+Runs with `--odometry drift`, so it needs no Ultra-Fusion sidecar: sensor frames
 do not depend on the odometry source. Requires numpy and pillow.
 """
 
@@ -281,7 +281,7 @@ def main() -> int:
     argos_file = rundir / "visual.argos"
     gen = [sys.executable, str(SCENARIO / "make_argos_session.py"),
            "--config", args.config, "-o", str(argos_file),
-           "--socket", sock_path, "--no-estimator"]
+           "--socket", sock_path, "--odometry", "drift"]
     if args.gui:
         gen.append("--gui")
     subprocess.run(gen, check=True)
