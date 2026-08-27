@@ -1,0 +1,66 @@
+# SuperOdometry for Botman. SwarmDeck-owned copy of the MIST workspace's
+# os1_128.yaml, which cannot be edited: /ssd/mist_ws is bind-mounted read-only.
+#
+# TWO THINGS DIFFER FROM THE UPSTREAM FILE.
+#
+# 1. imu_topic is /vectornav/imu, not /ouster/imu. The VN-100 is a far quieter
+#    IMU than the Ouster's internal part, and SuperOdometry is IMU-first: it
+#    falls back to IMU-only propagation whenever lidar is late or missing, so
+#    the IMU sets the floor on odometry quality.
+#
+# 2. The calibration file is Botman's own. This is the load-bearing half, see
+#    botman_superodom_calibration.yaml: the upstream calibration ships an
+#    IDENTITY lidar-to-IMU rotation, and identity is wrong by 180 degrees for
+#    EITHER IMU on this robot.
+#
+# The filename upstream says os1_128; the sensor is an OS-0-64-U13. scan_line
+# below is 64, which is correct, and is the only place the beam count enters.
+/**:
+  ros__parameters:
+    imu_topic: "/vectornav/imu"
+    laser_topic: "/ouster/points"
+    sensor: "ouster"
+    use_imu_roll_pitch: false
+    save_ply: false
+
+    world_frame: "map"
+    world_frame_rot: "map_rot"
+    sensor_frame: "os_lidar"
+    sensor_frame_rot: "os_lidar_rot"
+
+    imu_acc_x_limit: 0.5
+    imu_acc_y_limit: 0.2
+    imu_acc_z_limit: 0.4
+
+    feature_extraction_node:
+        scan_line: 64
+        min_range: 0.2
+        filter_point_size: 3
+
+    laser_mapping_node:
+        mapping_line_resolution: 0.1
+        mapping_plane_resolution: 0.2
+        max_iterations: 5
+        max_surface_features: 2000
+        localization_mode: false
+        read_pose_file: false
+        init_x: 0.0
+        init_y: 0.0
+        init_z: 0.0
+        init_roll: 0.0
+        init_pitch: 0.0
+        init_yaw: 0.0
+
+    imu_preintegration_node:
+        lidar_correction_noise: 0.01
+        # VN-100 figures. The upstream values were tuned for the Ouster's
+        # internal IMU; the VN-100 is quieter, and overstating the noise makes
+        # the estimator trust lidar more than it should.
+        # Measured static on Botman 2026-08-27, 1200 samples at 200 Hz:
+        #   accel 1 sd [0.0122, 0.0132, 0.0225] m/s^2
+        #   gyro  bias [1.7e-5, -1.9e-5, -4e-6] rad/s
+        acc_n: 3.9939570888238808e-03
+        gyr_n: 1.5636343949698187e-03
+        acc_w: 6.4356659353532566e-05
+        gyr_w: 3.5640318696367613e-05
+        g_norm: 9.80511

@@ -1,0 +1,54 @@
+%YAML:1.0
+
+# os_lidar -> vectornav for Botman. MEASURED 2026-08-27.
+#
+# Recorded with scripts/calibration/calibrate_imu_to_imu.py: the VN-100's gyro
+# compared against the Ouster's internal gyro while the chassis was rocked by
+# hand, then composed with the Ouster's factory os_lidar -> os_imu transform
+# (a 180 deg yaw, from lidar_to_sensor_transform in the sensor's metadata).
+#
+#   R (/vectornav/imu <- /ouster/imu) : roll 0.88, pitch 0.45, yaw 87.48 deg
+#   R (os_lidar -> /vectornav/imu)    : roll -0.88, pitch -0.45, yaw -92.52 deg
+#
+#   excitation: singular values [16.75, 10.58, 0.77], second-axis ratio 0.632
+#   residual RMS 0.0177 rad/s over 2407 samples, stamp offset -0.005 s
+#
+# THE YAW IS THE WHOLE POINT, AND IT IS NOT A ROUND NUMBER.
+#   The VN-100 is mounted about 90 deg to the chassis, not aligned with it:
+#   base_link -> vectornav works out at +87.5 deg. Identity would have been
+#   ~92 deg wrong. So would the 180 deg that os_lidar's own mounting suggests.
+#   An in-place yaw spin cannot see this at all, which is why it took a rock
+#   about a second axis to measure.
+#
+# CROSS-CHECK: the angle between the vectornav and os_lidar z axes comes out at
+#   0.99 deg here, against 1.46 deg from the completely independent in-place
+#   spin in calibrate_imu_motion.py. Two methods, 0.47 deg apart.
+#
+# TRANSLATION IS ZERO ON PURPOSE. Two gyros cannot determine it: angular
+#   velocity is the same everywhere on a rigid body. Do NOT copy the Ouster's
+#   internal lever arm here; see aslan_superodom_calibration.yaml. Measure
+#   os_lidar -> vectornav with a ruler if the two are far apart.
+
+# Rotation from laser frame to imu frame, imu^R_laser
+extrinsicRotation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [-0.04391730,  0.99891056,  0.01577839,
+         -0.99900375, -0.04403570,  0.00723641,
+          0.00792334, -0.01544486,  0.99984933]
+
+# Translation from laser frame to imu frame, imu^T_laser
+extrinsicTranslation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+imu_laser_rotation_offset: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+yaw_ratio: 0.0

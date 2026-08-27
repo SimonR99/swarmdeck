@@ -1,0 +1,45 @@
+%YAML:1.0
+
+# os_lidar -> os_imu for Botman's OS-0-64-U13 (serial 122325000476).
+# EXACT, not estimated: composed from the sensor's own metadata API, read
+# 2026-08-27.
+#
+#   imu_to_sensor_transform    R = I,            t = [ 6.253, -11.775,  7.645] mm
+#   lidar_to_sensor_transform  R = 180 deg yaw,  t = [ 0,      0,      36.18 ] mm
+#
+#   os_lidar -> os_imu = inv(imu_to_sensor) * lidar_to_sensor
+#                      = 180 deg yaw, t = [-6.253, 11.775, 28.535] mm
+#
+# THE 180 DEGREES IS THE POINT. Ouster defines os_lidar rotated 180 degrees
+# about z from os_sensor, and the IMU sits in the sensor frame. The MIST
+# workspace's os1_128_calibration.yaml ships IDENTITY here, which feeds every
+# IMU sample to the estimator with its x and y axes negated, and drops the
+# 36.18 mm sensor-to-lidar z offset as well. That is the failure
+# aslan_superodom_calibration.yaml already describes: preintegration resetting
+# on "Large bias" and the map jumping.
+#
+# Use this file only with imu_topic: /ouster/imu.
+
+# Rotation from laser frame to imu frame, imu^R_laser
+extrinsicRotation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [-1.,  0.,  0.,
+          0., -1.,  0.,
+          0.,  0.,  1.]
+
+# Translation from laser frame to imu frame, imu^T_laser
+extrinsicTranslation_imu_laser: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [-0.006253, 0.011775, 0.028535]
+
+imu_laser_rotation_offset: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [0.0, 0.0, 0.0]
+
+yaw_ratio: 0.0

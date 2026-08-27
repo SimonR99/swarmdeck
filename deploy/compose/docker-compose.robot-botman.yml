@@ -89,13 +89,38 @@ services:
     volumes:
       - /dev:/dev
       - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
+      # SuperOdometry's configs now come from this checkout, not the read-only
+      # MIST workspace, because the upstream calibration is wrong for this robot
+      # and /ssd/mist_ws cannot be edited. See the note below.
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     command:
       - ros2
       - launch
       - super_odometry
       - os1_128.launch.py
-      - config_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128.yaml
-      - calibration_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128_calibration.yaml
+      # THE UPSTREAM CALIBRATION IS WRONG ON THIS ROBOT.
+      #
+      # os1_128_calibration.yaml ships extrinsicRotation_imu_laser = IDENTITY.
+      # It is not identity for either IMU here. The Ouster's own metadata gives
+      # lidar_to_sensor_transform = 180 deg yaw, and its IMU sits in the sensor
+      # frame, so os_lidar -> os_imu is a 180 degree yaw. Shipping identity
+      # negates the x and y of every IMU sample handed to the estimator, which
+      # is the "Large bias" preintegration reset already documented in
+      # adapters/adapter_ros2/config/aslan_superodom_calibration.yaml.
+      #
+      # Default below is the Ouster IMU with the factory-exact extrinsic: no
+      # estimation involved, and it is a strict improvement on what shipped.
+      #
+      # To move to the VN-100 (quieter, and SuperOdometry is IMU-first so the
+      # IMU sets the floor), first measure the mounting rotation, which nothing
+      # currently records:
+      #     python3 scripts/calibration/calibrate_imu_to_imu.py --duration 30
+      # paste its output into botman_superodom_calibration.yaml, then set in
+      # deploy/robots/botman.env:
+      #     BOTMAN_SUPERODOM_CONFIG=botman_superodom.yaml
+      #     BOTMAN_SUPERODOM_CALIB=botman_superodom_calibration.yaml
+      - config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CONFIG:-botman_superodom_ouster.yaml}
+      - calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CALIB:-botman_superodom_ouster_calibration.yaml}
     restart: unless-stopped
 
   # Botman's physical camera is an OAK-D Pro, which is a DepthAI USB device
