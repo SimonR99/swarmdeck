@@ -29,7 +29,14 @@ services:
     command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
     restart: unless-stopped
 
-  # Ouster OS1-128 driver and SuperOdometry SLAM.
+  # Ouster OS0-64 driver and SuperOdometry SLAM.
+  #
+  # The sensor is an OS-0-64-U13 running lidar_mode 512x10 with the
+  # RNG19_RFL8_SIG16_NIR16 profile, read from its HTTP API on 2026-08-27. That
+  # is 512 x 64 x 48 B = 1.5 MB per PointCloud2 at 10 Hz. This file previously
+  # said OS1-128; the count matters because 1.5 MB is 7.4x net.core.rmem_max on
+  # a stock kernel, which is why /ouster/points arrives at 8.7 Hz rather than 10
+  # and /laser_odometry at 0.6 Hz. See docs/operations/known-issues.md.
   #
   # These are the robot's own nodes, started here for the same reason
   # `oak_camera` is: on 2026-08-07 `bunker_gnm.launch.py` in the read-only MIST
