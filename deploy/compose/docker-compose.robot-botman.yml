@@ -76,6 +76,37 @@ services:
       - output_topic:=/ouster/points_throttled
     restart: unless-stopped
 
+  # VectorNav VN-100. Started here for the same reason the lidar, SLAM and OAK
+  # entries above are: bunker_gnm.launch.py in the read-only MIST workspace
+  # defines vectornav_node and vectornav_sensor_msgs_node but never adds them
+  # to its LaunchDescription (line 204 there is the commented-out list). The
+  # IMU was the one entry this file had not picked up, which left
+  # /vectornav/imu published only when someone had started the node by hand.
+  #
+  # SuperOdometry reads this as its imu_topic. Without it, it does not fail: it
+  # logs "no IMU data, running LiDAR Odometry only" and quietly degrades to
+  # lidar-only odometry.
+  vectornav:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-vectornav
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    volumes:
+      # /dev/vectornav is a udev symlink to ttyUSB0; the whole of /dev is bound
+      # so the link resolves inside the container.
+      - /dev:/dev
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    command:
+      - ros2
+      - launch
+      - /app/swarmdeck/adapters/adapter_ros2/launch/botman_vectornav.launch.py
+    restart: unless-stopped
+
   slam:
     image: bunker_super_odom:dev
     container_name: swarmdeck-botman-slam
@@ -85,6 +116,11 @@ services:
     runtime: nvidia
     depends_on:
       lidar:
+        condition: service_started
+      # SuperOdometry decides at startup whether it has an IMU. If the driver
+      # is not up yet it settles into lidar-only odometry and says so once,
+      # rather than picking the IMU up when it appears.
+      vectornav:
         condition: service_started
     volumes:
       - /dev:/dev
