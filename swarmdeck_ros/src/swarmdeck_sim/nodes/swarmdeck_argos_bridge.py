@@ -24,6 +24,16 @@ fused, from Ultra-Fusion, so there is no filter and this is the only publisher.
 Adding a second one gives a TF tree that flickers between two estimates, which
 is worse than either.
 
+**A stale cmd_vel expires.** The ARGoS controller latches whatever velocity it
+was last given, and this bridge sends the newest `cmd_vel` it has on every
+exchange, so without a deadman a robot whose publisher stops keeps driving on
+its last command indefinitely. That is not hypothetical: exploration yields
+`cmd_vel` to Nav2 per robot and deliberately says nothing while it does, and a
+finished goal or a crashed node leaves the same silence. Measured before the
+timeout existed: one `cmd_vel` of 0.25 m/s, no further publication, and the
+robot was still doing 0.25 m/s forty seconds later with its mode reading
+`idle`. The hardware adapters carry the same protection as `drive_timeout_s`.
+
 **Odometry is not ground truth.** `/<ns>/odom` carries the estimator's drifting
 pose and `/<ns>/ground_truth` carries the simulator's, on separate topics, and
 nothing but evaluation tooling should read the second. An earlier version of
@@ -63,6 +73,16 @@ try:
 except ImportError:  # pragma: no cover - only when robot_localization is absent
     SetPose = None
 
+# How long a cmd_vel stays valid, in SIMULATION seconds.
+#
+# Simulation time rather than wall clock because it is the robot's own clock,
+# and because the publishers do not share a wall-clock rate: Nav2 runs on
+# `use_sim_time` at roughly 20 Hz of SIM time whatever the real-time factor is,
+# while explore.py runs on `time.monotonic()` and so publishes MORE often in sim
+# time as the simulation slows. Nav2 is therefore the binding constraint at
+# ~0.05 s, and this leaves it ten missed control cycles before intervening.
+CMD_VEL_TIMEOUT_SIM_S = 0.5
+
 OBSERVATION_MAGIC = b"SDB2"
 COMMAND_MAGIC = b"SDCMD"
 
@@ -89,6 +109,13 @@ class RobotInterface:
         self.node = node
         self.id = robot_id
         self.cmd_vel = (0.0, 0.0)
+        # Bumped on arrival and compared at send time, which is how the send
+        # path learns a command is NEW without needing the simulation clock in
+        # a ROS callback thread that does not have it.
+        self.cmd_seq = 0
+        self._seen_seq = 0
+        self._cmd_at_sim: float | None = None
+        self._expired = False
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -148,6 +175,28 @@ class RobotInterface:
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         self.cmd_vel = (float(msg.linear.x), float(msg.angular.z))
+        self.cmd_seq += 1
+
+    def velocity_at(self, sim_now: float) -> tuple[float, float]:
+        """The velocity to command, zeroed once the last one has gone stale."""
+        if self.cmd_seq != self._seen_seq:
+            self._seen_seq = self.cmd_seq
+            self._cmd_at_sim = sim_now
+            if self._expired:
+                self._expired = False
+        if self._cmd_at_sim is None:
+            return (0.0, 0.0)
+        if sim_now - self._cmd_at_sim <= CMD_VEL_TIMEOUT_SIM_S:
+            return self.cmd_vel
+        if not self._expired and self.cmd_vel != (0.0, 0.0):
+            self._expired = True
+            # Once per lapse, not once per tick: a robot parked with no
+            # publisher would otherwise fill the log forever.
+            self.node.get_logger().info(
+                f"[{self.id}] no cmd_vel for {CMD_VEL_TIMEOUT_SIM_S}s of "
+                f"simulation time; commanding zero"
+            )
+        return (0.0, 0.0)
 
     def _on_set_pose(self, request, response):
         """Teleport the robot. Simulation-only, and the reset path's only mover.
@@ -249,7 +298,7 @@ class ArgosBridge(Node):
             ids = []
             for _ in range(count):
                 ids.append(self._read_robot(sock, stamp, ticks_per_second))
-            self._send_commands(sock, tick, ids)
+            self._send_commands(sock, tick, ids, seconds)
 
     def _read_robot(self, sock, stamp, ticks_per_second) -> str:
         robot_id = recv_exact(
@@ -421,14 +470,15 @@ class ArgosBridge(Node):
             if hit:
                 yield x, y, z, ring
 
-    def _send_commands(self, sock: socket.socket, tick: int, ids) -> None:
+    def _send_commands(self, sock: socket.socket, tick: int, ids,
+                       sim_now: float) -> None:
         out = bytearray(COMMAND_MAGIC)
         out += struct.pack("<II", tick, len(ids))
         for robot_id in ids:
             robot = self.robots[robot_id]
             name = robot_id.encode("utf-8")
             out += struct.pack("<B", len(name)) + name
-            out += struct.pack("<ff", *robot.cmd_vel)
+            out += struct.pack("<ff", *robot.velocity_at(sim_now))
             teleport = robot.pending_teleport
             if teleport is None:
                 out += struct.pack("<B", 0)
