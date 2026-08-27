@@ -17,7 +17,9 @@
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_planner</exec_depend>
   <exec_depend>nav2_velocity_smoother</exec_depend>
+  <depend>rclcpp</depend>
   <exec_depend>rclpy</exec_depend>
+  <depend>sensor_msgs</depend>
   <exec_depend>tf2_ros</exec_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

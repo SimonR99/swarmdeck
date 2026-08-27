@@ -10,10 +10,10 @@ robot_type: agilex_bunker
 ros_distro: humble
 network_iface: auto
 
-# Bunker is 1.023 x 0.778 m. `base_frame` below is os_lidar and the sensor is
-# mounted at the front, 0.15 m ahead of centre, so the far rear corners are
-# 0.767 m away. The registered-cloud map path reuses this radius to reject
-# chassis self-returns.
+# Bunker is 1.023 x 0.778 m. `base_frame` is a physical-forward frame at the
+# lidar origin. The sensor is mounted at the front, 0.15 m ahead of centre, so
+# the far rear corners are 0.767 m away. The registered-cloud map path reuses
+# this radius to reject chassis self-returns.
 footprint_radius: 0.77
 footprint:
   # Same physical rectangle and lidar-frame origin as Botman.
@@ -23,7 +23,11 @@ footprint:
   - [-0.662, 0.389]
 
 map_frame: map
-base_frame: os_lidar
+# /laser_odometry says its child is os_lidar, but live comparison against
+# /registered_scan proves that pose uses axes rotated pi from raw os_lidar.
+# The odom bridge publishes map -> aslan_base_link and Nav2 publishes the
+# explicit aslan_base_link -> os_lidar rotation.
+base_frame: aslan_base_link
 lidar_height_m: 0.520
 
 # Same Bunker envelope and SuperOdometry map origin as Botman: nominal chassis

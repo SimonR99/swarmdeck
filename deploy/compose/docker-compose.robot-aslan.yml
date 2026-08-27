@@ -84,7 +84,9 @@ services:
         start_imu:=true
         imu_topic:=/vectornav/imu
 
-  # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
+  # SuperOdometry publishes /laser_odometry but not map -> base TF. Despite
+  # naming os_lidar as the message child, its pose is the physical-forward
+  # frame; aslan.launch.py adds the measured pi-yaw edge to raw os_lidar.
   # Same host-side bridge Aslan already runs as swarmdeck-aslan-odom-tf.
   odom_tf:
     build:
@@ -112,7 +114,7 @@ services:
       - -p
       - parent_frame:=map
       - -p
-      - child_frame:=os_lidar
+      - child_frame:=aslan_base_link
       - -p
       - planar:=true
       - -p
@@ -270,7 +272,7 @@ services:
       - --yaw
       - "${ASLAN_OAK_YAW:-0}"
       - --frame-id
-      - os_lidar
+      - aslan_base_link
       - --child-frame-id
       - oak-d-base-frame
     restart: unless-stopped

@@ -9,6 +9,10 @@ CONFIG = REPO / "adapters/adapter_ros2/config/aslan_bunker.yaml"
 COMPOSE = REPO / "deploy/compose/docker-compose.robot-aslan.yml"
 LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/aslan.launch.py"
 PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
+PROJECTOR = (
+    REPO
+    / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
+)
 ROBOT_LAUNCH = REPO / "adapters/adapter_ros2/launch/aslan_bunker.launch.py"
 
 
@@ -57,19 +61,42 @@ def test_aslan_nav_namespace_and_tf_bridge_are_distinct():
     assert '"namespace": "aslan_0"' in source
     assert 'name="aslan_odom_to_tf"' in source
     assert '"use_receive_time": True' in source
+    assert '"robot_base_frame": _BASE_FRAME' in source
+    assert 'name="aslan_base_to_scan"' in source
+    assert '"--frame-id",\n            _BASE_FRAME' in source
+    assert '"--child-frame-id",\n            _SCAN_FRAME' in source
+    assert '"--yaw",\n            "3.141592653589793"' in source
+    assert 'executable="footprint_cloud_to_scan"' in source
+    assert '"input_topic": "/ouster/points"' in source
+    assert '"min_height": _OBSTACLE_MIN_HEIGHT' in source
+    assert '"max_height": _OBSTACLE_MAX_HEIGHT' in source
+    assert '"footprint_padding": _SELF_FILTER_PADDING' in source
+    assert '"obstacle_scan_topic": _SCAN_TOPIC' in source
+    assert '"obstacle_sensor_frame": _SCAN_FRAME' in source
     assert '"robot_radius": _BUNKER_RADIUS' in source
     assert '"footprint": _BUNKER_FOOTPRINT' in source
     assert "_LIDAR_X = 0.150" in source
     assert '"inflation_radius": "0.50"' in source
 
 
-def test_aslan_runs_exactly_one_map_to_os_lidar_broadcaster():
+def test_aslan_filters_its_footprint_before_cloud_projection():
+    """A self return must not mask a farther, valid point in the same beam."""
+    source = PROJECTOR.read_text()
+
+    reject = source.index("if (rear <= base_x")
+    project = source.index("scan.ranges[index] =")
+    assert reject < project
+    assert "pz < min_height_ || pz > max_height_" in source
+    assert "std::numeric_limits<float>::infinity()" in source
+
+
+def test_aslan_runs_exactly_one_map_to_physical_base_broadcaster():
     """Compose already runs odom_tf; Nav2 must not start a second copy.
 
     Both bridges relay the same /laser_odometry pose and both stamp it with
     their own receipt time, so leaving both alive publishes every pose twice
     under two timestamps. Measured on the robot 2026-08-25 with both running:
-    12.95 Hz of map -> os_lidar against a 7.04 Hz odometry source, 49% of
+    12.95 Hz of map -> base against a 7.04 Hz odometry source, 49% of
     broadcasts an identical pose re-sent up to 26 ms later, and 7.8% of stamps
     out of order -- a later stamp carrying an earlier pose. Parked, that is
     invisible, because duplicating an unchanging pose changes nothing. In
@@ -89,13 +116,20 @@ def test_aslan_runs_exactly_one_map_to_os_lidar_broadcaster():
     # The standalone bridge is the one that must survive a Nav2 restart.
     odom_tf_command = compose["services"]["odom_tf"]["command"]
     assert "__node:=aslan_odom_to_tf_host" in odom_tf_command
-    assert "child_frame:=os_lidar" in odom_tf_command
+    assert "child_frame:=aslan_base_link" in odom_tf_command
 
 
 def test_aslan_uses_the_same_bunker_footprint_radius():
     config = yaml.safe_load(CONFIG.read_text())
 
     assert config["footprint_radius"] == 0.77
+    assert config["base_frame"] == "aslan_base_link"
+    compose = yaml.safe_load(COMPOSE.read_text())
+    assert compose["services"]["oak_mount_tf"]["command"][-3:] == [
+        "aslan_base_link",
+        "--child-frame-id",
+        "oak-d-base-frame",
+    ]
 
 
 def test_aslan_uses_the_same_forward_or_reverse_nav_limits():

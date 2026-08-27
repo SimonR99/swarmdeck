@@ -1,36 +1,12 @@
 # Botman hardware navigation, reusing the same Nav2 nodes as nav2_params.yaml.
 #
-# SuperOdometry supplies map-frame /laser_odometry and the Ouster driver supplies
-# /ouster/scan.
-#
-# BROKEN OBSERVATION SOURCE -- READ BEFORE TRUSTING THE COSTMAPS BELOW.
-# /ouster/scan is 360 degrees in AZIMUTH but it is NOT a horizontal slice. The
-# ouster_ros driver builds its LaserScan from a single beam row chosen by
-# `scan_ring`, and Botman's driver_ouster.yaml leaves that at the stock default
-# `scan_ring: 0`. On this OS0-64, row 0 is the TOPMOST beam: measured live on
-# 2026-08-25 it sits at +44.65 deg elevation, and /ouster/scan matched row 0's
-# SLANT range with an RMSE of 0.8 cm over all 512 beams.
-#
-# So every "obstacle" in this scan is the CEILING, reported at its slant range
-# as though it were a horizontal distance. With a ceiling 1.93 m above the
-# sensor that paints a closed ring of phantom obstacles at ~2.7 m in EVERY
-# direction, which follows the robot. Measured consequences on 2026-08-25:
-#   - NavFn-reachable area from the robot: 13.5 m^2 (a ~2 m disc).
-#     The same test against the static SLAM map alone: 3930.7 m^2.
-#   - compute_path_to_pose succeeded at 0.8/1.2/1.8/2.2/2.6 m and returned
-#     NO PATH at 3.0/4.0/4.9 m, in a direction with clear floor.
-#   - Because every ray terminates on the phantom ring at ~2.7 m, the obstacle
-#     layer can never raytrace-clear anything beyond it, so with
-#     rolling_window:false the global costmap accumulates those rings forever.
-# This is why "local planning works but goals fail": the local costmap is fine
-# INSIDE the moving bubble, and nothing can ever plan out of it.
-#
-# The fix is `scan_ring: 31` (or 32 -- the ~0 deg rows on this sensor) in
-# /ssd/mist_ws/.../config/drivers/driver_ouster.yaml, which needs a lidar
-# restart; or better, feed these layers a 2.5D flattened scan
-# (see swarmdeck_slam/launch/cloud_to_scan.launch.py, mode:=flatten) instead of
-# any single ring. Note the driver also caps the cloud at max_range: 10.0 m, so
-# the obstacle/raytrace ranges below can never be reached.
+# SuperOdometry supplies map-frame /laser_odometry. The hardware launch converts
+# the complete /ouster/points cloud to a 2.5D LaserScan for Nav2; /ouster/scan's
+# single ring is deliberately not used. The projector keeps points physically
+# 0.15..1.80 m above the floor, removes the padded Bunker footprint before
+# angular binning, and publishes empty bearings as infinity for ray clearing.
+# The Ouster driver caps the source cloud at 10 m, so marking stops at 9.5 m and
+# clearing at 10 m.
 
 bt_navigator:
   ros__parameters:
@@ -189,27 +165,25 @@ local_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          # SEE HEADER: this is lidar ring 0 at +44.65 deg -- the ceiling,
-          # not the floor plane. It imprisons the robot in a ~2.7 m disc.
-          topic: /ouster/scan
-          sensor_frame: os_lidar
+          # The hardware launch projects /ouster/points over a physical
+          # 0.15..1.80 m height band. It rejects points inside the real Bunker
+          # footprint plus 5 cm BEFORE projection, so a chassis return from one
+          # ring cannot hide a close obstacle observed by another ring.
+          topic: <obstacle_scan_topic>
+          sensor_frame: <obstacle_sensor_frame>
           data_type: "LaserScan"
           clearing: true
           marking: true
-          # 0.85 m, not 0.2. /ouster/scan is now a horizontal ring (scan_ring
-          # 31 in driver_ouster.yaml), and at horizontal the beam hits the
-          # Bunker's OWN chassis -- 1.02 x 0.78 m, half-diagonal ~0.64 m.
-          # Measured live 2026-08-25 by sweeping headings: returns at 0.58-0.65 m
-          # in EVERY direction, a near-uniform ring, which the obstacle layer
-          # marked as real and inflation then sealed into a wall around the
-          # robot. Every goal past ~1 m became unreachable in every direction.
-          # This never bit while scan_ring was 0: that beam pointed at the
-          # ceiling and nothing was ever within 0.45 m of it. Fixing the ring
-          # exposed it. 0.85 clears the chassis with ~0.2 m margin.
-          obstacle_min_range: 0.85
-          obstacle_max_range: 14.0
-          raytrace_min_range: 0.85
-          raytrace_max_range: 16.0
+          # Do not restore the old 0.85 m radial blind disc: the Bunker's front
+          # edge is only 0.361 m from the lidar, so that disc made obstacles
+          # disappear for another 0.489 m beyond the physical front bumper.
+          obstacle_min_range: 0.0
+          obstacle_max_range: 9.5
+          raytrace_min_range: 0.0
+          raytrace_max_range: 10.0
+          inf_is_valid: true
+          # LaserScan is already a 2.5D projection. This parameter does not
+          # define its height; the launch's 0.15..1.80 m cloud band does.
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -268,27 +242,18 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          # SEE HEADER: this is lidar ring 0 at +44.65 deg -- the ceiling,
-          # not the floor plane. It imprisons the robot in a ~2.7 m disc.
-          topic: /ouster/scan
-          sensor_frame: os_lidar
+          # Same footprint-filtered 0.15..1.80 m cloud projection as the local
+          # costmap. Keep the live scan authoritative over static/merged data.
+          topic: <obstacle_scan_topic>
+          sensor_frame: <obstacle_sensor_frame>
           data_type: "LaserScan"
           clearing: true
           marking: true
-          # 0.85 m, not 0.2. /ouster/scan is now a horizontal ring (scan_ring
-          # 31 in driver_ouster.yaml), and at horizontal the beam hits the
-          # Bunker's OWN chassis -- 1.02 x 0.78 m, half-diagonal ~0.64 m.
-          # Measured live 2026-08-25 by sweeping headings: returns at 0.58-0.65 m
-          # in EVERY direction, a near-uniform ring, which the obstacle layer
-          # marked as real and inflation then sealed into a wall around the
-          # robot. Every goal past ~1 m became unreachable in every direction.
-          # This never bit while scan_ring was 0: that beam pointed at the
-          # ceiling and nothing was ever within 0.45 m of it. Fixing the ring
-          # exposed it. 0.85 clears the chassis with ~0.2 m margin.
-          obstacle_min_range: 0.85
-          obstacle_max_range: 18.0
-          raytrace_min_range: 0.85
-          raytrace_max_range: 20.0
+          obstacle_min_range: 0.0
+          obstacle_max_range: 9.5
+          raytrace_min_range: 0.0
+          raytrace_max_range: 10.0
+          inf_is_valid: true
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"

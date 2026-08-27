@@ -14,8 +14,8 @@ robot_type: agilex_bunker
 ros_distro: humble
 network_iface: auto
 
-# Bunker is 1.023 x 0.778 m, but `base_frame` below is os_lidar, so this radius
-# must be measured from the LIDAR rather than the chassis centre. The sensor is
+# Bunker is 1.023 x 0.778 m, and `base_frame` is at the lidar origin, so this
+# radius must be measured from the LIDAR rather than the chassis centre. The sensor is
 # mounted at the front, 0.15 m ahead of centre, which puts the far (rear) corners
 # 0.767 m away; round up so the UI never draws a footprint smaller than the
 # physical tracked chassis.
@@ -27,7 +27,7 @@ network_iface: auto
 # ScanGridAccumulator quite correctly marks them permanently occupied, so the
 # moving robot paints a trail of itself into the map.
 footprint_radius: 0.77
-# Exact chassis rectangle in `base_frame` (os_lidar), x forward / y left.
+# Exact chassis rectangle in physical-forward `base_frame`, x forward / y left.
 # Keep this identical to swarmdeck_nav's Nav2 launch footprint so the map and
 # collision checker show the same four corners.
 footprint:
@@ -36,12 +36,13 @@ footprint:
   - [-0.662, -0.389]
   - [-0.662, 0.389]
 
-# SuperOdometry's /laser_odometry carries map -> os_lidar, but the running
-# stack does not broadcast that TF; swarmdeck_nav's odom_to_tf bridge does.
-# The Bunker driver separately publishes odom -> base_link, with no calibrated
-# transform connecting the trees, so os_lidar remains the honest SLAM pose.
+# /laser_odometry labels its child os_lidar, but live comparison against
+# /registered_scan proves its pose uses axes rotated pi from raw os_lidar.
+# The bridge therefore publishes map -> botman_base_link and Nav2 supplies the
+# explicit botman_base_link -> os_lidar rotation. The Bunker driver's unrelated
+# odom -> base_link tree remains disconnected.
 map_frame: map
-base_frame: os_lidar
+base_frame: botman_base_link
 lidar_height_m: 0.520
 
 # /registered_scan is already transformed into `map`. SuperOdometry starts the

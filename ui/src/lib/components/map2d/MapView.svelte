@@ -989,9 +989,7 @@
           <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
             <span>{detectionCatalog.labelOf(activeObj.class)}</span>
             <span class="font-normal text-fg-dim">
-              {'best_score' in activeObj
-                ? `${Math.round(activeObj.best_score * 100)}%`
-                : `${activeObj.observations} views`}
+              {`${Math.round(activeObj.best_score * 100)}%`}
             </span>
           </div>
         </div>

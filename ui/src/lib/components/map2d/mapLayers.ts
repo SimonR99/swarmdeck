@@ -11,7 +11,13 @@ import { mapStore } from '$lib/stores/mapstore.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
-import type { CostmapKind, DetectionEntity, DetectionProposal, Footprint } from '$lib/types/protocol';
+import type {
+  CostmapKind,
+  DetectionEntity,
+  DetectionProposal,
+  Footprint,
+  RobotState
+} from '$lib/types/protocol';
 
 export type ScreenPoint = { sx: number; sy: number };
 export type GridPoint = { gx: number; gy: number };
@@ -28,6 +34,8 @@ export interface MapRobot {
   footprint_radius?: number;
   footprint?: Footprint | null;
   goal?: { x: number; y: number } | null;
+  nav_status?: RobotState['nav_status'];
+  mode?: RobotState['mode'];
 }
 
 // Keep the map useful while an older adapter is reconnecting and has not yet
@@ -396,28 +404,20 @@ export function drawCostmap(
   ctx.globalAlpha = 0.68;
   ctx.imageSmoothingEnabled = view.scale < 1;
 
-  if (mapStore.viewMode === 'global') {
-    const tf = mapStore.status?.transforms[robotId];
-    if (tf) {
-      const originGrid = mapStore.viewToGrid(tf.x, tf.y);
-      if (originGrid) {
-        ctx.translate(originGrid.gx * view.scale, originGrid.gy * view.scale);
-        if (tf.yaw) ctx.rotate(-tf.yaw);
-        const localGx = (layer.info.origin.x / mapStore.info.resolution) * view.scale;
-        const localGy = (-(maxY / mapStore.info.resolution)) * view.scale;
-        ctx.drawImage(layer.canvas, localGx, localGy, width, height);
-      }
-    } else {
-      const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
-      if (topLeft) {
-        ctx.drawImage(
-          layer.canvas,
-          topLeft.gx * view.scale,
-          topLeft.gy * view.scale,
-          width,
-          height
-        );
-      }
+  // Optimized robot maps are rendered in the collaborative frame even when
+  // the UI calls the view "local". Raw SLAM local maps stay in the robot map
+  // frame, so only the optimized path needs the registration transform here.
+  const useRobotTransform =
+    mapStore.viewMode === 'global' || mapStore.mapSource === 'optimized';
+  const tf = useRobotTransform ? mapStore.status?.transforms[robotId] : undefined;
+  if (tf) {
+    const originGrid = mapStore.viewToGrid(tf.x, tf.y);
+    if (originGrid) {
+      ctx.translate(originGrid.gx * view.scale, originGrid.gy * view.scale);
+      if (tf.yaw) ctx.rotate(-tf.yaw);
+      const localGx = (layer.info.origin.x / mapStore.info.resolution) * view.scale;
+      const localGy = (-(maxY / mapStore.info.resolution)) * view.scale;
+      ctx.drawImage(layer.canvas, localGx, localGy, width, height);
     }
   } else {
     const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
@@ -531,7 +531,6 @@ export function drawRobots(
 
     const isNavActive =
       robot.nav_status === 'active' ||
-      robot.nav_status === 'nav' ||
       robot.mode === 'nav' ||
       Boolean(robot.goal);
 

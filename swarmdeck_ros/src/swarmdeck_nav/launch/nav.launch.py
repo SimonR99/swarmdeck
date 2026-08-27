@@ -18,6 +18,9 @@ def generate_launch_description() -> LaunchDescription:
     source_params = LaunchConfiguration("params_file")
     tf_topic = LaunchConfiguration("tf_topic")
     tf_static_topic = LaunchConfiguration("tf_static_topic")
+    robot_base_frame = LaunchConfiguration("robot_base_frame")
+    obstacle_scan_topic = LaunchConfiguration("obstacle_scan_topic")
+    obstacle_sensor_frame = LaunchConfiguration("obstacle_sensor_frame")
     controller_cmd_vel_topic = LaunchConfiguration("controller_cmd_vel_topic")
     output_cmd_vel_topic = LaunchConfiguration("output_cmd_vel_topic")
 
@@ -26,7 +29,13 @@ def generate_launch_description() -> LaunchDescription:
     # robot's namespace.
     namespaced_params = ReplaceString(
         source_file=source_params,
-        replacements={"<robot_namespace>": namespace},
+        replacements={
+            "<robot_namespace>": namespace,
+            # Present only in the hardware Bunker template. Simulation keeps
+            # its separate planar and proximity scan sources unchanged.
+            "<obstacle_scan_topic>": obstacle_scan_topic,
+            "<obstacle_sensor_frame>": obstacle_sensor_frame,
+        },
     )
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -52,6 +61,10 @@ def generate_launch_description() -> LaunchDescription:
                 "footprint": LaunchConfiguration("footprint"),
                 "robot_radius": LaunchConfiguration("robot_radius"),
                 "inflation_radius": LaunchConfiguration("inflation_radius"),
+                # Hardware SLAM may report a physical-forward pose under a
+                # misleading sensor-frame child ID. Keep the planning base an
+                # explicit launch contract instead of trusting that label.
+                "robot_base_frame": robot_base_frame,
             },
             convert_types=True,
         ),
@@ -148,6 +161,12 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("inflation_radius", default_value="0.70"),
             # Chassis rectangle. Empty means "fall back to robot_radius".
             DeclareLaunchArgument("footprint", default_value="[]"),
+            DeclareLaunchArgument(
+                "robot_base_frame",
+                default_value=[LaunchConfiguration("namespace"), "/base_link"],
+            ),
+            DeclareLaunchArgument("obstacle_scan_topic", default_value="/ouster/scan"),
+            DeclareLaunchArgument("obstacle_sensor_frame", default_value="os_lidar"),
             # Simulation keeps TF namespaced. Hardware can opt into the
             # machine-wide TF graph without duplicating this Nav2 bring-up.
             DeclareLaunchArgument("tf_topic", default_value="tf"),

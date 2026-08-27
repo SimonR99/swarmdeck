@@ -301,6 +301,7 @@ def setup(context, *args, **kwargs):
                         launch_arguments={
                             "namespace": ns,
                             "use_sim_time": "true",
+                            "robot_base_frame": f"{ns}/base_link",
                             # Nav2 plans with a circular footprint, so this is
                             # the circumscribed radius of the chassis — an
                             # inscribed one lets a 1.02 m Bunker's corner clip a
