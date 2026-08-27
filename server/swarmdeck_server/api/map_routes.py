@@ -8,7 +8,11 @@ from becoming the owner of binary upload validation and map rendering policy.
 from __future__ import annotations
 
 import asyncio
+import base64
+from dataclasses import dataclass
+import math
 import threading
+import time
 import zlib
 from typing import Any
 
@@ -41,6 +45,24 @@ CLOUD_SCALE = 0.01
 # arrives and nothing else could tell a live one from a dead one.
 _optimized: dict[str, tuple[GridMeta, np.ndarray, tuple[str, ...]]] = {}
 _optimized_lock = threading.Lock()
+
+
+@dataclass
+class CostmapEntry:
+    robot_id: str
+    kind: str
+    meta: GridMeta
+    cells: np.ndarray
+    frame_id: str
+    seq: int = 0
+    updated_at: float = 0.0
+    dirty: bool = True
+
+
+# Costmaps are navigation products, not map inputs. They stay in this separate
+# store so a local rolling window can never affect collaborative map merging.
+_costmaps: dict[tuple[str, str], CostmapEntry] = {}
+_costmap_lock = threading.Lock()
 
 
 async def get_map() -> Response:
@@ -114,6 +136,8 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
         # existed for exactly this and was never called from anywhere.
         reset_optimized_maps()
         await asyncio.to_thread(graph_bridge.post_reset)
+    reset_costmaps(robot_id)
+    await broadcast({"type": "costmap_clear", "robot_id": robot_id})
     await broadcast({"type": "network_clear", "robot_id": robot_id})
     patch = map_service.take_patch()
     if patch is not None:
@@ -167,6 +191,68 @@ async def get_local_network(robot_id: str) -> Response:
     return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
 
 
+def _costmap_payload(entry: CostmapEntry) -> dict[str, Any]:
+    """Make the full browser snapshot from a bottom-up ROS grid."""
+    # Canvas images are top-down while ROS OccupancyGrid data is bottom-up.
+    top_down = np.flipud(entry.cells)
+    return {
+        "type": "costmap",
+        "robot_id": entry.robot_id,
+        "kind": entry.kind,
+        "seq": entry.seq,
+        "resolution": entry.meta.resolution,
+        "origin": {
+            "x": entry.meta.origin_x,
+            "y": entry.meta.origin_y,
+        },
+        "width": entry.meta.width,
+        "height": entry.meta.height,
+        "frame_id": entry.frame_id,
+        "updated_at": entry.updated_at,
+        "data": base64.b64encode(
+            zlib.compress(np.ascontiguousarray(top_down, dtype=np.int8).tobytes(), 1)
+        ).decode("ascii"),
+    }
+
+
+def costmap_snapshots() -> list[dict[str, Any]]:
+    """Return current costmaps for a newly connected GUI websocket."""
+    with _costmap_lock:
+        return [_costmap_payload(entry) for entry in _costmaps.values()]
+
+
+def take_costmap_patches() -> list[dict[str, Any]]:
+    """Take newly uploaded full snapshots for the websocket fan-out."""
+    with _costmap_lock:
+        entries = [entry for entry in _costmaps.values() if entry.dirty]
+        for entry in entries:
+            entry.dirty = False
+        return [_costmap_payload(entry) for entry in entries]
+
+
+def reset_costmaps(robot_id: str | None = None) -> None:
+    """Forget visualization snapshots after a map/world reset."""
+    with _costmap_lock:
+        if robot_id is None:
+            _costmaps.clear()
+        else:
+            for key in list(_costmaps):
+                if key[0] == robot_id:
+                    del _costmaps[key]
+
+
+async def get_costmap(robot_id: str, kind: str) -> Response:
+    """Restore one full costmap for a browser that missed the websocket frame."""
+    if kind not in {"global", "local"}:
+        return JSONResponse({"error": "kind must be global or local"}, status_code=400)
+    with _costmap_lock:
+        entry = _costmaps.get((robot_id, kind))
+        if entry is None:
+            return JSONResponse({"error": "costmap not available"}, status_code=404)
+        payload = _costmap_payload(entry)
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
 def _inflate(body: bytes) -> bytes:
     """zlib-decompress an upload, refusing anything past MAX_UPLOAD_BYTES."""
     decompressor = zlib.decompressobj()
@@ -202,6 +288,69 @@ async def post_map(request: Request) -> Any:
         return JSONResponse({"error": "size mismatch"}, status_code=400)
     await map_service.ingest_async(rid, meta, cells.reshape(meta.height, meta.width))
     return {"ok": True, "cells": int(cells.size)}
+
+
+async def post_costmap(request: Request) -> Any:
+    """Store one normalized Nav2 costmap for the dashboard overlay.
+
+    The body is zlib-compressed int8 data in ROS's bottom-up row order. It is
+    deliberately not passed to ``MapService``: costmaps describe the planner's
+    current obstacle view and must not become collaborative map evidence.
+    """
+    rid = request.query_params.get("robot_id", "")
+    kind = request.query_params.get("kind", "")
+    if not rid:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+    if kind not in {"global", "local"}:
+        return JSONResponse(
+            {"error": "kind must be global or local"}, status_code=400
+        )
+    try:
+        resolution = float(request.query_params.get("resolution", 0.0))
+        width = int(request.query_params.get("width", 0))
+        height = int(request.query_params.get("height", 0))
+        origin_x = float(request.query_params.get("origin_x", 0.0))
+        origin_y = float(request.query_params.get("origin_y", 0.0))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "malformed costmap metadata"}, status_code=400)
+    if (
+        not math.isfinite(resolution)
+        or resolution <= 0.0
+        or width <= 0
+        or height <= 0
+        or width * height > MAX_UPLOAD_BYTES
+        or not math.isfinite(origin_x)
+        or not math.isfinite(origin_y)
+    ):
+        return JSONResponse({"error": "invalid costmap dimensions or geometry"}, status_code=400)
+
+    try:
+        raw = _inflate(await request.body())
+        cells = np.frombuffer(raw, dtype=np.int8)
+    except (zlib.error, ValueError) as exc:
+        return JSONResponse({"error": f"malformed costmap: {exc}"}, status_code=400)
+    if cells.size != width * height:
+        return JSONResponse({"error": "costmap size mismatch"}, status_code=400)
+
+    # Be defensive about adapters that hand us a value outside Nav2's range.
+    normalized = np.where(cells < 0, -1, np.clip(cells, 0, 100)).astype(np.int8)
+    frame_id = str(request.query_params.get("frame_id", "") or "").lstrip("/")
+    now = time.time()
+    key = (rid, kind)
+    with _costmap_lock:
+        previous = _costmaps.get(key)
+        entry = CostmapEntry(
+            robot_id=rid,
+            kind=kind,
+            meta=GridMeta(resolution, width, height, origin_x, origin_y),
+            cells=np.ascontiguousarray(normalized.reshape(height, width)).copy(),
+            frame_id=frame_id,
+            seq=(previous.seq + 1) if previous else 1,
+            updated_at=now,
+            dirty=True,
+        )
+        _costmaps[key] = entry
+    return {"ok": True, "kind": kind, "seq": entry.seq, "cells": int(cells.size)}
 
 
 async def post_global_map(request: Request) -> Any:

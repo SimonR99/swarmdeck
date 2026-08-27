@@ -388,6 +388,13 @@ class Keyframe:
     points: np.ndarray  # float32 [n, 3] in the base frame at capture
     descriptor: np.ndarray | None = None  # uint8 [rings, sectors]
     descriptor_kind: str = ""
+    #: Optional physical height calibration carried by current producers.
+    #: ``ground_z`` is the floor plane in the base frame at capture; the two
+    #: limits are metres above that plane. Older captures leave these unset.
+    ground_z: float | None = None
+    min_height: float | None = None
+    max_height: float | None = None
+    lidar_height: float | None = None
 
     def __post_init__(self) -> None:
         if self.t_odom_base.shape != (4, 4):

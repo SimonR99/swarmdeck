@@ -12,6 +12,7 @@ from swarmdeck_protocol import encode_keyframe, decode_keyframe
 from swarmdeck_slam.backend import (
     ODOM_INFORMATION,
     CollaborativeBackend,
+    keyframe_from_packet,
     majority_component,
     scoped_grids,
     snapshot_update,
@@ -118,6 +119,28 @@ def test_hessian_information_is_the_production_default() -> None:
     backend = CollaborativeBackend()
     assert backend.verify.information == "hessian"
     assert VerifyConfig().information == "hessian"
+
+
+def test_keyframe_height_metadata_survives_the_wire_backend_boundary() -> None:
+    points = np.zeros((60, 3), dtype=np.float32)
+    points[:, 0] = np.linspace(1.0, 4.0, 60)
+    blob = encode_keyframe(
+        robot_id="alpha",
+        seq=0,
+        stamp=1.0,
+        points=points,
+        t_odom_base=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ground_z=-0.52,
+        min_height=0.15,
+        max_height=1.8,
+        lidar_height=0.52,
+    )
+
+    keyframe = keyframe_from_packet(decode_keyframe(blob))
+    assert keyframe.ground_z == pytest.approx(-0.52)
+    assert keyframe.min_height == pytest.approx(0.15)
+    assert keyframe.max_height == pytest.approx(1.8)
+    assert keyframe.lidar_height == pytest.approx(0.52)
 
 
 def _thicken_planar(points: np.ndarray) -> np.ndarray:

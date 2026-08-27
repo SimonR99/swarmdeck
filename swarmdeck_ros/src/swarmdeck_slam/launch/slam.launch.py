@@ -63,25 +63,19 @@ from launch.substitutions import (
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-# The band this stack flattens a 3D cloud into, in metres above the FLOOR.
-# Defined in cloud_to_scan.launch.py, restated here because a launch file
-# cannot import a sibling launch file through FindPackageShare.
-FLATTEN_MIN_HEIGHT = 0.12
-FLATTEN_MAX_HEIGHT = 1.60
-
 
 def generate_launch_description() -> LaunchDescription:
     ns = LaunchConfiguration("namespace")
     use_sim = LaunchConfiguration("use_sim_time")
     lidar_x = LaunchConfiguration("lidar_x")
     lidar_z = LaunchConfiguration("lidar_z")
+    floor_z = LaunchConfiguration("floor_z")
     rings = LaunchConfiguration("lidar_rings")
     multi_ring = IfCondition(PythonExpression(['"', rings, '" != "1"']))
     fuse_imu = LaunchConfiguration("fuse_imu")
     odom_source = LaunchConfiguration("odometry_source")
     proximity = LaunchConfiguration("proximity_from_cloud")
     prox_range = LaunchConfiguration("proximity_range_max")
-    base_height = LaunchConfiguration("base_height")
     fuse_cov = LaunchConfiguration("fuse_covariance")
     range_max = LaunchConfiguration("range_max")
 
@@ -102,6 +96,12 @@ def generate_launch_description() -> LaunchDescription:
             # from. See docs/operations/hardware-bringup.md.
             DeclareLaunchArgument("lidar_x", default_value="-0.07"),
             DeclareLaunchArgument("lidar_z", default_value="0.402"),
+            DeclareLaunchArgument(
+                "floor_z",
+                default_value="0.0",
+                description="Ground height in base_link for the physical "
+                "0.15..1.80 m obstacle band.",
+            ),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("lidar_rings", default_value="1"),
             DeclareLaunchArgument(
@@ -139,14 +139,6 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="8.0",
                 description="Range limit for the derived bumper scan; the "
                 "costmap raytraces it to 4 m either way.",
-            ),
-            DeclareLaunchArgument(
-                "base_height",
-                default_value="0.0",
-                description="How far base_link floats above the floor, from "
-                "RobotSpec. Used to turn the derived bumper scan's "
-                "height band from base_link-relative into "
-                "floor-relative; see the include below.",
             ),
             DeclareLaunchArgument(
                 "fuse_imu",
@@ -314,7 +306,7 @@ def generate_launch_description() -> LaunchDescription:
                             "range_max": prox_range,
                             "output_topic": "proximity_scan",
                             "node_name": "cloud_to_proximity_scan",
-                            # The band is subtracted back to the floor, because
+                            # The band is referred back to the floor, because
                             # pointcloud_to_laserscan filters in `target_frame` and
                             # that frame is base_link, which floats. Left
                             # base_link-relative, Spot's band would start 0.62 m above
@@ -322,13 +314,9 @@ def generate_launch_description() -> LaunchDescription:
                             # Mini, which is 0.245 m tall, entirely. That is precisely
                             # the failure PROXIMITY_SCAN_HEIGHT existed to prevent on
                             # the Gazebo fleet: a tall robot has to be able to see a
-                            # short one.
-                            "min_height": PythonExpression(
-                                [str(FLATTEN_MIN_HEIGHT), " - ", base_height]
-                            ),
-                            "max_height": PythonExpression(
-                                [str(FLATTEN_MAX_HEIGHT), " - ", base_height]
-                            ),
+                            # short one. cloud_to_scan.launch.py applies the band to
+                            # `floor_z` itself.
+                            "floor_z": floor_z,
                         }.items(),
                     ),
                 ],
@@ -353,6 +341,7 @@ def generate_launch_description() -> LaunchDescription:
                             "output_topic": "scan",
                             "node_name": "cloud_to_scan",
                             "range_max": range_max,
+                            "floor_z": floor_z,
                         }.items(),
                     ),
                 ],

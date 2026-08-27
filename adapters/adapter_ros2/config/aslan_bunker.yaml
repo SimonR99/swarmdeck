@@ -24,13 +24,14 @@ footprint:
 
 map_frame: map
 base_frame: os_lidar
+lidar_height_m: 0.520
 
 # Same Bunker envelope and SuperOdometry map origin as Botman: nominal chassis
-# height 0.400 m, with the requested 0.150..0.550 m physical obstacle band.
+# height 0.400 m, with the requested 0.150..1.800 m physical obstacle band.
 map_cloud_height_band:
   floor_z: -0.520
   min_z: 0.150
-  max_z: 0.550
+  max_z: 1.800
 retain_free_space: true
 
 topics:
@@ -41,6 +42,9 @@ topics:
   plan: /aslan_0/plan
   # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /aslan_0/local_plan
+  # Nav2 costmaps are visualization-only snapshots.
+  global_costmap: /aslan_0/global_costmap/costmap
+  local_costmap: /aslan_0/local_costmap/costmap
   cmd_vel: /cmd_vel
   battery: /bunker_status
   # OAK-D on USB (03e7:2485). The default camera service runs the RGB-D profile

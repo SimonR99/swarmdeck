@@ -423,6 +423,7 @@ def test_spot_config_enables_conservative_trajectory_limits():
         (REPO / "adapters/adapter_ros2/config/spot.yaml").read_text()
     )
 
+    assert config["topics"]["battery"] == "/status/battery_states"
     assert config["services"]["max_velocity"] == "/max_velocity"
     assert config["trajectory"]["velocity_limit"] == {
         "linear_x": 0.25,
@@ -440,14 +441,26 @@ def test_hardware_configs_declare_four_corner_footprints():
         assert all(len(point) == 2 for point in config["footprint"])
 
 
+def test_hardware_configs_declare_the_live_battery_topics():
+    expected = {
+        "adapters/adapter_ros1/config/scout_mini.yaml": "/scout_status",
+        "adapters/adapter_ros2/config/bunker.yaml": "/bunker_status",
+        "adapters/adapter_ros2/config/aslan_bunker.yaml": "/bunker_status",
+        "adapters/adapter_ros2/config/spot.yaml": "/status/battery_states",
+    }
+    for relative_path, topic in expected.items():
+        config = yaml.safe_load((REPO / relative_path).read_text())
+        assert config["topics"]["battery"] == topic
+
+
 def test_hardware_configs_declare_physical_map_height_bands():
     expected = {
-        "bunker": (-0.520, 0.550),
-        "aslan_bunker": (-0.520, 0.550),
-        "spot": (-0.500, 0.760),
-        "scout_mini": (-0.575, 0.395),
+        "bunker": (-0.520, 0.520, 1.800),
+        "aslan_bunker": (-0.520, 0.520, 1.800),
+        "spot": (-0.500, 0.500, 1.800),
+        "scout_mini": (-0.575, 0.575, 1.800),
     }
-    for name, (floor_z, max_height) in expected.items():
+    for name, (floor_z, lidar_height, max_height) in expected.items():
         config = yaml.safe_load(
             (REPO / f"adapters/adapter_ros2/config/{name}.yaml").read_text()
         )
@@ -455,6 +468,7 @@ def test_hardware_configs_declare_physical_map_height_bands():
         assert band["floor_z"] == pytest.approx(floor_z)
         assert band["min_z"] == pytest.approx(0.150)
         assert band["max_z"] == pytest.approx(max_height)
+        assert config["lidar_height_m"] == pytest.approx(lidar_height)
 
 
 def test_trajectory_goal_without_tf_is_dropped(mod):
@@ -514,6 +528,18 @@ def test_battery_normalisation_handles_percent_and_nan(mod):
 
     bridge._on_battery(type("M", (), {"percentage": float("nan")})())
     assert bridge.battery is None, "NaN must not be reported as a real level"
+
+
+def test_spot_battery_array_uses_the_lowest_valid_pack(mod):
+    """Spot reports pack percentages in spot_msgs/BatteryStateArray."""
+    bridge = _bridge(mod)
+    pack = lambda percentage: type("Pack", (), {"charge_percentage": percentage})()
+
+    bridge._on_battery(type("M", (), {"battery_states": [pack(82.0), pack(75.0)]})())
+    assert bridge.battery == pytest.approx(0.75)
+
+    bridge._on_battery(type("M", (), {"battery_states": []})())
+    assert bridge.battery is None
 
 
 def test_drive_watchdog_stops_a_robot_whose_operator_vanished(mod):

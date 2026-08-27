@@ -346,6 +346,7 @@ def setup(context, *args, **kwargs):
                 "grid_3d": str(grid_3d).lower(),
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
+                "floor_z": f"{-robot.base_height:.4f}",
             }
             slam_launch = "/launch/slam_rtabmap.launch.py"
         else:
@@ -364,7 +365,7 @@ def setup(context, *args, **kwargs):
                 "odometry_source": "external" if argos else "ekf",
                 "proximity_from_cloud": "true" if argos else "false",
                 "proximity_range_max": f"{robot.prox_range_max:.1f}",
-                "base_height": f"{robot.base_height:.4f}",
+                "floor_z": f"{-robot.base_height:.4f}",
             }
             slam_launch = "/launch/slam.launch.py"
 

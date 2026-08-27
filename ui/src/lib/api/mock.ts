@@ -50,6 +50,32 @@ function buildTruth(): Int8Array {
   return t;
 }
 
+/** A small inflated-cost field so the mock makes the overlay useful to inspect. */
+function buildTruthCostmap(): Int8Array {
+  const cost = buildTruth();
+  const walls: [number, number][] = [];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (cost[y * W + x] >= 100) walls.push([x, y]);
+    }
+  }
+  const radius = 9;
+  for (const [wx, wy] of walls) {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const distance = Math.hypot(dx, dy);
+        if (distance > radius) continue;
+        const x = wx + dx;
+        const y = wy + dy;
+        if (x < 0 || x >= W || y < 0 || y >= H) continue;
+        const value = Math.max(1, Math.round(100 - distance * 10));
+        cost[y * W + x] = Math.max(cost[y * W + x], value);
+      }
+    }
+  }
+  return cost;
+}
+
 /** Mirrors the backend catalog; the mock never reaches `/api/detection/classes`. */
 const MOCK_DETECTION_CLASSES = [
   'rubber_duck',
@@ -61,6 +87,7 @@ const MOCK_DETECTION_CLASSES = [
 
 export class MockFleet {
   private truth = buildTruth();
+  private truthCostmap = buildTruthCostmap();
   private known = new Int8Array(W * H).fill(-1);
   private robots: MockRobot[] = [];
   private timers: number[] = [];
@@ -70,6 +97,7 @@ export class MockFleet {
   private network = new Map<string, Uint8Array>();
   private networkDirty = new Map<string, { x0: number; y0: number; x1: number; y1: number }>();
   private networkSeq = new Map<string, number>();
+  private costmapSeq = new Map<string, number>();
 
   constructor(
     private emit: (m: ServerMessage) => void,
@@ -104,10 +132,12 @@ export class MockFleet {
 
     const info: MapInfo = { resolution: RES, width: W, height: H, origin: ORIGIN, seq: 0 };
     this.emit({ type: 'map_info', info });
+    this.pushCostmaps();
 
     this.timers.push(setInterval(() => this.step(0.2), 200) as unknown as number);
     this.timers.push(setInterval(() => this.pushPatch(), 600) as unknown as number);
     this.timers.push(setInterval(() => this.pushNetworkPatches(), 1000) as unknown as number);
+    this.timers.push(setInterval(() => this.pushCostmaps(), 1000) as unknown as number);
     this.timers.push(setInterval(() => this.maybeDetect(), 5200) as unknown as number);
 
     this.emit({
@@ -291,6 +321,57 @@ export class MockFleet {
       });
     }
     this.networkDirty.clear();
+  }
+
+  private encodeCostmap(robotId: string, kind: 'global' | 'local', origin: { x: number; y: number }, width: number, height: number, values: Int8Array) {
+    const compressed = deflate(new Uint8Array(values.buffer));
+    let binary = '';
+    for (let i = 0; i < compressed.length; i++) binary += String.fromCharCode(compressed[i]);
+    const key = `${robotId}:${kind}`;
+    const seq = (this.costmapSeq.get(key) ?? 0) + 1;
+    this.costmapSeq.set(key, seq);
+    this.emit({
+      type: 'costmap',
+      robot_id: robotId,
+      kind,
+      seq,
+      resolution: RES,
+      origin,
+      width,
+      height,
+      frame_id: `${robotId}/map_frame`,
+      updated_at: Date.now() / 1000,
+      data: btoa(binary)
+    });
+  }
+
+  private pushCostmaps() {
+    if (!this.robots.length) return;
+    // The mock's truth array is in the same bottom-up convention as the map
+    // patches. The browser costmap layer receives top-down rows.
+    const global = new Int8Array(W * H);
+    for (let y = 0; y < H; y++) {
+      global.set(this.truthCostmap.subarray((H - 1 - y) * W, (H - y) * W), y * W);
+    }
+    for (const robot of this.robots) {
+      this.encodeCostmap(robot.id, 'global', ORIGIN, W, H, global);
+
+      const width = 100;
+      const height = 100;
+      const origin = { x: robot.x - (width * RES) / 2, y: robot.y - (height * RES) / 2 };
+      const local = new Int8Array(width * height);
+      for (let y = 0; y < height; y++) {
+        const worldY = origin.y + (height - y - 0.5) * RES;
+        const gy = Math.floor(H - (worldY - ORIGIN.y) / RES);
+        if (gy < 0 || gy >= H) continue;
+        for (let x = 0; x < width; x++) {
+          const worldX = origin.x + (x + 0.5) * RES;
+          const gx = Math.floor((worldX - ORIGIN.x) / RES);
+          if (gx >= 0 && gx < W) local[y * width + x] = global[gy * W + gx];
+        }
+      }
+      this.encodeCostmap(robot.id, 'local', origin, width, height, local);
+    }
   }
 
   /** Reveal ground truth within sensor radius, simulating SLAM. */

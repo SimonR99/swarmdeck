@@ -28,6 +28,7 @@ SwarmDeck follows a **trajectory-first collaborative SLAM** design ("Merge traje
 | adapter → MediaMTX | `RTSP :8554/<robot_id>` | **Video stream**: Production H.264 video. |
 | adapter → backend | `POST /api/adapter/cloud` | Optional registered XYZ cloud for 3D viewer. |
 | backend → adapter | `GET /api/map/nav/<robot_id>` | **Navigation map downlink**: Common-frame grid warped to robot frame for Nav2 `/global_map`. |
+| adapter → backend | `POST /api/adapter/costmap?robot_id=<id>&kind=global\|local` | **Read-only Nav2 overlay**: zlib-compressed int8 global/local planner costs. |
 | adapter → backend | `POST /api/adapter/map` | *Legacy fallback*: One robot's 2D occupancy grid. |
 | adapter → backend | `POST /api/adapter/scan` | *Legacy fallback*: Registered XY scan when no grid/keyframes are available. |
 | collaborative backend → backend | `POST /api/adapter/global_map` | Rendered common-frame grid. |
@@ -276,6 +277,11 @@ Body: SDKF blob (see swarmdeck_protocol.keyframe)
 ```
 
 One voxel-downsampled cloud in the **base frame at capture**, plus `T_odom_base`.
+Current producers also include an optional `height_band` header containing the
+ground plane in that base frame, the physical lower/upper limits above ground,
+and the lidar height above ground. This lets the renderer apply the same
+`0.15..1.80 m` band per robot even when their base frames have different
+heights. Older blobs omit it and use the configured compatibility fallback.
 The query-string `robot_id` must match the blob. The server is a dumb pipe: it
 checks identity and forwards the opaque body to the SLAM process. Adapters
 upload through a bounded queue that **drops** rather than blocking telemetry.
@@ -303,6 +309,24 @@ robot is in a multi-robot component; 304 if `If-None-Match` matches the current
 seq. Body is zlib(int8 row-major cells); metadata is in `X-Map-*` headers.
 Adapters publish this as a latched OccupancyGrid on `/global_map` (hardware)
 or `/<ns>/global_map` (sim). **Local costmaps must not subscribe.**
+
+### Nav2 costmap overlay
+
+```text
+POST /api/adapter/costmap?robot_id=<id>&kind=<global|local>
+Content-Type: application/octet-stream
+Query: resolution, width, height, origin_x, origin_y, frame_id
+Body: zlib(int8[height][width])
+```
+
+This is a visualization-only stream. Adapters subscribe to Nav2's existing
+`global_costmap/costmap` and `local_costmap/costmap` topics, normalize the grid
+into the robot's navigation-map frame, and upload the latest snapshot. The
+server broadcasts it as `type: "costmap"`; the GUI can select Global or Local.
+Unknown is `-1`, free is `0`, and costs `1..100` are drawn from transparent
+yellow through red. The stream never enters `MapService`, is never used to
+compute goals, and is cleared with the map reset. Only Nav2's own
+planner/controller consumes the local costmap for navigation.
 
 ### Camera video
 

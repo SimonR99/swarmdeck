@@ -34,15 +34,15 @@ footprint:
 # odom_mapping; the adapter pose is the TF lookup, not that message.
 map_frame: map
 base_frame: body
+lidar_height_m: 0.500
 
-# LIO-SAM starts the map at the first lidar pose. Spot's standing envelope is
-# about 0.610 m high, so the requested physical obstacle band is 0.150..0.760 m
-# above the floor. The payload lidar is near 0.500 m, which is the current
+# LIO-SAM starts the map at the first lidar pose. The payload lidar is near
+# 0.500 m above the floor, which is the current
 # map-frame floor reference; calibrate floor_z if the live SLAM origin differs.
 map_cloud_height_band:
   floor_z: -0.500
   min_z: 0.150
-  max_z: 0.760
+  max_z: 1.800
 retain_free_space: true
 
 topics:
@@ -55,7 +55,9 @@ topics:
   # Point nav uses /trajectory (not Nav2). Joystick uses /cmd_vel. Both need
   # the driver, a claimed lease, and a standing robot.
   cmd_vel: /cmd_vel
-  battery: ""
+  # Spot's driver publishes one charge record per pack in this custom array.
+  # The adapter collapses it to the lowest valid pack percentage for the UI.
+  battery: /status/battery_states
   camera: /d435/color/image_raw
   # D435i color (YUYV). Compressed comes from image_transport if the plugin
   # is loaded; the adapter also JPEG-encodes the raw topic as fallback.
@@ -65,6 +67,9 @@ topics:
   camera_color_info: ""
   camera_depth_points: ""
   nav_cmd_vel: ""
+  # Spot uses its trajectory stack rather than Nav2; no costmap topics.
+  global_costmap: ""
+  local_costmap: ""
 
 # Click-to-pose is Clearpath /trajectory, the same action
 # spot_high_level_controller uses. Goals are TF'd map -> body.

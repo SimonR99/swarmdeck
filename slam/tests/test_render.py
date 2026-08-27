@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 import tracemalloc
+from dataclasses import replace
 from unittest import mock
 
 import numpy as np
@@ -233,6 +234,33 @@ def test_floor_z_offsets_the_band(fleet):
     offset_grid = next(iter(render_occupancy(graph, keyframes, offset).values()))
 
     np.testing.assert_array_equal(baseline_grid.cells, offset_grid.cells)
+
+
+def test_keyframe_height_metadata_overrides_one_global_fallback_band(fleet):
+    """Current keyframes use their robot's floor reference and band.
+
+    The deliberately impossible service band proves this is not silently
+    falling back to one global height range; the synthetic keyframes carry a
+    small, valid physical band that contains real returns.
+    """
+    _, robots = fleet
+    graph = _graph(robots, _truth_poses(robots), _merged_component(robots))
+    keyframes = [
+        replace(
+            keyframe,
+            ground_z=0.0,
+            min_height=0.05,
+            max_height=0.15,
+            lidar_height=0.5,
+        )
+        for keyframe in _all_keyframes(robots)
+    ]
+    fallback_only = RenderConfig(
+        min_z=10.0, max_z=20.0, native_map_resolution=RESOLUTION
+    )
+
+    grid = next(iter(render_occupancy(graph, keyframes, fallback_only).values()))
+    assert np.sum(grid.cells == OCCUPIED) > 0
 
 
 def test_separate_components_never_overlay(fleet):

@@ -199,3 +199,26 @@ def test_an_explicit_session_overrides_the_minted_one():
     )
     assert uploader.consider(_wall(), pose7_from_xy_yaw(0.0, 0.0, 0.0), 0.0)
     assert decode_keyframe(uploader._queue[0]).session == "named-run"
+
+
+def test_keyframe_carries_ground_relative_band_and_lidar_height():
+    uploader = KeyframeUploader(
+        "botman_0",
+        "http://backend",
+        min_period_s=0.0,
+        height_band={"floor_z": -0.520, "min_z": 0.150, "max_z": 1.800},
+        lidar_height_m=0.520,
+    )
+    pose = pose7_from_xy_yaw(0.0, 0.0, 0.0, z=0.1)
+    assert uploader.consider(_wall(), pose, 0.0)
+
+    packet = decode_keyframe(uploader._queue[0])
+    assert packet.ground_z == pytest.approx(-0.620)
+    assert packet.min_height == pytest.approx(0.150)
+    assert packet.max_height == pytest.approx(1.800)
+    assert packet.lidar_height == pytest.approx(0.520)
+    header_band = peek_keyframe_header(uploader._queue[0])["height_band"]
+    assert header_band["ground_z"] == pytest.approx(-0.620)
+    assert header_band["min_height"] == pytest.approx(0.150)
+    assert header_band["max_height"] == pytest.approx(1.800)
+    assert header_band["lidar_height"] == pytest.approx(0.520)

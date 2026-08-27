@@ -576,7 +576,8 @@ def test_hardware_configs_declare_physical_map_height_bands():
     band = config["map_cloud_height_band"]
     assert band["floor_z"] == pytest.approx(-0.575)
     assert band["min_z"] == pytest.approx(0.150)
-    assert band["max_z"] == pytest.approx(1.000)
+    assert band["max_z"] == pytest.approx(1.800)
+    assert config["lidar_height_m"] == pytest.approx(0.575)
 
 
 def test_map_cloud_alone_still_advertises_the_map_capability(mod):

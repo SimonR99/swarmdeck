@@ -35,6 +35,6 @@ also be stopped using the robot's process supervisor or launch-session procedure
 Scout's ROS 1 profile uses LVI-SAM's accumulated
 `/lvi_sam/lidar/mapping/map_global` as the SwarmDeck map source. The adapter
 projects the 3D cloud to 2D using returns from 15 cm above the floor through
-1.0 m (0.150–1.000 m), and forwards the accumulated cloud to
+1.8 m (0.150–1.800 m), and forwards the accumulated cloud to
 the 3D viewer. The projection marks returned cells occupied; unobserved cells
 remain unknown rather than being treated as safe free space.

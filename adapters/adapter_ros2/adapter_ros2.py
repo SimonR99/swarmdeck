@@ -100,6 +100,7 @@ from adapters.runtime import (
     yaw_of,
 )
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
 
 # Transport quantisation for registered-cloud uploads. One centimetre keeps a
@@ -207,6 +208,10 @@ DEFAULTS: dict[str, Any] = {
         # planner path for the dashboard because it is the route selected for
         # the next control cycle. Empty disables the optional local route.
         "local_plan": "",
+        # Read-only Nav2 planner products for the dashboard. These are never
+        # fed back into the collaborative occupancy map or navigation stack.
+        "global_costmap": "",
+        "local_costmap": "",
     },
     # min_z/max_z are map-frame limits by default. A profile may add floor_z;
     # then they mean physical heights above the floor and the adapter adds that
@@ -350,6 +355,8 @@ class HardwareBridge(
             robot_id,
             http_url,
             min_period_s=float(rates.get("keyframe_period_s", 2.0)),
+            height_band=cfg.get("map_cloud_height_band"),
+            lidar_height_m=cfg.get("lidar_height_m"),
         )
         self._nav_map = NavMapClient(http_url, robot_id)
 
@@ -362,6 +369,10 @@ class HardwareBridge(
 
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
+        self._costmaps: dict[str, CostmapSnapshot] = {}
+        self._costmap_dirty: set[str] = set()
+        self._costmap_lock = threading.Lock()
+        self._costmap_warned_at: dict[str, float] = {}
         self._scan_points: np.ndarray | None = None
         # Sensor pose when `_scan_points` was captured; see _on_map_cloud.
         self._scan_origin: dict[str, float] | None = None
@@ -448,6 +459,20 @@ class HardwareBridge(
             node.create_subscription(
                 NavPath, topics["local_plan"], self._on_local_plan, 10
             )
+        if topics.get("global_costmap"):
+            node.create_subscription(
+                OccupancyGrid,
+                topics["global_costmap"],
+                lambda msg: self._on_costmap(msg, "global"),
+                qos_profile_sensor_data,
+            )
+        if topics.get("local_costmap"):
+            node.create_subscription(
+                OccupancyGrid,
+                topics["local_costmap"],
+                lambda msg: self._on_costmap(msg, "local"),
+                qos_profile_sensor_data,
+            )
         if topics.get("battery"):
             battery_topic = topics["battery"]
             msg_cls = BatteryState
@@ -462,6 +487,23 @@ class HardwareBridge(
 
                         msg_cls = (
                             get_message("bunker_msgs/msg/BunkerStatus") or BatteryState
+                        )
+                    except Exception:
+                        pass
+            elif "battery_states" in battery_topic:
+                # Spot exposes its two packs as spot_msgs/BatteryStateArray,
+                # not sensor_msgs/BatteryState. The callback reduces the pack
+                # levels to the conservative whole-robot value.
+                try:
+                    from spot_msgs.msg import BatteryStateArray
+
+                    msg_cls = BatteryStateArray
+                except ImportError:
+                    try:
+                        from rosidl_runtime_py.utilities import get_message
+
+                        msg_cls = (
+                            get_message("spot_msgs/msg/BatteryStateArray") or BatteryState
                         )
                     except Exception:
                         pass
@@ -607,6 +649,53 @@ class HardwareBridge(
         return caps
 
     # ------------------------------------------------------------- ROS inputs
+
+    def _warn_costmap(self, kind: str, reason: str) -> None:
+        now = time.monotonic()
+        if now - self._costmap_warned_at.get(kind, 0.0) < 10.0:
+            return
+        self._costmap_warned_at[kind] = now
+        self.node.get_logger().warn(
+            f"[{self.id}] {kind} costmap unavailable for overlay: {reason}"
+        )
+
+    def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
+        """Capture Nav2's planner view without changing navigation inputs."""
+        source = str(
+            getattr(getattr(msg, "header", None), "frame_id", "") or ""
+        ).lstrip("/")
+        target = str(self.map_frame or "").lstrip("/")
+        transform = (0.0, 0.0, 0.0)
+        if source and source != target:
+            try:
+                stamp = getattr(getattr(msg, "header", None), "stamp", None)
+                tf_time = (
+                    rclpy.time.Time.from_msg(stamp)
+                    if stamp is not None
+                    else rclpy.time.Time()
+                )
+                tf = self.tf_buffer.lookup_transform(
+                    target, source, tf_time, timeout=Duration(seconds=0.1)
+                )
+                t = tf.transform
+                transform = (
+                    float(t.translation.x),
+                    float(t.translation.y),
+                    float(yaw_of(t.rotation)),
+                )
+            except Exception as exc:
+                self._warn_costmap(kind, f"no {target} <- {source} transform: {exc}")
+                return
+        try:
+            snapshot = normalize_costmap(
+                msg, target_frame=target or source, transform=transform
+            )
+        except (TypeError, ValueError) as exc:
+            self._warn_costmap(kind, str(exc))
+            return
+        with self._costmap_lock:
+            self._costmaps[kind] = snapshot
+            self._costmap_dirty.add(kind)
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
         """Reduce one registered scan for the 2D map and optional 3D view."""
@@ -1408,6 +1497,46 @@ class HardwareBridge(
             },
         }
 
+    def upload_costmaps(self) -> None:
+        """Push the newest global/local Nav2 snapshots to the read-only overlay."""
+        with self._costmap_lock:
+            pending = [
+                (kind, self._costmaps[kind])
+                for kind in tuple(self._costmap_dirty)
+                if kind in self._costmaps
+            ]
+            for kind, _ in pending:
+                self._costmap_dirty.discard(kind)
+
+        for kind, snapshot in pending:
+            body = zlib.compress(
+                np.ascontiguousarray(snapshot.cells, dtype=np.int8).tobytes(), 1
+            )
+            frame = urllib.parse.quote(snapshot.frame_id, safe="")
+            url = (
+                f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
+                f"&kind={kind}&resolution={snapshot.resolution}"
+                f"&width={snapshot.width}&height={snapshot.height}"
+                f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
+                f"&frame_id={frame}"
+            )
+            try:
+                urllib.request.urlopen(
+                    urllib.request.Request(
+                        url,
+                        data=body,
+                        headers={"Content-Type": "application/octet-stream"},
+                    ),
+                    timeout=float(self.cfg.get("upload_timeout_s", 25.0)),
+                ).read()
+            except Exception as exc:
+                with self._costmap_lock:
+                    if self._costmaps.get(kind) is snapshot:
+                        self._costmap_dirty.add(kind)
+                self.node.get_logger().warn(
+                    f"[{self.id}] {kind} costmap upload failed: {exc}"
+                )
+
     def upload_scan(self) -> None:
         """Upload registered XY returns for server-side occupancy raytracing."""
         if not self._scan_dirty or self._scan_points is None:
@@ -1667,6 +1796,7 @@ async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
                             # behind. Maps now arrive as fast as the backend can
                             # accept them and no faster.
                             last_map = time.monotonic()
+                        await loop.run_in_executor(None, bridge.upload_costmaps)
                         if now - last_cloud > float(rates["cloud_period_s"]):
                             await loop.run_in_executor(None, bridge.upload_cloud)
                             last_cloud = time.monotonic()

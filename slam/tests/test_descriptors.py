@@ -23,6 +23,7 @@ from swarmdeck_slam.descriptors import (
     DESCRIPTOR_KIND,
     PlaceCandidate,
     ScanContextIndex,
+    alignment_hypotheses,
     best_alignment,
     ring_key,
     scan_context_descriptor,
@@ -33,6 +34,18 @@ from swarmdeck_slam.types import KeyframeId
 from synthetic import make_scene, observe, two_robot_fleet, yaw_pose
 
 SEED = 0
+
+
+def test_alignment_hypotheses_keeps_distinct_rotation_modes() -> None:
+    descriptor = np.zeros((2, 12), dtype=np.uint8)
+    descriptor[:, (1, 7)] = 200
+    hypotheses = alignment_hypotheses(
+        descriptor, descriptor, count=2, min_separation_sectors=2
+    )
+
+    assert [shift for shift, _ in hypotheses] == [0, 6]
+    assert hypotheses[0][1] == pytest.approx(hypotheses[1][1])
+    assert hypotheses[0][1] == pytest.approx(best_alignment(descriptor, descriptor)[1])
 
 
 # --------------------------------------------------------------------------- #

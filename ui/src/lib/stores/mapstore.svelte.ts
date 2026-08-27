@@ -1,6 +1,14 @@
 import { inflate } from 'pako';
 import { fleet } from '$lib/stores/fleet.svelte';
-import type { MapInfo, MapPatch, MapStatus, NetworkPatch, SlamGraph } from '$lib/types/protocol';
+import type {
+  CostmapKind,
+  CostmapPatch,
+  MapInfo,
+  MapPatch,
+  MapStatus,
+  NetworkPatch,
+  SlamGraph
+} from '$lib/types/protocol';
 
 /** One entry from GET /api/map/optimized: a grid the collaborative solver posed. */
 export interface OptimizedScope {
@@ -74,6 +82,17 @@ export interface NetworkLayerEntry {
   seq: number;
 }
 const networkLayers = new Map<string, NetworkLayerEntry>();
+
+export interface CostmapLayerEntry {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  info: MapInfo;
+  robotId: string;
+  kind: CostmapKind;
+  seq: number;
+  updatedAt: number;
+}
+const costmapLayers = new Map<string, CostmapLayerEntry>();
 let statusLoading = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
@@ -177,11 +196,45 @@ function networkImageData(values: Uint8Array, width: number, height: number): Im
   return image;
 }
 
+function costmapColor(cost: number): [number, number, number, number] {
+  const t = Math.max(0, Math.min(1, (cost - 1) / 99));
+  return [250, Math.round(194 - 146 * t), Math.round(55 - 28 * t), Math.round(42 + 185 * t)];
+}
+
+function costmapImageData(values: Int8Array, width: number, height: number): ImageData {
+  const image = new ImageData(width, height);
+  for (let i = 0; i < values.length; i++) {
+    const cost = values[i];
+    if (cost <= 0) continue;
+    const color = costmapColor(cost);
+    const offset = i * 4;
+    image.data[offset] = color[0];
+    image.data[offset + 1] = color[1];
+    image.data[offset + 2] = color[2];
+    image.data[offset + 3] = color[3];
+  }
+  return image;
+}
+
 function clearNetworkLayer(robotId: string | null = null) {
   if (robotId) {
     networkLayers.delete(robotId);
   } else {
     networkLayers.clear();
+  }
+}
+
+function costmapKey(robotId: string, kind: CostmapKind): string {
+  return `${robotId}:${kind}`;
+}
+
+function clearCostmapLayer(robotId: string | null = null) {
+  if (robotId) {
+    for (const key of costmapLayers.keys()) {
+      if (key.startsWith(`${robotId}:`)) costmapLayers.delete(key);
+    }
+  } else {
+    costmapLayers.clear();
   }
 }
 
@@ -418,8 +471,95 @@ export const mapStore = {
     }
     return networkLayers.values().next().value ?? null;
   },
+  get costmapLayers(): CostmapLayerEntry[] {
+    void state.revision;
+    return Array.from(costmapLayers.values());
+  },
+  costmapLayer(robotId: string | null, kind: CostmapKind): CostmapLayerEntry | null {
+    void state.revision;
+    return robotId ? costmapLayers.get(costmapKey(robotId, kind)) ?? null : null;
+  },
   clearNetwork(robotId: string | null = null) {
     clearNetworkLayer(robotId);
+    state.revision++;
+  },
+  clearCostmaps(robotId: string | null = null) {
+    clearCostmapLayer(robotId);
+    state.revision++;
+  },
+
+  /** Full read-only Nav2 planner-cost overlay. */
+  applyCostmap(patch: CostmapPatch) {
+    if (patch.kind !== 'global' && patch.kind !== 'local') return;
+    if (
+      !Number.isInteger(patch.width) ||
+      !Number.isInteger(patch.height) ||
+      patch.width <= 0 ||
+      patch.height <= 0 ||
+      !Number.isFinite(patch.resolution) ||
+      patch.resolution <= 0 ||
+      !Number.isFinite(patch.origin.x) ||
+      !Number.isFinite(patch.origin.y)
+    ) {
+      console.warn('[swarmdeck] ignored malformed costmap dimensions');
+      return;
+    }
+    const cells = patch.width * patch.height;
+    if (cells > 16_000_000) {
+      console.warn('[swarmdeck] ignored oversized costmap');
+      return;
+    }
+    const key = costmapKey(patch.robot_id, patch.kind);
+    const previous = costmapLayers.get(key);
+    if (previous && patch.seq < previous.seq) return;
+    let values: Int8Array;
+    try {
+      const compressed = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
+      const inflated = inflate(compressed);
+      if (inflated.byteLength !== cells) throw new Error('size mismatch');
+      values = new Int8Array(inflated.buffer, inflated.byteOffset, inflated.byteLength);
+    } catch {
+      console.warn('[swarmdeck] ignored malformed costmap');
+      return;
+    }
+
+    let entry = previous;
+    if (!entry || entry.info.width !== patch.width || entry.info.height !== patch.height) {
+      const layerCanvas = document.createElement('canvas');
+      layerCanvas.width = patch.width;
+      layerCanvas.height = patch.height;
+      const layerCtx = layerCanvas.getContext('2d');
+      if (!layerCtx) return;
+      entry = {
+        canvas: layerCanvas,
+        ctx: layerCtx,
+        info: {
+          resolution: patch.resolution,
+          width: patch.width,
+          height: patch.height,
+          origin: { x: patch.origin.x, y: patch.origin.y },
+          seq: patch.seq
+        },
+        robotId: patch.robot_id,
+        kind: patch.kind,
+        seq: patch.seq,
+        updatedAt: patch.updated_at ? patch.updated_at * 1000 : Date.now()
+      };
+      costmapLayers.set(key, entry);
+    } else {
+      entry.info.resolution = patch.resolution;
+      entry.info.origin = { x: patch.origin.x, y: patch.origin.y };
+      entry.info.seq = patch.seq;
+      entry.seq = patch.seq;
+      entry.updatedAt = patch.updated_at ? patch.updated_at * 1000 : Date.now();
+      entry.ctx.clearRect(0, 0, patch.width, patch.height);
+    }
+    entry.ctx.putImageData(costmapImageData(values, patch.width, patch.height), 0, 0);
+    entry.info.resolution = patch.resolution;
+    entry.info.origin = { x: patch.origin.x, y: patch.origin.y };
+    entry.info.seq = patch.seq;
+    entry.seq = patch.seq;
+    entry.updatedAt = patch.updated_at ? patch.updated_at * 1000 : Date.now();
     state.revision++;
   },
 
@@ -898,6 +1038,7 @@ export const mapStore = {
     canvas = null;
     ctx = null;
     clearNetworkLayer();
+    clearCostmapLayer();
     maskLevels = [];
     occupied = null;
     maskDirty = true;

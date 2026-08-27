@@ -239,6 +239,54 @@ def mint_session() -> str:
     return f"{int(time.time()):010d}-{uuid.uuid4().hex[:8]}"
 
 
+def _normalise_height_band(
+    height_band: dict[str, Any] | None,
+    lidar_height_m: float | None,
+) -> dict[str, float | None] | None:
+    """Validate a profile's physical band for keyframe metadata.
+
+    ``map_cloud_height_band`` uses ``floor_z`` as the registered-map height of
+    the ground and ``min_z``/``max_z`` as metres above it. Profiles that still
+    use the legacy map-frame-only form cannot provide a ground-relative band,
+    so they intentionally retain the renderer's compatibility fallback.
+    """
+    if height_band is None:
+        band: dict[str, Any] = {}
+    elif isinstance(height_band, dict):
+        band = height_band
+    else:
+        raise ValueError("map height band must be a mapping")
+    if "floor_z" not in band:
+        if lidar_height_m is not None:
+            value = float(lidar_height_m)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError("lidar_height_m must be finite and non-negative")
+        return None
+
+    try:
+        floor_z = float(band["floor_z"])
+        min_height = float(band.get("min_z", 0.0))
+        max_height = float(band["max_z"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed physical map height band: {exc}") from exc
+    if not all(math.isfinite(value) for value in (floor_z, min_height, max_height)):
+        raise ValueError("map height band must contain finite values")
+    if min_height < 0.0 or max_height <= min_height:
+        raise ValueError("map height band must satisfy 0 <= min_z < max_z")
+
+    lidar_height = None if lidar_height_m is None else float(lidar_height_m)
+    if lidar_height is not None and (
+        not math.isfinite(lidar_height) or lidar_height < 0.0
+    ):
+        raise ValueError("lidar_height_m must be finite and non-negative")
+    return {
+        "floor_z": floor_z,
+        "min_height": min_height,
+        "max_height": max_height,
+        "lidar_height": lidar_height,
+    }
+
+
 class KeyframeUploader:
     """Motion-gated producer with a bounded drop-oldest upload queue."""
 
@@ -256,6 +304,8 @@ class KeyframeUploader:
         min_points: int = DEFAULT_MIN_POINTS,
         max_yaw_rate: float = DEFAULT_MAX_YAW_RATE,
         session: str | None = None,
+        height_band: dict[str, Any] | None = None,
+        lidar_height_m: float | None = None,
     ) -> None:
         self.robot_id = robot_id
         #: Minted once per process. See :func:`mint_session`. Passing one in is
@@ -270,6 +320,7 @@ class KeyframeUploader:
         self.timeout_s = timeout_s
         self.min_points = min_points
         self.max_yaw_rate = max_yaw_rate
+        self._height_band = _normalise_height_band(height_band, lidar_height_m)
         self._queue: deque[bytes] = deque(maxlen=max(1, queue_size))
         self._lock = threading.Lock()
         self._seq = 0
@@ -315,6 +366,19 @@ class KeyframeUploader:
             return False
         if base_points.shape[0] < self.min_points:
             return False
+
+        # The wire cloud is in the base frame at capture. Carry the floor plane
+        # in that same frame so the renderer can apply the physical band per
+        # robot, even when the fleet uses different chassis/lidar heights.
+        height_kwargs: dict[str, float] = {}
+        if self._height_band is not None:
+            height_kwargs = {
+                "ground_z": self._height_band["floor_z"] - float(pose[2]),
+                "min_height": self._height_band["min_height"],
+                "max_height": self._height_band["max_height"],
+            }
+            if self._height_band["lidar_height"] is not None:
+                height_kwargs["lidar_height"] = self._height_band["lidar_height"]
         with self._lock:
             seq = self._seq
             self._seq += 1
@@ -326,6 +390,7 @@ class KeyframeUploader:
                 points=base_points,
                 t_odom_base=pose,
                 session=self.session,
+                **height_kwargs,
             )
         except ProtocolError:
             return False

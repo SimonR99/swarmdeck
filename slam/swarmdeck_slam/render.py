@@ -359,7 +359,7 @@ def _keyframe_contributions(
     Keyframes with no optimized pose (not yet solved) are skipped rather than
     guessed at.
     """
-    min_z, max_z = config.height_limits()
+    fallback_min_z, fallback_max_z = config.height_limits()
     contributions: dict[KeyframeId, _Contribution] = {}
 
     for kf_id, pose in graph.poses.items():
@@ -370,13 +370,20 @@ def _keyframe_contributions(
         origin_xy = pose[:2, 3]
 
         # Height band and range are evaluated in the BASE frame at capture,
-        # before the world transform: floor_z is a per-robot sensor-mount
-        # calibration (see scout_mini.yaml), not a property of wherever the
-        # optimizer happened to place this keyframe in world. This assumes
-        # T_world_base does not roll or pitch the vertical axis, true for the
-        # ground-vehicle fleets this module targets (see tests/synthetic.py's
-        # planar yaw_pose) and the same assumption the height-band config
-        # itself makes.
+        # before the world transform. Current producers carry the floor plane
+        # and physical limits for their own robot; old captures use the service
+        # fallback. This assumes T_world_base does not roll or pitch the
+        # vertical axis, true for the ground-vehicle fleets this module targets
+        # (see tests/synthetic.py's planar yaw_pose).
+        if (
+            keyframe.ground_z is not None
+            and keyframe.min_height is not None
+            and keyframe.max_height is not None
+        ):
+            min_z = keyframe.ground_z + keyframe.min_height
+            max_z = keyframe.ground_z + keyframe.max_height
+        else:
+            min_z, max_z = fallback_min_z, fallback_max_z
         planar_range = np.linalg.norm(points[:, :2], axis=1)
         in_band = (points[:, 2] >= min_z) & (points[:, 2] <= max_z)
         keep = in_band & (planar_range <= config.max_range_m)

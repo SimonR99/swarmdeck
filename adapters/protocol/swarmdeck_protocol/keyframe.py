@@ -34,6 +34,13 @@ Conventions that the rest of the system depends on:
   ``T_world_base @ points``, with no per-robot extrinsic lookup at render time.
 * ``stamp`` is UNIX seconds as a float.
 
+``height_band`` is an optional header field for current producers. Its
+``ground_z`` is the horizontal ground-plane Z in the keyframe's base frame;
+``min_height`` and ``max_height`` are physical heights above that ground plane.
+``lidar_height`` is the sensor origin's height above the same ground and is
+carried for diagnostics. Older packets omit this field and remain renderable
+with the service fallback.
+
 ``session``: what makes ``seq`` mean something
 -----------------------------------------------
 ``seq`` counts from zero and is minted by the producer, which restarts at zero
@@ -62,6 +69,7 @@ un-upgraded robot would have had every keyframe refused at the door.
 from __future__ import annotations
 
 import json
+import math
 import struct
 import zlib
 from dataclasses import dataclass
@@ -151,6 +159,12 @@ class KeyframePacket:
     #: Producer boot id; ``""`` for a packet recorded before the field existed.
     #: See this module's docstring -- ``seq`` is only unique within one session.
     session: str = ""
+    #: Ground plane and obstacle band in the base frame at capture. These are
+    #: optional so captures made before per-robot height calibration still decode.
+    ground_z: float | None = None
+    min_height: float | None = None
+    max_height: float | None = None
+    lidar_height: float | None = None
 
     @property
     def n_points(self) -> int:
@@ -187,6 +201,34 @@ def _validate_pose(t_odom_base: Any) -> np.ndarray:
     return pose
 
 
+def _validate_height_band(
+    spec: Any,
+) -> tuple[float, float, float, float | None] | None:
+    """Validate optional ground-relative height metadata."""
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ProtocolError("height_band header must be a JSON object or null")
+    try:
+        ground_z = float(spec["ground_z"])
+        min_height = float(spec["min_height"])
+        max_height = float(spec["max_height"])
+        lidar_value = spec.get("lidar_height")
+        lidar_height = None if lidar_value is None else float(lidar_value)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProtocolError(f"height_band header is malformed: {exc}") from exc
+
+    if not all(math.isfinite(value) for value in (ground_z, min_height, max_height)):
+        raise ProtocolError("height_band contains a non-finite ground or limit")
+    if min_height < 0.0 or max_height <= min_height:
+        raise ProtocolError("height_band must satisfy 0 <= min_height < max_height")
+    if lidar_height is not None and (
+        not math.isfinite(lidar_height) or lidar_height < 0.0
+    ):
+        raise ProtocolError("height_band lidar_height must be finite and non-negative")
+    return ground_z, min_height, max_height, lidar_height
+
+
 def encode_keyframe(
     *,
     robot_id: str,
@@ -197,6 +239,10 @@ def encode_keyframe(
     descriptor: Descriptor | None = None,
     scale: float = 0.01,
     session: str = "",
+    ground_z: float | None = None,
+    min_height: float | None = None,
+    max_height: float | None = None,
+    lidar_height: float | None = None,
 ) -> bytes:
     """Serialize one keyframe. Raises :class:`ProtocolError` on invalid input.
 
@@ -213,6 +259,20 @@ def encode_keyframe(
     pts = _validate_points(points)
     pose = _validate_pose(t_odom_base)
     session = _validate_session(session)
+    height_band_spec = None
+    if any(
+        value is not None
+        for value in (ground_z, min_height, max_height, lidar_height)
+    ):
+        height_band_spec = {
+            "ground_z": ground_z,
+            "min_height": min_height,
+            "max_height": max_height,
+            "lidar_height": lidar_height,
+        }
+        # Reuse the decoder's validation so an encoder cannot emit metadata the
+        # backend would reject later.
+        _validate_height_band(height_band_spec)
 
     quantized = np.rint(pts / scale)
     in_range = (np.abs(quantized) <= _INT16_LIMIT).all(axis=1)
@@ -234,6 +294,12 @@ def encode_keyframe(
     # point: both mean one trajectory per robot.
     if session:
         header["session"] = session
+    if height_band_spec is not None:
+        header["height_band"] = {
+            key: value
+            for key, value in height_band_spec.items()
+            if value is not None
+        }
 
     body = quantized.tobytes(order="C")
     if descriptor is not None:
@@ -360,6 +426,7 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
 
     descriptor = _decode_descriptor(header.get("descriptor"), body, points_bytes)
     pose = _validate_pose(header.get("t_odom_base"))
+    height_band = _validate_height_band(header.get("height_band"))
 
     return KeyframePacket(
         robot_id=robot_id,
@@ -369,6 +436,10 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
         t_odom_base=pose,
         descriptor=descriptor,
         session=session,
+        ground_z=height_band[0] if height_band is not None else None,
+        min_height=height_band[1] if height_band is not None else None,
+        max_height=height_band[2] if height_band is not None else None,
+        lidar_height=height_band[3] if height_band is not None else None,
     )
 
 

@@ -219,6 +219,70 @@ def best_alignment(candidate: np.ndarray, query: np.ndarray) -> tuple[int, float
     return int(shifts[0]), float(distances[0])
 
 
+def alignment_hypotheses(
+    candidate: np.ndarray,
+    query: np.ndarray,
+    *,
+    count: int = 4,
+    min_separation_sectors: int = 3,
+) -> list[tuple[int, float]]:
+    """Return several distinct column-shift alignments, best first.
+
+    :func:`best_alignment` is sufficient when GICP only needs one yaw seed,
+    but it is unsafe for odometry-free reconstruction. Real indoor scans can
+    have two equally convincing orientations -- most importantly the common
+    180-degree corridor ambiguity. Throwing the runner-up away before
+    geometric and graph-level checks makes that ambiguity impossible to
+    recover from later.
+
+    This function scores every circular shift with the same metric as
+    :func:`best_alignment`, then greedily keeps the best shifts separated by
+    at least ``min_separation_sectors`` on the circular sector axis. The
+    separation prevents neighbouring bins around one broad minimum from
+    crowding out a genuinely different orientation hypothesis.
+    """
+    if candidate.shape != query.shape:
+        raise ValueError(
+            f"shape mismatch: candidate {candidate.shape} vs query {query.shape}"
+        )
+    if candidate.ndim != 2:
+        raise ValueError(f"descriptors must be [rings, sectors], got {candidate.shape}")
+    if count <= 0:
+        raise ValueError(f"count must be positive, got {count}")
+    sectors = candidate.shape[1]
+    if not 0 <= min_separation_sectors <= sectors // 2:
+        raise ValueError(
+            "min_separation_sectors must be between 0 and half the sector count, "
+            f"got {min_separation_sectors} for {sectors} sectors"
+        )
+
+    candidates = candidate[None, ...].astype(np.float64)
+    query_float = query.astype(np.float64)
+    grid = _shift_grid(sectors)
+    shifted = candidates[..., grid]
+    candidate_norms = np.linalg.norm(candidates, axis=1)
+    shifted_norms = candidate_norms[:, grid]
+    query_norms = np.linalg.norm(query_float, axis=0)
+    dot = np.einsum("krns,rs->kns", shifted, query_float)
+    denom = shifted_norms * query_norms[None, None, :]
+    cosine = np.divide(dot, denom, out=np.zeros_like(dot), where=denom > 1e-12)
+    distances = 1.0 - cosine.mean(axis=2)[0]
+
+    selected: list[tuple[int, float]] = []
+    for shift in np.argsort(distances, kind="stable"):
+        shift_int = int(shift)
+        if any(
+            min(abs(shift_int - chosen), sectors - abs(shift_int - chosen))
+            < min_separation_sectors
+            for chosen, _ in selected
+        ):
+            continue
+        selected.append((shift_int, float(distances[shift_int])))
+        if len(selected) >= min(count, sectors):
+            break
+    return selected
+
+
 def shift_to_yaw(shift: int | np.ndarray, sectors: int) -> float | np.ndarray:
     """Sector shift -> radians, wrapped to ``(-pi, pi]``. See :meth:`ScanContextIndex.query`."""
     delta = np.asarray(shift, dtype=np.float64) * (_TAU / sectors)
