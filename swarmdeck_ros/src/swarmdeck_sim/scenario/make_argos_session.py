@@ -13,11 +13,20 @@ part of the stack reports an error.
 
 Two things in the output are worth understanding before editing it.
 
-**The world appears twice.** `indoor.gltf` is both the Jolt `<mesh>` the robots
-collide with and the photorealism `<prop>` the cameras and the photorealistic
-lidar raytrace, with the same position, orientation and scale on both. If the
-two ever disagree, robots collide with a building that is not where it is
-drawn, and nothing says so.
+**The world appears twice, from two files.** The photorealism `<prop>` that the
+cameras and the photorealistic lidar raytrace draws `indoor.gltf`; the Jolt
+`<mesh>` the robots collide with is `indoor_collision.gltf`. Position,
+orientation and scale are identical on both and must stay identical: if they
+disagree, robots collide with a building that is not where it is drawn, and
+nothing says so.
+
+They are separate files for exactly one reason. The collision mesh has no floor
+slab, because `<physics_engines>` below already provides the ground as a
+`<floor height="0">` plane. A slab whose top face is also at z=0 leaves every
+robot resting on two coincident surfaces, and the degenerate contacts cost
+60-100% of the commanded turn rate (position-dependent, and measured on all
+three platforms) while barely touching translation: a robot that drives but
+will not turn. `make_argos_world.build_indoor_world` writes both.
 
 **The odometry is not ground truth.** `<odometry implementation="external"
 medium="uf"/>` reports whatever Ultra-Fusion estimated from the simulated IMU,
@@ -45,7 +54,7 @@ REPO = HERE.parents[3]
 sys.path.insert(0, str(HERE))
 
 from generate_world import place_targets  # noqa: E402
-from make_argos_world import target_classes  # noqa: E402
+from make_argos_world import collision_path, target_classes  # noqa: E402
 from spawn_fleet import lidar_spec, robot_spec, robot_types  # noqa: E402
 
 # Bistro scene constants
@@ -253,6 +262,7 @@ def generate_argos_xml(
     headless: bool = True,
     estimator: bool = True,
 ) -> str:
+    world_collision = str(collision_path(Path(world_gltf)))
     cfg = yaml.safe_load(config_path.read_text())
     fleet_cfg = cfg.get("fleet", {}) or {}
     count = int(fleet_cfg.get("robot_count", 4)) if robot_count is None else robot_count
@@ -344,9 +354,16 @@ def generate_argos_xml(
         lines.extend([
             '  <arena size="30,30,6" center="0,0,3">',
             "",
-            "    <!-- Collision geometry. The photorealism <prop> at the bottom of",
-            "         this file draws the SAME file with the SAME transform. -->",
-            f'    <mesh id="world_mesh" file={_attr(world_gltf)}',
+            "    <!-- Collision geometry, at the SAME transform as the photorealism",
+            "         <prop> at the bottom of this file, but NOT the same file.",
+            "         The collision mesh carries no floor slab: the <jolt> engine",
+            "         below already provides the ground as a plane at z=0, and a",
+            "         slab whose top face is also at z=0 puts every robot in",
+            "         contact with two coincident surfaces. Measured cost of that:",
+            "         60-100% of the commanded turn rate, varying with position,",
+            "         while translation is almost unaffected. A robot that drives",
+            "         but will not turn. See make_argos_world.build_indoor_world. -->",
+            f'    <mesh id="world_mesh" file={_attr(world_collision)}',
             '          position="0,0,0" orientation="0,0,90" scale="1.0" />',
         ])
         placements = place_targets(seed, targets)

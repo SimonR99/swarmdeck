@@ -145,15 +145,43 @@ def test_robots_spawn_on_the_floor_at_their_configured_poses(tree, cfg):
 def test_the_collision_mesh_and_the_visual_prop_agree(tree):
     """Physics and rendering must place the building identically.
 
-    They are the same file loaded twice, by two subsystems that share nothing.
-    When they disagree the robots collide with a building that is not where it
-    is drawn, the lidar reports free space through a wall, and nothing raises.
+    Two subsystems that share nothing load the building separately. When they
+    disagree the robots collide with a building that is not where it is drawn,
+    the lidar reports free space through a wall, and nothing raises.
+
+    The transform therefore has to match exactly. The FILE deliberately does
+    not: see the companion test below.
     """
     mesh = tree.find("./arena/mesh[@id='world_mesh']")
     prop = tree.find("./media/photorealism/scenery/prop")
-    assert mesh.get("file") == prop.get("model")
     for attr in ("position", "orientation", "scale"):
         assert mesh.get(attr) == prop.get(attr), attr
+
+
+def test_physics_collides_with_the_floorless_copy_of_the_world(tree):
+    """The Jolt mesh must be the collision variant, not the drawn one.
+
+    `<physics_engines>` provides the ground as a `<floor height="0">` plane.
+    `indoor.gltf` also carries a floor slab whose top face is at z=0, for the
+    renderer, which needs something to photograph. Cook that slab into the
+    collision mesh as well and every robot rests on two coincident surfaces;
+    the degenerate contacts cost 60-100% of the commanded turn rate, varying
+    with position, while translation is almost unaffected. The symptom is a
+    robot that drives but will not turn, and nothing anywhere reports it.
+
+    So the two files must differ, and the collision one must be the floorless
+    variant that `make_argos_world.collision_path` names.
+    """
+    mesh = tree.find("./arena/mesh[@id='world_mesh']")
+    prop = tree.find("./media/photorealism/scenery/prop")
+
+    assert tree.find("./physics_engines/jolt/floor") is not None, (
+        "the reasoning below assumes the engine supplies the ground plane"
+    )
+    assert mesh.get("file") != prop.get("model")
+
+    import make_argos_world as maw  # noqa: E402
+    assert mesh.get("file") == str(maw.collision_path(Path(prop.get("model"))))
 
 
 def test_every_detection_target_is_both_collidable_and_visible(tree):
@@ -166,7 +194,15 @@ def test_every_detection_target_is_both_collidable_and_visible(tree):
              tree.findall("./media/photorealism/scenery/prop")}
     world = tree.find("./arena/mesh[@id='world_mesh']").get("file")
     assert meshes, "no detection targets were placed"
-    assert set(meshes) == set(props) - {world}
+
+    # The building is in both sets under DIFFERENT names: the prop draws
+    # indoor.gltf, physics collides with indoor_collision.gltf. Drop it from
+    # the prop side by the same mapping the generator used, so this stays a
+    # statement about detection targets and nothing else.
+    import make_argos_world as maw  # noqa: E402
+    world_props = {m for m in props if str(maw.collision_path(Path(m))) == world}
+    assert len(world_props) == 1, world_props
+    assert set(meshes) == set(props) - world_props
     for model, mesh in meshes.items():
         for attr in ("position", "orientation", "scale"):
             assert mesh.get(attr) == props[model].get(attr), (model, attr)

@@ -65,7 +65,8 @@ and `argos-entrypoint.sh` waits for the generated experiment rather than racing.
 
 | File | Written by | Read by |
 |---|---|---|
-| `<runtime>/indoor.gltf` | `scenario/make_argos_world.py` | Jolt `<mesh>` and photorealism `<prop>` |
+| `<runtime>/indoor.gltf` | `scenario/make_argos_world.py` | photorealism `<prop>` (drawn) |
+| `<runtime>/indoor_collision.gltf` | same run of the same script | Jolt `<mesh>` (collided with) |
 | `<runtime>/session.argos` | `scenario/make_argos_session.py` | `argos3`, and `argos_mounts.py` for the estimator's extrinsics |
 | `<runtime>/argos.sock` | the ROS bridge (bind) | the loop function (dial) |
 | `<runtime>/uf.sock` | Ultra-Fusion (bind) | the `external_estimator` medium (dial) |
@@ -109,7 +110,19 @@ SwarmDeck supports two simulation environments:
 2. **Amazon Lumberyard Bistro (`world: bistro`)**:
    - Configured in `configs/4robot_bistro.yaml`, `configs/3robot_bistro.yaml`, `configs/bistro.yaml`.
    - Uses the realistic Parisian street scene (`bistro_exterior.glb`) from `argos3-examples/experiments/bistro_exploration`.
-   - The entire glTF geometry is loaded directly into Jolt physics as a `<mesh id="world_mesh">` entity, exactly mirroring the photorealism `<prop>` visual model with zero proxy collision boxes.
+   - The glTF geometry is loaded directly into Jolt physics as a
+     `<mesh id="world_mesh">` entity, at exactly the position, orientation and
+     scale of the photorealism `<prop>`, with zero proxy collision boxes.
+   - Physics and rendering read two different FILES, though, and the difference
+     is one mesh: the drawn `indoor.gltf` has a floor slab, the collided
+     `indoor_collision.gltf` does not. The `<jolt>` engine already supplies the
+     ground as a `<floor height="0">` plane, and the slab's top face is also at
+     z=0, so cooking it into the collision mesh rests every robot on two
+     coincident surfaces. The degenerate contacts cost 60-100% of the commanded
+     turn rate (position-dependent, all three platforms) while leaving
+     translation almost untouched: a robot that drives but will not turn, with
+     nothing logged anywhere. The renderer still needs a floor to photograph,
+     hence the split rather than deleting the slab outright.
    - Uses a 200 × 210 × 70 m arena, PBR night lighting with 28 street lamps, San Giuseppe IBL environment map, and EV 5.6 camera exposure (`aperture="2" shutter_speed="0.02" sensitivity="400"`).
    - Start poses distributed along the 141 m closed road circuit.
 

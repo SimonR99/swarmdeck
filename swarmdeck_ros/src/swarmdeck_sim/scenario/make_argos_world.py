@@ -3,12 +3,15 @@
 
 Two products, from one mesh builder:
 
-1. `indoor.gltf` (+ `indoor.bin`): the seeded indoor floor plan, used twice by
-   the generated experiment. Once as the Jolt `<mesh>` the robots collide
-   with, and once as the photorealism `<prop>` the cameras and the
-   photorealistic lidar raytrace. The two carry the same transform on purpose:
-   if they ever disagree, robots collide with a building that is not where it
-   is drawn.
+1. `indoor.gltf` and `indoor_collision.gltf` (+ their `.bin`): the seeded
+   indoor floor plan. The first is the photorealism `<prop>` the cameras and
+   the photorealistic lidar raytrace; the second is the Jolt `<mesh>` the
+   robots collide with. They carry the same transform, and MUST: if those ever
+   disagree, robots collide with a building that is not where it is drawn.
+
+   They differ in exactly one thing, and only because the physics engine
+   supplies it instead: the collision mesh has no floor slab. See
+   `build_indoor_world` for what a second ground surface did to rotation.
 
 2. `props/*.glb`: one model per class in `adapters/perception/catalog.py`,
    the objects the detector is asked to find. These are static and committed;
@@ -361,11 +364,30 @@ _FURNITURE_BUILDERS = {
 }
 
 
-def build_indoor_world() -> GLTFBuilder:
-    """Floor, walls and furniture, in the ARGoS frame with z up."""
+def build_indoor_world(floor: bool = True) -> GLTFBuilder:
+    """Walls and furniture, in the ARGoS frame with z up, optionally floored.
+
+    `floor=False` is what the COLLISION mesh is built with, and the reason is
+    worth stating because the two meshes otherwise being identical is a rule
+    this deliberately breaks.
+
+    The Jolt engine already provides the ground as a `<floor height="0">`
+    plane. Cooking a floor slab into the collision mesh as well puts a second
+    surface at exactly the same height, so every robot rests on both at once
+    and the solver has to reconcile two coplanar contacts under it. Measured
+    against 0.4 rad/s commanded: rotation collapsed to 0-35% of the commanded
+    rate, varying with arena position, while translation was unaffected. A
+    robot that drives but will not turn, and nothing logs a thing.
+
+    Removing the slab from the collision mesh restored 90-100% for all three
+    platforms at three different arena positions.
+
+    The slab stays in the VISUAL mesh, because something has to be drawn.
+    """
     mesh = GLTFBuilder()
-    mesh.add_box(FLOOR, (0.0, 0.0, -FLOOR_THICKNESS / 2.0),
-                 (FLOOR_HALF * 2.0, FLOOR_HALF * 2.0, FLOOR_THICKNESS))
+    if floor:
+        mesh.add_box(FLOOR, (0.0, 0.0, -FLOOR_THICKNESS / 2.0),
+                     (FLOOR_HALF * 2.0, FLOOR_HALF * 2.0, FLOOR_THICKNESS))
     for x0, y0, x1, y1 in LAYOUT:
         mesh.add_box(WALL,
                      ((x0 + x1) / 2.0, (y0 + y1) / 2.0, WALL_H / 2.0),
@@ -373,6 +395,11 @@ def build_indoor_world() -> GLTFBuilder:
     for kind, _index, args in FURNITURE:
         _FURNITURE_BUILDERS[kind](mesh, *args)
     return mesh
+
+
+def collision_path(world: Path) -> Path:
+    """Where the collision mesh sits, given the visual one."""
+    return world.with_name(f"{world.stem}_collision{world.suffix}")
 
 
 # --------------------------------------------------------------------------
@@ -518,11 +545,17 @@ def main() -> int:
         generate_props(Path(args.props))
         return 0
 
-    mesh = build_indoor_world()
     out = Path(args.output)
-    mesh.export_gltf(out)
+    visual = build_indoor_world(floor=True)
+    visual.export_gltf(out)
+    collision = build_indoor_world(floor=False)
+    collision_out = collision_path(out)
+    collision.export_gltf(collision_out)
     print(f"[world] seed={args.seed} walls={len(LAYOUT)} "
-          f"furniture={len(FURNITURE)} triangles={mesh.triangle_count} -> {out}")
+          f"furniture={len(FURNITURE)}")
+    print(f"[world]   visual    {visual.triangle_count} triangles -> {out}")
+    print(f"[world]   collision {collision.triangle_count} triangles -> "
+          f"{collision_out}  (no floor slab; see build_indoor_world)")
     return 0
 
 

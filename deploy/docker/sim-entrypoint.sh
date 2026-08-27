@@ -50,7 +50,8 @@ mkdir -p /app/sessions "${RUNTIME_DIR}"
 # ever going to bind. Any change of robot count, world seed or fleet config has
 # the same hazard.
 rm -f "${RUNTIME_DIR}/session.argos" "${RUNTIME_DIR}/indoor.gltf" \
-      "${RUNTIME_DIR}/indoor.bin"
+      "${RUNTIME_DIR}/indoor.bin" "${RUNTIME_DIR}/indoor_collision.gltf" \
+      "${RUNTIME_DIR}/indoor_collision.bin"
 
 echo "[sim] launching session config=${CONFIG} backend=${SIM_BACKEND}" \
      "slam_backend=${SLAM_BACKEND} explore_seconds=${EXPLORE_SECONDS}"

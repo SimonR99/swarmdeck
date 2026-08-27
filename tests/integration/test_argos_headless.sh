@@ -35,9 +35,30 @@ python3 "$SCENARIO/make_argos_world.py" --seed 20260801 -o "$WORK/a/indoor.gltf"
 python3 "$SCENARIO/make_argos_world.py" --seed 20260801 -o "$WORK/b/indoor.gltf" >/dev/null
 cmp -s "$WORK/a/indoor.gltf" "$WORK/b/indoor.gltf" || fail "world glTF not deterministic (NFR-5)"
 cmp -s "$WORK/a/indoor.bin"  "$WORK/b/indoor.bin"  || fail "world buffer not deterministic (NFR-5)"
-python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$WORK/a/indoor.gltf" \
-  || fail "world glTF is not valid JSON"
-echo "   ok: byte-identical across runs, valid glTF"
+cmp -s "$WORK/a/indoor_collision.gltf" "$WORK/b/indoor_collision.gltf" \
+  || fail "collision glTF not deterministic (NFR-5)"
+cmp -s "$WORK/a/indoor_collision.bin" "$WORK/b/indoor_collision.bin" \
+  || fail "collision buffer not deterministic (NFR-5)"
+for f in indoor.gltf indoor_collision.gltf; do
+  python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$WORK/a/$f" \
+    || fail "$f is not valid glTF JSON"
+done
+# The collision copy exists only to omit the floor slab. If it ever stops being
+# smaller than the drawn one, the slab is back and the fleet loses its ability
+# to turn, silently.
+python3 - "$WORK/a" <<'PY' || fail "collision mesh is not the floorless variant"
+import json, sys
+from pathlib import Path
+w = Path(sys.argv[1])
+def tris(name):
+    g = json.loads((w / name).read_text())
+    return sum(g["accessors"][p["indices"]]["count"]
+               for m in g["meshes"] for p in m["primitives"]) // 3
+v, c = tris("indoor.gltf"), tris("indoor_collision.gltf")
+if c >= v:
+    sys.exit(f"collision has {c} triangles, visual {v}: floor slab not removed")
+PY
+echo "   ok: byte-identical across runs, valid glTF, collision copy is floorless"
 
 echo "== 2. every detection-target model exists =="
 python3 - "$SCENARIO" "$REPO/argos/assets/props" <<'PY' || fail "missing prop models"
