@@ -1312,6 +1312,17 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         # session would otherwise resume full-rate video for a robot nobody has
         # on screen, and stay that way until the operator happened to switch.
         await push_camera_interest({robot_id})
+        known_ids = {item.get("id") for item in settings_store.value.get("robots", []) if isinstance(item, dict)}
+        if robot_id not in known_ids:
+            settings_store.value.setdefault("robots", []).append(
+                {
+                    "id": robot_id,
+                    "enabled": True,
+                    "color": default_color(robot_id, len(settings_store.value.get("robots", []))),
+                }
+            )
+            settings_store.save(settings_store.value)
+            await broadcast({"type": "settings_state", "settings": settings_store.value})
         await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
         events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
 

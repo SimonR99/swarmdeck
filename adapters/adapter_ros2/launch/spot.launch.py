@@ -123,15 +123,54 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(start_slam),
     )
 
-    lio_sam = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            str(rover_share / "launch/auxilary/lio_sam.launch.py")
-        ),
-        launch_arguments={
-            "lio_params_file": PathJoinSubstitution(
-                [mist_config, "lio_sam/lio_sam.yaml"]
-            ),
-        }.items(),
+    lio_params = PathJoinSubstitution([mist_config, "lio_sam/lio_sam.yaml"])
+    tf_map_odom = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="tf_map_odom",
+        arguments=["0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "map", "odom_link"],
+        parameters=[lio_params],
+        output="screen",
+        condition=IfCondition(start_slam),
+    )
+    lio_sam_imu = Node(
+        package="lio_sam",
+        executable="lio_sam_imuPreintegration",
+        name="lio_sam_imuPreintegration",
+        parameters=[lio_params],
+        output="screen",
+        respawn=True,
+        respawn_delay=2.0,
+        condition=IfCondition(start_slam),
+    )
+    lio_sam_img = Node(
+        package="lio_sam",
+        executable="lio_sam_imageProjection",
+        name="lio_sam_imageProjection",
+        parameters=[lio_params],
+        output="screen",
+        respawn=True,
+        respawn_delay=2.0,
+        condition=IfCondition(start_slam),
+    )
+    lio_sam_feat = Node(
+        package="lio_sam",
+        executable="lio_sam_featureExtraction",
+        name="lio_sam_featureExtraction",
+        parameters=[lio_params],
+        output="screen",
+        respawn=True,
+        respawn_delay=2.0,
+        condition=IfCondition(start_slam),
+    )
+    lio_sam_map = Node(
+        package="lio_sam",
+        executable="lio_sam_mapOptimization",
+        name="lio_sam_mapOptimization",
+        parameters=[lio_params],
+        output="screen",
+        respawn=True,
+        respawn_delay=2.0,
         condition=IfCondition(start_slam),
     )
 
@@ -214,7 +253,11 @@ def generate_launch_description() -> LaunchDescription:
             ouster,
             vectornav,
             vn_sensor_msgs,
-            lio_sam,
+            tf_map_odom,
+            lio_sam_imu,
+            lio_sam_img,
+            lio_sam_feat,
+            lio_sam_map,
             tf_body_oslidar,
             tf_lidar_body,
             tf_lidar_imubody,

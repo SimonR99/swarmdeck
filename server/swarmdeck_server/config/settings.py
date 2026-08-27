@@ -16,7 +16,7 @@ from .detection import (
 )
 from ..detect.review import DEFAULT_ASK_RADIUS_M, DEFAULT_SAME_RADIUS_M
 
-MAX_ROBOTS = 8
+MAX_ROBOTS = 16
 # How the dashboard draws its manual-drive control.  "arrows" is a four-button
 # pad, one direction per button, which is what a gloved finger on a tablet can
 # actually hit; "joystick" is the analogue thumbstick.  Keyboard WASD/arrow keys

@@ -1,7 +1,7 @@
 # Unitree G1 Humanoid Robot (SSH alias `chris` → `192.168.1.37`, user `unitree`).
-# Runs ROS 2 (Foxy / CycloneDDS) and g1pilot / unitree_ros2 / DinoNav.
+# Runs ROS 2 (Humble / CycloneDDS) and g1pilot / unitree_ros2 / DinoNav.
 robot_type: unitree_g1
-ros_distro: foxy
+ros_distro: humble
 network_iface: auto
 
 # Humanoid torso/pelvis bounding footprint.
@@ -13,19 +13,19 @@ footprint:
   - [-0.18, 0.22]
 
 map_frame: map
-base_frame: pelvis
+base_frame: robot_center
 
 topics:
-  odom: /g1pilot/odom
+  odom: /dog_odom
   map: /map
-  map_cloud: ""
+  map_cloud: /utlidar/cloud_livox_mid360
   plan: /g1pilot/path
   cmd_vel: /cmd_vel
   battery: /g1pilot/battery
-  camera: /camera/color/image_raw
-  camera_compressed: ""
-  camera_depth: /camera/aligned_depth_to_color/image_raw
-  camera_info: /camera/aligned_depth_to_color/camera_info
+  camera: /d435/color/image_raw
+  camera_compressed: /d435/color/image_raw/compressed
+  camera_depth: /d435/aligned_depth_to_color/image_raw
+  camera_info: /d435/aligned_depth_to_color/camera_info
   camera_color_info: ""
   camera_depth_points: ""
 
