@@ -44,7 +44,9 @@ const OCCUPIED_RED_MAX = 140;
 
 const state = $state({
   info: null as MapInfo | null,
-  seq: -1,
+  seq: 0,
+  globalSeq: 0,
+  robotSeqs: {} as Record<string, number>,
   revision: 0, // bumped on every change so views can react
   ready: false,
   status: null as MapStatus | null,
@@ -56,7 +58,7 @@ const state = $state({
   // than a third viewMode because it answers a different question -- viewMode
   // asks WHOSE map, this asks WHICH ESTIMATE of it -- and folding them together
   // would multiply out into states like "global raw" that do not exist.
-  mapSource: 'optimized' as 'slam' | 'optimized',
+  mapSource: 'slam' as 'slam' | 'optimized',
   optimizedScopes: [] as OptimizedScope[],
   viewRobot: null as string | null,
   // What the OPERATOR asked for, as opposed to what the backend recommends.
@@ -369,7 +371,10 @@ export const mapStore = {
     return state.revision;
   },
   get seq() {
-    return state.seq;
+    if (state.viewMode === 'local' && state.viewRobot) {
+      return state.robotSeqs[state.viewRobot] ?? (state.info?.seq ?? 0);
+    }
+    return state.globalSeq;
   },
   get ready() {
     return state.ready;
@@ -393,7 +398,7 @@ export const mapStore = {
     if (state.mapSource === 'optimized') {
       void this.loadOptimizedScopes().then(() => {
         if (state.viewMode === 'local' && state.viewRobot === robotId) {
-          void this.selectRobotView(robotId);
+          void this.selectRobotView(robotId, true);
         }
       });
     }
@@ -408,9 +413,8 @@ export const mapStore = {
     state.mapSource = source;
     await this.loadOptimizedScopes();
     if (state.viewMode === 'local' && state.viewRobot) {
-      state.seq = -1;
       state.ready = false;
-      await this.selectRobotView(state.viewRobot);
+      await this.selectRobotView(state.viewRobot, true);
     }
     state.revision++;
   },
@@ -607,7 +611,7 @@ export const mapStore = {
 
       // A live patch may have arrived while the PNG was downloading. Never
       // overwrite newer map data with an older reconnect snapshot.
-      if (state.seq > seq) {
+      if (state.globalSeq > seq) {
         bitmap.close();
         return;
       }
@@ -619,7 +623,10 @@ export const mapStore = {
       }
       bitmap.close();
       state.info = info;
-      state.seq = seq;
+      state.globalSeq = Math.max(state.globalSeq, seq);
+      if (state.viewMode === 'global') {
+        state.seq = state.globalSeq;
+      }
       state.ready = true;
       state.revision++;
       for (const robot of fleet.robots) {
@@ -640,13 +647,15 @@ export const mapStore = {
     ensureCanvas(info.width, info.height);
     state.info = info;
     if (ctx) ctx.putImageData(toImageData(cells, info.width, info.height), 0, 0);
-    state.seq = info.seq;
+    state.globalSeq = Math.max(state.globalSeq, info.seq);
+    state.seq = state.globalSeq;
     state.ready = true;
     state.revision++;
   },
 
   /** Incremental patch — the common path. Never re-fetches the whole grid. */
   applyGlobalPatch(patch: MapPatch) {
+    state.globalSeq = Math.max(state.globalSeq, patch.seq);
     if (state.viewMode !== 'global') return;
     if (!state.info) return;
 
@@ -716,7 +725,7 @@ export const mapStore = {
       canvasY0
     );
 
-    state.seq = patch.seq;
+    state.seq = state.globalSeq;
     state.revision++;
   },
 
@@ -833,13 +842,12 @@ export const mapStore = {
   /** Reload whichever full grid is visible after an operator map reset. */
   async reloadCurrentView() {
     loadGeneration++;
-    state.seq = -1;
     state.ready = false;
     state.revision++;
 
     if (state.viewMode === 'local' && state.viewRobot) {
       clearNetworkLayer();
-      await this.selectRobotView(state.viewRobot);
+      await this.selectRobotView(state.viewRobot, true);
       return;
     }
 
@@ -870,10 +878,10 @@ export const mapStore = {
     // absorb the backend changing its mind.
     autoView = null;
     autoPending = null;
-    await this.selectRobotView(robotId);
+    await this.selectRobotView(robotId, true);
   },
 
-  async selectRobotView(robotId: string | null) {
+  async selectRobotView(robotId: string | null, force: boolean = false) {
     const recommended = state.status?.view_by_robot?.[robotId ?? ''] === 'local';
     const desiredLocal = Boolean(
       robotId &&
@@ -883,11 +891,15 @@ export const mapStore = {
     const desiredMode = desiredLocal ? 'local' : 'global';
     const desiredRobot = desiredLocal ? robotId : null;
 
-    if (state.viewMode !== desiredMode || state.viewRobot !== desiredRobot) {
+    const viewChanged = state.viewMode !== desiredMode || state.viewRobot !== desiredRobot;
+    if (!viewChanged && !force && state.ready) {
+      return;
+    }
+
+    if (viewChanged) {
       loadGeneration++;
       state.viewMode = desiredMode;
       state.viewRobot = desiredRobot;
-      state.seq = -1;
       state.ready = false;
       state.revision++;
     }
@@ -917,12 +929,15 @@ export const mapStore = {
       let info: MapInfo;
       let mapResponse: Response;
       if (scope) {
+        const prevSeq = state.robotSeqs[robotId!] ?? 0;
+        const currentSeq = prevSeq + 1;
+        state.robotSeqs[robotId!] = currentSeq;
         info = {
           resolution: scope.resolution,
           width: scope.width,
           height: scope.height,
           origin: scope.origin,
-          seq: state.seq + 1
+          seq: currentSeq
         } as MapInfo;
         mapResponse = await fetch(`/api/map/optimized/${encodeURIComponent(scopeName)}`, {
           cache: 'no-store'
@@ -933,6 +948,7 @@ export const mapStore = {
         });
         if (!infoResponse.ok) throw new Error(`local map info ${infoResponse.status}`);
         info = (await infoResponse.json()) as MapInfo;
+        state.robotSeqs[robotId!] = Math.max(state.robotSeqs[robotId!] ?? 0, info.seq);
         mapResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}`, {
           cache: 'no-store'
         });
@@ -953,7 +969,7 @@ export const mapStore = {
       readBackOccupancy();
       bitmap.close();
       state.info = info;
-      state.seq = info.seq;
+      state.seq = state.robotSeqs[robotId!] ?? info.seq;
       state.ready = true;
       state.revision++;
       await this.loadNetworkSnapshot(robotId!, generation);
@@ -1025,7 +1041,9 @@ export const mapStore = {
 
   reset() {
     state.info = null;
-    state.seq = -1;
+    state.seq = 0;
+    state.globalSeq = 0;
+    state.robotSeqs = {};
     state.ready = false;
     state.status = null;
     state.statusUpdatedAt = 0;

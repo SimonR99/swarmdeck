@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import {
     Box,
     Compass,
@@ -66,8 +67,8 @@
   let showLabels = $state(true);
   let showSensors = $state(false);
   let showPlans = $state(true);
-  let showNetwork = $state(true);
-  let showCostmap = $state(true);
+  let showNetwork = $state(false);
+  let showCostmap = $state(false);
   let costmapKind = $state<'global' | 'local'>('global');
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
@@ -347,29 +348,7 @@
     }
   });
 
-  $effect(() => {
-    void mapStore.revision;
-    void fleet.robots;
-    void settings.value;
-    void view.scale;
-    void view.tx;
-    void view.ty;
-    void session.detections;
-    void review.entities;
-    void review.proposals;
-    void review.focused;
-    void review.selected;
-    void showGrid;
-    void showTrails;
-    void showLabels;
-    void showSensors;
-    void showPlans;
-    void showNetwork;
-    void showCostmap;
-    void costmapKind;
-    draw();
-  });
-
+  // Continuous render loop & resize observer
   $effect(() => {
     let raf = 0;
     const loop = () => {
@@ -402,15 +381,19 @@
   $effect(() => {
     const selectedRobot = fleet.selected.length === 1 ? fleet.selected[0] : null;
     void mapStore.statusUpdatedAt;
-    void mapStore.selectRobotView(selectedRobot);
+    untrack(() => {
+      void mapStore.selectRobotView(selectedRobot);
+    });
   });
 
   $effect(() => {
     void mapStore.viewMode;
     void mapStore.viewRobot;
-    trails.clear();
-    lastRenderedInfo = null;
-    view.initialised = false;
+    untrack(() => {
+      trails.clear();
+      lastRenderedInfo = null;
+      view.initialised = false;
+    });
   });
 
   let pointerDownPos: { x: number; y: number } | null = null;
@@ -1008,8 +991,10 @@
     {#if mapStore.info}
       <span class="h-3 w-px bg-border"></span>
       <span>{Math.round(mapStore.info.resolution * 100)} cm/cell</span>
-      <span class="h-3 w-px bg-border"></span>
-      <span>rev {mapStore.seq}</span>
+      {#if mapStore.seq >= 0}
+        <span class="h-3 w-px bg-border"></span>
+        <span>rev {mapStore.seq}</span>
+      {/if}
     {/if}
   </div>
 </div>

@@ -19,7 +19,7 @@
 
 | Component | Port / Path | Purpose & Responsibilities |
 |---|---|---|
-| **Frontend UI** | `:5173` / `ui/` | SvelteKit dashboard, WebGL2 3D viewer, Canvas 2D map viewer, teleoperation controls, detection reviewer. Defaults to `mapSource: "optimized"`. |
+| **Frontend UI** | `:5173` / `ui/` | SvelteKit dashboard, WebGL2 3D viewer, Canvas 2D map viewer, teleoperation controls, detection reviewer. Defaults to `mapSource: "slam"`. |
 | **Server Backend** | `:8080` / `server/` | FastAPI orchestration, robot registry, telemetry routing, map patch broadcaster, navigation map downlink, object review persistence. |
 | **Collaborative SLAM** | `:8090` / `slam/` | Python 3.12 / GTSAM pose graph optimizer, conditioned-Hessian loop closure weighting, probabilistic ray clearing (`render.py`), and scoped grid publisher. |
 | **MediaMTX** | `:8554` (RTSP), `:8889` (WHEP) | Low-latency H.264 video streaming from onboard robot cameras. |
