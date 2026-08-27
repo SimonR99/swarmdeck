@@ -25,24 +25,22 @@ services:
       - realsense2_camera
       - realsense2_camera_node
       - --ros-args
+      - -r
+      - __node:=camera
+      - -r
+      - __ns:=/d435
       - -p
-      - camera_name:=d435
+      - enable_color:=true
       - -p
-      - initial_reset:=true
+      - enable_depth:=true
+      - -p
+      - enable_accel:=false
+      - -p
+      - enable_gyro:=false
       - -p
       - pointcloud.enable:=false
       - -p
       - align_depth.enable:=true
-      - -p
-      - enable_depth:=true
-      - -p
-      - enable_color:=true
-      - -p
-      - enable_sync:=true
-      - -p
-      - rgb_camera.profile:=640x480x15
-      - -p
-      - depth_module.profile:=640x480x15
     restart: unless-stopped
 
   media:
@@ -66,9 +64,9 @@ services:
       - --robot-id
       - chris_0
       - --topic
-      - /d435/color/image_raw/compressed
+      - /d435/camera/color/image_raw/compressed
       - --raw-topic
-      - /d435/color/image_raw
+      - /d435/camera/color/image_raw
       - --rtsp-url
       - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/chris_0"
       - --bitrate-kbps

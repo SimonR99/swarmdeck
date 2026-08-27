@@ -22,11 +22,11 @@ topics:
   plan: /g1pilot/path
   cmd_vel: /cmd_vel
   battery: /g1pilot/battery
-  camera: /d435/color/image_raw
-  camera_compressed: /d435/color/image_raw/compressed
-  camera_depth: /d435/aligned_depth_to_color/image_raw
-  camera_info: /d435/aligned_depth_to_color/camera_info
-  camera_color_info: ""
+  camera: /d435/camera/color/image_raw
+  camera_compressed: /d435/camera/color/image_raw/compressed
+  camera_depth: /d435/camera/depth/image_rect_raw
+  camera_info: /d435/camera/depth/camera_info
+  camera_color_info: /d435/camera/color/camera_info
   camera_depth_points: ""
 
 actions:
