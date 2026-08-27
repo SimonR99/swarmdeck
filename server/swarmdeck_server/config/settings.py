@@ -42,6 +42,7 @@ IDENTITY_COLORS = {
     "spot": "#c9a000",
     "botman": "#007aff",
     "aslan": "#e07000",
+    "chris": "#5865f2",
 }
 
 

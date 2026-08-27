@@ -443,6 +443,15 @@ export const mapStore = {
       (scope) => scope.scope.startsWith('component:') && scope.robots.length < 2
     );
   },
+  get unmergedRobots(): string[] {
+    const ids = new Set<string>();
+    for (const scope of this.unmergedScopes) {
+      for (const robot of scope.robots) {
+        if (fleet.isEnabled(robot)) ids.add(robot);
+      }
+    }
+    return Array.from(ids);
+  },
 
   get viewMode() {
     return state.viewMode;

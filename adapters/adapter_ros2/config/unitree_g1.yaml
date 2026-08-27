@@ -1,0 +1,57 @@
+# Unitree G1 Humanoid Robot (SSH alias `chris` → `192.168.1.37`, user `unitree`).
+# Runs ROS 2 (Foxy / CycloneDDS) and g1pilot / unitree_ros2 / DinoNav.
+robot_type: unitree_g1
+ros_distro: foxy
+network_iface: auto
+
+# Humanoid torso/pelvis bounding footprint.
+footprint_radius: 0.30
+footprint:
+  - [0.18, 0.22]
+  - [0.18, -0.22]
+  - [-0.18, -0.22]
+  - [-0.18, 0.22]
+
+map_frame: map
+base_frame: pelvis
+
+topics:
+  odom: /g1pilot/odom
+  map: /map
+  map_cloud: ""
+  plan: /g1pilot/path
+  cmd_vel: /cmd_vel
+  battery: /g1pilot/battery
+  camera: /camera/color/image_raw
+  camera_compressed: ""
+  camera_depth: /camera/aligned_depth_to_color/image_raw
+  camera_info: /camera/aligned_depth_to_color/camera_info
+  camera_color_info: ""
+  camera_depth_points: ""
+
+actions:
+  navigate_to_pose: /navigate_to_pose
+
+services:
+  claim: /g1pilot/start
+  release: /g1pilot/emergency_stop
+  sit: /g1pilot/sit
+  stand: /g1pilot/balance
+  stop: /g1pilot/emergency_stop
+  damping: /g1pilot/damping
+  lie_to_stand: /g1pilot/lie_to_stand
+  lock_stand: /g1pilot/lock_stand
+  walk_mode: /g1pilot/walk_mode
+  run_mode: /g1pilot/run_mode
+  wave: /g1pilot/wave
+
+perception:
+  depth_max_age_s: 1.0
+
+rates:
+  state_hz: 5.0
+  map_period_s: 2.0
+  camera_period_s: 0.2
+  cloud_period_s: 4.0
+
+drive_timeout_s: 0.45

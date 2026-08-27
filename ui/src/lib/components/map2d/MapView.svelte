@@ -757,12 +757,11 @@
             Optimised
           </button>
         </div>
-        {#if mapStore.unmergedScopes.length}
+        {#if mapStore.unmergedRobots.length}
           <div class="mb-1 rounded-[--radius-control] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">
             Not merged into the fleet map:
             <span class="font-medium text-fg-muted">
-              {mapStore.unmergedScopes
-                .flatMap((scope) => scope.robots)
+              {mapStore.unmergedRobots
                 .map(robotDisplayName)
                 .join(', ')}
             </span>

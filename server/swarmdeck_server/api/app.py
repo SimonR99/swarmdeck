@@ -1174,7 +1174,18 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     elif kind == "body_command":
         action = str(msg.get("action") or "")
-        if action not in ("claim", "release", "sit", "stand"):
+        if action not in (
+            "claim",
+            "release",
+            "sit",
+            "stand",
+            "damping",
+            "lie_to_stand",
+            "lock_stand",
+            "walk_mode",
+            "run_mode",
+            "wave",
+        ):
             return
         if not registry.can(rid, "body"):
             return

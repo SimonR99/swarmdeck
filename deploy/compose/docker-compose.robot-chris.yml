@@ -1,0 +1,89 @@
+# Chris (Unitree G1) bring-up owned by SwarmDeck.
+#
+# Connects Unitree G1 humanoid (192.168.1.37) running ROS 2 (CycloneDDS / g1pilot / DinoNav)
+# into SwarmDeck operator dashboard.
+
+x-ros-domain: &ros_domain "${CHRIS_ROS_DOMAIN_ID:-0}"
+
+services:
+  adapter:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-chris-adapter
+    network_mode: host
+    ipc: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - ${CHRIS_WORKSPACE:-/home/unitree/workspaces}:/workspace:ro
+      - ${ROBOT_REPO:-/home/unitree/swarmdeck}:/app/swarmdeck:ro
+    environment:
+      ROS_DOMAIN_ID: *ros_domain
+      SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
+    command:
+      - /ros_entrypoint.sh
+      - python3
+      - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py
+      - --robot-id
+      - chris_0
+      - --config
+      - /app/swarmdeck/adapters/adapter_ros2/config/unitree_g1.yaml
+      - --host
+      - ${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host}
+      - --port
+      - "${BACKEND_PORT:-8080}"
+    restart: unless-stopped
+
+  media:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-chris-media
+    network_mode: host
+    ipc: host
+    volumes:
+      - ${ROBOT_REPO:-/home/unitree/swarmdeck}:/app/swarmdeck:ro
+    environment:
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - python3
+      - /app/swarmdeck/adapters/media/ros2_rtsp.py
+      - --robot-id
+      - chris_0
+      - --topic
+      - /camera/color/image_raw/compressed
+      - --raw-topic
+      - /camera/color/image_raw
+      - --rtsp-url
+      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/chris_0"
+      - --bitrate-kbps
+      - "${VIDEO_BITRATE_KBPS:-700}"
+      - --fps
+      - "${VIDEO_FPS:-10}"
+      - --width
+      - "${VIDEO_WIDTH:-640}"
+      - --height
+      - "${VIDEO_HEIGHT:-480}"
+    restart: unless-stopped
+
+  duck_detector:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.duck-detector
+      args:
+        ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
+    image: swarmdeck-duck-detector:jetpack6
+    container_name: swarmdeck-chris-detector
+    network_mode: host
+    ipc: host
+    runtime: nvidia
+    volumes:
+      - duck_detector_models:/models
+      - ${ROBOT_REPO:-/home/unitree/swarmdeck}/adapters:/app/adapters:ro
+    restart: unless-stopped
+
+volumes:
+  duck_detector_models:

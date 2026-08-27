@@ -216,7 +216,7 @@ export const actions = {
   stopAll() {
     sendAction({ type: 'stop_all' });
   },
-  bodyCommand(robotId: string, action: 'claim' | 'release' | 'sit' | 'stand') {
+  bodyCommand(robotId: string, action: string) {
     if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'body_command', robot_id: robotId, action });
   },

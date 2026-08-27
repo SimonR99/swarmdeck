@@ -142,8 +142,19 @@ try:
 except ImportError:  # pragma: no cover - depends on the robot's install
     SetVelocity = None
 
-# Spot (and similar) body services. `stand` may also call `power_on` first.
-BODY_ACTIONS = ("claim", "release", "sit", "stand")
+# Spot and Unitree G1 humanoid body services.
+BODY_ACTIONS = (
+    "claim",
+    "release",
+    "sit",
+    "stand",
+    "damping",
+    "lie_to_stand",
+    "lock_stand",
+    "walk_mode",
+    "run_mode",
+    "wave",
+)
 # Trigger names that are not GUI body actions: motors, software e-stop allow,
 # tablet keepalive clear, and the SDK stop used because Clearpath's ROS 2
 # Trajectory server does not honour cancel/preempt.

@@ -169,6 +169,22 @@ def generate_launch_description() -> LaunchDescription:
         ],
         condition=IfCondition(start_slam),
     )
+    tf_lidar_imubody = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="tf_lidar_imubody",
+        arguments=[
+            "--x", "0.062",
+            "--y", "-0.104",
+            "--z", "-0.04",
+            "--roll", "0.0",
+            "--pitch", "0.0",
+            "--yaw", "-1.5708",
+            "--frame-id", "lidar_link",
+            "--child-frame-id", "imu_body",
+        ],
+        condition=IfCondition(start_slam),
+    )
     tf_body_d435 = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -201,6 +217,7 @@ def generate_launch_description() -> LaunchDescription:
             lio_sam,
             tf_body_oslidar,
             tf_lidar_body,
+            tf_lidar_imubody,
             tf_body_d435,
             OpaqueFunction(function=_spot_driver),
             OpaqueFunction(function=_spot_camera),
