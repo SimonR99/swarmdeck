@@ -347,3 +347,14 @@ def test_a_seeded_verification_still_has_to_pass_every_gate() -> None:
         )
         is None
     )
+
+
+def test_odom_free_backend_reconstructs_components() -> None:
+    _, fleet = synthetic.two_robot_fleet()
+    backend = CollaborativeBackend(registration_mode="odom_free")
+    _ingest_fleet(backend, fleet)
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+    assert len(snapshot.optimized.poses) > 0
+    assert len(snapshot.optimized.components) > 0
+    assert all(r in snapshot.optimized.t_world_map for r in ("alpha", "beta"))

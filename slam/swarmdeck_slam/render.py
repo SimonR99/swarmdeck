@@ -171,7 +171,7 @@ def render_per_robot(
     comparable to each other and to the merged map.
     """
     config = config or RenderConfig()
-    return _robot_grids(_contributions_of(graph, keyframes, config), config)
+    return _robot_grids(graph, _contributions_of(graph, keyframes, config), config)
 
 
 def render_occupancy(
@@ -253,7 +253,7 @@ def render_all(
     contributions = _contributions_of(graph, keyframes, config)
     return (
         _component_grids(graph, contributions, config),
-        _robot_grids(contributions, config),
+        _robot_grids(graph, contributions, config),
         _trajectory_grids(contributions, config),
     )
 
@@ -270,20 +270,57 @@ def _component_grids(
     config: RenderConfig,
 ) -> dict[int, RenderedGrid]:
     robot_ids = {kf_id.robot_id for kf_id in contributions}
-    return {
-        component_id: _render_component(component_id, robots, contributions, config)
-        for component_id, robots in _partition_robots(graph, robot_ids)
-    }
+    comp_map = {c.component_id: c for c in graph.components}
+    result: dict[int, RenderedGrid] = {}
+    for component_id, robots in _partition_robots(graph, robot_ids):
+        comp = comp_map.get(component_id)
+        if comp is not None:
+            comp_contribs = {
+                k: v
+                for k, v in contributions.items()
+                if k.trajectory in comp.trajectories and k.robot_id in robots
+            }
+        else:
+            comp_contribs = {
+                k: v for k, v in contributions.items() if k.robot_id in robots
+            }
+        result[component_id] = _render_component(
+            component_id, robots, comp_contribs, config
+        )
+    return result
 
 
 def _robot_grids(
-    contributions: dict[KeyframeId, _Contribution], config: RenderConfig
+    graph: OptimizedGraph,
+    contributions: dict[KeyframeId, _Contribution],
+    config: RenderConfig,
 ) -> dict[str, RenderedGrid]:
     robot_ids = sorted({kf_id.robot_id for kf_id in contributions})
-    return {
-        robot_id: _render_component(index, frozenset({robot_id}), contributions, config)
-        for index, robot_id in enumerate(robot_ids)
-    }
+    result: dict[str, RenderedGrid] = {}
+    for index, robot_id in enumerate(robot_ids):
+        robot_comps = [c for c in graph.components if robot_id in c.robots]
+        if robot_comps:
+            best_comp = max(
+                robot_comps,
+                key=lambda c: sum(
+                    1
+                    for k in contributions
+                    if k.trajectory in c.trajectories and k.robot_id == robot_id
+                ),
+            )
+            robot_contribs = {
+                k: v
+                for k, v in contributions.items()
+                if k.trajectory in best_comp.trajectories and k.robot_id == robot_id
+            }
+        else:
+            robot_contribs = {
+                k: v for k, v in contributions.items() if k.robot_id == robot_id
+            }
+        result[robot_id] = _render_component(
+            index, frozenset({robot_id}), robot_contribs, config
+        )
+    return result
 
 
 def _trajectory_grids(

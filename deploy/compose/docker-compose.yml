@@ -69,6 +69,8 @@ services:
       # offline replay (slam/tools/replay.py). Empty disables capture, which is
       # the normal state: a long run writes one file per keyframe.
       SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
+      SWARMDECK_SLAM_REGISTRATION_MODE: "${SWARMDECK_SLAM_REGISTRATION_MODE:-odom_free}"
+      SWARMDECK_SLAM_QUEUE_CAP: "${SWARMDECK_SLAM_QUEUE_CAP:-2048}"
     volumes:
       # Datasets land beside the session recordings, on the host, so a capture
       # survives the container it was made in.

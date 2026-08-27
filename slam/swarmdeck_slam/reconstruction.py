@@ -24,7 +24,7 @@ from scipy.spatial import cKDTree
 
 from swarmdeck_slam.descriptors import best_alignment, ring_key
 from swarmdeck_slam.odom_free import PreparedCloud, RegistrationHypothesis
-from swarmdeck_slam.types import se3_distance, se3_identity, se3_inverse
+from swarmdeck_slam.types import TrajectoryId, se3_distance, se3_identity, se3_inverse
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +68,17 @@ class ReconstructionFrame:
     seq: int
     stamp: float
     cloud: PreparedCloud
+    session: str = ""
+
+    @property
+    def trajectory_id(self) -> TrajectoryId:
+        """Continuous producer run this frame belongs to.
+
+        Robot identity survives a SLAM restart; geometric continuity does not.
+        Keeping the session here prevents equal sequence numbers from two runs
+        being interleaved before registration has a chance to prove a merge.
+        """
+        return TrajectoryId(self.robot_id, self.session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +97,11 @@ class Fragment:
     frame_indices: tuple[int, ...]
     poses: dict[int, np.ndarray]
     edges: tuple[FragmentEdge, ...]
+    session: str = ""
+
+    @property
+    def trajectory_id(self) -> TrajectoryId:
+        return TrajectoryId(self.robot_id, self.session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +110,7 @@ class FragmentBoundary:
     previous_index: int
     next_index: int
     reason: str
+    session: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,12 +341,15 @@ def build_temporal_fragments(
     config = config or TemporalConfig()
     fragments: list[Fragment] = []
     boundaries: list[FragmentBoundary] = []
-    by_robot: dict[str, list[ReconstructionFrame]] = {}
+    by_trajectory: dict[TrajectoryId, list[ReconstructionFrame]] = {}
     for frame in frames:
-        by_robot.setdefault(frame.robot_id, []).append(frame)
+        by_trajectory.setdefault(frame.trajectory_id, []).append(frame)
 
-    for robot_id in sorted(by_robot):
-        ordered = sorted(by_robot[robot_id], key=lambda item: (item.seq, item.stamp))
+    for trajectory_id in sorted(by_trajectory):
+        robot_id, session = trajectory_id
+        ordered = sorted(
+            by_trajectory[trajectory_id], key=lambda item: (item.seq, item.stamp)
+        )
         candidate_runs: list[
             tuple[list[ReconstructionFrame], list[list[RegistrationHypothesis]]]
         ] = []
@@ -356,7 +376,13 @@ def build_temporal_fragments(
             if reason:
                 candidate_runs.append((run_frames, run_adjacent))
                 boundaries.append(
-                    FragmentBoundary(robot_id, previous.index, current.index, reason)
+                    FragmentBoundary(
+                        robot_id,
+                        previous.index,
+                        current.index,
+                        reason,
+                        session,
+                    )
                 )
                 run_frames = [current]
                 run_adjacent = []
@@ -366,7 +392,7 @@ def build_temporal_fragments(
         if run_frames:
             candidate_runs.append((run_frames, run_adjacent))
 
-        robot_fragment_number = 0
+        trajectory_fragment_number = 0
         for run_frames, run_adjacent in candidate_runs:
             selected = _select_chain(run_frames, run_adjacent, register, config)
             poses = {run_frames[0].index: se3_identity()}
@@ -382,14 +408,17 @@ def build_temporal_fragments(
                 )
             fragments.append(
                 Fragment(
-                    fragment_id=f"{robot_id}:{robot_fragment_number:03d}",
+                    fragment_id=(
+                        f"{trajectory_id}:{trajectory_fragment_number:03d}"
+                    ),
                     robot_id=robot_id,
                     frame_indices=tuple(frame.index for frame in run_frames),
                     poses=poses,
                     edges=tuple(edges),
+                    session=session,
                 )
             )
-            robot_fragment_number += 1
+            trajectory_fragment_number += 1
 
     return fragments, boundaries
 
@@ -411,14 +440,14 @@ def _candidate_frame_pairs(
     # Directly inspect several scans on both sides of each temporal break. A
     # restarted SLAM process often resumes at the same physical place, but one
     # pair is not enough evidence to reconnect two unrelated frames.
-    by_robot: dict[str, list[Fragment]] = {}
+    by_trajectory: dict[TrajectoryId, list[Fragment]] = {}
     for fragment in fragments:
-        by_robot.setdefault(fragment.robot_id, []).append(fragment)
-    for robot_fragments in by_robot.values():
-        robot_fragments.sort(
+        by_trajectory.setdefault(fragment.trajectory_id, []).append(fragment)
+    for trajectory_fragments in by_trajectory.values():
+        trajectory_fragments.sort(
             key=lambda fragment: frame_by_index[fragment.frame_indices[0]].seq
         )
-        for left, right in zip(robot_fragments, robot_fragments[1:]):
+        for left, right in zip(trajectory_fragments, trajectory_fragments[1:]):
             key = tuple(sorted((left.fragment_id, right.fragment_id)))
             bucket = pairs.setdefault(key, {})
             for left_index in left.frame_indices[-config.boundary_window :]:
@@ -545,7 +574,7 @@ def _best_boundary_proposal(
     register: RegistrationFunction,
 ) -> ConnectionProposal | None:
     """Best direct scan registration when two fragments straddle one seq edge."""
-    if fragment_a.robot_id != fragment_b.robot_id:
+    if fragment_a.trajectory_id != fragment_b.trajectory_id:
         return None
     a_first = frame_by_index[fragment_a.frame_indices[0]].seq
     b_first = frame_by_index[fragment_b.frame_indices[0]].seq

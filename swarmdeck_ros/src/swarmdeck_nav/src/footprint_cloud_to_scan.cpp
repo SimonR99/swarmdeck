@@ -64,10 +64,15 @@ public:
     angle_increment_ = requested_span / static_cast<double>(beam_count_);
     angle_max_ = angle_min_ + angle_increment_ * static_cast<double>(beam_count_ - 1);
 
-    scan_publisher_ = create_publisher<sensor_msgs::msg::LaserScan>(
-      output_topic_, rclcpp::SensorDataQoS());
+    // The live Ouster publisher is RELIABLE/TRANSIENT_LOCAL. Matching its
+    // reliability prevents whole 10 Hz clouds from being discarded during
+    // brief scheduler contention. A reliable scan publisher is compatible
+    // with Nav2's best-effort sensor subscribers and avoids another lossy hop.
+    const auto cloud_qos = rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile();
+    const auto scan_qos = rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile();
+    scan_publisher_ = create_publisher<sensor_msgs::msg::LaserScan>(output_topic_, scan_qos);
     cloud_subscription_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-      input_topic_, rclcpp::SensorDataQoS(),
+      input_topic_, cloud_qos,
       std::bind(&FootprintCloudToScan::on_cloud, this, std::placeholders::_1));
 
     RCLCPP_INFO(

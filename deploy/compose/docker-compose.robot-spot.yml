@@ -39,10 +39,40 @@ services:
       - export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=true start_lidar:=false start_slam:=false start_camera:=false
 
   camera:
-    <<: *spot-stack
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.robot-ros2
+    image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-spot-camera
+    network_mode: host
+    ipc: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
     command:
-      - export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=false start_lidar:=false start_slam:=false start_camera:=true
+      - ros2
+      - run
+      - realsense2_camera
+      - realsense2_camera_node
+      - --ros-args
+      - -p
+      - camera_name:=d435
+      - -p
+      - pointcloud.enable:=false
+      - -p
+      - align_depth.enable:=true
+      - -p
+      - enable_depth:=true
+      - -p
+      - enable_color:=true
+      - -p
+      - rgb_camera.profile:=640x480x15
+      - -p
+      - depth_module.profile:=640x480x15
+    restart: unless-stopped
 
   lidar:
     <<: *spot-stack
@@ -113,9 +143,9 @@ services:
       - --robot-id
       - spot_0
       - --topic
-      - /d435/color/image_raw/compressed
+      - /camera/camera/color/image_raw/compressed
       - --raw-topic
-      - /d435/color/image_raw
+      - /camera/camera/color/image_raw
       - --rtsp-url
       - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/spot_0"
       - --bitrate-kbps

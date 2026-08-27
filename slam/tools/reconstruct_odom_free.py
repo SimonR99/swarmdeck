@@ -416,6 +416,7 @@ def main() -> None:
                 packet.points,
                 _packet_registration_config(packet, registration_config),
             ),
+            packet.session,
         )
         for index, packet in enumerate(packets)
     ]

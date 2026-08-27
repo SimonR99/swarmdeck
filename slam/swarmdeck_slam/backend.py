@@ -30,9 +30,28 @@ from swarmdeck_slam.descriptors import (
     ScanContextIndex,
     scan_context_descriptor,
 )
-from swarmdeck_slam.graph import GtsamPoseGraph
+from swarmdeck_slam.graph import GtsamPoseGraph, _MIN_FIT_KEYFRAMES, _frame_residual
+from swarmdeck_slam.odom_free import (
+    OdomFreeConfig,
+    PreparedCloud,
+    RegistrationHypothesis,
+    prepare_cloud,
+    register_clouds,
+)
+from swarmdeck_slam.reconstruction import (
+    FragmentMatchConfig,
+    ReconstructionFrame,
+    TemporalConfig,
+    build_temporal_fragments,
+    filter_inter_robot_connections,
+    find_fragment_connections,
+    find_intra_fragment_loops,
+    optimize_keyframe_poses,
+    place_fragments,
+)
 from swarmdeck_slam.render import RenderConfig, RenderedGrid, render_all
 from swarmdeck_slam.types import (
+    Component,
     Edge,
     EdgeKind,
     Keyframe,
@@ -43,6 +62,7 @@ from swarmdeck_slam.types import (
     se3_from_quat_xyz,
     se3_identity,
     se3_inverse,
+    se3_kabsch,
     se3_relative,
 )
 from swarmdeck_slam.verify import VerifyConfig, verify_candidate
@@ -517,7 +537,17 @@ class CollaborativeBackend:
     why it was the measurement that settled this.
     """
 
+    registration_mode: str = "graph"
+    """Registration solver mode: 'graph' (conventional pose graph) or 'odom_free'
+    (odometry-free geometric reconstruction)."""
+
+    temporal_config: TemporalConfig = field(default_factory=TemporalConfig)
+    match_config: FragmentMatchConfig = field(default_factory=FragmentMatchConfig)
+    odom_free_config: OdomFreeConfig = field(default_factory=OdomFreeConfig)
+
     def __post_init__(self) -> None:
+        self._prepared_clouds: dict[KeyframeId, PreparedCloud] = {}
+        self._pair_cache: dict[tuple[KeyframeId, KeyframeId], list[RegistrationHypothesis]] = {}
         self._graph = GtsamPoseGraph(
             pcm_confidence=self.pcm_confidence,
             min_pcm_clique_size=self.min_pcm_clique_size,
@@ -921,9 +951,127 @@ class CollaborativeBackend:
             )
         return summaries
 
-    # ------------------------------------------------------------------ #
-    # Solve
-    # ------------------------------------------------------------------ #
+    def _optimize_odom_free(
+        self, included: list[Keyframe]
+    ) -> tuple[OptimizedGraph, int, int]:
+        frames = []
+        for idx, kf in enumerate(included):
+            cloud = self._prepared_clouds.get(kf.id)
+            if cloud is None:
+                cloud = prepare_cloud(kf.points, self.odom_free_config)
+                self._prepared_clouds[kf.id] = cloud
+            frames.append(
+                ReconstructionFrame(
+                    index=idx,
+                    robot_id=kf.id.robot_id,
+                    seq=kf.id.seq,
+                    stamp=kf.stamp,
+                    cloud=cloud,
+                    session=kf.id.session,
+                )
+            )
+
+        def memo_register(
+            target: ReconstructionFrame, source: ReconstructionFrame
+        ) -> list[RegistrationHypothesis]:
+            key = (included[target.index].id, included[source.index].id)
+            if key not in self._pair_cache:
+                self._pair_cache[key] = register_clouds(
+                    target.cloud, source.cloud, self.odom_free_config
+                )
+            return self._pair_cache[key]
+
+        fragments, boundaries = build_temporal_fragments(
+            frames, memo_register, self.temporal_config
+        )
+        connections, rejected_connections = find_fragment_connections(
+            frames, fragments, memo_register, self.match_config
+        )
+        connections, rejected_inter = filter_inter_robot_connections(
+            fragments, connections, self.match_config
+        )
+        loop_closures = find_intra_fragment_loops(
+            frames, fragments, memo_register, self.match_config
+        )
+        placement = place_fragments(fragments, connections)
+        frame_poses = optimize_keyframe_poses(
+            fragments, connections, placement, loop_closures
+        )
+
+        poses = {included[idx].id: frame_poses[idx] for idx in frame_poses}
+        components = []
+        frag_by_id = {f.fragment_id: f for f in fragments}
+        for comp_idx, comp_frags in enumerate(placement.components):
+            comp_kf_ids = []
+            for fid in comp_frags:
+                if fid in frag_by_id:
+                    for frame_idx in frag_by_id[fid].frame_indices:
+                        kf_id = included[frame_idx].id
+                        if kf_id in poses:
+                            comp_kf_ids.append(kf_id)
+            if not comp_kf_ids:
+                continue
+            anchor = min(comp_kf_ids, key=lambda k: k.seq)
+            robots = frozenset(k.robot_id for k in comp_kf_ids)
+            trajs = frozenset(k.trajectory for k in comp_kf_ids)
+            components.append(
+                Component(
+                    component_id=comp_idx,
+                    robots=robots,
+                    anchor=anchor,
+                    trajectories=trajs,
+                    keyframe_ids=frozenset(comp_kf_ids),
+                )
+            )
+
+        kf_map = {kf.id: kf for kf in included}
+        by_traj: dict[TrajectoryId, list[KeyframeId]] = {}
+        for k in included:
+            if k.id in poses:
+                by_traj.setdefault(k.id.trajectory, []).append(k.id)
+
+        t_world_traj: dict[TrajectoryId, np.ndarray] = {}
+        for traj, kf_ids in by_traj.items():
+            kf_ids.sort(key=lambda k: k.seq)
+            snapshot = poses[kf_ids[-1]] @ se3_inverse(
+                kf_map[kf_ids[-1]].t_odom_base
+            )
+            if len(kf_ids) >= _MIN_FIT_KEYFRAMES:
+                src = np.array([kf_map[k].t_odom_base[:3, 3] for k in kf_ids])
+                tgt = np.array([poses[k][:3, 3] for k in kf_ids])
+                try:
+                    fitted = se3_kabsch(src, tgt)
+                    if _frame_residual(
+                        fitted, kf_ids, kf_map, poses
+                    ) <= _frame_residual(snapshot, kf_ids, kf_map, poses):
+                        t_world_traj[traj] = fitted
+                    else:
+                        t_world_traj[traj] = snapshot
+                except Exception:
+                    t_world_traj[traj] = snapshot
+            else:
+                t_world_traj[traj] = snapshot
+
+        best_t: dict[str, tuple[float, np.ndarray]] = {}
+        for traj, tf in t_world_traj.items():
+            latest_st = max(kf_map[k].stamp for k in by_traj[traj])
+            if traj.robot_id not in best_t or latest_st > best_t[traj.robot_id][0]:
+                best_t[traj.robot_id] = (latest_st, tf)
+
+        t_world_map = {rid: tf for rid, (_, tf) in best_t.items()}
+        inter_robot = sum(
+            1
+            for c in connections
+            if c.fragment_a.split("@")[0] != c.fragment_b.split("@")[0]
+        )
+        total_closures = len(connections) + len(loop_closures)
+        optimized = OptimizedGraph(
+            poses=poses,
+            t_world_map=t_world_map,
+            t_world_trajectory=t_world_traj,
+            components=components,
+        )
+        return optimized, total_closures, inter_robot
 
     def optimize_and_render(self) -> BackendSnapshot | None:
         """Run the solver and rasterize occupancy. None if nothing is ingested yet.
@@ -933,38 +1081,45 @@ class CollaborativeBackend:
         """
         if not self._keyframes:
             return None
-        if self._graph_stale:
-            self._rebuild_graph()
-        excluded = self._excluded
-        optimized = self._graph.optimize()
-        self._last_solved = optimized
         with self._keyframes_lock:
             keyframes = list(self._keyframes.values())
+        excluded = self._excluded
         included = [
             keyframe for keyframe in keyframes if keyframe.id.trajectory not in excluded
         ]
+        if not included:
+            return None
+
+        if self.registration_mode == "odom_free":
+            optimized, accepted_count, inter_robot_count = self._optimize_odom_free(
+                included
+            )
+        else:
+            if self._graph_stale:
+                self._rebuild_graph()
+            optimized = self._graph.optimize()
+            loops = [
+                edge
+                for edge in list(self._edges)
+                if edge.kind.is_loop_closure and self._edge_included(edge, excluded)
+            ]
+            accepted_count = len(loops)
+            inter_robot_count = sum(1 for edge in loops if edge.is_inter_robot)
+
+        self._last_solved = optimized
         grids, robot_grids, trajectory_grids = render_all(
             optimized, included, self.render
         )
         self._dirty = False
         self._new_since_optimize = 0
-        # Counted over the INCLUDED edges rather than from the running ingest
-        # totals, so excluding a segment drops the closures that went with it
-        # instead of leaving the operator's counters claiming constraints the
-        # solved graph never saw. Identical to the ingest totals whenever
-        # nothing is excluded, which is the ordinary case.
-        loops = [
-            edge
-            for edge in list(self._edges)
-            if edge.kind.is_loop_closure and self._edge_included(edge, excluded)
-        ]
+
         return BackendSnapshot(
             optimized=optimized,
             grids=grids,
             robot_grids=robot_grids,
             keyframe_counts=_counts(k.id for k in included),
-            accepted_closures=len(loops),
-            inter_robot_closures=sum(1 for edge in loops if edge.is_inter_robot),
+            accepted_closures=accepted_count,
+            inter_robot_closures=inter_robot_count,
             stamp=time.time(),
             trajectory_grids=trajectory_grids,
             trajectories=self.trajectory_summaries(optimized),

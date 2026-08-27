@@ -141,15 +141,48 @@ def generate_launch_description() -> LaunchDescription:
         package="tf2_ros",
         executable="static_transform_publisher",
         name="tf_body_oslidar",
-        arguments=["-0.082", "0", "-0.398", "0", "0", "0", "body", "os_lidar"],
+        arguments=[
+            "--x", "-0.082",
+            "--y", "0.0",
+            "--z", "-0.398",
+            "--roll", "0.0",
+            "--pitch", "0.0",
+            "--yaw", "0.0",
+            "--frame-id", "body",
+            "--child-frame-id", "os_lidar",
+        ],
         condition=IfCondition(start_slam),
     )
     tf_lidar_body = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
         name="tf_lidar_body",
-        arguments=["0.0", "0", "0", "1.5708", "0", "0", "lidar_link", "body"],
+        arguments=[
+            "--x", "0.0",
+            "--y", "0.0",
+            "--z", "0.0",
+            "--roll", "0.0",
+            "--pitch", "0.0",
+            "--yaw", "1.5708",
+            "--frame-id", "lidar_link",
+            "--child-frame-id", "body",
+        ],
         condition=IfCondition(start_slam),
+    )
+    tf_body_d435 = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="tf_body_d435",
+        arguments=[
+            "--x", "0.35",
+            "--y", "0.0",
+            "--z", "0.20",
+            "--roll", "0.0",
+            "--pitch", "0.0",
+            "--yaw", "0.0",
+            "--frame-id", "body",
+            "--child-frame-id", "d435_link",
+        ],
     )
 
     return LaunchDescription(
@@ -168,6 +201,7 @@ def generate_launch_description() -> LaunchDescription:
             lio_sam,
             tf_body_oslidar,
             tf_lidar_body,
+            tf_body_d435,
             OpaqueFunction(function=_spot_driver),
             OpaqueFunction(function=_spot_camera),
         ]

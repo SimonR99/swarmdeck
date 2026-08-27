@@ -502,6 +502,7 @@ class Component:
     robots: frozenset[str]
     anchor: KeyframeId
     trajectories: frozenset[TrajectoryId] = frozenset()
+    keyframe_ids: frozenset[KeyframeId] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.trajectories:
@@ -560,16 +561,30 @@ class OptimizedGraph:
     """
 
     def component_of(self, robot_id: str) -> Component | None:
-        """The first component holding ANY trajectory of this robot.
-
-        Ambiguous, by construction, for a robot whose segments have not
-        re-merged -- it is in more than one. Callers that need to be exact
-        want :meth:`component_of_trajectory`.
-        """
-        return next((c for c in self.components if robot_id in c.robots), None)
+        matching = [c for c in self.components if robot_id in c.robots]
+        if not matching:
+            return None
+        return max(
+            matching,
+            key=lambda c: (
+                len([k for k in c.keyframe_ids if k.robot_id == robot_id])
+                if c.keyframe_ids
+                else 1
+            ),
+        )
 
     def component_of_trajectory(self, trajectory: TrajectoryId) -> Component | None:
-        return next((c for c in self.components if trajectory in c.trajectories), None)
+        matching = [c for c in self.components if trajectory in c.trajectories]
+        if not matching:
+            return None
+        return max(
+            matching,
+            key=lambda c: (
+                len([k for k in c.keyframe_ids if k.trajectory == trajectory])
+                if c.keyframe_ids
+                else 1
+            ),
+        )
 
     def share_frame(self, a: str, b: str) -> bool:
         """Whether two robots have a verified relative transform.

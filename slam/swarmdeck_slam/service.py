@@ -66,11 +66,12 @@ RENDER = RenderConfig(
     max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "1.80")),
 )
 
-backend = CollaborativeBackend(render=RENDER)
+REGISTRATION_MODE = os.environ.get("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
+backend = CollaborativeBackend(render=RENDER, registration_mode=REGISTRATION_MODE)
 
 _queue: deque[bytes] = deque()
 _queue_lock = threading.Lock()
-_queue_cap = 64
+_queue_cap = int(os.environ.get("SWARMDECK_SLAM_QUEUE_CAP", "2048"))
 _dropped = 0
 _ingested = 0
 _last_error = ""

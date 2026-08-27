@@ -91,6 +91,30 @@ def test_temporal_fragments_reject_impossible_flip_and_split_at_gap() -> None:
     assert np.allclose(fragments[0].poses[2][:3, 3], [1.0, 0.0, 0.0])
 
 
+def test_temporal_fragments_never_chain_across_sessions() -> None:
+    first = _frame(0, 0.0)
+    second = ReconstructionFrame(
+        1,
+        first.robot_id,
+        0,
+        1.0,
+        first.cloud,
+        "next-run",
+    )
+    calls: list[tuple[int, int]] = []
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        calls.append((target.index, source.index))
+        return [_hypothesis(0.0, 0.5, 0.9)]
+
+    fragments, boundaries = build_temporal_fragments([first, second], register)
+
+    assert calls == []
+    assert boundaries == []
+    assert [fragment.frame_indices for fragment in fragments] == [(0,), (1,)]
+    assert fragments[0].trajectory_id != fragments[1].trajectory_id
+
+
 def test_fragment_connection_requires_multi_frame_consensus() -> None:
     frames = [_frame(index, float(index)) for index in range(6)]
     poses_a = {index: _hypothesis(0.0, float(index), 1.0).t_target_source for index in range(3)}
