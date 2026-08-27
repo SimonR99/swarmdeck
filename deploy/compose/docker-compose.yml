@@ -203,6 +203,10 @@ services:
       # faster because it leaves the lockstep exchange, and correspondingly
       # less faithful. `make up-argos-dev` sets drift; nothing else should.
       SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-external}"
+      # Diagnostic: log each robot's wheel encoder readings, which are the
+      # only view of what the controller actually commanded. Separates a
+      # controller fault from a physics one when a robot will not turn.
+      SWARMDECK_DEBUG_ENCODERS: "${SWARMDECK_DEBUG_ENCODERS:-}"
       # Bootstrap the maps by exploring, then stop and hand the fleet to the
       # operator. Without this nothing drives, and goals issued against an empty
       # map jam robots into walls where wheel slip destroys their odometry.

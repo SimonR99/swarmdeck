@@ -83,6 +83,9 @@ except ImportError:  # pragma: no cover - only when robot_localization is absent
 # ~0.05 s, and this leaves it ten missed control cycles before intervening.
 CMD_VEL_TIMEOUT_SIM_S = 0.5
 
+# Diagnostic only. See the encoder block in _read_robot().
+DEBUG_ENCODERS = os.environ.get("SWARMDECK_DEBUG_ENCODERS", "") == "1"
+
 OBSERVATION_MAGIC = b"SDB2"
 COMMAND_MAGIC = b"SDCMD"
 
@@ -116,6 +119,7 @@ class RobotInterface:
         self._seen_seq = 0
         self._cmd_at_sim: float | None = None
         self._expired = False
+        self._encoder_log_at = -1e9
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -176,6 +180,13 @@ class RobotInterface:
     def _on_cmd_vel(self, msg: Twist) -> None:
         self.cmd_vel = (float(msg.linear.x), float(msg.angular.z))
         self.cmd_seq += 1
+
+    def _encoder_log_due(self, sim_now: float) -> bool:
+        """Rate-limit the diagnostic to once a second of simulation time."""
+        if sim_now - self._encoder_log_at < 1.0:
+            return False
+        self._encoder_log_at = sim_now
+        return True
 
     def velocity_at(self, sim_now: float) -> tuple[float, float]:
         """The velocity to command, zeroed once the last one has gone stale."""
@@ -297,10 +308,10 @@ class ArgosBridge(Node):
 
             ids = []
             for _ in range(count):
-                ids.append(self._read_robot(sock, stamp, ticks_per_second))
+                ids.append(self._read_robot(sock, stamp, ticks_per_second, seconds))
             self._send_commands(sock, tick, ids, seconds)
 
-    def _read_robot(self, sock, stamp, ticks_per_second) -> str:
+    def _read_robot(self, sock, stamp, ticks_per_second, seconds=0.0) -> str:
         robot_id = recv_exact(
             sock, struct.unpack("<B", recv_exact(sock, 1))[0]).decode("utf-8")
         robot = self._robot(robot_id)
@@ -354,11 +365,21 @@ class ArgosBridge(Node):
                     f"/{robot_id}/odom and odom->base_link until it converges")
 
         # -- wheel encoders --------------------------------------------------
-        # Read and discarded: Ultra-Fusion consumes the encoders inside ARGoS,
-        # through the external_estimator medium, and nothing in ROS wants a
-        # second dead-reckoned pose to disagree with the fused one.
+        # Normally read and discarded: Ultra-Fusion consumes the encoders inside
+        # ARGoS, through the external_estimator medium, and nothing in ROS wants
+        # a second dead-reckoned pose to disagree with the fused one.
+        #
+        # SWARMDECK_DEBUG_ENCODERS=1 logs them instead. They are the only view
+        # of what the controller actually commanded, which is what separates a
+        # controller fault from a physics one when a robot will not turn.
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            recv_exact(sock, 4 * 8)
+            encoders = struct.unpack("<4d", recv_exact(sock, 4 * 8))
+            if DEBUG_ENCODERS and robot._encoder_log_due(seconds):
+                left, right = encoders[0], encoders[1]
+                self.get_logger().info(
+                    f"[{robot_id}] wheels L={left:+.4f} R={right:+.4f} m/s "
+                    f"diff={right - left:+.4f}"
+                )
 
         # -- IMU -------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
