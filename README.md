@@ -168,7 +168,8 @@ Adapters normally report pose, goals, maps, and clouds in each robot's local
 navigation-map frame. The backend converts them to the shared frame used by the
 UI.
 
-- `graph`: (default in `4robot.yaml`, `2robot.yaml`, and `hardware_fleet.yaml`)
+- `graph`: (default in `4robot.yaml`, `3robot.yaml`, `2robot.yaml`, and
+  `hardware_fleet.yaml`)
   trajectory-based collaborative SLAM. Keyframes are sent to `swarmdeck-slam`,
   loops are closed via Scan Context + GICP, pairwise consistent inter-robot
   closures are accepted by PCM (minimum clique size 2), GTSAM optimizes the joint
@@ -194,7 +195,14 @@ make up-argos
 ```
 
 `GRID_3D=true` retains height in RTAB-Map's cloud but substantially increases
-simulation cost. `EXPLORE_SECONDS` controls the mapping bootstrap duration.
+simulation cost.
+
+The fleet explores reactively to bootstrap its maps, because navigation goals
+issued against an empty map drive robots into walls. Start and stop it from the
+Fleet panel; robots report an `Exploring` state while it drives them, and it
+yields to any operator goal. `EXPLORE_SECONDS` decides whether one run starts
+automatically at launch (600 by default; `0` leaves the fleet still until you
+press Explore).
 
 ### Video and detections
 
@@ -243,9 +251,12 @@ For manual integration debugging:
 
 ```bash
 bash tests/integration/run_stack.sh 2
-python3 swarmdeck_ros/src/swarmdeck_sim/scenario/explore.py --robots 2 --seconds 240
 bash tests/integration/stop_stack.sh
 ```
+
+Exploration is not started by hand any more: `adapter_sim` owns that process so
+the dashboard can start and stop it, and running a second copy would put two
+reactive command streams on one `cmd_vel`.
 
 ## Dependencies and safety
 
