@@ -18,10 +18,11 @@ help:
 	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
 	@echo "  make demo            server + mock + ui, all at once"
 	@echo "  make [build|up|down]-server  Docker: backend + UI only"
-	@echo "  make [build|up|down]-argos   Docker: ARGoS + Ultra-Fusion + SLAM/Nav2/adapter_sim"
+	@echo "  make up-argos        Docker: ARGoS + Ultra-Fusion + SLAM/Nav2/adapter_sim"
 	@echo "  make up-argos-gpu    as up-argos, rendering on an NVIDIA GPU"
 	@echo "  make up-argos-dri    as up-argos, rendering on an Intel/AMD GPU"
 	@echo "  make up-argos-dev    FAST: 3 robots, drift odometry, no estimator"
+	@echo "  make up-argos-bistro Docker: 4 robots in Amazon Lumberyard Bistro scenario"
 	@echo "  make [build|up|down]-sim     Docker: LEGACY Gazebo/SLAM/Nav2/adapter_sim"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
@@ -31,10 +32,12 @@ help:
 	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
 	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
 	@echo "  make docker-logs     follow Docker logs"
+	@echo "  make docker-ps       list running containers"
 	@echo "  make docker-test     run backend tests inside Docker"
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
 	@echo "  make sim             launch the ARGoS simulation (host ROS + host argos3)"
 	@echo "  make visual-test     capture per-robot RGB, depth and lidar frames as PNGs"
+	@echo "  make visual-test-bistro capture Bistro scenario RGB, depth and lidar frames"
 	@echo "  make tunnel          publish the running stack on a public URL"
 	@echo "  make test            run all tests (local venv)"
 	@echo "  make install-slam    bootstrap the SLAM back-end venv (Python 3.12)"
@@ -91,6 +94,9 @@ sim:
 # publishes black, and neither logs anything.
 visual-test:
 	python3 tests/integration/run_visual_test.py
+
+visual-test-bistro:
+	python3 tests/integration/run_visual_test.py --config configs/4robot_bistro.yaml
 
 # One tunnel to port 5173 publishes the whole app: nginx there serves the UI and
 # proxies /api and /ws. The URL has no authentication — see the script.
@@ -191,6 +197,23 @@ up-argos-dri:
 up-argos-gpu:
 	docker compose -p $(COMPOSE_PROJECT) $(GPU_COMPOSE) --profile argos up --build -d
 	@echo "Fleet:            ARGoS on the NVIDIA GPU"
+
+up-argos-bistro:
+	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
+	  $(COMPOSE) --profile argos up --build -d server ui slam argos sim ultrafusion
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "SLAM back-end:    http://localhost:8090/status"
+	@echo "Fleet:            ARGoS + Ultra-Fusion (Bistro environment)"
+
+up-argos-bistro-dri:
+	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
+	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos up --build -d
+	@echo "Fleet:            ARGoS Bistro on the Intel/AMD render node"
+
+up-argos-bistro-gpu:
+	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
+	  docker compose -p $(COMPOSE_PROJECT) $(GPU_COMPOSE) --profile argos up --build -d
+	@echo "Fleet:            ARGoS Bistro on the NVIDIA GPU"
 
 down-argos:
 	$(COMPOSE) --profile argos stop argos sim ultrafusion

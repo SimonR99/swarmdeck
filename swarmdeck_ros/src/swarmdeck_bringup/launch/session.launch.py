@@ -133,18 +133,30 @@ def argos_actions(context, cfg_path, count, prefix, seed, runtime_dir,
 
     Path(runtime_dir).mkdir(parents=True, exist_ok=True)
 
-    actions = [
-        ExecuteProcess(
-            cmd=["python3", str(scenario / "make_argos_world.py"),
-                 "--seed", str(seed), "-o", str(world)],
-            output="screen",
-        ),
+    cfg = yaml.safe_load(open(cfg_path))
+    world_cfg = cfg.get("world") or cfg.get("environment") or "procedural"
+    if isinstance(world_cfg, dict):
+        world_name = str(world_cfg.get("name") or world_cfg.get("type", "procedural")).lower()
+    else:
+        world_name = str(world_cfg).lower()
+    is_bistro = (world_name == "bistro")
+
+    actions = []
+    if not is_bistro:
+        actions.append(
+            ExecuteProcess(
+                cmd=["python3", str(scenario / "make_argos_world.py"),
+                     "--seed", str(seed), "-o", str(world)],
+                output="screen",
+            )
+        )
+    actions.append(
         ExecuteProcess(
             cmd=["python3", str(scenario / "make_argos_session.py"),
                  "--config", str(cfg_path),
                  "-o", str(experiment),
                  "--robots", str(count),
-                 "--world", str(world),
+                 "--world", str(world if not is_bistro else "bistro"),
                  "--props-dir", str(props),
                  "--targets", str(targets),
                  "--socket", str(socket),
@@ -152,7 +164,9 @@ def argos_actions(context, cfg_path, count, prefix, seed, runtime_dir,
                  "--odometry", odometry]
                 + ([] if headless else ["--gui"]),
             output="screen",
-        ),
+        )
+    )
+    actions.append(
         TimerAction(
             period=2.0,
             actions=[
@@ -162,8 +176,8 @@ def argos_actions(context, cfg_path, count, prefix, seed, runtime_dir,
                     output="screen",
                 )
             ],
-        ),
-    ]
+        )
+    )
 
     if launch_argos:
         # Host development runs the simulator here. Under Compose the `argos`

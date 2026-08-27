@@ -272,8 +272,19 @@ def main() -> int:
     for glb in (REPO / "argos" / "assets" / "props").glob("*.glb"):
         (rundir / "props" / glb.name).write_bytes(glb.read_bytes())
 
-    subprocess.run([sys.executable, str(SCENARIO / "make_argos_world.py"),
-                    "-o", str(rundir / "indoor.gltf")], check=True)
+    cfg_path = Path(args.config) if Path(args.config).is_absolute() else REPO / args.config
+    import yaml
+    cfg_data = yaml.safe_load(cfg_path.read_text()) if cfg_path.is_file() else {}
+    world_cfg = cfg_data.get("world") or cfg_data.get("environment") or "procedural"
+    if isinstance(world_cfg, dict):
+        world_name = str(world_cfg.get("name") or world_cfg.get("type", "procedural")).lower()
+    else:
+        world_name = str(world_cfg).lower()
+    is_bistro = (world_name == "bistro")
+
+    if not is_bistro:
+        subprocess.run([sys.executable, str(SCENARIO / "make_argos_world.py"),
+                        "-o", str(rundir / "indoor.gltf")], check=True)
 
     # Short by necessity: a Unix socket path is capped at 107 bytes, and the
     # bind fails with "AF_UNIX path too long" rather than anything descriptive.

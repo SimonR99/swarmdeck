@@ -1,0 +1,37 @@
+# SwarmDeck development session: three robots in Amazon Lumberyard Bistro
+name: 3robot_bistro
+seed: 20260801
+world: bistro
+
+fleet:
+  robot_count: 3
+  robot_prefix: robot_
+  robot_type: bunker
+  robot_types:
+    robot_1: scout_mini
+    robot_2: spot
+  lidar:
+    profile: vlp16
+
+map:
+  merge_mode: graph
+  size_m: 120.0
+  resolution: 0.05
+  start_poses:
+    robot_0: {x: -10.75, y: 8.25, yaw: -1.4259}
+    robot_1: {x: 14.25, y: -15.75, yaw: -0.3665}
+    robot_2: {x: 40.25, y: -25.75, yaw: 2.8047}
+
+alerts:
+  unattended_threshold_s: 45
+  nav_failure: true
+  adapter_disconnect: true
+
+video:
+  width: 640
+  height: 480
+  fps: 15
+
+recording:
+  enabled: true
+  output_dir: sessions

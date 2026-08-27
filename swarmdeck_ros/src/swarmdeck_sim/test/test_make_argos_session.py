@@ -313,3 +313,96 @@ def test_the_same_config_renders_the_same_bytes():
     """The world is regenerated on every launch; a run that cannot be repeated
     is not a baseline (NFR-5)."""
     assert mas.generate_argos_xml(CONFIG) == mas.generate_argos_xml(CONFIG)
+
+
+# -------------------------------------------------------------------- bistro
+
+
+BISTRO_CONFIG = REPO / "configs" / "4robot_bistro.yaml"
+
+
+@pytest.fixture(scope="module")
+def bistro_tree():
+    return ElementTree.fromstring(mas.generate_argos_xml(BISTRO_CONFIG))
+
+
+@pytest.fixture(scope="module")
+def bistro_cfg():
+    return yaml.safe_load(BISTRO_CONFIG.read_text())
+
+
+def test_bistro_scenario_generates_valid_xml(bistro_tree):
+    """The bistro scenario config emits a well-formed ARGoS experiment."""
+    assert bistro_tree.tag == "argos-configuration"
+    assert bistro_tree.find("arena") is not None
+    assert bistro_tree.find("physics_engines/jolt") is not None
+    assert bistro_tree.find("media/photorealism") is not None
+
+
+def test_bistro_arena_and_collision_mesh(bistro_tree):
+    """Bistro uses the large 200x210 arena and loads the glTF mesh into Jolt physics."""
+    arena = bistro_tree.find("arena")
+    assert arena.get("size") == "200,210,70"
+    assert arena.get("center") == "24,-4,25"
+
+    mesh = arena.find("./mesh[@id='world_mesh']")
+    assert mesh is not None, "Bistro must declare world_mesh for Jolt physics"
+    assert "bistro_exterior.glb" in mesh.get("file")
+    assert mesh.get("position") == "0,0,-0.3"
+    assert mesh.get("orientation") == "0,0,90"
+
+
+def test_bistro_scenery_and_lighting(bistro_tree):
+    """Scenery prop matches the physics mesh at z=-0.3 with night lighting."""
+    pr = bistro_tree.find("media/photorealism")
+    assert pr.get("draw_floor") == "false"
+
+    scenery = pr.findall("scenery/prop")
+    world_prop = next(p for p in scenery if "bistro_exterior.glb" in p.get("model", ""))
+    assert world_prop.get("position") == "0,0,-0.3"
+    assert world_prop.get("orientation") == "0,0,90"
+
+    # Physics mesh and visual prop agree bitwise
+    arena = bistro_tree.find("arena")
+    mesh = arena.find("./mesh[@id='world_mesh']")
+    assert mesh.get("file") == world_prop.get("model")
+    assert mesh.get("position") == world_prop.get("position")
+    assert mesh.get("orientation") == world_prop.get("orientation")
+
+    lights = pr.findall("lights/point")
+    assert len(lights) == 28, "Bistro has 28 street lamps"
+
+    exposure = pr.find("exposure")
+    assert float(exposure.get("aperture")) == pytest.approx(2.0)
+    assert float(exposure.get("shutter_speed")) == pytest.approx(0.02)
+    assert float(exposure.get("sensitivity")) == pytest.approx(400.0)
+
+
+def test_bistro_robot_spawn_poses(bistro_tree, bistro_cfg):
+    """Robots spawn at their designated positions along the 141 m Bistro street tour."""
+    starts = bistro_cfg["map"]["start_poses"]
+    arena = bistro_tree.find("arena")
+    for rid, pose in starts.items():
+        body = next(b for e in arena for b in e.findall("body") if e.get("id") == rid)
+        x, y, z = (float(v) for v in body.get("position").split(","))
+        assert x == pytest.approx(pose["x"], abs=1e-3)
+        assert y == pytest.approx(pose["y"], abs=1e-3)
+        assert 0.0 <= z <= 0.05
+        yaw, _p, _r = (float(v) for v in body.get("orientation").split(","))
+        assert yaw == pytest.approx(math.degrees(pose["yaw"]), abs=1e-2)
+
+
+def test_bistro_3robot_dev_config():
+    """3-robot bistro config starts one of each platform."""
+    dev = REPO / "configs" / "3robot_bistro.yaml"
+    cfg = yaml.safe_load(dev.read_text())
+    fleet = cfg["fleet"]
+    types = spawn_fleet.robot_types(
+        fleet, int(fleet["robot_count"]), fleet.get("robot_prefix", "robot_")
+    )
+    assert sorted(types) == ["bunker", "scout_mini", "spot"]
+    tree = ElementTree.fromstring(mas.generate_argos_xml(dev))
+    arena = tree.find("arena")
+    for platform in types:
+        assert arena.findall(f"./{platform}"), platform
+

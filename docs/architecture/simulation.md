@@ -97,6 +97,32 @@ seeded target placement, and both world backends build from it. A detection
 scored against one backend's world is otherwise being compared with a run of a
 different building.
 
+## Environments and Scenarios
+
+SwarmDeck supports two simulation environments:
+
+1. **Procedural Indoor World (`world: procedural`, default)**:
+   - Configured in `configs/4robot.yaml`, `configs/3robot.yaml`, etc.
+   - Procedurally generates a seeded multi-room indoor facility (`indoor.gltf`) with walls, doorways, rooms, and furniture.
+   - Uses a 30 × 30 × 6 m arena, overcast daylight, and point lights.
+
+2. **Amazon Lumberyard Bistro (`world: bistro`)**:
+   - Configured in `configs/4robot_bistro.yaml`, `configs/3robot_bistro.yaml`, `configs/bistro.yaml`.
+   - Uses the realistic Parisian street scene (`bistro_exterior.glb`) from `argos3-examples/experiments/bistro_exploration`.
+   - The entire glTF geometry is loaded directly into Jolt physics as a `<mesh id="world_mesh">` entity, exactly mirroring the photorealism `<prop>` visual model with zero proxy collision boxes.
+   - Uses a 200 × 210 × 70 m arena, PBR night lighting with 28 street lamps, San Giuseppe IBL environment map, and EV 5.6 camera exposure (`aperture="2" shutter_speed="0.02" sensitivity="400"`).
+   - Start poses distributed along the 141 m closed road circuit.
+
+```bash
+# Launch Bistro in ARGoS:
+make up-argos-bistro          # software rendering
+make up-argos-bistro-gpu      # NVIDIA GPU
+make up-argos-bistro-dri      # Intel/AMD DRI
+
+# Capture Bistro visual test dashboard:
+make visual-test-bistro       # -> /tmp/swarmdeck_visual/fleet_visual_dashboard.png
+```
+
 ## Rates
 
 Set in `make_argos_session.py`, and not free choices.
