@@ -17,7 +17,8 @@ which is included as part of this source code package.
 
 VisualPoint::VisualPoint(const Vector3d &pos)
     : pos_(pos), previous_normal_(Vector3d::Zero()), normal_(Vector3d::Zero()),
-      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false)
+      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false),
+      last_seen_id_(-1)
 {
 }
 

@@ -50,7 +50,7 @@ a no-op until configured.
 
 --- a/include/vio.h
 +++ b/include/vio.h
-@@ -131,6 +131,22 @@
+@@ -131,6 +131,23 @@
    FramePtr new_frame_;
    cv::Mat img_cp, img_rgb, img_test;
  
@@ -62,6 +62,7 @@ a no-op until configured.
 +  // therefore leaks at the camera frame rate. Zero keeps upstream behaviour.
 +  int max_pts_per_voxel = 0;          // 0 = unbounded (upstream)
 +  int max_warp_cache = 0;             // 0 = unbounded (upstream)
++  int max_point_age = 0;              // frames a point may go unmatched, 0 = unbounded
 +  bool visual_map_sliding_en = false;
 +  double visual_sliding_thresh = 8.0; // metres of travel between slides
 +  double visual_half_map_size = 50.0; // metres, half-extent of retained cube
@@ -73,7 +74,7 @@ a no-op until configured.
    enum CellType
    {
      TYPE_MAP = 1,
-@@ -161,6 +177,7 @@
+@@ -161,6 +178,7 @@
    void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                    const int pyramid_level, const int halfpatch_size, float *patch);
    void insertPointIntoVoxelMap(VisualPoint *pt_new);
@@ -110,7 +111,23 @@ a no-op until configured.
  
    // Controls whether to include the visual submap from the previous frame.
    sub_feat_map.clear();
-@@ -1783,6 +1787,99 @@
+@@ -762,6 +766,7 @@
+ 
+       if (error > outlier_threshold * patch_size_total) continue;
+ 
++      pt->last_seen_id_ = new_frame_->id_;
+       visual_submap->voxel_points.push_back(pt);
+       visual_submap->propa_errors.push_back(error);
+       visual_submap->search_levels.push_back(search_level);
+@@ -875,6 +880,7 @@
+       getImagePatch(img, pc, patch, 0);
+ 
+       VisualPoint *pt_new = new VisualPoint(pt);
++      pt_new->last_seen_id_ = new_frame_->id_;
+ 
+       Vector3d f = cam->cam2world(pc);
+       Feature *ftr_new = new Feature(pt_new, patch, pc, f, new_frame_->T_f_w_, 0);
+@@ -1783,6 +1789,127 @@
    cnt++;
  }
  
@@ -123,12 +140,13 @@ a no-op until configured.
 +  // VisualPoints, ~VisualPoint deletes its Features, and ~Feature releases the
 +  // cv::Mat reference that was pinning a full frame.
 +
-+  // 1. Bound the points held per voxel. obs_ is push_front-ed, so
-+  //    obs_.front()->id_ is the frame that most recently observed the point.
-+  //    Keeping the highest ids retains actively tracked points and ages out
-+  //    the create-once-never-match churn that drives the leak.
++  // 1. Bound the points held per voxel, keeping those matched most recently.
++  //    last_seen_id_ is stamped whenever the point is retrieved into the frame's
++  //    submap, so actively tracked points are retained and the
++  //    create-once-never-matched churn ages out first.
 +  trim_calls_++;
 +  int evicted = 0;
++  int aged = 0;
 +  if (max_pts_per_voxel > 0)
 +  {
 +    for (auto &pair : feat_map)
@@ -139,8 +157,8 @@ a no-op until configured.
 +      std::nth_element(pts.begin(), pts.begin() + max_pts_per_voxel, pts.end(),
 +                       [](const VisualPoint *a, const VisualPoint *b)
 +                       {
-+                         int ia = (a == nullptr || a->obs_.empty()) ? -1 : a->obs_.front()->id_;
-+                         int ib = (b == nullptr || b->obs_.empty()) ? -1 : b->obs_.front()->id_;
++                         int ia = (a == nullptr) ? -1 : a->last_seen_id_;
++                         int ib = (b == nullptr) ? -1 : b->last_seen_id_;
 +                         return ia > ib;
 +                       });
 +      for (size_t i = (size_t)max_pts_per_voxel; i < pts.size(); i++)
@@ -153,13 +171,30 @@ a no-op until configured.
 +    }
 +  }
 +
-+  // Periodic proof the bound is actually holding, and what it costs.
-+  if (map_report_every > 0 && (trim_calls_ % map_report_every) == 0)
++  // 1b. Bound how far back the map still reaches. This, not the point count, is
++  //     what bounds memory: every surviving Feature pins an entire decoded frame
++  //     through Feature::img_ (a refcounted cv::Mat, ~1 MB at 1280x800 grey), so
++  //     resident memory tracks the SPAN of frame ids the map still references.
++  //     Dropping points unmatched for max_point_age frames caps that span, and
++  //     hence caps memory at roughly max_point_age x frame size.
++  if (max_point_age > 0 && new_frame_ != nullptr)
 +  {
-+    size_t total_pts = 0;
-+    for (auto &pair : feat_map) total_pts += pair.second->voxel_points.size();
-+    printf("[ VIO ] visual map: %zu voxels, %zu points, %d evicted this frame, warp cache %zu\n",
-+           feat_map.size(), total_pts, evicted, warp_map.size());
++    const int cutoff = (int)new_frame_->id_ - max_point_age;
++    for (auto it = feat_map.begin(); it != feat_map.end();)
++    {
++      std::vector<VisualPoint *> &pts = it->second->voxel_points;
++      size_t keep = 0;
++      for (size_t r = 0; r < pts.size(); r++)
++      {
++        VisualPoint *pt = pts[r];
++        if (pt != nullptr && pt->last_seen_id_ < cutoff) { delete pt; aged++; }
++        else pts[keep++] = pt;
++      }
++      pts.resize(keep);
++      it->second->count = (int)keep;
++      if (pts.empty()) { delete it->second; it = feat_map.erase(it); }
++      else { ++it; }
++    }
 +  }
 +
 +  // 2. Slide the visual map with the platform, mirroring
@@ -205,12 +240,22 @@ a no-op until configured.
 +    for (auto &pair : warp_map) delete pair.second;
 +    warp_map.clear();
 +  }
++
++  // Periodic proof the bound is actually holding, and what it costs.
++  if (map_report_every > 0 && (trim_calls_ % map_report_every) == 0)
++  {
++    size_t total_pts = 0;
++    for (auto &pair : feat_map) total_pts += pair.second->voxel_points.size();
++    printf("[ VIO ] visual map: %zu voxels, %zu points, %d evicted, %d aged out, warp cache %zu\n",
++           feat_map.size(), total_pts, evicted, aged, warp_map.size());
++  }
++
 +}
 +
  void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
  {
    if (width != img.cols || height != img.rows)
-@@ -1828,6 +1925,8 @@
+@@ -1828,6 +1955,8 @@
    updateReferencePatch(feat_map);
  
    double t7 = omp_get_wtime();
@@ -221,12 +266,13 @@ a no-op until configured.
  
 --- a/include/LIVMapper.h
 +++ b/include/LIVMapper.h
-@@ -112,6 +112,12 @@
+@@ -112,6 +112,13 @@
    bool lidar_pushed = false, imu_en, gravity_est_en, flg_reset = false, ba_bg_est_en = true;
    bool dense_map_en = false;
    int img_en = 1, imu_int_frame = 3;
 +  // Bounded visual map (see VIOManager::trimVisualMap)
 +  int vio_max_pts_per_voxel = 0, vio_max_warp_cache = 0;
++  int vio_max_point_age = 0;
 +  bool vio_map_sliding_en = false;
 +  int path_max_poses = 0;   // 0 = unbounded (upstream)
 +  int vio_map_report_every = 200;
@@ -236,12 +282,13 @@ a no-op until configured.
    double exposure_time_init = 0.0;
 --- a/src/LIVMapper.cpp
 +++ b/src/LIVMapper.cpp
-@@ -67,6 +67,12 @@
+@@ -67,6 +67,13 @@
    nh.param<int>("vio/patch_pyrimid_level", patch_pyrimid_level, 3);
    nh.param<int>("vio/patch_size", patch_size, 8);
    nh.param<double>("vio/outlier_threshold", outlier_threshold, 1000);
 +  nh.param<int>("vio/max_pts_per_voxel", vio_max_pts_per_voxel, 0);
 +  nh.param<int>("vio/max_warp_cache", vio_max_warp_cache, 0);
++  nh.param<int>("vio/max_point_age", vio_max_point_age, 0);
 +  nh.param<bool>("vio/map_sliding_en", vio_map_sliding_en, false);
 +  nh.param<double>("vio/sliding_thresh", vio_sliding_thresh, 8.0);
 +  nh.param<double>("vio/half_map_size", vio_half_map_size, 50.0);
@@ -249,7 +296,7 @@ a no-op until configured.
  
    nh.param<double>("time_offset/exposure_time_init", exposure_time_init, 0.0);
    nh.param<double>("time_offset/img_time_offset", img_time_offset, 0.0);
-@@ -105,6 +111,7 @@
+@@ -105,6 +112,7 @@
    nh.param<int>("publish/pub_scan_num", pub_scan_num, 1);
    nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
    nh.param<bool>("publish/dense_map_en", dense_map_en, false);
@@ -257,12 +304,13 @@ a no-op until configured.
  
    p_pre->blind_sqr = p_pre->blind * p_pre->blind;
  }
-@@ -180,6 +187,12 @@
+@@ -180,6 +188,13 @@
    vio_manager->patch_pyrimid_level = patch_pyrimid_level;
    vio_manager->exposure_estimate_en = exposure_estimate_en;
    vio_manager->colmap_output_en = colmap_output_en;
 +  vio_manager->max_pts_per_voxel = vio_max_pts_per_voxel;
 +  vio_manager->max_warp_cache = vio_max_warp_cache;
++  vio_manager->max_point_age = vio_max_point_age;
 +  vio_manager->visual_map_sliding_en = vio_map_sliding_en;
 +  vio_manager->visual_sliding_thresh = vio_sliding_thresh;
 +  vio_manager->visual_half_map_size = vio_half_map_size;
@@ -270,7 +318,7 @@ a no-op until configured.
    vio_manager->initializeVIO();
  
    p_imu->set_extrinsic(extT, extR);
-@@ -1328,5 +1341,12 @@
+@@ -1328,5 +1343,12 @@
    msg_body_pose.header.stamp = ros::Time::now();
    msg_body_pose.header.frame_id = "camera_init";
    path.poses.push_back(msg_body_pose);
@@ -295,4 +343,29 @@ a no-op until configured.
 +    // once sliding is enabled. The interesting events are logged below.
      return false;
    }
+ 
+--- a/include/visual_point.h
++++ b/include/visual_point.h
+@@ -35,6 +35,10 @@
+   bool is_normal_initialized_;  //!< True if the normal is initialized.
+   bool has_ref_patch_;          //!< True if the point has a reference patch.
+   Feature *ref_patch;           //!< Reference patch of the point.
++  int last_seen_id_;            //!< Frame id that last MATCHED this point.
++                                //!< obs_.front()->id_ only advances when a new
++                                //!< Feature is added, which needs parallax, so a
++                                //!< stationary platform never refreshes it.
+ 
+   VisualPoint(const Vector3d &pos);
+   ~VisualPoint();
+--- a/src/visual_point.cpp
++++ b/src/visual_point.cpp
+@@ -17,7 +17,8 @@
+ 
+ VisualPoint::VisualPoint(const Vector3d &pos)
+     : pos_(pos), previous_normal_(Vector3d::Zero()), normal_(Vector3d::Zero()),
+-      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false)
++      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false),
++      last_seen_id_(-1)
+ {
+ }
  

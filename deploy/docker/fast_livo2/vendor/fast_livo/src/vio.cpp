@@ -766,6 +766,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       if (error > outlier_threshold * patch_size_total) continue;
 
+      pt->last_seen_id_ = new_frame_->id_;
       visual_submap->voxel_points.push_back(pt);
       visual_submap->propa_errors.push_back(error);
       visual_submap->search_levels.push_back(search_level);
@@ -879,6 +880,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       getImagePatch(img, pc, patch, 0);
 
       VisualPoint *pt_new = new VisualPoint(pt);
+      pt_new->last_seen_id_ = new_frame_->id_;
 
       Vector3d f = cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt_new, patch, pc, f, new_frame_->T_f_w_, 0);
@@ -1796,12 +1798,13 @@ void VIOManager::trimVisualMap()
   // VisualPoints, ~VisualPoint deletes its Features, and ~Feature releases the
   // cv::Mat reference that was pinning a full frame.
 
-  // 1. Bound the points held per voxel. obs_ is push_front-ed, so
-  //    obs_.front()->id_ is the frame that most recently observed the point.
-  //    Keeping the highest ids retains actively tracked points and ages out
-  //    the create-once-never-match churn that drives the leak.
+  // 1. Bound the points held per voxel, keeping those matched most recently.
+  //    last_seen_id_ is stamped whenever the point is retrieved into the frame's
+  //    submap, so actively tracked points are retained and the
+  //    create-once-never-matched churn ages out first.
   trim_calls_++;
   int evicted = 0;
+  int aged = 0;
   if (max_pts_per_voxel > 0)
   {
     for (auto &pair : feat_map)
@@ -1812,8 +1815,8 @@ void VIOManager::trimVisualMap()
       std::nth_element(pts.begin(), pts.begin() + max_pts_per_voxel, pts.end(),
                        [](const VisualPoint *a, const VisualPoint *b)
                        {
-                         int ia = (a == nullptr || a->obs_.empty()) ? -1 : a->obs_.front()->id_;
-                         int ib = (b == nullptr || b->obs_.empty()) ? -1 : b->obs_.front()->id_;
+                         int ia = (a == nullptr) ? -1 : a->last_seen_id_;
+                         int ib = (b == nullptr) ? -1 : b->last_seen_id_;
                          return ia > ib;
                        });
       for (size_t i = (size_t)max_pts_per_voxel; i < pts.size(); i++)
@@ -1826,13 +1829,30 @@ void VIOManager::trimVisualMap()
     }
   }
 
-  // Periodic proof the bound is actually holding, and what it costs.
-  if (map_report_every > 0 && (trim_calls_ % map_report_every) == 0)
+  // 1b. Bound how far back the map still reaches. This, not the point count, is
+  //     what bounds memory: every surviving Feature pins an entire decoded frame
+  //     through Feature::img_ (a refcounted cv::Mat, ~1 MB at 1280x800 grey), so
+  //     resident memory tracks the SPAN of frame ids the map still references.
+  //     Dropping points unmatched for max_point_age frames caps that span, and
+  //     hence caps memory at roughly max_point_age x frame size.
+  if (max_point_age > 0 && new_frame_ != nullptr)
   {
-    size_t total_pts = 0;
-    for (auto &pair : feat_map) total_pts += pair.second->voxel_points.size();
-    printf("[ VIO ] visual map: %zu voxels, %zu points, %d evicted this frame, warp cache %zu\n",
-           feat_map.size(), total_pts, evicted, warp_map.size());
+    const int cutoff = (int)new_frame_->id_ - max_point_age;
+    for (auto it = feat_map.begin(); it != feat_map.end();)
+    {
+      std::vector<VisualPoint *> &pts = it->second->voxel_points;
+      size_t keep = 0;
+      for (size_t r = 0; r < pts.size(); r++)
+      {
+        VisualPoint *pt = pts[r];
+        if (pt != nullptr && pt->last_seen_id_ < cutoff) { delete pt; aged++; }
+        else pts[keep++] = pt;
+      }
+      pts.resize(keep);
+      it->second->count = (int)keep;
+      if (pts.empty()) { delete it->second; it = feat_map.erase(it); }
+      else { ++it; }
+    }
   }
 
   // 2. Slide the visual map with the platform, mirroring
@@ -1878,6 +1898,16 @@ void VIOManager::trimVisualMap()
     for (auto &pair : warp_map) delete pair.second;
     warp_map.clear();
   }
+
+  // Periodic proof the bound is actually holding, and what it costs.
+  if (map_report_every > 0 && (trim_calls_ % map_report_every) == 0)
+  {
+    size_t total_pts = 0;
+    for (auto &pair : feat_map) total_pts += pair.second->voxel_points.size();
+    printf("[ VIO ] visual map: %zu voxels, %zu points, %d evicted, %d aged out, warp cache %zu\n",
+           feat_map.size(), total_pts, evicted, aged, warp_map.size());
+  }
+
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)

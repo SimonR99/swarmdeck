@@ -139,6 +139,7 @@ public:
   // therefore leaks at the camera frame rate. Zero keeps upstream behaviour.
   int max_pts_per_voxel = 0;          // 0 = unbounded (upstream)
   int max_warp_cache = 0;             // 0 = unbounded (upstream)
+  int max_point_age = 0;              // frames a point may go unmatched, 0 = unbounded
   bool visual_map_sliding_en = false;
   double visual_sliding_thresh = 8.0; // metres of travel between slides
   double visual_half_map_size = 50.0; // metres, half-extent of retained cube

@@ -232,6 +232,9 @@ def build_fast_livo_config(
             # Feature::img_. Zero restores the upstream unbounded behaviour.
             "max_pts_per_voxel": 20,
             "max_warp_cache": 2000,
+            # Bounds the span of frames the map pins through Feature::img_,
+            # which is what actually bounds resident memory.
+            "max_point_age": 300,
             "map_sliding_en": True,
             "sliding_thresh": 8.0,
             "half_map_size": 50.0,

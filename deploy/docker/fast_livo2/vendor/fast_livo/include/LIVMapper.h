@@ -114,6 +114,7 @@ public:
   int img_en = 1, imu_int_frame = 3;
   // Bounded visual map (see VIOManager::trimVisualMap)
   int vio_max_pts_per_voxel = 0, vio_max_warp_cache = 0;
+  int vio_max_point_age = 0;
   bool vio_map_sliding_en = false;
   int path_max_poses = 0;   // 0 = unbounded (upstream)
   int vio_map_report_every = 200;

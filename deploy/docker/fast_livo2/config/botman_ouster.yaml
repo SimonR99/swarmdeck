@@ -106,6 +106,12 @@
       # almost flat (550 -> 676), and a longer run was OOM-killed at 21.5 GiB.
       max_pts_per_voxel: 20    # 0 restores upstream unbounded behaviour
       max_warp_cache: 2000     # warp_map is never cleared when normal_en: true
+      # THE memory bound: each surviving Feature pins a whole decoded frame via
+      # Feature::img_ (~1 MB at 1280x800 grey), so resident memory tracks the span
+      # of frames the map still references. 300 frames at 15 Hz is 20 s, capping
+      # the pinned set near 300 MB. Measured on Botman: without it the visual path
+      # leaked 4.5 MiB/s even with max_pts_per_voxel active.
+      max_point_age: 300
       map_sliding_en: true     # drop visual voxels left behind while driving
       sliding_thresh: 8.0      # metres of travel between slides
       half_map_size: 50.0      # metres, half-extent of the retained cube

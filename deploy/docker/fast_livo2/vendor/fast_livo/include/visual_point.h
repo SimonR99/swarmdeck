@@ -35,6 +35,10 @@ public:
   bool is_normal_initialized_;  //!< True if the normal is initialized.
   bool has_ref_patch_;          //!< True if the point has a reference patch.
   Feature *ref_patch;           //!< Reference patch of the point.
+  int last_seen_id_;            //!< Frame id that last MATCHED this point.
+                                //!< obs_.front()->id_ only advances when a new
+                                //!< Feature is added, which needs parallax, so a
+                                //!< stationary platform never refreshes it.
 
   VisualPoint(const Vector3d &pos);
   ~VisualPoint();

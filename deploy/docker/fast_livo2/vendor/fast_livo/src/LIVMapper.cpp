@@ -69,6 +69,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("vio/outlier_threshold", outlier_threshold, 1000);
   nh.param<int>("vio/max_pts_per_voxel", vio_max_pts_per_voxel, 0);
   nh.param<int>("vio/max_warp_cache", vio_max_warp_cache, 0);
+  nh.param<int>("vio/max_point_age", vio_max_point_age, 0);
   nh.param<bool>("vio/map_sliding_en", vio_map_sliding_en, false);
   nh.param<double>("vio/sliding_thresh", vio_sliding_thresh, 8.0);
   nh.param<double>("vio/half_map_size", vio_half_map_size, 50.0);
@@ -189,6 +190,7 @@ void LIVMapper::initializeComponents()
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->max_pts_per_voxel = vio_max_pts_per_voxel;
   vio_manager->max_warp_cache = vio_max_warp_cache;
+  vio_manager->max_point_age = vio_max_point_age;
   vio_manager->visual_map_sliding_en = vio_map_sliding_en;
   vio_manager->visual_sliding_thresh = vio_sliding_thresh;
   vio_manager->visual_half_map_size = vio_half_map_size;
