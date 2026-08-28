@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast DDS transport profile for high-rate, large point clouds.
+
+  A 17-ring LiDAR scan (e.g. VLP-16) with 1800 azimuth steps produces ~30,000 points.
+  At ~26-32 bytes per point, a single PointCloud2 message is ~700-900 KB.
+  Fast DDS sizes its UDP socket buffer from net.core.rmem_default (208 KB by default),
+  which is smaller than a single scan message, leading to silent UDP fragment drops.
+
+  This profile configures a 7 MB socket buffer to prevent packet loss under multi-robot
+  simulations in lockstep.
+-->
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>large_udp</transport_id>
+        <type>UDPv4</type>
+        <sendBufferSize>7000000</sendBufferSize>
+        <receiveBufferSize>7000000</receiveBufferSize>
+        <maxMessageSize>65000</maxMessageSize>
+        <maxInitialPeersRange>10</maxInitialPeersRange>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="large_data_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>large_udp</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

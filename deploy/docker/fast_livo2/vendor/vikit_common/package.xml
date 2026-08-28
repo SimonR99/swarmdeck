@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>vikit_common</name>
+  <version>0.0.1</version>
+  <description>
+    Vision toolkit (camera models, math and interpolation helpers) used by
+    FAST-LIVO2. Vendored from rpg_vikit via sjtuyinjie/M3DGR and rebuilt for
+    ament. The upstream package is catkin, but the library itself contains no
+    ROS code at all, so the only change is the build system.
+  </description>
+  <maintainer email="swarmdeck@example.com">SwarmDeck</maintainer>
+  <license>BSD</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
