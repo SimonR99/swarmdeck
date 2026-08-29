@@ -175,7 +175,7 @@
       <div class="p-4 flex flex-col gap-3">
         {#if robot.robot_type === 'unitree_g1' || robot.robot_id.startsWith('chris')}
           <div class="text-[11px] text-fg-dim">
-            Direct humanoid posture and motion commands for <strong class="text-fg">{shortName}</strong>.
+            Direct humanoid commands backed by Chris's native G1 bridge for <strong class="text-fg">{shortName}</strong>.
           </div>
 
           <div class="grid grid-cols-2 gap-2 mt-0.5">
@@ -203,41 +203,21 @@
               class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
               disabled={!robot.online}
               onclick={() => {
-                actions.bodyCommand(robot.robot_id, 'lock_stand');
+                actions.bodyCommand(robot.robot_id, 'sit');
                 bodyModalOpen = false;
               }}
             >
-              Locked Stand
-            </button>
-            <button
-              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
-              disabled={!robot.online}
-              onclick={() => {
-                actions.bodyCommand(robot.robot_id, 'walk_mode');
-                bodyModalOpen = false;
-              }}
-            >
-              Walk Mode
-            </button>
-            <button
-              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
-              disabled={!robot.online}
-              onclick={() => {
-                actions.bodyCommand(robot.robot_id, 'run_mode');
-                bodyModalOpen = false;
-              }}
-            >
-              Run Mode
+              Sit
             </button>
             <button
               class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
               disabled={!robot.online}
               onclick={() => {
-                actions.bodyCommand(robot.robot_id, 'wave');
+                actions.bodyCommand(robot.robot_id, 'stand');
                 bodyModalOpen = false;
               }}
             >
-              Wave
+              Start / Walk
             </button>
           </div>
         {:else}

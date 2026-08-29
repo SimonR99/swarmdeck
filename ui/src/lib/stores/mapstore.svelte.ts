@@ -259,6 +259,18 @@ function ensureCanvas(w: number, h: number) {
   }
 }
 
+/** Drop the displayed grid before an asynchronous view replacement begins. */
+function clearGrid() {
+  canvas = null;
+  ctx = null;
+  maskLevels = [];
+  occupied = null;
+  maskDirty = true;
+  state.info = null;
+  state.seq = 0;
+  state.ready = false;
+}
+
 /** Convert an int8 occupancy buffer to RGBA pixels, recording occupancy. */
 function toImageData(
   cells: Int8Array,
@@ -413,7 +425,8 @@ export const mapStore = {
     state.mapSource = source;
     await this.loadOptimizedScopes();
     if (state.viewMode === 'local' && state.viewRobot) {
-      state.ready = false;
+      clearGrid();
+      state.revision++;
       await this.selectRobotView(state.viewRobot, true);
     }
     state.revision++;
@@ -851,7 +864,7 @@ export const mapStore = {
   /** Reload whichever full grid is visible after an operator map reset. */
   async reloadCurrentView() {
     loadGeneration++;
-    state.ready = false;
+    clearGrid();
     state.revision++;
 
     if (state.viewMode === 'local' && state.viewRobot) {
@@ -868,6 +881,8 @@ export const mapStore = {
       await this.loadFullPng(payload.info);
     } catch (error) {
       console.warn('[swarmdeck] map reset reload failed', error);
+      clearGrid();
+      state.revision++;
     }
   },
 
@@ -909,7 +924,11 @@ export const mapStore = {
       loadGeneration++;
       state.viewMode = desiredMode;
       state.viewRobot = desiredRobot;
-      state.ready = false;
+      clearGrid();
+      state.revision++;
+    } else if (force) {
+      loadGeneration++;
+      clearGrid();
       state.revision++;
     }
 
@@ -984,6 +1003,10 @@ export const mapStore = {
       await this.loadNetworkSnapshot(robotId!, generation);
     } catch (error) {
       console.warn('[swarmdeck] local map restore failed', error);
+      if (generation === loadGeneration && state.viewMode === 'local' && state.viewRobot === robotId) {
+        clearGrid();
+        state.revision++;
+      }
     }
   },
 

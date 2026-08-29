@@ -90,7 +90,7 @@ then start the operator services and deploy robots:
 
 ```bash
 make up-deploy
-make deploy ROBOT=scout       # scout, botman, aslan, or spot
+make deploy ROBOT=scout       # scout, botman, aslan, spot, or chris
 make deploy ROBOT=all
 ```
 

@@ -27,13 +27,13 @@ The protocol rule "never send a capability you cannot honour" is enforced here b
 construction: a capability is only advertised if its topic or action is present
 in the configuration AND resolves at runtime.
 
-WHAT IS DELIBERATELY NOT DONE
------------------------------
-This has never run against physical hardware. It is written against the protocol
-spec (adapters/protocol/README.md) and the working `adapter_sim` reference, and
-its message construction is unit-tested, but every timeout, QoS choice and frame
-name below is a hypothesis until a robot proves it. See docs/operations/hardware-bringup.md
-for the order to validate them in.
+HARDWARE VALIDATION
+-------------------
+The generic adapter is unit-tested, and the Chris profile has been smoke-tested
+against a live Unitree G1: its native odometry, camera, point cloud, TF, and
+command-velocity bridge are all discovered at runtime. Other hardware profiles
+still require the same topic, QoS, and frame validation described in
+docs/operations/hardware-bringup.md.
 """
 
 from __future__ import annotations

@@ -60,7 +60,13 @@ class Ros2JpegRtspPublisher(Node):
             "! video/x-h264,profile=baseline "
             "! h264parse config-interval=-1 "
             "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=100000000 leaky=downstream "
-            f'! rtspclientsink location="{rtsp_url}" protocols=udp latency=0'
+            # Keep the RTP packets on the RTSP TCP connection.  The robot and
+            # backend are separated by Wi-Fi, and UDP loss can leave
+            # rtspclientsink's internal reconnect with a live control socket
+            # but no publishing session.  TCP also makes a broken session
+            # observable to the bus monitor so the outer loop can rebuild it.
+            f'! rtspclientsink location="{rtsp_url}" protocols=tcp '
+            "latency=0 tcp-timeout=5000000"
         )
         self.pipeline = Gst.parse_launch(pipeline)
         self.source = self.pipeline.get_by_name("source")
@@ -122,11 +128,16 @@ class Ros2JpegRtspPublisher(Node):
             else:
                 self.get_logger().error("camera RTSP pipeline ended unexpectedly")
             self._failed.set()
-            rclpy.try_shutdown()
 
     def close(self) -> None:
-        self.source.emit("end-of-stream")
-        self.pipeline.set_state(Gst.State.NULL)
+        try:
+            self.source.emit("end-of-stream")
+        except Exception:
+            pass
+        try:
+            self.pipeline.set_state(Gst.State.NULL)
+        except Exception:
+            pass
 
 
 def main() -> None:
@@ -148,24 +159,38 @@ def main() -> None:
     if args.width < 1 or args.height < 1:
         parser.error("--width and --height must be positive")
 
-    rclpy.init()
-    publisher = Ros2JpegRtspPublisher(
-        args.robot_id,
-        args.topic,
-        args.rtsp_url,
-        args.bitrate_kbps,
-        max(1, args.fps),
-        raw_topic=args.raw_topic,
-        width=args.width,
-        height=args.height,
-    )
     source = args.topic + (f" or {args.raw_topic}" if args.raw_topic else "")
-    publisher.get_logger().info(f"streaming {source} to {args.rtsp_url}")
+    rclpy.init()
     try:
-        rclpy.spin(publisher)
+        while rclpy.ok():
+            publisher = None
+            try:
+                publisher = Ros2JpegRtspPublisher(
+                    args.robot_id,
+                    args.topic,
+                    args.rtsp_url,
+                    args.bitrate_kbps,
+                    max(1, args.fps),
+                    raw_topic=args.raw_topic,
+                    width=args.width,
+                    height=args.height,
+                )
+                publisher.get_logger().info(
+                    f"streaming {source} to {args.rtsp_url}"
+                )
+                while rclpy.ok() and not publisher._failed.is_set():
+                    rclpy.spin_once(publisher, timeout_sec=0.5)
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:
+                print(f"RTSP publisher error: {exc}; retrying in 2s...", file=sys.stderr)
+            finally:
+                if publisher is not None:
+                    publisher.close()
+                    publisher.destroy_node()
+            if rclpy.ok():
+                time.sleep(2.0)
     finally:
-        publisher.close()
-        publisher.destroy_node()
         rclpy.try_shutdown()
 
 

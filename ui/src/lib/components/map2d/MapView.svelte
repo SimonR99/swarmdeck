@@ -285,6 +285,12 @@
       view.initialised = true;
       lastRenderedInfo = info;
       fitMap();
+      // A local map belongs to one robot. Centre it on that robot when the
+      // async map load completes, even if the operator had panned the prior
+      // robot's map.
+      if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
+        centreOnFleet();
+      }
     } else if (view.initialised && lastRenderedInfo && info) {
       if (
         lastRenderedInfo.origin.x !== info.origin.x ||

@@ -1,8 +1,9 @@
 # Unitree G1 Humanoid Robot (SSH alias `chris` → `192.168.1.37`, user `unitree`).
-# Runs ROS 2 (Humble / CycloneDDS) and g1pilot / unitree_ros2 / DinoNav.
+# SwarmDeck's ROS 2 Humble adapter shares the graph with the host-side
+# `g1_ros2_bridge` (Foxy + Unitree SDK). The latter is started by scripts/chris-up.
 robot_type: unitree_g1
 ros_distro: humble
-network_iface: auto
+network_iface: wlan0
 
 # Humanoid torso/pelvis bounding footprint.
 footprint_radius: 0.30
@@ -12,38 +13,44 @@ footprint:
   - [-0.18, -0.22]
   - [-0.18, 0.22]
 
-map_frame: map
-base_frame: robot_center
+map_frame: world
+base_frame: base_link
 
 topics:
-  odom: /dog_odom
-  map: /map
+  odom: /odom
+  map: ""
   map_cloud: /utlidar/cloud_livox_mid360
-  plan: /g1pilot/path
+  plan: ""
   cmd_vel: /cmd_vel
-  battery: /g1pilot/battery
+  battery: ""
   camera: /d435/camera/color/image_raw
   camera_compressed: /d435/camera/color/image_raw/compressed
-  camera_depth: /d435/camera/depth/image_rect_raw
-  camera_info: /d435/camera/depth/camera_info
-  camera_color_info: /d435/camera/color/camera_info
+  # The camera publishes colour at 1280x720 and depth at 848x480. Use the
+  # aligned stream so detection pixels and depth pixels share one CameraInfo.
+  camera_depth: /d435/camera/aligned_depth_to_color/image_raw
+  camera_info: /d435/camera/aligned_depth_to_color/camera_info
+  camera_color_info: ""
   camera_depth_points: ""
 
 actions:
-  navigate_to_pose: /navigate_to_pose
+  # No Nav2/action server is installed on Chris; teleop is deliberately the
+  # only motion path until a planner is deployed and verified.
+  navigate_to_pose: ""
 
 services:
-  claim: /g1pilot/start
-  release: /g1pilot/emergency_stop
-  sit: /g1pilot/sit
-  stand: /g1pilot/balance
-  stop: /g1pilot/emergency_stop
-  damping: /g1pilot/damping
-  lie_to_stand: /g1pilot/lie_to_stand
-  lock_stand: /g1pilot/lock_stand
-  walk_mode: /g1pilot/walk_mode
-  run_mode: /g1pilot/run_mode
-  wave: /g1pilot/wave
+  # g1_ros2_bridge exposes std_srvs/Trigger services under this node. Start
+  # maps to FSM 500, which is the state required before /cmd_vel is accepted.
+  claim: /g1_loco_bridge/start
+  release: /g1_loco_bridge/damp
+  sit: /g1_loco_bridge/sit
+  stand: /g1_loco_bridge/start
+  stop: /g1_loco_bridge/stop_move
+  damping: /g1_loco_bridge/damp
+  lie_to_stand: /g1_loco_bridge/lie_to_stand
+  lock_stand: ""
+  walk_mode: /g1_loco_bridge/start
+  run_mode: ""
+  wave: ""
 
 perception:
   depth_max_age_s: 1.0

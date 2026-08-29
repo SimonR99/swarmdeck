@@ -1,7 +1,7 @@
 # Chris (Unitree G1) bring-up owned by SwarmDeck.
 #
-# Connects Unitree G1 humanoid (192.168.1.37) running ROS 2 (CycloneDDS / g1pilot / DinoNav)
-# into SwarmDeck operator dashboard.
+# Connects Unitree G1 humanoid (192.168.1.37) running ROS 2 Humble containers
+# and the host-side Foxy/Unitree locomotion bridge into SwarmDeck.
 
 x-ros-domain: &ros_domain "${CHRIS_ROS_DOMAIN_ID:-0}"
 
