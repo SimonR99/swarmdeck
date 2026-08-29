@@ -264,6 +264,7 @@ class GtsamPoseGraph:
         pcm_confidence: float = 0.99,
         min_pcm_clique_size: int = 2,
         gnc_weight_threshold: float = _DEFAULT_GNC_WEIGHT_THRESHOLD,
+        pose_prior_sigmas: np.ndarray | None = None,
     ) -> None:
         """
         Args:
@@ -280,6 +281,12 @@ class GtsamPoseGraph:
                 uncorroborated closures when overlap is known to be sparse.
             gnc_weight_threshold: minimum final GNC weight for a loop-closure
                 factor to be kept in the Levenberg-Marquardt refit.
+            pose_prior_sigmas: optional 6-vector (gtsam tangent order
+                rx,ry,rz,tx,ty,tz). When set, every keyframe gets a PriorFactor
+                at its SLAM pose expressed in the component frame. That is
+                the "odometry as suggestion" pin: loop closures may still
+                refine, but they cannot fold a working onboard trajectory.
+                ``None`` keeps today's behaviour (anchor only).
         """
         self._keys = KeyRegistry()
         self._keyframes: dict[KeyframeId, Keyframe] = {}
@@ -289,6 +296,13 @@ class GtsamPoseGraph:
         self._gnc_weight_threshold = gnc_weight_threshold
         self._anchor_noise = gtsam.noiseModel.Diagonal.Sigmas(_ANCHOR_SIGMAS)
         self._lm_params = gtsam.LevenbergMarquardtParams()
+        self._pose_prior_noise = (
+            None
+            if pose_prior_sigmas is None
+            else gtsam.noiseModel.Diagonal.Sigmas(
+                np.asarray(pose_prior_sigmas, dtype=np.float64).reshape(6)
+            )
+        )
 
     # ------------------------------------------------------------------ #
     # PoseGraphOptimizer protocol
@@ -586,6 +600,19 @@ class GtsamPoseGraph:
                     self._anchor_noise,
                 )
             )
+
+        if self._pose_prior_noise is not None:
+            for kf_id, keyframe in self._keyframes.items():
+                known_inliers.append(graph.size())
+                graph.add(
+                    gtsam.PriorFactorPose3(
+                        self._keys.key(kf_id),
+                        gtsam.Pose3(
+                            init_t_world_odom[kf_id.trajectory] @ keyframe.t_odom_base
+                        ),
+                        self._pose_prior_noise,
+                    )
+                )
 
         loop_factors: list[tuple[int, Edge]] = []
         for edge in [*intra_trajectory_loops, *pcm_accepted_inter]:

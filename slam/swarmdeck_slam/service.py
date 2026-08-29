@@ -24,6 +24,7 @@ import urllib.request
 import zlib
 from collections import deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,12 +40,13 @@ from swarmdeck_protocol import (
 from swarmdeck_slam.backend import (
     BackendSnapshot,
     CollaborativeBackend,
+    operator_setting_defaults,
     majority_component,
     scoped_grids,
     snapshot_update,
 )
 from swarmdeck_slam.render import RenderConfig
-from swarmdeck_slam.types import TrajectoryId
+from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz
 
 # Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
 # dump of every point. With a single-ring lidar the distinction is invisible --
@@ -60,14 +62,68 @@ from swarmdeck_slam.types import TrajectoryId
 # the values below are only the compatibility fallback for old packets or a
 # profile without floor calibration. The environment variables remain useful
 # when replaying such legacy captures.
+REGISTRATION_MODE = os.environ.get("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
 RENDER = RenderConfig(
     floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "0.0")),
     min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.15")),
     max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "1.80")),
+    odometry_as_pose=REGISTRATION_MODE != "odom_free",
+    close_occupied=1,
+    hit_weight=5,
 )
 
-REGISTRATION_MODE = os.environ.get("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
-backend = CollaborativeBackend(render=RENDER, registration_mode=REGISTRATION_MODE)
+# gtsam tangent order: rx, ry, rz, tx, ty, tz. Tight enough that a working
+# onboard SLAM trajectory stays rigid; loose enough that a genuine residual
+# of a few centimetres can still be absorbed.
+_POSE_PRIOR_SIGMAS = np.array([0.05, 0.05, 0.05, 0.10, 0.10, 0.15])
+
+
+def _start_pose_hints(path: str) -> dict[str, np.ndarray] | None:
+    """Read ``map.start_poses`` from the session yaml, if present.
+
+    These are the Gazebo spawn poses. Graph mode uses them as ``T_world_map``
+    so onboard maps overlay in the world frame. Odometry-free mode uses them
+    only to gauge reconstructed occupancy, not to pin every keyframe.
+    Absent on hardware, where the field is empty.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    import math
+    import re
+
+    matches = re.findall(
+        r"(robot_\w+):\s*\{x:\s*([-\d.e]+),\s*y:\s*([-\d.e]+),\s*yaw:\s*([-\d.e]+)\}",
+        text,
+    )
+    if not matches:
+        return None
+    hints = {}
+    for robot_id, x, y, yaw in matches:
+        yaw_f = float(yaw)
+        hints[robot_id] = se3_from_quat_xyz(
+            [
+                float(x),
+                float(y),
+                0.0,
+                0.0,
+                0.0,
+                math.sin(yaw_f / 2.0),
+                math.cos(yaw_f / 2.0),
+            ]
+        )
+    return hints or None
+
+
+backend = CollaborativeBackend(
+    render=RENDER,
+    registration_mode=REGISTRATION_MODE,
+    pose_prior_sigmas=_POSE_PRIOR_SIGMAS if REGISTRATION_MODE == "graph" else None,
+    t_world_map_hint=_start_pose_hints(os.environ.get("SWARMDECK_CONFIG", "")),
+)
 
 _queue: deque[bytes] = deque()
 _queue_lock = threading.Lock()
@@ -340,6 +396,29 @@ def status() -> dict[str, Any]:
         ],
         "server_url": SERVER_URL,
     }
+
+
+@app.get("/config")
+def get_config() -> dict[str, Any]:
+    """Operator merge knobs. Safe to poll from the dashboard."""
+    return {
+        "ok": True,
+        "settings": backend.operator_settings(),
+        "defaults": operator_setting_defaults(),
+    }
+
+
+@app.put("/config")
+async def put_config(request: Request) -> Any:
+    """Apply merge knobs. The worker re-solves on its next pass."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "JSON object required"}, status_code=400)
+    settings = backend.apply_operator_settings(payload)
+    return {"ok": True, "settings": settings, "defaults": operator_setting_defaults()}
 
 
 @app.post("/trajectories/select")

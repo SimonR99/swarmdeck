@@ -76,6 +76,13 @@ export interface MapInfo {
   origin: { x: number; y: number };
 }
 
+/** World-space distance between the visible metric-grid lines at this zoom. */
+export function metricGridSpacing(info: MapInfo | null, view: Viewport): number {
+  const resolution = info?.resolution ?? 0.05;
+  const pixelsPerMetre = view.scale / resolution;
+  return pixelsPerMetre >= 24 ? 1 : pixelsPerMetre >= 7 ? 5 : 10;
+}
+
 export function drawMetricGrid(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -91,8 +98,7 @@ export function drawMetricGrid(
   const originY = info?.origin.y ?? 0;
   const gridHeight = info?.height ?? 0;
 
-  const pixelsPerMetre = view.scale / resolution;
-  const spacing = pixelsPerMetre >= 24 ? 1 : pixelsPerMetre >= 7 ? 5 : 10;
+  const spacing = metricGridSpacing(info, view);
 
   // Calculate visible world bounds from viewport corners
   const minWorldX = originX + ((0 - view.tx) / view.scale) * resolution;
@@ -414,7 +420,7 @@ export function drawCostmap(
   // the UI calls the view "local". Raw SLAM local maps stay in the robot map
   // frame, so only the optimized path needs the registration transform here.
   const useRobotTransform =
-    mapStore.viewMode === 'global' || mapStore.mapSource === 'optimized';
+    mapStore.viewMode === 'global' || mapStore.showingOptimizedGrid;
   const tf = useRobotTransform ? mapStore.status?.transforms[robotId] : undefined;
   if (tf) {
     const originGrid = mapStore.viewToGrid(tf.x, tf.y);

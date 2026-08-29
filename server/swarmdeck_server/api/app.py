@@ -917,6 +917,20 @@ async def post_slam_update(request: Request) -> Any:
     return await handler(request)
 
 
+@app.get("/api/slam/backend")
+async def get_slam_backend() -> Any:
+    from .map_routes import get_slam_backend as handler
+
+    return await handler()
+
+
+@app.put("/api/slam/config")
+async def put_slam_config(request: Request) -> Any:
+    from .map_routes import put_slam_config as handler
+
+    return await handler(request)
+
+
 @app.get("/api/map/nav/{robot_id}")
 async def get_nav_map(request: Request, robot_id: str) -> Response:
     from .map_routes import get_nav_map as handler

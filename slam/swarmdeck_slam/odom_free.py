@@ -19,7 +19,7 @@ that is the central lesson from ``sessions/captures/hw-run-01``.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import small_gicp
@@ -63,17 +63,28 @@ class OdomFreeConfig:
     min_symmetric_overlap: float = 0.42
     max_symmetric_rmse: float = 0.30
     min_inliers: int = 150
+    min_inliers_floor: int = 30
+    min_inlier_ratio: float = 0.35
     deduplicate_translation_m: float = 0.35
     deduplicate_yaw_rad: float = math.radians(8.0)
+    planar_z_span_voxels: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedCloud:
-    """Filtered representation cached once for repeated pair registration."""
+    """Filtered representation cached once for repeated pair registration.
+
+    ``points`` is what GICP sees. For a one-ring scan that is a short vertical
+    extrusion of the original ring so plane-to-plane GICP can estimate wall
+    normals; the descriptor and bird's-eye occupancy stay on the raw plane.
+    3D clouds are stored unchanged.
+    """
 
     points: np.ndarray
     descriptor: np.ndarray
     occupancy: np.ndarray
+    coplanar: bool = False
+    n_observed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +111,60 @@ def _validate_config(config: OdomFreeConfig) -> None:
         raise ValueError("voxel and grid resolutions must be positive")
     if config.grid_half_extent <= 0.0:
         raise ValueError("grid_half_extent must be positive")
+    if not 0.0 < config.min_inlier_ratio <= 1.0:
+        raise ValueError("min_inlier_ratio must be in (0, 1]")
+    if config.min_inliers_floor <= 0 or config.min_inliers <= 0:
+        raise ValueError("inlier counts must be positive")
+
+
+def config_for_keyframe(keyframe: object, base: OdomFreeConfig) -> OdomFreeConfig:
+    """Override height limits from a producer-calibrated keyframe when present."""
+    ground_z = getattr(keyframe, "ground_z", None)
+    min_height = getattr(keyframe, "min_height", None)
+    max_height = getattr(keyframe, "max_height", None)
+    if ground_z is None or min_height is None or max_height is None:
+        return base
+    return replace(
+        base,
+        min_z=float(ground_z) + float(min_height),
+        max_z=float(ground_z) + float(max_height),
+    )
+
+
+def _inlier_threshold(n_points: int, config: OdomFreeConfig) -> int:
+    """Never demand more inliers than the Ouster-sized floor on a large cloud.
+
+    On a one-ring scan of ~200 points the historic 150-inlier gate was 60%+
+    of the cloud and dropped partial overlaps. ``min(min_inliers, ratio * n)``
+    keeps the 150-count for dense 3D while scaling down for sparse rings.
+    """
+    scaled = int(config.min_inlier_ratio * n_points)
+    return max(config.min_inliers_floor, min(config.min_inliers, scaled))
+
+
+def _is_coplanar(points: np.ndarray, config: OdomFreeConfig) -> bool:
+    if len(points) < 3:
+        return False
+    return float(np.ptp(points[:, 2])) < config.planar_z_span_voxels * config.voxel_size
+
+
+def _extrude_planar(points: np.ndarray, voxel_size: float) -> np.ndarray:
+    """Copy the ring at z ± voxel so GICP's 0.20 m voxels keep three layers."""
+    layers = [
+        points + np.array([0.0, 0.0, offset], dtype=np.float64)
+        for offset in (-voxel_size, 0.0, voxel_size)
+    ]
+    return np.vstack(layers)
+
+
+def _project_se2(transform: np.ndarray) -> np.ndarray:
+    """Drop roll/pitch/z: a one-ring ground robot has no measurement of them."""
+    yaw = math.atan2(transform[1, 0], transform[0, 0])
+    out = se3_identity()
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    out[:2, :2] = [[cosine, -sine], [sine, cosine]]
+    out[:2, 3] = transform[:2, 3]
+    return out
 
 
 def _occupancy(points: np.ndarray, config: OdomFreeConfig) -> np.ndarray:
@@ -142,7 +207,16 @@ def prepare_cloud(
         height_min=config.min_z,
         height_max=config.max_z,
     )
-    return PreparedCloud(filtered, descriptor, _occupancy(filtered, config))
+    occupancy = _occupancy(filtered, config)
+    coplanar = _is_coplanar(filtered, config)
+    gicp_points = _extrude_planar(filtered, config.voxel_size) if coplanar else filtered
+    return PreparedCloud(
+        gicp_points,
+        descriptor,
+        occupancy,
+        coplanar,
+        len(filtered),
+    )
 
 
 def _rotation_z(yaw: float) -> np.ndarray:
@@ -247,14 +321,31 @@ def register_clouds(
     """
     config = config or OdomFreeConfig()
     _validate_config(config)
-    if len(target.points) < config.min_inliers or len(source.points) < config.min_inliers:
+    n_observed = min(
+        target.n_observed or len(target.points),
+        source.n_observed or len(source.points),
+    )
+    if n_observed < config.min_inliers_floor:
+        return []
+    required = _inlier_threshold(n_observed, config)
+    if len(target.points) < required or len(source.points) < required:
         return []
 
+    extra_shifts = None
+    if target.coplanar and source.coplanar:
+        extra_shifts = [
+            0,
+            target.descriptor.shape[1] // 4,
+            target.descriptor.shape[1] // 2,
+            3 * target.descriptor.shape[1] // 4,
+        ]
     yaw_modes = alignment_hypotheses(
         target.descriptor,
         source.descriptor,
         count=config.yaw_hypotheses,
         min_separation_sectors=config.yaw_separation_sectors,
+        extra_shifts=extra_shifts,
+        include_antipode=True,
     )
     hypotheses: list[RegistrationHypothesis] = []
     for shift, descriptor_distance in yaw_modes:
@@ -277,9 +368,11 @@ def register_clouds(
                 num_threads=1,
                 max_iterations=config.max_iterations,
             )
-            if not result.converged or result.num_inliers < config.min_inliers:
+            if not result.converged or result.num_inliers < required:
                 continue
             transform = np.asarray(result.T_target_source, dtype=np.float64)
+            if target.coplanar and source.coplanar:
+                transform = _project_se2(transform)
             overlap, rmse = _symmetric_fit(
                 target.points,
                 source.points,

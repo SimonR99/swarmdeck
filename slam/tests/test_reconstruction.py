@@ -18,10 +18,21 @@ from swarmdeck_slam.reconstruction import (
 from swarmdeck_slam.types import se3_identity, se3_inverse
 
 
-def _frame(index: int, stamp: float) -> ReconstructionFrame:
+def _yaw_pose(x: float, yaw: float) -> np.ndarray:
+    pose = se3_identity()
+    cosine, sine = math.cos(yaw), math.sin(yaw)
+    pose[:2, :2] = [[cosine, -sine], [sine, cosine]]
+    pose[0, 3] = x
+    return pose
+
+
+def _frame(
+    index: int, stamp: float, *, x: float | None = None, yaw: float = 0.0
+) -> ReconstructionFrame:
     empty = np.empty((0, 3), dtype=np.float64)
     cloud = PreparedCloud(empty, np.zeros((20, 60), dtype=np.uint8), np.zeros((2, 2)))
-    return ReconstructionFrame(index, "robot", index, stamp, cloud)
+    odom = None if x is None else _yaw_pose(x, yaw)
+    return ReconstructionFrame(index, "robot", index, stamp, cloud, t_odom_base=odom)
 
 
 def _hypothesis(yaw: float, x: float, score: float) -> RegistrationHypothesis:
@@ -89,6 +100,60 @@ def test_temporal_fragments_reject_impossible_flip_and_split_at_gap() -> None:
     assert boundaries[0].reason == "capture gap"
     assert all(abs(edge.registration.yaw_prior) < 1e-6 for edge in fragments[0].edges)
     assert np.allclose(fragments[0].poses[2][:3, 3], [1.0, 0.0, 0.0])
+
+
+def test_vertical_hop_is_not_physical_ground_robot_motion() -> None:
+    frames = [_frame(0, 0.0), _frame(1, 2.0)]
+    jump = se3_identity()
+    jump[2, 3] = 3.0
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        return [
+            RegistrationHypothesis(jump, 0.0, 0.1, 0.8, 0.9, 0.05, 0.05, 500, 0.9)
+        ]
+
+    fragments, boundaries = build_temporal_fragments(frames, register)
+    assert [fragment.frame_indices for fragment in fragments] == [(0,), (1,)]
+    assert boundaries[0].reason == "no physically plausible registration"
+
+
+def test_odom_hint_prefers_the_matching_yaw_mode() -> None:
+    """A kinematically plausible odom hop may break a 180-degree alias.
+
+    Both modes pass the physical gate. Geometry scores the flip higher; a
+    hop that itself turned around selects that flip. Pair registration still
+    never sees the pose -- only the already-computed modes are ranked.
+    """
+    frames = [
+        _frame(0, 0.0, x=0.0, yaw=0.0),
+        _frame(1, 5.0, x=0.5, yaw=math.pi),
+    ]
+    correct = _hypothesis(0.0, 0.5, 0.8)
+    flip = _hypothesis(math.pi, 0.5, 0.9)
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        return [flip, correct]
+
+    fragments, boundaries = build_temporal_fragments(frames, register)
+    assert boundaries == []
+    assert len(fragments) == 1
+    assert abs(fragments[0].edges[0].registration.yaw_prior - math.pi) < 1e-6
+
+
+def test_catastrophic_odom_hop_is_ignored() -> None:
+    """A 20 m jump is not robot motion; geometry keeps the zero-yaw mode."""
+    frames = [
+        _frame(0, 0.0, x=0.0, yaw=0.0),
+        _frame(1, 5.0, x=20.5, yaw=math.pi),
+    ]
+    correct = _hypothesis(0.0, 0.5, 0.8)
+    flip = _hypothesis(math.pi, 0.5, 0.9)
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        return [flip, correct]
+
+    fragments, _ = build_temporal_fragments(frames, register)
+    assert abs(fragments[0].edges[0].registration.yaw_prior) < 1e-6
 
 
 def test_temporal_fragments_never_chain_across_sessions() -> None:

@@ -424,3 +424,71 @@ def test_batched_rays_mark_the_same_cells_as_a_single_batch():
         _rasterize_free(origin, ends, meta, many_batches)
 
     assert np.array_equal(one_batch, many_batches)
+
+
+def test_odometry_as_pose_does_not_paint_solver_smear(fleet):
+    """Occupancy follows the SLAM frame, not a folded solver trajectory.
+
+    A working onboard map sampled into ``t_odom_base`` should still render
+    as that map when the solver has smeared ``poses``. Without this, a few
+    bad loop closures turn thin walls into a fan.
+    """
+    _, robots = fleet
+    keyframes = _all_keyframes(robots)
+    rng = np.random.default_rng(0)
+    smeared = {}
+    traj_frames = {}
+    for kf in keyframes:
+        pose = np.array(kf.t_odom_base, dtype=np.float64, copy=True)
+        pose[0, 3] += float(rng.normal(0.0, 1.5))
+        pose[1, 3] += float(rng.normal(0.0, 1.5))
+        smeared[kf.id] = pose
+        traj_frames[kf.id.trajectory] = np.eye(4)
+    graph = OptimizedGraph(
+        poses=smeared,
+        t_world_map={robot.robot_id: np.eye(4) for robot in robots},
+        t_world_trajectory=traj_frames,
+        components=_singleton_components(robots),
+    )
+    cfg = RenderConfig(native_map_resolution=RESOLUTION)
+    rigid = next(
+        iter(
+            render_occupancy(
+                graph, keyframes, replace(cfg, odometry_as_pose=True)
+            ).values()
+        )
+    )
+    expected = next(
+        iter(
+            render_occupancy(
+                OptimizedGraph(
+                    poses={kf.id: kf.t_odom_base for kf in keyframes},
+                    t_world_map={robot.robot_id: np.eye(4) for robot in robots},
+                    t_world_trajectory=traj_frames,
+                    components=_singleton_components(robots),
+                ),
+                keyframes,
+                cfg,
+            ).values()
+        )
+    )
+    deformed = next(iter(render_occupancy(graph, keyframes, cfg).values()))
+    assert np.array_equal(rigid.cells, expected.cells)
+    assert not np.array_equal(deformed.cells, expected.cells)
+
+
+def test_close_occupied_does_not_erase_walls(truth_grid, fleet):
+    _, robots = fleet
+    graph = _graph(robots, _truth_poses(robots), _merged_component(robots))
+    closed = next(
+        iter(
+            render_occupancy(
+                graph,
+                _all_keyframes(robots),
+                RenderConfig(native_map_resolution=RESOLUTION, close_occupied=1),
+            ).values()
+        )
+    )
+    assert int((closed.cells == OCCUPIED).sum()) >= int(
+        (truth_grid.cells == OCCUPIED).sum()
+    )

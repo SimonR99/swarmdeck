@@ -208,3 +208,19 @@ def test_fleet_map_reset_clears_optimized_scopes():
         assert _scopes(c) == {"component:0"}
         assert c.post("/api/map/reset").status_code == 200
         assert _scopes(c) == set()
+
+
+def test_slam_backend_proxy_reports_unreachable_without_a_slam_url():
+    from swarmdeck_server.mapsvc import graph_bridge
+
+    previous = graph_bridge.SLAM_URL
+    graph_bridge.configure("")
+    try:
+        with TestClient(app) as c:
+            response = c.get("/api/slam/backend")
+            assert response.status_code == 503
+            body = response.json()
+            assert body["reachable"] is False
+            assert body["settings"] is None
+    finally:
+        graph_bridge.configure(previous)

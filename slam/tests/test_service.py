@@ -213,3 +213,14 @@ def test_capture_starts_at_zero_in_a_fresh_directory(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(svc, "_capture_failed", False)
     svc._capture(b"first")
     assert (tmp_path / "keyframes" / "000000.kf").read_bytes() == b"first"
+
+
+def test_config_endpoint_clamps_and_does_not_switch_mode(slam_client) -> None:
+    before = slam_client.get("/config").json()
+    assert before["ok"] is True
+    assert "min_support" in before["settings"]
+    applied = slam_client.put("/config", json={"min_support": 1, "registration_mode": "graph"})
+    assert applied.status_code == 200
+    body = applied.json()
+    assert body["settings"]["min_support"] == 2
+    assert body["settings"]["registration_mode"] == before["settings"]["registration_mode"]

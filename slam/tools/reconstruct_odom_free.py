@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconstruct saved keyframes from geometry, never from recorded odometry.
+"""Reconstruct saved keyframes from geometry, with odometry only as a mode vote.
 
 Usage from ``slam/``::
 
@@ -47,6 +47,7 @@ from swarmdeck_slam.reconstruction import (
     optimize_keyframe_poses,
     place_fragments,
 )
+from swarmdeck_slam.types import se3_from_quat_xyz
 
 
 def _arguments() -> argparse.Namespace:
@@ -125,6 +126,11 @@ def _arguments() -> argparse.Namespace:
             "largest same-robot capture gap eligible for direct geometric "
             f"tracking (default: {temporal_defaults.max_contiguous_gap_s:g} s)"
         ),
+    )
+    parser.add_argument(
+        "--ignore-odom",
+        action="store_true",
+        help="do not use recorded t_odom_base even as a mode vote",
     )
     return parser.parse_args()
 
@@ -403,7 +409,12 @@ def main() -> None:
         f"loaded {len(packets)} keyframes from dataset "
         f"{arguments.dataset.resolve()}"
     )
-    print("recorded t_odom_base poses will not be read")
+    print(
+        "recorded t_odom_base is a weak mode vote; "
+        "kinematically impossible hops are ignored"
+        if not arguments.ignore_odom
+        else "recorded t_odom_base poses will not be read"
+    )
 
     started = time.time()
     frames = [
@@ -417,6 +428,9 @@ def main() -> None:
                 _packet_registration_config(packet, registration_config),
             ),
             packet.session,
+            None
+            if arguments.ignore_odom
+            else se3_from_quat_xyz(packet.t_odom_base),
         )
         for index, packet in enumerate(packets)
     ]

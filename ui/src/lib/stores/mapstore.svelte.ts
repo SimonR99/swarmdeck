@@ -59,6 +59,10 @@ const state = $state({
   // asks WHOSE map, this asks WHICH ESTIMATE of it -- and folding them together
   // would multiply out into states like "global raw" that do not exist.
   mapSource: 'slam' as 'slam' | 'optimized',
+  // True only while the canvas is an actual solver-posed PNG. Selecting
+  // Optimised before the solver has published a grid falls back to the
+  // robot's own SLAM map; overlays must then use that map's frame, not world.
+  showingOptimizedGrid: false,
   optimizedScopes: [] as OptimizedScope[],
   viewRobot: null as string | null,
   // What the OPERATOR asked for, as opposed to what the backend recommends.
@@ -269,6 +273,7 @@ function clearGrid() {
   state.info = null;
   state.seq = 0;
   state.ready = false;
+  state.showingOptimizedGrid = false;
 }
 
 /** Convert an int8 occupancy buffer to RGBA pixels, recording occupancy. */
@@ -957,6 +962,7 @@ export const mapStore = {
       let info: MapInfo;
       let mapResponse: Response;
       if (scope) {
+        state.showingOptimizedGrid = true;
         const prevSeq = state.robotSeqs[robotId!] ?? 0;
         const currentSeq = prevSeq + 1;
         state.robotSeqs[robotId!] = currentSeq;
@@ -971,6 +977,7 @@ export const mapStore = {
           cache: 'no-store'
         });
       } else {
+        state.showingOptimizedGrid = false;
         const infoResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}/info`, {
           cache: 'no-store'
         });
@@ -1030,10 +1037,19 @@ export const mapStore = {
     };
   },
 
+  /** True when the canvas is the solver-posed grid, not a SLAM fallback. */
+  get showingOptimizedGrid() {
+    return state.showingOptimizedGrid;
+  },
+
+  overlayUsesRobotSlamFrame(): boolean {
+    return state.viewMode === 'local' && Boolean(state.viewRobot) && !state.showingOptimizedGrid;
+  },
+
   /** Global world metres → currently displayed grid pixel. */
   worldToGrid(x: number, y: number): { gx: number; gy: number } | null {
-    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
-      const tf = state.status?.transforms[state.viewRobot];
+    if (this.overlayUsesRobotSlamFrame()) {
+      const tf = state.status?.transforms[state.viewRobot!];
       if (tf) {
         const c = Math.cos(tf.yaw);
         const s = Math.sin(tf.yaw);
@@ -1050,8 +1066,8 @@ export const mapStore = {
   gridToWorld(gx: number, gy: number): { x: number; y: number } | null {
     const point = this.gridToView(gx, gy);
     if (!point) return null;
-    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
-      const tf = state.status?.transforms[state.viewRobot];
+    if (this.overlayUsesRobotSlamFrame()) {
+      const tf = state.status?.transforms[state.viewRobot!];
       if (tf) {
         const c = Math.cos(tf.yaw);
         const s = Math.sin(tf.yaw);
@@ -1065,8 +1081,8 @@ export const mapStore = {
   },
 
   worldYawToView(yaw: number): number {
-    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
-      yaw -= state.status?.transforms[state.viewRobot]?.yaw ?? 0;
+    if (this.overlayUsesRobotSlamFrame()) {
+      yaw -= state.status?.transforms[state.viewRobot!]?.yaw ?? 0;
     }
     return yaw;
   },
@@ -1081,6 +1097,7 @@ export const mapStore = {
     state.statusUpdatedAt = 0;
     state.viewMode = 'global';
     state.viewRobot = null;
+    state.showingOptimizedGrid = false;
     autoView = null;
     autoPending = null;
     globalInfo = null;

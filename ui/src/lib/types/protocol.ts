@@ -294,6 +294,31 @@ export interface MapStatus {
   cslam_disagreement?: Record<string, CslamDisagreement>;
 }
 
+/** Merge knobs the Swarm SLAM panel can change without a restart. */
+export interface SlamOperatorSettings {
+  registration_mode?: string;
+  allow_inter_robot: boolean;
+  min_support: number;
+  min_inter_robot_connections: number;
+  min_inter_robot_separation_m: number;
+  max_contiguous_gap_s: number;
+  min_temporal_registration_score: number;
+  odom_hint_weight: number;
+}
+
+export interface SlamBackendStatus {
+  keyframes?: number;
+  queued?: number;
+  dropped?: number;
+  ingested?: number;
+  dirty?: boolean;
+  last_error?: string;
+  has_snapshot?: boolean;
+  components?: { id: number; robots: string[] }[];
+  accepted_closures?: number;
+  inter_robot_closures?: number;
+}
+
 /**
  * What an operator may decide about a robot. Deliberately short: the adapter
  * declares what it is and where it came from at `hello`, so anything the robot

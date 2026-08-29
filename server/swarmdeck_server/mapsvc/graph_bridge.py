@@ -8,6 +8,7 @@ queue drops rather than blocking -- adapters must never wait on optimization.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections import deque
 from typing import Any
@@ -127,3 +128,54 @@ def post_reset() -> None:
         ).read()
     except (urllib.error.URLError, TimeoutError, OSError):
         pass
+
+
+def fetch_json(path: str, timeout: float = 2.0) -> tuple[int, dict[str, Any]]:
+    """GET a JSON path on the slam process. 503 when it is not configured or down."""
+    if not SLAM_URL:
+        return 503, {"error": "slam service is not configured"}
+    try:
+        with urllib.request.urlopen(f"{SLAM_URL}{path}", timeout=timeout) as response:
+            body = json.loads(response.read().decode())
+            if not isinstance(body, dict):
+                return 502, {"error": "slam service returned a non-object"}
+            return 200, body
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode())
+        except Exception:
+            payload = {"error": str(exc)}
+        if not isinstance(payload, dict):
+            payload = {"error": str(exc)}
+        return int(exc.code), payload
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        return 503, {"error": str(exc)}
+
+
+def put_json(path: str, payload: dict[str, Any], timeout: float = 2.0) -> tuple[int, dict[str, Any]]:
+    """PUT JSON to the slam process."""
+    if not SLAM_URL:
+        return 503, {"error": "slam service is not configured"}
+    data = json.dumps(payload).encode()
+    try:
+        request = urllib.request.Request(
+            f"{SLAM_URL}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read().decode())
+            if not isinstance(body, dict):
+                return 502, {"error": "slam service returned a non-object"}
+            return 200, body
+    except urllib.error.HTTPError as exc:
+        try:
+            parsed = json.loads(exc.read().decode())
+        except Exception:
+            parsed = {"error": str(exc)}
+        if not isinstance(parsed, dict):
+            parsed = {"error": str(exc)}
+        return int(exc.code), parsed
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        return 503, {"error": str(exc)}

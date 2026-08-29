@@ -65,6 +65,7 @@ services:
       - "http://server:8080"
     environment:
       SWARMDECK_SERVER_URL: http://server:8080
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
       # Set to a path under /app/sessions to record every accepted keyframe for
       # offline replay (slam/tools/replay.py). Empty disables capture, which is
       # the normal state: a long run writes one file per keyframe.
@@ -75,6 +76,7 @@ services:
       # Datasets land beside the session recordings, on the host, so a capture
       # survives the container it was made in.
       - ../../sessions:/app/sessions
+      - ../../configs:/app/configs:ro
     ports:
       - "8090:8090"
     depends_on:

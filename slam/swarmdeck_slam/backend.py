@@ -15,8 +15,8 @@ from __future__ import annotations
 import math
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Iterable
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -35,6 +35,7 @@ from swarmdeck_slam.odom_free import (
     OdomFreeConfig,
     PreparedCloud,
     RegistrationHypothesis,
+    config_for_keyframe,
     prepare_cloud,
     register_clouds,
 )
@@ -450,6 +451,23 @@ class CollaborativeBackend:
     those thresholds can actually be calibrated.
     """
 
+    pose_prior_sigmas: np.ndarray | None = None
+    """Forwarded to :class:`~swarmdeck_slam.graph.GtsamPoseGraph`. ``None``
+    means anchor-only (tests, drifted-odometry fixtures). Production sets a
+    moderate 6-vector so onboard SLAM poses are a suggestion the solver may
+    refine but not fold.
+    """
+
+    t_world_map_hint: dict[str, np.ndarray] | None = None
+    """Known ``T_world_map`` per robot (Gazebo spawn, surveyed origin).
+
+    Graph mode: occupancy is posed at ``hint @ t_odom_base`` so four working
+    onboard maps overlay in the world frame. Odometry-free mode uses the
+    hint only as one rigid gauge per reconstructed component (the anchor
+    keyframe); relative geometry stays reconstructed. ``None`` on hardware,
+    where no such hint exists.
+    """
+
     legacy_session_split: bool = True
     """Recover trajectory boundaries for packets that declare no session.
 
@@ -552,6 +570,7 @@ class CollaborativeBackend:
             pcm_confidence=self.pcm_confidence,
             min_pcm_clique_size=self.min_pcm_clique_size,
             gnc_weight_threshold=self.gnc_weight_threshold,
+            pose_prior_sigmas=self.pose_prior_sigmas,
         )
         self._index = ScanContextIndex(
             rings=DEFAULT_RINGS,
@@ -909,6 +928,7 @@ class CollaborativeBackend:
             pcm_confidence=self.pcm_confidence,
             min_pcm_clique_size=self.min_pcm_clique_size,
             gnc_weight_threshold=self.gnc_weight_threshold,
+            pose_prior_sigmas=self.pose_prior_sigmas,
         )
         for keyframe in list(self._keyframes.values()):
             if keyframe.id.trajectory not in excluded:
@@ -958,7 +978,9 @@ class CollaborativeBackend:
         for idx, kf in enumerate(included):
             cloud = self._prepared_clouds.get(kf.id)
             if cloud is None:
-                cloud = prepare_cloud(kf.points, self.odom_free_config)
+                cloud = prepare_cloud(
+                    kf.points, config_for_keyframe(kf, self.odom_free_config)
+                )
                 self._prepared_clouds[kf.id] = cloud
             frames.append(
                 ReconstructionFrame(
@@ -968,6 +990,7 @@ class CollaborativeBackend:
                     stamp=kf.stamp,
                     cloud=cloud,
                     session=kf.id.session,
+                    t_odom_base=kf.t_odom_base,
                 )
             )
 
@@ -990,6 +1013,16 @@ class CollaborativeBackend:
         connections, rejected_inter = filter_inter_robot_connections(
             fragments, connections, self.match_config
         )
+        if not self.allow_inter_robot:
+            fragment_robot = {
+                fragment.fragment_id: fragment.robot_id for fragment in fragments
+            }
+            connections = [
+                connection
+                for connection in connections
+                if fragment_robot[connection.fragment_a]
+                == fragment_robot[connection.fragment_b]
+            ]
         loop_closures = find_intra_fragment_loops(
             frames, fragments, memo_register, self.match_config
         )
@@ -1107,6 +1140,11 @@ class CollaborativeBackend:
             inter_robot_count = sum(1 for edge in loops if edge.is_inter_robot)
 
         self._last_solved = optimized
+        if self.t_world_map_hint:
+            if self.registration_mode == "odom_free":
+                optimized = self._gauge_reconstructed_to_world(optimized, included)
+            else:
+                optimized = self._apply_world_hints(optimized, included)
         grids, robot_grids, trajectory_grids = render_all(
             optimized, included, self.render
         )
@@ -1125,9 +1163,157 @@ class CollaborativeBackend:
             trajectories=self.trajectory_summaries(optimized),
         )
 
+    def _gauge_reconstructed_to_world(
+        self, optimized: OptimizedGraph, included: list[Keyframe]
+    ) -> OptimizedGraph:
+        """Sit reconstructed poses in the world with one rigid per component.
+
+        Occupancy is drawn from reconstructed geometry, not from every
+        keyframe's recorded pose. The only odometry reading that moves the
+        map is the component anchor, composed with a known spawn/survey frame.
+
+        ``t_world_map`` is the live-marker transform (``T @ slam_pose``). It
+        has to be the same rigid as the occupancy, or robots sit in Gazebo
+        world while the map sits in the reconstructed frame. Compose the
+        gauge onto the Kabsch fit; do not replace it with the spawn hint.
+        """
+        hints = self.t_world_map_hint or {}
+        if not hints:
+            return optimized
+        kf_by_id = {kf.id: kf for kf in included}
+        poses = dict(optimized.poses)
+        for component in optimized.components:
+            anchor = component.anchor
+            if anchor not in poses or anchor.robot_id not in hints:
+                continue
+            keyframe = kf_by_id.get(anchor)
+            if keyframe is None:
+                continue
+            gauge = (
+                hints[anchor.robot_id]
+                @ keyframe.t_odom_base
+                @ se3_inverse(poses[anchor])
+            )
+            members = component.keyframe_ids or frozenset(
+                keyframe_id
+                for keyframe_id in poses
+                if keyframe_id.robot_id in component.robots
+            )
+            for keyframe_id in members:
+                if keyframe_id in poses:
+                    poses[keyframe_id] = gauge @ poses[keyframe_id]
+        t_world_traj, t_world_map = _live_frames_from_poses(poses, kf_by_id)
+        return replace(
+            optimized,
+            poses=poses,
+            t_world_map=t_world_map,
+            t_world_trajectory=t_world_traj,
+        )
+
+    def _apply_world_hints(
+        self, optimized: OptimizedGraph, included: list[Keyframe]
+    ) -> OptimizedGraph:
+        """Pose occupancy at known ``T_world_map`` rather than the solver fit."""
+        hints = self.t_world_map_hint or {}
+        traj_frames = {
+            kf.id.trajectory: hints[kf.id.robot_id]
+            for kf in included
+            if kf.id.robot_id in hints
+        }
+        if not traj_frames:
+            return optimized
+        robots = frozenset(trajectory.robot_id for trajectory in traj_frames)
+        optimized.t_world_trajectory.update(traj_frames)
+        optimized.t_world_map.update({robot_id: hints[robot_id] for robot_id in robots})
+        if len(robots) >= 2:
+            anchor = min(
+                kf.id for kf in included if kf.id.robot_id in hints
+            )
+            optimized.components = [
+                Component(0, robots, anchor, frozenset(traj_frames))
+            ]
+        return optimized
+
     def reset(self) -> None:
         """Forget the session. Config (verify/render) stays."""
         self.__post_init__()
+
+    def operator_settings(self) -> dict[str, Any]:
+        """The merge knobs the operator panel may read and write."""
+        return {
+            "registration_mode": self.registration_mode,
+            "allow_inter_robot": self.allow_inter_robot,
+            "min_support": self.match_config.min_support,
+            "min_inter_robot_connections": self.match_config.min_inter_robot_connections,
+            "min_inter_robot_separation_m": self.match_config.min_inter_robot_separation_m,
+            "max_contiguous_gap_s": self.temporal_config.max_contiguous_gap_s,
+            "min_temporal_registration_score": (
+                self.temporal_config.min_temporal_registration_score
+            ),
+            "odom_hint_weight": self.temporal_config.odom_hint_weight,
+        }
+
+    def apply_operator_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
+        """Clamp and apply operator knobs. Takes effect on the next optimize.
+
+        Registration caches stay: these fields change consensus, not GICP.
+        ``registration_mode`` is reported but not switched live — a mid-run
+        mode change would mix two solvers on one graph.
+        """
+        with self._keyframes_lock:
+            if "allow_inter_robot" in updates:
+                self.allow_inter_robot = bool(updates["allow_inter_robot"])
+            match_updates = _clamped_fields(
+                updates,
+                {
+                    "min_support": (int, 2, 8),
+                    "min_inter_robot_connections": (int, 1, 4),
+                    "min_inter_robot_separation_m": (float, 1.0, 12.0),
+                },
+            )
+            temporal_updates = _clamped_fields(
+                updates,
+                {
+                    "max_contiguous_gap_s": (float, 5.0, 180.0),
+                    "min_temporal_registration_score": (float, 0.30, 0.80),
+                    "odom_hint_weight": (float, 0.0, 2.0),
+                },
+            )
+            if match_updates:
+                self.match_config = replace(self.match_config, **match_updates)
+            if temporal_updates:
+                self.temporal_config = replace(self.temporal_config, **temporal_updates)
+            self._dirty = True
+            return self.operator_settings()
+
+
+def operator_setting_defaults() -> dict[str, Any]:
+    match = FragmentMatchConfig()
+    temporal = TemporalConfig()
+    return {
+        "allow_inter_robot": True,
+        "min_support": match.min_support,
+        "min_inter_robot_connections": match.min_inter_robot_connections,
+        "min_inter_robot_separation_m": match.min_inter_robot_separation_m,
+        "max_contiguous_gap_s": temporal.max_contiguous_gap_s,
+        "min_temporal_registration_score": temporal.min_temporal_registration_score,
+        "odom_hint_weight": temporal.odom_hint_weight,
+    }
+
+
+def _clamped_fields(
+    updates: dict[str, Any], spec: dict[str, tuple[type, float, float]]
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for name, (kind, low, high) in spec.items():
+        if name not in updates:
+            continue
+        try:
+            value = kind(updates[name])
+        except (TypeError, ValueError):
+            continue
+        result[name] = kind(min(high, max(low, value)))
+    return result
 
 
 def _counts(keyframe_ids: Iterable[KeyframeId]) -> dict[str, int]:
@@ -1135,6 +1321,38 @@ def _counts(keyframe_ids: Iterable[KeyframeId]) -> dict[str, int]:
     for kf_id in keyframe_ids:
         counts[kf_id.robot_id] = counts.get(kf_id.robot_id, 0) + 1
     return counts
+
+
+def _live_frames_from_poses(
+    poses: dict[KeyframeId, np.ndarray],
+    kf_by_id: dict[KeyframeId, Keyframe],
+) -> tuple[dict[TrajectoryId, np.ndarray], dict[str, np.ndarray]]:
+    """``T`` such that ``T @ slam`` of the newest keyframe equals its reconstructed pose.
+
+    That is the transform the UI applies to the live robot marker. A Kabsch
+    fit over the whole trajectory can be a better average and still put the
+    newest pose metres off the occupancy the operator is looking at.
+    """
+    newest_of_traj: dict[TrajectoryId, KeyframeId] = {}
+    newest_stamp: dict[TrajectoryId, float] = {}
+    for kf_id in poses:
+        keyframe = kf_by_id.get(kf_id)
+        if keyframe is None:
+            continue
+        traj = kf_id.trajectory
+        if traj not in newest_stamp or keyframe.stamp >= newest_stamp[traj]:
+            newest_stamp[traj] = keyframe.stamp
+            newest_of_traj[traj] = kf_id
+    t_world_traj: dict[TrajectoryId, np.ndarray] = {}
+    for traj, kf_id in newest_of_traj.items():
+        t_world_traj[traj] = poses[kf_id] @ se3_inverse(kf_by_id[kf_id].t_odom_base)
+    best: dict[str, tuple[float, np.ndarray]] = {}
+    for traj, kf_id in newest_of_traj.items():
+        robot_id = traj.robot_id
+        stamp = newest_stamp[traj]
+        if robot_id not in best or stamp >= best[robot_id][0]:
+            best[robot_id] = (stamp, t_world_traj[traj])
+    return t_world_traj, {robot_id: tf for robot_id, (_, tf) in best.items()}
 
 
 def majority_component(snapshot: BackendSnapshot) -> RenderedGrid | None:
@@ -1290,7 +1508,7 @@ def snapshot_update(snapshot: BackendSnapshot) -> dict:
             graphs[robot_id] = {
                 "keyframes": snapshot.keyframe_counts.get(robot_id, 0),
                 "in_common_frame": in_majority,
-                "inter_robot": peers,
+                "inter_robot": [{"other": other, "count": 1} for other in peers],
                 "residual": snapshot.optimized.final_error,
             }
 

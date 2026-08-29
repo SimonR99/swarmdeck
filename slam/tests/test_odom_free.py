@@ -63,3 +63,46 @@ def test_empty_filtered_cloud_has_no_registration() -> None:
     prepared = prepare_cloud(points, config)
     assert prepared.points.shape == (0, 3)
     assert register_clouds(prepared, prepared, config) == []
+
+
+def _planar_corridor() -> np.ndarray:
+    along = np.linspace(-8.0, 8.0, 500)
+    north = np.column_stack([along, np.full(along.shape, 1.8), np.full(along.shape, 0.52)])
+    south = np.column_stack([along, np.full(along.shape, -1.8), np.full(along.shape, 0.52)])
+    end = np.column_stack(
+        [np.full(80, 8.0), np.linspace(-1.8, 1.8, 80), np.full(80, 0.52)]
+    )
+    return np.vstack([north, south, end])
+
+
+def test_three_d_cloud_is_not_extruded() -> None:
+    prepared = prepare_cloud(_scene(), OdomFreeConfig(min_radius=0.0, max_radius=20.0))
+    assert prepared.coplanar is False
+    assert float(np.ptp(prepared.points[:, 2])) > 0.5
+
+
+def test_coplanar_ring_is_extruded_and_registers() -> None:
+    target_points = _planar_corridor()
+    expected = _transform(math.radians(12.0), 1.1, -0.4)
+    source_points = (target_points - expected[:3, 3]) @ expected[:3, :3]
+    config = OdomFreeConfig(
+        min_radius=0.0,
+        max_radius=20.0,
+        grid_half_extent=16.0,
+        min_z=0.0,
+        max_z=1.0,
+        min_symmetric_overlap=0.50,
+    )
+    target = prepare_cloud(target_points, config)
+    source = prepare_cloud(source_points, config)
+    assert target.coplanar and source.coplanar
+    assert target.n_observed == len(target.points) // 3
+    assert float(np.ptp(target.points[:, 2])) > config.voxel_size
+    hypotheses = register_clouds(target, source, config)
+    assert hypotheses
+    translation_error, rotation_error = se3_distance(
+        expected, hypotheses[0].t_target_source
+    )
+    assert translation_error < 0.15
+    assert rotation_error < math.radians(2.0)
+    assert abs(hypotheses[0].t_target_source[2, 3]) < 1e-9

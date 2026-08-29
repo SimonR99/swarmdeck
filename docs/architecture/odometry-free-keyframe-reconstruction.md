@@ -24,11 +24,17 @@ The reconstruction uses:
 - robot identity;
 - sequence number, only to propose temporal neighbours;
 - timestamp, only to reject motion faster than the physical robot and to split
-  long capture gaps.
+  long capture gaps;
+- optionally, `t_odom_base` as a **weak mode vote** after registration.
 
-It never reads `t_odom_base`. There is intentionally no pose parameter in the
-pair-registration API, so recorded odometry cannot accidentally become an ICP
-seed or a graph factor.
+Pair registration still never reads `t_odom_base`. There is no pose parameter
+in that API, so recorded odometry cannot become an ICP seed or a graph
+factor. After GICP has returned several geometrically valid modes, Viterbi
+may prefer the mode whose hop agrees with a kinematically plausible odom
+step. A 20 m jump, a yaw spike, or a missing pose is ignored -- the chain
+falls back to geometry and the zero-yaw prior. Occupancy is rasterized at
+the reconstructed poses, not at `T_world_map @ t_odom_base`.
+
 
 Sequence adjacency is not treated as proof that two keyframes are connected.
 A long timestamp gap or unsupported registration creates a new fragment. The
@@ -96,7 +102,9 @@ registration modes. Its cost combines:
 - linear velocity and yaw magnitude;
 - changes in linear velocity and yaw rate;
 - agreement with independently registered skip-one pairs, forming
-  three-keyframe cycles.
+  three-keyframe cycles;
+- when present, agreement with a kinematically plausible odometry hop
+  (ignored if the hop could not be robot motion).
 
 An isolated 180-degree flip therefore costs much more than a sustained physical
 turn. If no physically plausible pair mode survives, the run is split rather
@@ -200,8 +208,15 @@ reconnection. The largest single reported steps are:
 - robot 0: 23.44 m and 163.83 degrees;
 - robot 1: 19.20 m and 139.71 degrees.
 
-This is intentionally more severe than realistic wheel slip. The odometry-free
-result is exactly invariant:
+This is intentionally more severe than realistic wheel slip. Hops that fail
+the kinematic gate (the 20 m jumps and 160-degree spikes) are ignored, so
+they cannot flip a corridor alias. Small jitter inside the gate may still
+break a remaining mode tie; that is the intended "minor help". The
+reconstruction is therefore invariant to catastrophic odometry, not to
+every perturbation of `t_odom_base`.
+
+The 2026-08-27 fault-injection replay (before the weak mode vote) was
+byte-identical to the clean run:
 
 - all accepted/rejected constraints, fragment poses, optimized keyframe poses,
   components, and render metadata match the clean run exactly;

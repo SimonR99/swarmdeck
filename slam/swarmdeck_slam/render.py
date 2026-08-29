@@ -106,6 +106,19 @@ class RenderConfig:
     # the vectorized DDA matrix, which is sized by the *longest* ray in a
     # keyframe. Mirrors the old accumulator's MAX_RAY_RANGE_M.
     max_range_m: float = 60.0
+    # When True, rasterize each keyframe at the robot's own SLAM pose
+    # (``T_world_map @ t_odom_base``) rather than at the solver's deformed
+    # ``poses[k]``. The solver still estimates the common frame; occupancy
+    # treats onboard SLAM as a rigid trajectory. That is the "odometry as
+    # suggestion" occupancy: loop closures may not smear a working map.
+    odometry_as_pose: bool = False
+    # Binary-close occupied cells this many times after the hit/free vote.
+    # Sparse keyframes leave 1-cell nicks in walls that a dense SLAM grid
+    # fills by seeing the same surface from many extra scans.
+    close_occupied: int = 0
+    # Evidence ratio: occupied if ``hits * hit_weight >= free``. Higher
+    # prefers walls over grazing free-space rays from a slightly-off pose.
+    hit_weight: int = 3
 
     def height_limits(self) -> tuple[float, float]:
         """``(min_z, max_z)`` in the frame the band was measured in.
@@ -403,6 +416,12 @@ def _keyframe_contributions(
         keyframe = keyframes_by_id.get(kf_id)
         if keyframe is None:
             continue
+        if config.odometry_as_pose:
+            frame = graph.t_world_trajectory.get(kf_id.trajectory)
+            if frame is None:
+                frame = graph.t_world_map.get(kf_id.robot_id)
+            if frame is not None:
+                pose = frame @ keyframe.t_odom_base
         points = keyframe.points.astype(np.float64, copy=False)
         origin_xy = pose[:2, 3]
 
@@ -501,7 +520,15 @@ def _render_component(
     cells = np.full((meta.height, meta.width), UNKNOWN, dtype=np.int8)
     if config.retain_free_space:
         cells[free_counts > 0] = FREE
-    occupied_mask = (hit_counts > 0) & ((hit_counts * 3) >= free_counts)
+    occupied_mask = (hit_counts > 0) & (
+        (hit_counts * int(config.hit_weight)) >= free_counts
+    )
+    if config.close_occupied > 0:
+        from scipy.ndimage import binary_closing
+
+        occupied_mask = binary_closing(
+            occupied_mask, iterations=int(config.close_occupied)
+        )
     cells[occupied_mask] = OCCUPIED
 
     return RenderedGrid(

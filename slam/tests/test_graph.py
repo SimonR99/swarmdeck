@@ -785,3 +785,44 @@ def test_t_world_map_falls_back_for_a_robot_with_too_few_keyframes() -> None:
         "a 2-keyframe robot must fall back to the single-keyframe read rather than "
         "publish an under-determined fit"
     )
+
+
+def test_pose_priors_keep_a_working_slam_trajectory_from_folding() -> None:
+    """Onboard SLAM poses are a suggestion: a loop may refine them, not fan them.
+
+    A 5 m lie between the first and last keyframe of one robot is the kind of
+    confident-wrong closure that previously smeared occupancy into double
+    walls. Pose priors, registered as GNC known-inliers, cap that motion.
+    """
+    _scene, robots = two_robot_fleet(seed=4)
+    alpha = next(robot for robot in robots if robot.robot_id == "alpha")
+    lie = np.eye(4, dtype=np.float64)
+    lie[0, 3] = 5.0
+    loop = Edge(
+        EdgeKind.INTRA_LOOP,
+        alpha.keyframes[0].id,
+        alpha.keyframes[-1].id,
+        lie,
+        _closure_information(sigma_t=0.02, sigma_r=np.deg2rad(1.0)),
+    )
+
+    def max_move(result: OptimizedGraph) -> float:
+        trajectory = alpha.keyframes[0].id.trajectory
+        frame = result.t_world_trajectory[trajectory]
+        return max(
+            float(
+                np.linalg.norm(
+                    result.poses[kf.id][:3, 3] - (frame @ kf.t_odom_base)[:3, 3]
+                )
+            )
+            for kf in alpha.keyframes
+        )
+
+    free = _build_graph([alpha], [loop]).optimize()
+    pinned = _build_graph(
+        [alpha],
+        [loop],
+        pose_prior_sigmas=np.array([0.05, 0.05, 0.05, 0.10, 0.10, 0.15]),
+    ).optimize()
+    assert max_move(pinned) < 0.5
+    assert max_move(pinned) <= max_move(free) + 1e-6

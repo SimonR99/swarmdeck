@@ -1,9 +1,14 @@
-"""Build locally consistent fragments without using recorded odometry poses.
+"""Build locally consistent fragments from cloud registration.
 
 Temporal order and timestamps are observations, not odometry. They tell us
 which scans were captured near one another in time and bound how fast a ground
 robot could have moved; they do not provide a transform. Every transform in a
 fragment comes from :func:`swarmdeck_slam.odom_free.register_clouds`.
+
+Recorded ``t_odom_base`` is optional and never an ICP seed or a graph factor.
+When a hop is kinematically plausible it may break a 180-degree registration
+tie; a 20 m jump, a yaw spike, or a missing pose is ignored and the chain
+falls back to geometry. Pair registration itself still never reads odometry.
 
 Fragment boundaries are intentional outputs. Long capture gaps, missing
 registration, and impossible motion split the chain instead of fabricating an
@@ -24,7 +29,13 @@ from scipy.spatial import cKDTree
 
 from swarmdeck_slam.descriptors import best_alignment, ring_key
 from swarmdeck_slam.odom_free import PreparedCloud, RegistrationHypothesis
-from swarmdeck_slam.types import TrajectoryId, se3_distance, se3_identity, se3_inverse
+from swarmdeck_slam.types import (
+    TrajectoryId,
+    se3_distance,
+    se3_identity,
+    se3_inverse,
+    se3_relative,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +54,7 @@ class TemporalConfig:
     max_yaw_rate_rad_s: float = 0.80
     translation_slack_m: float = 0.35
     yaw_slack_rad: float = math.radians(15.0)
+    max_vertical_speed_mps: float = 0.20
     registration_weight: float = 5.0
     velocity_smoothness_weight: float = 3.0
     yaw_rate_smoothness_weight: float = 2.0
@@ -57,6 +69,13 @@ class TemporalConfig:
     # overlap 0.499 / score 0.387 and a 179.9-degree error.  Splitting is safer
     # than forcing the only returned mode into the temporal chain.
     min_temporal_registration_score: float = 0.50
+    # Weak vote among already-registered pair modes. Never an ICP seed.
+    # A hop inside this envelope may prefer the hypothesis that agrees with it;
+    # a hop that could not be robot motion (frame jump, encoder spike) is
+    # ignored so catastrophic odometry cannot flip a corridor alias.
+    odom_hint_translation_m: float = 0.50
+    odom_hint_rotation_rad: float = math.radians(25.0)
+    odom_hint_weight: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +88,7 @@ class ReconstructionFrame:
     stamp: float
     cloud: PreparedCloud
     session: str = ""
+    t_odom_base: np.ndarray | None = None
 
     @property
     def trajectory_id(self) -> TrajectoryId:
@@ -204,14 +224,24 @@ def _yaw(transform: np.ndarray) -> float:
     return float(math.atan2(transform[1, 0], transform[0, 0]))
 
 
-def _plausible(
-    hypothesis: RegistrationHypothesis, dt: float, config: TemporalConfig
+def _motion_plausible(
+    transform: np.ndarray, dt: float, config: TemporalConfig
 ) -> bool:
-    transform = hypothesis.t_target_source
     translation = float(np.linalg.norm(transform[:2, 3]))
     max_translation = config.translation_slack_m + config.max_linear_speed_mps * dt
     max_yaw = min(math.pi, config.yaw_slack_rad + config.max_yaw_rate_rad_s * dt)
-    return translation <= max_translation and abs(_yaw(transform)) <= max_yaw
+    max_z = config.translation_slack_m + config.max_vertical_speed_mps * dt
+    return (
+        translation <= max_translation
+        and abs(transform[2, 3]) <= max_z
+        and abs(_yaw(transform)) <= max_yaw
+    )
+
+
+def _plausible(
+    hypothesis: RegistrationHypothesis, dt: float, config: TemporalConfig
+) -> bool:
+    return _motion_plausible(hypothesis.t_target_source, dt, config)
 
 
 def _cycle_penalty(
@@ -263,14 +293,49 @@ def _transition_penalty(
     )
 
 
+def _odom_relative(
+    previous: ReconstructionFrame, current: ReconstructionFrame
+) -> np.ndarray | None:
+    if previous.t_odom_base is None or current.t_odom_base is None:
+        return None
+    return se3_relative(previous.t_odom_base, current.t_odom_base)
+
+
+def _odom_hop_usable(
+    rel: np.ndarray, dt: float, config: TemporalConfig
+) -> bool:
+    """True when the recorded hop could have been physical robot motion."""
+    return _motion_plausible(rel, dt, config)
+
+
 def _unary_cost(
-    hypothesis: RegistrationHypothesis, dt: float, config: TemporalConfig
+    hypothesis: RegistrationHypothesis,
+    dt: float,
+    config: TemporalConfig,
+    odom_rel: np.ndarray | None = None,
 ) -> float:
-    speed = float(np.linalg.norm(hypothesis.t_target_source[:2, 3])) / dt
+    transform = hypothesis.t_target_source
+    speed = float(np.linalg.norm(transform[:2, 3])) / dt
+    yaw_term = abs(_yaw(transform))
+    odom_term = 0.0
+    if odom_rel is not None and _odom_hop_usable(odom_rel, dt, config):
+        translation, rotation = se3_distance(transform, odom_rel)
+        if (
+            translation <= config.odom_hint_translation_m
+            and rotation <= config.odom_hint_rotation_rad
+        ):
+            # Prefer the mode that agrees with the hop. Residual yaw replaces
+            # the zero-yaw prior so a real 180-degree turn odometry reports
+            # can beat path_yaw_weight; a hop that matches no mode is ignored.
+            yaw_term = rotation
+            odom_term = config.odom_hint_weight * (
+                translation / config.odom_hint_translation_m
+            ) ** 2
     return (
         -config.registration_weight * hypothesis.score
         + config.path_speed_weight * speed
-        + config.path_yaw_weight * abs(_yaw(hypothesis.t_target_source))
+        + config.path_yaw_weight * yaw_term
+        + odom_term
     )
 
 
@@ -285,7 +350,12 @@ def _select_chain(
         return []
     costs = [
         [
-            _unary_cost(item, frames[1].stamp - frames[0].stamp, config)
+            _unary_cost(
+                item,
+                frames[1].stamp - frames[0].stamp,
+                config,
+                _odom_relative(frames[0], frames[1]),
+            )
             for item in adjacent[0]
         ]
     ]
@@ -296,8 +366,9 @@ def _select_chain(
         skip = register(frames[edge_index - 1], frames[edge_index + 1])
         row: list[float] = []
         row_backpointers: list[int] = []
+        odom_rel = _odom_relative(frames[edge_index], frames[edge_index + 1])
         for second in adjacent[edge_index]:
-            unary = _unary_cost(second, dt_second, config)
+            unary = _unary_cost(second, dt_second, config, odom_rel)
             alternatives = [
                 (
                     costs[-1][previous_index]

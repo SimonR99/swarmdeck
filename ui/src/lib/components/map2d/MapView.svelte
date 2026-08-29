@@ -35,6 +35,7 @@
     drawMetricGrid,
     drawCostmap,
     drawNetworkHeatmap,
+    metricGridSpacing,
     drawReviewedObjects,
     drawRobots,
     drawScaleBar,
@@ -757,7 +758,7 @@
                    {mapStore.mapSource === 'optimized'
                      ? 'bg-surface-2 text-fg'
                      : 'text-fg-muted hover:bg-surface-2'}"
-            title="The same keyframes posed by the collaborative pose-graph solver"
+            title="Keyframe occupancy posed by the collaborative solver. Falls back to Robot SLAM until that grid exists."
             onclick={() => void mapStore.setMapSource('optimized')}
           >
             Optimised
@@ -995,7 +996,7 @@
     <span>{cursorWorld ? `${cursorWorld.x.toFixed(1)}, ${cursorWorld.y.toFixed(1)} m` : 'Move cursor to inspect'}</span>
     {#if mapStore.info}
       <span class="h-3 w-px bg-border"></span>
-      <span>{Math.round(mapStore.info.resolution * 100)} cm/cell</span>
+      <span>Grid: {metricGridSpacing(mapStore.info, view)} m</span>
       {#if mapStore.seq >= 0}
         <span class="h-3 w-px bg-border"></span>
         <span>rev {mapStore.seq}</span>

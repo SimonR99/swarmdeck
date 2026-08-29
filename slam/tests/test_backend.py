@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -16,8 +17,9 @@ from swarmdeck_slam.backend import (
     majority_component,
     scoped_grids,
     snapshot_update,
+    se2_of,
 )
-from swarmdeck_slam.types import EdgeKind, quat_xyz_from_se3, se3_inverse
+from swarmdeck_slam.types import EdgeKind, KeyframeId, quat_xyz_from_se3, se3_inverse
 from swarmdeck_slam.verify import VerifyConfig, verify_candidate
 
 
@@ -358,3 +360,109 @@ def test_odom_free_backend_reconstructs_components() -> None:
     assert len(snapshot.optimized.poses) > 0
     assert len(snapshot.optimized.components) > 0
     assert all(r in snapshot.optimized.t_world_map for r in ("alpha", "beta"))
+
+
+def test_odom_free_hint_gauges_without_merging() -> None:
+    """Spawn is a display gauge, not a substitute for geometric merge."""
+    from swarmdeck_slam.render import RenderConfig
+
+    _, fleet = synthetic.disjoint_fleet()
+    hints = {robot.robot_id: robot.t_world_map_true for robot in fleet}
+    backend = CollaborativeBackend(
+        registration_mode="odom_free",
+        render=RenderConfig(odometry_as_pose=False, native_map_resolution=0.1),
+        t_world_map_hint=hints,
+    )
+    _ingest_fleet(backend, fleet)
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+    assert majority_component(snapshot) is None
+    assert len(snapshot.optimized.components) >= 2
+
+
+def test_gauge_keeps_live_pose_on_reconstructed_occupancy() -> None:
+    """``T_world_map @ slam`` must land on the occupancy the UI is drawing.
+
+    Replacing that transform with the spawn hint after the gauge step puts
+    robots in Gazebo world while the map stays in the reconstructed frame.
+    """
+    from swarmdeck_slam.render import RenderConfig
+
+    _, fleet = synthetic.two_robot_fleet()
+    hints = {robot.robot_id: robot.t_world_map_true for robot in fleet}
+    backend = CollaborativeBackend(
+        registration_mode="odom_free",
+        render=RenderConfig(odometry_as_pose=False, native_map_resolution=0.1),
+        t_world_map_hint=hints,
+    )
+    _ingest_fleet(backend, fleet)
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+    latest: dict[str, KeyframeId] = {}
+    for kf_id in snapshot.optimized.poses:
+        current = latest.get(kf_id.robot_id)
+        if current is None or kf_id.seq >= current.seq:
+            latest[kf_id.robot_id] = kf_id
+    assert latest
+    for robot_id, kf_id in latest.items():
+        keyframe = backend._keyframes[kf_id]
+        live = snapshot.optimized.t_world_map[robot_id] @ keyframe.t_odom_base
+        lx, ly, _ = se2_of(live)
+        px, py, _ = se2_of(snapshot.optimized.poses[kf_id])
+        err = math.hypot(lx - px, ly - py)
+        assert err < 0.05, f"{robot_id} live pose is {err:.2f} m off reconstructed occupancy"
+
+
+
+def test_world_map_hint_overlays_robots_the_solver_did_not_merge() -> None:
+    """A known spawn/survey frame is occupancy's merge, not a loop-closure vote.
+
+    ``allow_inter_robot=False`` leaves two components. The hint still puts
+    both robots in one occupancy grid at their true start poses.
+    """
+    from swarmdeck_slam.render import RenderConfig
+
+    _, fleet = synthetic.two_robot_fleet()
+    hints = {robot.robot_id: robot.t_world_map_true for robot in fleet}
+    backend = CollaborativeBackend(
+        render=RenderConfig(odometry_as_pose=True, native_map_resolution=0.1),
+        t_world_map_hint=hints,
+        allow_inter_robot=False,
+    )
+    _ingest_fleet(backend, fleet)
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+    majority = majority_component(snapshot)
+    assert majority is not None
+    assert majority.robots == frozenset({"alpha", "beta"})
+    for robot in fleet:
+        assert np.allclose(
+            snapshot.optimized.t_world_map[robot.robot_id], robot.t_world_map_true
+        )
+
+
+def test_operator_settings_clamp_and_mark_dirty() -> None:
+    backend = CollaborativeBackend(registration_mode="odom_free")
+    applied = backend.apply_operator_settings(
+        {
+            "min_support": 1,
+            "min_inter_robot_connections": 9,
+            "min_inter_robot_separation_m": 0.1,
+            "max_contiguous_gap_s": 1000,
+            "min_temporal_registration_score": 0.01,
+            "odom_hint_weight": 9,
+            "allow_inter_robot": False,
+            "registration_mode": "graph",
+        }
+    )
+    assert applied["min_support"] == 2
+    assert applied["min_inter_robot_connections"] == 4
+    assert applied["min_inter_robot_separation_m"] == 1.0
+    assert applied["max_contiguous_gap_s"] == 180.0
+    assert applied["min_temporal_registration_score"] == 0.30
+    assert applied["odom_hint_weight"] == 2.0
+    assert applied["allow_inter_robot"] is False
+    assert applied["registration_mode"] == "odom_free"
+    assert backend.dirty is True
+    assert backend.match_config.min_support == 2
+    assert backend.temporal_config.max_contiguous_gap_s == 180.0
