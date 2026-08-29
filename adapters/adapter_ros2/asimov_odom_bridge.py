@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Publish Chris's Unitree ``rt/odommodestate`` as standard ROS odometry.
+"""Publish Asimov's Unitree ``rt/odommodestate`` as standard ROS odometry.
 
-Chris's installed G1 bridge has a correct control/state implementation, but
+Asimov's installed G1 bridge has a correct control/state implementation, but
 its generic odometry child subscribes to ``rt/sportmodestate``. The robot's
 live SportModeState publisher is on ``rt/odommodestate`` instead (confirmed by
 the read-only SDK probe on the robot). Keep this bridge small and owned by
@@ -25,7 +25,7 @@ from tf2_ros import TransformBroadcaster
 from g1_ros2_bridge.dds_init import finalize_dds, prepare_dds
 
 
-class ChrisOdomBridge(Node):
+class AsimovOdomBridge(Node):
     def __init__(self) -> None:
         super().__init__("g1_odom_bridge")
         self.declare_parameter("odom_frame_id", "odom")
@@ -79,7 +79,7 @@ class ChrisOdomBridge(Node):
 def main() -> None:
     domain, interface = prepare_dds()
     rclpy.init()
-    node = ChrisOdomBridge()
+    node = AsimovOdomBridge()
     finalize_dds(domain, interface)
     node.subscriber = ChannelSubscriber(node.native_topic, SportModeState_)
     node.subscriber.Init(node.on_sport_state)

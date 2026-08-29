@@ -3,7 +3,7 @@ const ROBOT_ALIASES: Readonly<Record<string, string>> = {
   botman_0: 'botman',
   aslan_0: 'aslan',
   spot_0: 'spot',
-  chris_0: 'chris'
+  asimov_0: 'asimov'
 };
 
 /** Human-friendly UI label; the protocol-facing robot ID remains unchanged. */

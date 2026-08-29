@@ -1,7 +1,7 @@
-# Single-robot server session for Chris (Unitree G1). Robot drivers and odometry
+# Single-robot server session for Asimov (Unitree G1). Robot drivers and odometry
 # are started on the humanoid payload; this file configures only the
 # ROS-free SwarmDeck backend.
-name: hardware_chris
+name: hardware_asimov
 seed: 20260827
 
 fleet:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start Chris's host-side Unitree bridge and its SwarmDeck Compose services.
+# Start Asimov's host-side Unitree bridge and its SwarmDeck Compose services.
 # This runs on the operator workstation and performs the bring-up over SSH.
 
 set -Eeuo pipefail
@@ -8,43 +8,43 @@ operator_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "${operator_repo}/deploy/fleet.env"
 
-chris_host=${DEPLOY_SSH_HOST:-chris}
-chris_repo=${DEPLOY_REMOTE_REPO:-/home/unitree/swarmdeck}
-compose_file=${DEPLOY_COMPOSE_FILE:-deploy/compose/docker-compose.robot-chris.yml}
-robot_id=${DEPLOY_ROBOT_ID:-chris_0}
+asimov_host=${DEPLOY_SSH_HOST:-asimov}
+asimov_repo=${DEPLOY_REMOTE_REPO:-/home/unitree/swarmdeck}
+compose_file=${DEPLOY_COMPOSE_FILE:-deploy/compose/docker-compose.robot-asimov.yml}
+robot_id=${DEPLOY_ROBOT_ID:-asimov_0}
 backend_host=${BACKEND_HOST:?BACKEND_HOST must be set}
 backend_port=${BACKEND_PORT:?BACKEND_PORT must be set}
-chris_workspace=${CHRIS_WORKSPACE:-/home/unitree/workspaces}
-ros_domain=${CHRIS_ROS_DOMAIN_ID:-0}
-unitree_iface=${CHRIS_INTERFACE:-eth0}
-native_ws=${CHRIS_ROS_WORKSPACE:-/home/unitree/workspaces/unitree_g1_ros2}
-native_log=${CHRIS_NATIVE_LOG:-/tmp/swarmdeck-chris-g1-bridge.log}
-native_reset=${CHRIS_NATIVE_RESET:-yes}
-container_reset=${CHRIS_CONTAINER_RESET:-yes}
+asimov_workspace=${ASIMOV_WORKSPACE:-/home/unitree/workspaces}
+ros_domain=${ASIMOV_ROS_DOMAIN_ID:-0}
+unitree_iface=${ASIMOV_INTERFACE:-eth0}
+native_ws=${ASIMOV_ROS_WORKSPACE:-/home/unitree/workspaces/unitree_g1_ros2}
+native_log=${ASIMOV_NATIVE_LOG:-/tmp/swarmdeck-asimov-g1-bridge.log}
+native_reset=${ASIMOV_NATIVE_RESET:-yes}
+container_reset=${ASIMOV_CONTAINER_RESET:-yes}
 
 case "$native_reset" in
   yes|no) ;;
-  *) echo "CHRIS_NATIVE_RESET must be yes or no (got '$native_reset')" >&2; exit 2 ;;
+  *) echo "ASIMOV_NATIVE_RESET must be yes or no (got '$native_reset')" >&2; exit 2 ;;
 esac
 case "$container_reset" in
   yes|no) ;;
-  *) echo "CHRIS_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2; exit 2 ;;
+  *) echo "ASIMOV_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2; exit 2 ;;
 esac
 
-echo "Starting ${robot_id} on ${chris_host}..."
+echo "Starting ${robot_id} on ${asimov_host}..."
 
 ssh \
   -o ConnectTimeout=8 \
   -o BatchMode=yes \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
-  "$chris_host" bash --noprofile --norc -s -- \
-  "$chris_repo" \
+  "$asimov_host" bash --noprofile --norc -s -- \
+  "$asimov_repo" \
   "$compose_file" \
   "$robot_id" \
   "$backend_host" \
   "$backend_port" \
-  "$chris_workspace" \
+  "$asimov_workspace" \
   "$ros_domain" \
   "$unitree_iface" \
   "$native_ws" \
@@ -58,7 +58,7 @@ compose_file=$2
 robot_id=$3
 backend_host=$4
 backend_port=$5
-chris_workspace=$6
+asimov_workspace=$6
 ros_domain=$7
 unitree_iface=$8
 native_ws=$9
@@ -66,12 +66,12 @@ native_log=${10}
 native_reset=${11:-yes}
 container_reset=${12:-yes}
 
-native_pid_file="${repo}/.deploy/chris-native.pid"
-odom_pid_file="${repo}/.deploy/chris-odom.pid"
+native_pid_file="${repo}/.deploy/asimov-native.pid"
+odom_pid_file="${repo}/.deploy/asimov-odom.pid"
 odom_log="${native_log%.log}-odom.log"
 mkdir -p "${repo}/.deploy"
 
-# The bridge package is installed on Chris in a Foxy workspace. Nounset has to
+# The bridge package is installed on Asimov in a Foxy workspace. Nounset has to
 # be disabled only while sourcing ROS setup hooks; the rest of this script stays
 # strict so a partial bring-up cannot be reported as ready.
 set +u
@@ -94,7 +94,7 @@ native_pids() {
   done
   # Catch a bridge started by hand before this deployment created its pid file.
   pgrep -f '[r]os2 launch g1_ros2_bridge robot.launch.py' || true
-  pgrep -f '[c]hris_odom_bridge.py' || true
+  pgrep -f '[a]simov_odom_bridge.py' || true
 }
 
 stop_native() {
@@ -146,7 +146,7 @@ start_native() {
   fi
 
   echo "Starting native G1 bridge on ${unitree_iface}..."
-  # The installed odom child listens to rt/sportmodestate, while Chris's live
+  # The installed odom child listens to rt/sportmodestate, while Asimov's live
   # state is on rt/odommodestate. SwarmDeck starts its corrected child below,
   # so keep the incorrect one disabled.
   nohup bash -c '
@@ -168,7 +168,7 @@ start_native() {
       require_enable:=false \
       dry_run:=false \
       quiet:=true
-  ' swarmdeck-chris-native "${native_ws}" "${ros_domain}" "${unitree_iface}" \
+  ' swarmdeck-asimov-native "${native_ws}" "${ros_domain}" "${unitree_iface}" \
     >"${native_log}" 2>&1 < /dev/null &
   local pid=$!
   echo "${pid}" >"${native_pid_file}"
@@ -184,16 +184,16 @@ start_native() {
 start_odom() {
   local -a pids=()
   mapfile -t pids < <(native_pids | sort -nu | while read -r pid; do
-    if tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null | grep -Fq 'chris_odom_bridge.py'; then
+    if tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null | grep -Fq 'asimov_odom_bridge.py'; then
       echo "${pid}"
     fi
   done)
   if ((${#pids[@]} != 0)); then
-    echo "Chris odometry bridge: already running (PIDs: ${pids[*]})"
+    echo "Asimov odometry bridge: already running (PIDs: ${pids[*]})"
     return
   fi
 
-  echo "Starting Chris odometry bridge on ${unitree_iface}..."
+  echo "Starting Asimov odometry bridge on ${unitree_iface}..."
   nohup bash -c '
     set +u
     source /opt/ros/foxy/setup.bash
@@ -202,43 +202,43 @@ start_odom() {
     export ROS_DOMAIN_ID="$3"
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export G1_INTERFACE="$4"
-    exec /usr/bin/python3 "$1/adapters/adapter_ros2/chris_odom_bridge.py"
-  ' swarmdeck-chris-odom "${repo}" "${native_ws}" "${ros_domain}" "${unitree_iface}" \
+    exec /usr/bin/python3 "$1/adapters/adapter_ros2/asimov_odom_bridge.py"
+  ' swarmdeck-asimov-odom "${repo}" "${native_ws}" "${ros_domain}" "${unitree_iface}" \
     >"${odom_log}" 2>&1 < /dev/null &
   local pid=$!
   echo "${pid}" >"${odom_pid_file}"
   sleep 2
   if ! kill -0 "${pid}" 2>/dev/null; then
-    echo "Chris odometry bridge exited during startup; recent log:" >&2
+    echo "Asimov odometry bridge exited during startup; recent log:" >&2
     tail -n 60 "${odom_log}" >&2 || true
     return 1
   fi
-  echo "Chris odometry bridge started (log: ${odom_log})"
+  echo "Asimov odometry bridge started (log: ${odom_log})"
 }
 
 compose=(docker compose --project-name swarmdeck)
-if [[ -f "${repo}/.deploy/chris.env" ]]; then
-  compose+=(--env-file "${repo}/.deploy/chris.env")
+if [[ -f "${repo}/.deploy/asimov.env" ]]; then
+  compose+=(--env-file "${repo}/.deploy/asimov.env")
 else
   export ROBOT_REPO="${repo}"
   export BACKEND_HOST="${backend_host}"
   export BACKEND_PORT="${backend_port}"
-  export CHRIS_WORKSPACE="${chris_workspace}"
-  export CHRIS_ROS_DOMAIN_ID="${ros_domain}"
+  export ASIMOV_WORKSPACE="${asimov_workspace}"
+  export ASIMOV_ROS_DOMAIN_ID="${ros_domain}"
 fi
 compose+=(--file "${repo}/${compose_file}")
 
 stop_native
 
-echo "Validating Chris Compose configuration..."
+echo "Validating Asimov Compose configuration..."
 "${compose[@]}" config --quiet
 if [[ "${container_reset}" == yes ]]; then
-  echo "Resetting Chris containers..."
+  echo "Resetting Asimov containers..."
   "${compose[@]}" --profile '*' down --remove-orphans
 else
-  echo "Chris container reset: skipped"
+  echo "Asimov container reset: skipped"
 fi
-echo "Starting Chris containers..."
+echo "Starting Asimov containers..."
 "${compose[@]}" up -d --force-recreate --remove-orphans
 
 start_native
@@ -289,7 +289,7 @@ require_cmd_vel_subscriber() {
 require_rtsp_stream() {
   local rtsp_url="rtsp://${backend_host}:${MEDIA_RTSP_PORT:-8554}/${robot_id}"
   local probe
-  probe="$(docker exec swarmdeck-chris-media timeout 8s \
+  probe="$(docker exec swarmdeck-asimov-media timeout 8s \
     gst-launch-1.0 -v \
     rtspsrc location="${rtsp_url}" protocols=tcp latency=0 \
     ! rtph264depay ! fakesink sync=false 2>&1 || true)"

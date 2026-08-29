@@ -38,18 +38,18 @@ and adapter/sensor configuration. `ROBOT=all` discovers the profile automaticall
 Deployment reset means `docker compose down --remove-orphans`; it does not move
 hardware or clear robot-side SLAM.
 
-## Chris (Unitree G1)
+## Asimov (Unitree G1)
 
-Chris's camera, media relay, and SwarmDeck adapter run in ROS 2 Humble
+Asimov's camera, media relay, and SwarmDeck adapter run in ROS 2 Humble
 containers. Locomotion, odometry, joint state, and TF use the host-installed
 Foxy `g1_ros2_bridge` on Unitree's `eth0` interface. The normal deployment
 starts both layers and verifies the G1 service endpoints, `/cmd_vel` subscriber,
 odometry, joint state, RTSP stream, and backend registration:
 
 ```bash
-make deploy ROBOT=chris
+make deploy ROBOT=asimov
 ```
 
-The profile intentionally advertises teleoperation only. Chris has no verified
+The profile intentionally advertises teleoperation only. Asimov has no verified
 Nav2 action server or battery adapter yet, so those capabilities stay disabled
 until their native producers are installed and tested.

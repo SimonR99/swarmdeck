@@ -173,9 +173,9 @@
       </header>
 
       <div class="p-4 flex flex-col gap-3">
-        {#if robot.robot_type === 'unitree_g1' || robot.robot_id.startsWith('chris')}
+        {#if robot.robot_type === 'unitree_g1' || robot.robot_id.startsWith('asimov')}
           <div class="text-[11px] text-fg-dim">
-            Direct humanoid commands backed by Chris's native G1 bridge for <strong class="text-fg">{shortName}</strong>.
+            Direct humanoid commands backed by Asimov's native G1 bridge for <strong class="text-fg">{shortName}</strong>.
           </div>
 
           <div class="grid grid-cols-2 gap-2 mt-0.5">

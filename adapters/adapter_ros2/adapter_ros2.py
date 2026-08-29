@@ -29,7 +29,7 @@ in the configuration AND resolves at runtime.
 
 HARDWARE VALIDATION
 -------------------
-The generic adapter is unit-tested, and the Chris profile has been smoke-tested
+The generic adapter is unit-tested, and the Asimov profile has been smoke-tested
 against a live Unitree G1: its native odometry, camera, point cloud, TF, and
 command-velocity bridge are all discovered at runtime. Other hardware profiles
 still require the same topic, QoS, and frame validation described in

@@ -20,7 +20,7 @@ export const ROBOT_IDENTITY_COLORS: Record<string, string> = {
   spot: '#c9a000',
   botman: '#007aff',
   aslan: '#e07000',
-  chris: '#5865f2'
+  asimov: '#5865f2'
 };
 
 /**

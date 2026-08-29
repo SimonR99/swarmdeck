@@ -1,6 +1,6 @@
-# Unitree G1 Humanoid Robot (SSH alias `chris` → `192.168.1.37`, user `unitree`).
+# Unitree G1 Humanoid Robot (SSH alias `asimov` → `192.168.1.37`, user `unitree`).
 # SwarmDeck's ROS 2 Humble adapter shares the graph with the host-side
-# `g1_ros2_bridge` (Foxy + Unitree SDK). The latter is started by scripts/chris-up.
+# `g1_ros2_bridge` (Foxy + Unitree SDK). The latter is started by scripts/asimov-up.
 robot_type: unitree_g1
 ros_distro: humble
 network_iface: wlan0
@@ -33,7 +33,7 @@ topics:
   camera_depth_points: ""
 
 actions:
-  # No Nav2/action server is installed on Chris; teleop is deliberately the
+  # No Nav2/action server is installed on Asimov; teleop is deliberately the
   # only motion path until a planner is deployed and verified.
   navigate_to_pose: ""
 

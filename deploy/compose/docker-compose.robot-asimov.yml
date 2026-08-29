@@ -1,9 +1,9 @@
-# Chris (Unitree G1) bring-up owned by SwarmDeck.
+# Asimov (Unitree G1) bring-up owned by SwarmDeck.
 #
 # Connects Unitree G1 humanoid (192.168.1.37) running ROS 2 Humble containers
 # and the host-side Foxy/Unitree locomotion bridge into SwarmDeck.
 
-x-ros-domain: &ros_domain "${CHRIS_ROS_DOMAIN_ID:-0}"
+x-ros-domain: &ros_domain "${ASIMOV_ROS_DOMAIN_ID:-0}"
 
 services:
   camera:
@@ -11,7 +11,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
-    container_name: swarmdeck-chris-camera
+    container_name: swarmdeck-asimov-camera
     network_mode: host
     ipc: host
     privileged: true
@@ -48,7 +48,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
-    container_name: swarmdeck-chris-media
+    container_name: swarmdeck-asimov-media
     depends_on:
       camera:
         condition: service_started
@@ -62,13 +62,13 @@ services:
       - python3
       - /app/swarmdeck/adapters/media/ros2_rtsp.py
       - --robot-id
-      - chris_0
+      - asimov_0
       - --topic
       - /d435/camera/color/image_raw/compressed
       - --raw-topic
       - /d435/camera/color/image_raw
       - --rtsp-url
-      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/chris_0"
+      - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/asimov_0"
       - --bitrate-kbps
       - "${VIDEO_BITRATE_KBPS:-700}"
       - --fps
@@ -86,7 +86,7 @@ services:
       args:
         ULTRALYTICS_IMAGE: ultralytics/ultralytics:8.4.14-jetson-jetpack6
     image: swarmdeck-duck-detector:jetpack6
-    container_name: swarmdeck-chris-detector
+    container_name: swarmdeck-asimov-detector
     profiles: ["detector"]
     network_mode: host
     ipc: host
@@ -101,7 +101,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.robot-ros2
     image: swarmdeck-robot-ros2:local
-    container_name: swarmdeck-chris-adapter
+    container_name: swarmdeck-asimov-adapter
     depends_on:
       camera:
         condition: service_started
@@ -110,7 +110,7 @@ services:
     privileged: true
     volumes:
       - /dev:/dev
-      - ${CHRIS_WORKSPACE:-/home/unitree/workspaces}:/workspace:ro
+      - ${ASIMOV_WORKSPACE:-/home/unitree/workspaces}:/workspace:ro
       - ${ROBOT_REPO:-/home/unitree/swarmdeck}:/app/swarmdeck:ro
     environment:
       ROS_DOMAIN_ID: *ros_domain
@@ -120,7 +120,7 @@ services:
       - python3
       - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py
       - --robot-id
-      - chris_0
+      - asimov_0
       - --config
       - /app/swarmdeck/adapters/adapter_ros2/config/unitree_g1.yaml
       - --host
