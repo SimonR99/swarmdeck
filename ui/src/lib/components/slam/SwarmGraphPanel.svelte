@@ -56,8 +56,6 @@
   const keyframes = $derived(
     status?.keyframes ?? rows.reduce((total, [, graph]) => total + graph.keyframes, 0)
   );
-  const components = $derived(status?.components ?? []);
-  const mergedComponents = $derived(components.filter((component) => component.robots.length >= 2));
   const riskyMerge = $derived(draft.min_inter_robot_connections < 2);
 
   function closeModal() {
@@ -189,9 +187,9 @@
 
       <div class="grid shrink-0 grid-cols-3 border-b border-border/70 bg-surface-2">
         <div class="px-4 py-3">
-          <div class="text-[10px] font-medium text-fg-dim">Merged groups</div>
+          <div class="text-[10px] font-medium text-fg-dim">Merged robots</div>
           <div class="mt-1 text-lg font-semibold tabular text-fg">
-            {mergedComponents.length || joined}/{Math.max(components.length, rows.length, 1)}
+            {joined}/{Math.max(rows.length, 1)}
           </div>
         </div>
         <div class="border-x border-border px-4 py-3">

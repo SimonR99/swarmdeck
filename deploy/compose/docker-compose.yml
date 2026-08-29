@@ -177,6 +177,10 @@ services:
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
+      VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-700}"
+      VIDEO_FPS: "${VIDEO_FPS:-10}"
+      VIDEO_WIDTH: "${VIDEO_WIDTH:-640}"
+      VIDEO_HEIGHT: "${VIDEO_HEIGHT:-480}"
     volumes:
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
