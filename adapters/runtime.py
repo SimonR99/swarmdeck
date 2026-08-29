@@ -1,25 +1,21 @@
 """ROS-independent adapter protocol building blocks.
 
-The ROS 1 and ROS 2 bridges deliberately keep their transport and message
-construction in separate files.  Their protocol-facing behaviour, however,
-must stay the same: a stale link stops autonomy, image/cloud decoding honours
-the message wire format, and dashboard settings are applied in the same way.
-This module owns those small runtime policies so a fix does not have to be
-copied into both adapters (and so the policies can be tested without ROS).
+Hardware and simulation keep ROS wiring in separate files. Hello, robot_state,
+keepalive, and reconnect live here so those clients cannot drift.
 
-The mixins only depend on attributes and hooks supplied by a bridge.  They do
-not import rospy or rclpy at module import time; this is important for the
-offline adapter tests and for deploying either bridge into a minimal image.
+Mixins do not import rospy or rclpy at module import time.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -27,6 +23,46 @@ import numpy as np
 from adapters.network_quality import read_link_quality
 
 _LOG = logging.getLogger(__name__)
+
+# 2 adds optional `slam_graph`. The server still accepts 1 so an old binary
+# on a robot is not kicked off a mixed fleet.
+PROTOCOL_VERSION = 2
+
+# Ping 2/4 s, not the library 20/20: a dead radio would otherwise look live
+# for ~40 s while autonomy keeps running. Tighter than ~6 s flaps a lossy
+# link (Botman, 60% loss). Upload 25 s, not 5: scans queue on one server lock
+# and 5 s discarded the four-robot fleet.
+TRANSPORT_DEFAULTS: dict[str, Any] = {
+    "ping_interval_s": 2.0,
+    "ping_timeout_s": 4.0,
+    "drive_timeout_s": 0.45,
+    "link_timeout_s": 1.5,
+    "upload_timeout_s": 25.0,
+    "rates": {
+        "state_hz": 5.0,
+        "map_period_s": 2.0,
+        "cloud_period_s": 4.0,
+        "camera_period_s": 0.2,
+        "keyframe_period_s": 2.0,
+        "settings_period_s": 5.0,
+    },
+}
+
+RECONNECT_BACKOFF_S = 1.0
+RECONNECT_BACKOFF_MAX_S = 30.0
+
+HELLO_FIELDS = (
+    "type",
+    "protocol",
+    "robot_id",
+    "robot_type",
+    "adapter",
+    "ros",
+    "coordinate_frame",
+    "capabilities",
+    "footprint_radius",
+    "footprint",
+)
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -38,6 +74,115 @@ def deep_merge(base: dict, override: dict) -> dict:
         else:
             out[key] = value
     return out
+
+
+def load_yaml_profile(path: str | None, defaults: dict) -> dict:
+    """Shallow-copy defaults, then deep-merge an optional YAML profile."""
+    cfg = dict(defaults)
+    if path:
+        import yaml
+        from pathlib import Path
+
+        loaded = yaml.safe_load(Path(path).read_text()) or {}
+        cfg = deep_merge(cfg, loaded)
+    return cfg
+
+
+def hello_message(
+    *,
+    robot_id: str,
+    robot_type: str,
+    adapter: str,
+    ros: str,
+    capabilities: Sequence[str],
+    footprint_radius: float,
+    footprint: Any = None,
+    coordinate_frame: str = "local",
+) -> dict[str, Any]:
+    """Registration envelope. Every adapter sends this key set on connect."""
+    return {
+        "type": "hello",
+        "protocol": PROTOCOL_VERSION,
+        "robot_id": robot_id,
+        "robot_type": robot_type,
+        "adapter": adapter,
+        "ros": ros,
+        "coordinate_frame": (
+            "merged" if coordinate_frame == "merged" else "local"
+        ),
+        "capabilities": list(capabilities),
+        "footprint_radius": float(footprint_radius),
+        "footprint": footprint or None,
+    }
+
+
+def detections_message(
+    robot_id: str,
+    t0: float,
+    items: list[dict[str, Any]],
+    *,
+    now: float | None = None,
+    camera: str = "front",
+) -> dict[str, Any]:
+    """Detections batch, including `t_mono`."""
+    stamp = time.monotonic() if now is None else now
+    return {
+        "type": "detections",
+        "robot_id": robot_id,
+        "t_mono": round(stamp - t0, 4),
+        "camera": camera,
+        "items": items,
+    }
+
+
+def websocket_connect_kwargs(cfg: Mapping[str, Any]) -> dict[str, float]:
+    """Ping interval/timeout every adapter must pass to `websockets.connect`."""
+    return {
+        "ping_interval": float(cfg["ping_interval_s"]),
+        "ping_timeout": float(cfg["ping_timeout_s"]),
+    }
+
+
+def next_backoff(current: float) -> float:
+    return min(float(current) * 2.0, RECONNECT_BACKOFF_MAX_S)
+
+
+async def run_until_first_failure(*coros: Any) -> None:
+    """First failure cancels the rest. They share one socket; a sibling that
+    keeps writing after close surfaces later as 'never retrieved'.
+
+    Cancelling a task blocked in ``run_in_executor`` does not stop the worker.
+    The in-flight upload finishes unobserved, which is safe.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in done:
+            task.result()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class AdapterHelloMixin:
+    """`hello()` from `self.cfg`. Subclasses set `adapter_name` and `capabilities()`."""
+
+    adapter_name: str = ""
+    coordinate_frame: str = "local"
+
+    def hello(self) -> dict[str, Any]:
+        cfg = getattr(self, "cfg", {}) or {}
+        return hello_message(
+            robot_id=self.id,
+            robot_type=str(cfg.get("robot_type", "unknown")),
+            adapter=self.adapter_name,
+            ros=str(cfg.get("ros_distro", "")),
+            capabilities=list(self.capabilities()),
+            footprint_radius=float(cfg.get("footprint_radius", 0.3)),
+            footprint=cfg.get("footprint"),
+            coordinate_frame=self.coordinate_frame,
+        )
 
 
 def map_cloud_height_limits(band: dict[str, Any] | None) -> tuple[float, float]:
@@ -448,7 +593,7 @@ class AdapterLinkMixin:
 
 
 class AdapterTelemetryMixin:
-    """Protocol state envelope shared by ROS 1 and ROS 2 adapters."""
+    """Protocol `robot_state` envelope shared by every adapter."""
 
     def _network_quality(self, iface: str):
         host = getattr(self, "_server_host", None)

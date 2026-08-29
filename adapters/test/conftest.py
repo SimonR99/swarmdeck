@@ -88,7 +88,8 @@ def sim_module():
         yield importlib.import_module("adapter_sim")
     finally:
         sys.path.remove(str(REPO / "adapters" / "adapter_sim"))
-        sys.modules.pop("adapter_sim", None)
+        for name in ("adapter_sim", "sim_cslam", "sim_reset"):
+            sys.modules.pop(name, None)
         for name, value in saved.items():
             if value is None:
                 sys.modules.pop(name, None)

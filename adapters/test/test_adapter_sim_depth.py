@@ -285,6 +285,8 @@ def test_camera_processing_still_detects_without_a_preview_upload(
     bridge._upload_lock = threading.Lock()
     bridge._camera_dirty = True
     bridge._detection_enabled = True
+    bridge._detection_period_s = 0.2
+    bridge._last_detection_at = 0.0
     bridge._detections = None
     bridge._camera_encoding_warned = False
     bridge._depth_map_position = lambda *a, **k: {"x": 1.0, "y": 2.0}

@@ -21,3 +21,19 @@ def test_dashboard_seven_cannot_leak_in_as_the_default(sim_module):
 def test_count_is_clamped_to_the_spawnable_fleet(sim_module):
     assert sim_module.resolve_sim_robot_count(9, "", None) == 5
     assert sim_module.resolve_sim_robot_count(0, "", None) == 1
+
+
+def test_hello_matches_the_hardware_protocol_envelope(sim_module):
+    from adapters.runtime import PROTOCOL_VERSION, TRANSPORT_DEFAULTS
+
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.id = "robot_0"
+    bridge.cfg = sim_module.deep_merge(
+        TRANSPORT_DEFAULTS,
+        {"robot_type": "agilex_bunker", "ros_distro": "jazzy", "footprint_radius": 0.643},
+    )
+    msg = bridge.hello()
+    assert msg["protocol"] == PROTOCOL_VERSION
+    assert msg["adapter"] == "adapter_sim/0.1.0"
+    assert "reset" in msg["capabilities"]
+    assert "battery" not in msg["capabilities"]

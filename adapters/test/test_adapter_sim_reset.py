@@ -21,10 +21,7 @@ import pytest
 @pytest.fixture
 def sim(sim_module):
     """adapter_sim with its fleet-wide reset state returned to a known start."""
-    sim_module._world_name = None
-    sim_module._world_reset_at = 0.0
-    sim_module.CSLAM_GRID.clear()
-    sim_module.SLAM_GRAPHS.clear()
+    sim_module.reset_module_state()
     return sim_module
 
 

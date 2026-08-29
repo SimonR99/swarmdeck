@@ -53,7 +53,18 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from adapters.perception.depth_projection import point_for_depth_image
 from adapters.perception.object_detector import ObjectDetector, track_ids
-from adapters.runtime import AdapterSensorMixin, cloud_xyz, stamp_seconds, yaw_of
+from adapters.runtime import (
+    AdapterDetectionMixin,
+    AdapterHelloMixin,
+    AdapterSensorMixin,
+    AdapterTelemetryMixin,
+    TRANSPORT_DEFAULTS,
+    cloud_xyz,
+    deep_merge,
+    stamp_seconds,
+    yaw_of,
+)
+from adapters.session import run_adapter_session
 from adapters.keyframe_producer import (
     KeyframeUploader,
     laser_scan_to_map_points,
@@ -62,6 +73,20 @@ from adapters.keyframe_producer import (
 )
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
+
+from sim_cslam import (
+    CSLAM_GRID,
+    SLAM_GRAPHS,
+    on_cslam_grid as _on_cslam_grid,
+    on_slam_graph as _on_slam_graph,
+    slam_graph_payload,
+    upload_cslam_grid,
+)
+from sim_reset import (
+    gz_world_name as _gz_world_name,
+    reset_module_state,
+    reset_world,
+)
 
 # The platform table, imported from the spawner rather than restated here.
 #
@@ -95,12 +120,6 @@ CLOUD_VOXEL = 0.10
 CLOUD_SCALE = 0.01
 
 
-# Newest collaborative pose graph per robot, as reported by
-# swarmdeck_cslam's graph_reporter. Empty unless Swarm-SLAM is running, in
-# which case the GUI's swarm panel appears on its own.
-SLAM_GRAPHS: dict[str, dict] = {}
-
-
 def resolve_sim_robot_count(
     cli_robots: int | None,
     env_robots: str = "",
@@ -124,64 +143,6 @@ def resolve_sim_robot_count(
         else:
             count = int(default)
     return max(1, min(count, 5))
-
-
-def _on_slam_graph(msg) -> None:
-    """cslam pose-graph summary, arriving as JSON on a std_msgs/String.
-
-    Deliberately not a cslam message type: `cslam_common_interfaces` is built in
-    the cslam image and absent here, and a subscriber cannot deserialise a type
-    it does not have — it would simply never fire. See graph_reporter.py.
-    """
-    try:
-        graph = json.loads(msg.data)
-    except (ValueError, TypeError):
-        return
-    rid = graph.get("robot_id")
-    if isinstance(rid, str):
-        SLAM_GRAPHS[rid] = graph
-
-
-# The collaborative back end's own merged grid, if one is running. Fleet-wide
-# rather than per robot: cslam produces a single map in its common frame from
-# every robot's keyframes, so there is nothing to merge afterwards.
-CSLAM_GRID: dict[str, object] = {}
-
-
-def _on_cslam_grid(msg) -> None:
-    CSLAM_GRID["grid"] = msg
-    CSLAM_GRID["dirty"] = True
-
-
-def upload_cslam_grid(http_url: str) -> None:
-    """Push the back end's merged grid straight to the backend, unmerged.
-
-    Uploading it as a per-robot map instead would send it back through the
-    merge, which would transform a grid that is already in the common frame and
-    reintroduce exactly the mismatch cslam_grid.py exists to remove.
-    """
-    if not CSLAM_GRID.get("dirty"):
-        return
-    CSLAM_GRID["dirty"] = False
-    g = CSLAM_GRID.get("grid")
-    if g is None:
-        return
-    cells = np.array(g.data, dtype=np.int8)
-    body = zlib.compress(np.ascontiguousarray(cells).tobytes())
-    url = (
-        f"{http_url}/api/adapter/global_map?resolution={g.info.resolution}"
-        f"&width={g.info.width}&height={g.info.height}"
-        f"&origin_x={g.info.origin.position.x}&origin_y={g.info.origin.position.y}"
-    )
-    try:
-        urllib.request.urlopen(
-            urllib.request.Request(
-                url, data=body, headers={"Content-Type": "application/octet-stream"}
-            ),
-            timeout=5,
-        ).read()
-    except Exception as exc:
-        print(f"[adapter_sim] cslam grid upload failed: {exc}")
 
 
 def camera_point_to_map(
@@ -296,25 +257,8 @@ NAV_READY_GRACE_S = 30.0
 # leave real time between attempts rather than hammering the service.
 NAV_RECOVER_INTERVAL_S = 30.0
 
-# ------------------------------------------------------------------- reset
-#
-# A reset is fleet-wide in Gazebo and per-robot in ROS, while the protocol
-# addresses one robot at a time. The world reset is therefore coalesced here.
-
-# Seconds within which a second robot's reset reuses the first one's world reset.
-# Longer than a fleet-wide reset takes to fan out, shorter than any interval an
-# operator could press the button twice deliberately.
-WORLD_RESET_COALESCE_S = 5.0
-# Spawn height is per platform and comes from ROBOT_PROFILES via RobotBridge —
-# a Spot's hidden drive wheels sit 0.50 m below its body, so the single constant
-# that used to live here would bury it in the floor on reset.
-# Let the teleport's velocity transient pass before re-zeroing the filters.
 WORLD_SETTLE_S = 0.5
 SERVICE_TIMEOUT_S = 8.0
-
-_WORLD_RESET_LOCK = threading.Lock()
-_world_reset_at = 0.0
-_world_name: str | None = None
 
 # The SLAM back ends this stack can run, newest request first. Discovered rather
 # than assumed, because `slam_backend:=rtabmap` swaps the SLAM node out entirely
@@ -333,107 +277,17 @@ def _srv_type(module: str, name: str):
         return None
 
 
-def _gz_world_name(logger) -> str | None:
-    """Find the running world's name instead of hardcoding it.
-
-    generate_world.py writes the world, so its name is a property of the
-    scenario rather than of this adapter, and a stale hardcoded name fails as a
-    service timeout that looks exactly like a busy simulator.
-    """
-    global _world_name
-    if _world_name:
-        return _world_name
-    try:
-        listing = subprocess.run(
-            ["gz", "service", "-l"], capture_output=True, text=True, timeout=10
-        ).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warn(f"[adapter_sim] cannot list gz services: {exc}")
-        return None
-    for line in listing.splitlines():
-        line = line.strip()
-        # Exactly /world/<name>/control. /world/<name>/playback/control also ends
-        # in /control and controls log playback, not the world.
-        if line.startswith("/world/") and line.endswith("/control"):
-            name = line[len("/world/") : -len("/control")]
-            if name and "/" not in name:
-                _world_name = name
-                return name
-    logger.warn("[adapter_sim] no /world/<name>/control service found")
-    return None
-
-
-def reset_world(logger) -> bool:
-    """Put the *scenery* back where it started. Once per fleet-wide reset.
-
-    This restores the chairs, tables, plants and rubber ducks that make up the
-    generated world, which robots push around as they drive.
-
-    It does NOT move the robots, and that is not a bug to be fixed here — it is
-    a property of Gazebo. A world reset restores entities declared in the world
-    SDF, and the fleet is spawned into a running world by spawn_fleet.py through
-    `/world/<name>/create`. Measured against the live stack: the service answers
-    `data: true` and robot_0 stays exactly where it was. `RobotBridge._reset_pose`
-    puts the robots back, one explicit `set_pose` each.
-
-    `model_only`, and deliberately not `all`: `all` also sets the simulation
-    clock back to zero, and every node in this stack runs on `use_sim_time`. A
-    /clock that jumps backwards invalidates the tf2 buffers, the Nav2 lifecycle
-    timers and SLAM's scan queue at the same instant, which is a far larger
-    change than the one being asked for.
-
-    The lock coalesces the per-robot resets into one world reset, and orders
-    them: the scene is restored before any robot starts mapping it again.
-    """
-    global _world_reset_at
-    with _WORLD_RESET_LOCK:
-        if time.monotonic() - _world_reset_at < WORLD_RESET_COALESCE_S:
-            return True
-        world = _gz_world_name(logger)
-        if world is None:
-            return False
-        try:
-            done = subprocess.run(
-                [
-                    "gz",
-                    "service",
-                    "-s",
-                    f"/world/{world}/control",
-                    "--reqtype",
-                    "gz.msgs.WorldControl",
-                    "--reptype",
-                    "gz.msgs.Boolean",
-                    "--timeout",
-                    "5000",
-                    "--req",
-                    "reset: {model_only: true}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            logger.warn(f"[adapter_sim] world reset failed: {exc}")
-            return False
-        # gz exits 0 whether the world answered or the call timed out, so the
-        # reply body is the only evidence that anything happened.
-        if "true" not in done.stdout.lower():
-            logger.warn(
-                f"[adapter_sim] world reset rejected: "
-                f"{done.stdout.strip()} {done.stderr.strip()}"
-            )
-            return False
-        _world_reset_at = time.monotonic()
-        # The collaborative back end's merged grid describes the world that was
-        # just reset. Holding it would re-upload the old map to the backend
-        # moments after the backend cleared it.
-        CSLAM_GRID.clear()
-        SLAM_GRAPHS.clear()
-        return True
-
-
-class RobotBridge(AdapterSensorMixin):
+class RobotBridge(
+    AdapterHelloMixin,
+    AdapterDetectionMixin,
+    AdapterSensorMixin,
+    AdapterTelemetryMixin,
+):
     """Per-robot ROS subscriptions and command publisher."""
+
+    adapter_name = "adapter_sim/0.1.0"
+    coordinate_frame = "local"
+    _TRACK_IDS = staticmethod(track_ids)
 
     def __init__(
         self, node: Node, robot_id: str, http_url: str, platform: str | None = None
@@ -448,9 +302,19 @@ class RobotBridge(AdapterSensorMixin):
         # than half its width.
         self.platform = platform or DEFAULT_ROBOT_PROFILE
         spec = robot_spec(self.platform)
-        self.robot_type = spec.robot_type
-        self.footprint_radius = round(spec.footprint_radius, 3)
-        self.footprint = json.loads(spec.footprint)
+        self.cfg = deep_merge(
+            TRANSPORT_DEFAULTS,
+            {
+                "robot_type": spec.robot_type,
+                "ros_distro": "jazzy",
+                "footprint_radius": round(spec.footprint_radius, 3),
+                "footprint": json.loads(spec.footprint),
+                "network_iface": "",
+            },
+        )
+        self.robot_type = self.cfg["robot_type"]
+        self.footprint_radius = self.cfg["footprint_radius"]
+        self.footprint = self.cfg["footprint"]
         self.spawn_z = spec.spawn_z
         # Where this platform's RGBD camera is bolted, from the same table the
         # SDF was rendered from. Turning a duck detection into a map marker is
@@ -459,9 +323,11 @@ class RobotBridge(AdapterSensorMixin):
         self.camera_z = spec.camera_z
         self.lidar_x = spec.lidar_x
         self.lidar_z = spec.lidar_z
+        rates = self.cfg.get("rates") or {}
         self._keyframes = KeyframeUploader(
             robot_id,
             http_url,
+            min_period_s=float(rates.get("keyframe_period_s", 2.0)),
             height_band={
                 "floor_z": -float(spec.base_height),
                 "min_z": 0.15,
@@ -471,6 +337,7 @@ class RobotBridge(AdapterSensorMixin):
         )
         self._nav_map = NavMapClient(http_url, robot_id)
         self._scan_cloud_at = 0.0
+        self.battery = None
 
         # Two links of the same TF chain: map_frame -> odom -> base_link. Both
         # come off the robot's namespaced /tf, which is the only place they are
@@ -502,6 +369,10 @@ class RobotBridge(AdapterSensorMixin):
         self._last_depth_warning_at = 0.0
         self._detector = ObjectDetector()
         self._detection_enabled = True
+        self._detection_period_s = max(
+            0.05, float((self.cfg.get("rates") or {}).get("camera_period_s", 0.2))
+        )
+        self._last_detection_at = 0.0
         self._detections: list[dict] | None = None
         self._goal_handle = None
         self._goal_generation = 0
@@ -878,7 +749,7 @@ class RobotBridge(AdapterSensorMixin):
                     data=zlib.compress(quantised.tobytes(), 1),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
-                timeout=5,
+                timeout=self._cfg_timeout("upload_timeout_s"),
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] cloud upload failed: {exc}")
@@ -963,35 +834,13 @@ class RobotBridge(AdapterSensorMixin):
 
     # -- protocol side -------------------------------------------------
 
-    def hello(self) -> dict:
-        return {
-            "type": "hello",
-            # 2: adds the optional slam_graph message, emitted only when
-            # Swarm-SLAM is running and graph_reporter is publishing.
-            "protocol": 2,
-            "robot_id": self.id,
-            "robot_type": self.robot_type,
-            "adapter": "adapter_sim/0.1.0",
-            "ros": "jazzy",
-            # `reset` is simulation-only and must stay that way — it means
-            # teleport to spawn and forget the map. See the protocol README.
-            "capabilities": ["navigate", "map", "camera", "battery", "estop", "reset"],
-            "footprint_radius": self.footprint_radius,
-            "footprint": self.footprint,
-        }
+    def capabilities(self) -> list[str]:
+        """Advertise only what this process honours. `reset` is simulation-only."""
+        return ["navigate", "map", "camera", "estop", "reset"]
 
-    def state(self) -> dict:
-        return {
-            "type": "robot_state",
-            "robot_id": self.id,
-            "t_mono": round(time.monotonic() - self.t0, 4),
-            "pose": self.map_pose(),
-            "battery": None,  # simulation has no battery model
-            "mode": self.mode,
-            "nav_status": self.nav_status,
-            "goal": self.goal,
-            "planned_path": self.planned_path,
-        }
+    def _cfg_timeout(self, key: str) -> float:
+        cfg = getattr(self, "cfg", None) or TRANSPORT_DEFAULTS
+        return float(cfg[key])
 
     def navigate_to(self, goal: dict) -> None:
         """Map a planner-agnostic command onto Nav2's NavigateToPose action."""
@@ -1226,7 +1075,8 @@ class RobotBridge(AdapterSensorMixin):
         self.nav_status, self.mode = "idle", "teleop" if moving else "idle"
 
     def drive_watchdog(self) -> None:
-        if self.mode == "teleop" and time.monotonic() - self._last_drive_at > 0.45:
+        timeout = self._cfg_timeout("drive_timeout_s")
+        if self.mode == "teleop" and time.monotonic() - self._last_drive_at > timeout:
             self.pub_cmd.publish(Twist())
             self._last_drive_at = 0.0
             self.mode = "idle"
@@ -1237,6 +1087,9 @@ class RobotBridge(AdapterSensorMixin):
         self.goal = None
         self.planned_path = []
         self.nav_status, self.mode = "cancelled", "idle"
+
+    def cancel_goal(self) -> None:
+        self.cancel()
 
     # -- reset ---------------------------------------------------------
 
@@ -1487,6 +1340,31 @@ class RobotBridge(AdapterSensorMixin):
         self._reset_report = None
         return report
 
+    def session_state_tick(self) -> dict | None:
+        self.drive_watchdog()
+        self.escape_tick()
+        return self.take_reset_report()
+
+    async def session_maps_tick(self, now: float, send, loop) -> None:
+        graph = SLAM_GRAPHS.get(self.id)
+        last_graph = getattr(self, "_session_last_graph", 0.0)
+        if graph is not None and now - last_graph > 3.0:
+            self._session_last_graph = now
+            await send(
+                slam_graph_payload(
+                    self.id, self.t0, graph, self.cslam_origin(graph), now
+                )
+            )
+        period = float((self.cfg.get("rates") or {}).get("cloud_period_s", 4.0))
+        last_grid = getattr(self, "_session_last_cslam_grid", 0.0)
+        if now - last_grid > period:
+            self._session_last_cslam_grid = now
+            await loop.run_in_executor(None, upload_cslam_grid, self.http_url)
+        last_nav = getattr(self, "_session_last_nav_health", 0.0)
+        if now - last_nav > 5.0:
+            self._session_last_nav_health = now
+            await loop.run_in_executor(None, self.recover_nav_if_down)
+
     def upload_map(self) -> None:
         if not self._grid_dirty or self.grid is None:
             return
@@ -1518,7 +1396,7 @@ class RobotBridge(AdapterSensorMixin):
                 urllib.request.Request(
                     url, data=body, headers={"Content-Type": "application/octet-stream"}
                 ),
-                timeout=5,
+                timeout=self._cfg_timeout("upload_timeout_s"),
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] map upload failed: {exc}")
@@ -1556,7 +1434,7 @@ class RobotBridge(AdapterSensorMixin):
                             data=body,
                             headers={"Content-Type": "application/octet-stream"},
                         ),
-                        timeout=25,
+                        timeout=self._cfg_timeout("upload_timeout_s"),
                     ).read()
                 except Exception as exc:
                     with self._costmap_lock:
@@ -1615,182 +1493,14 @@ class RobotBridge(AdapterSensorMixin):
                     self._camera_encoding_warned = True
                 return
 
-            detections = []
-            if self._detection_enabled:
-                from adapters.perception.object_detector import (
-                    crop_detection_jpeg_base64,
-                )
-
-                for detection, track_id in track_ids(self._detector.detect_bgr(image)):
-                    item = detection.as_protocol(track_id)
-                    # The detector is RGB-only; the depth half of the same frame
-                    # is what makes the box a place rather than a rectangle.
-                    item["map_position"] = self._depth_map_position(
-                        detection.bbox, msg.header, detection.polygon
-                    )
-                    item["image"] = crop_detection_jpeg_base64(image, detection.bbox)
-                    detections.append(item)
-            self._detections = detections
+            self._detect_bgr(image, image_header=msg.header)
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] camera processing failed: {exc}")
 
-    def take_detections(self) -> list[dict] | None:
-        current = self._detections
-        self._detections = None
-        return current
-
-    def refresh_settings(self) -> None:
-        """Apply persisted perception settings without coupling to ROS/Gazebo."""
-        try:
-            with urllib.request.urlopen(
-                f"{self.http_url}/api/settings", timeout=2
-            ) as response:
-                payload = json.loads(response.read())
-            value = payload.get("settings", {})
-            self._detection_enabled = bool(value.get("detection_enabled", True))
-            self._detector.sensitivity = max(
-                0.1, min(1.0, float(value.get("detection_sensitivity", 0.55)))
-            )
-            self._detector.classes = value.get("detection_classes")
-            # The CAPTURE floor, not the operator's display floor; the backend
-            # enforces the latter against stored detections. See
-            # capture_floors() in the server's config/detection.py. The
-            # fallback keeps a new adapter working against an old backend.
-            self._detector.class_floors = value.get(
-                "detection_capture_floors"
-            ) or value.get("detection_class_floors")
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] settings refresh failed: {exc}")
-
 
 async def run_robot(bridge: RobotBridge, ws_url: str) -> None:
-    while True:
-        try:
-            async with websockets.connect(ws_url) as ws:
-                await ws.send(json.dumps(bridge.hello()))
-                print(f"[adapter_sim] {bridge.id} connected")
-
-                async def rx() -> None:
-                    loop = asyncio.get_running_loop()
-                    async for raw in ws:
-                        msg = json.loads(raw)
-                        t = msg.get("type")
-                        if t == "navigate_to":
-                            bridge.navigate_to(msg["goal"])
-                        elif t == "cancel_goal":
-                            bridge.cancel()
-                        elif t == "stop":
-                            bridge.stop()
-                        elif t == "drive":
-                            bridge.drive(
-                                msg.get("linear", 0.0), msg.get("angular", 0.0)
-                            )
-                        elif t == "reset":
-                            # Several seconds of blocking service calls. Run it
-                            # off the loop and do not await it here, or this
-                            # socket stops reading — including the `stop` an
-                            # operator might send while it runs.
-                            loop.run_in_executor(None, bridge.reset)
-
-                async def tx() -> None:
-                    last_map = 0.0
-                    last_cloud = 0.0
-                    last_graph = 0.0
-                    last_cslam_grid = 0.0
-                    last_frame = 0.0
-                    last_settings = 0.0
-                    last_nav_health = 0.0
-                    loop = asyncio.get_running_loop()
-                    while True:
-                        await ws.send(json.dumps(bridge.state()))
-                        report = bridge.take_reset_report()
-                        if report is not None:
-                            await ws.send(json.dumps(report))
-                        now = time.monotonic()
-                        bridge.drive_watchdog()
-                        bridge.escape_tick()
-                        await loop.run_in_executor(None, bridge.upload_costmaps)
-                        if now - last_map > 2.0:
-                            last_map = now
-                            await loop.run_in_executor(None, bridge.upload_map)
-                            await loop.run_in_executor(None, bridge.upload_keyframe)
-                            await loop.run_in_executor(None, bridge.pull_nav_map)
-                        # Slower than the grid: a 3D map changes gradually and
-                        # is an order of magnitude more bytes.
-                        graph = SLAM_GRAPHS.get(bridge.id)
-                        if graph is not None and now - last_graph > 3.0:
-                            last_graph = now
-                            payload = {
-                                "type": "slam_graph",
-                                "robot_id": bridge.id,
-                                "t_mono": round(now - bridge.t0, 4),
-                                "keyframes": graph.get("keyframes", 0),
-                                "in_common_frame": graph.get("in_common_frame", False),
-                                "residual": graph.get("residual"),
-                                "inter_robot": graph.get("inter_robot", []),
-                            }
-                            origin = bridge.cslam_origin(graph)
-                            if origin is not None:
-                                payload["origin"] = origin
-                            # The robot's pose AS THE BACK END SEES IT, in the
-                            # common frame. Sent verbatim so the backend can use
-                            # it directly instead of transforming a pose out of
-                            # RTAB-Map's frame: composing across two independent
-                            # SLAM estimates is what produced 8-18 m of error,
-                            # and the composition is unnecessary once the grid is
-                            # cslam's too.
-                            common = graph.get("common")
-                            if isinstance(common, dict) and graph.get(
-                                "in_common_frame"
-                            ):
-                                payload["common_pose"] = {
-                                    "x": float(common.get("x", 0.0)),
-                                    "y": float(common.get("y", 0.0)),
-                                    "yaw": float(common.get("yaw", 0.0)),
-                                }
-                            await ws.send(json.dumps(payload))
-                        if now - last_cslam_grid > 4.0:
-                            last_cslam_grid = now
-                            await loop.run_in_executor(
-                                None, upload_cslam_grid, bridge.http_url
-                            )
-                        if now - last_cloud > 4.0:
-                            last_cloud = now
-                            await loop.run_in_executor(None, bridge.upload_cloud)
-                        if now - last_frame > 0.2:
-                            last_frame = now
-                            # Detection runs on every frame regardless of which
-                            # camera is on screen. No image is sent over the
-                            # adapter connection.
-                            await loop.run_in_executor(None, bridge.process_camera)
-                            detections = bridge.take_detections()
-                            if detections is not None:
-                                await ws.send(
-                                    json.dumps(
-                                        {
-                                            "type": "detections",
-                                            "robot_id": bridge.id,
-                                            "camera": "front",
-                                            "items": detections,
-                                        }
-                                    )
-                                )
-                        if now - last_settings > 5.0:
-                            last_settings = now
-                            await loop.run_in_executor(None, bridge.refresh_settings)
-                        # Proactive, not on demand: an operator should not have
-                        # to issue a doomed goal to discover that this robot's
-                        # Nav2 lost the startup race, and the recovery takes
-                        # seconds during which nothing else needs to happen.
-                        if now - last_nav_health > 5.0:
-                            last_nav_health = now
-                            await loop.run_in_executor(None, bridge.recover_nav_if_down)
-                        await asyncio.sleep(0.2)
-
-                await asyncio.gather(rx(), tx())
-        except Exception as exc:
-            print(f"[adapter_sim] {bridge.id} disconnected ({exc}); retry in 2s")
-            await asyncio.sleep(2)
+    """Connect, announce, pump state. Same session shape as hardware."""
+    await run_adapter_session(bridge, ws_url, connect=websockets.connect)
 
 
 async def main_async(bridges: list[RobotBridge], ws_url: str) -> None:
