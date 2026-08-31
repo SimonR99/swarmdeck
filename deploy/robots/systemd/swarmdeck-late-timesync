@@ -1,0 +1,40 @@
+#!/bin/sh
+# Detect the clock being corrected AFTER the containers started, which silently
+# skews sensor stamps against each other until the drivers are restarted.
+# Installed as /usr/local/bin/swarmdeck-late-timesync, triggered by
+# swarmdeck-late-timesync.path when /run/systemd/timesync/synchronized appears.
+#
+# Log-only by default. Restarting containers underneath a running mission is a
+# worse failure than a skewed clock, so the restart is opt-in: set
+# SWARMDECK_LATE_TIMESYNC_RESTART=1 (and the container list) in
+# /etc/default/swarmdeck-timesync if you want automatic recovery.
+
+FLAG="${SWARMDECK_TIMESYNC_FLAG:-/run/systemd/timesync/synchronized}"
+RESTART="${SWARMDECK_LATE_TIMESYNC_RESTART:-0}"
+CONTAINERS="${SWARMDECK_LATE_TIMESYNC_CONTAINERS:-}"
+
+[ -e "$FLAG" ] || exit 0
+
+sync_at=$(date -r "$FLAG" +%s 2>/dev/null) || exit 0
+docker_at=$(date -d "$(systemctl show docker.service -p ActiveEnterTimestamp --value)" +%s 2>/dev/null) || exit 0
+[ -n "$docker_at" ] || exit 0
+
+if [ "$sync_at" -le "$docker_at" ]; then
+    exit 0   # clock settled before the stack came up, which is the good case
+fi
+
+skew=$((sync_at - docker_at))
+echo "swarmdeck-late-timesync: WARNING clock synchronized ${skew}s AFTER docker started."
+echo "swarmdeck-late-timesync: sensor drivers stamped with the pre-correction clock;"
+echo "swarmdeck-late-timesync: stamps from drivers on opposite sides of the step disagree."
+
+if [ "$RESTART" = "1" ] && [ -n "$CONTAINERS" ]; then
+    echo "swarmdeck-late-timesync: restarting: $CONTAINERS"
+    # shellcheck disable=SC2086
+    docker restart $CONTAINERS >/dev/null 2>&1 \
+        && echo "swarmdeck-late-timesync: restarted" \
+        || echo "swarmdeck-late-timesync: restart FAILED"
+else
+    echo "swarmdeck-late-timesync: restart not enabled; restart the sensor containers by hand"
+fi
+exit 0

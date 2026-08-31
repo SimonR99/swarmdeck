@@ -1,0 +1,10 @@
+[Unit]
+Description=SwarmDeck: watch for NTP landing after the stack started
+After=docker.service
+
+[Path]
+PathExists=/run/systemd/timesync/synchronized
+Unit=swarmdeck-late-timesync.service
+
+[Install]
+WantedBy=multi-user.target

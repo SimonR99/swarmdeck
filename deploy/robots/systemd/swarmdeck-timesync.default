@@ -1,0 +1,10 @@
+# Seconds to wait for NTP before starting containers. The wait is skipped
+# entirely when there is no default route, so this only costs time on a robot
+# that has a network but no reachable time server.
+SWARMDECK_TIMESYNC_TIMEOUT=60
+
+# Set to 1 to have the sensor containers restarted automatically when the clock
+# is corrected after they started. Off by default: restarting containers under a
+# running mission can be worse than a skewed clock.
+SWARMDECK_LATE_TIMESYNC_RESTART=0
+SWARMDECK_LATE_TIMESYNC_CONTAINERS="swarmdeck-botman-vectornav swarmdeck-botman-lidar swarmdeck-botman-oak"

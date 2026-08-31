@@ -1,0 +1,26 @@
+# Bounded wait for a synchronized clock, ordered before Docker so sensor
+# drivers do not start on the wrong side of an NTP step.
+#
+# This replaces enabling systemd-time-wait-sync.service, which defaults to
+# TimeoutStartSec=infinity and would hang a robot with no NTP access.
+[Unit]
+Description=SwarmDeck: wait briefly for NTP before starting containers
+Documentation=file:///usr/local/bin/swarmdeck-wait-timesync
+After=network-online.target systemd-timesyncd.service
+Wants=network-online.target
+Before=docker.service time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Tune with SWARMDECK_TIMESYNC_TIMEOUT in /etc/default/swarmdeck-timesync.
+# Measured on Botman: 44 s from boot to initial synchronization, so the default
+# of 60 s leaves margin. The wait is skipped entirely with no default route.
+EnvironmentFile=-/etc/default/swarmdeck-timesync
+ExecStart=/usr/local/bin/swarmdeck-wait-timesync
+# Hard ceiling so a wedged script can never block boot.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

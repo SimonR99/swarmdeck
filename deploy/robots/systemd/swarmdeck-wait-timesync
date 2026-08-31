@@ -1,0 +1,57 @@
+#!/bin/sh
+# Wait briefly for the system clock to be NTP-synchronized, then continue
+# regardless. Installed as /usr/local/bin/swarmdeck-wait-timesync.
+#
+# WHY
+#
+#   The Jetson comes up with an untrusted clock: systemd-timesyncd logs its own
+#   startup at "Dec 31 19:00:39" (Unix time 0) and journalctl reports a single
+#   boot spanning 2025-02-20 to 2026-08-31, both signatures of the clock being
+#   stepped well after boot. Measured on Botman: 44 s from boot to "Initial
+#   synchronization to time server".
+#
+#   Docker is ordered After=time-set.target, which only means the clock has been
+#   SET from some source (RTC, fake-hwclock), not that it has been SYNCHRONIZED.
+#   So every sensor driver starts before the correction lands, and drivers that
+#   start on opposite sides of the step disagree by the step size. That is
+#   exactly FAST-LIVO2's "IMU and LiDAR not synced! delta time: 26.605148", and
+#   the same root cause as the earlier OAK-D stamp skew.
+#
+#   The stock fix, systemd-time-wait-sync, defaults to TimeoutStartSec=infinity,
+#   which would hang a field robot that has no NTP server at all. Hence this:
+#   bounded, and skipped entirely when there is no route to a time server.
+#
+# Always exits 0: a robot that cannot reach NTP must still boot.
+
+TIMEOUT="${SWARMDECK_TIMESYNC_TIMEOUT:-60}"
+FLAG="${SWARMDECK_TIMESYNC_FLAG:-/run/systemd/timesync/synchronized}"
+
+log() { echo "swarmdeck-wait-timesync: $*"; }
+
+if [ -e "$FLAG" ]; then
+    log "clock already synchronized"
+    exit 0
+fi
+
+# No default route means no reachable time server, so do not spend the timeout.
+# This is the field case: boot straight through.
+if ! ip route show default 2>/dev/null | grep -q .; then
+    log "no default route, not waiting for NTP (field mode); clock is free-running"
+    exit 0
+fi
+
+i=0
+while [ "$i" -lt "$TIMEOUT" ]; do
+    if [ -e "$FLAG" ]; then
+        log "clock synchronized after ${i}s"
+        exit 0
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+
+# Continue anyway. The clock may still be stepped later in the session, which
+# will skew sensor stamps against each other until the affected drivers are
+# restarted. See swarmdeck-late-timesync.path for the optional guard.
+log "NOT synchronized after ${TIMEOUT}s, continuing anyway (stamps may be skewed if NTP lands later)"
+exit 0
