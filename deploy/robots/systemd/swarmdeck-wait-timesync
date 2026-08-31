@@ -53,5 +53,20 @@ done
 # Continue anyway. The clock may still be stepped later in the session, which
 # will skew sensor stamps against each other until the affected drivers are
 # restarted. See swarmdeck-late-timesync.path for the optional guard.
-log "NOT synchronized after ${TIMEOUT}s, continuing anyway (stamps may be skewed if NTP lands later)"
+log "NOT synchronized after ${TIMEOUT}s, continuing anyway"
+
+# Record a realtime/monotonic pair so that, if NTP lands later, the size of the
+# step can be measured rather than guessed. /proc/uptime is monotonic and is not
+# affected by settimeofday, so the difference between the elapsed monotonic time
+# and the elapsed realtime is exactly the step.
+#
+# This matters because the Orin has no RTC battery: systemd-timesyncd restores
+# the last-known time from /var/lib/systemd/timesync/clock at boot, so the clock
+# starts BEHIND by however long the machine was powered off, and the eventual
+# correction is a forward step of that same size. A few seconds is cosmetic; six
+# hours invalidates every TF buffer and message filter in the stack.
+mkdir -p /run 2>/dev/null
+printf '%s %s\n' "$(date +%s)" "$(cut -d" " -f1 /proc/uptime)" \
+    > /run/swarmdeck-timesync-unsynced 2>/dev/null || true
+
 exit 0

@@ -1,10 +1,16 @@
 # Seconds to wait for NTP before starting containers. The wait is skipped
 # entirely when there is no default route, so this only costs time on a robot
 # that has a network but no reachable time server.
+# Measured on Botman: 44 s from boot to initial synchronization.
 SWARMDECK_TIMESYNC_TIMEOUT=60
 
-# Set to 1 to have the sensor containers restarted automatically when the clock
-# is corrected after they started. Off by default: restarting containers under a
-# running mission can be worse than a skewed clock.
-SWARMDECK_LATE_TIMESYNC_RESTART=0
+# If the clock is corrected AFTER the stack started, the correction is a forward
+# step the size of the preceding poweroff, because the Orin has no RTC battery
+# and systemd-timesyncd restores the last-known time at boot.
+#
+# Below this many seconds the skew is cosmetic and the stack is left alone.
+# At or above it, every pre-step driver has already invalidated the TF buffers
+# and nav2's message filters, so restarting them is strictly an improvement.
+SWARMDECK_LATE_TIMESYNC_THRESHOLD=2
+SWARMDECK_LATE_TIMESYNC_RESTART=1
 SWARMDECK_LATE_TIMESYNC_CONTAINERS="swarmdeck-botman-vectornav swarmdeck-botman-lidar swarmdeck-botman-oak"

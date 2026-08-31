@@ -44,11 +44,27 @@ A clock that is wrong but free-running is fine for sensor fusion, because every
 driver reads the same wrong clock and the stamps stay mutually consistent. The
 damage comes from a *step* landing mid-session.
 
-`swarmdeck-late-timesync.path` covers that remaining case: if the clock is
-corrected after Docker started, it logs a loud warning naming the skew. The
-automatic container restart is **opt-in** (`SWARMDECK_LATE_TIMESYNC_RESTART=1`)
-because restarting drivers underneath a running mission can be worse than a
-skewed clock.
+`swarmdeck-late-timesync.path` covers that remaining case, and sizes its
+response to the damage.
+
+The Orin has no RTC battery. `systemd-timesyncd` restores the last-known time
+from `/var/lib/systemd/timesync/clock` at boot, so the clock comes up *behind*
+by however long the machine was powered off, and the eventual correction is a
+forward step of that same size. Six hours off the charger means a six hour step.
+
+So the handler measures the step rather than guessing it, using a
+realtime/monotonic pair recorded when the wait gave up (`/proc/uptime` is
+unaffected by `settimeofday`, so monotonic-elapsed minus realtime-elapsed *is*
+the step):
+
+- **below `SWARMDECK_LATE_TIMESYNC_THRESHOLD`** (default 2 s): cosmetic, log and
+  leave the stack alone.
+- **at or above it**: every driver that started beforehand is stamping in the
+  old frame, which invalidates the TF buffers (10 s by default) and nav2's
+  message filters, so the session is already broken and restarting the sensor
+  containers is strictly an improvement.
+
+Set `SWARMDECK_LATE_TIMESYNC_RESTART=0` to force log-only regardless of size.
 
 ## Install
 
