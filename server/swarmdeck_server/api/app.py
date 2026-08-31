@@ -1176,12 +1176,12 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             registry.robots[rid].planned_path = []
 
     elif kind == "drive":
-        if not registry.can(rid, "navigate"):
+        if not (registry.can(rid, "navigate") or registry.can(rid, "estop")):
             return
-        payload = msg.get("payload") or {}
+        payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else msg
         try:
-            linear = max(-0.45, min(0.45, float(payload.get("linear", 0.0))))
-            angular = max(-1.2, min(1.2, float(payload.get("angular", 0.0))))
+            linear = max(-0.8, min(0.8, float(payload.get("linear", 0.0))))
+            angular = max(-1.5, min(1.5, float(payload.get("angular", 0.0))))
         except (TypeError, ValueError):
             return
         sent = await registry.send(

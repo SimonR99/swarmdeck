@@ -19,7 +19,13 @@
 
   const activeId = $derived(fleet.selected[0] ?? null);
   const robot = $derived(activeId ? fleet.get(activeId) : undefined);
-  const canDrive = $derived(Boolean(activeId && fleet.can(activeId, 'navigate') && robot?.online));
+  const canDrive = $derived(
+    Boolean(
+      activeId &&
+      (fleet.can(activeId, 'navigate') || fleet.can(activeId, 'estop')) &&
+      robot?.online
+    )
+  );
   // Operator setting, defaulting to the arrow pad: one button per direction is
   // what a finger on a tablet can hit, where a thumbstick needs a sustained
   // drag held at the right angle.
@@ -35,7 +41,7 @@
   let driveTimer: number | null = null;
   let driving = false;
   let driveLabel = $state('Ready');
-  let maxSpeed = $state(0.3);
+  let maxSpeed = $state(0.5);
   let bodyHeight = $state(0.0);
   let joystickX = $state(0);
   let joystickY = $state(0);
@@ -474,7 +480,7 @@
         <input
           type="range"
           min="0.1"
-          max="0.45"
+          max="1.0"
           step="0.05"
           value={maxSpeed}
           disabled={!canDrive}
@@ -483,7 +489,7 @@
           oninput={changeMaxSpeed}
         />
         <div class="mt-0.5 flex justify-between text-[8px] text-fg-dim">
-          <span>0.10</span><span>m/s</span><span>0.45</span>
+          <span>0.10</span><span>m/s</span><span>1.00</span>
         </div>
 
         <div class="mb-2 mt-3 border-t border-border pt-3 text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">

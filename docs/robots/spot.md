@@ -24,7 +24,17 @@ point, not an orientation. Before each trajectory, the adapter applies the
 configured `0.25 m/s` translation and `0.5 rad/s` rotation limits through the
 driver's `/max_velocity` service. Change `trajectory.velocity_limit` in
 `adapters/adapter_ros2/config/spot.yaml` to tune those limits; `duration_s` is
-only the trajectory timeout.
+only the trajectory timeout. The lateral (`linear_y`) limit is zero, so click
+navigation behaves like differential drive instead of walking sideways. A
+cancel sends zero velocity immediately and dispatches the driver's SDK stop in
+the background, allowing teleoperation to take over without waiting for the
+stop service response.
+
+The driver, lidar, SLAM, and adapter containers use Fast DDS over host-loopback
+UDP. Do not remove `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` from the Spot Compose
+file: shared-memory port collisions can leave ROS endpoints discoverable while
+blocking VectorNav IMU and static TF delivery. Camera/media traffic continues to
+use the default shared-memory transport.
 
 ```bash
 ssh spot 'cd /home/indro/swarmdeck && docker compose --env-file .deploy/spot.env \

@@ -247,6 +247,9 @@ def generate_launch_description() -> LaunchDescription:
             "--frame-id", "body",
             "--child-frame-id", "d435_link",
         ],
+        # This launch is split across driver, lidar, and SLAM containers. Only
+        # the driver instance should publish this shared camera extrinsic.
+        condition=IfCondition(LaunchConfiguration("start_driver")),
     )
 
     return LaunchDescription(

@@ -83,7 +83,8 @@ DEFAULTS: dict[str, Any] = deep_merge(TRANSPORT_DEFAULTS, {
         "disable_obstacle_avoidance": False,
         # Optional Spot SDK mobility limit, applied through /max_velocity
         # immediately before each trajectory. `duration_s` is only a timeout;
-        # it does not control how quickly Spot walks to the target.
+        # it does not control how quickly Spot walks to the target. linear_y
+        # may be zero to prohibit lateral walking.
         "velocity_limit": {},
     },
     # Empty disables the `body` capability. Spot's Clearpath driver exposes
@@ -116,4 +117,3 @@ DEFAULTS: dict[str, Any] = deep_merge(TRANSPORT_DEFAULTS, {
     },
     # Ping, rates, and upload timeouts: TRANSPORT_DEFAULTS.
 })
-

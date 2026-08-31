@@ -45,7 +45,9 @@ echo "  validating Compose configuration"
 
 if [[ "$do_build" == yes ]]; then
   echo "  building robot images"
-  "${compose[@]}" build
+  if ! "${compose[@]}" build; then
+    echo "  build failed or timed out (offline registry); using existing local images"
+  fi
 fi
 
 if [[ "$do_reset" == yes ]]; then

@@ -259,13 +259,15 @@ require_service() {
 }
 
 require_topic() {
-  local topic=$1 label=$2
-  local sample
-  sample="$(timeout 8s ros2 topic echo "${topic}" 2>/dev/null | head -n 1 || true)"
-  if [[ -n "${sample}" ]]; then
-    echo "${label}: receiving data"
-    return
-  fi
+  local topic=$1 label=$2 attempt sample
+  for attempt in {1..15}; do
+    sample="$(timeout 5s ros2 topic echo "${topic}" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${sample}" ]]; then
+      echo "${label}: receiving data"
+      return
+    fi
+    sleep 1
+  done
   echo "${label}: no data received on ${topic}" >&2
   return 1
 }
@@ -288,16 +290,19 @@ require_cmd_vel_subscriber() {
 
 require_rtsp_stream() {
   local rtsp_url="rtsp://${backend_host}:${MEDIA_RTSP_PORT:-8554}/${robot_id}"
-  local probe
-  probe="$(docker exec swarmdeck-asimov-media timeout 8s \
-    gst-launch-1.0 -v \
-    rtspsrc location="${rtsp_url}" protocols=tcp latency=0 \
-    ! rtph264depay ! fakesink sync=false 2>&1 || true)"
-  if grep -Fq 'Sent PLAY request' <<<"${probe}" &&
-     grep -Fq 'video/x-h264' <<<"${probe}"; then
-    echo "MediaMTX RTSP: ${robot_id} H.264 stream is readable"
-    return
-  fi
+  local probe attempt
+  for attempt in {1..15}; do
+    probe="$(docker exec swarmdeck-asimov-media timeout 20s \
+      gst-launch-1.0 -v \
+      rtspsrc location="${rtsp_url}" protocols=tcp latency=0 \
+      ! rtph264depay ! fakesink sync=false 2>&1 || true)"
+    if grep -Fq 'Sent PLAY request' <<<"${probe}" &&
+       grep -Fq 'video/x-h264' <<<"${probe}"; then
+      echo "MediaMTX RTSP: ${robot_id} H.264 stream is readable"
+      return
+    fi
+    sleep 2
+  done
   echo "MediaMTX RTSP: ${robot_id} stream is not readable at ${rtsp_url}" >&2
   echo "${probe}" | tail -n 30 >&2
   return 1

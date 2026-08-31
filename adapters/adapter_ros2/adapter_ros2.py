@@ -210,6 +210,7 @@ class HardwareBridge(
             robot_id,
             http_url,
             min_period_s=float(rates.get("keyframe_period_s", 2.0)),
+            timeout_s=float(cfg.get("upload_timeout_s", 0.5)),
             height_band=cfg.get("map_cloud_height_band"),
             lidar_height_m=cfg.get("lidar_height_m"),
         )

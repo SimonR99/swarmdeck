@@ -28,6 +28,11 @@ x-spot-stack: &spot-stack
     - ${ROBOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
   environment:
     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    # Fast DDS SHM ports are host-global while these ROS processes live in
+    # separate containers. A stale/colliding port can leave endpoints visible
+    # in discovery but silently prevent TF and IMU samples from being delivered.
+    # Keep the core Spot graph on host-loopback UDP; camera/media retain SHM.
+    FASTDDS_BUILTIN_TRANSPORTS: UDPv4
     ROS_DOMAIN_ID: *ros_domain
     ROS_LOCALHOST_ONLY: "1"
   restart: unless-stopped
@@ -129,6 +134,7 @@ services:
       - ${ROBOT_REPO:-/home/indro/swarmdeck}/.spot_pip:/root/.local
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       ROS_DOMAIN_ID: *ros_domain
       ROS_LOCALHOST_ONLY: "1"
       PYTHONPATH: "/root/.local/lib/python3.10/site-packages:/app/swarmdeck/adapters/protocol:/app/swarmdeck:/app/adapters/protocol:/app"

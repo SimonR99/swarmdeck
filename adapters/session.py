@@ -81,8 +81,7 @@ async def dispatch_command(
         latch = getattr(bridge, "note_drive_command", None)
         if callable(latch):
             latch(lin, ang)
-        else:
-            bridge.drive(lin, ang)
+        bridge.drive(lin, ang)
     elif kind == "stop":
         bridge.stop()
     elif kind == "set_mode":
