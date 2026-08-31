@@ -117,6 +117,10 @@ public:
   int vio_max_point_age = 0;
   bool vio_map_sliding_en = false;
   int path_max_poses = 0;   // 0 = unbounded (upstream)
+  // Input queues. Upstream leaves all three unbounded, so a sensor stall or a
+  // clock desync turns into unbounded memory growth. 0 = unbounded (upstream).
+  int max_img_buffer = 0, max_lidar_buffer = 0, max_imu_buffer = 0;
+  int img_dropped = 0;
   int vio_map_report_every = 200;
   double vio_sliding_thresh = 8.0, vio_half_map_size = 50.0;
   bool normal_en = true;

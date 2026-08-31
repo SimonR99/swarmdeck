@@ -113,6 +113,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
   nh.param<int>("publish/path_max_poses", path_max_poses, 0);
+  nh.param<int>("common/max_img_buffer", max_img_buffer, 0);
+  nh.param<int>("common/max_lidar_buffer", max_lidar_buffer, 0);
+  nh.param<int>("common/max_imu_buffer", max_imu_buffer, 0);
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
@@ -762,6 +765,14 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstSharedPtr 
   p_pre->process(msg, ptr);
   lid_raw_data_buffer.push_back(ptr);
   lid_header_time_buffer.push_back(ros::toSec(msg->header.stamp));
+  if (max_lidar_buffer > 0)
+  {
+    while ((int)lid_raw_data_buffer.size() > max_lidar_buffer)
+    {
+      lid_raw_data_buffer.pop_front();
+      lid_header_time_buffer.pop_front();
+    }
+  }
   last_timestamp_lidar = ros::toSec(msg->header.stamp);
 
   mtx_buffer.unlock();
@@ -801,6 +812,14 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstSharedPtr 
   p_pre->process(msg, ptr);
   lid_raw_data_buffer.push_back(ptr);
   lid_header_time_buffer.push_back(cur_head_time);
+  if (max_lidar_buffer > 0)
+  {
+    while ((int)lid_raw_data_buffer.size() > max_lidar_buffer)
+    {
+      lid_raw_data_buffer.pop_front();
+      lid_header_time_buffer.pop_front();
+    }
+  }
   last_timestamp_lidar = cur_head_time;
 
   mtx_buffer.unlock();
@@ -849,6 +868,10 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstSharedPtr &msg_in)
   last_timestamp_imu = timestamp;
 
   imu_buffer.push_back(msg);
+  if (max_imu_buffer > 0)
+  {
+    while ((int)imu_buffer.size() > max_imu_buffer) imu_buffer.pop_front();
+  }
   // cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
   mtx_buffer.unlock();
   if (imu_prop_enable)
@@ -930,6 +953,24 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
   cv::Mat img_cur = getImageFromMsg(msg);
   img_buffer.push_back(img_cur);
   img_time_buffer.push_back(img_time_correct);
+
+  // Upstream never bounds this queue. sync_packages() only pops once a LiDAR
+  // and IMU package can be formed around the image, so any sensor stall or
+  // clock desync leaves images accumulating at the camera rate, each holding a
+  // full decoded frame. Measured on Botman with the VectorNav 2.1 s behind the
+  // LiDAR: ~34 MiB/s until the OOM killer intervened. Dropping the oldest
+  // frames is the right degradation: stale images are useless to the filter.
+  if (max_img_buffer > 0)
+  {
+    while ((int)img_buffer.size() > max_img_buffer)
+    {
+      img_buffer.pop_front();
+      img_time_buffer.pop_front();
+      img_dropped++;
+    }
+    if (img_dropped > 0 && (img_dropped % 100) == 0)
+      ROS_WARN("Image buffer over %d frames, dropped %d so far (sensors out of sync?)", max_img_buffer, img_dropped);
+  }
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
 

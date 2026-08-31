@@ -16,6 +16,16 @@
       img_en: 1
       lidar_en: 1
       ros_driver_bug_fix: false
+      # Bound the input queues. Upstream leaves all three unbounded and
+      # sync_packages() only drains them once a LiDAR+IMU package can be formed
+      # around an image, so a sensor stall or clock desync accumulates frames at
+      # the sensor rate. Measured on Botman with the VectorNav 2.1 s behind the
+      # LiDAR: ~34 MiB/s until the OOM killer intervened, with an EMPTY visual
+      # map, so no amount of map bounding helps. Dropping the oldest is the right
+      # degradation: stale frames are useless to the filter.
+      max_img_buffer: 30       # ~2 s at 15 Hz, 0 = unbounded (upstream)
+      max_lidar_buffer: 20     # ~2 s at 10 Hz
+      max_imu_buffer: 4000     # ~10 s at 400 Hz
 
     # Camera model. Upstream read this through vk::camera_loader off the ROS 1
     # parameter server; the port builds vk::PinholeCamera from these directly.

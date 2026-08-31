@@ -118,6 +118,12 @@ def build_fast_livo_config(
 
     cfg = {
         "common": {
+            # Bound the input queues. Upstream leaves them unbounded and
+            # sync_packages() drains them only when a full package forms, so a
+            # sensor stall or clock desync grows memory at the sensor rate.
+            "max_img_buffer": 30,
+            "max_lidar_buffer": 20,
+            "max_imu_buffer": 4000,
             "lid_topic": "points",
             "imu_topic": "imu",
             "img_topic": "color/image_raw/compressed",
