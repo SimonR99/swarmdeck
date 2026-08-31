@@ -158,7 +158,14 @@ function autoWantsLocal(robotId: string | null, recommended: boolean): boolean {
  * keeps full contrast at any zoom. Level cell sizes round up, so a level never
  * covers less ground than the grid it came from.
  */
-let maskLevels: HTMLCanvasElement[] = [];
+interface MaskLevel {
+  w: number;
+  h: number;
+  bits: Uint8Array;
+  canvas: HTMLCanvasElement | null;
+}
+
+let maskLevels: MaskLevel[] = [];
 let occupied: Uint8Array | null = null; // 1 byte per cell of the base grid
 let maskDirty = true;
 
@@ -308,12 +315,14 @@ function readBackOccupancy() {
   maskDirty = true;
 }
 
-function levelCanvas(w: number, h: number, bits: Uint8Array): HTMLCanvasElement {
-  const level = document.createElement('canvas');
-  level.width = w;
-  level.height = h;
-  const img = new ImageData(w, h);
+function getLevelCanvas(level: MaskLevel): HTMLCanvasElement {
+  if (level.canvas) return level.canvas;
+  const c = document.createElement('canvas');
+  c.width = level.w;
+  c.height = level.h;
+  const img = new ImageData(level.w, level.h);
   const px = img.data;
+  const bits = level.bits;
   for (let i = 0; i < bits.length; i++) {
     if (!bits[i]) continue;
     const o = i * 4;
@@ -322,15 +331,16 @@ function levelCanvas(w: number, h: number, bits: Uint8Array): HTMLCanvasElement 
     px[o + 2] = OCCUPIED[2];
     px[o + 3] = 255;
   }
-  level.getContext('2d')?.putImageData(img, 0, 0);
-  return level;
+  c.getContext('2d')?.putImageData(img, 0, 0);
+  level.canvas = c;
+  return c;
 }
 
 /**
  * Rebuild the pyramid, lazily — only when something has actually changed and a
- * frame is asking for it. Patches arrive at most at the backend's 2 Hz, so a
- * full rebuild (a few hundred thousand integer max operations on a 600x600
- * grid) is cheaper than tracking dirty rectangles through ten levels.
+ * frame is asking for it. The pyramid bit arrays are calculated via fast typed
+ * array operations without allocating canvas DOM elements. Canvas elements are
+ * only instantiated for the specific level that is actually requested.
  */
 function ensureMask() {
   if (!maskDirty || !canvas || !occupied) return;
@@ -341,7 +351,7 @@ function ensureMask() {
   let w = canvas.width;
   let h = canvas.height;
   for (;;) {
-    maskLevels.push(levelCanvas(w, h, bits));
+    maskLevels.push({ w, h, bits, canvas: null });
     if (w <= 1 && h <= 1) break;
     const nw = Math.max(1, Math.ceil(w / 2));
     const nh = Math.max(1, Math.ceil(h / 2));
@@ -576,8 +586,9 @@ export const mapStore = {
     if (scale >= 1 || !canvas) return null;
     ensureMask();
     if (!maskLevels.length) return null;
-    const level = Math.min(maskLevels.length - 1, Math.ceil(-Math.log2(scale)));
-    return maskLevels[Math.max(0, level)];
+    const levelIdx = Math.min(maskLevels.length - 1, Math.ceil(-Math.log2(scale)));
+    const level = maskLevels[Math.max(0, levelIdx)];
+    return level ? getLevelCanvas(level) : null;
   },
 
   setGlobalInfo(info: MapInfo) {

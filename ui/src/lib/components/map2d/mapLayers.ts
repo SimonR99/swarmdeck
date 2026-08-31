@@ -22,6 +22,8 @@ export interface MapRobot {
   robot_id: string;
   robot_type?: string;
   pose: { x: number; y: number; yaw: number };
+  nav_status?: string;
+  mode?: string;
   planned_path?: { x: number; y: number }[];
   global_planned_path?: { x: number; y: number }[];
   local_planned_path?: { x: number; y: number }[];

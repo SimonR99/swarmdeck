@@ -28,7 +28,7 @@
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
-  import type { MapRegistration } from '$lib/types/protocol';
+  import type { MapInfo, MapRegistration } from '$lib/types/protocol';
   import {
     drawLoopClosures,
     drawMetricGrid,
@@ -37,8 +37,7 @@
     drawReviewedObjects,
     drawRobots,
     drawScaleBar,
-    hitTestReviewedObject,
-    type MapInfo
+    hitTestReviewedObject
   } from './mapLayers';
 
   let host = $state<HTMLDivElement | null>(null);
@@ -347,6 +346,18 @@
     }
   });
 
+  let drawPending = false;
+  let rafId = 0;
+
+  function requestDraw() {
+    if (drawPending) return;
+    drawPending = true;
+    rafId = requestAnimationFrame(() => {
+      drawPending = false;
+      draw();
+    });
+  }
+
   $effect(() => {
     void mapStore.revision;
     void fleet.robots;
@@ -354,6 +365,7 @@
     void view.scale;
     void view.tx;
     void view.ty;
+    void view.rotation;
     void session.detections;
     void review.entities;
     void review.proposals;
@@ -367,20 +379,15 @@
     void showNetwork;
     void showCostmap;
     void costmapKind;
-    draw();
+    requestDraw();
   });
 
   $effect(() => {
-    let raf = 0;
-    const loop = () => {
-      draw();
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    const ro = new ResizeObserver(() => draw());
+    const ro = new ResizeObserver(() => requestDraw());
     if (host) ro.observe(host);
+    requestDraw();
     return () => {
-      cancelAnimationFrame(raf);
+      if (rafId) cancelAnimationFrame(rafId);
       ro.disconnect();
     };
   });
@@ -989,9 +996,9 @@
           <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
             <span>{detectionCatalog.labelOf(activeObj.class)}</span>
             <span class="font-normal text-fg-dim">
-              {'best_score' in activeObj
-                ? `${Math.round(activeObj.best_score * 100)}%`
-                : `${activeObj.observations} views`}
+              {activeObj.observations > 1
+                ? `${activeObj.observations} views`
+                : `${Math.round(activeObj.best_score * 100)}%`}
             </span>
           </div>
         </div>
