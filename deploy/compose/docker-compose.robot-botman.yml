@@ -29,7 +29,14 @@ services:
     command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
     restart: unless-stopped
 
-  # Ouster OS1-128 driver and SuperOdometry SLAM.
+  # Ouster OS0-64 driver and SuperOdometry SLAM.
+  #
+  # The sensor is an OS-0-64-U13 running lidar_mode 512x10 with the
+  # RNG19_RFL8_SIG16_NIR16 profile, read from its HTTP API on 2026-08-27. That
+  # is 512 x 64 x 48 B = 1.5 MB per PointCloud2 at 10 Hz. This file previously
+  # said OS1-128; the count matters because 1.5 MB is 7.4x net.core.rmem_max on
+  # a stock kernel, which is why /ouster/points arrives at 8.7 Hz rather than 10
+  # and /laser_odometry at 0.6 Hz. See docs/operations/known-issues.md.
   #
   # These are the robot's own nodes, started here for the same reason
   # `oak_camera` is: on 2026-08-07 `bunker_gnm.launch.py` in the read-only MIST
@@ -69,6 +76,37 @@ services:
       - output_topic:=/ouster/points_throttled
     restart: unless-stopped
 
+  # VectorNav VN-100. Started here for the same reason the lidar, SLAM and OAK
+  # entries above are: bunker_gnm.launch.py in the read-only MIST workspace
+  # defines vectornav_node and vectornav_sensor_msgs_node but never adds them
+  # to its LaunchDescription (line 204 there is the commented-out list). The
+  # IMU was the one entry this file had not picked up, which left
+  # /vectornav/imu published only when someone had started the node by hand.
+  #
+  # SuperOdometry reads this as its imu_topic. Without it, it does not fail: it
+  # logs "no IMU data, running LiDAR Odometry only" and quietly degrades to
+  # lidar-only odometry.
+  vectornav:
+    image: bunker_super_odom:dev
+    container_name: swarmdeck-botman-vectornav
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    volumes:
+      # /dev/vectornav is a udev symlink to ttyUSB0; the whole of /dev is bound
+      # so the link resolves inside the container.
+      - /dev:/dev
+      - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    command:
+      - ros2
+      - launch
+      - /app/swarmdeck/adapters/adapter_ros2/launch/botman_vectornav.launch.py
+    restart: unless-stopped
+
   slam:
     image: bunker_super_odom:dev
     container_name: swarmdeck-botman-slam
@@ -79,16 +117,46 @@ services:
     depends_on:
       lidar:
         condition: service_started
+      # SuperOdometry decides at startup whether it has an IMU. If the driver
+      # is not up yet it settles into lidar-only odometry and says so once,
+      # rather than picking the IMU up when it appears.
+      vectornav:
+        condition: service_started
     volumes:
       - /dev:/dev
       - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
+      # SuperOdometry's configs now come from this checkout, not the read-only
+      # MIST workspace, because the upstream calibration is wrong for this robot
+      # and /ssd/mist_ws cannot be edited. See the note below.
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     command:
       - ros2
       - launch
       - super_odometry
       - os1_128.launch.py
-      - config_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128.yaml
-      - calibration_file:=/workspace/install/rover_launch/share/rover_launch/config/superodom/os1_128_calibration.yaml
+      # THE UPSTREAM CALIBRATION IS WRONG ON THIS ROBOT.
+      #
+      # os1_128_calibration.yaml ships extrinsicRotation_imu_laser = IDENTITY.
+      # It is not identity for either IMU here. The Ouster's own metadata gives
+      # lidar_to_sensor_transform = 180 deg yaw, and its IMU sits in the sensor
+      # frame, so os_lidar -> os_imu is a 180 degree yaw. Shipping identity
+      # negates the x and y of every IMU sample handed to the estimator, which
+      # is the "Large bias" preintegration reset already documented in
+      # adapters/adapter_ros2/config/aslan_superodom_calibration.yaml.
+      #
+      # Default below is the Ouster IMU with the factory-exact extrinsic: no
+      # estimation involved, and it is a strict improvement on what shipped.
+      #
+      # To move to the VN-100 (quieter, and SuperOdometry is IMU-first so the
+      # IMU sets the floor), first measure the mounting rotation, which nothing
+      # currently records:
+      #     python3 scripts/calibration/calibrate_imu_to_imu.py --duration 30
+      # paste its output into botman_superodom_calibration.yaml, then set in
+      # deploy/robots/botman.env:
+      #     BOTMAN_SUPERODOM_CONFIG=botman_superodom.yaml
+      #     BOTMAN_SUPERODOM_CALIB=botman_superodom_calibration.yaml
+      - config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CONFIG:-botman_superodom_ouster.yaml}
+      - calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CALIB:-botman_superodom_ouster_calibration.yaml}
     restart: unless-stopped
 
   # Botman's physical camera is an OAK-D Pro, which is a DepthAI USB device
