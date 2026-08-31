@@ -98,6 +98,7 @@ from adapters.runtime import (
     map_cloud_height_limits,
     stamp_seconds,
     yaw_of,
+    unique_row_index,
 )
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 from adapters.costmap import CostmapSnapshot, normalize_costmap
@@ -710,7 +711,7 @@ class HardwareBridge(
         if now - self._last_cloud_prepare_at >= cloud_period:
             self._last_cloud_prepare_at = now
             cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
-            _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
+            cloud_keep = unique_row_index(cloud_keys)
             self._cloud_points = points[cloud_keep]
             self._cloud_dirty = True
 
@@ -721,7 +722,7 @@ class HardwareBridge(
             self._scan_dirty = True
             return
         keys = np.round(xy / MAP_CLOUD_VOXEL).astype(np.int32)
-        _, keep = np.unique(keys, axis=0, return_index=True)
+        keep = unique_row_index(keys)
         self._scan_points = xy[keep]
         # Pair the points with the pose they were captured AT. upload_scan used
         # to read the pose at upload time, up to map_period_s later, and the

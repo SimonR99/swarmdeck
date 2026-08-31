@@ -7,6 +7,7 @@ must never load this product — only the global planner's static layer.
 
 from __future__ import annotations
 
+import array
 import urllib.error
 import urllib.request
 import zlib
@@ -162,4 +163,10 @@ def apply_to_occupancy_grid(
             y=float(pose_xy[1]),
             radius_m=float(clear_radius_m),
         )
-    grid.data = cells.reshape(-1).tolist()
+    # array.array hits the fast path in the generated setter, which returns
+    # immediately. A list takes the __debug__ branch instead, which walks every
+    # cell twice in Python ("all(isinstance(v, int) ...)" then a range check)
+    # before converting back to array.array anyway. Measured on Botman for a
+    # 1419x1419 grid (2,013,561 cells): 486.4 ms per publish via tolist(),
+    # 0.5 ms this way, byte-for-byte identical.
+    grid.data = array.array("b", cells.reshape(-1).tobytes())
