@@ -34,7 +34,7 @@
 | `tars_0` | Scout Mini (Jetson Noetic) | LVI-SAM + EKF | `/lvi_sam/lidar/mapping/cloud_registered` ($Z \in [0.1, 4.5]\text{ m}$) | `/camera/color/image_raw/compressed` |
 | `botman_0` | Bunker (Jetson Humble) | SuperOdometry | `/registered_scan`, `/laser_odometry` | `/oak/rgb/image_raw/compressed` |
 | `aslan_0` | Bunker (Jetson Humble) | SuperOdometry | `/registered_scan`, `/laser_odometry` | `/oak/rgb/image_raw/compressed` |
-| `spot_0` | Boston Dynamics Spot | Spot SDK / Clearpath | `/spot/odometry`, `/spot/lidar/points` | `/spot/camera/frontright/image/compressed` |
+| `spot_0` | Boston Dynamics Spot | Spot SDK / Clearpath | `/spot/odometry`, `/spot/lidar/points` | `/d435/camera/color/image_raw/compressed` |
 
 ---
 

@@ -49,6 +49,7 @@ services:
     privileged: true
     volumes:
       - /dev:/dev
+      - ${ROBOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
@@ -58,16 +59,22 @@ services:
       - realsense2_camera
       - realsense2_camera_node
       - --ros-args
+      - -r
+      - __node:=camera
+      - -r
+      - __ns:=/d435
       - -p
-      - camera_name:=d435
+      - enable_color:=true
+      - -p
+      - enable_depth:=true
+      - -p
+      - enable_accel:=false
+      - -p
+      - enable_gyro:=false
       - -p
       - pointcloud.enable:=false
       - -p
       - align_depth.enable:=true
-      - -p
-      - enable_depth:=true
-      - -p
-      - enable_color:=true
       - -p
       - rgb_camera.profile:=640x480x15
       - -p
@@ -101,6 +108,8 @@ services:
         condition: service_started
       slam:
         condition: service_started
+      camera:
+        condition: service_started
       duck_detector:
         condition: service_started
     volumes:
@@ -117,7 +126,7 @@ services:
       - export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && python3 /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py --robot-id spot_0 --config /app/swarmdeck/adapters/adapter_ros2/config/spot.yaml --host ${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host} --port ${BACKEND_PORT:-8080}
 
   # Production low-latency video. usb_cam may only publish raw rgb8, so
-  # --raw-topic JPEG-encodes /d435/color/image_raw when compressed is absent;
+  # --raw-topic JPEG-encodes /d435/camera/color/image_raw when compressed is absent;
   # the only outbound stream is then scaled to 640x480 H.264 over RTSP/TCP.
   media:
     build:
@@ -143,9 +152,9 @@ services:
       - --robot-id
       - spot_0
       - --topic
-      - /camera/camera/color/image_raw/compressed
+      - /d435/camera/color/image_raw/compressed
       - --raw-topic
-      - /camera/camera/color/image_raw
+      - /d435/camera/color/image_raw
       - --rtsp-url
       - "rtsp://${BACKEND_HOST}:${MEDIA_RTSP_PORT:-8554}/spot_0"
       - --bitrate-kbps

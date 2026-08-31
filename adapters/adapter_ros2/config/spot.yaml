@@ -58,10 +58,10 @@ topics:
   # Spot's driver publishes one charge record per pack in this custom array.
   # The adapter collapses it to the lowest valid pack percentage for the UI.
   battery: /status/battery_states
-  camera: /camera/camera/color/image_raw
-  camera_compressed: ""
-  camera_depth: /camera/camera/aligned_depth_to_color/image_raw
-  camera_info: /camera/camera/aligned_depth_to_color/camera_info
+  camera: /d435/camera/color/image_raw
+  camera_compressed: /d435/camera/color/image_raw/compressed
+  camera_depth: /d435/camera/aligned_depth_to_color/image_raw
+  camera_info: /d435/camera/aligned_depth_to_color/camera_info
   camera_color_info: ""
   camera_depth_points: ""
   nav_cmd_vel: ""

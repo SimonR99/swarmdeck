@@ -444,6 +444,25 @@ def test_spot_config_enables_conservative_trajectory_limits():
     }
 
 
+def test_spot_config_declares_realsense_camera_topics():
+    config = yaml.safe_load(
+        (REPO / "adapters/adapter_ros2/config/spot.yaml").read_text()
+    )
+    assert config["topics"]["camera"] == "/d435/camera/color/image_raw"
+    assert (
+        config["topics"]["camera_compressed"]
+        == "/d435/camera/color/image_raw/compressed"
+    )
+    assert (
+        config["topics"]["camera_depth"]
+        == "/d435/camera/aligned_depth_to_color/image_raw"
+    )
+    assert (
+        config["topics"]["camera_info"]
+        == "/d435/camera/aligned_depth_to_color/camera_info"
+    )
+
+
 def test_hardware_configs_declare_four_corner_footprints():
     for name in ("bunker", "aslan_bunker", "spot"):
         config = yaml.safe_load(
