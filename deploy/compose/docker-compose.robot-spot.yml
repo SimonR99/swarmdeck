@@ -68,6 +68,10 @@ services:
       - -p
       - enable_depth:=true
       - -p
+      - enable_infra1:=false
+      - -p
+      - enable_infra2:=false
+      - -p
       - enable_accel:=false
       - -p
       - enable_gyro:=false
