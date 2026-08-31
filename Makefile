@@ -256,6 +256,10 @@ build-deploy:
 
 up-deploy:
 	SWARMDECK_CONFIG=/app/configs/hardware_fleet.yaml \
+	  SWARMDECK_SLAM_REGISTRATION_MODE=graph \
+	  SWARMDECK_SLAM_ANCHOR_ROBOT=aslan_0 \
+	  SWARMDECK_SLAM_CAPTURE_DIR=/app/sessions/captures/hardware-live \
+	  SWARMDECK_SLAM_RESTORE_CAPTURE=true \
 	  docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router slam
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"

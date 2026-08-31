@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import {
     Box,
     Compass,
@@ -28,16 +29,18 @@
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
-  import type { MapInfo, MapRegistration } from '$lib/types/protocol';
+  import type { MapRegistration } from '$lib/types/protocol';
   import {
     drawLoopClosures,
     drawMetricGrid,
     drawCostmap,
     drawNetworkHeatmap,
+    metricGridSpacing,
     drawReviewedObjects,
     drawRobots,
     drawScaleBar,
-    hitTestReviewedObject
+    hitTestReviewedObject,
+    type MapInfo
   } from './mapLayers';
 
   let host = $state<HTMLDivElement | null>(null);
@@ -65,8 +68,8 @@
   let showLabels = $state(true);
   let showSensors = $state(false);
   let showPlans = $state(true);
-  let showNetwork = $state(true);
-  let showCostmap = $state(true);
+  let showNetwork = $state(false);
+  let showCostmap = $state(false);
   let costmapKind = $state<'global' | 'local'>('global');
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
@@ -283,6 +286,12 @@
       view.initialised = true;
       lastRenderedInfo = info;
       fitMap();
+      // A local map belongs to one robot. Centre it on that robot when the
+      // async map load completes, even if the operator had panned the prior
+      // robot's map.
+      if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
+        centreOnFleet();
+      }
     } else if (view.initialised && lastRenderedInfo && info) {
       if (
         lastRenderedInfo.origin.x !== info.origin.x ||
@@ -346,48 +355,18 @@
     }
   });
 
-  let drawPending = false;
-  let rafId = 0;
-
-  function requestDraw() {
-    if (drawPending) return;
-    drawPending = true;
-    rafId = requestAnimationFrame(() => {
-      drawPending = false;
+  // Continuous render loop & resize observer
+  $effect(() => {
+    let raf = 0;
+    const loop = () => {
       draw();
-    });
-  }
-
-  $effect(() => {
-    void mapStore.revision;
-    void fleet.robots;
-    void settings.value;
-    void view.scale;
-    void view.tx;
-    void view.ty;
-    void view.rotation;
-    void session.detections;
-    void review.entities;
-    void review.proposals;
-    void review.focused;
-    void review.selected;
-    void showGrid;
-    void showTrails;
-    void showLabels;
-    void showSensors;
-    void showPlans;
-    void showNetwork;
-    void showCostmap;
-    void costmapKind;
-    requestDraw();
-  });
-
-  $effect(() => {
-    const ro = new ResizeObserver(() => requestDraw());
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    const ro = new ResizeObserver(() => draw());
     if (host) ro.observe(host);
-    requestDraw();
     return () => {
-      if (rafId) cancelAnimationFrame(rafId);
+      cancelAnimationFrame(raf);
       ro.disconnect();
     };
   });
@@ -409,15 +388,19 @@
   $effect(() => {
     const selectedRobot = fleet.selected.length === 1 ? fleet.selected[0] : null;
     void mapStore.statusUpdatedAt;
-    void mapStore.selectRobotView(selectedRobot);
+    untrack(() => {
+      void mapStore.selectRobotView(selectedRobot);
+    });
   });
 
   $effect(() => {
     void mapStore.viewMode;
     void mapStore.viewRobot;
-    trails.clear();
-    lastRenderedInfo = null;
-    view.initialised = false;
+    untrack(() => {
+      trails.clear();
+      lastRenderedInfo = null;
+      view.initialised = false;
+    });
   });
 
   let pointerDownPos: { x: number; y: number } | null = null;
@@ -775,18 +758,17 @@
                    {mapStore.mapSource === 'optimized'
                      ? 'bg-surface-2 text-fg'
                      : 'text-fg-muted hover:bg-surface-2'}"
-            title="The same keyframes posed by the collaborative pose-graph solver"
+            title="Keyframe occupancy posed by the collaborative solver. Falls back to Robot SLAM until that grid exists."
             onclick={() => void mapStore.setMapSource('optimized')}
           >
             Optimised
           </button>
         </div>
-        {#if mapStore.unmergedScopes.length}
+        {#if mapStore.unmergedRobots.length}
           <div class="mb-1 rounded-[--radius-control] bg-surface-2 px-1.5 py-1 text-[9px] text-fg-dim">
             Not merged into the fleet map:
             <span class="font-medium text-fg-muted">
-              {mapStore.unmergedScopes
-                .flatMap((scope) => scope.robots)
+              {mapStore.unmergedRobots
                 .map(robotDisplayName)
                 .join(', ')}
             </span>
@@ -996,9 +978,7 @@
           <div class="mt-1 flex w-full items-center justify-between px-1 text-[9px] font-semibold text-fg">
             <span>{detectionCatalog.labelOf(activeObj.class)}</span>
             <span class="font-normal text-fg-dim">
-              {activeObj.observations > 1
-                ? `${activeObj.observations} views`
-                : `${Math.round(activeObj.best_score * 100)}%`}
+              {`${Math.round(activeObj.best_score * 100)}%`}
             </span>
           </div>
         </div>
@@ -1016,9 +996,11 @@
     <span>{cursorWorld ? `${cursorWorld.x.toFixed(1)}, ${cursorWorld.y.toFixed(1)} m` : 'Move cursor to inspect'}</span>
     {#if mapStore.info}
       <span class="h-3 w-px bg-border"></span>
-      <span>{Math.round(mapStore.info.resolution * 100)} cm/cell</span>
-      <span class="h-3 w-px bg-border"></span>
-      <span>rev {mapStore.seq}</span>
+      <span>Grid: {metricGridSpacing(mapStore.info, view)} m</span>
+      {#if mapStore.seq >= 0}
+        <span class="h-3 w-px bg-border"></span>
+        <span>rev {mapStore.seq}</span>
+      {/if}
     {/if}
   </div>
 </div>

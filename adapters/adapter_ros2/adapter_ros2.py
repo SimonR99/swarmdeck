@@ -27,20 +27,19 @@ The protocol rule "never send a capability you cannot honour" is enforced here b
 construction: a capability is only advertised if its topic or action is present
 in the configuration AND resolves at runtime.
 
-WHAT IS DELIBERATELY NOT DONE
------------------------------
-This has never run against physical hardware. It is written against the protocol
-spec (adapters/protocol/README.md) and the working `adapter_sim` reference, and
-its message construction is unit-tested, but every timeout, QoS choice and frame
-name below is a hypothesis until a robot proves it. See docs/operations/hardware-bringup.md
-for the order to validate them in.
+HARDWARE VALIDATION
+-------------------
+The generic adapter is unit-tested, and the Asimov profile has been smoke-tested
+against a live Unitree G1: its native odometry, camera, point cloud, TF, and
+command-velocity bridge are all discovered at runtime. Other hardware profiles
+still require the same topic, QoS, and frame validation described in
+docs/operations/hardware-bringup.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import math
 import signal
 import sys
@@ -55,7 +54,6 @@ from typing import Any
 import numpy as np
 import rclpy
 import websockets
-import yaml
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.action import ActionClient
@@ -91,18 +89,22 @@ from adapters.perception.depth_projection import (
 from adapters.network_quality import read_link_quality
 from adapters.runtime import (
     AdapterDetectionMixin,
+    AdapterHelloMixin,
     AdapterLinkMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
     deep_merge,
+    load_yaml_profile,
     map_cloud_height_limits,
     stamp_seconds,
     yaw_of,
     unique_row_index,
 )
+from adapters.session import run_adapter_session
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
+from ros2_defaults import DEFAULTS
 
 # Transport quantisation for registered-cloud uploads. One centimetre keeps a
 # normal building-scale map inside int16 while remaining finer than either
@@ -143,8 +145,19 @@ try:
 except ImportError:  # pragma: no cover - depends on the robot's install
     SetVelocity = None
 
-# Spot (and similar) body services. `stand` may also call `power_on` first.
-BODY_ACTIONS = ("claim", "release", "sit", "stand")
+# Spot and Unitree G1 humanoid body services.
+BODY_ACTIONS = (
+    "claim",
+    "release",
+    "sit",
+    "stand",
+    "damping",
+    "lie_to_stand",
+    "lock_stand",
+    "walk_mode",
+    "run_mode",
+    "wave",
+)
 # Trigger names that are not GUI body actions: motors, software e-stop allow,
 # tablet keepalive clear, and the SDK stop used because Clearpath's ROS 2
 # Trajectory server does not honour cancel/preempt.
@@ -158,184 +171,18 @@ BODY_SERVICE_NAMES = (
 # Missing these is normal on non-Spot robots; do not warn.
 OPTIONAL_BODY_SERVICES = frozenset({"power_on", "estop_release", "clear_keepalive"})
 
-DEFAULTS: dict[str, Any] = {
-    "robot_type": "generic",
-    "ros_distro": "jazzy",
-    "footprint_radius": 0.35,
-    # Optional polygon in base_frame coordinates, x forward / y left. The
-    # radius remains the conservative fallback for map filtering and older
-    # protocol peers.
-    "footprint": [],
-    # Linux wireless interface to sample into the per-robot network heatmap.
-    # "auto" uses the first row in /proc/net/wireless; empty disables it.
-    "network_iface": "",
-    # Frames. `map` and `base_link` are REP-105 names and the only two that must
-    # exist; the pose is a tf2 lookup between them rather than a composition of
-    # transforms we recognise, because a real TF tree has links we do not know
-    # about (base_footprint, odom_combined, per-vendor intermediates).
-    "map_frame": "map",
-    "base_frame": "base_link",
-    "topics": {
-        "odom": "odom",
-        "map": "map",
-        # OccupancyGrid the collaborative back-end warps into this robot's
-        # map frame. Nav2's global static layer subscribes here. Local
-        # costmaps must not.
-        "nav_map": "/global_map",
-        # Registered PointCloud2 for a 3D SLAM stack that does not publish an
-        # OccupancyGrid. The backend raytraces a height-filtered XY view into
-        # a grid and keeps a coarser XYZ view for the optional 3D panel.
-        "map_cloud": "",
-        "plan": "plan",
-        "cmd_vel": "cmd_vel",
-        "battery": "",  # empty disables the capability
-        "camera": "",
-        "camera_compressed": "",
-        "camera_depth": "",
-        "camera_info": "",
-        # Colour CameraInfo. Set this when depth is *not* RGB-aligned so a
-        # detection box in the operator image can be joined to a slower,
-        # independently-published depth stream. Leave empty when `camera_info`
-        # already describes aligned depth (the usual RGB-D case).
-        "camera_color_info": "",
-        # Organised PointCloud2 aligned pixel-for-pixel with the RGB image.
-        # Optional: bbox-only detection still works when it is absent.
-        "camera_depth_points": "",
-        # Isolated output from a navigation stack. If set, the adapter relays
-        # it to the real driver only while an action goal is active, keeping
-        # teleop, cancellation and e-stop authoritative.
-        "nav_cmd_vel": "",
-        # Nav2's DWB controller trajectory. This is preferred over the global
-        # planner path for the dashboard because it is the route selected for
-        # the next control cycle. Empty disables the optional local route.
-        "local_plan": "",
-        # Read-only Nav2 planner products for the dashboard. These are never
-        # fed back into the collaborative occupancy map or navigation stack.
-        "global_costmap": "",
-        "local_costmap": "",
-    },
-    # min_z/max_z are map-frame limits by default. A profile may add floor_z;
-    # then they mean physical heights above the floor and the adapter adds that
-    # map-frame floor reference before filtering.
-    "map_cloud_height_band": {"min_z": -0.3, "max_z": 0.5},
-    # Keep ray-traced known-free cells white after the lidar moves on. Unknown
-    # cells remain unknown; this only controls retention of observed free space.
-    "retain_free_space": False,
-    "actions": {
-        "navigate_to_pose": "navigate_to_pose",
-        # Spot: Clearpath `spot_msgs/Trajectory`. Empty on every other robot.
-        "trajectory": "",
-    },
-    # Spot Trajectory goals are in `body`. duration_s must be > 0 or the
-    # driver aborts. The high-level controller uses 30 s.
-    "trajectory": {
-        "frame": "body",
-        "duration_s": 30.0,
-        "precise_positioning": True,
-        "disable_obstacle_avoidance": False,
-        # Optional Spot SDK mobility limit, applied through /max_velocity
-        # immediately before each trajectory. `duration_s` is only a timeout;
-        # it does not control how quickly Spot walks to the target.
-        "velocity_limit": {},
-    },
-    # Empty disables the `body` capability. Spot's Clearpath driver exposes
-    # these as std_srvs/Trigger; a robot without them leaves them blank.
-    "services": {
-        "claim": "",
-        "release": "",
-        "sit": "",
-        "stand": "",
-        "power_on": "",
-        "stop": "",
-        "estop_release": "",
-        "clear_keepalive": "",
-        # Spot SDK mobility limit service (spot_msgs/SetVelocity).
-        "max_velocity": "",
-    },
-    "rates": {
-        "state_hz": 5.0,
-        "map_period_s": 2.0,
-        "cloud_period_s": 4.0,
-        "camera_period_s": 0.2,  # detection poll; hardware video is H.264/WebRTC
-    },
-    "perception": {
-        "enabled": True,
-        "period_s": 0.2,
-        "sensitivity": 0.55,
-        # Catalog classes this robot looks for (adapters/perception/catalog.py).
-        # Empty means all of them; the dashboard's own selection overrides this
-        # on the next settings refresh either way.
-        "classes": [],
-        # Empty uses SWARMDECK_DETECTOR_URL, then localhost:8091.
-        "detector_url": "",
-        "depth_min_m": 0.15,
-        "depth_max_m": 8.0,
-        "depth_max_age_s": 0.35,
-    },
-    # A drive command older than this stops the robot. Teleop over a network is
-    # only safe with a deadman: if the link drops mid-command the robot must not
-    # keep executing the last velocity it heard.
-    "drive_timeout_s": 0.45,
-    # The same deadman, for autonomy. `drive_timeout_s` protects teleop because
-    # the GUI repeats `drive` while a button is held, so silence is detectable.
-    # An active navigation goal sends nothing repeatedly — Nav2 drives the robot
-    # from on board, and `_on_nav_cmd_vel` relays it purely on nav_status, which
-    # nothing revokes when the operator link wedges. Without this an active goal
-    # runs to completion with nobody watching, which is what happened to Botman
-    # on 2026-08-12: the link dropped mid-goal and the robot kept driving and
-    # rotating until it was powered down by hand.
-    #
-    # Freshness is "either direction heard from": `tx_state` sends state at
-    # `state_hz`, and any received command also counts.
-    #
-    # A completed `await ws.send()` is weaker evidence than it looks — it means
-    # the frame reached the kernel's write buffer, not the operator. State
-    # frames are ~400 B at 5 Hz, so filling a ~200 KB socket buffer after a hard
-    # cut takes on the order of a hundred seconds; backpressure is NOT the thing
-    # that catches this. What catches it is the websocket ping below closing the
-    # connection, after which sends raise and this stops advancing.
-    "link_timeout_s": 1.5,
-    # Websocket keepalive. The library defaults (20 s interval, 20 s timeout)
-    # leave up to ~40 s between the network dying and the socket closing, and
-    # for all of it `link_ok()` reads true off our own completing sends — so an
-    # active goal keeps running with nobody watching. Detection now costs at
-    # most interval + timeout = 6 s, after which the `except` in `run_robot`
-    # cancels the goal and zeroes cmd_vel.
-    #
-    # Not tighter: a robot on a degraded-but-usable link (Botman measured 60%
-    # packet loss at 333 ms RTT) would drop the socket constantly, and each
-    # reconnect cancels the active goal. 4 s matches the backend's own
-    # OFFLINE_AFTER_S, so both ends give up at about the same point.
-    "ping_interval_s": 2.0,
-    "ping_timeout_s": 4.0,
-    # How long a map/scan/cloud upload may take before the adapter gives up.
-    #
-    # This was hardcoded at 5 s, chosen when the uploads shared a coroutine with
-    # the state pump: a longer wait there meant a longer telemetry blackout, so
-    # the timeout had to stay under the backend's 4 s OFFLINE_AFTER_S. Since
-    # `tx_maps` was split out, a slow upload costs nothing but its own latency,
-    # and the ceiling is free to reflect what the BACKEND actually needs.
-    #
-    # It needs much more than 5 s. Every robot's scan queues behind one
-    # registration lock on the server, so the wait scales with fleet size: on the
-    # live four-robot fleet essentially every scan upload was hitting the 5 s
-    # timeout and being DISCARDED. That is not a cosmetic loss — every robot here
-    # runs `topics.map: ""` (no OccupancyGrid publisher), so the scan endpoint is
-    # the ONLY source its map has, and the maps were starving.
-    #
-    # A discarded scan is worse than a late one: the points carry the pose they
-    # were captured at, so arriving late costs nothing but freshness.
-    "upload_timeout_s": 25.0,
-}
-
 
 class HardwareBridge(
+    AdapterHelloMixin,
     AdapterDetectionMixin,
     AdapterLinkMixin,
     AdapterSensorMixin,
     AdapterTelemetryMixin,
 ):
     """One real robot's ROS interface, expressed as the SwarmDeck protocol."""
+
+    adapter_name = "adapter_ros2/0.1.0"
+    coordinate_frame = "local"
 
     _TRACK_IDS = staticmethod(track_ids) if track_ids is not None else None
 
@@ -1638,248 +1485,16 @@ class HardwareBridge(
         pub.publish(grid)
 
 
-async def run_until_first_failure(*coros: Any) -> None:
-    """Run coroutines together; the first to fail cancels the rest and raises.
-
-    The link's coroutines share one socket, so any one of them dying makes the
-    others meaningless — they would go on writing to a closing connection, and
-    their exceptions would surface much later as "Task exception was never
-    retrieved" rather than as the reconnect this is supposed to trigger.
-    """
-    tasks = [asyncio.ensure_future(c) for c in coros]
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        for task in done:
-            task.result()  # re-raise into run_robot's reconnect handler
-    finally:
-        for task in tasks:
-            task.cancel()
-        # Cancelling a task blocked in run_in_executor does not stop the worker
-        # thread; the in-flight urllib call still runs to its own timeout. It
-        # writes nothing but the upload it was already making, so letting it
-        # finish unobserved is safe.
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
 async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:
     """Connect, announce, then pump state until the link drops. Repeat.
 
-    Protocol rule 2: reconnect with backoff and re-send `hello` every time. The
-    backoff matters more on hardware than in simulation — a robot that hammers a
-    downed backend over Wi-Fi wastes the airtime its own teleop needs.
+    Protocol rule 2: reconnect with backoff and re-send `hello` every time.
     """
-    backoff = 1.0
-    while True:
-        try:
-            async with websockets.connect(
-                ws_url,
-                ping_interval=float(bridge.cfg["ping_interval_s"]),
-                ping_timeout=float(bridge.cfg["ping_timeout_s"]),
-            ) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "hello",
-                            "protocol": 1,
-                            "robot_id": bridge.id,
-                            "robot_type": bridge.cfg["robot_type"],
-                            "adapter": "adapter_ros2/0.1.0",
-                            "ros": bridge.cfg["ros_distro"],
-                            # `local`: a real robot's pose and grid are in its own
-                            # navigation-map frame. The backend does the merging.
-                            "coordinate_frame": "local",
-                            "capabilities": bridge.capabilities(),
-                            "footprint_radius": bridge.cfg["footprint_radius"],
-                            "footprint": bridge.cfg.get("footprint") or None,
-                        }
-                    )
-                )
-                bridge.node.get_logger().info(
-                    f"[{bridge.id}] connected; capabilities=" f"{bridge.capabilities()}"
-                )
-                backoff = 1.0
-                bridge.note_link_activity()
-
-                async def rx() -> None:
-                    async for raw in ws:
-                        bridge.note_link_activity()
-                        try:
-                            msg = json.loads(raw)
-                        except ValueError:
-                            continue
-                        kind = msg.get("type")
-                        if kind == "navigate_to":
-                            # Off-thread: sending a goal talks to an action
-                            # server that may be slow or absent, and blocking
-                            # this coroutine stalls every other one on this link.
-                            await asyncio.get_running_loop().run_in_executor(
-                                None, bridge.navigate_to, msg.get("goal", {})
-                            )
-                        elif kind == "cancel_goal":
-                            bridge.cancel_goal()
-                        elif kind == "drive":
-                            # Latched, not executed here — see note_drive_command.
-                            bridge.note_drive_command(
-                                msg.get("linear", 0.0), msg.get("angular", 0.0)
-                            )
-                        elif kind == "stop":
-                            bridge.stop()
-                        elif kind == "set_mode":
-                            bridge.mode = msg.get("mode", bridge.mode)
-                        elif kind == "body_command":
-                            await asyncio.get_running_loop().run_in_executor(
-                                None, bridge.body_command, msg.get("action", "")
-                            )
-                        # Rule 3: unknown types are ignored, not fatal.
-
-                # Telemetry and the bulk uploads run as separate coroutines, so
-                # one socket now has several writers. `websockets` does not
-                # serialise overlapping `send()` calls, and two coroutines
-                # writing at once can interleave frames on the wire.
-                send_lock = asyncio.Lock()
-
-                async def send(payload: dict[str, Any]) -> None:
-                    async with send_lock:
-                        await ws.send(json.dumps(payload))
-
-                async def tx_state() -> None:
-                    """The telemetry heartbeat. Nothing slow may run in here.
-
-                    This used to share one loop with the uploads below, which
-                    tied liveness to backend latency: `upload_map` blocks for up
-                    to its 5 s timeout, and no state frame went out while it did.
-                    The server calls a robot offline after 4 s (OFFLINE_AFTER_S)
-                    and `link_watchdog` cancels an active goal after
-                    `link_timeout_s` (1.5 s), so a single slow upload took the
-                    robot off the dashboard AND stopped its mission.
-
-                    That made the failure a property of FLEET SIZE rather than of
-                    this robot: every map upload queues behind one lock on the
-                    server, so a fourth robot connecting is what makes the first
-                    one drop out. Uploading is best-effort and may lag; being
-                    reachable is not. Keeping them in separate coroutines is what
-                    makes a slow backend cost only map freshness.
-                    """
-                    period = 1.0 / float(bridge.cfg["rates"]["state_hz"])
-                    while True:
-                        await send(bridge.state())
-                        # A completed send means the frame reached the socket,
-                        # which is the freshness signal the autonomy deadman
-                        # reads. On a wedged link this is exactly where it stops
-                        # completing, which is the point.
-                        bridge.note_link_activity()
-                        # No drive_watchdog() here: it runs on a ROS timer so it
-                        # keeps ticking when this loop cannot. See __init__.
-                        await asyncio.sleep(period)
-
-                async def tx_maps() -> None:
-                    """Occupancy, scans and clouds — the backend-bound path."""
-                    rates = bridge.cfg["rates"]
-                    tick = 1.0 / float(rates["state_hz"])
-                    loop = asyncio.get_running_loop()
-                    last_map = 0.0
-                    last_cloud = 0.0
-                    last_settings = 0.0
-                    while True:
-                        now = time.monotonic()
-                        if now - last_map > float(rates["map_period_s"]):
-                            meta = await loop.run_in_executor(None, bridge.upload_map)
-                            if meta:
-                                await send(meta)
-                            await loop.run_in_executor(None, bridge.upload_scan)
-                            # Measured from COMPLETION, not from the start of the
-                            # attempt. Against a backend slow enough that an
-                            # upload outlasts its own period — which is the state
-                            # a four-robot fleet puts the server in — starting the
-                            # clock at the top means the next upload is already
-                            # due the moment this one returns, and the adapter
-                            # spins, piling work onto a server that is already
-                            # behind. Maps now arrive as fast as the backend can
-                            # accept them and no faster.
-                            last_map = time.monotonic()
-                        await loop.run_in_executor(None, bridge.upload_costmaps)
-                        if now - last_cloud > float(rates["cloud_period_s"]):
-                            await loop.run_in_executor(None, bridge.upload_cloud)
-                            last_cloud = time.monotonic()
-                        upload_kf = getattr(bridge, "upload_keyframe", None)
-                        if callable(upload_kf):
-                            await loop.run_in_executor(None, upload_kf)
-                        pull_nav = getattr(bridge, "pull_nav_map", None)
-                        if callable(pull_nav):
-                            await loop.run_in_executor(None, pull_nav)
-                        if now - last_settings > 5.0:
-                            last_settings = now
-                            await loop.run_in_executor(None, bridge.refresh_settings)
-                        await asyncio.sleep(tick)
-
-                async def tx_camera() -> None:
-                    """Camera and detections, on their own clock.
-
-                    Separate from `tx_maps` because the two block for very
-                    different reasons: a map upload waits on the server's
-                    registration lock for seconds at a time, and sharing a loop
-                    with it froze the operator's video for exactly as long.
-                    """
-                    rates = bridge.cfg["rates"]
-                    tick = 1.0 / float(rates["state_hz"])
-                    loop = asyncio.get_running_loop()
-                    last_detect = 0.0
-                    while True:
-                        now = time.monotonic()
-
-                        # Detection runs at the configured rate regardless of
-                        # which camera is on screen. The H.264 media publisher
-                        # owns the operator video path and never uses this
-                        # protocol connection for camera frames.
-                        if now - last_detect > float(rates["camera_period_s"]):
-                            await loop.run_in_executor(None, bridge.run_detection)
-                            detections = bridge.take_detections()
-                            if detections is not None:
-                                await send(
-                                    {
-                                        "type": "detections",
-                                        "robot_id": bridge.id,
-                                        "t_mono": round(now - bridge.t0, 4),
-                                        "camera": "front",
-                                        "items": detections,
-                                    }
-                                )
-                            last_detect = time.monotonic()
-
-                        await asyncio.sleep(tick)
-
-                # Not `gather`: it leaves the siblings of a failed coroutine
-                # running against a socket that is already closing, and their
-                # exceptions surface later as "never retrieved". The first one to
-                # fail is the reconnect trigger, and the rest must be torn down
-                # with it.
-                await run_until_first_failure(rx(), tx_state(), tx_maps(), tx_camera())
-        except Exception as exc:
-            bridge.node.get_logger().warn(
-                f"[{bridge.id}] disconnected ({exc}); retrying in {backoff:.0f}s"
-            )
-            # Stop the robot on link loss. A robot that keeps driving after
-            # losing its operator is the failure that hurts someone.
-            #
-            # cancel_goal() FIRST, and not only drive(0, 0): while nav_status is
-            # still "active" the relay in `_on_nav_cmd_vel` overwrites a zero
-            # Twist with Nav2's next sample, so zeroing alone stops an
-            # autonomous robot for milliseconds and nothing more.
-            try:
-                bridge.cancel_goal()
-                bridge.drive(0.0, 0.0)
-            except Exception:
-                pass
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2.0, 30.0)
+    await run_adapter_session(bridge, ws_url, connect=websockets.connect)
 
 
 def load_config(path: str | None) -> dict:
-    cfg = dict(DEFAULTS)
-    if path:
-        loaded = yaml.safe_load(Path(path).read_text()) or {}
-        cfg = deep_merge(cfg, loaded)
-    return cfg
+    return load_yaml_profile(path, DEFAULTS)
 
 
 def main() -> None:

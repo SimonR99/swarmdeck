@@ -370,6 +370,35 @@ def se3_distance(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     return translation, float(np.arccos(cos_theta))
 
 
+def se3_medoid(
+    candidates: Iterable[np.ndarray],
+    *,
+    translation_scale_m: float = 1.0,
+    rotation_scale_rad: float = 1.0,
+) -> np.ndarray:
+    """Return the observed rigid transform most central to all candidates.
+
+    Unlike averaging matrices, a medoid is always one physically valid input
+    transform. The scales make metres and radians comparable and let a
+    majority of consistent surveyed starts reject one bad survey without
+    deforming any trajectory.
+    """
+    values = list(candidates)
+    if not values:
+        raise ValueError("at least one SE(3) candidate is required")
+    if translation_scale_m <= 0.0 or rotation_scale_rad <= 0.0:
+        raise ValueError("SE(3) medoid scales must be positive")
+    return min(
+        values,
+        key=lambda candidate: sum(
+            translation / translation_scale_m + rotation / rotation_scale_rad
+            for translation, rotation in (
+                se3_distance(candidate, other) for other in values
+            )
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Graph elements
 # --------------------------------------------------------------------------- #
@@ -502,6 +531,7 @@ class Component:
     robots: frozenset[str]
     anchor: KeyframeId
     trajectories: frozenset[TrajectoryId] = frozenset()
+    keyframe_ids: frozenset[KeyframeId] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.trajectories:
@@ -560,16 +590,30 @@ class OptimizedGraph:
     """
 
     def component_of(self, robot_id: str) -> Component | None:
-        """The first component holding ANY trajectory of this robot.
-
-        Ambiguous, by construction, for a robot whose segments have not
-        re-merged -- it is in more than one. Callers that need to be exact
-        want :meth:`component_of_trajectory`.
-        """
-        return next((c for c in self.components if robot_id in c.robots), None)
+        matching = [c for c in self.components if robot_id in c.robots]
+        if not matching:
+            return None
+        return max(
+            matching,
+            key=lambda c: (
+                len([k for k in c.keyframe_ids if k.robot_id == robot_id])
+                if c.keyframe_ids
+                else 1
+            ),
+        )
 
     def component_of_trajectory(self, trajectory: TrajectoryId) -> Component | None:
-        return next((c for c in self.components if trajectory in c.trajectories), None)
+        matching = [c for c in self.components if trajectory in c.trajectories]
+        if not matching:
+            return None
+        return max(
+            matching,
+            key=lambda c: (
+                len([k for k in c.keyframe_ids if k.trajectory == trajectory])
+                if c.keyframe_ids
+                else 1
+            ),
+        )
 
     def share_frame(self, a: str, b: str) -> bool:
         """Whether two robots have a verified relative transform.

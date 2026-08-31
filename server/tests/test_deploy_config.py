@@ -138,6 +138,16 @@ def test_hardware_camera_policy_is_h264_640x480_without_jpeg_fallback():
         assert "/api/camera/" not in source
 
 
+def test_spot_deployment_declares_camera_service_and_topics():
+    compose = (COMPOSE_DIR / "docker-compose.robot-spot.yml").read_text()
+    assert "-r" in compose
+    assert "__ns:=/d435" in compose
+    assert "/d435/camera/color/image_raw/compressed" in compose
+    assert "/d435/camera/color/image_raw" in compose
+    spot_env = (PROFILE_DIR / "spot.env").read_text()
+    assert "swarmdeck-spot-camera" in spot_env
+
+
 class _FleetHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - stdlib handler API
         if self.path != "/api/fleet":

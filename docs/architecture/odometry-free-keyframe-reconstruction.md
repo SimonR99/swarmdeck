@@ -24,11 +24,17 @@ The reconstruction uses:
 - robot identity;
 - sequence number, only to propose temporal neighbours;
 - timestamp, only to reject motion faster than the physical robot and to split
-  long capture gaps.
+  long capture gaps;
+- optionally, `t_odom_base` as a **weak mode vote** after registration.
 
-It never reads `t_odom_base`. There is intentionally no pose parameter in the
-pair-registration API, so recorded odometry cannot accidentally become an ICP
-seed or a graph factor.
+Pair registration still never reads `t_odom_base`. There is no pose parameter
+in that API, so recorded odometry cannot become an ICP seed or a graph
+factor. After GICP has returned several geometrically valid modes, Viterbi
+may prefer the mode whose hop agrees with a kinematically plausible odom
+step. A 20 m jump, a yaw spike, or a missing pose is ignored -- the chain
+falls back to geometry and the zero-yaw prior. Occupancy is rasterized at
+the reconstructed poses, not at `T_world_map @ t_odom_base`.
+
 
 Sequence adjacency is not treated as proof that two keyframes are connected.
 A long timestamp gap or unsupported registration creates a new fragment. The
@@ -96,7 +102,9 @@ registration modes. Its cost combines:
 - linear velocity and yaw magnitude;
 - changes in linear velocity and yaw rate;
 - agreement with independently registered skip-one pairs, forming
-  three-keyframe cycles.
+  three-keyframe cycles;
+- when present, agreement with a kinematically plausible odometry hop
+  (ignored if the hop could not be robot motion).
 
 An isolated 180-degree flip therefore costs much more than a sustained physical
 turn. If no physically plausible pair mode survives, the run is split rather
@@ -147,7 +155,50 @@ The final GTSAM graph contains every selected temporal registration, every
 verified fragment/cross-robot proposal, and every accepted intra-fragment loop.
 Huber factors suppress residual outliers. Optimization is per keyframe, so loop
 error is distributed along the trajectory rather than moving a whole fragment
-as one rigid block.
+as one rigid block. Registrations from one rendezvous remain correlated even
+when many scan pairs support them, so their aggregate information is normalized
+by cluster size; otherwise a 24-pair encounter can deform a more accurate local
+scan chain simply by being sampled densely.
+
+## Four-robot coordinated results (2026-08-30)
+
+`coordinated-gt-run-10` is a clean four-robot Gazebo capture produced by the
+joint frontier planner. Ground truth was recorded in a separate evaluation
+process and was never subscribed to by the planner or reconstruction service.
+The final cold replay contains 288 calibrated keyframes:
+
+- all 288 keyframes and all four robots are in one verified component;
+- 7 fragment links survive the full gates (6 inter-robot, 1 same-robot
+  continuation), plus 48 intra-fragment loop closures;
+- joint translation ATE is **0.0250 m RMSE**, 0.0190 m median, and 0.0778 m
+  maximum; joint rotation ATE is **0.632 degrees RMSE**;
+- the absolute pose set using only surveyed starts to fix gauge is **0.0267 m
+  RMSE**, with 0.0731 m maximum translation error;
+- the largest disagreement between independently aligned robot frames is
+  0.0488 m and 0.086 degrees;
+- the surveyed-world wall-surface map score at 0.10 m tolerance is **F1 0.933,
+  precision 0.990, recall 0.882**, with 0.112 m symmetric p95. Filled-cell IoU
+  is reported separately
+  because lidar observes wall faces while the SDF contains filled collision
+  boxes.
+
+Removing every recorded `t_odom_base` value produces identical accepted and
+rejected constraints, fragment and optimized poses, components, render
+metadata, and SHA-256 hashes for all five PNGs. Thus odometry contributes no
+decision or pose to this capture. An exact incremental arrival replay merges
+robot 3 at keyframe 100 and remains one component through keyframe 288; retained
+pair identities are re-registered and re-gated on every solve, not retained as
+unconditional factors.
+
+The capture also exposed three aliasing edge cases now covered by regressions:
+
+- fixed descriptor budgets are sampled across both fragment trajectories so a
+  repeated doorway cannot evict a spatially distributed rendezvous;
+- only structurally valid clusters compete, and an exact adjacent-boundary
+  registration may select a lower-ranked but independently supported mode;
+- a coarse-start-corroborated primary connection outranks a contradictory
+  high-score alias to a later fragment. Coarse starts still never seed ICP or
+  enter the pose graph as factors.
 
 ## Gazebo ground-truth results (2026-08-26)
 
@@ -200,8 +251,15 @@ reconnection. The largest single reported steps are:
 - robot 0: 23.44 m and 163.83 degrees;
 - robot 1: 19.20 m and 139.71 degrees.
 
-This is intentionally more severe than realistic wheel slip. The odometry-free
-result is exactly invariant:
+This is intentionally more severe than realistic wheel slip. Hops that fail
+the kinematic gate (the 20 m jumps and 160-degree spikes) are ignored, so
+they cannot flip a corridor alias. Small jitter inside the gate may still
+break a remaining mode tie; that is the intended "minor help". The
+reconstruction is therefore invariant to catastrophic odometry, not to
+every perturbation of `t_odom_base`.
+
+The 2026-08-27 fault-injection replay (before the weak mode vote) was
+byte-identical to the clean run:
 
 - all accepted/rejected constraints, fragment poses, optimized keyframe poses,
   components, and render metadata match the clean run exactly;
@@ -350,11 +408,12 @@ capture or subtract pixels from an already rasterized merged image.
   the correct result is multiple components/hypotheses, not a guessed heading.
 - Timestamp-based kinematics assumes the sensor timestamps are monotonic. Bad
   timestamps produce safe fragmentation rather than a wrong transform.
-- The current graph is batch/offline. Cold registration of 239 saved Gazebo
-  keyframes took about two minutes on this workstation; a cached full rebuild
-  takes roughly two seconds. Production should run it as a background batch
-  optimizer until incremental candidate scheduling is implemented and a second
-  labelled hardware capture validates the thresholds.
+- The optimizer still performs a batch solve, but the production service is
+  online: it retains a geometry-only pair cache and the identities of verified
+  support pairs as new keyframes arrive. A cold production rebuild of the 288
+  keyframe four-robot capture took 83.5 seconds; the cached standalone rebuild
+  took 4.4 seconds. Incremental factorization remains future work, and labelled
+  hardware captures must validate the current thresholds before deployment.
 - Camera images would make this much closer to photogrammetry: visual features
   and learned/global image descriptors can break lidar's 180-degree symmetry.
   They are not present in this saved keyframe format, so the current method is

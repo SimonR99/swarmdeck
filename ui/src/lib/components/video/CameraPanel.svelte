@@ -23,6 +23,9 @@
   */
 
   let video = $state<HTMLVideoElement | null>(null);
+  let containerEl = $state<HTMLDivElement | null>(null);
+  let overlayEl = $state<HTMLDivElement | null>(null);
+
   let pc: RTCPeerConnection | null = null;
   let whepRetryTimer: number | null = null;
   let whepProbeTimer: number | null = null;
@@ -31,6 +34,42 @@
   let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
   let fps = $state(0);
   let pingLatencyMs = $state(0);
+
+  function updateOverlayPosition() {
+    if (!containerEl || !overlayEl) return;
+    const cw = containerEl.clientWidth;
+    const ch = containerEl.clientHeight;
+    const vw = video?.videoWidth ?? 0;
+    const vh = video?.videoHeight ?? 0;
+
+    if (cw <= 0 || ch <= 0 || vw <= 0 || vh <= 0) {
+      overlayEl.style.left = '0px';
+      overlayEl.style.top = '0px';
+      overlayEl.style.width = '100%';
+      overlayEl.style.height = '100%';
+      return;
+    }
+
+    const containerAspect = cw / ch;
+    const videoAspect = vw / vh;
+    let width = cw;
+    let height = ch;
+    let left = 0;
+    let top = 0;
+
+    if (containerAspect > videoAspect) {
+      width = ch * videoAspect;
+      left = (cw - width) / 2;
+    } else {
+      height = cw / videoAspect;
+      top = (ch - height) / 2;
+    }
+
+    overlayEl.style.left = `${left}px`;
+    overlayEl.style.top = `${top}px`;
+    overlayEl.style.width = `${width}px`;
+    overlayEl.style.height = `${height}px`;
+  }
 
   const ROLLING_ALPHA = 0.2;
   let lastFrameTime = 0;
@@ -61,10 +100,12 @@
 
   function startVideoFrameLoop() {
     stopVideoFrameLoop();
+    updateOverlayPosition();
     if (!video) return;
     if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
       const onFrame = (now: DOMHighResTimeStamp) => {
         recordFrame(now);
+        updateOverlayPosition();
         if (streamSource === 'webrtc' && video) {
           rfcHandle = (video as any).requestVideoFrameCallback(onFrame);
         }
@@ -274,6 +315,7 @@
     pc = null;
     closing?.close();
     if (video) video.srcObject = null;
+    updateOverlayPosition();
   }
 
   function teardown() {
@@ -307,6 +349,15 @@
     untrack(() => connectWhep(id));
     return () => untrack(teardown);
   });
+
+  $effect(() => {
+    if (!containerEl) return;
+    const ro = new ResizeObserver(() => {
+      updateOverlayPosition();
+    });
+    ro.observe(containerEl);
+    return () => ro.disconnect();
+  });
 </script>
 
 <div
@@ -314,6 +365,7 @@
          bg-surface-2 {expanded ? 'h-full min-h-0' : 'min-h-[180px] flex-1'}"
 >
   <div
+    bind:this={containerEl}
     class="relative h-full w-full flex-1 overflow-hidden"
   >
     <video
@@ -322,7 +374,13 @@
       autoplay
       muted
       playsinline
-      onplay={startVideoFrameLoop}
+      onplay={() => {
+        updateOverlayPosition();
+        startVideoFrameLoop();
+      }}
+      onloadedmetadata={updateOverlayPosition}
+      onresize={updateOverlayPosition}
+      ontimeupdate={updateOverlayPosition}
     ></video>
 
     {#if streamState !== 'live'}
@@ -339,7 +397,10 @@
     {/if}
 
     <!-- detection overlay, sized to the video element (never an iframe) -->
-    <div class="pointer-events-none absolute inset-0 z-30">
+    <div
+      bind:this={overlayEl}
+      class="pointer-events-none absolute z-30"
+    >
       <!-- Outlines first, in one normalized-coordinate SVG that stretches with
            the frame, so a mask always lines up with its own box. -->
       <svg

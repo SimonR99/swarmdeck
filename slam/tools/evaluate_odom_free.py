@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Score an odometry-free reconstruction manifest against Gazebo ground truth.
 
-The reconstruction has an arbitrary origin per disconnected component.  This
-tool removes exactly one rigid transform per component (never scale), then
-reports the residual trajectory error.  All robots in a merged component share
-that one alignment: aligning each robot separately would hide a bad merge.
+The reconstruction has an arbitrary origin per disconnected component. This
+tool reports gauge-invariant ATE after exactly one rigid transform per component
+(never scale). When surveyed first poses are supplied, it also reports the
+unaligned world-frame error using only those surveys to set the gauge. Gazebo
+ground truth is used exclusively as the scoring target.
 """
 
 from __future__ import annotations
@@ -20,7 +21,13 @@ from typing import Any
 import numpy as np
 
 from swarmdeck_slam.evaluation import ErrorStats
-from swarmdeck_slam.types import se3_distance, se3_from_quat_xyz, se3_kabsch
+from swarmdeck_slam.types import (
+    se3_distance,
+    se3_from_quat_xyz,
+    se3_inverse,
+    se3_kabsch,
+    se3_medoid,
+)
 
 
 def _arguments() -> argparse.Namespace:
@@ -28,6 +35,14 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("manifest", type=pathlib.Path)
     parser.add_argument("--ground-truth", type=pathlib.Path)
     parser.add_argument("--max-gap-s", type=float, default=0.25)
+    parser.add_argument(
+        "--start-poses-json",
+        default="",
+        help=(
+            "surveyed first base poses as {robot: {x, y, yaw}} JSON; defaults "
+            "to surveyed_start_poses embedded in a new reconstruction manifest"
+        ),
+    )
     parser.add_argument("--output", type=pathlib.Path)
     return parser.parse_args()
 
@@ -91,12 +106,58 @@ def _pose_errors(
     }
 
 
+def _pose_hints(value: str) -> dict[str, np.ndarray] | None:
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+        result: dict[str, np.ndarray] = {}
+        for robot_id, pose in payload.items():
+            if isinstance(pose, list):
+                matrix = np.asarray(pose, dtype=np.float64)
+                if matrix.shape != (4, 4):
+                    raise ValueError(f"{robot_id} matrix is not 4x4")
+                result[str(robot_id)] = matrix
+                continue
+            yaw = float(pose.get("yaw", 0.0))
+            result[str(robot_id)] = se3_from_quat_xyz(
+                [
+                    float(pose.get("x", 0.0)),
+                    float(pose.get("y", 0.0)),
+                    0.0,
+                    0.0,
+                    0.0,
+                    math.sin(yaw / 2.0),
+                    math.cos(yaw / 2.0),
+                ]
+            )
+        return result or None
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise SystemExit(f"invalid --start-poses-json: {exc}") from exc
+
+
 def evaluate(
     manifest: dict[str, Any],
     truth: dict[str, tuple[np.ndarray, np.ndarray]],
     max_gap_s: float,
+    pose_hints: dict[str, np.ndarray] | None = None,
 ) -> dict[str, Any]:
     fragments = {fragment["id"]: fragment for fragment in manifest["fragments"]}
+    first_by_robot: dict[str, tuple[tuple[float, int, str], str, np.ndarray]] = {}
+    for fragment in fragments.values():
+        for frame in fragment["frames"]:
+            if "t_optimized_keyframe" not in frame:
+                continue
+            key = (float(frame["stamp"]), int(frame["seq"]), fragment["id"])
+            current = first_by_robot.get(fragment["robot_id"])
+            if current is None or key < current[0]:
+                # A surveyed first observation can gauge only the component
+                # containing that observation, never a later/restart fragment.
+                first_by_robot[fragment["robot_id"]] = (
+                    key,
+                    fragment["id"],
+                    np.asarray(frame["t_optimized_keyframe"], dtype=np.float64),
+                )
     components: list[dict[str, Any]] = []
     scored = 0
     for component in manifest["components"]:
@@ -137,6 +198,24 @@ def evaluate(
             )
             continue
 
+        component_fragments = frozenset(component["fragments"])
+        start_candidates = [
+            (robot_id, pose_hints[robot_id] @ se3_inverse(first[2]))
+            for robot_id, first in sorted(first_by_robot.items())
+            if pose_hints is not None
+            and robot_id in pose_hints
+            and first[1] in component_fragments
+        ]
+        surveyed_gauge = (
+            se3_medoid(
+                [candidate for _, candidate in start_candidates],
+                translation_scale_m=8.0,
+                rotation_scale_rad=math.radians(75.0),
+            )
+            if start_candidates
+            else None
+        )
+
         alignment = se3_kabsch(
             np.stack([pose[:3, 3] for pose in estimates]),
             np.stack([pose[:3, 3] for pose in actual]),
@@ -148,6 +227,10 @@ def evaluate(
             robot_est = [estimates[index] for index in indices]
             robot_truth = [actual[index] for index in indices]
             entry = _pose_errors(robot_est, robot_truth, alignment)
+            if surveyed_gauge is not None:
+                entry["surveyed_absolute"] = _pose_errors(
+                    robot_est, robot_truth, surveyed_gauge
+                )
             if len(indices) >= 2:
                 independent = se3_kabsch(
                     np.stack([pose[:3, 3] for pose in robot_est]),
@@ -196,8 +279,7 @@ def evaluate(
                 }
 
         scored += len(estimates)
-        components.append(
-            {
+        component_result = {
                 "id": component["id"],
                 "keyframes": component["keyframes"],
                 "scored_poses": len(estimates),
@@ -207,7 +289,21 @@ def evaluate(
                 "robot_alignment_disagreement": alignment_disagreement,
                 "rpe": rpe,
             }
-        )
+        if surveyed_gauge is not None:
+            component_result.update(
+                {
+                    "surveyed_absolute": _pose_errors(
+                        estimates, actual, surveyed_gauge
+                    ),
+                    "surveyed_gauge_sources": [
+                        robot_id for robot_id, _ in start_candidates
+                    ],
+                    "t_world_component_from_surveys": np.round(
+                        surveyed_gauge, 8
+                    ).tolist(),
+                }
+            )
+        components.append(component_result)
 
     accepted = manifest.get("accepted_connections", [])
     fragment_robot = {
@@ -242,7 +338,15 @@ def main() -> None:
     ground_truth_path = arguments.ground_truth
     if ground_truth_path is None:
         ground_truth_path = pathlib.Path(manifest["dataset"]) / "ground_truth.csv"
-    result = evaluate(manifest, _load_truth(ground_truth_path), arguments.max_gap_s)
+    pose_hints = _pose_hints(arguments.start_poses_json)
+    if pose_hints is None and manifest.get("surveyed_start_poses"):
+        pose_hints = {
+            robot_id: np.asarray(pose, dtype=np.float64)
+            for robot_id, pose in manifest["surveyed_start_poses"].items()
+        }
+    result = evaluate(
+        manifest, _load_truth(ground_truth_path), arguments.max_gap_s, pose_hints
+    )
     rendered = json.dumps(result, indent=2) + "\n"
     if arguments.output:
         arguments.output.write_text(rendered)

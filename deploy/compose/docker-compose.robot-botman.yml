@@ -238,7 +238,7 @@ services:
       - --yaw
       - "${BOTMAN_OAK_YAW:-unset-measure-the-oak-mount}"
       - --frame-id
-      - os_lidar
+      - botman_base_link
       - --child-frame-id
       - oak-d-base-frame
     restart: unless-stopped
@@ -362,7 +362,9 @@ services:
       - "${VIDEO_HEIGHT:-480}"
     restart: unless-stopped
 
-  # SuperOdometry publishes /laser_odometry but not map -> os_lidar TF.
+  # SuperOdometry publishes /laser_odometry but not map -> base TF. Despite
+  # naming os_lidar as the message child, its pose is the physical-forward
+  # frame; botman.launch.py adds the measured pi-yaw edge to raw os_lidar.
   # Keep one bridge independent of Nav2 so costmaps still get a pose if Nav2
   # restarts. botman.launch.py disables its embedded copy in this deployment;
   # two broadcasters for the same dynamic edge corrupt the TF cache.
@@ -389,7 +391,7 @@ services:
       - -p
       - parent_frame:=map
       - -p
-      - child_frame:=os_lidar
+      - child_frame:=botman_base_link
       - -p
       - planar:=true
       - -p

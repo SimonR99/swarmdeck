@@ -614,6 +614,40 @@ def test_optimize_on_empty_graph_returns_empty_result() -> None:
     assert result.rejected_edges == []
 
 
+def test_preferred_robot_anchors_the_component_a_new_robot_joins() -> None:
+    """Joining is a relative-pose event, not permission to re-gauge the map.
+
+    Robot ids are deliberately reverse lexical order: the regression selected
+    ``aardvark`` merely because it sorted before the already-live ``zulu``.
+    """
+    established = Keyframe(
+        id=KeyframeId("zulu", 0, "established"),
+        stamp=1.0,
+        t_odom_base=se3_identity(),
+        points=np.zeros((50, 3), dtype=np.float32),
+    )
+    newcomer = Keyframe(
+        id=KeyframeId("aardvark", 0, "newcomer"),
+        stamp=2.0,
+        t_odom_base=se3_identity(),
+        points=np.zeros((50, 3), dtype=np.float32),
+    )
+    graph = GtsamPoseGraph(preferred_anchor_robot="zulu")
+    graph.add_keyframe(established)
+    graph.add_keyframe(newcomer)
+    joining_edge = Edge(
+        EdgeKind.INTER_LOOP,
+        established.id,
+        newcomer.id,
+        se3_identity(),
+        _closure_information(sigma_t=0.05, sigma_r=np.deg2rad(3.0)),
+    )
+
+    component = graph._components([joining_edge])[0]
+    assert component.anchor == established.id
+    assert component.component_id == 0
+
+
 def test_edge_referencing_unknown_keyframe_raises() -> None:
     """A caller bug (an edge naming a keyframe that was never added) must fail
     loudly at ``optimize()`` rather than silently dropping the edge or
@@ -715,7 +749,13 @@ def test_t_world_map_beats_the_single_keyframe_snapshot_on_a_drifting_frame() ->
         _rebase_from(robot, len(robot.keyframes) // 2, shift) for robot in robots
     ]
 
-    result = _build_graph(drifting, []).optimize()
+    # Odometry rebuilt from the same rebased poses is exactly self-consistent:
+    # without an independent geometric observation, both the trajectory fit
+    # and newest-frame snapshot have zero residual and the intended regression
+    # is unobservable. Real closures preserve the physical trajectory while
+    # the saved map-frame poses jump, which is the production failure this
+    # fixture is meant to exercise.
+    result = _build_graph(drifting, _find_real_closures(drifting)).optimize()
 
     for robot in drifting:
         published = result.t_world_map[robot.robot_id]
@@ -785,3 +825,44 @@ def test_t_world_map_falls_back_for_a_robot_with_too_few_keyframes() -> None:
         "a 2-keyframe robot must fall back to the single-keyframe read rather than "
         "publish an under-determined fit"
     )
+
+
+def test_pose_priors_keep_a_working_slam_trajectory_from_folding() -> None:
+    """Onboard SLAM poses are a suggestion: a loop may refine them, not fan them.
+
+    A 5 m lie between the first and last keyframe of one robot is the kind of
+    confident-wrong closure that previously smeared occupancy into double
+    walls. Pose priors, registered as GNC known-inliers, cap that motion.
+    """
+    _scene, robots = two_robot_fleet(seed=4)
+    alpha = next(robot for robot in robots if robot.robot_id == "alpha")
+    lie = np.eye(4, dtype=np.float64)
+    lie[0, 3] = 5.0
+    loop = Edge(
+        EdgeKind.INTRA_LOOP,
+        alpha.keyframes[0].id,
+        alpha.keyframes[-1].id,
+        lie,
+        _closure_information(sigma_t=0.02, sigma_r=np.deg2rad(1.0)),
+    )
+
+    def max_move(result: OptimizedGraph) -> float:
+        trajectory = alpha.keyframes[0].id.trajectory
+        frame = result.t_world_trajectory[trajectory]
+        return max(
+            float(
+                np.linalg.norm(
+                    result.poses[kf.id][:3, 3] - (frame @ kf.t_odom_base)[:3, 3]
+                )
+            )
+            for kf in alpha.keyframes
+        )
+
+    free = _build_graph([alpha], [loop]).optimize()
+    pinned = _build_graph(
+        [alpha],
+        [loop],
+        pose_prior_sigmas=np.array([0.05, 0.05, 0.05, 0.10, 0.10, 0.15]),
+    ).optimize()
+    assert max_move(pinned) < 0.5
+    assert max_move(pinned) <= max_move(free) + 1e-6

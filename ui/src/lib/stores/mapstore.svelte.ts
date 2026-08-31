@@ -44,7 +44,9 @@ const OCCUPIED_RED_MAX = 140;
 
 const state = $state({
   info: null as MapInfo | null,
-  seq: -1,
+  seq: 0,
+  globalSeq: 0,
+  robotSeqs: {} as Record<string, number>,
   revision: 0, // bumped on every change so views can react
   ready: false,
   status: null as MapStatus | null,
@@ -56,7 +58,13 @@ const state = $state({
   // than a third viewMode because it answers a different question -- viewMode
   // asks WHOSE map, this asks WHICH ESTIMATE of it -- and folding them together
   // would multiply out into states like "global raw" that do not exist.
+  // The verified graph pipeline is the production default. Until it has a
+  // scoped raster, the loaders below transparently fall back to Robot SLAM.
   mapSource: 'optimized' as 'slam' | 'optimized',
+  // True only while the canvas is an actual solver-posed PNG. Selecting
+  // Optimised before the solver has published a grid falls back to the
+  // robot's own SLAM map; overlays must then use that map's frame, not world.
+  showingOptimizedGrid: false,
   optimizedScopes: [] as OptimizedScope[],
   viewRobot: null as string | null,
   // What the OPERATOR asked for, as opposed to what the backend recommends.
@@ -264,6 +272,19 @@ function ensureCanvas(w: number, h: number) {
   }
 }
 
+/** Drop the displayed grid before an asynchronous view replacement begins. */
+function clearGrid() {
+  canvas = null;
+  ctx = null;
+  maskLevels = [];
+  occupied = null;
+  maskDirty = true;
+  state.info = null;
+  state.seq = 0;
+  state.ready = false;
+  state.showingOptimizedGrid = false;
+}
+
 /** Convert an int8 occupancy buffer to RGBA pixels, recording occupancy. */
 function toImageData(
   cells: Int8Array,
@@ -379,7 +400,10 @@ export const mapStore = {
     return state.revision;
   },
   get seq() {
-    return state.seq;
+    if (state.viewMode === 'local' && state.viewRobot) {
+      return state.robotSeqs[state.viewRobot] ?? (state.info?.seq ?? 0);
+    }
+    return state.globalSeq;
   },
   get ready() {
     return state.ready;
@@ -403,7 +427,11 @@ export const mapStore = {
     if (state.mapSource === 'optimized') {
       void this.loadOptimizedScopes().then(() => {
         if (state.viewMode === 'local' && state.viewRobot === robotId) {
-          void this.selectRobotView(robotId);
+          void this.selectRobotView(robotId, true);
+        } else if (state.viewMode === 'global' && globalInfo) {
+          // Optimized grids are snapshots rather than websocket patches. A
+          // graph update is the signal that a fresher component raster exists.
+          void this.loadFullPng(globalInfo);
         }
       });
     }
@@ -418,9 +446,12 @@ export const mapStore = {
     state.mapSource = source;
     await this.loadOptimizedScopes();
     if (state.viewMode === 'local' && state.viewRobot) {
-      state.seq = -1;
-      state.ready = false;
-      await this.selectRobotView(state.viewRobot);
+      await this.selectRobotView(state.viewRobot, true);
+    } else if (globalInfo) {
+      loadGeneration++;
+      clearGrid();
+      state.revision++;
+      await this.loadFullPng(globalInfo);
     }
     state.revision++;
   },
@@ -448,6 +479,15 @@ export const mapStore = {
     return state.optimizedScopes.filter(
       (scope) => scope.scope.startsWith('component:') && scope.robots.length < 2
     );
+  },
+  get unmergedRobots(): string[] {
+    const ids = new Set<string>();
+    for (const scope of this.unmergedScopes) {
+      for (const robot of scope.robots) {
+        if (fleet.isEnabled(robot)) ids.add(robot);
+      }
+    }
+    return Array.from(ids);
   },
 
   get viewMode() {
@@ -593,7 +633,7 @@ export const mapStore = {
 
   setGlobalInfo(info: MapInfo) {
     globalInfo = info;
-    if (state.viewMode === 'global') {
+    if (state.viewMode === 'global' && !state.showingOptimizedGrid) {
       state.info = info;
       ensureCanvas(info.width, info.height);
       state.ready = true;
@@ -601,9 +641,80 @@ export const mapStore = {
     }
   },
 
-  /** Restore the current full map on first connect or browser reload (FR-M7). */
+  /** Fetch the largest verified collaborative component for the global view. */
+  async loadGlobalOptimized(): Promise<boolean> {
+    const scope = state.optimizedScopes
+      .filter((entry) => entry.scope.startsWith('component:') && entry.robots.length >= 2)
+      .sort(
+        (a, b) =>
+          b.robots.length - a.robots.length ||
+          b.width * b.height - a.width * a.height ||
+          a.scope.localeCompare(b.scope)
+      )[0];
+    if (!scope || state.viewMode !== 'global' || state.mapSource !== 'optimized') {
+      return false;
+    }
+
+    const generation = loadGeneration;
+    try {
+      const response = await fetch(`/api/map/optimized/${encodeURIComponent(scope.scope)}`, {
+        cache: 'no-store'
+      });
+      if (!response.ok) throw new Error(`optimized global map ${response.status}`);
+      const bitmap = await createImageBitmap(await response.blob());
+      if (
+        generation !== loadGeneration ||
+        state.viewMode !== 'global' ||
+        state.mapSource !== 'optimized'
+      ) {
+        bitmap.close();
+        return true;
+      }
+      const info = {
+        resolution: scope.resolution,
+        width: scope.width,
+        height: scope.height,
+        origin: scope.origin,
+        seq: state.globalSeq
+      } as MapInfo;
+      ensureCanvas(info.width, info.height);
+      ctx?.clearRect(0, 0, info.width, info.height);
+      ctx?.drawImage(bitmap, 0, 0, info.width, info.height);
+      readBackOccupancy();
+      bitmap.close();
+      state.info = info;
+      state.seq = state.globalSeq;
+      state.showingOptimizedGrid = true;
+      state.ready = true;
+      state.revision++;
+      for (const robot of fleet.robots) {
+        void this.loadNetworkSnapshot(robot.robot_id, generation);
+      }
+      return true;
+    } catch (error) {
+      console.warn('[swarmdeck] optimized global map restore failed', error);
+      if (
+        generation === loadGeneration &&
+        state.viewMode === 'global' &&
+        state.mapSource === 'optimized'
+      ) {
+        state.showingOptimizedGrid = false;
+      }
+      return false;
+    }
+  },
+
+  /** Restore the selected full map on first connect or browser reload (FR-M7). */
   async loadFullPng(info: MapInfo) {
     globalInfo = info;
+    if (state.viewMode !== 'global') return;
+    if (state.mapSource === 'optimized') {
+      await this.loadOptimizedScopes();
+      if (await this.loadGlobalOptimized()) return;
+      // No verified multi-robot component yet: honour the toggle's documented
+      // fallback and keep the ordinary merged SLAM map usable.
+    }
+    state.showingOptimizedGrid = false;
     const generation = loadGeneration;
     try {
       const response = await fetch('/api/map', { cache: 'no-store' });
@@ -618,7 +729,7 @@ export const mapStore = {
 
       // A live patch may have arrived while the PNG was downloading. Never
       // overwrite newer map data with an older reconnect snapshot.
-      if (state.seq > seq) {
+      if (state.globalSeq > seq) {
         bitmap.close();
         return;
       }
@@ -630,7 +741,10 @@ export const mapStore = {
       }
       bitmap.close();
       state.info = info;
-      state.seq = seq;
+      state.globalSeq = Math.max(state.globalSeq, seq);
+      if (state.viewMode === 'global') {
+        state.seq = state.globalSeq;
+      }
       state.ready = true;
       state.revision++;
       for (const robot of fleet.robots) {
@@ -651,14 +765,16 @@ export const mapStore = {
     ensureCanvas(info.width, info.height);
     state.info = info;
     if (ctx) ctx.putImageData(toImageData(cells, info.width, info.height), 0, 0);
-    state.seq = info.seq;
+    state.globalSeq = Math.max(state.globalSeq, info.seq);
+    state.seq = state.globalSeq;
     state.ready = true;
     state.revision++;
   },
 
   /** Incremental patch — the common path. Never re-fetches the whole grid. */
   applyGlobalPatch(patch: MapPatch) {
-    if (state.viewMode !== 'global') return;
+    state.globalSeq = Math.max(state.globalSeq, patch.seq);
+    if (state.viewMode !== 'global' || state.showingOptimizedGrid) return;
     if (!state.info) return;
 
     const patchWidth = patch.width ?? state.info.width;
@@ -727,7 +843,7 @@ export const mapStore = {
       canvasY0
     );
 
-    state.seq = patch.seq;
+    state.seq = state.globalSeq;
     state.revision++;
   },
 
@@ -844,13 +960,12 @@ export const mapStore = {
   /** Reload whichever full grid is visible after an operator map reset. */
   async reloadCurrentView() {
     loadGeneration++;
-    state.seq = -1;
-    state.ready = false;
+    clearGrid();
     state.revision++;
 
     if (state.viewMode === 'local' && state.viewRobot) {
       clearNetworkLayer();
-      await this.selectRobotView(state.viewRobot);
+      await this.selectRobotView(state.viewRobot, true);
       return;
     }
 
@@ -862,6 +977,8 @@ export const mapStore = {
       await this.loadFullPng(payload.info);
     } catch (error) {
       console.warn('[swarmdeck] map reset reload failed', error);
+      clearGrid();
+      state.revision++;
     }
   },
 
@@ -881,10 +998,10 @@ export const mapStore = {
     // absorb the backend changing its mind.
     autoView = null;
     autoPending = null;
-    await this.selectRobotView(robotId);
+    await this.selectRobotView(robotId, true);
   },
 
-  async selectRobotView(robotId: string | null) {
+  async selectRobotView(robotId: string | null, force: boolean = false) {
     const recommended = state.status?.view_by_robot?.[robotId ?? ''] === 'local';
     const desiredLocal = Boolean(
       robotId &&
@@ -894,12 +1011,20 @@ export const mapStore = {
     const desiredMode = desiredLocal ? 'local' : 'global';
     const desiredRobot = desiredLocal ? robotId : null;
 
-    if (state.viewMode !== desiredMode || state.viewRobot !== desiredRobot) {
+    const viewChanged = state.viewMode !== desiredMode || state.viewRobot !== desiredRobot;
+    if (!viewChanged && !force && state.ready) {
+      return;
+    }
+
+    if (viewChanged) {
       loadGeneration++;
       state.viewMode = desiredMode;
       state.viewRobot = desiredRobot;
-      state.seq = -1;
-      state.ready = false;
+      clearGrid();
+      state.revision++;
+    } else if (force) {
+      loadGeneration++;
+      clearGrid();
       state.revision++;
     }
 
@@ -928,22 +1053,28 @@ export const mapStore = {
       let info: MapInfo;
       let mapResponse: Response;
       if (scope) {
+        state.showingOptimizedGrid = true;
+        const prevSeq = state.robotSeqs[robotId!] ?? 0;
+        const currentSeq = prevSeq + 1;
+        state.robotSeqs[robotId!] = currentSeq;
         info = {
           resolution: scope.resolution,
           width: scope.width,
           height: scope.height,
           origin: scope.origin,
-          seq: state.seq + 1
+          seq: currentSeq
         } as MapInfo;
         mapResponse = await fetch(`/api/map/optimized/${encodeURIComponent(scopeName)}`, {
           cache: 'no-store'
         });
       } else {
+        state.showingOptimizedGrid = false;
         const infoResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}/info`, {
           cache: 'no-store'
         });
         if (!infoResponse.ok) throw new Error(`local map info ${infoResponse.status}`);
         info = (await infoResponse.json()) as MapInfo;
+        state.robotSeqs[robotId!] = Math.max(state.robotSeqs[robotId!] ?? 0, info.seq);
         mapResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}`, {
           cache: 'no-store'
         });
@@ -964,12 +1095,16 @@ export const mapStore = {
       readBackOccupancy();
       bitmap.close();
       state.info = info;
-      state.seq = info.seq;
+      state.seq = state.robotSeqs[robotId!] ?? info.seq;
       state.ready = true;
       state.revision++;
       await this.loadNetworkSnapshot(robotId!, generation);
     } catch (error) {
       console.warn('[swarmdeck] local map restore failed', error);
+      if (generation === loadGeneration && state.viewMode === 'local' && state.viewRobot === robotId) {
+        clearGrid();
+        state.revision++;
+      }
     }
   },
 
@@ -993,10 +1128,22 @@ export const mapStore = {
     };
   },
 
+  /** True when the canvas is the solver-optimized grid, not a SLAM fallback. */
+  get showingOptimizedGrid() {
+    return state.showingOptimizedGrid;
+  },
+
+  overlayUsesRobotSlamFrame(): boolean {
+    // Both local sources use the robot's current map frame. The raw source is
+    // uploaded in that frame; robot:<id> optimized scopes are solver-corrected
+    // and then rigidly re-expressed in the same frame by the SLAM service.
+    return state.viewMode === 'local' && Boolean(state.viewRobot);
+  },
+
   /** Global world metres → currently displayed grid pixel. */
   worldToGrid(x: number, y: number): { gx: number; gy: number } | null {
-    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
-      const tf = state.status?.transforms[state.viewRobot];
+    if (this.overlayUsesRobotSlamFrame()) {
+      const tf = state.status?.transforms[state.viewRobot!];
       if (tf) {
         const c = Math.cos(tf.yaw);
         const s = Math.sin(tf.yaw);
@@ -1013,8 +1160,8 @@ export const mapStore = {
   gridToWorld(gx: number, gy: number): { x: number; y: number } | null {
     const point = this.gridToView(gx, gy);
     if (!point) return null;
-    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
-      const tf = state.status?.transforms[state.viewRobot];
+    if (this.overlayUsesRobotSlamFrame()) {
+      const tf = state.status?.transforms[state.viewRobot!];
       if (tf) {
         const c = Math.cos(tf.yaw);
         const s = Math.sin(tf.yaw);
@@ -1028,20 +1175,23 @@ export const mapStore = {
   },
 
   worldYawToView(yaw: number): number {
-    if (state.viewMode === 'local' && state.viewRobot && state.mapSource !== 'optimized') {
-      yaw -= state.status?.transforms[state.viewRobot]?.yaw ?? 0;
+    if (this.overlayUsesRobotSlamFrame()) {
+      yaw -= state.status?.transforms[state.viewRobot!]?.yaw ?? 0;
     }
     return yaw;
   },
 
   reset() {
     state.info = null;
-    state.seq = -1;
+    state.seq = 0;
+    state.globalSeq = 0;
+    state.robotSeqs = {};
     state.ready = false;
     state.status = null;
     state.statusUpdatedAt = 0;
     state.viewMode = 'global';
     state.viewRobot = null;
+    state.showingOptimizedGrid = false;
     autoView = null;
     autoPending = null;
     globalInfo = null;

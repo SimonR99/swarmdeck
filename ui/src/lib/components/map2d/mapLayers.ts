@@ -11,7 +11,13 @@ import { mapStore } from '$lib/stores/mapstore.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
-import type { CostmapKind, DetectionEntity, DetectionProposal, Footprint } from '$lib/types/protocol';
+import type {
+  CostmapKind,
+  DetectionEntity,
+  DetectionProposal,
+  Footprint,
+  RobotState
+} from '$lib/types/protocol';
 
 export type ScreenPoint = { sx: number; sy: number };
 export type GridPoint = { gx: number; gy: number };
@@ -30,6 +36,8 @@ export interface MapRobot {
   footprint_radius?: number;
   footprint?: Footprint | null;
   goal?: { x: number; y: number } | null;
+  nav_status?: RobotState['nav_status'];
+  mode?: RobotState['mode'];
 }
 
 // Keep the map useful while an older adapter is reconnecting and has not yet
@@ -49,6 +57,12 @@ const KNOWN_FOOTPRINTS: Record<string, Footprint> = {
     [-0.55, -0.25],
     [-0.55, 0.25]
   ],
+  unitree_g1: [
+    [0.18, 0.22],
+    [0.18, -0.22],
+    [-0.18, -0.22],
+    [-0.18, 0.22]
+  ],
   scout_mini: [
     [0.31, 0.293],
     [0.31, -0.293],
@@ -62,6 +76,13 @@ export interface MapInfo {
   height: number;
   resolution: number;
   origin: { x: number; y: number };
+}
+
+/** World-space distance between the visible metric-grid lines at this zoom. */
+export function metricGridSpacing(info: MapInfo | null, view: Viewport): number {
+  const resolution = info?.resolution ?? 0.05;
+  const pixelsPerMetre = view.scale / resolution;
+  return pixelsPerMetre >= 24 ? 1 : pixelsPerMetre >= 7 ? 5 : 10;
 }
 
 export function drawMetricGrid(
@@ -79,8 +100,7 @@ export function drawMetricGrid(
   const originY = info?.origin.y ?? 0;
   const gridHeight = info?.height ?? 0;
 
-  const pixelsPerMetre = view.scale / resolution;
-  const spacing = pixelsPerMetre >= 24 ? 1 : pixelsPerMetre >= 7 ? 5 : 10;
+  const spacing = metricGridSpacing(info, view);
 
   // Calculate visible world bounds from viewport corners
   const minWorldX = originX + ((0 - view.tx) / view.scale) * resolution;
@@ -398,28 +418,19 @@ export function drawCostmap(
   ctx.globalAlpha = 0.68;
   ctx.imageSmoothingEnabled = view.scale < 1;
 
-  if (mapStore.viewMode === 'global') {
-    const tf = mapStore.status?.transforms[robotId];
-    if (tf) {
-      const originGrid = mapStore.viewToGrid(tf.x, tf.y);
-      if (originGrid) {
-        ctx.translate(originGrid.gx * view.scale, originGrid.gy * view.scale);
-        if (tf.yaw) ctx.rotate(-tf.yaw);
-        const localGx = (layer.info.origin.x / mapStore.info.resolution) * view.scale;
-        const localGy = (-(maxY / mapStore.info.resolution)) * view.scale;
-        ctx.drawImage(layer.canvas, localGx, localGy, width, height);
-      }
-    } else {
-      const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
-      if (topLeft) {
-        ctx.drawImage(
-          layer.canvas,
-          topLeft.gx * view.scale,
-          topLeft.gy * view.scale,
-          width,
-          height
-        );
-      }
+  // Global grids use the collaborative frame and need T_world_map for a
+  // robot-local costmap. Both local grid sources (raw SLAM and optimized
+  // robot:<id>) use the selected robot's map frame already.
+  const useRobotTransform = mapStore.viewMode === 'global';
+  const tf = useRobotTransform ? mapStore.status?.transforms[robotId] : undefined;
+  if (tf) {
+    const originGrid = mapStore.viewToGrid(tf.x, tf.y);
+    if (originGrid) {
+      ctx.translate(originGrid.gx * view.scale, originGrid.gy * view.scale);
+      if (tf.yaw) ctx.rotate(-tf.yaw);
+      const localGx = (layer.info.origin.x / mapStore.info.resolution) * view.scale;
+      const localGy = (-(maxY / mapStore.info.resolution)) * view.scale;
+      ctx.drawImage(layer.canvas, localGx, localGy, width, height);
     }
   } else {
     const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
@@ -533,7 +544,6 @@ export function drawRobots(
 
     const isNavActive =
       robot.nav_status === 'active' ||
-      robot.nav_status === 'nav' ||
       robot.mode === 'nav' ||
       Boolean(robot.goal);
 

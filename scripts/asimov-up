@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+# Start Asimov's host-side Unitree bridge and its SwarmDeck Compose services.
+# This runs on the operator workstation and performs the bring-up over SSH.
+
+set -Eeuo pipefail
+
+operator_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "${operator_repo}/deploy/fleet.env"
+
+asimov_host=${DEPLOY_SSH_HOST:-asimov}
+asimov_repo=${DEPLOY_REMOTE_REPO:-/home/unitree/swarmdeck}
+compose_file=${DEPLOY_COMPOSE_FILE:-deploy/compose/docker-compose.robot-asimov.yml}
+robot_id=${DEPLOY_ROBOT_ID:-asimov_0}
+backend_host=${BACKEND_HOST:?BACKEND_HOST must be set}
+backend_port=${BACKEND_PORT:?BACKEND_PORT must be set}
+asimov_workspace=${ASIMOV_WORKSPACE:-/home/unitree/workspaces}
+ros_domain=${ASIMOV_ROS_DOMAIN_ID:-0}
+unitree_iface=${ASIMOV_INTERFACE:-eth0}
+native_ws=${ASIMOV_ROS_WORKSPACE:-/home/unitree/workspaces/unitree_g1_ros2}
+native_log=${ASIMOV_NATIVE_LOG:-/tmp/swarmdeck-asimov-g1-bridge.log}
+native_reset=${ASIMOV_NATIVE_RESET:-yes}
+container_reset=${ASIMOV_CONTAINER_RESET:-yes}
+
+case "$native_reset" in
+  yes|no) ;;
+  *) echo "ASIMOV_NATIVE_RESET must be yes or no (got '$native_reset')" >&2; exit 2 ;;
+esac
+case "$container_reset" in
+  yes|no) ;;
+  *) echo "ASIMOV_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2; exit 2 ;;
+esac
+
+echo "Starting ${robot_id} on ${asimov_host}..."
+
+ssh \
+  -o ConnectTimeout=8 \
+  -o BatchMode=yes \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  "$asimov_host" bash --noprofile --norc -s -- \
+  "$asimov_repo" \
+  "$compose_file" \
+  "$robot_id" \
+  "$backend_host" \
+  "$backend_port" \
+  "$asimov_workspace" \
+  "$ros_domain" \
+  "$unitree_iface" \
+  "$native_ws" \
+  "$native_log" \
+  "$native_reset" \
+  "$container_reset" <<'REMOTE_SCRIPT'
+set -Eeuo pipefail
+
+repo=$1
+compose_file=$2
+robot_id=$3
+backend_host=$4
+backend_port=$5
+asimov_workspace=$6
+ros_domain=$7
+unitree_iface=$8
+native_ws=$9
+native_log=${10}
+native_reset=${11:-yes}
+container_reset=${12:-yes}
+
+native_pid_file="${repo}/.deploy/asimov-native.pid"
+odom_pid_file="${repo}/.deploy/asimov-odom.pid"
+odom_log="${native_log%.log}-odom.log"
+mkdir -p "${repo}/.deploy"
+
+# The bridge package is installed on Asimov in a Foxy workspace. Nounset has to
+# be disabled only while sourcing ROS setup hooks; the rest of this script stays
+# strict so a partial bring-up cannot be reported as ready.
+set +u
+source /opt/ros/foxy/setup.bash
+source "${native_ws}/install/setup.bash"
+set -u
+export ROS_DOMAIN_ID="${ros_domain}"
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export G1_INTERFACE="${unitree_iface}"
+
+native_pids() {
+  local pid pid_file
+  for pid_file in "${native_pid_file}" "${odom_pid_file}"; do
+    if [[ -r "${pid_file}" ]]; then
+      read -r pid <"${pid_file}" || true
+      if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+        echo "${pid}"
+      fi
+    fi
+  done
+  # Catch a bridge started by hand before this deployment created its pid file.
+  pgrep -f '[r]os2 launch g1_ros2_bridge robot.launch.py' || true
+  pgrep -f '[a]simov_odom_bridge.py' || true
+}
+
+stop_native() {
+  if [[ "${native_reset}" != yes ]]; then
+    echo "Native G1 bridge reset: skipped"
+    return
+  fi
+
+  local -a pids=()
+  mapfile -t pids < <(native_pids | sort -nu)
+  if ((${#pids[@]} == 0)); then
+    echo "Native G1 bridge: not running"
+    rm -f -- "${native_pid_file}"
+    rm -f -- "${odom_pid_file}"
+    return
+  fi
+
+  echo "Stopping native G1 bridge (PIDs: ${pids[*]})..."
+  kill -INT "${pids[@]}" 2>/dev/null || true
+  local attempt
+  for attempt in {1..15}; do
+    mapfile -t pids < <(native_pids | sort -nu)
+    ((${#pids[@]} == 0)) && break
+    sleep 1
+  done
+  if ((${#pids[@]} != 0)); then
+    echo "Native G1 bridge did not stop after SIGINT; sending SIGTERM..." >&2
+    kill -TERM "${pids[@]}" 2>/dev/null || true
+    for attempt in {1..10}; do
+      mapfile -t pids < <(native_pids | sort -nu)
+      ((${#pids[@]} == 0)) && break
+      sleep 1
+    done
+  fi
+  if ((${#pids[@]} != 0)); then
+    echo "Native G1 bridge is still running: ${pids[*]}" >&2
+    return 1
+  fi
+  rm -f -- "${native_pid_file}"
+  rm -f -- "${odom_pid_file}"
+}
+
+start_native() {
+  local -a pids=()
+  mapfile -t pids < <(native_pids | sort -nu)
+  if ((${#pids[@]} != 0)); then
+    echo "Native G1 bridge: already running (PIDs: ${pids[*]})"
+    return
+  fi
+
+  echo "Starting native G1 bridge on ${unitree_iface}..."
+  # The installed odom child listens to rt/sportmodestate, while Asimov's live
+  # state is on rt/odommodestate. SwarmDeck starts its corrected child below,
+  # so keep the incorrect one disabled.
+  nohup bash -c '
+    set +u
+    source /opt/ros/foxy/setup.bash
+    source "$1/install/setup.bash"
+    set -u
+    export ROS_DOMAIN_ID="$2"
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export G1_INTERFACE="$3"
+    exec ros2 launch g1_ros2_bridge robot.launch.py \
+      interface:="$3" \
+      domain_id:="$2" \
+      enable_odom:=false \
+      enable_cmd_vel:=true \
+      enable_loco:=true \
+      enable_description:=true \
+      enable_camera:=false \
+      require_enable:=false \
+      dry_run:=false \
+      quiet:=true
+  ' swarmdeck-asimov-native "${native_ws}" "${ros_domain}" "${unitree_iface}" \
+    >"${native_log}" 2>&1 < /dev/null &
+  local pid=$!
+  echo "${pid}" >"${native_pid_file}"
+  sleep 2
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "Native G1 bridge exited during startup; recent log:" >&2
+    tail -n 60 "${native_log}" >&2 || true
+    return 1
+  fi
+  echo "Native G1 bridge started (log: ${native_log})"
+}
+
+start_odom() {
+  local -a pids=()
+  mapfile -t pids < <(native_pids | sort -nu | while read -r pid; do
+    if tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null | grep -Fq 'asimov_odom_bridge.py'; then
+      echo "${pid}"
+    fi
+  done)
+  if ((${#pids[@]} != 0)); then
+    echo "Asimov odometry bridge: already running (PIDs: ${pids[*]})"
+    return
+  fi
+
+  echo "Starting Asimov odometry bridge on ${unitree_iface}..."
+  nohup bash -c '
+    set +u
+    source /opt/ros/foxy/setup.bash
+    source "$2/install/setup.bash"
+    set -u
+    export ROS_DOMAIN_ID="$3"
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export G1_INTERFACE="$4"
+    exec /usr/bin/python3 "$1/adapters/adapter_ros2/asimov_odom_bridge.py"
+  ' swarmdeck-asimov-odom "${repo}" "${native_ws}" "${ros_domain}" "${unitree_iface}" \
+    >"${odom_log}" 2>&1 < /dev/null &
+  local pid=$!
+  echo "${pid}" >"${odom_pid_file}"
+  sleep 2
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "Asimov odometry bridge exited during startup; recent log:" >&2
+    tail -n 60 "${odom_log}" >&2 || true
+    return 1
+  fi
+  echo "Asimov odometry bridge started (log: ${odom_log})"
+}
+
+compose=(docker compose --project-name swarmdeck)
+if [[ -f "${repo}/.deploy/asimov.env" ]]; then
+  compose+=(--env-file "${repo}/.deploy/asimov.env")
+else
+  export ROBOT_REPO="${repo}"
+  export BACKEND_HOST="${backend_host}"
+  export BACKEND_PORT="${backend_port}"
+  export ASIMOV_WORKSPACE="${asimov_workspace}"
+  export ASIMOV_ROS_DOMAIN_ID="${ros_domain}"
+fi
+compose+=(--file "${repo}/${compose_file}")
+
+stop_native
+
+echo "Validating Asimov Compose configuration..."
+"${compose[@]}" config --quiet
+if [[ "${container_reset}" == yes ]]; then
+  echo "Resetting Asimov containers..."
+  "${compose[@]}" --profile '*' down --remove-orphans
+else
+  echo "Asimov container reset: skipped"
+fi
+echo "Starting Asimov containers..."
+"${compose[@]}" up -d --force-recreate --remove-orphans
+
+start_native
+start_odom
+
+require_service() {
+  local service=$1 label=$2 attempt
+  for attempt in {1..30}; do
+    if ros2 service list 2>/dev/null | grep -Fq "${service}"; then
+      echo "${label}: available"
+      return
+    fi
+    sleep 1
+  done
+  echo "${label}: service ${service} is unavailable" >&2
+  tail -n 60 "${native_log}" >&2 || true
+  return 1
+}
+
+require_topic() {
+  local topic=$1 label=$2
+  local sample
+  sample="$(timeout 8s ros2 topic echo "${topic}" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${sample}" ]]; then
+    echo "${label}: receiving data"
+    return
+  fi
+  echo "${label}: no data received on ${topic}" >&2
+  return 1
+}
+
+require_cmd_vel_subscriber() {
+  local attempt info
+  for attempt in {1..30}; do
+    # Foxy's `ros2 topic info` reports endpoint counts but not endpoint names;
+    # node info is the portable way to prove the actual G1 subscriber is there.
+    info="$(ros2 node info /g1_cmd_vel_bridge 2>/dev/null || true)"
+    if grep -Fq '/cmd_vel: geometry_msgs/msg/Twist' <<<"${info}"; then
+      echo "G1 /cmd_vel bridge: subscribed"
+      return
+    fi
+    sleep 1
+  done
+  echo "G1 /cmd_vel bridge did not subscribe to /cmd_vel" >&2
+  return 1
+}
+
+require_rtsp_stream() {
+  local rtsp_url="rtsp://${backend_host}:${MEDIA_RTSP_PORT:-8554}/${robot_id}"
+  local probe
+  probe="$(docker exec swarmdeck-asimov-media timeout 8s \
+    gst-launch-1.0 -v \
+    rtspsrc location="${rtsp_url}" protocols=tcp latency=0 \
+    ! rtph264depay ! fakesink sync=false 2>&1 || true)"
+  if grep -Fq 'Sent PLAY request' <<<"${probe}" &&
+     grep -Fq 'video/x-h264' <<<"${probe}"; then
+    echo "MediaMTX RTSP: ${robot_id} H.264 stream is readable"
+    return
+  fi
+  echo "MediaMTX RTSP: ${robot_id} stream is not readable at ${rtsp_url}" >&2
+  echo "${probe}" | tail -n 30 >&2
+  return 1
+}
+
+require_backend_registration() {
+  local attempt
+  for attempt in {1..30}; do
+    if python3 - "${backend_host}" "${backend_port}" "${robot_id}" <<'PY'
+import json
+import sys
+import urllib.request
+
+host, port, expected = sys.argv[1:]
+try:
+    with urllib.request.urlopen(f"http://{host}:{port}/api/fleet", timeout=4) as response:
+        payload = json.load(response)
+except Exception:
+    raise SystemExit(1)
+robots = payload.get("robots") if isinstance(payload, dict) else []
+if not isinstance(robots, list):
+    raise SystemExit(1)
+if not any(
+    isinstance(robot, dict)
+    and robot.get("robot_id") == expected
+    and robot.get("online") is True
+    for robot in robots
+):
+    raise SystemExit(1)
+PY
+    then
+      echo "SwarmDeck backend: ${robot_id} registered and reporting live state"
+      return
+    fi
+    sleep 2
+  done
+  echo "SwarmDeck backend did not report ${robot_id} online at http://${backend_host}:${backend_port}/api/fleet" >&2
+  return 1
+}
+
+require_service /g1_loco_bridge/start "G1 locomotion services"
+require_service /g1_loco_bridge/damp "G1 damping service"
+require_cmd_vel_subscriber
+require_topic /odom "G1 odometry"
+require_topic /joint_states "G1 joint state"
+require_rtsp_stream
+require_backend_registration
+
+"${compose[@]}" --profile '*' ps --all
+echo "${robot_id}: ready"
+REMOTE_SCRIPT

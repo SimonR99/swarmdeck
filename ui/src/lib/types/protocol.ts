@@ -18,18 +18,12 @@ export type Capability =
   | 'network'
   | 'estop'
   | 'reset'
-  | 'explore'
   | 'body';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 // `recover` is the adapter reversing a robot out of a pose Nav2 could not plan
 // from. It moves on its own, briefly and without an operator command, so it has
 // to be a mode the GUI can name rather than an unexplained lurch.
-//
-// `explore` is the same argument for the reactive bootstrap: the robot is
-// driving itself, and an operator who sees IDLE next to a moving robot has been
-// told something false. Only a robot that would otherwise be idle reports it,
-// so a robot under an operator goal still reads as navigating.
-export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover' | 'explore';
+export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover';
 export type AlertLevel = 'info' | 'warn' | 'critical';
 
 export interface Pose {
@@ -300,6 +294,31 @@ export interface MapStatus {
   cslam_disagreement?: Record<string, CslamDisagreement>;
 }
 
+/** Merge knobs the Swarm SLAM panel can change without a restart. */
+export interface SlamOperatorSettings {
+  registration_mode?: string;
+  allow_inter_robot: boolean;
+  min_support: number;
+  min_inter_robot_connections: number;
+  min_inter_robot_separation_m: number;
+  max_contiguous_gap_s: number;
+  min_temporal_registration_score: number;
+  odom_hint_weight: number;
+}
+
+export interface SlamBackendStatus {
+  keyframes?: number;
+  queued?: number;
+  dropped?: number;
+  ingested?: number;
+  dirty?: boolean;
+  last_error?: string;
+  has_snapshot?: boolean;
+  components?: { id: number; robots: string[] }[];
+  accepted_closures?: number;
+  inter_robot_closures?: number;
+}
+
 /**
  * What an operator may decide about a robot. Deliberately short: the adapter
  * declares what it is and where it came from at `hello`, so anything the robot
@@ -436,9 +455,7 @@ export type ClientMessage =
   | { type: 'report_target'; robot_id: string; payload: Point }
   | { type: 'stop_all' }
   | { type: 'reset_sim' }
-  | { type: 'start_explore' }
-  | { type: 'stop_explore' }
-  | { type: 'body_command'; robot_id: string; action: 'claim' | 'release' | 'sit' | 'stand' }
+  | { type: 'body_command'; robot_id: string; action: string }
   | { type: 'detection_accept'; proposal_id: string }
   | { type: 'detection_ignore'; proposal_id: string }
   | { type: 'detection_merge'; proposal_id: string; entity_id: string }

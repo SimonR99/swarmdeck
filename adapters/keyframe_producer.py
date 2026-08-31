@@ -56,6 +56,9 @@ except ImportError:
 DEFAULT_VOXEL_M = float(os.environ.get("SWARMDECK_KEYFRAME_VOXEL_M", "0.05"))
 DEFAULT_MIN_TRANSLATION_M = 0.5
 DEFAULT_MIN_YAW_RAD = math.radians(15.0)
+DEFAULT_MIN_SCAN_CHANGE_M = float(
+    os.environ.get("SWARMDECK_KEYFRAME_MIN_SCAN_CHANGE_M", "0.25")
+)
 DEFAULT_MIN_PERIOD_S = 2.0
 DEFAULT_QUEUE = 2
 DEFAULT_TIMEOUT_S = 2.0
@@ -216,6 +219,36 @@ def _moved(
     return dyaw >= min_yaw
 
 
+def _scan_signature(points_base: np.ndarray, sectors: int = 60) -> np.ndarray:
+    """Compact, rotation-sensitive body-frame signature for capture gating."""
+    points = np.asarray(points_base, dtype=np.float64)
+    radius = np.linalg.norm(points[:, :2], axis=1)
+    finite = np.isfinite(radius) & (radius > 0.05)
+    signature = np.full(sectors, np.nan, dtype=np.float32)
+    if not np.any(finite):
+        return signature
+    angles = np.arctan2(points[finite, 1], points[finite, 0])
+    bins = np.floor((angles + math.pi) * sectors / (2.0 * math.pi)).astype(int)
+    bins = np.clip(bins, 0, sectors - 1)
+    values = np.full(sectors, np.inf, dtype=np.float64)
+    np.minimum.at(values, bins, radius[finite])
+    observed = np.isfinite(values)
+    signature[observed] = values[observed].astype(np.float32)
+    return signature
+
+
+def _scan_changed(previous: np.ndarray, current: np.ndarray, threshold_m: float) -> bool:
+    """Return whether common angular sectors changed enough to keep a scan."""
+    if threshold_m <= 0.0:
+        return False
+    common = np.isfinite(previous) & np.isfinite(current)
+    if int(np.count_nonzero(common)) < max(8, previous.size // 5):
+        # A large visibility-set change is itself useful geometric novelty.
+        return not np.array_equal(np.isfinite(previous), np.isfinite(current))
+    residual = np.minimum(np.abs(previous[common] - current[common]), 2.0)
+    return float(np.sqrt(np.mean(residual * residual))) >= threshold_m
+
+
 def mint_session() -> str:
     """A fresh boot id for one adapter process.
 
@@ -300,6 +333,7 @@ class KeyframeUploader:
         voxel_m: float = DEFAULT_VOXEL_M,
         min_translation_m: float = DEFAULT_MIN_TRANSLATION_M,
         min_yaw_rad: float = DEFAULT_MIN_YAW_RAD,
+        min_scan_change_m: float = DEFAULT_MIN_SCAN_CHANGE_M,
         min_period_s: float = DEFAULT_MIN_PERIOD_S,
         queue_size: int = DEFAULT_QUEUE,
         timeout_s: float = DEFAULT_TIMEOUT_S,
@@ -318,6 +352,7 @@ class KeyframeUploader:
         self.voxel_m = voxel_m
         self.min_translation_m = min_translation_m
         self.min_yaw_rad = min_yaw_rad
+        self.min_scan_change_m = min_scan_change_m
         self.min_period_s = min_period_s
         self.timeout_s = timeout_s
         self.min_points = min_points
@@ -327,6 +362,7 @@ class KeyframeUploader:
         self._lock = threading.Lock()
         self._seq = 0
         self._last_pose: np.ndarray | None = None
+        self._last_scan_signature: np.ndarray | None = None
         self._last_at = 0.0
         self.dropped = 0
         self.sent = 0
@@ -355,10 +391,6 @@ class KeyframeUploader:
         if self._last_pose is not None:
             if now - self._last_at < self.min_period_s:
                 return False
-            if not _moved(
-                self._last_pose, pose, self.min_translation_m, self.min_yaw_rad
-            ):
-                return False
         pts = np.asarray(points_map)
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < self.min_points:
             return False
@@ -368,6 +400,28 @@ class KeyframeUploader:
             return False
         if base_points.shape[0] < self.min_points:
             return False
+        signature = _scan_signature(base_points)
+        if self._last_pose is not None:
+            moved = _moved(
+                self._last_pose, pose, self.min_translation_m, self.min_yaw_rad
+            )
+            scan_changed = (
+                self._last_scan_signature is not None
+                and _scan_changed(
+                    self._last_scan_signature, signature, self.min_scan_change_m
+                )
+            )
+            # A SLAM loop closure can move both the reported map pose and the
+            # map-frame cloud by metres while the robot is physically still.
+            # Body-frame scan novelty is invariant to that gauge correction,
+            # and also works when low-quality odometry reports no motion.  A
+            # caller can set the threshold to zero to recover the legacy pose
+            # gate for sensors whose scans cannot provide a stable signature.
+            if self.min_scan_change_m > 0.0:
+                if not scan_changed:
+                    return False
+            elif not moved:
+                return False
 
         # The wire cloud is in the base frame at capture. Carry the floor plane
         # in that same frame so the renderer can apply the physical band per
@@ -404,6 +458,7 @@ class KeyframeUploader:
                 self.dropped += 1
             self._queue.append(blob)
             self._last_pose = pose
+            self._last_scan_signature = signature
             self._last_at = now
         return True
 

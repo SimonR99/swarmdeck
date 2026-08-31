@@ -77,14 +77,30 @@ services:
       - "http://server:8080"
     environment:
       SWARMDECK_SERVER_URL: http://server:8080
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
       # Set to a path under /app/sessions to record every accepted keyframe for
       # offline replay (slam/tools/replay.py). Empty disables capture, which is
       # the normal state: a long run writes one file per keyframe.
       SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
+      # Hardware validation on the 2026-08-31 Botman/Aslan session showed that
+      # the odometry-free reconstructor split 85 keyframes into 27 fragments
+      # and published a non-planar Aslan frame.  The graph solver kept all 85
+      # keyframes in one component while moving either onboard trajectory by
+      # at most 2.1 cm.  Preserve the robot SLAM trajectories and optimize only
+      # their verified closure residuals by default.
+      SWARMDECK_SLAM_REGISTRATION_MODE: "${SWARMDECK_SLAM_REGISTRATION_MODE:-graph}"
+      SWARMDECK_SLAM_ANCHOR_ROBOT: "${SWARMDECK_SLAM_ANCHOR_ROBOT:-}"
+      # Opt-in replay for production captures.  A deployment can point both
+      # variables at one durable session directory and restart without losing
+      # the in-memory graph.  Empty capture remains the normal simulation
+      # default, so old datasets are never replayed accidentally.
+      SWARMDECK_SLAM_RESTORE_CAPTURE: "${SWARMDECK_SLAM_RESTORE_CAPTURE:-false}"
+      SWARMDECK_SLAM_QUEUE_CAP: "${SWARMDECK_SLAM_QUEUE_CAP:-2048}"
     volumes:
       # Datasets land beside the session recordings, on the host, so a capture
       # survives the container it was made in.
       - ../../sessions:/app/sessions
+      - ../../configs:/app/configs:ro
     ports:
       - "8090:8090"
     depends_on:
@@ -315,6 +331,14 @@ services:
       # operator. Without this nothing drives, and goals issued against an empty
       # map jam robots into walls where wheel slip destroys their odometry.
       EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
+      # Coordinated performs one bounded common-observation leg, then allocates
+      # non-overlapping frontier goals jointly. `reactive` is the legacy A/B.
+      EXPLORE_STRATEGY: "${EXPLORE_STRATEGY:-coordinated}"
+      # Evaluation-only truth recorder. When omitted during a keyframe capture,
+      # the entrypoint writes ground_truth.csv beside those keyframes. Nothing
+      # in the adapter, planner, or SLAM service receives this path or topic.
+      SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
+      SWARMDECK_GROUND_TRUTH_PATH: "${SWARMDECK_GROUND_TRUTH_PATH:-}"
       # Keyframe production budget, per robot. Voxel matches the 0.05 m grid so
       # the render is not coarser than the cells it fills; the yaw gate drops
       # captures taken mid-turn, whose clouds are motion-skewed. Both are
@@ -327,6 +351,10 @@ services:
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
+      VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-700}"
+      VIDEO_FPS: "${VIDEO_FPS:-10}"
+      VIDEO_WIDTH: "${VIDEO_WIDTH:-640}"
+      VIDEO_HEIGHT: "${VIDEO_HEIGHT:-480}"
     volumes:
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro

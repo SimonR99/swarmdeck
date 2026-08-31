@@ -48,6 +48,15 @@ def test_alignment_hypotheses_keeps_distinct_rotation_modes() -> None:
     assert hypotheses[0][1] == pytest.approx(best_alignment(descriptor, descriptor)[1])
 
 
+def test_alignment_hypotheses_keeps_antipode_when_greedy_is_clustered() -> None:
+    descriptor = np.zeros((2, 12), dtype=np.uint8)
+    descriptor[:, 0] = 200
+    hypotheses = alignment_hypotheses(
+        descriptor, descriptor, count=3, min_separation_sectors=2
+    )
+    assert 6 in [shift for shift, _ in hypotheses]
+
+
 # --------------------------------------------------------------------------- #
 # Yaw recovery
 # --------------------------------------------------------------------------- #
@@ -344,6 +353,7 @@ def test_ring_key_is_invariant_to_sector_rotation() -> None:
     )
     rolled = np.roll(descriptor, shift=17, axis=1)
     assert np.allclose(ring_key(descriptor), ring_key(rolled))
+    assert np.isclose(np.linalg.norm(ring_key(descriptor)), 1.0)
 
 
 # --------------------------------------------------------------------------- #

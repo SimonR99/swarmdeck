@@ -24,6 +24,7 @@ import urllib.request
 import zlib
 from collections import deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,12 +40,13 @@ from swarmdeck_protocol import (
 from swarmdeck_slam.backend import (
     BackendSnapshot,
     CollaborativeBackend,
+    operator_setting_defaults,
     majority_component,
     scoped_grids,
     snapshot_update,
 )
 from swarmdeck_slam.render import RenderConfig
-from swarmdeck_slam.types import TrajectoryId
+from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz
 
 # Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
 # dump of every point. With a single-ring lidar the distinction is invisible --
@@ -60,17 +62,85 @@ from swarmdeck_slam.types import TrajectoryId
 # the values below are only the compatibility fallback for old packets or a
 # profile without floor calibration. The environment variables remain useful
 # when replaying such legacy captures.
+REGISTRATION_MODE = os.environ.get("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
+ANCHOR_ROBOT = os.environ.get("SWARMDECK_SLAM_ANCHOR_ROBOT", "").strip() or None
 RENDER = RenderConfig(
     floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "0.0")),
     min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.15")),
     max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "1.80")),
+    odometry_as_pose=REGISTRATION_MODE != "odom_free",
+    close_occupied=1,
+    hit_weight=8,
+    peer_exclusion_radius_m=float(
+        os.environ.get("SWARMDECK_SLAM_PEER_EXCLUSION_RADIUS_M", "0.80")
+    ),
+    peer_exclusion_max_dt_s=float(
+        os.environ.get("SWARMDECK_SLAM_PEER_EXCLUSION_MAX_DT_S", "2.0")
+    ),
+    peer_exclusion_max_interp_gap_s=float(
+        os.environ.get("SWARMDECK_SLAM_PEER_EXCLUSION_MAX_INTERP_GAP_S", "15.0")
+    ),
 )
 
-backend = CollaborativeBackend(render=RENDER)
+# gtsam tangent order: rx, ry, rz, tx, ty, tz. Tight enough that a working
+# onboard SLAM trajectory stays rigid; loose enough that a genuine residual
+# of a few centimetres can still be absorbed.
+_POSE_PRIOR_SIGMAS = np.array([0.05, 0.05, 0.05, 0.10, 0.10, 0.15])
+
+
+def _start_pose_hints(path: str) -> dict[str, np.ndarray] | None:
+    """Read ``map.start_poses`` from the session yaml, if present.
+
+    These are Gazebo spawn poses or surveyed first-observation poses. Graph
+    mode uses them as ``T_world_map`` so onboard maps overlay in the world
+    frame. Odometry-free mode uses them only to choose between already-valid
+    symmetric geometric modes and to rigidly gauge each connected component;
+    they never pin individual keyframes. The field may be empty when hardware
+    starts are unknown.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    import math
+    import re
+
+    matches = re.findall(
+        r"(robot_\w+):\s*\{x:\s*([-\d.e]+),\s*y:\s*([-\d.e]+),\s*yaw:\s*([-\d.e]+)\}",
+        text,
+    )
+    if not matches:
+        return None
+    hints = {}
+    for robot_id, x, y, yaw in matches:
+        yaw_f = float(yaw)
+        hints[robot_id] = se3_from_quat_xyz(
+            [
+                float(x),
+                float(y),
+                0.0,
+                0.0,
+                0.0,
+                math.sin(yaw_f / 2.0),
+                math.cos(yaw_f / 2.0),
+            ]
+        )
+    return hints or None
+
+
+backend = CollaborativeBackend(
+    render=RENDER,
+    registration_mode=REGISTRATION_MODE,
+    pose_prior_sigmas=_POSE_PRIOR_SIGMAS if REGISTRATION_MODE == "graph" else None,
+    anchor_robot_id=ANCHOR_ROBOT,
+    t_world_map_hint=_start_pose_hints(os.environ.get("SWARMDECK_CONFIG", "")),
+)
 
 _queue: deque[bytes] = deque()
 _queue_lock = threading.Lock()
-_queue_cap = 64
+_queue_cap = int(os.environ.get("SWARMDECK_SLAM_QUEUE_CAP", "2048"))
 _dropped = 0
 _ingested = 0
 _last_error = ""
@@ -93,10 +163,17 @@ _worker: threading.Thread | None = None
 # Never let capture break ingestion: a full disk must cost a dataset, not the
 # live map.
 CAPTURE_DIR = os.environ.get("SWARMDECK_SLAM_CAPTURE_DIR", "")
+RESTORE_CAPTURE = os.environ.get("SWARMDECK_SLAM_RESTORE_CAPTURE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 #: -1 until the first capture, when it resumes past whatever is already on disk.
 _capture_seq = -1
 _capture_lock = threading.Lock()
 _capture_failed = False
+_restored = 0
 
 
 def _resume_capture_index(directory: str) -> int:
@@ -139,6 +216,47 @@ def _capture(blob: bytes) -> None:
     except OSError as exc:
         _capture_failed = True
         _last_error = f"keyframe capture disabled: {exc}"
+
+
+def _restore_capture() -> int:
+    """Rebuild the in-memory graph from an explicitly selected capture.
+
+    Keyframes are captured before entering the bounded live queue, so this is
+    the durable source of truth after a planned container replacement.  Replay
+    directly into the backend rather than POSTing the blobs: POST would append
+    a second copy of every file to the same capture and grow it on each boot.
+
+    Restoration is opt-in.  Capture directories are also used for offline
+    experiments, and silently adopting yesterday's dataset into a fresh
+    simulation would be much worse than starting empty.
+    """
+    global _ingested, _last_error, _restored
+    if not RESTORE_CAPTURE or not CAPTURE_DIR:
+        return 0
+    directory = Path(CAPTURE_DIR) / "keyframes"
+    try:
+        paths = sorted(directory.glob("*.kf"))
+    except OSError as exc:
+        _last_error = f"capture restore disabled: {exc}"
+        return 0
+
+    restored = 0
+    failures: list[str] = []
+    for path in paths:
+        try:
+            accepted = backend.ingest_packet(decode_keyframe(path.read_bytes()))
+        except (OSError, ProtocolError, ValueError) as exc:
+            failures.append(f"{path.name}: {exc}")
+            continue
+        if accepted:
+            restored += 1
+    _restored += restored
+    _ingested += restored
+    if failures:
+        preview = "; ".join(failures[:3])
+        suffix = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+        _last_error = f"capture restore skipped {len(failures)} file(s): {preview}{suffix}"
+    return restored
 
 
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "").rstrip("/")
@@ -284,6 +402,7 @@ def _worker_loop() -> None:
 async def lifespan(_: FastAPI):
     global _worker
     _stop.clear()
+    _restore_capture()
     _worker = threading.Thread(target=_worker_loop, name="slam-worker", daemon=True)
     _worker.start()
     try:
@@ -311,7 +430,12 @@ def status() -> dict[str, Any]:
         "queued": _queued(),
         "dropped": _dropped,
         "ingested": _ingested,
+        "restored": _restored,
         "dirty": backend.dirty,
+        "registration_mode": backend.registration_mode,
+        "anchor_robot": backend.anchor_robot_id,
+        "capture_dir": CAPTURE_DIR,
+        "restore_capture": RESTORE_CAPTURE,
         "last_error": _last_error,
         "has_snapshot": snapshot is not None,
         "components": (
@@ -339,6 +463,29 @@ def status() -> dict[str, Any]:
         ],
         "server_url": SERVER_URL,
     }
+
+
+@app.get("/config")
+def get_config() -> dict[str, Any]:
+    """Operator merge knobs. Safe to poll from the dashboard."""
+    return {
+        "ok": True,
+        "settings": backend.operator_settings(),
+        "defaults": operator_setting_defaults(),
+    }
+
+
+@app.put("/config")
+async def put_config(request: Request) -> Any:
+    """Apply merge knobs. The worker re-solves on its next pass."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "JSON object required"}, status_code=400)
+    settings = backend.apply_operator_settings(payload)
+    return {"ok": True, "settings": settings, "defaults": operator_setting_defaults()}
 
 
 @app.post("/trajectories/select")
@@ -442,9 +589,10 @@ def post_reset() -> dict[str, Any]:
     with _queue_lock:
         _queue.clear()
     backend.reset()
-    global _last_snapshot, _ingested, _dropped, _last_error
+    global _last_snapshot, _ingested, _dropped, _last_error, _restored
     _last_snapshot = None
     _ingested = 0
+    _restored = 0
     _dropped = 0
     _last_error = ""
     return {"ok": True}

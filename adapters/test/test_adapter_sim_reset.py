@@ -1,16 +1,10 @@
 """The simulation reset: what it calls, in what order, and what it refuses to do.
 
-Everything here runs without ROS, ARGoS or Gazebo. What cannot be checked that
-way — that the simulator really does return the robots to spawn, that
-slam_toolbox really does drop its graph — is a live test, and these cover the
-parts that decide whether the live test can succeed at all: the request shape,
-the ordering, and the caching rules that stop a cleared map coming straight
-back.
-
-The two backends reset differently, so every test that exercises a backend says
-which one it is running as. `SIM_BACKEND` is read from the environment at
-import, and a test that forgets to pin it is a test that changes meaning when
-the default changes.
+Everything here runs without ROS or Gazebo. What cannot be checked that way — that
+Gazebo really does return the models to spawn, that slam_toolbox really does drop
+its graph — is a live test, and these cover the parts that decide whether the live
+test can succeed at all: the request shape, the ordering, and the caching rules
+that stop a cleared map coming straight back.
 """
 
 from __future__ import annotations
@@ -27,24 +21,8 @@ import pytest
 @pytest.fixture
 def sim(sim_module):
     """adapter_sim with its fleet-wide reset state returned to a known start."""
-    sim_module._world_name = None
-    sim_module._world_reset_at = 0.0
-    sim_module.CSLAM_GRID.clear()
-    sim_module.SLAM_GRAPHS.clear()
+    sim_module.reset_module_state()
     return sim_module
-
-
-@pytest.fixture
-def gazebo(sim, monkeypatch):
-    """Run the legacy backend's reset path, whatever the default is."""
-    monkeypatch.setattr(sim, "SIM_BACKEND", "gazebo")
-    return sim
-
-
-@pytest.fixture
-def argos(sim, monkeypatch):
-    monkeypatch.setattr(sim, "SIM_BACKEND", "argos")
-    return sim
 
 
 GZ_SERVICE_LISTING = """
@@ -60,7 +38,9 @@ def fake_run(recorder, stdout="data: true\n", stderr=""):
     def run(cmd, **kwargs):
         recorder.append(cmd)
         if cmd[:3] == ["gz", "service", "-l"]:
-            return types.SimpleNamespace(stdout=GZ_SERVICE_LISTING, stderr="", returncode=0)
+            return types.SimpleNamespace(
+                stdout=GZ_SERVICE_LISTING, stderr="", returncode=0
+            )
         return types.SimpleNamespace(stdout=stdout, stderr=stderr, returncode=0)
 
     return run
@@ -76,26 +56,29 @@ def test_world_name_ignores_the_playback_control_service(sim, monkeypatch):
 
 
 def test_world_name_is_absent_rather_than_guessed(sim, monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(
-        stdout="/gazebo/resource_paths/get\n", stderr="", returncode=0
-    ))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: types.SimpleNamespace(
+            stdout="/gazebo/resource_paths/get\n", stderr="", returncode=0
+        ),
+    )
     assert sim._gz_world_name(MagicMock()) is None
 
 
 # ---------------------------------------------------------------- world reset
 
 
-def test_world_reset_asks_for_models_only_and_never_the_clock(gazebo, monkeypatch):
+def test_world_reset_asks_for_models_only_and_never_the_clock(sim, monkeypatch):
     """`all` would reset simulation time, and every node here runs on sim time.
 
     A /clock that jumps backwards invalidates the tf2 buffers, the Nav2 lifecycle
     timers and SLAM's scan queue at once. Only the poses are meant to go back.
     """
-    sim = gazebo
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_run(calls))
 
-    assert sim.reset_world(make_bridge(sim)) is True
+    assert sim.reset_world(MagicMock()) is True
 
     request = next(c for c in calls if "--req" in c)
     payload = request[request.index("--req") + 1]
@@ -105,19 +88,18 @@ def test_world_reset_asks_for_models_only_and_never_the_clock(gazebo, monkeypatc
     assert "/world/swarmdeck_indoor/control" in request
 
 
-def test_world_reset_is_coalesced_across_the_fleet(gazebo, monkeypatch):
+def test_world_reset_is_coalesced_across_the_fleet(sim, monkeypatch):
     """The protocol addresses one robot at a time; there is only one world."""
-    sim = gazebo
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_run(calls))
 
-    assert all(sim.reset_world(make_bridge(sim)) for _ in range(4))
+    assert all(sim.reset_world(MagicMock()) for _ in range(4))
 
     resets = [c for c in calls if "--req" in c]
     assert len(resets) == 1, f"world reset issued {len(resets)} times for one fleet"
 
 
-def test_world_reset_detects_a_timeout_that_exits_zero(gazebo, monkeypatch):
+def test_world_reset_detects_a_timeout_that_exits_zero(sim, monkeypatch):
     """`gz service` exits 0 whether the world answered or the call timed out.
 
     Verified against the running stack: a good call prints `data: true`, a call to
@@ -125,130 +107,35 @@ def test_world_reset_detects_a_timeout_that_exits_zero(gazebo, monkeypatch):
     The reply body is the only evidence, so trusting the exit code would report
     every failed reset as a success.
     """
-    sim = gazebo
     monkeypatch.setattr(
         subprocess, "run", fake_run([], stdout="Service call timed out\n")
     )
-    assert sim.reset_world(make_bridge(sim)) is False
+    assert sim.reset_world(MagicMock()) is False
 
 
-def test_a_failed_world_reset_is_not_remembered_as_done(gazebo, monkeypatch):
+def test_a_failed_world_reset_is_not_remembered_as_done(sim, monkeypatch):
     """Otherwise the coalescing window would suppress the retry."""
-    sim = gazebo
     monkeypatch.setattr(
         subprocess, "run", fake_run([], stdout="Service call timed out\n")
     )
-    assert sim.reset_world(make_bridge(sim)) is False
+    assert sim.reset_world(MagicMock()) is False
 
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_run(calls))
-    assert sim.reset_world(make_bridge(sim)) is True
+    assert sim.reset_world(MagicMock()) is True
     assert any("--req" in c for c in calls)
 
 
-def test_world_reset_drops_the_collaborative_grid(gazebo, monkeypatch):
+def test_world_reset_drops_the_collaborative_grid(sim, monkeypatch):
     """It describes the world that was just reset."""
-    sim = gazebo
     monkeypatch.setattr(subprocess, "run", fake_run([]))
     sim.CSLAM_GRID.update({"grid": object(), "dirty": True})
     sim.SLAM_GRAPHS["robot_0"] = {"keyframes": 40}
 
-    sim.reset_world(make_bridge(sim))
+    sim.reset_world(MagicMock())
 
     assert sim.CSLAM_GRID == {}
     assert sim.SLAM_GRAPHS == {}
-
-
-# ------------------------------------------------------- world reset (ARGoS)
-
-
-def test_argos_world_reset_is_one_service_call_and_never_shells_out(argos,
-                                                                    monkeypatch):
-    """The ARGoS bridge owns the entities, so a Trigger does the whole job.
-
-    There is no `gz` binary in the ARGoS image and no world name to discover.
-    Shelling out would not fail loudly either: `subprocess.run` on a missing
-    binary raises, gets caught, and the reset reports `world: false` with no
-    hint that the adapter is talking to the wrong simulator.
-    """
-    bridge = make_bridge(argos)
-    shelled: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", fake_run(shelled))
-    called = {}
-
-    def record(name, srv_type, request, **kw):
-        called["name"] = name
-        return True
-
-    bridge._call = record
-
-    assert argos.reset_world(bridge) is True
-    assert called["name"] == "/swarmdeck_sim/reset_world"
-    assert shelled == []
-
-
-def test_argos_world_reset_is_coalesced_across_the_fleet(argos):
-    """Four robots resetting together ask the simulator once."""
-    calls: list[str] = []
-
-    def make(rid):
-        bridge = make_bridge(argos)
-        bridge.id = rid
-        bridge._call = lambda name, *a, **kw: calls.append(name) is None or True
-        return bridge
-
-    assert all(argos.reset_world(make(f"robot_{i}")) for i in range(4))
-    assert calls == ["/swarmdeck_sim/reset_world"]
-
-
-def test_a_failed_argos_world_reset_is_not_remembered_as_done(argos):
-    """A refused reset must not suppress the next robot's attempt."""
-    bridge = make_bridge(argos)
-    answers = iter([False, True])
-    bridge._call = lambda *a, **kw: next(answers)
-
-    assert argos.reset_world(bridge) is False
-    assert argos.reset_world(bridge) is True
-
-
-def test_argos_world_reset_drops_the_collaborative_grid(argos):
-    """The merged grid describes the world that was just reset."""
-    argos.CSLAM_GRID["component:0"] = object()
-    argos.SLAM_GRAPHS["robot_0"] = object()
-    bridge = make_bridge(argos)
-    bridge._call = lambda *a, **kw: True
-
-    assert argos.reset_world(bridge) is True
-    assert argos.CSLAM_GRID == {}
-    assert argos.SLAM_GRAPHS == {}
-
-
-def test_argos_does_not_teleport_a_second_time(argos, monkeypatch):
-    """The bridge's world reset already put every robot back.
-
-    A second teleport would land a tick or two later and re-apply exactly the
-    velocity transient WORLD_SETTLE_S exists to let pass.
-    """
-    bridge = make_bridge(argos)
-    shelled: list[list[str]] = []
-    monkeypatch.setattr(subprocess, "run", fake_run(shelled))
-    bridge._call = lambda *a, **kw: pytest.fail("no service call expected")
-
-    assert bridge._reset_pose() is True
-    assert shelled == []
-
-
-def test_argos_has_no_filter_to_re_zero(argos):
-    """Ultra-Fusion runs outside ARGoS and has no reset input.
-
-    Faking a re-zero here would put a step in `odom` that the estimator does
-    not know about, and SLAM would integrate it as motion. The offset is
-    absorbed by the SLAM reset in the following step instead.
-    """
-    bridge = make_bridge(argos)
-    bridge._call = lambda *a, **kw: pytest.fail("no service call expected")
-
-    assert bridge._reset_odometry() is True
 
 
 # --------------------------------------------------------------- robot reset
@@ -272,13 +159,6 @@ def make_bridge(sim):
     bridge.platform = "bunker"
     bridge.robot_type = "agilex_bunker"
     bridge.footprint_radius = 0.643
-    # The chassis rectangle, as hello() reports it to the backend.
-    bridge.footprint = "[[0.51,0.39],[0.51,-0.39],[-0.51,-0.39],[-0.51,0.39]]"
-    # The TF-derived pose state state() reports through map_pose().
-    bridge._map_to_odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-    bridge._odom_to_base = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-    bridge._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-    bridge._warned_no_tf_base = False
     bridge.spawn_z = 0.230
     bridge.goal = {"x": 3.0, "y": 1.0}
     bridge.planned_path = [{"x": 1.0, "y": 1.0}]
@@ -300,7 +180,7 @@ def make_bridge(sim):
 def instrument(sim, bridge, monkeypatch, order):
     monkeypatch.setattr(sim, "WORLD_SETTLE_S", 0.0)
     monkeypatch.setattr(
-        sim, "reset_world", lambda bridge: order.append("world") is None or True
+        sim, "reset_world", lambda logger: order.append("world") is None or True
     )
     monkeypatch.setattr(
         bridge, "_reset_pose", lambda: order.append("pose") is None or True
@@ -333,8 +213,11 @@ def test_reset_moves_the_robot_before_re_zeroing_what_measures_its_movement(
 
     assert order == ["world", "pose", "odometry", "slam", "costmaps"]
     assert steps == {
-        "world": True, "pose": True, "odometry": True,
-        "slam": True, "costmaps": True,
+        "world": True,
+        "pose": True,
+        "odometry": True,
+        "slam": True,
+        "costmaps": True,
     }
 
 
@@ -359,7 +242,7 @@ def test_reset_stops_the_robot_and_drops_every_cached_upload(sim, monkeypatch):
     assert bridge._detections is None
 
 
-def test_the_robot_is_moved_by_set_pose_not_by_the_world_reset(gazebo, monkeypatch):
+def test_the_robot_is_moved_by_set_pose_not_by_the_world_reset(sim, monkeypatch):
     """Regression test for a bug found only by running it against Gazebo.
 
     A world reset restores what the world SDF declared. The fleet is created in
@@ -368,7 +251,6 @@ def test_the_robot_is_moved_by_set_pose_not_by_the_world_reset(gazebo, monkeypat
     live: robot_0 sat at (-2.48, 3.45) before and (-2.51, 3.03) after, which is
     continued driving, not a teleport to its spawn pose at (-9, 0).
     """
-    sim = gazebo
     bridge = make_bridge(sim)
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_run(calls))
@@ -386,8 +268,7 @@ def test_the_robot_is_moved_by_set_pose_not_by_the_world_reset(gazebo, monkeypat
     assert "z: 0.23" in payload
 
 
-def test_set_pose_encodes_yaw_as_a_quaternion(gazebo, monkeypatch):
-    sim = gazebo
+def test_set_pose_encodes_yaw_as_a_quaternion(sim, monkeypatch):
     bridge = make_bridge(sim)
     bridge._start_pose = {"x": 3.0, "y": 0.0, "yaw": math.pi}
     calls: list[list[str]] = []
@@ -401,13 +282,16 @@ def test_set_pose_encodes_yaw_as_a_quaternion(gazebo, monkeypatch):
     assert "w: 0.000000000" in payload
 
 
-def test_a_robot_with_no_configured_start_pose_is_left_where_it_stands(gazebo, monkeypatch):
+def test_a_robot_with_no_configured_start_pose_is_left_where_it_stands(
+    sim, monkeypatch
+):
     """Guessing one would teleport it somewhere it was never spawned."""
-    sim = gazebo
     bridge = make_bridge(sim)
     bridge._start_pose = None
     monkeypatch.setattr(
-        sim.urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("no backend"))
+        sim.urllib.request,
+        "urlopen",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("no backend")),
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(subprocess, "run", fake_run(calls))
@@ -506,7 +390,10 @@ def test_a_service_that_never_answers_is_a_failure_not_a_hang(sim, monkeypatch):
     client.call_async.return_value = future
     bridge.node.create_client.return_value = client
 
-    assert bridge._call("/robot_0/set_pose", MagicMock(), MagicMock(), timeout_s=0.05) is False
+    assert (
+        bridge._call("/robot_0/set_pose", MagicMock(), MagicMock(), timeout_s=0.05)
+        is False
+    )
     future.cancel.assert_called_once()
 
 
@@ -516,7 +403,9 @@ def test_a_missing_service_is_reported_rather_than_waited_on(sim):
     client.wait_for_service.return_value = False
     bridge.node.create_client.return_value = client
 
-    assert bridge._call("/robot_0/nope", MagicMock(), MagicMock(), timeout_s=0.01) is False
+    assert (
+        bridge._call("/robot_0/nope", MagicMock(), MagicMock(), timeout_s=0.01) is False
+    )
     client.call_async.assert_not_called()
 
 
@@ -524,7 +413,9 @@ def test_slam_reset_picks_the_back_end_that_is_actually_running(sim):
     """`slam_backend:=rtabmap` swaps the SLAM node out entirely."""
     bridge = make_bridge(sim)
     called: list[str] = []
-    bridge._call = lambda name, srv_type, request, **kw: called.append(name) is None or True
+    bridge._call = (
+        lambda name, srv_type, request, **kw: called.append(name) is None or True
+    )
     bridge.node.get_service_names_and_types.return_value = [
         ("/robot_0/rtabmap/reset", ["std_srvs/srv/Empty"]),
         ("/robot_0/odom", ["nav_msgs/msg/Odometry"]),
@@ -537,7 +428,9 @@ def test_slam_reset_picks_the_back_end_that_is_actually_running(sim):
 def test_slam_reset_prefers_slam_toolbox_when_both_are_advertised(sim):
     bridge = make_bridge(sim)
     called: list[str] = []
-    bridge._call = lambda name, srv_type, request, **kw: called.append(name) is None or True
+    bridge._call = (
+        lambda name, srv_type, request, **kw: called.append(name) is None or True
+    )
     bridge.node.get_service_names_and_types.return_value = [
         ("/robot_0/rtabmap/reset", ["std_srvs/srv/Empty"]),
         ("/robot_0/slam_toolbox/reset", ["slam_toolbox/srv/Reset"]),
@@ -556,8 +449,7 @@ def test_no_slam_reset_service_is_a_reported_failure(sim):
     bridge.node.get_logger.return_value.warn.assert_called()
 
 
-def test_odometry_reset_targets_the_robot_s_own_odom_frame(gazebo):
-    sim = gazebo
+def test_odometry_reset_targets_the_robot_s_own_odom_frame(sim):
     bridge = make_bridge(sim)
     recorded = {}
 
@@ -684,8 +576,11 @@ def test_the_escape_stops_once_the_robot_has_retreated_far_enough(sim, twist):
     bridge._finish_goal("failed", bridge._goal_generation)
 
     step = sim.ESCAPE_DISTANCE / 2
-    poses = [{"x": -step, "y": 0.0}, {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
-             {"x": -sim.ESCAPE_DISTANCE, "y": 0.0}]
+    poses = [
+        {"x": -step, "y": 0.0},
+        {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
+        {"x": -sim.ESCAPE_DISTANCE, "y": 0.0},
+    ]
     commands = escaping(sim, bridge, poses)
 
     assert commands == [sim.ESCAPE_SPEED, 0.0], "must stop, and stay stopped"
@@ -702,7 +597,7 @@ def test_a_pinned_robot_stops_instead_of_grinding(sim, twist, monkeypatch):
     monkeypatch.setattr(sim.time, "monotonic", lambda: clock[0])
     bridge._finish_goal("failed", bridge._goal_generation)
 
-    bridge.escape_tick()                       # commanded, no movement yet
+    bridge.escape_tick()  # commanded, no movement yet
     clock[0] += sim.ESCAPE_STALL_S + 0.1
     sent = []
     bridge.pub_cmd.publish.side_effect = lambda msg: sent.append(msg.linear.x)
@@ -915,133 +810,3 @@ def test_a_lifecycle_manager_that_does_not_answer_is_reported(sim, monkeypatch):
     clock[0] += sim.NAV_READY_GRACE_S + 1
     assert bridge.recover_nav_if_down() is False
     bridge.node.get_logger.return_value.error.assert_called()
-
-
-# ------------------------------------------------------------- exploration
-#
-# The reactive bootstrap the operator starts and stops from the dashboard. The
-# process itself is not launched here; what these cover is the part that
-# decides whether the dashboard tells the truth about it.
-
-
-@pytest.fixture
-def exploration(sim, monkeypatch):
-    """A fresh, un-launched Exploration with a recording spawner."""
-    controller = sim.Exploration()
-    monkeypatch.setattr(sim, "EXPLORATION", controller)
-    return controller
-
-
-class _FakeProc:
-    def __init__(self, argv):
-        self.argv = argv
-        self.pid = 4242
-        self.signals = []
-        self._alive = True
-
-    def poll(self):
-        return None if self._alive else 0
-
-    def send_signal(self, sig):
-        self.signals.append(sig)
-        self._alive = False
-
-    def wait(self, timeout=None):
-        return 0
-
-    def kill(self):
-        self._alive = False
-
-
-def test_a_second_explore_command_does_not_start_a_second_process(
-    exploration, monkeypatch
-):
-    """Fleet-wide, but delivered once per robot: every robot has its own
-    connection. Two explore.py instances would put two reactive command streams
-    on one cmd_vel, which is the contention the whole design avoids."""
-    spawned = []
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda argv, **kw: spawned.append(argv) or _FakeProc(argv)
-    )
-    exploration.configure(["python3", "explore.py"])
-
-    for _ in range(4):  # one per robot
-        assert exploration.start(MagicMock()) is True
-
-    assert len(spawned) == 1
-    assert exploration.running is True
-
-
-def test_stopping_interrupts_rather_than_kills(exploration, monkeypatch):
-    """explore.py's halt() publishes a zero Twist to every robot it still owns.
-
-    SIGKILL skips that, and the fleet keeps driving on its last command until
-    something else claims cmd_vel.
-    """
-    import signal as signal_module
-
-    procs = []
-    monkeypatch.setattr(
-        subprocess, "Popen",
-        lambda argv, **kw: procs.append(_FakeProc(argv)) or procs[-1],
-    )
-    exploration.configure(["python3", "explore.py"])
-    exploration.start(MagicMock())
-
-    assert exploration.stop(MagicMock()) is True
-    assert procs[0].signals == [signal_module.SIGINT]
-    assert exploration.running is False
-
-
-def test_stopping_when_never_started_is_not_an_error(exploration):
-    """The operator may press Stop on a fleet that was never exploring."""
-    assert exploration.stop(MagicMock()) is True
-
-
-def test_exploration_refuses_to_start_unconfigured(exploration):
-    """Before the fleet is known there is no argument list to launch with, and
-    guessing one would explore with the wrong robot ids and radii."""
-    assert exploration.start(MagicMock()) is False
-
-
-def test_an_idle_robot_reports_exploring(sim, exploration, monkeypatch):
-    bridge = make_bridge(sim)
-    bridge.mode = "idle"
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda argv, **kw: _FakeProc(argv)
-    )
-    exploration.configure(["python3", "explore.py"])
-    exploration.start(MagicMock())
-
-    assert bridge.effective_mode() == "explore"
-    assert bridge.state()["mode"] == "explore"
-
-
-@pytest.mark.parametrize("mode", ["nav", "teleop", "estop", "recover"])
-def test_exploration_never_overrides_what_the_robot_is_actually_doing(
-    sim, exploration, monkeypatch, mode
-):
-    """explore.py yields cmd_vel per robot to Nav2, so a robot with a live goal
-    genuinely is not exploring. Labelling it EXPLORING while it drove an
-    operator's path would be the dashboard lying about the one thing the
-    operator is watching."""
-    bridge = make_bridge(sim)
-    bridge.mode = mode
-    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: _FakeProc(argv))
-    exploration.configure(["python3", "explore.py"])
-    exploration.start(MagicMock())
-
-    assert bridge.effective_mode() == mode
-
-
-def test_an_idle_robot_reports_idle_when_nothing_is_exploring(sim, exploration):
-    bridge = make_bridge(sim)
-    bridge.mode = "idle"
-    assert bridge.effective_mode() == "idle"
-
-
-def test_exploration_is_advertised_as_a_capability(sim):
-    """Simulation only, like `reset`. The dashboard gates its controls on this,
-    and a hardware adapter must never offer it."""
-    bridge = make_bridge(sim)
-    assert "explore" in bridge.hello()["capabilities"]

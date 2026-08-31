@@ -11,6 +11,35 @@ const state = $state({
   activeCamera: null as string | null
 });
 
+function getStoredTargetRobot(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const param = new URLSearchParams(window.location.search).get('robot');
+    if (param) return param;
+    return localStorage.getItem('swarmdeck_selected_robot');
+  } catch {
+    return null;
+  }
+}
+
+function persistTargetRobot(id: string | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    const url = new URL(window.location.href);
+    if (id) {
+      url.searchParams.set('robot', id);
+      localStorage.setItem('swarmdeck_selected_robot', id);
+    } else {
+      url.searchParams.delete('robot');
+      localStorage.removeItem('swarmdeck_selected_robot');
+    }
+    window.history.replaceState({}, '', url.toString());
+  } catch {}
+}
+
+let targetRobot = getStoredTargetRobot();
+let targetMatched = false;
+
 export const fleet = {
   get robots() {
     return state.order.map((id) => state.robots[id]).filter((robot) => robot && this.isEnabled(robot.robot_id));
@@ -73,16 +102,32 @@ export const fleet = {
   apply(msg: RobotState) {
     if (!state.robots[msg.robot_id]) {
       state.order = [...state.order, msg.robot_id];
-      if (this.selected.length === 0 && this.isEnabled(msg.robot_id)) {
+      if (targetRobot && msg.robot_id === targetRobot && this.isEnabled(msg.robot_id)) {
         state.selected = [msg.robot_id];
+        targetMatched = true;
+        if (msg.capabilities?.includes('camera')) {
+          state.activeCamera = msg.robot_id;
+        }
+        persistTargetRobot(msg.robot_id);
+      } else if (!targetMatched && state.selected.length === 0 && this.isEnabled(msg.robot_id)) {
+        state.selected = [msg.robot_id];
+        if (
+          this.activeCamera === null &&
+          msg.capabilities?.includes('camera')
+        ) {
+          state.activeCamera = msg.robot_id;
+        }
+        if (!targetRobot) {
+          persistTargetRobot(msg.robot_id);
+        }
       }
-      if (
-        this.activeCamera === null &&
-        this.isEnabled(msg.robot_id) &&
-        msg.capabilities?.includes('camera')
-      ) {
+    } else if (targetRobot && !targetMatched && msg.robot_id === targetRobot && this.isEnabled(msg.robot_id)) {
+      state.selected = [msg.robot_id];
+      targetMatched = true;
+      if (msg.capabilities?.includes('camera')) {
         state.activeCamera = msg.robot_id;
       }
+      persistTargetRobot(msg.robot_id);
     }
     state.robots[msg.robot_id] = { ...state.robots[msg.robot_id], ...msg };
   },
@@ -93,6 +138,11 @@ export const fleet = {
     state.selected = state.selected.filter((r) => r !== id);
     if (state.activeCamera === id) {
       state.activeCamera = state.order[0] ?? null;
+    }
+    if (targetRobot === id) {
+      targetRobot = state.selected[0] ?? null;
+      targetMatched = Boolean(targetRobot);
+      persistTargetRobot(targetRobot);
     }
   },
 
@@ -109,11 +159,17 @@ export const fleet = {
     if (state.selected.includes(id) && this.can(id, 'camera')) {
       state.activeCamera = id;
     }
+    targetRobot = state.selected[0] ?? null;
+    targetMatched = Boolean(targetRobot);
+    persistTargetRobot(targetRobot);
   },
 
   selectAll() {
     const ids = this.robots.map((robot) => robot.robot_id);
     state.selected = this.selected.length === ids.length ? [] : ids;
+    targetRobot = state.selected[0] ?? null;
+    targetMatched = Boolean(targetRobot);
+    persistTargetRobot(targetRobot);
   },
 
   setCamera(id: string) {
@@ -126,6 +182,9 @@ export const fleet = {
     if (!this.isEnabled(id)) return;
     state.selected = [id];
     if (this.can(id, 'camera')) state.activeCamera = id;
+    targetRobot = id;
+    targetMatched = true;
+    persistTargetRobot(id);
   },
 
   reset() {

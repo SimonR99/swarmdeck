@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pillow>=10.0"]
 
 [project.scripts]
 swarmdeck-slam = "swarmdeck_slam.service:main"

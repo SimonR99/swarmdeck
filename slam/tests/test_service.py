@@ -213,3 +213,49 @@ def test_capture_starts_at_zero_in_a_fresh_directory(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(svc, "_capture_failed", False)
     svc._capture(b"first")
     assert (tmp_path / "keyframes" / "000000.kf").read_bytes() == b"first"
+
+
+def test_capture_restore_rebuilds_without_recapturing(tmp_path, monkeypatch) -> None:
+    """A planned process replacement restores each durable blob exactly once."""
+    _, fleet = synthetic.two_robot_fleet()
+    keyframe = fleet[0].keyframes[0]
+    blob = encode_keyframe(
+        robot_id=keyframe.id.robot_id,
+        seq=keyframe.id.seq,
+        stamp=keyframe.stamp,
+        points=keyframe.points,
+        t_odom_base=quat_xyz_from_se3(keyframe.t_odom_base),
+        session="restore-test",
+    )
+    keyframes = tmp_path / "keyframes"
+    keyframes.mkdir()
+    (keyframes / "000000.kf").write_bytes(blob)
+
+    restored_backend = type(svc.backend)(registration_mode="graph")
+    monkeypatch.setattr(svc, "backend", restored_backend)
+    monkeypatch.setattr(svc, "CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setattr(svc, "RESTORE_CAPTURE", True)
+    monkeypatch.setattr(svc, "_ingested", 0)
+    monkeypatch.setattr(svc, "_restored", 0)
+
+    assert svc._restore_capture() == 1
+    assert len(restored_backend) == 1
+    assert svc._ingested == 1
+    assert svc._restored == 1
+    assert sorted(p.name for p in keyframes.iterdir()) == ["000000.kf"]
+
+    # A second call sees the same keyframe id and remains idempotent.
+    assert svc._restore_capture() == 0
+    assert len(restored_backend) == 1
+    assert svc._ingested == 1
+
+
+def test_config_endpoint_clamps_and_does_not_switch_mode(slam_client) -> None:
+    before = slam_client.get("/config").json()
+    assert before["ok"] is True
+    assert "min_support" in before["settings"]
+    applied = slam_client.put("/config", json={"min_support": 1, "registration_mode": "graph"})
+    assert applied.status_code == 200
+    body = applied.json()
+    assert body["settings"]["min_support"] == 2
+    assert body["settings"]["registration_mode"] == before["settings"]["registration_mode"]

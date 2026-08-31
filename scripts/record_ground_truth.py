@@ -29,6 +29,7 @@ import argparse
 import csv
 import signal
 import sys
+from pathlib import Path
 
 import rclpy
 from nav_msgs.msg import Odometry
@@ -42,7 +43,9 @@ class GroundTruthRecorder(Node):
         # use_sim_time is passed as a ROS arg, not declared here: rclpy declares
         # it for every node automatically, so a second declare_parameter raises
         # ParameterAlreadyDeclaredException before a single row is written.
-        self._handle = open(out_path, "w", newline="")
+        output = Path(out_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = output.open("w", newline="")
         self._writer = csv.writer(self._handle)
         self._writer.writerow(
             ["robot_id", "stamp", "x", "y", "z", "qx", "qy", "qz", "qw"]

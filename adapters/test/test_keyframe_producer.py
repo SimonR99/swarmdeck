@@ -68,6 +68,37 @@ def test_motion_gate_skips_a_parked_robot():
     assert uploader.consider(_wall(), moved, 2.0)
 
 
+def test_scan_novelty_captures_motion_when_reported_pose_is_frozen():
+    """Low-quality odometry may report no motion while lidar geometry changes."""
+    uploader = KeyframeUploader("r0", "http://backend", min_period_s=0.0)
+    frozen = pose7_from_xy_yaw(0.0, 0.0, 0.0)
+    assert uploader.consider(_wall(), frozen, 0.0)
+
+    changed_view = _wall() + np.array([2.0, 0.0, 0.0], dtype=np.float32)
+    assert uploader.consider(changed_view, frozen, 1.0)
+
+
+def test_map_gauge_correction_does_not_look_like_physical_motion():
+    """A loop closure shifts map pose and cloud together, not the body view."""
+    uploader = KeyframeUploader("r0", "http://backend", min_period_s=0.0)
+    initial = pose7_from_xy_yaw(0.0, 0.0, 0.0)
+    corrected = pose7_from_xy_yaw(5.0, -2.0, 0.0)
+    assert uploader.consider(_wall(), initial, 0.0)
+
+    map_shift = np.array([5.0, -2.0, 0.0], dtype=np.float32)
+    assert not uploader.consider(_wall() + map_shift, corrected, 1.0)
+
+
+def test_pose_gate_remains_available_when_scan_gate_is_disabled():
+    uploader = KeyframeUploader(
+        "r0", "http://backend", min_period_s=0.0, min_scan_change_m=0.0
+    )
+    initial = pose7_from_xy_yaw(0.0, 0.0, 0.0)
+    moved = pose7_from_xy_yaw(1.0, 0.0, 0.0)
+    assert uploader.consider(_wall(), initial, 0.0)
+    assert uploader.consider(_wall(), moved, 1.0)
+
+
 def test_full_queue_drops_the_oldest_and_never_blocks():
     uploader = KeyframeUploader(
         "r0", "http://backend", queue_size=2, min_period_s=0.0, min_translation_m=0.1

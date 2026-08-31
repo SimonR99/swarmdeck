@@ -328,6 +328,40 @@ def test_a_reconnect_does_not_unbind_the_new_socket():
     asyncio.run(scenario())
 
 
+def test_a_failed_send_does_not_unbind_a_replacement_socket():
+    """A stale command failure must not disable the newly reconnected robot."""
+    import asyncio
+
+    class FailingSocket:
+        def __init__(self, reconnect) -> None:
+            self.reconnect = reconnect
+
+        async def send_json(self, message: dict) -> None:
+            self.reconnect()
+            raise ConnectionError("stale socket")
+
+    class WorkingSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send_json(self, message: dict) -> None:
+            self.sent.append(message)
+
+    async def scenario() -> None:
+        reg = Registry()
+        replacement = WorkingSocket()
+        stale = FailingSocket(
+            lambda: reg.hello({"robot_id": "r0"}, sink=replacement)
+        )
+        reg.hello({"robot_id": "r0"}, sink=stale)
+
+        assert await reg.send("r0", {"type": "drive"}) is False
+        assert await reg.send("r0", {"type": "stop"}) is True
+        assert replacement.sent == [{"type": "stop"}]
+
+    asyncio.run(scenario())
+
+
 def test_detection_position_is_normalized_into_the_merged_map():
     app_registry.robots.clear()
     try:

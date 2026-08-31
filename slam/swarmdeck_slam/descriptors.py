@@ -39,7 +39,7 @@ living in that keyframe's own base frame at capture. See
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Sequence
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -142,16 +142,19 @@ def scan_context_descriptor(
 
 
 def ring_key(descriptor: np.ndarray) -> np.ndarray:
-    """Rotation-invariant per-ring summary: mean bin value across sectors.
+    """Rotation-invariant per-ring summary: L2-normalized mean across sectors.
 
-    A heading change between two visits to the same place rotates the physical
-    world relative to the sensor, which is a circular shift of the
-    descriptor's sector axis -- and the mean of a row is invariant to any
-    circular shift of that row. This is the coarse filter :class:`ScanContextIndex`
-    runs its k-NN search over; the (heading-sensitive) full descriptor is only
-    compared after that filter has cut the candidate set down.
+    A heading change is a circular shift of the sector axis, which does not
+    change a row mean. L2-normalizing the key makes Euclidean k-NN compare
+    *shape* rather than absolute max-height scale, so two lidars at different
+    mounting heights (or a one-ring scan whose every bin shares one z) still
+    retrieve the same place.
     """
-    return descriptor.astype(np.float64).mean(axis=1)
+    key = descriptor.astype(np.float64).mean(axis=1)
+    norm = float(np.linalg.norm(key))
+    if norm > 1e-12:
+        return key / norm
+    return key
 
 
 def _shift_grid(sectors: int) -> np.ndarray:
@@ -225,6 +228,8 @@ def alignment_hypotheses(
     *,
     count: int = 4,
     min_separation_sectors: int = 3,
+    extra_shifts: Sequence[int] | None = None,
+    include_antipode: bool = True,
 ) -> list[tuple[int, float]]:
     """Return several distinct column-shift alignments, best first.
 
@@ -269,6 +274,10 @@ def alignment_hypotheses(
     distances = 1.0 - cosine.mean(axis=2)[0]
 
     selected: list[tuple[int, float]] = []
+    # Indoor corridors admit a 180-degree alias that is often not in the
+    # greedy top-k (they all sit in one 18-degree basin). Keep it on the
+    # ballot so Viterbi and the weak odom vote can still choose it. Extra
+    # shifts (planar cardinals) are appended the same way.
     for shift in np.argsort(distances, kind="stable"):
         shift_int = int(shift)
         if any(
@@ -280,6 +289,22 @@ def alignment_hypotheses(
         selected.append((shift_int, float(distances[shift_int])))
         if len(selected) >= min(count, sectors):
             break
+
+    def _separated(shift: int) -> bool:
+        return not any(
+            min(abs(shift - chosen), sectors - abs(shift - chosen))
+            < min_separation_sectors
+            for chosen, _ in selected
+        )
+
+    mandatory: list[int] = []
+    if include_antipode and selected:
+        mandatory.append((selected[0][0] + sectors // 2) % sectors)
+    if extra_shifts:
+        mandatory.extend(int(shift) % sectors for shift in extra_shifts)
+    for shift in mandatory:
+        if _separated(shift):
+            selected.append((shift, float(distances[shift])))
     return selected
 
 

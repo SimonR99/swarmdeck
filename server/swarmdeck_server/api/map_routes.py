@@ -632,6 +632,42 @@ async def get_optimized_map(scope: str) -> Response:
     )
 
 
+async def get_slam_backend() -> Any:
+    """Operator view of the pose-graph process: status, merge knobs, reachability."""
+    from ..mapsvc import graph_bridge
+
+    status_code, status_body = await asyncio.to_thread(graph_bridge.fetch_json, "/status")
+    config_code, config_body = (503, {})
+    if status_code == 200:
+        config_code, config_body = await asyncio.to_thread(
+            graph_bridge.fetch_json, "/config"
+        )
+    reachable = status_code == 200
+    payload = {
+        "ok": reachable,
+        "reachable": reachable,
+        "status": status_body if status_code == 200 else None,
+        "settings": config_body.get("settings") if config_code == 200 else None,
+        "defaults": config_body.get("defaults") if config_code == 200 else None,
+        "error": None if reachable else status_body.get("error", "slam unreachable"),
+    }
+    return JSONResponse(payload, status_code=200 if reachable else 503)
+
+
+async def put_slam_config(request: Request) -> Any:
+    """Forward merge knobs to the slam process. Never runs the solver here."""
+    from ..mapsvc import graph_bridge
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "JSON body required"}, status_code=400)
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "JSON object required"}, status_code=400)
+    code, body = await asyncio.to_thread(graph_bridge.put_json, "/config", payload)
+    return JSONResponse(body, status_code=code)
+
+
 def reset_optimized_maps() -> None:
     """Drop every scoped grid. Used when the session or the graph resets."""
     with _optimized_lock:

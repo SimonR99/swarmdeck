@@ -1,0 +1,62 @@
+# VectorNav VN-100 on Botman (/dev/vectornav -> /dev/ttyUSB0).
+# Verified on Botman: 115200 baud, 100 Hz output rate, ENU coordinate frames.
+vectornav:
+  ros__parameters:
+    port: "/dev/vectornav"
+    baud: 115200
+    reconnect_ms: 500
+    AsyncDataOutputType: 0           # VNOFF, binary only
+    AsyncDataOutputFrequency: 1
+    syncInMode: 3
+    syncInEdge: 0
+    syncInSkipFactor: 0
+    syncOutMode: 0
+    syncOutPolarity: 0
+    syncOutSkipFactor: 0
+    syncOutPulseWidth_ns: 100000000
+    serialCount: 0
+    serialStatus: 0
+    spiCount: 0
+    spiStatus: 0
+    serialChecksum: 1
+    spiChecksum: 0
+    errorMode: 1
+    BO1:
+      asyncMode: 1                   # port 1 only
+      rateDivisor: 8                 # 800 Hz / 8 = 100 Hz
+      # TimeStartup + Qtn + AngularRate + Accel
+      commonField: 0x131
+      timeField: 0x0000
+      imuField: 0x0000
+      attitudeField: 0x0000
+      gps2Field: 0x0000
+    BO2:
+      asyncMode: 0
+      rateDivisor: 0
+      commonField: 0x0000
+      timeField: 0x0000
+      imuField: 0x0000
+      gpsField: 0x0000
+      attitudeField: 0x0000
+      insField: 0x0000
+      gps2Field: 0x0000
+    BO3:
+      asyncMode: 0
+      rateDivisor: 0
+      commonField: 0x0000
+      timeField: 0x0000
+      imuField: 0x0000
+      gpsField: 0x0000
+      attitudeField: 0x0000
+      insField: 0x0000
+      gps2Field: 0x0000
+    frame_id: "vectornav"
+
+vn_sensor_msgs:
+  ros__parameters:
+    # VN body is Forward-Right-Down. ROS / UltraFusion want x-forward, y-left, z-up (ENU).
+    use_enu: true
+    orientation_covariance: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+    angular_velocity_covariance: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+    linear_acceleration_covariance: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+    magnetic_covariance: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]

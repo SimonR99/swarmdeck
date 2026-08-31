@@ -15,12 +15,18 @@ import asyncio
 import json
 import math
 import random
+import sys
 import time
 import urllib.request
 import zlib
+from pathlib import Path
 
 import numpy as np
 import websockets
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+from adapters.runtime import hello_message
 
 RES = 0.05
 N = 800
@@ -207,16 +213,12 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
             async with websockets.connect(ws_url) as ws:
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "hello",
-                            "protocol": 2,
-                            "robot_id": robot.id,
-                            "robot_type": robot.type,
-                            "adapter": "adapter_mock/0.1.0",
-                            "ros": "none",
-                            # Synthetic poses and maps already share one global frame.
-                            "coordinate_frame": "merged",
-                            "capabilities": [
+                        hello_message(
+                            robot_id=robot.id,
+                            robot_type=robot.type,
+                            adapter="adapter_mock/0.1.0",
+                            ros="none",
+                            capabilities=[
                                 "navigate",
                                 "map",
                                 "camera",
@@ -224,8 +226,9 @@ async def run_robot(robot: MockRobot, ws_url: str, http_url: str) -> None:
                                 "network",
                                 "estop",
                             ],
-                            "footprint_radius": 0.35,
-                        }
+                            footprint_radius=0.35,
+                            coordinate_frame="merged",
+                        )
                     )
                 )
                 print(f"[{robot.id}] connected")

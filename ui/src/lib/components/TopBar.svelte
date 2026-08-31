@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    Bug,
     Circle,
     Globe,
     Maximize2,
@@ -7,7 +8,6 @@
     Octagon,
     RotateCcw,
     Settings2,
-    Share2
   } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
@@ -213,14 +213,11 @@
       variant="ghost"
       size="sm"
       class="px-2 sm:px-3"
-      disabled={swarmGraphCount === 0}
-      title={swarmGraphCount
-        ? 'Open Swarm SLAM details'
-        : 'Swarm SLAM data is not available yet'}
+      title="Swarm SLAM — merge health and reconstruction settings"
       onclick={onswarmslam}
     >
-      <Share2 class="h-4 w-4" />
-      <span class="hidden 2xl:inline">Swarm SLAM</span>
+      <Bug class="h-4 w-4" />
+      <span class="sr-only">Swarm SLAM</span>
       {#if swarmGraphCount > 0}
         <span
           class="grid h-5 min-w-5 place-items-center rounded-full bg-accent-container px-1

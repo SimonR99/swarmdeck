@@ -917,6 +917,20 @@ async def post_slam_update(request: Request) -> Any:
     return await handler(request)
 
 
+@app.get("/api/slam/backend")
+async def get_slam_backend() -> Any:
+    from .map_routes import get_slam_backend as handler
+
+    return await handler()
+
+
+@app.put("/api/slam/config")
+async def put_slam_config(request: Request) -> Any:
+    from .map_routes import put_slam_config as handler
+
+    return await handler(request)
+
+
 @app.get("/api/map/nav/{robot_id}")
 async def get_nav_map(request: Request, robot_id: str) -> Response:
     from .map_routes import get_nav_map as handler
@@ -1174,7 +1188,18 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     elif kind == "body_command":
         action = str(msg.get("action") or "")
-        if action not in ("claim", "release", "sit", "stand"):
+        if action not in (
+            "claim",
+            "release",
+            "sit",
+            "stand",
+            "damping",
+            "lie_to_stand",
+            "lock_stand",
+            "walk_mode",
+            "run_mode",
+            "wave",
+        ):
             return
         if not registry.can(rid, "body"):
             return
@@ -1343,6 +1368,17 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         # session would otherwise resume full-rate video for a robot nobody has
         # on screen, and stay that way until the operator happened to switch.
         await push_camera_interest({robot_id})
+        known_ids = {item.get("id") for item in settings_store.value.get("robots", []) if isinstance(item, dict)}
+        if robot_id not in known_ids:
+            settings_store.value.setdefault("robots", []).append(
+                {
+                    "id": robot_id,
+                    "enabled": True,
+                    "color": default_color(robot_id, len(settings_store.value.get("robots", []))),
+                }
+            )
+            settings_store.save(settings_store.value)
+            await broadcast({"type": "settings_state", "settings": settings_store.value})
         await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
         events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
 

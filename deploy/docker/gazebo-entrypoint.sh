@@ -23,28 +23,60 @@ SLAM_BACKEND="${SLAM_BACKEND:-toolbox}"
 FUSE_IMU="${FUSE_IMU:-true}"
 FUSE_COVARIANCE="${FUSE_COVARIANCE:-false}"
 GRID_3D="${GRID_3D:-false}"
-# Seconds of reactive exploration after startup, to bootstrap the maps before the
+# Seconds of bounded exploration after startup, to bootstrap the maps before the
 # operator takes over. 0 leaves the fleet stationary until a goal arrives.
 EXPLORE_SECONDS="${EXPLORE_SECONDS:-0}"
+EXPLORE_STRATEGY="${EXPLORE_STRATEGY:-coordinated}"
+GROUND_TRUTH_PATH="${SWARMDECK_GROUND_TRUTH_PATH:-}"
+if [ -z "${GROUND_TRUTH_PATH}" ] && [ -n "${SWARMDECK_SLAM_CAPTURE_DIR:-}" ]; then
+  GROUND_TRUTH_PATH="${SWARMDECK_SLAM_CAPTURE_DIR}/ground_truth.csv"
+fi
+# Simulation exposes raw sensor_msgs/Image topics. The shared media publisher
+# JPEG-encodes those frames, then sends one low-latency H.264/RTSP stream per
+# robot to MediaMTX, exactly like the hardware media services do.
+VIDEO_BITRATE_KBPS="${VIDEO_BITRATE_KBPS:-700}"
+VIDEO_FPS="${VIDEO_FPS:-10}"
+VIDEO_WIDTH="${VIDEO_WIDTH:-640}"
+VIDEO_HEIGHT="${VIDEO_HEIGHT:-480}"
+MEDIA_ROBOT_COUNT="${SWARMDECK_ROBOT_COUNT:-4}"
+
+if ! [[ "${MEDIA_ROBOT_COUNT}" =~ ^[1-5]$ ]]; then
+  echo "[gazebo] invalid SWARMDECK_ROBOT_COUNT=${MEDIA_ROBOT_COUNT}; using 4 for media" >&2
+  MEDIA_ROBOT_COUNT=4
+fi
 
 mkdir -p /app/sessions
 
 echo "[gazebo] launching session config=${CONFIG} headless=${HEADLESS}" \
      "slam_backend=${SLAM_BACKEND} fuse_imu=${FUSE_IMU}" \
-     "explore_seconds=${EXPLORE_SECONDS}"
-ros2 launch swarmdeck_bringup session.launch.py \
-  "config:=${CONFIG}" \
-  "headless:=${HEADLESS}" \
-  "slam_backend:=${SLAM_BACKEND}" \
-  "fuse_imu:=${FUSE_IMU}" \
-  "fuse_covariance:=${FUSE_COVARIANCE}" \
-  "grid_3d:=${GRID_3D}" \
-  "explore_seconds:=${EXPLORE_SECONDS}" &
+     "explore_seconds=${EXPLORE_SECONDS} explore_strategy=${EXPLORE_STRATEGY}" \
+     "ground_truth_path=${GROUND_TRUTH_PATH:-disabled}"
+LAUNCH_ARGS=(
+  "config:=${CONFIG}"
+  "headless:=${HEADLESS}"
+  "slam_backend:=${SLAM_BACKEND}"
+  "fuse_imu:=${FUSE_IMU}"
+  "fuse_covariance:=${FUSE_COVARIANCE}"
+  "grid_3d:=${GRID_3D}"
+  "explore_seconds:=${EXPLORE_SECONDS}"
+  "explore_strategy:=${EXPLORE_STRATEGY}"
+)
+# An empty ``name:=`` token is rejected by the ROS launch CLI. Ground truth is
+# optional for normal live runs, so omit the launch argument entirely unless a
+# capture path was explicitly configured.
+if [ -n "${GROUND_TRUTH_PATH}" ]; then
+  LAUNCH_ARGS+=("ground_truth_path:=${GROUND_TRUTH_PATH}")
+fi
+ros2 launch swarmdeck_bringup session.launch.py "${LAUNCH_ARGS[@]}" &
 LAUNCH_PID=$!
 
 cleanup() {
   echo "[gazebo] shutting down"
-  kill "${ADAPTER_PID:-}" "${LAUNCH_PID}" 2>/dev/null || true
+  for pid in "${MEDIA_PIDS[@]:-}" "${ADAPTER_PID:-}" "${LAUNCH_PID}"; do
+    if [ -n "${pid}" ]; then
+      kill "${pid}" 2>/dev/null || true
+    fi
+  done
   wait || true
 }
 trap cleanup EXIT INT TERM
@@ -63,11 +95,40 @@ ADAPTER_ARGS=(--host "${BACKEND_HOST}" --port "${BACKEND_PORT}")
 if [ -n "${SWARMDECK_ROBOT_COUNT:-}" ]; then
   ADAPTER_ARGS+=(--robots "${SWARMDECK_ROBOT_COUNT}")
 fi
+
+MEDIA_PIDS=()
+echo "[gazebo] starting ${MEDIA_ROBOT_COUNT} camera RTSP publisher(s) -> mediamtx:8554"
+for ((i = 0; i < MEDIA_ROBOT_COUNT; i++)); do
+  ROBOT_ID="robot_${i}"
+  # The Gazebo bridge publishes raw Image only. Keep the compressed topic
+  # distinct so ros2_rtsp subscribes to the raw fallback without a ROS type
+  # collision on the actual Image topic.
+  python3 /app/adapters/media/ros2_rtsp.py \
+    --robot-id "${ROBOT_ID}" \
+    --topic "/${ROBOT_ID}/camera/image/compressed" \
+    --raw-topic "/${ROBOT_ID}/camera/image" \
+    --rtsp-url "rtsp://mediamtx:8554/${ROBOT_ID}" \
+    --bitrate-kbps "${VIDEO_BITRATE_KBPS}" \
+    --fps "${VIDEO_FPS}" \
+    --width "${VIDEO_WIDTH}" \
+    --height "${VIDEO_HEIGHT}" &
+  MEDIA_PIDS+=("$!")
+done
+
 python3 /app/adapters/adapter_sim/adapter_sim.py "${ADAPTER_ARGS[@]}" &
 ADAPTER_PID=$!
 
-# Exit if either child dies.
+# Exit if the session, adapter, or a media publisher dies. The publisher has
+# its own RTSP reconnect loop, so a dead process indicates a real configuration
+# or dependency failure that should restart the simulation container.
 while kill -0 "${LAUNCH_PID}" 2>/dev/null && kill -0 "${ADAPTER_PID}" 2>/dev/null; do
+  for pid in "${MEDIA_PIDS[@]}"; do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      echo "[gazebo] camera media publisher ${pid} ended" >&2
+      wait "${pid}" || true
+      exit 1
+    fi
+  done
   sleep 2
 done
 

@@ -216,19 +216,7 @@ export const actions = {
   stopAll() {
     sendAction({ type: 'stop_all' });
   },
-  /**
-   * Simulation only, and fleet-wide. Nothing is set optimistically: the robots
-   * report `explore` themselves once the adapter has actually started the
-   * process, so a start that failed shows as robots that stay idle rather than
-   * as a button that lies.
-   */
-  startExplore() {
-    sendAction({ type: 'start_explore' });
-  },
-  stopExplore() {
-    sendAction({ type: 'stop_explore' });
-  },
-  bodyCommand(robotId: string, action: 'claim' | 'release' | 'sit' | 'stand') {
+  bodyCommand(robotId: string, action: string) {
     if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'body_command', robot_id: robotId, action });
   },

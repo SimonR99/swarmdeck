@@ -1,4 +1,4 @@
-# Whole physical fleet on one backend: tars_0, botman_0, aslan_0, spot_0.
+# Whole physical fleet on one backend: tars_0, botman_0, aslan_0, spot_0, asimov_0.
 #
 # The per-robot hardware_*.yaml files each bring up a single-robot session. This
 # one is for running the real fleet together, which is what the operator actually

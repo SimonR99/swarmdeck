@@ -14,6 +14,10 @@ PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
 BUNKER = REPO / "adapters/adapter_ros2/config/bunker.yaml"
 COMPOSE = REPO / "deploy/compose/docker-compose.robot-botman.yml"
 BOTMAN_LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/botman.launch.py"
+PROJECTOR = (
+    REPO
+    / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
+)
 
 
 def test_botman_uses_live_superodom_and_ouster_interfaces():
@@ -25,8 +29,8 @@ def test_botman_uses_live_superodom_and_ouster_interfaces():
     assert bt["global_frame"] == "map"
     assert bt["robot_base_frame"] == "os_lidar"
     assert bt["odom_topic"] == "/laser_odometry"
-    assert scan["topic"] == "/ouster/scan"
-    assert scan["sensor_frame"] == "os_lidar"
+    assert scan["topic"] == "<obstacle_scan_topic>"
+    assert scan["sensor_frame"] == "<obstacle_sensor_frame>"
 
 
 def test_botman_params_are_humble_compatible_and_keep_live_local_costmap():
@@ -57,6 +61,23 @@ def test_botman_params_are_humble_compatible_and_keep_live_local_costmap():
     # Collision authority stays on live sensors. A foreign map here is a crash.
     assert "static_layer" not in local_map["plugins"]
     assert global_map["track_unknown_space"] is True
+
+
+def test_bunker_costmaps_have_no_radial_blind_zone():
+    """The projector, not a circular range cutoff, removes chassis points."""
+    params = yaml.safe_load(PARAMS.read_text())
+    local = params["local_costmap"]["local_costmap"]["ros__parameters"]
+    global_map = params["global_costmap"]["global_costmap"]["ros__parameters"]
+
+    for costmap in (local, global_map):
+        scan = costmap["obstacle_layer"]["scan"]
+        assert scan["marking"] is True
+        assert scan["clearing"] is True
+        assert scan["obstacle_min_range"] == 0.0
+        assert scan["obstacle_max_range"] == 9.5
+        assert scan["raytrace_min_range"] == 0.0
+        assert scan["raytrace_max_range"] == 10.0
+        assert scan["inf_is_valid"] is True
 
 
 def test_bunker_point_goals_do_not_require_a_final_heading():
@@ -105,7 +126,40 @@ def test_autonomous_velocity_can_only_reach_driver_through_adapter():
 
 def test_botman_tf_bridge_accounts_for_live_pipeline_latency():
     launch_source = BOTMAN_LAUNCH.read_text()
+    compose = yaml.safe_load(COMPOSE.read_text())
+    bunker = yaml.safe_load(BUNKER.read_text())
+
     assert '"use_receive_time": True' in launch_source
+    assert '"robot_base_frame": _BASE_FRAME' in launch_source
+    assert 'name="botman_base_to_scan"' in launch_source
+    assert '"--frame-id",\n            _BASE_FRAME' in launch_source
+    assert '"--child-frame-id",\n            _SCAN_FRAME' in launch_source
+    assert '"--yaw",\n            "3.141592653589793"' in launch_source
+    assert 'executable="footprint_cloud_to_scan"' in launch_source
+    assert '"input_topic": "/ouster/points"' in launch_source
+    assert '"min_height": _OBSTACLE_MIN_HEIGHT' in launch_source
+    assert '"max_height": _OBSTACLE_MAX_HEIGHT' in launch_source
+    assert '"footprint_padding": _SELF_FILTER_PADDING' in launch_source
+    assert '"obstacle_scan_topic": _SCAN_TOPIC' in launch_source
+    assert '"obstacle_sensor_frame": _SCAN_FRAME' in launch_source
+    assert (
+        "child_frame:=botman_base_link"
+        in compose["services"]["odom_tf"]["command"]
+    )
+    assert bunker["base_frame"] == "botman_base_link"
+    assert compose["services"]["oak_mount_tf"]["command"][-3:] == [
+        "botman_base_link",
+        "--child-frame-id",
+        "oak-d-base-frame",
+    ]
+
+
+def test_bunker_self_filter_runs_before_angular_projection():
+    source = PROJECTOR.read_text()
+
+    assert source.index("if (rear <= base_x") < source.index("scan.ranges[index] =")
+    assert 'declare_parameter<double>("min_height", -0.37)' in source
+    assert 'declare_parameter<double>("max_height", 1.28)' in source
 
 
 def test_botman_passes_the_bunker_footprint_instead_of_the_scout_default():

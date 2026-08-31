@@ -58,12 +58,10 @@ topics:
   # Spot's driver publishes one charge record per pack in this custom array.
   # The adapter collapses it to the lowest valid pack percentage for the UI.
   battery: /status/battery_states
-  camera: /d435/color/image_raw
-  # D435i color (YUYV). Compressed comes from image_transport if the plugin
-  # is loaded; the adapter also JPEG-encodes the raw topic as fallback.
-  camera_compressed: /d435/color/image_raw/compressed
-  camera_depth: ""
-  camera_info: ""
+  camera: /d435/camera/color/image_raw
+  camera_compressed: /d435/camera/color/image_raw/compressed
+  camera_depth: /d435/camera/aligned_depth_to_color/image_raw
+  camera_info: /d435/camera/aligned_depth_to_color/camera_info
   camera_color_info: ""
   camera_depth_points: ""
   nav_cmd_vel: ""
@@ -106,6 +104,9 @@ services:
   estop_release: /estop/release
   clear_keepalive: /clear_keepalive
   max_velocity: /max_velocity
+
+perception:
+  depth_max_age_s: 1.0
 
 rates:
   state_hz: 5.0

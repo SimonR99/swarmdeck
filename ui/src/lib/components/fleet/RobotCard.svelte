@@ -183,52 +183,101 @@
       </header>
 
       <div class="p-4 flex flex-col gap-3">
-        <div class="text-[11px] text-fg-dim">
-          Direct quadruped posture and control commands for <strong class="text-fg">{shortName}</strong>.
-        </div>
+        {#if robot.robot_type === 'unitree_g1' || robot.robot_id.startsWith('asimov')}
+          <div class="text-[11px] text-fg-dim">
+            Direct humanoid commands backed by Asimov's native G1 bridge for <strong class="text-fg">{shortName}</strong>.
+          </div>
 
-        <div class="grid grid-cols-2 gap-2 mt-0.5">
-          <button
-            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
-            disabled={!robot.online}
-            onclick={() => {
-              actions.bodyCommand(robot.robot_id, 'claim');
-              bodyModalOpen = false;
-            }}
-          >
-            Claim
-          </button>
-          <button
-            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
-            disabled={!robot.online}
-            onclick={() => {
-              actions.bodyCommand(robot.robot_id, 'release');
-              bodyModalOpen = false;
-            }}
-          >
-            Release
-          </button>
-          <button
-            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
-            disabled={!robot.online}
-            onclick={() => {
-              actions.bodyCommand(robot.robot_id, 'sit');
-              bodyModalOpen = false;
-            }}
-          >
-            Sit
-          </button>
-          <button
-            class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
-            disabled={!robot.online}
-            onclick={() => {
-              actions.bodyCommand(robot.robot_id, 'stand');
-              bodyModalOpen = false;
-            }}
-          >
-            Stand
-          </button>
-        </div>
+          <div class="grid grid-cols-2 gap-2 mt-0.5">
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'damping');
+                bodyModalOpen = false;
+              }}
+            >
+              Damping
+            </button>
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'lie_to_stand');
+                bodyModalOpen = false;
+              }}
+            >
+              Lie &rarr; Stand
+            </button>
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'sit');
+                bodyModalOpen = false;
+              }}
+            >
+              Sit
+            </button>
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'stand');
+                bodyModalOpen = false;
+              }}
+            >
+              Start / Walk
+            </button>
+          </div>
+        {:else}
+          <div class="text-[11px] text-fg-dim">
+            Direct quadruped posture and control commands for <strong class="text-fg">{shortName}</strong>.
+          </div>
+
+          <div class="grid grid-cols-2 gap-2 mt-0.5">
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'claim');
+                bodyModalOpen = false;
+              }}
+            >
+              Claim
+            </button>
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'release');
+                bodyModalOpen = false;
+              }}
+            >
+              Release
+            </button>
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'sit');
+                bodyModalOpen = false;
+              }}
+            >
+              Sit
+            </button>
+            <button
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'stand');
+                bodyModalOpen = false;
+              }}
+            >
+              Stand
+            </button>
+          </div>
+        {/if}
       </div>
     </div>
   </div>

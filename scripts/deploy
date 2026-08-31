@@ -26,7 +26,7 @@ Default stages: sync, override, build, reset stack, up, verify.
   --no-build      reuse existing images
   --no-reset      keep the existing stack while recreating it
   --no-native-reset
-                  for Scout, keep the native ROS launchers running
+                  keep the profile's native ROS launchers running
   --no-up         stop after sync/override/build (also disables reset/verify)
   --no-verify     skip the post-up container/mount check
 USAGE
@@ -184,6 +184,11 @@ deploy_one() (
     SCOUT_CONTAINER_RESET="$container_reset"
     export SCOUT_NATIVE_RESET
     export SCOUT_CONTAINER_RESET
+  elif [[ "$target" == asimov ]]; then
+    ASIMOV_NATIVE_RESET="$native_reset"
+    ASIMOV_CONTAINER_RESET="$container_reset"
+    export ASIMOV_NATIVE_RESET
+    export ASIMOV_CONTAINER_RESET
   fi
   echo "──────── $target  ($DEPLOY_SSH_HOST:$DEPLOY_REMOTE_REPO)"
   preflight
@@ -202,6 +207,9 @@ deploy_one() (
     if [[ "$target" == scout ]]; then
       [[ "$native_reset" == yes ]] && echo "  would: reset native ROS launchers" ||
         echo "  native ROS reset: skipped"
+    elif [[ "$target" == asimov ]]; then
+      [[ "$native_reset" == yes ]] && echo "  would: reset native G1 bridge" ||
+        echo "  native G1 bridge reset: skipped"
     fi
     return 0
   fi

@@ -210,7 +210,11 @@ class Registry:
             await sink.send_json(msg)
             return True
         except Exception:
-            self.disconnect(robot_id)
+            # The adapter may have reconnected while this send was waiting.
+            # Retire only the socket that actually failed; removing the
+            # replacement would leave telemetry online while all controls
+            # silently route nowhere.
+            self.disconnect(robot_id, sink)
             return False
 
     def goal_taken(

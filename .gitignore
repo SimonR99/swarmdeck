@@ -45,3 +45,9 @@ slam/replay/
 .env.local
 *.local.yaml
 .deploy/
+artifacts
+artifacts/
+artefacts
+artefacts/
+artefatcs
+artefatcs/

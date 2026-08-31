@@ -57,6 +57,7 @@ def mod():
         yield module
     finally:
         sys.modules.pop("adapter_ros1", None)
+        sys.modules.pop("ros1_defaults", None)
         for name, value in saved.items():
             if value is None:
                 sys.modules.pop(name, None)
@@ -119,6 +120,17 @@ def test_config_merge_is_deep_not_shallow(mod):
     assert merged["topics"]["odom"] == "wheel_odom"
     assert merged["topics"]["map"] == "map"
     assert merged["topics"]["cmd_vel"] == "cmd_vel"
+
+
+def test_hello_uses_the_shared_protocol_envelope(mod):
+    from adapters.runtime import PROTOCOL_VERSION, TRANSPORT_DEFAULTS
+
+    bridge = _bridge(mod)
+    msg = bridge.hello()
+    assert msg["protocol"] == PROTOCOL_VERSION
+    assert msg["adapter"] == "adapter_ros1/0.1.0"
+    assert "reset" not in msg["capabilities"]
+    assert bridge.cfg["ping_interval_s"] == TRANSPORT_DEFAULTS["ping_interval_s"]
 
 
 def test_capabilities_reflect_configuration_only(mod):
@@ -1056,6 +1068,9 @@ def test_a_blocking_upload_does_not_stall_state_or_nav_joy(mod, monkeypatch):
         def state(self):
             return {"type": "robot_state", "robot_id": "r0"}
 
+        def hello(self):
+            return {"type": "hello", "robot_id": "r0"}
+
         def capabilities(self):
             return []
 
@@ -1067,6 +1082,10 @@ def test_a_blocking_upload_does_not_stall_state_or_nav_joy(mod, monkeypatch):
 
         def _pump_nav_joy(self):
             joy_pumps.append(1)
+
+        def session_state_tick(self):
+            self._check_topic_nav_progress()
+            self._pump_nav_joy()
 
         def upload_map(self):
             started.set()

@@ -18,6 +18,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       ros-humble-nav2-msgs \
       ros-humble-sensor-msgs \
       ros-humble-tf2-ros \
+      ros-humble-realsense2-camera \
     && pip3 install --no-cache-dir websockets==10.4 \
     && rm -rf /var/lib/apt/lists/*
 

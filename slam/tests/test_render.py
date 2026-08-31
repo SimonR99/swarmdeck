@@ -36,9 +36,17 @@ from swarmdeck_slam.render import (
     RenderedGrid,
     _Meta,
     _rasterize_free,
+    render_all,
     render_occupancy,
 )
-from swarmdeck_slam.types import Component, OptimizedGraph
+from swarmdeck_slam.types import (
+    Component,
+    Keyframe,
+    KeyframeId,
+    OptimizedGraph,
+    TrajectoryId,
+    se3_identity,
+)
 from synthetic import WALL_HEIGHT, make_scene, simulate_robot, two_robot_fleet, yaw_pose
 
 RESOLUTION = 0.1
@@ -177,6 +185,62 @@ def test_drifted_odometry_blurs_the_wall(fleet, truth_grid):
     assert drift_count > 1.5 * truth_count  # more cells lit up painting the same wall
 
 
+def test_reconstructed_peer_body_is_not_painted_as_a_static_obstacle() -> None:
+    observer_id = KeyframeId("observer", 0)
+    peer_before_id = KeyframeId("peer", 0)
+    peer_after_id = KeyframeId("peer", 1)
+    observer = Keyframe(
+        observer_id,
+        10.0,
+        se3_identity(),
+        np.asarray([[2.0, 0.0, 0.5], [5.0, 0.0, 0.5]], dtype=np.float32),
+    )
+    peer_before = Keyframe(
+        peer_before_id,
+        5.0,
+        se3_identity(),
+        np.empty((0, 3), dtype=np.float32),
+    )
+    peer_after = Keyframe(
+        peer_after_id,
+        15.0,
+        se3_identity(),
+        np.empty((0, 3), dtype=np.float32),
+    )
+    graph = OptimizedGraph(
+        poses={
+            observer_id: se3_identity(),
+            peer_before_id: yaw_pose(1.0, 0.0, 0.0),
+            peer_after_id: yaw_pose(3.0, 0.0, 0.0),
+        },
+        components=[
+            Component(
+                0,
+                frozenset({"observer", "peer"}),
+                observer_id,
+                frozenset({TrajectoryId("observer"), TrajectoryId("peer")}),
+                frozenset({observer_id, peer_before_id, peer_after_id}),
+            )
+        ],
+    )
+    grid = next(
+        iter(
+            render_occupancy(
+                graph,
+                [observer, peer_before, peer_after],
+                RenderConfig(
+                    native_map_resolution=0.1,
+                    retain_free_space=False,
+                    peer_exclusion_radius_m=0.8,
+                ),
+            ).values()
+        )
+    )
+
+    assert _cell_value(grid, 2.0, 0.0) != OCCUPIED
+    assert _cell_value(grid, 5.0, 0.0) == OCCUPIED
+
+
 def test_corridor_interior_is_free_never_observed_is_unknown(truth_grid):
     # beta's path passes directly through/near this waypoint.
     assert _cell_value(truth_grid, 6.0, 12.0) == FREE
@@ -275,6 +339,117 @@ def test_separate_components_never_overlay(fleet):
         assert len(grid.robots) == 1  # never two robots sharing one grid here
         all_robots_seen |= grid.robots
     assert all_robots_seen == {"alpha", "beta"}
+
+
+def test_disconnected_fragments_in_one_trajectory_never_overlay() -> None:
+    """A temporal break does not create permission to mix map frames.
+
+    Odom-free tracking can split one boot/session into several components. All
+    those keyframes have the same ``TrajectoryId``; exact component keyframe
+    membership must win over that coarse identity for both component and robot
+    renders.
+    """
+    trajectory = TrajectoryId("r3", "boot")
+    ids = [KeyframeId("r3", seq, trajectory.session) for seq in range(3)]
+    keyframes = [
+        Keyframe(
+            keyframe_id,
+            float(index),
+            se3_identity(),
+            np.asarray([[1.0, 0.0, 0.5]], dtype=np.float32),
+        )
+        for index, keyframe_id in enumerate(ids)
+    ]
+    graph = OptimizedGraph(
+        poses={
+            ids[0]: yaw_pose(0.0, 0.0, 0.0),
+            ids[1]: yaw_pose(1.0, 0.0, 0.0),
+            ids[2]: yaw_pose(100.0, 0.0, 0.0),
+        },
+        components=[
+            Component(
+                0,
+                frozenset({"r3"}),
+                ids[0],
+                frozenset({trajectory}),
+                frozenset(ids[:2]),
+            ),
+            Component(
+                1,
+                frozenset({"r3"}),
+                ids[2],
+                frozenset({trajectory}),
+                frozenset({ids[2]}),
+            ),
+        ],
+    )
+
+    components, robots, _trajectories = render_all(
+        graph,
+        keyframes,
+        RenderConfig(
+            native_map_resolution=0.1,
+            native_map_padding_m=0.2,
+            retain_free_space=False,
+        ),
+    )
+    primary = _occupied_world_points(components[0])
+    orphan = _occupied_world_points(components[1])
+    robot = _occupied_world_points(robots["r3"])
+
+    assert primary[:, 0].max() < 10.0
+    assert orphan[:, 0].min() > 90.0
+    # The robot scope chooses its largest verified component (two keyframes),
+    # rather than superimposing the incompatible one-keyframe orphan.
+    assert robot[:, 0].max() < 10.0
+
+
+def test_robot_scope_is_expressed_in_robot_map_frame() -> None:
+    """Solo optimized grids share coordinates with the robot's SLAM map.
+
+    The component remains in the collaborative frame; only ``robot:<id>`` is
+    transformed back by ``T_map_world``. This is what keeps the solo raster and
+    the live robot marker together when a merge rotates/translates the robot.
+    """
+    robot_id = "solo"
+    keyframe_id = KeyframeId(robot_id, 0)
+    t_world_map = yaw_pose(5.0, 7.0, np.pi / 2.0)
+    t_map_base = yaw_pose(2.0, 0.0, 0.0)
+    keyframe = Keyframe(
+        keyframe_id,
+        0.0,
+        t_map_base,
+        np.asarray([[1.0, 0.0, 0.5]], dtype=np.float32),
+    )
+    graph = OptimizedGraph(
+        poses={keyframe_id: t_world_map @ t_map_base},
+        t_world_map={robot_id: t_world_map},
+        t_world_trajectory={keyframe_id.trajectory: t_world_map},
+        components=[
+            Component(
+                0,
+                frozenset({robot_id}),
+                keyframe_id,
+                frozenset({keyframe_id.trajectory}),
+                frozenset({keyframe_id}),
+            )
+        ],
+    )
+    components, robots, _trajectories = render_all(
+        graph,
+        [keyframe],
+        RenderConfig(
+            native_map_resolution=0.05,
+            native_map_padding_m=0.2,
+            retain_free_space=False,
+        ),
+    )
+
+    # In map coordinates the robot is at x=2 and the return at x=3.
+    assert _cell_value(robots[robot_id], 3.0, 0.0) == OCCUPIED
+    # In collaborative coordinates that return was rotated and translated.
+    assert _cell_value(components[0], 5.0, 10.0) == OCCUPIED
+    assert _cell_value(robots[robot_id], 5.0, 10.0) is None
 
 
 def test_merged_component_renders_one_consistent_grid(fleet):
@@ -424,3 +599,71 @@ def test_batched_rays_mark_the_same_cells_as_a_single_batch():
         _rasterize_free(origin, ends, meta, many_batches)
 
     assert np.array_equal(one_batch, many_batches)
+
+
+def test_odometry_as_pose_does_not_paint_solver_smear(fleet):
+    """Occupancy follows the SLAM frame, not a folded solver trajectory.
+
+    A working onboard map sampled into ``t_odom_base`` should still render
+    as that map when the solver has smeared ``poses``. Without this, a few
+    bad loop closures turn thin walls into a fan.
+    """
+    _, robots = fleet
+    keyframes = _all_keyframes(robots)
+    rng = np.random.default_rng(0)
+    smeared = {}
+    traj_frames = {}
+    for kf in keyframes:
+        pose = np.array(kf.t_odom_base, dtype=np.float64, copy=True)
+        pose[0, 3] += float(rng.normal(0.0, 1.5))
+        pose[1, 3] += float(rng.normal(0.0, 1.5))
+        smeared[kf.id] = pose
+        traj_frames[kf.id.trajectory] = np.eye(4)
+    graph = OptimizedGraph(
+        poses=smeared,
+        t_world_map={robot.robot_id: np.eye(4) for robot in robots},
+        t_world_trajectory=traj_frames,
+        components=_singleton_components(robots),
+    )
+    cfg = RenderConfig(native_map_resolution=RESOLUTION)
+    rigid = next(
+        iter(
+            render_occupancy(
+                graph, keyframes, replace(cfg, odometry_as_pose=True)
+            ).values()
+        )
+    )
+    expected = next(
+        iter(
+            render_occupancy(
+                OptimizedGraph(
+                    poses={kf.id: kf.t_odom_base for kf in keyframes},
+                    t_world_map={robot.robot_id: np.eye(4) for robot in robots},
+                    t_world_trajectory=traj_frames,
+                    components=_singleton_components(robots),
+                ),
+                keyframes,
+                cfg,
+            ).values()
+        )
+    )
+    deformed = next(iter(render_occupancy(graph, keyframes, cfg).values()))
+    assert np.array_equal(rigid.cells, expected.cells)
+    assert not np.array_equal(deformed.cells, expected.cells)
+
+
+def test_close_occupied_does_not_erase_walls(truth_grid, fleet):
+    _, robots = fleet
+    graph = _graph(robots, _truth_poses(robots), _merged_component(robots))
+    closed = next(
+        iter(
+            render_occupancy(
+                graph,
+                _all_keyframes(robots),
+                RenderConfig(native_map_resolution=RESOLUTION, close_occupied=1),
+            ).values()
+        )
+    )
+    assert int((closed.cells == OCCUPIED).sum()) >= int(
+        (truth_grid.cells == OCCUPIED).sum()
+    )
