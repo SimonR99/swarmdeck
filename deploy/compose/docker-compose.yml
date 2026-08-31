@@ -70,7 +70,19 @@ services:
       # offline replay (slam/tools/replay.py). Empty disables capture, which is
       # the normal state: a long run writes one file per keyframe.
       SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
-      SWARMDECK_SLAM_REGISTRATION_MODE: "${SWARMDECK_SLAM_REGISTRATION_MODE:-odom_free}"
+      # Hardware validation on the 2026-08-31 Botman/Aslan session showed that
+      # the odometry-free reconstructor split 85 keyframes into 27 fragments
+      # and published a non-planar Aslan frame.  The graph solver kept all 85
+      # keyframes in one component while moving either onboard trajectory by
+      # at most 2.1 cm.  Preserve the robot SLAM trajectories and optimize only
+      # their verified closure residuals by default.
+      SWARMDECK_SLAM_REGISTRATION_MODE: "${SWARMDECK_SLAM_REGISTRATION_MODE:-graph}"
+      SWARMDECK_SLAM_ANCHOR_ROBOT: "${SWARMDECK_SLAM_ANCHOR_ROBOT:-}"
+      # Opt-in replay for production captures.  A deployment can point both
+      # variables at one durable session directory and restart without losing
+      # the in-memory graph.  Empty capture remains the normal simulation
+      # default, so old datasets are never replayed accidentally.
+      SWARMDECK_SLAM_RESTORE_CAPTURE: "${SWARMDECK_SLAM_RESTORE_CAPTURE:-false}"
       SWARMDECK_SLAM_QUEUE_CAP: "${SWARMDECK_SLAM_QUEUE_CAP:-2048}"
     volumes:
       # Datasets land beside the session recordings, on the host, so a capture

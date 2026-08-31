@@ -416,11 +416,10 @@ export function drawCostmap(
   ctx.globalAlpha = 0.68;
   ctx.imageSmoothingEnabled = view.scale < 1;
 
-  // Optimized robot maps are rendered in the collaborative frame even when
-  // the UI calls the view "local". Raw SLAM local maps stay in the robot map
-  // frame, so only the optimized path needs the registration transform here.
-  const useRobotTransform =
-    mapStore.viewMode === 'global' || mapStore.showingOptimizedGrid;
+  // Global grids use the collaborative frame and need T_world_map for a
+  // robot-local costmap. Both local grid sources (raw SLAM and optimized
+  // robot:<id>) use the selected robot's map frame already.
+  const useRobotTransform = mapStore.viewMode === 'global';
   const tf = useRobotTransform ? mapStore.status?.transforms[robotId] : undefined;
   if (tf) {
     const originGrid = mapStore.viewToGrid(tf.x, tf.y);

@@ -19,9 +19,12 @@ Three partitions of one render
 -------------------------------
 The same posed points are grouped three ways: per component (the merged map),
 per robot (that machine's whole coverage), and per trajectory (one unbroken
-stretch of driving, for a robot that has restarted). :func:`render_all`
-computes the poses once and groups them three times; the per-trajectory
-partition is empty unless some robot actually restarted.
+stretch of driving, for a robot that has restarted). Component and trajectory
+grids stay in the collaborative world frame. A robot grid is re-expressed in
+that robot's current map frame so the solo optimized view has the same frame as
+its live SLAM map and pose. :func:`render_all` computes the world contributions
+once and only applies that final rigid frame change to the robot partition; the
+per-trajectory partition is empty unless some robot actually restarted.
 
 Per-component isolation
 ------------------------
@@ -188,13 +191,15 @@ def render_per_robot(
     inside a larger component contributes to a joint grid where its own
     coverage is no longer separable.
 
-    Distinct from the local map an adapter uploads, which is that robot's own
-    SLAM package's output in its own frame -- this one is posed by the
-    collaborative solver, so where a merge exists these grids are directly
-    comparable to each other and to the merged map. If geometric tracking
-    split one boot/session into disconnected fragments, only the robot's
-    largest component is used: sharing a trajectory id is not evidence that
-    those fragments share a frame.
+    Distinct from the local map an adapter uploads: this one uses the
+    collaborative solver's optimized poses, then applies ``T_map_world`` so it
+    is published in the robot's current SLAM map frame. That keeps the solo
+    optimized and Robot SLAM views directly comparable and puts the live robot
+    pose on the raster; the corresponding ``component:`` grid remains in the
+    collaborative world frame. If geometric tracking split one boot/session
+    into disconnected fragments, only the robot's largest component is used:
+    sharing a trajectory id is not evidence that those fragments share a
+    frame.
     """
     config = config or RenderConfig()
     return _robot_grids(graph, _contributions_of(graph, keyframes, config), config)
@@ -343,9 +348,43 @@ def _robot_grids(
             robot_contribs = {
                 k: v for k, v in contributions.items() if k.robot_id == robot_id
             }
+        # Component grids are deliberately in the common world frame. A solo
+        # robot grid has a different UI contract: it replaces that robot's raw
+        # SLAM grid, whose coordinates are in the robot's current map frame.
+        # Express the optimized coverage in that same frame. This is only a
+        # final rigid frame change; all graph corrections and the verified
+        # component selection above are preserved.
+        t_world_map = graph.t_world_map.get(robot_id)
+        if t_world_map is not None:
+            robot_contribs = _world_to_robot_map(robot_contribs, t_world_map)
         result[robot_id] = _render_component(
             index, frozenset({robot_id}), robot_contribs, config
         )
+    return result
+
+
+def _world_to_robot_map(
+    contributions: dict[KeyframeId, _Contribution],
+    t_world_map: np.ndarray,
+) -> dict[KeyframeId, _Contribution]:
+    """Rigidly express world XY contributions in one robot's map frame.
+
+    The wire/UI transform is planar (x, y, yaw), so use that exact projection
+    here as well. Applying an arbitrary SE(3) inverse after the renderer has
+    intentionally discarded point Z would introduce a small XY scale/shear
+    whenever a fitted ground-robot frame contains numerical roll or pitch.
+    """
+    yaw = math.atan2(float(t_world_map[1, 0]), float(t_world_map[0, 0]))
+    c = math.cos(yaw)
+    s = math.sin(yaw)
+    # Row-vector form of R_world_map: (p_world - translation) @ R_world_map.
+    rotation = np.asarray([[c, -s], [s, c]], dtype=np.float64)
+    translation = np.asarray(t_world_map[:2, 3], dtype=np.float64)
+    result: dict[KeyframeId, _Contribution] = {}
+    for keyframe_id, contribution in contributions.items():
+        origin = (contribution.origin_xy - translation) @ rotation
+        points = (contribution.points_world - translation) @ rotation
+        result[keyframe_id] = _Contribution(origin, points)
     return result
 
 

@@ -63,6 +63,7 @@ from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz
 # profile without floor calibration. The environment variables remain useful
 # when replaying such legacy captures.
 REGISTRATION_MODE = os.environ.get("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
+ANCHOR_ROBOT = os.environ.get("SWARMDECK_SLAM_ANCHOR_ROBOT", "").strip() or None
 RENDER = RenderConfig(
     floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "0.0")),
     min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.15")),
@@ -133,6 +134,7 @@ backend = CollaborativeBackend(
     render=RENDER,
     registration_mode=REGISTRATION_MODE,
     pose_prior_sigmas=_POSE_PRIOR_SIGMAS if REGISTRATION_MODE == "graph" else None,
+    anchor_robot_id=ANCHOR_ROBOT,
     t_world_map_hint=_start_pose_hints(os.environ.get("SWARMDECK_CONFIG", "")),
 )
 
@@ -161,10 +163,17 @@ _worker: threading.Thread | None = None
 # Never let capture break ingestion: a full disk must cost a dataset, not the
 # live map.
 CAPTURE_DIR = os.environ.get("SWARMDECK_SLAM_CAPTURE_DIR", "")
+RESTORE_CAPTURE = os.environ.get("SWARMDECK_SLAM_RESTORE_CAPTURE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 #: -1 until the first capture, when it resumes past whatever is already on disk.
 _capture_seq = -1
 _capture_lock = threading.Lock()
 _capture_failed = False
+_restored = 0
 
 
 def _resume_capture_index(directory: str) -> int:
@@ -207,6 +216,47 @@ def _capture(blob: bytes) -> None:
     except OSError as exc:
         _capture_failed = True
         _last_error = f"keyframe capture disabled: {exc}"
+
+
+def _restore_capture() -> int:
+    """Rebuild the in-memory graph from an explicitly selected capture.
+
+    Keyframes are captured before entering the bounded live queue, so this is
+    the durable source of truth after a planned container replacement.  Replay
+    directly into the backend rather than POSTing the blobs: POST would append
+    a second copy of every file to the same capture and grow it on each boot.
+
+    Restoration is opt-in.  Capture directories are also used for offline
+    experiments, and silently adopting yesterday's dataset into a fresh
+    simulation would be much worse than starting empty.
+    """
+    global _ingested, _last_error, _restored
+    if not RESTORE_CAPTURE or not CAPTURE_DIR:
+        return 0
+    directory = Path(CAPTURE_DIR) / "keyframes"
+    try:
+        paths = sorted(directory.glob("*.kf"))
+    except OSError as exc:
+        _last_error = f"capture restore disabled: {exc}"
+        return 0
+
+    restored = 0
+    failures: list[str] = []
+    for path in paths:
+        try:
+            accepted = backend.ingest_packet(decode_keyframe(path.read_bytes()))
+        except (OSError, ProtocolError, ValueError) as exc:
+            failures.append(f"{path.name}: {exc}")
+            continue
+        if accepted:
+            restored += 1
+    _restored += restored
+    _ingested += restored
+    if failures:
+        preview = "; ".join(failures[:3])
+        suffix = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+        _last_error = f"capture restore skipped {len(failures)} file(s): {preview}{suffix}"
+    return restored
 
 
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "").rstrip("/")
@@ -352,6 +402,7 @@ def _worker_loop() -> None:
 async def lifespan(_: FastAPI):
     global _worker
     _stop.clear()
+    _restore_capture()
     _worker = threading.Thread(target=_worker_loop, name="slam-worker", daemon=True)
     _worker.start()
     try:
@@ -379,7 +430,12 @@ def status() -> dict[str, Any]:
         "queued": _queued(),
         "dropped": _dropped,
         "ingested": _ingested,
+        "restored": _restored,
         "dirty": backend.dirty,
+        "registration_mode": backend.registration_mode,
+        "anchor_robot": backend.anchor_robot_id,
+        "capture_dir": CAPTURE_DIR,
+        "restore_capture": RESTORE_CAPTURE,
         "last_error": _last_error,
         "has_snapshot": snapshot is not None,
         "components": (
@@ -533,9 +589,10 @@ def post_reset() -> dict[str, Any]:
     with _queue_lock:
         _queue.clear()
     backend.reset()
-    global _last_snapshot, _ingested, _dropped, _last_error
+    global _last_snapshot, _ingested, _dropped, _last_error, _restored
     _last_snapshot = None
     _ingested = 0
+    _restored = 0
     _dropped = 0
     _last_error = ""
     return {"ok": True}

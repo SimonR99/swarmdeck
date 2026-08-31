@@ -614,6 +614,40 @@ def test_optimize_on_empty_graph_returns_empty_result() -> None:
     assert result.rejected_edges == []
 
 
+def test_preferred_robot_anchors_the_component_a_new_robot_joins() -> None:
+    """Joining is a relative-pose event, not permission to re-gauge the map.
+
+    Robot ids are deliberately reverse lexical order: the regression selected
+    ``aardvark`` merely because it sorted before the already-live ``zulu``.
+    """
+    established = Keyframe(
+        id=KeyframeId("zulu", 0, "established"),
+        stamp=1.0,
+        t_odom_base=se3_identity(),
+        points=np.zeros((50, 3), dtype=np.float32),
+    )
+    newcomer = Keyframe(
+        id=KeyframeId("aardvark", 0, "newcomer"),
+        stamp=2.0,
+        t_odom_base=se3_identity(),
+        points=np.zeros((50, 3), dtype=np.float32),
+    )
+    graph = GtsamPoseGraph(preferred_anchor_robot="zulu")
+    graph.add_keyframe(established)
+    graph.add_keyframe(newcomer)
+    joining_edge = Edge(
+        EdgeKind.INTER_LOOP,
+        established.id,
+        newcomer.id,
+        se3_identity(),
+        _closure_information(sigma_t=0.05, sigma_r=np.deg2rad(3.0)),
+    )
+
+    component = graph._components([joining_edge])[0]
+    assert component.anchor == established.id
+    assert component.component_id == 0
+
+
 def test_edge_referencing_unknown_keyframe_raises() -> None:
     """A caller bug (an edge naming a keyframe that was never added) must fail
     loudly at ``optimize()`` rather than silently dropping the edge or

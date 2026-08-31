@@ -458,6 +458,14 @@ class CollaborativeBackend:
     refine but not fold.
     """
 
+    anchor_robot_id: str | None = None
+    """Preferred gauge robot for any graph component it belongs to.
+
+    This changes no relative pose. It keeps the merged map in one operator-
+    selected robot's SLAM frame when other robots join, so a newcomer's name
+    or restart cannot rotate the established fleet presentation.
+    """
+
     t_world_map_hint: dict[str, np.ndarray] | None = None
     """Known first-observation pose per robot (Gazebo spawn, surveyed start).
 
@@ -578,6 +586,7 @@ class CollaborativeBackend:
             min_pcm_clique_size=self.min_pcm_clique_size,
             gnc_weight_threshold=self.gnc_weight_threshold,
             pose_prior_sigmas=self.pose_prior_sigmas,
+            preferred_anchor_robot=self.anchor_robot_id,
         )
         self._index = ScanContextIndex(
             rings=DEFAULT_RINGS,
@@ -936,6 +945,7 @@ class CollaborativeBackend:
             min_pcm_clique_size=self.min_pcm_clique_size,
             gnc_weight_threshold=self.gnc_weight_threshold,
             pose_prior_sigmas=self.pose_prior_sigmas,
+            preferred_anchor_robot=self.anchor_robot_id,
         )
         for keyframe in list(self._keyframes.values()):
             if keyframe.id.trajectory not in excluded:

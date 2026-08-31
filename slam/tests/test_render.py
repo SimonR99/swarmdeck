@@ -404,6 +404,54 @@ def test_disconnected_fragments_in_one_trajectory_never_overlay() -> None:
     assert robot[:, 0].max() < 10.0
 
 
+def test_robot_scope_is_expressed_in_robot_map_frame() -> None:
+    """Solo optimized grids share coordinates with the robot's SLAM map.
+
+    The component remains in the collaborative frame; only ``robot:<id>`` is
+    transformed back by ``T_map_world``. This is what keeps the solo raster and
+    the live robot marker together when a merge rotates/translates the robot.
+    """
+    robot_id = "solo"
+    keyframe_id = KeyframeId(robot_id, 0)
+    t_world_map = yaw_pose(5.0, 7.0, np.pi / 2.0)
+    t_map_base = yaw_pose(2.0, 0.0, 0.0)
+    keyframe = Keyframe(
+        keyframe_id,
+        0.0,
+        t_map_base,
+        np.asarray([[1.0, 0.0, 0.5]], dtype=np.float32),
+    )
+    graph = OptimizedGraph(
+        poses={keyframe_id: t_world_map @ t_map_base},
+        t_world_map={robot_id: t_world_map},
+        t_world_trajectory={keyframe_id.trajectory: t_world_map},
+        components=[
+            Component(
+                0,
+                frozenset({robot_id}),
+                keyframe_id,
+                frozenset({keyframe_id.trajectory}),
+                frozenset({keyframe_id}),
+            )
+        ],
+    )
+    components, robots, _trajectories = render_all(
+        graph,
+        [keyframe],
+        RenderConfig(
+            native_map_resolution=0.05,
+            native_map_padding_m=0.2,
+            retain_free_space=False,
+        ),
+    )
+
+    # In map coordinates the robot is at x=2 and the return at x=3.
+    assert _cell_value(robots[robot_id], 3.0, 0.0) == OCCUPIED
+    # In collaborative coordinates that return was rotated and translated.
+    assert _cell_value(components[0], 5.0, 10.0) == OCCUPIED
+    assert _cell_value(robots[robot_id], 5.0, 10.0) is None
+
+
 def test_merged_component_renders_one_consistent_grid(fleet):
     """Two robots WITH a verified transform land in one grid, and that grid
     actually contains geometry from both -- not just the anchor robot."""
