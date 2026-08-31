@@ -55,6 +55,7 @@ topics:
   # Point nav uses /trajectory (not Nav2). Joystick uses /cmd_vel. Both need
   # the driver, a claimed lease, and a standing robot.
   cmd_vel: /cmd_vel
+  body_pose: /body_pose
   # Spot's driver publishes one charge record per pack in this custom array.
   # The adapter collapses it to the lowest valid pack percentage for the UI.
   battery: /status/battery_states

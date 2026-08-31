@@ -305,25 +305,31 @@ def test_set_stand_height_and_clamping(mod, monkeypatch):
 
     client.call_async.side_effect = call_async
     bridge._stand_height_client = client
+    bridge.pub_body_pose = MagicMock()
 
     # Normal range
     assert bridge.set_stand_height(0.10) is True
     assert calls[-1] == pytest.approx(0.10)
+    assert bridge.pub_body_pose.publish.call_args[0][0].position.z == pytest.approx(0.10)
 
     # Clamped above max (0.15)
     assert bridge.set_stand_height(0.30) is True
     assert calls[-1] == pytest.approx(0.15)
+    assert bridge.pub_body_pose.publish.call_args[0][0].position.z == pytest.approx(0.15)
 
     # Clamped below min (-0.15)
     assert bridge.set_stand_height(-0.25) is True
     assert calls[-1] == pytest.approx(-0.15)
+    assert bridge.pub_body_pose.publish.call_args[0][0].position.z == pytest.approx(-0.15)
 
     # Via body_command
     bridge.body_command("set_height", height=0.08)
     assert calls[-1] == pytest.approx(0.08)
+    assert bridge.pub_body_pose.publish.call_args[0][0].position.z == pytest.approx(0.08)
 
     bridge.body_command("stand", height=-0.05)
     assert calls[-1] == pytest.approx(-0.05)
+    assert bridge.pub_body_pose.publish.call_args[0][0].position.z == pytest.approx(-0.05)
 
 
 def _identity_tf():

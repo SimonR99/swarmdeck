@@ -54,7 +54,7 @@ from typing import Any
 import numpy as np
 import rclpy
 import websockets
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -197,6 +197,7 @@ class HardwareBridge(
     # so `_on_nav_cmd_vel` can fire against a half-built bridge — and the safe
     # answer to "is the operator there?" before anyone has connected is no.
     _last_link_at: float = 0.0
+    _target_body_height: float = 0.0
 
     def __init__(self, node: Node, robot_id: str, cfg: dict, http_url: str) -> None:
         self.node = node
@@ -440,6 +441,12 @@ class HardwareBridge(
         self.pub_body_cmd = None
         if body_cmd_topic and String is not None:
             self.pub_body_cmd = node.create_publisher(String, body_cmd_topic, 10)
+
+        body_pose_topic = (cfg.get("topics") or {}).get("body_pose")
+        self.pub_body_pose = None
+        if body_pose_topic and Pose is not None:
+            self.pub_body_pose = node.create_publisher(Pose, body_pose_topic, 10)
+        self._target_body_height: float = 0.0
 
         max_velocity_name = (cfg.get("services") or {}).get("max_velocity")
         self._velocity_client = None
@@ -999,44 +1006,51 @@ class HardwareBridge(
             self.node.get_logger().warn(f"[{self.id}] invalid stand height {height!r}")
             return False
         clamped_h = max(-0.15, min(0.15, h))
+        self._target_body_height = clamped_h
+
+        # 1. Update Spot mobility parameters via /body_pose so walking (cmd_vel)
+        # and locomotion commands maintain this body height offset.
+        if getattr(self, "pub_body_pose", None) is not None and Pose is not None:
+            pose = Pose()
+            pose.position.x = 0.0
+            pose.position.y = 0.0
+            pose.position.z = float(clamped_h)
+            pose.orientation.x = 0.0
+            pose.orientation.y = 0.0
+            pose.orientation.z = 0.0
+            pose.orientation.w = 1.0
+            self.pub_body_pose.publish(pose)
+
+        # 2. Call /set_stand_height service to immediately update the stand posture if standing.
         client = self._stand_height_client
-        if client is None or SetStandHeight is None:
-            self.node.get_logger().warn(
-                f"[{self.id}] set_stand_height service is not configured or spot_msgs unavailable"
-            )
-            return False
-        if not client.wait_for_service(timeout_sec=3.0):
-            self.node.get_logger().warn(
-                f"[{self.id}] set_stand_height service is not up (is spot_driver running?)"
-            )
-            return False
-        req = SetStandHeight.Request()
-        req.height = float(clamped_h)
-        future = client.call_async(req)
-        deadline = time.monotonic() + 10.0
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if not future.done():
-            self.node.get_logger().warn(f"[{self.id}] set_stand_height timed out")
-            return False
-        try:
-            resp = future.result()
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] set_stand_height failed: {exc}")
-            return False
-        ok = bool(getattr(resp, "success", True))
-        message = str(getattr(resp, "message", "") or "")
-        if ok:
-            self.node.get_logger().info(
-                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): ok"
-                + (f" ({message})" if message else "")
-            )
-        else:
-            self.node.get_logger().warn(
-                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): refused"
-                + (f" ({message})" if message else "")
-            )
-        return ok
+        if client is not None and SetStandHeight is not None:
+            if client.wait_for_service(timeout_sec=1.0):
+                req = SetStandHeight.Request()
+                req.height = float(clamped_h)
+                future = client.call_async(req)
+                deadline = time.monotonic() + 5.0
+                while not future.done() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if future.done():
+                    try:
+                        resp = future.result()
+                        ok = bool(getattr(resp, "success", True))
+                        message = str(getattr(resp, "message", "") or "")
+                        if ok:
+                            self.node.get_logger().info(
+                                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): ok"
+                                + (f" ({message})" if message else "")
+                            )
+                        else:
+                            self.node.get_logger().warn(
+                                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): refused"
+                                + (f" ({message})" if message else "")
+                            )
+                    except Exception as exc:
+                        self.node.get_logger().warn(
+                            f"[{self.id}] set_stand_height failed: {exc}"
+                        )
+        return True
 
     def body_command(
         self, action: str, height: float | None = None, **kwargs: Any
@@ -1073,6 +1087,8 @@ class HardwareBridge(
             self._call_trigger("clear_keepalive")
             self._call_trigger("power_on")
             self._call_trigger("stand")
+            if self._target_body_height != 0.0:
+                self.set_stand_height(self._target_body_height)
             return
         self._call_trigger(action)
 
