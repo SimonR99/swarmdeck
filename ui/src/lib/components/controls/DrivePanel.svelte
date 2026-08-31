@@ -36,6 +36,7 @@
   let driving = false;
   let driveLabel = $state('Ready');
   let maxSpeed = $state(0.3);
+  let bodyHeight = $state(0.0);
   let joystickX = $state(0);
   let joystickY = $state(0);
   let joystickPointer = $state<number | null>(null);
@@ -509,6 +510,70 @@
         >
           <CircleSlash class="h-3 w-3" /> Cancel
         </button>
+
+        {#if robot.capabilities.includes('body')}
+          <div class="mb-2 mt-3 border-t border-border pt-3">
+            <div class="mb-1.5 flex items-center justify-between">
+              <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+                Stand Height
+              </span>
+              <output class="tabular text-[10px] font-semibold text-fg">
+                {bodyHeight > 0 ? '+' : ''}{bodyHeight.toFixed(2)} m
+              </output>
+            </div>
+            <input
+              type="range"
+              min="-0.15"
+              max="0.15"
+              step="0.01"
+              bind:value={bodyHeight}
+              disabled={!canDrive}
+              aria-label="Spot stand height relative to default in metres"
+              class="speed-slider"
+              oninput={() => {
+                if (activeId) actions.bodyCommand(activeId, 'set_height', bodyHeight);
+              }}
+            />
+            <div class="mt-0.5 flex justify-between text-[8px] text-fg-dim">
+              <span>-0.15m</span><span>0.00m</span><span>+0.15m</span>
+            </div>
+            <div class="mt-1.5 grid grid-cols-3 gap-1">
+              <button
+                type="button"
+                disabled={!canDrive}
+                class="flex h-7 items-center justify-center rounded-md bg-surface-3 text-[9px] font-medium text-fg-muted hover:bg-border active:scale-[0.98] disabled:opacity-40"
+                onclick={() => {
+                  bodyHeight = -0.15;
+                  if (activeId) actions.bodyCommand(activeId, 'set_height', -0.15);
+                }}
+              >
+                Crouch
+              </button>
+              <button
+                type="button"
+                disabled={!canDrive}
+                class="flex h-7 items-center justify-center rounded-md bg-surface-3 text-[9px] font-medium text-fg-muted hover:bg-border active:scale-[0.98] disabled:opacity-40"
+                onclick={() => {
+                  bodyHeight = 0.0;
+                  if (activeId) actions.bodyCommand(activeId, 'set_height', 0.0);
+                }}
+              >
+                Default
+              </button>
+              <button
+                type="button"
+                disabled={!canDrive}
+                class="flex h-7 items-center justify-center rounded-md bg-surface-3 text-[9px] font-medium text-fg-muted hover:bg-border active:scale-[0.98] disabled:opacity-40"
+                onclick={() => {
+                  bodyHeight = 0.15;
+                  if (activeId) actions.bodyCommand(activeId, 'set_height', 0.15);
+                }}
+              >
+                Tiptoes
+              </button>
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
   {:else}

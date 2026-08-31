@@ -14,6 +14,7 @@
     $props();
 
   let bodyModalOpen = $state(false);
+  let targetHeight = $state(0.0);
 
   const color = $derived(fleet.colorOf(robot.robot_id));
   const selected = $derived(fleet.isSelected(robot.robot_id));
@@ -210,7 +211,17 @@
               Sit
             </button>
             <button
-              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
+              class="inline-flex h-10 touch-target items-center justify-center rounded-full bg-surface-3 px-3 text-xs font-semibold text-fg-muted transition-[background,transform] hover:bg-border active:scale-[0.98] disabled:opacity-40"
+              disabled={!robot.online}
+              onclick={() => {
+                actions.bodyCommand(robot.robot_id, 'lock_stand');
+                bodyModalOpen = false;
+              }}
+            >
+              Lock Stand
+            </button>
+            <button
+              class="col-span-2 inline-flex h-10 touch-target items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-[background,transform] hover:brightness-95 active:scale-[0.98] disabled:opacity-40"
               disabled={!robot.online}
               onclick={() => {
                 actions.bodyCommand(robot.robot_id, 'stand');
@@ -266,6 +277,69 @@
             >
               Stand
             </button>
+          </div>
+
+          <div class="border-t border-border/70 pt-3 mt-1 flex flex-col gap-2">
+            <div class="flex items-center justify-between">
+              <span class="text-[10px] font-semibold uppercase tracking-[0.06em] text-fg-muted">
+                Stand Height
+              </span>
+              <span class="tabular text-[11px] font-semibold text-fg">
+                {targetHeight > 0 ? '+' : ''}{targetHeight.toFixed(2)} m
+              </span>
+            </div>
+
+            <input
+              type="range"
+              min="-0.15"
+              max="0.15"
+              step="0.01"
+              bind:value={targetHeight}
+              disabled={!robot.online}
+              aria-label="Stand height in metres relative to default"
+              class="w-full h-7 accent-accent"
+              oninput={() => {
+                actions.bodyCommand(robot.robot_id, 'set_height', targetHeight);
+              }}
+            />
+            <div class="flex justify-between text-[8px] text-fg-dim">
+              <span>-0.15m (Crouch)</span>
+              <span>0.00m (Default)</span>
+              <span>+0.15m (Tiptoes)</span>
+            </div>
+
+            <div class="grid grid-cols-3 gap-1.5 mt-1">
+              <button
+                class="inline-flex h-8 items-center justify-center rounded-lg bg-surface-3 px-2 text-[10px] font-medium text-fg-muted hover:bg-border active:scale-[0.98] disabled:opacity-40"
+                disabled={!robot.online}
+                onclick={() => {
+                  targetHeight = -0.15;
+                  actions.bodyCommand(robot.robot_id, 'set_height', -0.15);
+                }}
+              >
+                Crouch
+              </button>
+              <button
+                class="inline-flex h-8 items-center justify-center rounded-lg bg-surface-3 px-2 text-[10px] font-medium text-fg-muted hover:bg-border active:scale-[0.98] disabled:opacity-40"
+                disabled={!robot.online}
+                onclick={() => {
+                  targetHeight = 0.0;
+                  actions.bodyCommand(robot.robot_id, 'set_height', 0.0);
+                }}
+              >
+                Default
+              </button>
+              <button
+                class="inline-flex h-8 items-center justify-center rounded-lg bg-surface-3 px-2 text-[10px] font-medium text-fg-muted hover:bg-border active:scale-[0.98] disabled:opacity-40"
+                disabled={!robot.online}
+                onclick={() => {
+                  targetHeight = 0.15;
+                  actions.bodyCommand(robot.robot_id, 'set_height', 0.15);
+                }}
+              >
+                Tiptoes
+              </button>
+            </div>
           </div>
         {/if}
       </div>

@@ -275,6 +275,57 @@ def test_body_command_claim_clears_tablet_keepalive(mod):
     assert order == ["estop_release", "clear_keepalive", "power_on", "stand"]
 
 
+def test_set_stand_height_and_clamping(mod, monkeypatch):
+    """Stand height is clamped to [-0.15, 0.15] and sent to SetStandHeight."""
+    class FakeSetStandHeight:
+        class Request:
+            def __init__(self):
+                self.height = 0.0
+
+        class Response:
+            def __init__(self):
+                self.success = True
+                self.message = "ok"
+
+    monkeypatch.setattr(mod, "SetStandHeight", FakeSetStandHeight)
+    bridge = _bridge(
+        mod,
+        {"services": {"set_stand_height": "/set_stand_height"}},
+    )
+    calls: list[float] = []
+    client = MagicMock()
+    client.wait_for_service.return_value = True
+
+    def call_async(req):
+        calls.append(req.height)
+        fut = MagicMock()
+        fut.done.return_value = True
+        fut.result.return_value = FakeSetStandHeight.Response()
+        return fut
+
+    client.call_async.side_effect = call_async
+    bridge._stand_height_client = client
+
+    # Normal range
+    assert bridge.set_stand_height(0.10) is True
+    assert calls[-1] == pytest.approx(0.10)
+
+    # Clamped above max (0.15)
+    assert bridge.set_stand_height(0.30) is True
+    assert calls[-1] == pytest.approx(0.15)
+
+    # Clamped below min (-0.15)
+    assert bridge.set_stand_height(-0.25) is True
+    assert calls[-1] == pytest.approx(-0.15)
+
+    # Via body_command
+    bridge.body_command("set_height", height=0.08)
+    assert calls[-1] == pytest.approx(0.08)
+
+    bridge.body_command("stand", height=-0.05)
+    assert calls[-1] == pytest.approx(-0.05)
+
+
 def _identity_tf():
     rot = type("Q", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})()
     trans = type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})()
@@ -375,7 +426,7 @@ def test_trajectory_applies_configured_velocity_limit(mod):
             "trajectory": {
                 "velocity_limit": {
                     "linear_x": 0.25,
-                    "linear_y": 0.2,
+                    "linear_y": 0.0,
                     "angular_z": 0.5,
                 }
             },
@@ -400,7 +451,7 @@ def test_trajectory_applies_configured_velocity_limit(mod):
 
     request = bridge._velocity_client.call_async.call_args[0][0]
     assert request.velocity_limit.linear.x == pytest.approx(0.25)
-    assert request.velocity_limit.linear.y == pytest.approx(0.2)
+    assert request.velocity_limit.linear.y == pytest.approx(0.0)
     assert request.velocity_limit.angular.z == pytest.approx(0.5)
     bridge.traj_client.send_goal_async.assert_called_once()
 
@@ -439,7 +490,7 @@ def test_spot_config_enables_conservative_trajectory_limits():
     assert config["services"]["max_velocity"] == "/max_velocity"
     assert config["trajectory"]["velocity_limit"] == {
         "linear_x": 0.25,
-        "linear_y": 0.25,
+        "linear_y": 0.0,
         "angular_z": 0.5,
     }
 
@@ -535,8 +586,39 @@ def test_cancel_trajectory_calls_spot_stop(mod):
 
     handle.cancel_goal_async.assert_called_once_with()
     assert order == ["stop"]
+    zero = bridge.pub_cmd.publish.call_args[0][0]
+    assert zero.linear.x == pytest.approx(0.0)
+    assert zero.linear.y == pytest.approx(0.0)
+    assert zero.angular.z == pytest.approx(0.0)
     assert bridge.nav_status == "cancelled"
     assert bridge.goal is None
+
+
+def test_cancel_trajectory_does_not_wait_for_stop_response(mod):
+    """Manual drive must publish even while Spot's /stop call is in flight."""
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "services": {"stop": "/stop"},
+        },
+    )
+    client = MagicMock()
+    client.wait_for_service.return_value = True
+    future = MagicMock()
+    future.done.return_value = False
+    client.call_async.return_value = future
+    bridge._body_clients = {"stop": client}
+    bridge.nav_status = "active"
+
+    bridge.drive(0.2, 0.1)
+
+    client.call_async.assert_called_once()
+    assert bridge.pub_cmd.publish.call_count == 2
+    manual = bridge.pub_cmd.publish.call_args_list[-1].args[0]
+    assert manual.linear.x == pytest.approx(0.2)
+    assert manual.angular.z == pytest.approx(0.1)
+    assert bridge.mode == "teleop"
 
 
 def test_camera_capability_needs_a_real_topic(mod):

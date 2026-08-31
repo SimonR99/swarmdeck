@@ -455,7 +455,7 @@ export type ClientMessage =
   | { type: 'report_target'; robot_id: string; payload: Point }
   | { type: 'stop_all' }
   | { type: 'reset_sim' }
-  | { type: 'body_command'; robot_id: string; action: string }
+  | { type: 'body_command'; robot_id: string; action: string; height?: number }
   | { type: 'detection_accept'; proposal_id: string }
   | { type: 'detection_ignore'; proposal_id: string }
   | { type: 'detection_merge'; proposal_id: string; entity_id: string }

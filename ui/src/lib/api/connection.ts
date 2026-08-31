@@ -216,9 +216,14 @@ export const actions = {
   stopAll() {
     sendAction({ type: 'stop_all' });
   },
-  bodyCommand(robotId: string, action: string) {
+  bodyCommand(robotId: string, action: string, height?: number) {
     if (!fleet.isEnabled(robotId)) return;
-    sendAction({ type: 'body_command', robot_id: robotId, action });
+    sendAction({
+      type: 'body_command',
+      robot_id: robotId,
+      action,
+      ...(height !== undefined ? { height } : {})
+    });
   },
   /**
    * Simulation only. The map clears through the ordinary patch path once the

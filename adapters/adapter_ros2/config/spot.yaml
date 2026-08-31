@@ -76,8 +76,10 @@ actions:
   trajectory: /trajectory
 
 # A point goal has no requested yaw, so the adapter keeps the current body
-# heading. These are SDK mobility limits for both forward/lateral walking and
-# turning; the Trajectory duration is only a timeout and does not set speed.
+# heading. The zero lateral limit constrains the otherwise-holonomic Spot
+# controller to differential-drive-like motion: forward/backward plus yaw, with
+# no sideways walking. The Trajectory duration is only a timeout and does not
+# set speed.
 trajectory:
   frame: body
   duration_s: 30.0
@@ -85,7 +87,7 @@ trajectory:
   disable_obstacle_avoidance: false
   velocity_limit:
     linear_x: 0.25
-    linear_y: 0.25
+    linear_y: 0.0
     angular_z: 0.5
 
 # Clearpath spot_driver services. MIST's spot.yaml leaves `spot_name` empty, so
@@ -97,6 +99,7 @@ services:
   release: /release
   sit: /sit
   stand: /stand
+  set_stand_height: /set_stand_height
   power_on: /power_on
   stop: /stop
   # Software e-stop allow, plus drop a leftover tablet keepalive that holds

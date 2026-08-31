@@ -135,13 +135,19 @@ except ImportError:  # pragma: no cover - depends on the robot's install
     Trigger = None
 
 try:
+    from std_msgs.msg import String
+except ImportError:  # pragma: no cover - depends on the robot's install
+    String = None
+
+try:
     from spot_msgs.action import Trajectory
 except ImportError:  # pragma: no cover - depends on the robot's install
     Trajectory = None
 
 try:
-    from spot_msgs.srv import SetVelocity
+    from spot_msgs.srv import SetStandHeight, SetVelocity
 except ImportError:  # pragma: no cover - depends on the robot's install
+    SetStandHeight = None
     SetVelocity = None
 
 # Spot and Unitree G1 humanoid body services.
@@ -156,6 +162,7 @@ BODY_ACTIONS = (
     "walk_mode",
     "run_mode",
     "wave",
+    "set_height",
 )
 # Trigger names that are not GUI body actions: motors, software e-stop allow,
 # tablet keepalive clear, and the SDK stop used because Clearpath's ROS 2
@@ -429,10 +436,22 @@ class HardwareBridge(
                 if name in BODY_SERVICE_NAMES and topic:
                     self._body_clients[name] = node.create_client(Trigger, topic)
 
+        body_cmd_topic = (cfg.get("topics") or {}).get("body_cmd")
+        self.pub_body_cmd = None
+        if body_cmd_topic and String is not None:
+            self.pub_body_cmd = node.create_publisher(String, body_cmd_topic, 10)
+
         max_velocity_name = (cfg.get("services") or {}).get("max_velocity")
         self._velocity_client = None
         if max_velocity_name and SetVelocity is not None:
             self._velocity_client = node.create_client(SetVelocity, max_velocity_name)
+
+        stand_height_name = (cfg.get("services") or {}).get("set_stand_height")
+        self._stand_height_client = None
+        if stand_height_name and SetStandHeight is not None:
+            self._stand_height_client = node.create_client(
+                SetStandHeight, stand_height_name
+            )
 
         # The deadman runs off the ROBOT's clock, not the operator link.
         #
@@ -491,7 +510,12 @@ class HardwareBridge(
         if self.pub_cmd is not None:
             caps.append("estop")
         services = self.cfg.get("services") or {}
-        if any(services.get(name) for name in BODY_ACTIONS):
+        topics = self.cfg.get("topics") or {}
+        if (
+            any(services.get(name) for name in BODY_ACTIONS)
+            or bool(topics.get("body_cmd"))
+            or getattr(self, "pub_body_cmd", None) is not None
+        ):
             caps.append("body")
         return caps
 
@@ -967,8 +991,57 @@ class HardwareBridge(
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
-    def body_command(self, action: str) -> None:
-        """Claim/release the body lease, or sit/stand.
+    def set_stand_height(self, height: float) -> bool:
+        """Command Spot's stand height in range [-0.15, 0.15] meters relative to default."""
+        try:
+            h = float(height)
+        except (ValueError, TypeError):
+            self.node.get_logger().warn(f"[{self.id}] invalid stand height {height!r}")
+            return False
+        clamped_h = max(-0.15, min(0.15, h))
+        client = self._stand_height_client
+        if client is None or SetStandHeight is None:
+            self.node.get_logger().warn(
+                f"[{self.id}] set_stand_height service is not configured or spot_msgs unavailable"
+            )
+            return False
+        if not client.wait_for_service(timeout_sec=3.0):
+            self.node.get_logger().warn(
+                f"[{self.id}] set_stand_height service is not up (is spot_driver running?)"
+            )
+            return False
+        req = SetStandHeight.Request()
+        req.height = float(clamped_h)
+        future = client.call_async(req)
+        deadline = time.monotonic() + 10.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not future.done():
+            self.node.get_logger().warn(f"[{self.id}] set_stand_height timed out")
+            return False
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] set_stand_height failed: {exc}")
+            return False
+        ok = bool(getattr(resp, "success", True))
+        message = str(getattr(resp, "message", "") or "")
+        if ok:
+            self.node.get_logger().info(
+                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): ok"
+                + (f" ({message})" if message else "")
+            )
+        else:
+            self.node.get_logger().warn(
+                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): refused"
+                + (f" ({message})" if message else "")
+            )
+        return ok
+
+    def body_command(
+        self, action: str, height: float | None = None, **kwargs: Any
+    ) -> None:
+        """Claim/release the body lease, sit/stand, or adjust stand height.
 
         `stand` powers the motors first when `services.power_on` is set —
         Clearpath's `/stand` fails if the robot is still sitting unpowered.
@@ -978,7 +1051,17 @@ class HardwareBridge(
         failures are logged and not retried here.
         """
         action = str(action or "")
+        if action == "set_height" or (action == "stand" and height is not None):
+            if height is not None:
+                self.set_stand_height(float(height))
+                return
         if action not in BODY_ACTIONS:
+            return
+        pub = getattr(self, "pub_body_cmd", None)
+        if pub is not None and String is not None:
+            msg = String()
+            msg.data = action
+            pub.publish(msg)
             return
         if action == "claim":
             self._call_trigger("claim")
@@ -1033,6 +1116,55 @@ class HardwareBridge(
                 + (f" ({message})" if message else "")
             )
         return ok
+
+    def _call_trigger_async(self, name: str) -> bool:
+        """Start a Trigger request without holding up the control path.
+
+        This is reserved for commands such as Spot's SDK stop where waiting for
+        the service response would delay the operator's next velocity command.
+        Ordinary body transitions remain synchronous so their required order
+        (claim, e-stop release, power on, stand) is preserved.
+        """
+        client = self._body_clients.get(name)
+        if client is None or Trigger is None:
+            if name not in OPTIONAL_BODY_SERVICES:
+                self.node.get_logger().warn(
+                    f"[{self.id}] body command {name!r} has no service configured"
+                )
+            return False
+        try:
+            if not client.wait_for_service(timeout_sec=0.0):
+                self.node.get_logger().warn(
+                    f"[{self.id}] body service {name!r} is not up "
+                    "(is spot_driver running?)"
+                )
+                return False
+            future = client.call_async(Trigger.Request())
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] body service {name!r} failed to start: {exc}"
+            )
+            return False
+
+        def report_result(done) -> None:
+            try:
+                resp = done.result()
+            except Exception as exc:
+                self.node.get_logger().warn(
+                    f"[{self.id}] body service {name!r} failed: {exc}"
+                )
+                return
+            ok = bool(getattr(resp, "success", True))
+            message = str(getattr(resp, "message", "") or "")
+            log = self.node.get_logger().info if ok else self.node.get_logger().warn
+            state = "ok" if ok else "refused"
+            log(
+                f"[{self.id}] body {name}: {state}"
+                + (f" ({message})" if message else "")
+            )
+
+        future.add_done_callback(report_result)
+        return True
 
     def navigate_to(self, goal: dict[str, float]) -> None:
         if self.traj_client is not None:
@@ -1149,11 +1281,13 @@ class HardwareBridge(
             return False
         if (
             not all(math.isfinite(v) for v in (linear_x, linear_y, angular_z))
-            or min(linear_x, linear_y, angular_z) <= 0.0
+            or linear_x <= 0.0
+            or linear_y < 0.0
+            or angular_z <= 0.0
         ):
             self.node.get_logger().warn(
-                f"[{self.id}] trajectory velocity limits must be positive; "
-                "goal dropped"
+                f"[{self.id}] trajectory linear_x/angular_z limits must be positive "
+                "and linear_y must be non-negative; goal dropped"
             )
             return False
 
@@ -1293,17 +1427,37 @@ class HardwareBridge(
             except Exception:
                 pass
             self._goal_handle = None
-        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
-        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
-        # The SDK `/stop` Trigger is what actually halts the body.
-        if self.traj_client is not None:
-            self._call_trigger("stop")
         self.goal = None
         self.planned_path = []
         self._local_planned_path = []
         self._global_planned_path = []
         self.nav_status = "cancelled"
         self.mode = "idle"
+        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
+        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
+        # A zero cmd_vel preempts the SDK trajectory immediately. Also enqueue
+        # `/stop` as a backstop, but never wait for that service round trip here:
+        # drive() calls this inline before publishing the operator's command.
+        if self.traj_client is not None:
+            if self.pub_cmd is not None:
+                zero = Twist()
+                zero.linear.x = 0.0
+                zero.linear.y = 0.0
+                zero.angular.z = 0.0
+                self.pub_cmd.publish(zero)
+            self._call_trigger_async("stop")
+
+    def stop_for_exit(self) -> None:
+        """Flush a synchronous SDK stop before the ROS executor is torn down."""
+        for _ in range(3):
+            try:
+                self.cancel_goal()
+                self.drive(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.05)
+        if self.traj_client is not None:
+            self._call_trigger("stop")
 
     # ------------------------------------------------------------- uploads
 

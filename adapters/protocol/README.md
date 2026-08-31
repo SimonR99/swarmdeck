@@ -191,7 +191,7 @@ metadata is carried by the HTTP request.
 { "type": "stop", "seq": 44 }
 { "type": "set_mode", "seq": 45, "mode": "teleop" }
 { "type": "reset", "seq": 46 }
-{ "type": "body_command", "seq": 47, "action": "stand" }
+{ "type": "body_command", "seq": 47, "action": "stand", "height": 0.0 }
 { "type": "camera_interest", "watched": false }
 ```
 
@@ -199,8 +199,9 @@ Commands are planner-agnostic. The adapter translates `navigate_to` to Nav2,
 `move_base`, or a vendor API. Local-frame goals are converted by the backend
 before transmission.
 
-`body_command.action` is `claim`, `release`, `sit`, or `stand`. Ignore it without
-the `body` capability.
+`body_command.action` is `claim`, `release`, `sit`, `stand`, or `set_height`
+(with optional `height` in metres relative to default height, e.g. `[-0.15, 0.15]`).
+Ignore it without the `body` capability.
 
 `camera_interest` is retained as a compatibility command and has no effect on
 the H.264 stream or detection. Never gate detection on camera interest.
