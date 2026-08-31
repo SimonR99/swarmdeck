@@ -50,6 +50,15 @@ def _spot_driver(context, *args, **kwargs):
                 {"start_estop": True},
             ],
         ),
+        Node(
+            package="spot_driver",
+            executable="state_publisher_node",
+            name="state_publisher_node",
+            output="screen",
+            parameters=[
+                str(mist_config / "spot.yaml"),
+            ],
+        ),
         # Drops the tablet's `tablet-stop` keepalive so Claim/Stand can power
         # the motors. Credentials stay in MIST's spot.yaml, not this repo.
         ExecuteProcess(
