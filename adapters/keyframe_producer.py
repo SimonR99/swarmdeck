@@ -24,6 +24,8 @@ from typing import Any
 
 import numpy as np
 
+from adapters.runtime import unique_row_index
+
 try:
     from swarmdeck_protocol import ProtocolError, encode_keyframe
 except ImportError:
@@ -122,7 +124,7 @@ def voxel_downsample(points: np.ndarray, voxel_m: float) -> np.ndarray:
     if points.shape[0] == 0:
         return points
     keys = np.round(np.asarray(points, dtype=np.float64) / voxel_m).astype(np.int32)
-    _, keep = np.unique(keys, axis=0, return_index=True)
+    keep = unique_row_index(keys)
     return np.asarray(points)[keep]
 
 
