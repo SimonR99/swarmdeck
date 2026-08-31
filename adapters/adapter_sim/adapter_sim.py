@@ -66,6 +66,7 @@ from adapters.runtime import (
 )
 from adapters.session import run_adapter_session
 from adapters.keyframe_producer import (
+    DEFAULT_MAX_YAW_RATE,
     KeyframeUploader,
     laser_scan_to_map_points,
     points_lidar_to_map,
@@ -97,7 +98,12 @@ from sim_reset import (
 # argument session.launch.py already makes by importing lidar_spec from here
 # instead of re-reading the YAML.
 sys.path.insert(0, str(REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"))
-from spawn_fleet import DEFAULT_ROBOT_PROFILE, robot_spec, robot_types  # noqa: E402
+from spawn_fleet import (  # noqa: E402
+    DEFAULT_ROBOT_PROFILE,
+    lidar_spec,
+    robot_spec,
+    robot_types,
+)
 
 # Depth acceptance band for placing a detection on the map, metres. The same
 # figures the hardware adapters default to (`perception.depth_min_m` /
@@ -290,7 +296,13 @@ class RobotBridge(
     _TRACK_IDS = staticmethod(track_ids)
 
     def __init__(
-        self, node: Node, robot_id: str, http_url: str, platform: str | None = None
+        self,
+        node: Node,
+        robot_id: str,
+        http_url: str,
+        platform: str | None = None,
+        *,
+        instantaneous_planar_scan: bool = False,
     ) -> None:
         self.node = node
         self.id = robot_id
@@ -327,7 +339,13 @@ class RobotBridge(
         self._keyframes = KeyframeUploader(
             robot_id,
             http_url,
+            # Gazebo's one-ring scan is instantaneous, so it cannot suffer
+            # spinning-lidar motion skew. Keep turn observations enabled even
+            # when wheel motion is badly reported, but retain the platform's
+            # normal capture period: 0.5 s overwhelmed online registration in
+            # a four-robot merge (279 captures with 80 still queued).
             min_period_s=float(rates.get("keyframe_period_s", 2.0)),
+            max_yaw_rate=(0.0 if instantaneous_planar_scan else DEFAULT_MAX_YAW_RATE),
             height_band={
                 "floor_z": -float(spec.base_height),
                 "min_z": 0.15,
@@ -594,7 +612,9 @@ class RobotBridge(
         pose = self.map_pose()
         return pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
 
-    def _enqueue_keyframe(self, points_map: np.ndarray, stamp: float) -> None:
+    def _enqueue_keyframe(
+        self, points_map: np.ndarray, t_map_base: np.ndarray, stamp: float
+    ) -> None:
         uploader = getattr(self, "_keyframes", None)
         if uploader is None or points_map.shape[0] == 0:
             return
@@ -605,7 +625,11 @@ class RobotBridge(
         if getattr(self, "_odom_to_base", None) is None:
             return
         try:
-            uploader.consider(points_map, self._pose7(), stamp)
+            # The map cloud and this pose are one observation. Looking the pose
+            # up again here races SLAM's map->odom correction; a loop-closure
+            # jump between the two lookups turns an otherwise valid scan into
+            # metre-long phantom walls after conversion back to base frame.
+            uploader.consider(points_map, t_map_base, stamp)
         except Exception:
             # Keyframe production must never starve the scan map or Nav2.
             pass
@@ -625,7 +649,10 @@ class RobotBridge(
             lidar_x=float(getattr(self, "lidar_x", 0.0)),
             lidar_z=float(getattr(self, "lidar_z", 0.0)),
         )
-        self._enqueue_keyframe(points, stamp_seconds(msg.header) or time.time())
+        captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
+        self._enqueue_keyframe(
+            points, captured_pose, stamp_seconds(msg.header) or time.time()
+        )
 
     def _on_scan_cloud(self, msg: PointCloud2) -> None:
         self._scan_cloud_at = time.monotonic()
@@ -639,7 +666,10 @@ class RobotBridge(
             lidar_x=float(getattr(self, "lidar_x", 0.0)),
             lidar_z=float(getattr(self, "lidar_z", 0.0)),
         )
-        self._enqueue_keyframe(mapped, stamp_seconds(msg.header) or time.time())
+        captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
+        self._enqueue_keyframe(
+            mapped, captured_pose, stamp_seconds(msg.header) or time.time()
+        )
 
     def upload_keyframe(self) -> None:
         uploader = getattr(self, "_keyframes", None)
@@ -1584,8 +1614,15 @@ def main() -> None:
         print(f"[adapter_sim] assuming every robot is a {DEFAULT_ROBOT_PROFILE}")
         platforms = [DEFAULT_ROBOT_PROFILE] * robot_count
 
+    instantaneous_planar_scan = bool(fleet_cfg) and lidar_spec(fleet_cfg).rings == 1
     bridges = [
-        RobotBridge(node, f"{args.prefix}{i}", http_url, platforms[i])
+        RobotBridge(
+            node,
+            f"{args.prefix}{i}",
+            http_url,
+            platforms[i],
+            instantaneous_planar_scan=instantaneous_planar_scan,
+        )
         for i in range(robot_count)
     ]
     for bridge in bridges:

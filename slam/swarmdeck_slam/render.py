@@ -60,6 +60,7 @@ from typing import Final, Iterable, NamedTuple
 import numpy as np
 
 from swarmdeck_slam.types import (
+    Component,
     Keyframe,
     KeyframeId,
     OptimizedGraph,
@@ -119,6 +120,15 @@ class RenderConfig:
     # Evidence ratio: occupied if ``hits * hit_weight >= free``. Higher
     # prefers walls over grazing free-space rays from a slightly-off pose.
     hit_weight: int = 3
+    # Remove returns on another robot's body using only reconstructed peer
+    # poses at nearby keyframe times. This prevents the deliberate rendezvous
+    # from becoming permanent robot-shaped obstacles in the shared map. Zero
+    # disables the filter for callers without reliable fleet synchronization.
+    peer_exclusion_radius_m: float = 0.0
+    peer_exclusion_max_dt_s: float = 2.0
+    # Bracketing reconstructed poses are safer than a distant nearest sample:
+    # interpolate only when the peer track gap itself remains bounded.
+    peer_exclusion_max_interp_gap_s: float = 15.0
 
     def height_limits(self) -> tuple[float, float]:
         """``(min_z, max_z)`` in the frame the band was measured in.
@@ -169,7 +179,7 @@ def render_per_robot(
     keyframes: Iterable[Keyframe],
     config: RenderConfig | None = None,
 ) -> dict[str, RenderedGrid]:
-    """One grid per robot, each rendered from that robot's keyframes alone.
+    """One grid per robot, rendered from its largest verified component.
 
     Same optimized poses as :func:`render_occupancy`, partitioned by robot
     instead of by component. This is what an operator needs that the merged map
@@ -181,7 +191,10 @@ def render_per_robot(
     Distinct from the local map an adapter uploads, which is that robot's own
     SLAM package's output in its own frame -- this one is posed by the
     collaborative solver, so where a merge exists these grids are directly
-    comparable to each other and to the merged map.
+    comparable to each other and to the merged map. If geometric tracking
+    split one boot/session into disconnected fragments, only the robot's
+    largest component is used: sharing a trajectory id is not evidence that
+    those fragments share a frame.
     """
     config = config or RenderConfig()
     return _robot_grids(graph, _contributions_of(graph, keyframes, config), config)
@@ -211,13 +224,11 @@ def render_per_trajectory(
 ) -> dict[TrajectoryId, RenderedGrid]:
     """One grid per trajectory, for a robot that has more than one.
 
-    A robot that reboots contributes several independent stretches of driving,
-    and :func:`render_per_robot` pours all of them into one grid -- correct,
-    because they are one machine's coverage, and useless for the question an
-    operator actually has after a reboot, which is whether the two segments
-    agree about the building. Rendering a segment alone answers it: two
-    trajectory grids that look like the same corridor at the same coordinates
-    are a merge that worked.
+    A robot that reboots contributes several independent stretches of driving.
+    Rendering one segment alone answers whether two such stretches agree about
+    the building. If one segment itself contains disconnected components, only
+    its largest verified component is rendered under this scope; the remaining
+    components stay available as separate ``component:`` grids.
 
     Only robots with more than one trajectory get grids here. For a robot with
     exactly one, this grid and its ``robot:`` grid are pixel-identical renders
@@ -225,7 +236,9 @@ def render_per_trajectory(
     worth paying twice to publish the same picture under two names.
     """
     config = config or RenderConfig()
-    return _trajectory_grids(_contributions_of(graph, keyframes, config), config)
+    return _trajectory_grids(
+        graph, _contributions_of(graph, keyframes, config), config
+    )
 
 
 def render_all(
@@ -267,7 +280,7 @@ def render_all(
     return (
         _component_grids(graph, contributions, config),
         _robot_grids(graph, contributions, config),
-        _trajectory_grids(contributions, config),
+        _trajectory_grids(graph, contributions, config),
     )
 
 
@@ -291,7 +304,7 @@ def _component_grids(
             comp_contribs = {
                 k: v
                 for k, v in contributions.items()
-                if k.trajectory in comp.trajectories and k.robot_id in robots
+                if _component_contains(comp, k) and k.robot_id in robots
             }
         else:
             comp_contribs = {
@@ -318,13 +331,13 @@ def _robot_grids(
                 key=lambda c: sum(
                     1
                     for k in contributions
-                    if k.trajectory in c.trajectories and k.robot_id == robot_id
+                    if _component_contains(c, k) and k.robot_id == robot_id
                 ),
             )
             robot_contribs = {
                 k: v
                 for k, v in contributions.items()
-                if k.trajectory in best_comp.trajectories and k.robot_id == robot_id
+                if _component_contains(best_comp, k) and k.robot_id == robot_id
             }
         else:
             robot_contribs = {
@@ -337,7 +350,9 @@ def _robot_grids(
 
 
 def _trajectory_grids(
-    contributions: dict[KeyframeId, _Contribution], config: RenderConfig
+    graph: OptimizedGraph,
+    contributions: dict[KeyframeId, _Contribution],
+    config: RenderConfig,
 ) -> dict[TrajectoryId, RenderedGrid]:
     """One grid per trajectory, skipping robots that only have one.
 
@@ -348,16 +363,54 @@ def _trajectory_grids(
     per_robot: dict[str, int] = {}
     for trajectory in trajectories:
         per_robot[trajectory.robot_id] = per_robot.get(trajectory.robot_id, 0) + 1
-    return {
-        trajectory: _render_component(
+    result: dict[TrajectoryId, RenderedGrid] = {}
+    for index, trajectory in enumerate(trajectories):
+        if per_robot[trajectory.robot_id] <= 1:
+            continue
+        components = [c for c in graph.components if trajectory in c.trajectories]
+        if components:
+            best_component = max(
+                components,
+                key=lambda c: sum(
+                    1
+                    for keyframe_id in contributions
+                    if keyframe_id.trajectory == trajectory
+                    and _component_contains(c, keyframe_id)
+                ),
+            )
+            selected = {
+                keyframe_id: contribution
+                for keyframe_id, contribution in contributions.items()
+                if keyframe_id.trajectory == trajectory
+                and _component_contains(best_component, keyframe_id)
+            }
+        else:
+            selected = {
+                keyframe_id: contribution
+                for keyframe_id, contribution in contributions.items()
+                if keyframe_id.trajectory == trajectory
+            }
+        result[trajectory] = _render_component(
             index,
             frozenset({trajectory.robot_id}),
-            {k: v for k, v in contributions.items() if k.trajectory == trajectory},
+            selected,
             config,
         )
-        for index, trajectory in enumerate(trajectories)
-        if per_robot[trajectory.robot_id] > 1
-    }
+    return result
+
+
+def _component_contains(component: Component, keyframe_id: KeyframeId) -> bool:
+    """Exact component membership, with compatibility for legacy graphs.
+
+    Odom-free reconstruction may split one continuous boot/session into
+    multiple disconnected fragments. Those components necessarily share a
+    :class:`TrajectoryId`, so trajectory membership alone would pour every
+    fragment into every grid. Current optimizers provide exact keyframe ids;
+    older graph fixtures and callers fall back to their trajectory partition.
+    """
+    if component.keyframe_ids:
+        return keyframe_id in component.keyframe_ids
+    return keyframe_id.trajectory in component.trajectories
 
 
 def _partition_robots(
@@ -399,6 +452,34 @@ class _Contribution(NamedTuple):
     points_world: np.ndarray  # [n, 2] world XY, already filtered
 
 
+def _track_position_at(
+    stamps: np.ndarray,
+    positions: np.ndarray,
+    stamp: float,
+    max_nearest_dt_s: float,
+    max_interp_gap_s: float,
+) -> np.ndarray | None:
+    """Interpolate a peer track at ``stamp``, with bounded endpoint fallback."""
+    insertion = int(np.searchsorted(stamps, stamp))
+    if 0 < insertion < len(stamps):
+        before, after = insertion - 1, insertion
+        t0, t1 = float(stamps[before]), float(stamps[after])
+        if t1 - t0 <= max_interp_gap_s:
+            if t1 <= t0:
+                return positions[before]
+            alpha = (stamp - t0) / (t1 - t0)
+            return (1.0 - alpha) * positions[before] + alpha * positions[after]
+    choices = [
+        index for index in (insertion - 1, insertion) if 0 <= index < len(stamps)
+    ]
+    if not choices:
+        return None
+    nearest = min(choices, key=lambda index: abs(float(stamps[index]) - stamp))
+    if abs(float(stamps[nearest]) - stamp) > max_nearest_dt_s:
+        return None
+    return positions[nearest]
+
+
 def _keyframe_contributions(
     graph: OptimizedGraph,
     keyframes_by_id: dict[KeyframeId, Keyframe],
@@ -412,7 +493,12 @@ def _keyframe_contributions(
     fallback_min_z, fallback_max_z = config.height_limits()
     contributions: dict[KeyframeId, _Contribution] = {}
 
-    for kf_id, pose in graph.poses.items():
+    # Resolve the pose used for rendering once, then build synchronized peer
+    # tracks in that same frame. Never compare across disconnected components:
+    # their relative gauge is intentionally unknown.
+    render_pose: dict[KeyframeId, np.ndarray] = {}
+    for kf_id, optimized_pose in graph.poses.items():
+        pose = optimized_pose
         keyframe = keyframes_by_id.get(kf_id)
         if keyframe is None:
             continue
@@ -422,6 +508,34 @@ def _keyframe_contributions(
                 frame = graph.t_world_map.get(kf_id.robot_id)
             if frame is not None:
                 pose = frame @ keyframe.t_odom_base
+        render_pose[kf_id] = pose
+
+    component_of = {
+        trajectory: component.component_id
+        for component in graph.components
+        for trajectory in component.trajectories
+    }
+    peer_tracks: dict[tuple[int, str], tuple[np.ndarray, np.ndarray]] = {}
+    if config.peer_exclusion_radius_m > 0.0:
+        pending: dict[tuple[int, str], list[tuple[float, np.ndarray]]] = {}
+        for kf_id, pose in render_pose.items():
+            component_id = component_of.get(kf_id.trajectory)
+            keyframe = keyframes_by_id[kf_id]
+            if component_id is not None:
+                pending.setdefault((component_id, kf_id.robot_id), []).append(
+                    (keyframe.stamp, pose[:2, 3])
+                )
+        for key, values in pending.items():
+            values.sort(key=lambda item: item[0])
+            peer_tracks[key] = (
+                np.asarray([item[0] for item in values], dtype=np.float64),
+                np.stack([item[1] for item in values]),
+            )
+
+    for kf_id, pose in render_pose.items():
+        keyframe = keyframes_by_id.get(kf_id)
+        if keyframe is None:
+            continue
         points = keyframe.points.astype(np.float64, copy=False)
         origin_xy = pose[:2, 3]
 
@@ -449,9 +563,29 @@ def _keyframe_contributions(
                 origin_xy, np.zeros((0, 2), dtype=np.float64)
             )
             continue
-        contributions[kf_id] = _Contribution(
-            origin_xy, transform_points(pose, points[keep])[:, :2]
-        )
+        points_world = transform_points(pose, points[keep])[:, :2]
+        component_id = component_of.get(kf_id.trajectory)
+        if component_id is not None and config.peer_exclusion_radius_m > 0.0:
+            keep_world = np.ones(points_world.shape[0], dtype=bool)
+            for (track_component, peer_robot), (stamps, positions) in peer_tracks.items():
+                if track_component != component_id or peer_robot == kf_id.robot_id:
+                    continue
+                peer_position = _track_position_at(
+                    stamps,
+                    positions,
+                    keyframe.stamp,
+                    config.peer_exclusion_max_dt_s,
+                    config.peer_exclusion_max_interp_gap_s,
+                )
+                if peer_position is None:
+                    continue
+                delta = points_world - peer_position
+                keep_world &= (
+                    np.einsum("ij,ij->i", delta, delta)
+                    > config.peer_exclusion_radius_m**2
+                )
+            points_world = points_world[keep_world]
+        contributions[kf_id] = _Contribution(origin_xy, points_world)
     return contributions
 
 

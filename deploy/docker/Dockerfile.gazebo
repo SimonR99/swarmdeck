@@ -51,6 +51,7 @@ WORKDIR /app
 COPY swarmdeck_ros /app/swarmdeck_ros
 COPY adapters /app/adapters
 COPY configs /app/configs
+COPY scripts/record_ground_truth.py /app/scripts/record_ground_truth.py
 RUN pip3 install --break-system-packages --no-cache-dir -e /app/adapters/protocol
 RUN ln -s /app/configs /app/study
 COPY deploy/docker/gazebo-entrypoint.sh /usr/local/bin/gazebo-entrypoint.sh

@@ -23,9 +23,14 @@ SLAM_BACKEND="${SLAM_BACKEND:-toolbox}"
 FUSE_IMU="${FUSE_IMU:-true}"
 FUSE_COVARIANCE="${FUSE_COVARIANCE:-false}"
 GRID_3D="${GRID_3D:-false}"
-# Seconds of reactive exploration after startup, to bootstrap the maps before the
+# Seconds of bounded exploration after startup, to bootstrap the maps before the
 # operator takes over. 0 leaves the fleet stationary until a goal arrives.
 EXPLORE_SECONDS="${EXPLORE_SECONDS:-0}"
+EXPLORE_STRATEGY="${EXPLORE_STRATEGY:-coordinated}"
+GROUND_TRUTH_PATH="${SWARMDECK_GROUND_TRUTH_PATH:-}"
+if [ -z "${GROUND_TRUTH_PATH}" ] && [ -n "${SWARMDECK_SLAM_CAPTURE_DIR:-}" ]; then
+  GROUND_TRUTH_PATH="${SWARMDECK_SLAM_CAPTURE_DIR}/ground_truth.csv"
+fi
 # Simulation exposes raw sensor_msgs/Image topics. The shared media publisher
 # JPEG-encodes those frames, then sends one low-latency H.264/RTSP stream per
 # robot to MediaMTX, exactly like the hardware media services do.
@@ -44,15 +49,25 @@ mkdir -p /app/sessions
 
 echo "[gazebo] launching session config=${CONFIG} headless=${HEADLESS}" \
      "slam_backend=${SLAM_BACKEND} fuse_imu=${FUSE_IMU}" \
-     "explore_seconds=${EXPLORE_SECONDS}"
-ros2 launch swarmdeck_bringup session.launch.py \
-  "config:=${CONFIG}" \
-  "headless:=${HEADLESS}" \
-  "slam_backend:=${SLAM_BACKEND}" \
-  "fuse_imu:=${FUSE_IMU}" \
-  "fuse_covariance:=${FUSE_COVARIANCE}" \
-  "grid_3d:=${GRID_3D}" \
-  "explore_seconds:=${EXPLORE_SECONDS}" &
+     "explore_seconds=${EXPLORE_SECONDS} explore_strategy=${EXPLORE_STRATEGY}" \
+     "ground_truth_path=${GROUND_TRUTH_PATH:-disabled}"
+LAUNCH_ARGS=(
+  "config:=${CONFIG}"
+  "headless:=${HEADLESS}"
+  "slam_backend:=${SLAM_BACKEND}"
+  "fuse_imu:=${FUSE_IMU}"
+  "fuse_covariance:=${FUSE_COVARIANCE}"
+  "grid_3d:=${GRID_3D}"
+  "explore_seconds:=${EXPLORE_SECONDS}"
+  "explore_strategy:=${EXPLORE_STRATEGY}"
+)
+# An empty ``name:=`` token is rejected by the ROS launch CLI. Ground truth is
+# optional for normal live runs, so omit the launch argument entirely unless a
+# capture path was explicitly configured.
+if [ -n "${GROUND_TRUTH_PATH}" ]; then
+  LAUNCH_ARGS+=("ground_truth_path:=${GROUND_TRUTH_PATH}")
+fi
+ros2 launch swarmdeck_bringup session.launch.py "${LAUNCH_ARGS[@]}" &
 LAUNCH_PID=$!
 
 cleanup() {

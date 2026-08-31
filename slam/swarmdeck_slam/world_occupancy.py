@@ -64,6 +64,20 @@ class OccupancyScore:
     truth_occupied: int
 
 
+@dataclass(frozen=True, slots=True)
+class SurfaceScore:
+    """Distance-tolerant agreement between lidar hits and collision surfaces."""
+
+    tolerance_m: float
+    precision: float
+    recall: float
+    f1: float
+    symmetric_rmse_m: float
+    symmetric_p95_m: float
+    estimated_surface_cells: int
+    truth_surface_cells: int
+
+
 def _pose6(text: str | None) -> tuple[float, float, float]:
     parts = [float(item) for item in (text or "0 0 0 0 0 0").split()]
     parts.extend([0.0] * (6 - len(parts)))
@@ -267,6 +281,96 @@ def score_beats(candidate: OccupancyScore, incumbent: OccupancyScore) -> bool:
     if candidate.iou != incumbent.iou:
         return candidate.iou > incumbent.iou
     return abs(candidate.yaw_rad) < abs(incumbent.yaw_rad)
+
+
+def _surface(cells: np.ndarray) -> np.ndarray:
+    """One-cell inner boundary of filled collision geometry."""
+    from scipy.ndimage import binary_erosion
+
+    occupied = np.asarray(cells, dtype=bool)
+    if not np.any(occupied):
+        return occupied.copy()
+    return occupied & ~binary_erosion(
+        occupied,
+        structure=np.ones((3, 3), dtype=bool),
+        border_value=0,
+    )
+
+
+def score_surfaces(
+    estimated: Occupancy,
+    truth: Occupancy,
+    alignment: OccupancyScore,
+    *,
+    tolerance_m: float = 0.10,
+) -> SurfaceScore:
+    """Score map surfaces after the rigid alignment used by exact IoU.
+
+    A range sensor measures the first visible face of a wall, whereas the SDF
+    truth is a filled collision box. Exact cell IoU therefore has a structural
+    ceiling even for a perfect scan. This metric compares the reconstructed
+    hits with the boundary of that collision geometry and allows a stated
+    metric tolerance for raster quantization and sensor noise. It does not
+    dilate the reported map or alter the occupancy sent to navigation.
+    """
+    if tolerance_m < 0.0:
+        raise ValueError("surface tolerance must be non-negative")
+    estimated_xy = _occupied_xy(estimated)
+    truth_surface = Occupancy(
+        _surface(truth.cells), truth.origin_x, truth.origin_y, truth.resolution
+    )
+    truth_xy = _occupied_xy(truth_surface)
+    if estimated_xy.size == 0 or truth_xy.size == 0:
+        return SurfaceScore(
+            tolerance_m,
+            0.0,
+            0.0,
+            0.0,
+            math.inf,
+            math.inf,
+            int(estimated_xy.shape[0]),
+            int(truth_xy.shape[0]),
+        )
+
+    centroid = estimated_xy.mean(axis=0)
+    cosine, sine = math.cos(alignment.yaw_rad), math.sin(alignment.yaw_rad)
+    rotation = np.array([[cosine, -sine], [sine, cosine]])
+    aligned_xy = (estimated_xy - centroid) @ rotation.T + centroid
+    aligned_xy[:, 0] += alignment.shift_x_m
+    aligned_xy[:, 1] += alignment.shift_y_m
+
+    resolution = min(estimated.resolution, truth.resolution)
+    mins = np.minimum(aligned_xy.min(axis=0), truth_xy.min(axis=0)) - resolution
+    maxs = np.maximum(aligned_xy.max(axis=0), truth_xy.max(axis=0)) + resolution
+    origin_x = math.floor(float(mins[0]) / resolution) * resolution
+    origin_y = math.floor(float(mins[1]) / resolution) * resolution
+    width = int(math.ceil((maxs[0] - origin_x) / resolution)) + 1
+    height = int(math.ceil((maxs[1] - origin_y) / resolution)) + 1
+    estimated_cells = _paint_on(
+        aligned_xy, origin_x, origin_y, resolution, height, width
+    )
+    truth_cells = _paint_on(truth_xy, origin_x, origin_y, resolution, height, width)
+
+    from scipy.ndimage import distance_transform_edt
+
+    estimate_to_truth = distance_transform_edt(~truth_cells)[estimated_cells] * resolution
+    truth_to_estimate = (
+        distance_transform_edt(~estimated_cells)[truth_cells] * resolution
+    )
+    precision = float(np.mean(estimate_to_truth <= tolerance_m))
+    recall = float(np.mean(truth_to_estimate <= tolerance_m))
+    f1 = 0.0 if precision + recall == 0.0 else 2.0 * precision * recall / (precision + recall)
+    symmetric = np.concatenate([estimate_to_truth, truth_to_estimate])
+    return SurfaceScore(
+        tolerance_m,
+        precision,
+        recall,
+        f1,
+        float(np.sqrt(np.mean(np.square(symmetric)))),
+        float(np.percentile(symmetric, 95.0)),
+        int(np.count_nonzero(estimated_cells)),
+        int(np.count_nonzero(truth_cells)),
+    )
 
 
 def overlay_png(estimated: Occupancy, truth: Occupancy, score: OccupancyScore) -> np.ndarray:

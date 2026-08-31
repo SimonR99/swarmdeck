@@ -25,6 +25,7 @@ from swarmdeck_slam.types import (
     OptimizedGraph,
     se3_identity,
     se3_inverse,
+    se3_medoid,
 )
 
 # --------------------------------------------------------------------------- #
@@ -92,6 +93,25 @@ def _expected_translation_rotation(
     dx: float, dy: float, yaw: float
 ) -> tuple[float, float]:
     return math.hypot(dx, dy), abs(yaw)
+
+
+def test_se3_medoid_rejects_one_bad_survey() -> None:
+    expected = yaw_pose(1.0, 2.0, 0.10)
+    nearby = yaw_pose(0.97, 2.0, 0.10)
+    outlier = yaw_pose(14.0, 2.0, 0.10)
+
+    selected = se3_medoid(
+        [outlier, expected, nearby],
+        translation_scale_m=8.0,
+        rotation_scale_rad=math.radians(75.0),
+    )
+
+    assert selected is expected
+
+
+def test_se3_medoid_rejects_empty_candidates() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        se3_medoid([])
 
 
 # --------------------------------------------------------------------------- #

@@ -216,10 +216,15 @@ bash tests/integration/test_sim_headless.sh
 For manual integration debugging:
 
 ```bash
-bash tests/integration/run_stack.sh 2
-python3 swarmdeck_ros/src/swarmdeck_sim/scenario/explore.py --robots 2 --seconds 240
+bash tests/integration/run_stack.sh 4
+ros2 launch swarmdeck_bringup session.launch.py \
+  config:=configs/4robot.yaml \
+  explore_seconds:=240 explore_strategy:=coordinated
 bash tests/integration/stop_stack.sh
 ```
+
+`coordinated` is the default joint-frontier planner. Use
+`explore_strategy:=reactive` only for the original wandering A/B baseline.
 
 ## Dependencies and safety
 

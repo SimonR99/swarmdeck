@@ -42,6 +42,33 @@ def test_a_room_scan_enqueues_a_keyframe(sim_module):
     assert bridge._keyframes.pending() == 1
 
 
+def test_scan_cloud_and_keyframe_pose_are_sampled_atomically(sim_module):
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.id = "robot_0"
+    bridge.node = MagicMock()
+    bridge._odom_to_base = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    bridge.lidar_x = 0.0
+    bridge.lidar_z = 0.45
+    bridge._scan_cloud_at = 0.0
+    bridge._keyframes = KeyframeUploader(
+        "robot_0", "http://backend", min_period_s=0.0, min_points=20
+    )
+    bridge.map_pose = MagicMock(return_value={"x": 1.0, "y": 2.0, "yaw": 0.3})
+
+    scan = MagicMock()
+    scan.ranges = [2.0] * 90
+    scan.angle_min = -1.0
+    scan.angle_increment = 0.02
+    scan.range_min = 0.1
+    scan.range_max = 30.0
+    scan.header = MagicMock()
+
+    bridge._on_scan(scan)
+
+    assert bridge._keyframes.pending() == 1
+    assert bridge.map_pose.call_count == 1
+
+
 def test_keyframes_wait_for_tf_before_using_wheel_odometry(sim_module):
     bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
     bridge.id = "robot_0"

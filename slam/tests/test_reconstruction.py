@@ -27,12 +27,25 @@ def _yaw_pose(x: float, yaw: float) -> np.ndarray:
 
 
 def _frame(
-    index: int, stamp: float, *, x: float | None = None, yaw: float = 0.0
+    index: int,
+    stamp: float,
+    *,
+    x: float | None = None,
+    yaw: float = 0.0,
+    robot_id: str = "robot",
+    seq: int | None = None,
 ) -> ReconstructionFrame:
     empty = np.empty((0, 3), dtype=np.float64)
-    cloud = PreparedCloud(empty, np.zeros((20, 60), dtype=np.uint8), np.zeros((2, 2)))
+    cloud = PreparedCloud(empty, np.ones((20, 60), dtype=np.uint8), np.zeros((2, 2)))
     odom = None if x is None else _yaw_pose(x, yaw)
-    return ReconstructionFrame(index, "robot", index, stamp, cloud, t_odom_base=odom)
+    return ReconstructionFrame(
+        index,
+        robot_id,
+        index if seq is None else seq,
+        stamp,
+        cloud,
+        t_odom_base=odom,
+    )
 
 
 def _hypothesis(yaw: float, x: float, score: float) -> RegistrationHypothesis:
@@ -114,6 +127,51 @@ def test_vertical_hop_is_not_physical_ground_robot_motion() -> None:
 
     fragments, boundaries = build_temporal_fragments(frames, register)
     assert [fragment.frame_indices for fragment in fragments] == [(0,), (1,)]
+    assert boundaries[0].reason == "no physically plausible registration"
+
+
+def test_two_skip_cycles_rescue_one_missing_turn_registration() -> None:
+    frames = [_frame(index, float(index)) for index in range(4)]
+    step = _hypothesis(0.0, 0.5, 0.8)
+    skip = _hypothesis(0.0, 1.0, 0.75)
+    false_flip = _hypothesis(math.pi, 0.5, 0.9)
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        pair = (target.index, source.index)
+        if pair == (1, 2):
+            return [false_flip]
+        if pair in {(0, 2), (1, 3)}:
+            return [skip]
+        if pair in {(0, 1), (2, 3)}:
+            return [step]
+        return []
+
+    fragments, boundaries = build_temporal_fragments(frames, register)
+
+    assert boundaries == []
+    assert [fragment.frame_indices for fragment in fragments] == [(0, 1, 2, 3)]
+    assert np.allclose(fragments[0].poses[3][:3, 3], [1.5, 0.0, 0.0])
+
+
+def test_one_sided_skip_evidence_does_not_bridge_a_bad_pair() -> None:
+    frames = [_frame(index, float(index)) for index in range(4)]
+    step = _hypothesis(0.0, 0.5, 0.8)
+    skip = _hypothesis(0.0, 1.0, 0.75)
+    false_flip = _hypothesis(math.pi, 0.5, 0.9)
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        pair = (target.index, source.index)
+        if pair == (1, 2):
+            return [false_flip]
+        if pair == (0, 2):
+            return [skip]
+        if pair in {(0, 1), (2, 3)}:
+            return [step]
+        return []
+
+    fragments, boundaries = build_temporal_fragments(frames, register)
+
+    assert [fragment.frame_indices for fragment in fragments] == [(0, 1), (2, 3)]
     assert boundaries[0].reason == "no physically plausible registration"
 
 
@@ -230,6 +288,297 @@ def test_fragment_connection_requires_multi_frame_consensus() -> None:
     assert np.allclose(placement.poses["robot:001"], t_a_b, atol=1e-6)
 
 
+def test_required_pairs_reconsider_a_verified_connection_after_retrieval_crowding() -> None:
+    frames = [
+        _frame(index, float(index), robot_id="left", seq=index)
+        for index in range(3)
+    ] + [
+        _frame(index, float(index - 3), robot_id="right", seq=index - 3)
+        for index in range(3, 6)
+    ]
+    poses_left = {index: _yaw_pose(float(index), 0.0) for index in range(3)}
+    poses_right = {
+        index: _yaw_pose(float(index - 3), 0.0) for index in range(3, 6)
+    }
+    left = Fragment("left:000", "left", (0, 1, 2), poses_left, ())
+    right = Fragment("right:000", "right", (3, 4, 5), poses_right, ())
+    t_left_right = _yaw_pose(6.0, 0.0)
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        transform = (
+            se3_inverse(poses_left[target.index])
+            @ t_left_right
+            @ poses_right[source.index]
+        )
+        template = _hypothesis(0.0, 0.0, 0.9)
+        return [
+            RegistrationHypothesis(
+                transform,
+                template.yaw_prior,
+                template.descriptor_distance,
+                template.coarse_score,
+                template.symmetric_overlap,
+                template.symmetric_rmse,
+                template.gicp_mean_error,
+                template.num_inliers,
+                template.score,
+            )
+        ]
+
+    accepted, rejected = find_fragment_connections(
+        frames,
+        [left, right],
+        register,
+        FragmentMatchConfig(
+            descriptor_neighbors=1,
+            candidates_per_frame=1,
+            max_pairs_per_fragment_pair=3,
+            min_spatial_span_m=0.5,
+        ),
+        required_frame_pairs=[(0, 3), (1, 4), (2, 5)],
+    )
+
+    assert rejected == []
+    assert len(accepted) == 1
+    assert accepted[0].support == 3
+    assert np.allclose(accepted[0].t_a_b, t_left_right)
+
+
+def test_spatially_correlated_alias_does_not_hide_a_valid_rendezvous() -> None:
+    """Many votes from one place cannot outrank distributed observations."""
+    frames = [
+        _frame(index, float(index), robot_id="left", seq=index)
+        for index in range(4)
+    ] + [
+        _frame(index, float(index - 4), robot_id="right", seq=index - 4)
+        for index in range(4, 8)
+    ]
+    poses_left = {
+        0: _yaw_pose(0.0, 0.0),
+        1: _yaw_pose(0.0, 0.0),
+        2: _yaw_pose(1.0, 0.0),
+        3: _yaw_pose(2.0, 0.0),
+    }
+    poses_right = {
+        4: _yaw_pose(0.0, 0.0),
+        5: _yaw_pose(0.0, 0.0),
+        6: _yaw_pose(1.0, 0.0),
+        7: _yaw_pose(2.0, 0.0),
+    }
+    left = Fragment("left:000", "left", (0, 1, 2, 3), poses_left, ())
+    right = Fragment("right:000", "right", (4, 5, 6, 7), poses_right, ())
+    correlated_alias = _yaw_pose(20.0, math.pi)
+    rendezvous = _yaw_pose(6.0, 0.0)
+    rendezvous_pairs = {(0, 4), (2, 6), (3, 7)}
+
+    def mode(
+        target: ReconstructionFrame,
+        source: ReconstructionFrame,
+        fragment_transform: np.ndarray,
+        score: float,
+    ) -> RegistrationHypothesis:
+        target_pose = poses_left[target.index]
+        source_pose = poses_right[source.index]
+        transform = se3_inverse(target_pose) @ fragment_transform @ source_pose
+        template = _hypothesis(0.0, 0.0, score)
+        return RegistrationHypothesis(
+            transform,
+            template.yaw_prior,
+            template.descriptor_distance,
+            template.coarse_score,
+            template.symmetric_overlap,
+            template.symmetric_rmse,
+            template.gicp_mean_error,
+            template.num_inliers,
+            score,
+        )
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        if target.robot_id == "right":
+            target, source = source, target
+        hypotheses = []
+        # Eight mutually consistent matches all reuse the same physical pose
+        # on the left, so this larger cluster must fail the span gate.
+        if target.index in {0, 1}:
+            hypotheses.append(mode(target, source, correlated_alias, 0.95))
+        if (target.index, source.index) in rendezvous_pairs:
+            hypotheses.append(mode(target, source, rendezvous, 0.85))
+        return hypotheses
+
+    accepted, rejected = find_fragment_connections(
+        frames,
+        [left, right],
+        register,
+        FragmentMatchConfig(
+            descriptor_neighbors=8,
+            candidates_per_frame=8,
+            max_pairs_per_fragment_pair=9,
+            min_spatial_span_m=0.5,
+        ),
+    )
+
+    assert rejected == []
+    assert len(accepted) == 1
+    assert accepted[0].support == 3
+    assert np.allclose(accepted[0].t_a_b, rendezvous)
+
+
+def test_coarse_pose_hints_resolve_equal_support_pi_alias() -> None:
+    """A broad prior selects a geometric mode but never creates one.
+
+    This is the regression for the four-robot Gazebo capture: mirrored paths
+    produced equal-support clusters at yaw 0 and pi, and summed scores chose
+    the wrong yaw. With no hints the correct answer is to remain disconnected;
+    with surveyed starts the lower-scoring, prior-consistent mode is safe.
+    """
+    frames = [
+        _frame(i, float(i), x=float(i), robot_id="left", seq=i)
+        for i in range(3)
+    ] + [
+        _frame(i + 3, float(i), x=float(i), robot_id="right", seq=i)
+        for i in range(3)
+    ]
+    poses_left = {i: _yaw_pose(float(i), 0.0) for i in range(3)}
+    poses_right = {i + 3: _yaw_pose(float(i), 0.0) for i in range(3)}
+    left = Fragment("left:000", "left", (0, 1, 2), poses_left, ())
+    right = Fragment("right:000", "right", (3, 4, 5), poses_right, ())
+    correct = _yaw_pose(10.0, math.pi)
+    wrong = _yaw_pose(4.0, 0.0)
+
+    def registration_mode(
+        target: ReconstructionFrame,
+        source: ReconstructionFrame,
+        fragment_transform: np.ndarray,
+        score: float,
+    ) -> RegistrationHypothesis:
+        target_pose = poses_left[target.index]
+        source_pose = poses_right[source.index]
+        transform = se3_inverse(target_pose) @ fragment_transform @ source_pose
+        template = _hypothesis(0.0, 0.0, score)
+        return RegistrationHypothesis(
+            transform,
+            0.0,
+            template.descriptor_distance,
+            template.coarse_score,
+            template.symmetric_overlap,
+            template.symmetric_rmse,
+            template.gicp_mean_error,
+            template.num_inliers,
+            score,
+        )
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        if target.robot_id == source.robot_id:
+            return []
+        if target.robot_id == "right":
+            target, source = source, target
+            return [
+                registration_mode(target, source, wrong, 0.9),
+                registration_mode(target, source, correct, 0.8),
+            ]
+        return [
+            registration_mode(target, source, wrong, 0.9),
+            registration_mode(target, source, correct, 0.8),
+        ]
+
+    config = FragmentMatchConfig(
+        descriptor_neighbors=6,
+        candidates_per_frame=6,
+        max_pairs_per_fragment_pair=36,
+        min_spatial_span_m=0.5,
+    )
+    accepted, rejected = find_fragment_connections(
+        frames, [left, right], register, config
+    )
+    assert accepted == []
+    assert rejected[0].reason == "ambiguous competing transform"
+
+    accepted, rejected = find_fragment_connections(
+        frames,
+        [left, right],
+        register,
+        config,
+        pose_hints={"left": se3_identity(), "right": correct},
+    )
+    assert rejected == []
+    assert len(accepted) == 1
+    assert np.allclose(accepted[0].t_a_b, correct)
+
+
+def test_coarse_start_is_not_reused_for_a_later_fragment() -> None:
+    """A capture gap/restart does not teleport that fragment to spawn."""
+    frames = [_frame(0, 0.0, robot_id="left", seq=0)] + [
+        _frame(i + 1, 10.0 + i, robot_id="left", seq=10 + i)
+        for i in range(3)
+    ] + [
+        _frame(i + 4, float(i), robot_id="right", seq=i)
+        for i in range(3)
+    ]
+    left_primary = Fragment(
+        "left:000", "left", (0,), {0: se3_identity()}, ()
+    )
+    poses_left = {i + 1: _yaw_pose(float(i), 0.0) for i in range(3)}
+    poses_right = {i + 4: _yaw_pose(float(i), 0.0) for i in range(3)}
+    left_later = Fragment(
+        "left:001", "left", (1, 2, 3), poses_left, ()
+    )
+    right = Fragment("right:000", "right", (4, 5, 6), poses_right, ())
+    correct = _yaw_pose(10.0, math.pi)
+    wrong = _yaw_pose(4.0, 0.0)
+
+    def mode(
+        target: ReconstructionFrame,
+        source: ReconstructionFrame,
+        fragment_transform: np.ndarray,
+        score: float,
+    ) -> RegistrationHypothesis:
+        target_pose = poses_left[target.index]
+        source_pose = poses_right[source.index]
+        transform = se3_inverse(target_pose) @ fragment_transform @ source_pose
+        template = _hypothesis(0.0, 0.0, score)
+        return RegistrationHypothesis(
+            transform,
+            0.0,
+            template.descriptor_distance,
+            template.coarse_score,
+            template.symmetric_overlap,
+            template.symmetric_rmse,
+            template.gicp_mean_error,
+            template.num_inliers,
+            score,
+        )
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        if target.index == 0 or source.index == 0 or target.robot_id == source.robot_id:
+            return []
+        if target.robot_id == "right":
+            target, source = source, target
+            return [mode(target, source, wrong, 0.9), mode(target, source, correct, 0.8)]
+        return [mode(target, source, wrong, 0.9), mode(target, source, correct, 0.8)]
+
+    config = FragmentMatchConfig(
+        descriptor_neighbors=7,
+        candidates_per_frame=7,
+        max_pairs_per_fragment_pair=49,
+        min_spatial_span_m=0.5,
+    )
+    accepted, rejected = find_fragment_connections(
+        frames,
+        [left_primary, left_later, right],
+        register,
+        config,
+        pose_hints={"left": se3_identity(), "right": correct},
+    )
+
+    assert accepted == []
+    assert any(
+        item.fragment_a == "left:001"
+        and item.fragment_b == "right:000"
+        and item.reason == "ambiguous competing transform"
+        for item in rejected
+    )
+
+
 def test_fragment_consensus_cannot_outvote_direct_boundary_registration() -> None:
     frames = [_frame(index, float(index)) for index in range(6)]
     poses_a = {
@@ -291,6 +640,69 @@ def test_fragment_consensus_cannot_outvote_direct_boundary_registration() -> Non
     )
 
 
+def test_boundary_registration_selects_a_supported_lower_ranked_mode() -> None:
+    frames = [_frame(index, float(index)) for index in range(8)]
+    poses_a = {index: _yaw_pose(float(index), 0.0) for index in range(4)}
+    poses_b = {
+        index: _yaw_pose(float(index - 4), 0.0) for index in range(4, 8)
+    }
+    fragment_a = Fragment("robot:000", "robot", (0, 1, 2, 3), poses_a, ())
+    fragment_b = Fragment("robot:001", "robot", (4, 5, 6, 7), poses_b, ())
+    correct = _yaw_pose(4.0, 0.0)
+    repeated_corridor = _yaw_pose(10.0, math.pi)
+
+    def mode(
+        target: ReconstructionFrame,
+        source: ReconstructionFrame,
+        fragment_transform: np.ndarray,
+        score: float,
+    ) -> RegistrationHypothesis:
+        transform = (
+            se3_inverse(poses_a[target.index])
+            @ fragment_transform
+            @ poses_b[source.index]
+        )
+        template = _hypothesis(0.0, 0.0, score)
+        return RegistrationHypothesis(
+            transform,
+            template.yaw_prior,
+            template.descriptor_distance,
+            template.coarse_score,
+            template.symmetric_overlap,
+            template.symmetric_rmse,
+            template.gicp_mean_error,
+            template.num_inliers,
+            score,
+        )
+
+    def register(target: ReconstructionFrame, source: ReconstructionFrame):
+        hypotheses = []
+        if target.index == 3 and source.index == 4:
+            hypotheses.append(mode(target, source, correct, 0.95))
+        if source.index - target.index == 4:
+            hypotheses.append(mode(target, source, correct, 0.80))
+        hypotheses.append(mode(target, source, repeated_corridor, 0.90))
+        return hypotheses
+
+    accepted, rejected = find_fragment_connections(
+        frames,
+        [fragment_a, fragment_b],
+        register,
+        FragmentMatchConfig(
+            boundary_window=4,
+            descriptor_neighbors=8,
+            candidates_per_frame=8,
+            max_pairs_per_fragment_pair=16,
+            min_spatial_span_m=0.5,
+        ),
+    )
+
+    assert rejected == []
+    assert len(accepted) == 1
+    assert accepted[0].support == 5
+    assert np.allclose(accepted[0].t_a_b, correct)
+
+
 def test_inter_robot_bridges_do_not_count_as_corroboration() -> None:
     aslan_a = _single_frame_fragment("aslan:000", "aslan", 0)
     aslan_b = _single_frame_fragment("aslan:001", "aslan", 1)
@@ -335,6 +747,43 @@ def test_inter_robot_merge_needs_two_separated_consistent_encounters() -> None:
         id(encounter_a),
         id(encounter_b),
     }
+
+
+def test_survey_corroborated_mode_outranks_later_fragment_alias() -> None:
+    aslan = _single_frame_fragment("aslan:000", "aslan", 0)
+    botman_primary = _single_frame_fragment("botman:000", "botman", 1)
+    botman_later = _single_frame_fragment("botman:001", "botman", 2)
+    five_metres = _yaw_pose(5.0, 0.0)
+    intra_botman = _connection(botman_primary, botman_later, five_metres)
+    correct = _connection(aslan, botman_primary, se3_identity())
+    correct = FragmentConnection(
+        correct.fragment_a,
+        correct.fragment_b,
+        correct.t_a_b,
+        correct.support,
+        correct.score,
+        correct.proposals,
+        pose_hint_support=3,
+    )
+    alias = _connection(aslan, botman_later, se3_identity())
+    alias = FragmentConnection(
+        alias.fragment_a,
+        alias.fragment_b,
+        alias.t_a_b,
+        alias.support,
+        30.0,
+        alias.proposals,
+    )
+
+    kept, rejected = filter_inter_robot_connections(
+        [aslan, botman_primary, botman_later],
+        [intra_botman, correct, alias],
+    )
+
+    assert set(map(id, kept)) == {id(intra_botman), id(correct)}
+    assert len(rejected) == 1
+    assert rejected[0].fragment_b == "botman:001"
+    assert rejected[0].reason == "inter-robot transform disagrees with consensus"
 
 
 def test_one_fragment_pair_can_contain_two_separated_encounters() -> None:

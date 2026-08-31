@@ -12,6 +12,7 @@ Usage from ``slam/``::
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import math
 import struct
 import sys
@@ -31,6 +32,7 @@ from swarmdeck_slam.world_occupancy import (
     overlay_png,
     rasterize,
     score_occupancy,
+    score_surfaces,
 )
 
 SPAWN = {
@@ -79,11 +81,24 @@ def load_packets(dataset: Path) -> list:
     return packets
 
 
-def report(name: str, score) -> None:
+def report(name: str, score, surface=None, world_surface=None) -> None:
+    suffix = ""
+    if surface is not None:
+        suffix = (
+            f"  surface@{surface.tolerance_m:.2f}m: "
+            f"F1={surface.f1:.3f} P={surface.precision:.3f} "
+            f"R={surface.recall:.3f} p95={surface.symmetric_p95_m:.3f}m"
+        )
+    if world_surface is not None:
+        suffix += (
+            f"  surveyed-world: F1={world_surface.f1:.3f} "
+            f"P={world_surface.precision:.3f} "
+            f"R={world_surface.recall:.3f}"
+        )
     print(
         f"{name:16} IoU={score.iou:.3f}  P={score.precision:.3f}  "
         f"R={score.recall:.3f}  yaw={math.degrees(score.yaw_rad):+.1f}deg  "
-        f"shift=({score.shift_x_m:+.2f},{score.shift_y_m:+.2f})m"
+        f"shift=({score.shift_x_m:+.2f},{score.shift_y_m:+.2f})m{suffix}"
     )
 
 
@@ -123,7 +138,9 @@ def main() -> int:
         native_map_resolution=args.resolution,
         odometry_as_pose=False,
         close_occupied=1,
-        hit_weight=5,
+        hit_weight=8,
+        peer_exclusion_radius_m=0.80,
+        peer_exclusion_max_dt_s=2.0,
     )
     hints = {robot_id: yaw_se3(x, y, yaw) for robot_id, (x, y, yaw) in SPAWN.items()}
     backend = CollaborativeBackend(
@@ -143,18 +160,31 @@ def main() -> int:
     grids = list(snapshot.grids.values()) + list(snapshot.robot_grids.values())
     best = None
     best_grid = None
+    best_surface = None
+    best_world_surface = None
     for grid in grids:
         occupancy = occupancy_from_grid(grid)
         score = score_occupancy(occupancy, truth, yaw_step_deg=args.yaw_step_deg)
+        surface = score_surfaces(occupancy, truth, score)
+        # The production back-end has already fixed the component gauge from
+        # surveyed starts. Report that absolute-world comparison explicitly:
+        # exact filled-wall IoU can prefer a one-cell shift that is immaterial
+        # to IoU but harmful to the distance-tolerant surface metric.
+        world_alignment = dataclasses.replace(
+            score, yaw_rad=0.0, shift_x_m=0.0, shift_y_m=0.0
+        )
+        world_surface = score_surfaces(occupancy, truth, world_alignment)
         label = f"comp{grid.component_id}" if hasattr(grid, "component_id") else "grid"
         robots = ",".join(sorted(grid.robots))
-        report(f"{label}[{robots}]", score)
+        report(f"{label}[{robots}]", score, surface, world_surface)
         if best is None or score.iou > best.iou:
             best = score
             best_grid = occupancy
+            best_surface = surface
+            best_world_surface = world_surface
     assert best is not None and best_grid is not None
     write_png(args.out / "reconstructed-vs-gt.png", overlay_png(best_grid, truth, best))
-    report("best", best)
+    report("best", best, best_surface, best_world_surface)
 
     # Onboard SLAM posed at spawn, for reference -- not the reconstruction.
     from swarmdeck_slam.types import Component, OptimizedGraph
@@ -187,20 +217,22 @@ def main() -> int:
 
     slam_merged = render_occupancy(slam_graph, keyframes, render)
     for grid in slam_merged.values():
-        score = score_occupancy(
-            occupancy_from_grid(grid), truth, yaw_step_deg=args.yaw_step_deg
-        )
-        report("slam-spawn", score)
+        occupancy = occupancy_from_grid(grid)
+        score = score_occupancy(occupancy, truth, yaw_step_deg=args.yaw_step_deg)
+        report("slam-spawn", score, score_surfaces(occupancy, truth, score))
         write_png(
             args.out / "slam-spawn-vs-gt.png",
             overlay_png(occupancy_from_grid(grid), truth, score),
         )
     slam_grids = render_per_robot(slam_graph, keyframes, render)
     for robot_id, grid in sorted(slam_grids.items()):
-        score = score_occupancy(
-            occupancy_from_grid(grid), truth, yaw_step_deg=args.yaw_step_deg
+        occupancy = occupancy_from_grid(grid)
+        score = score_occupancy(occupancy, truth, yaw_step_deg=args.yaw_step_deg)
+        report(
+            f"slam[{robot_id}]",
+            score,
+            score_surfaces(occupancy, truth, score),
         )
-        report(f"slam[{robot_id}]", score)
     return 0
 
 

@@ -16,9 +16,10 @@ config (see spawn_fleet.py's LIDAR_PROFILES).
 reproducing what unfused odometry does to a map; wheel odometry alone was measured
 8.8-30.5 m and up to 244 deg wrong on a 24 m floor plan.
 
-`explore_seconds:=N` drives the fleet reactively for N seconds to bootstrap the
-maps, then stops. Nothing moves without either this or an operator goal, and
-issuing goals against an empty map is how robots end up jammed against walls.
+`explore_seconds:=N` drives the fleet for at most N seconds to bootstrap the
+maps, then stops. ``explore_strategy:=coordinated`` (the default) performs one
+short merge rendezvous and jointly allocates distinct frontiers through Nav2;
+``reactive`` retains the original wandering A/B baseline.
 """
 
 import json
@@ -47,7 +48,11 @@ REPO = Path(__file__).resolve().parents[4]
 BRINGUP_DELAY = 20.0
 # Gap between successive robots' stacks. See the comment at the loop below: they
 # lose a startup race against each other if brought up simultaneously.
-ROBOT_STAGGER = 6.0
+# Six seconds still occasionally overlapped lifecycle service traffic under
+# cold-start CPU load, losing a controller configure reply and wedging that
+# robot's manager.  Ten seconds keeps each configure/activate transaction
+# isolated while remaining well inside the adapter/explorer lead-in.
+ROBOT_STAGGER = 10.0
 # Exploration starts after the last robot's stack is up, plus lifecycle settling.
 EXPLORE_LEAD_IN = 25.0
 # Costmap inflation beyond the chassis radius, metres. This is the knob that
@@ -102,6 +107,13 @@ def setup(context, *args, **kwargs):
     fuse_cov = LaunchConfiguration("fuse_covariance").perform(context).lower() == "true"
     grid_3d = LaunchConfiguration("grid_3d").perform(context).lower() == "true"
     explore_seconds = float(LaunchConfiguration("explore_seconds").perform(context))
+    explore_strategy = LaunchConfiguration("explore_strategy").perform(context).lower()
+    ground_truth_path = LaunchConfiguration("ground_truth_path").perform(context)
+    if explore_strategy not in {"coordinated", "reactive"}:
+        raise ValueError(
+            f"unknown explore_strategy {explore_strategy!r}; expected "
+            "coordinated or reactive"
+        )
 
     cfg_path = Path(cfg_arg)
     if not cfg_path.is_absolute():
@@ -227,6 +239,34 @@ def setup(context, *args, **kwargs):
         )
     )
 
+    # Evaluation side channel only. It records Gazebo poses beside captured
+    # keyframes so replay can score ATE/RPE; no estimator or planner subscribes
+    # to ground_truth, and this process is never launched on hardware.
+    if ground_truth_path:
+        actions.append(
+            TimerAction(
+                period=BRINGUP_DELAY,
+                actions=[
+                    ExecuteProcess(
+                        cmd=[
+                            "python3",
+                            str(REPO / "scripts" / "record_ground_truth.py"),
+                            "--robots",
+                            str(min(count, 5)),
+                            "--prefix",
+                            prefix,
+                            "--out",
+                            ground_truth_path,
+                            "--ros-args",
+                            "-p",
+                            "use_sim_time:=true",
+                        ],
+                        output="screen",
+                    )
+                ],
+            )
+        )
+
     # Each robot's stack starts on its own offset. Launching four lifecycle
     # managers, four SLAM nodes and four Nav2 stacks at once on a CPU-starved
     # container loses the race: `lifecycle_manager_slam` times out on
@@ -326,13 +366,55 @@ def setup(context, *args, **kwargs):
             )
         )
 
-    # Reactive exploration, for a bounded period, then the fleet stops and the
-    # operator drives it through Nav2. Without this nothing moves until someone
-    # sends a goal, and Nav2 sending goals against an empty map drives robots into
-    # walls, where a differential drive spins its wheels and destroys its own
-    # odometry — see scenario/explore.py. `explore.py` publishes cmd_vel directly,
-    # so it fights Nav2 while it runs; that is why it stops rather than persisting.
+    # Bounded exploration, then the fleet stops and returns control to the
+    # operator. Coordinated frontier allocation is the deployment path; the old
+    # reactive controller remains selectable as the measurement baseline.
     if explore_seconds > 0:
+        explorer_script = (
+            "coordinated_explore.py"
+            if explore_strategy == "coordinated"
+            else "explore.py"
+        )
+        explore_cmd = [
+            "python3",
+            str(scenario / explorer_script),
+            "--robots",
+            str(min(count, 5)),
+            "--prefix",
+            prefix,
+            "--seconds",
+            str(explore_seconds),
+            "--start-poses",
+            json.dumps(cfg.get("map", {}).get("start_poses", {})),
+            "--radii",
+            json.dumps(
+                {
+                    f"{prefix}{i}": round(robot_spec(types[i]).footprint_radius, 3)
+                    for i in range(min(count, 5))
+                }
+            ),
+            "--navigation-clearances",
+            json.dumps(
+                {
+                    # Coarse reachability should model whether the rectangle
+                    # can pass a corridor, not its much larger circumscribed
+                    # turning radius. Nav2 still validates the full polygon.
+                    f"{prefix}{i}": round(robot_spec(types[i]).width / 2.0 + 0.12, 3)
+                    for i in range(min(count, 5))
+                }
+            ),
+        ]
+        if explore_strategy == "coordinated":
+            explore_cmd += [
+                "--map-size-m",
+                str(float(cfg.get("map", {}).get("size_m", 30.0))),
+                "--resolution",
+                str(float(cfg.get("map", {}).get("resolution", 0.05))),
+                "--metrics",
+                "/app/sessions/exploration-latest.json",
+            ]
+        else:
+            explore_cmd += ["--seed", str(seed)]
         actions.append(
             TimerAction(
                 period=(
@@ -340,39 +422,7 @@ def setup(context, *args, **kwargs):
                 ),
                 actions=[
                     ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            str(scenario / "explore.py"),
-                            "--robots",
-                            str(min(count, 5)),
-                            "--prefix",
-                            prefix,
-                            "--seconds",
-                            str(explore_seconds),
-                            "--seed",
-                            str(seed),
-                            # Configured spawn poses, so the explorer can send
-                            # scheduled pairs to a shared meeting point. Every
-                            # robot steers in its own odom frame, so without
-                            # these a common rendezvous cannot be expressed and
-                            # inter-robot encounters stay a matter of luck.
-                            "--start-poses",
-                            json.dumps(cfg.get("map", {}).get("start_poses", {})),
-                            # Per-robot chassis size. The explorer's clearances
-                            # were absolute constants tuned on a 0.27 m
-                            # Duckiebot; on a fleet whose largest member is
-                            # 0.64 m they let a Bunker drive to within 0.9 m of
-                            # a neighbour and then rotate into it.
-                            "--radii",
-                            json.dumps(
-                                {
-                                    f"{prefix}{i}": round(
-                                        robot_spec(types[i]).footprint_radius, 3
-                                    )
-                                    for i in range(min(count, 5))
-                                }
-                            ),
-                        ],
+                        cmd=explore_cmd,
                         output="screen",
                     )
                 ],
@@ -418,9 +468,20 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "explore_seconds",
                 default_value="0",
-                description="Run reactive exploration for this many seconds after "
-                "startup to bootstrap the maps, then hand control back "
-                "to Nav2. 0 disables it.",
+                description="Run autonomous exploration for at most this many "
+                "seconds after startup. 0 disables it.",
+            ),
+            DeclareLaunchArgument(
+                "explore_strategy",
+                default_value="coordinated",
+                description="coordinated joint-frontier planner, or reactive "
+                "wandering A/B baseline.",
+            ),
+            DeclareLaunchArgument(
+                "ground_truth_path",
+                default_value="",
+                description="Simulation-evaluation CSV path. Empty disables the "
+                "ground-truth recorder; the data never enters SLAM or planning.",
             ),
             OpaqueFunction(function=setup),
         ]

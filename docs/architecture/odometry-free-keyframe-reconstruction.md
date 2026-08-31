@@ -155,7 +155,50 @@ The final GTSAM graph contains every selected temporal registration, every
 verified fragment/cross-robot proposal, and every accepted intra-fragment loop.
 Huber factors suppress residual outliers. Optimization is per keyframe, so loop
 error is distributed along the trajectory rather than moving a whole fragment
-as one rigid block.
+as one rigid block. Registrations from one rendezvous remain correlated even
+when many scan pairs support them, so their aggregate information is normalized
+by cluster size; otherwise a 24-pair encounter can deform a more accurate local
+scan chain simply by being sampled densely.
+
+## Four-robot coordinated results (2026-08-30)
+
+`coordinated-gt-run-10` is a clean four-robot Gazebo capture produced by the
+joint frontier planner. Ground truth was recorded in a separate evaluation
+process and was never subscribed to by the planner or reconstruction service.
+The final cold replay contains 288 calibrated keyframes:
+
+- all 288 keyframes and all four robots are in one verified component;
+- 7 fragment links survive the full gates (6 inter-robot, 1 same-robot
+  continuation), plus 48 intra-fragment loop closures;
+- joint translation ATE is **0.0250 m RMSE**, 0.0190 m median, and 0.0778 m
+  maximum; joint rotation ATE is **0.632 degrees RMSE**;
+- the absolute pose set using only surveyed starts to fix gauge is **0.0267 m
+  RMSE**, with 0.0731 m maximum translation error;
+- the largest disagreement between independently aligned robot frames is
+  0.0488 m and 0.086 degrees;
+- the surveyed-world wall-surface map score at 0.10 m tolerance is **F1 0.933,
+  precision 0.990, recall 0.882**, with 0.112 m symmetric p95. Filled-cell IoU
+  is reported separately
+  because lidar observes wall faces while the SDF contains filled collision
+  boxes.
+
+Removing every recorded `t_odom_base` value produces identical accepted and
+rejected constraints, fragment and optimized poses, components, render
+metadata, and SHA-256 hashes for all five PNGs. Thus odometry contributes no
+decision or pose to this capture. An exact incremental arrival replay merges
+robot 3 at keyframe 100 and remains one component through keyframe 288; retained
+pair identities are re-registered and re-gated on every solve, not retained as
+unconditional factors.
+
+The capture also exposed three aliasing edge cases now covered by regressions:
+
+- fixed descriptor budgets are sampled across both fragment trajectories so a
+  repeated doorway cannot evict a spatially distributed rendezvous;
+- only structurally valid clusters compete, and an exact adjacent-boundary
+  registration may select a lower-ranked but independently supported mode;
+- a coarse-start-corroborated primary connection outranks a contradictory
+  high-score alias to a later fragment. Coarse starts still never seed ICP or
+  enter the pose graph as factors.
 
 ## Gazebo ground-truth results (2026-08-26)
 
@@ -365,11 +408,12 @@ capture or subtract pixels from an already rasterized merged image.
   the correct result is multiple components/hypotheses, not a guessed heading.
 - Timestamp-based kinematics assumes the sensor timestamps are monotonic. Bad
   timestamps produce safe fragmentation rather than a wrong transform.
-- The current graph is batch/offline. Cold registration of 239 saved Gazebo
-  keyframes took about two minutes on this workstation; a cached full rebuild
-  takes roughly two seconds. Production should run it as a background batch
-  optimizer until incremental candidate scheduling is implemented and a second
-  labelled hardware capture validates the thresholds.
+- The optimizer still performs a batch solve, but the production service is
+  online: it retains a geometry-only pair cache and the identities of verified
+  support pairs as new keyframes arrive. A cold production rebuild of the 288
+  keyframe four-robot capture took 83.5 seconds; the cached standalone rebuild
+  took 4.4 seconds. Incremental factorization remains future work, and labelled
+  hardware captures must validate the current thresholds before deployment.
 - Camera images would make this much closer to photogrammetry: visual features
   and learned/global image descriptors can break lidar's 180-degree symmetry.
   They are not present in this saved keyframe format, so the current method is

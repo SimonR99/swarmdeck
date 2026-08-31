@@ -11,6 +11,7 @@ from swarmdeck_slam.world_occupancy import (
     boxes_from_sdf,
     rasterize,
     score_occupancy,
+    score_surfaces,
 )
 
 
@@ -54,3 +55,23 @@ def test_translated_occupancy_recovers_after_alignment() -> None:
     )
     score = score_occupancy(shifted, truth, yaw_step_deg=90.0)
     assert score.iou > 0.95
+
+
+def test_surface_score_compares_lidar_faces_not_filled_wall_interiors() -> None:
+    truth_cells = np.zeros((20, 20), dtype=bool)
+    truth_cells[5:15, 5:15] = True
+    estimated_cells = np.zeros_like(truth_cells)
+    estimated_cells[5, 5:15] = True
+    estimated_cells[14, 5:15] = True
+    estimated_cells[5:15, 5] = True
+    estimated_cells[5:15, 14] = True
+    truth = Occupancy(truth_cells, 0.0, 0.0, 0.05)
+    estimated = Occupancy(estimated_cells, 0.0, 0.0, 0.05)
+    alignment = score_occupancy(estimated, truth, yaw_step_deg=90.0)
+
+    surface = score_surfaces(estimated, truth, alignment, tolerance_m=0.0)
+
+    assert surface.precision == 1.0
+    assert surface.recall == 1.0
+    assert surface.f1 == 1.0
+    assert surface.symmetric_rmse_m == 0.0

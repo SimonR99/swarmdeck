@@ -133,6 +133,10 @@ def generate_launch_description() -> LaunchDescription:
                 "use_sim_time": use_sim_time,
                 "autostart": True,
                 "bond_timeout": 0.0,
+                # Match SLAM bringup's bounded tolerance for a loaded four-
+                # robot host. The default 5 s can permanently abandon an
+                # otherwise healthy lifecycle node during initial discovery.
+                "service_timeout": 30.0,
                 "node_names": [
                     "controller_server",
                     "planner_server",

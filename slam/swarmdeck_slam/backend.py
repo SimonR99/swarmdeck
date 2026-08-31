@@ -22,7 +22,6 @@ import numpy as np
 
 from swarmdeck_protocol import KeyframePacket
 from swarmdeck_slam.descriptors import (
-    DEFAULT_MAX_RANGE,
     DEFAULT_RINGS,
     DEFAULT_SECTORS,
     DESCRIPTOR_KIND,
@@ -64,6 +63,7 @@ from swarmdeck_slam.types import (
     se3_identity,
     se3_inverse,
     se3_kabsch,
+    se3_medoid,
     se3_relative,
 )
 from swarmdeck_slam.verify import VerifyConfig, verify_candidate
@@ -459,13 +459,14 @@ class CollaborativeBackend:
     """
 
     t_world_map_hint: dict[str, np.ndarray] | None = None
-    """Known ``T_world_map`` per robot (Gazebo spawn, surveyed origin).
+    """Known first-observation pose per robot (Gazebo spawn, surveyed start).
 
     Graph mode: occupancy is posed at ``hint @ t_odom_base`` so four working
     onboard maps overlay in the world frame. Odometry-free mode uses the
-    hint only as one rigid gauge per reconstructed component (the anchor
-    keyframe); relative geometry stays reconstructed. ``None`` on hardware,
-    where no such hint exists.
+    hints only (1) to reject grossly incompatible symmetric registration modes
+    between primary fragments and (2) as one rigid gauge per reconstructed
+    component. Relative geometry stays reconstructed. ``None`` when starts are
+    unknown.
     """
 
     legacy_session_split: bool = True
@@ -566,6 +567,12 @@ class CollaborativeBackend:
     def __post_init__(self) -> None:
         self._prepared_clouds: dict[KeyframeId, PreparedCloud] = {}
         self._pair_cache: dict[tuple[KeyframeId, KeyframeId], list[RegistrationHypothesis]] = {}
+        # Support pairs from closures that passed every geometric/cycle gate.
+        # Reconsidering these pairs on later incremental solves prevents a
+        # verified merge from disappearing when new, repetitive scans crowd a
+        # fixed-size descriptor shortlist. They are candidates, never factors:
+        # every solve still re-runs consensus and all rejection gates.
+        self._retained_odom_free_pairs: set[tuple[KeyframeId, KeyframeId]] = set()
         self._graph = GtsamPoseGraph(
             pcm_confidence=self.pcm_confidence,
             min_pcm_clique_size=self.min_pcm_clique_size,
@@ -1007,8 +1014,19 @@ class CollaborativeBackend:
         fragments, boundaries = build_temporal_fragments(
             frames, memo_register, self.temporal_config
         )
+        frame_index_by_id = {keyframe.id: idx for idx, keyframe in enumerate(included)}
+        retained_frame_pairs = [
+            (frame_index_by_id[first], frame_index_by_id[second])
+            for first, second in self._retained_odom_free_pairs
+            if first in frame_index_by_id and second in frame_index_by_id
+        ]
         connections, rejected_connections = find_fragment_connections(
-            frames, fragments, memo_register, self.match_config
+            frames,
+            fragments,
+            memo_register,
+            self.match_config,
+            pose_hints=self.t_world_map_hint,
+            required_frame_pairs=retained_frame_pairs,
         )
         connections, rejected_inter = filter_inter_robot_connections(
             fragments, connections, self.match_config
@@ -1023,6 +1041,11 @@ class CollaborativeBackend:
                 if fragment_robot[connection.fragment_a]
                 == fragment_robot[connection.fragment_b]
             ]
+        for connection in connections:
+            for proposal in connection.proposals:
+                first = included[proposal.frame_a].id
+                second = included[proposal.frame_b].id
+                self._retained_odom_free_pairs.add(tuple(sorted((first, second))))
         loop_closures = find_intra_fragment_loops(
             frames, fragments, memo_register, self.match_config
         )
@@ -1169,8 +1192,16 @@ class CollaborativeBackend:
         """Sit reconstructed poses in the world with one rigid per component.
 
         Occupancy is drawn from reconstructed geometry, not from every
-        keyframe's recorded pose. The only odometry reading that moves the
-        map is the component anchor, composed with a known spawn/survey frame.
+        keyframe's recorded pose. A surveyed start describes the robot's first
+        observed base pose. It is therefore composed directly against that
+        reconstructed pose; odometry origins, drift, jumps, and resets cannot
+        move the map.
+
+        When several robots have starts in one component, choose the medoid of
+        their candidate gauges. This remains one rigid transform (no trajectory
+        deformation), uses all starts to reject one bad survey, and is
+        deterministic. A component containing only later/restarted fragments
+        has no valid start observation and is deliberately left ungauged.
 
         ``t_world_map`` is the live-marker transform (``T @ slam_pose``). It
         has to be the same rigid as the occupancy, or robots sit in Gazebo
@@ -1181,23 +1212,35 @@ class CollaborativeBackend:
         if not hints:
             return optimized
         kf_by_id = {kf.id: kf for kf in included}
+        first_by_robot: dict[str, Keyframe] = {}
+        for keyframe in included:
+            current = first_by_robot.get(keyframe.id.robot_id)
+            if current is None or (
+                keyframe.stamp,
+                keyframe.id.seq,
+                keyframe.id.session,
+            ) < (current.stamp, current.id.seq, current.id.session):
+                first_by_robot[keyframe.id.robot_id] = keyframe
         poses = dict(optimized.poses)
         for component in optimized.components:
-            anchor = component.anchor
-            if anchor not in poses or anchor.robot_id not in hints:
-                continue
-            keyframe = kf_by_id.get(anchor)
-            if keyframe is None:
-                continue
-            gauge = (
-                hints[anchor.robot_id]
-                @ keyframe.t_odom_base
-                @ se3_inverse(poses[anchor])
-            )
             members = component.keyframe_ids or frozenset(
                 keyframe_id
                 for keyframe_id in poses
                 if keyframe_id.robot_id in component.robots
+            )
+            candidates = [
+                hints[robot_id] @ se3_inverse(poses[keyframe.id])
+                for robot_id, keyframe in sorted(first_by_robot.items())
+                if robot_id in hints
+                and keyframe.id in members
+                and keyframe.id in poses
+            ]
+            if not candidates:
+                continue
+            gauge = se3_medoid(
+                candidates,
+                translation_scale_m=self.match_config.pose_hint_translation_m,
+                rotation_scale_rad=self.match_config.pose_hint_rotation_rad,
             )
             for keyframe_id in members:
                 if keyframe_id in poses:

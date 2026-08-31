@@ -165,6 +165,14 @@ services:
       # operator. Without this nothing drives, and goals issued against an empty
       # map jam robots into walls where wheel slip destroys their odometry.
       EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
+      # Coordinated performs one bounded common-observation leg, then allocates
+      # non-overlapping frontier goals jointly. `reactive` is the legacy A/B.
+      EXPLORE_STRATEGY: "${EXPLORE_STRATEGY:-coordinated}"
+      # Evaluation-only truth recorder. When omitted during a keyframe capture,
+      # the entrypoint writes ground_truth.csv beside those keyframes. Nothing
+      # in the adapter, planner, or SLAM service receives this path or topic.
+      SWARMDECK_SLAM_CAPTURE_DIR: "${SWARMDECK_SLAM_CAPTURE_DIR:-}"
+      SWARMDECK_GROUND_TRUTH_PATH: "${SWARMDECK_GROUND_TRUTH_PATH:-}"
       # Keyframe production budget, per robot. Voxel matches the 0.05 m grid so
       # the render is not coarser than the cells it fills; the yaw gate drops
       # captures taken mid-turn, whose clouds are motion-skewed. Both are

@@ -36,9 +36,17 @@ from swarmdeck_slam.render import (
     RenderedGrid,
     _Meta,
     _rasterize_free,
+    render_all,
     render_occupancy,
 )
-from swarmdeck_slam.types import Component, OptimizedGraph
+from swarmdeck_slam.types import (
+    Component,
+    Keyframe,
+    KeyframeId,
+    OptimizedGraph,
+    TrajectoryId,
+    se3_identity,
+)
 from synthetic import WALL_HEIGHT, make_scene, simulate_robot, two_robot_fleet, yaw_pose
 
 RESOLUTION = 0.1
@@ -177,6 +185,62 @@ def test_drifted_odometry_blurs_the_wall(fleet, truth_grid):
     assert drift_count > 1.5 * truth_count  # more cells lit up painting the same wall
 
 
+def test_reconstructed_peer_body_is_not_painted_as_a_static_obstacle() -> None:
+    observer_id = KeyframeId("observer", 0)
+    peer_before_id = KeyframeId("peer", 0)
+    peer_after_id = KeyframeId("peer", 1)
+    observer = Keyframe(
+        observer_id,
+        10.0,
+        se3_identity(),
+        np.asarray([[2.0, 0.0, 0.5], [5.0, 0.0, 0.5]], dtype=np.float32),
+    )
+    peer_before = Keyframe(
+        peer_before_id,
+        5.0,
+        se3_identity(),
+        np.empty((0, 3), dtype=np.float32),
+    )
+    peer_after = Keyframe(
+        peer_after_id,
+        15.0,
+        se3_identity(),
+        np.empty((0, 3), dtype=np.float32),
+    )
+    graph = OptimizedGraph(
+        poses={
+            observer_id: se3_identity(),
+            peer_before_id: yaw_pose(1.0, 0.0, 0.0),
+            peer_after_id: yaw_pose(3.0, 0.0, 0.0),
+        },
+        components=[
+            Component(
+                0,
+                frozenset({"observer", "peer"}),
+                observer_id,
+                frozenset({TrajectoryId("observer"), TrajectoryId("peer")}),
+                frozenset({observer_id, peer_before_id, peer_after_id}),
+            )
+        ],
+    )
+    grid = next(
+        iter(
+            render_occupancy(
+                graph,
+                [observer, peer_before, peer_after],
+                RenderConfig(
+                    native_map_resolution=0.1,
+                    retain_free_space=False,
+                    peer_exclusion_radius_m=0.8,
+                ),
+            ).values()
+        )
+    )
+
+    assert _cell_value(grid, 2.0, 0.0) != OCCUPIED
+    assert _cell_value(grid, 5.0, 0.0) == OCCUPIED
+
+
 def test_corridor_interior_is_free_never_observed_is_unknown(truth_grid):
     # beta's path passes directly through/near this waypoint.
     assert _cell_value(truth_grid, 6.0, 12.0) == FREE
@@ -275,6 +339,69 @@ def test_separate_components_never_overlay(fleet):
         assert len(grid.robots) == 1  # never two robots sharing one grid here
         all_robots_seen |= grid.robots
     assert all_robots_seen == {"alpha", "beta"}
+
+
+def test_disconnected_fragments_in_one_trajectory_never_overlay() -> None:
+    """A temporal break does not create permission to mix map frames.
+
+    Odom-free tracking can split one boot/session into several components. All
+    those keyframes have the same ``TrajectoryId``; exact component keyframe
+    membership must win over that coarse identity for both component and robot
+    renders.
+    """
+    trajectory = TrajectoryId("r3", "boot")
+    ids = [KeyframeId("r3", seq, trajectory.session) for seq in range(3)]
+    keyframes = [
+        Keyframe(
+            keyframe_id,
+            float(index),
+            se3_identity(),
+            np.asarray([[1.0, 0.0, 0.5]], dtype=np.float32),
+        )
+        for index, keyframe_id in enumerate(ids)
+    ]
+    graph = OptimizedGraph(
+        poses={
+            ids[0]: yaw_pose(0.0, 0.0, 0.0),
+            ids[1]: yaw_pose(1.0, 0.0, 0.0),
+            ids[2]: yaw_pose(100.0, 0.0, 0.0),
+        },
+        components=[
+            Component(
+                0,
+                frozenset({"r3"}),
+                ids[0],
+                frozenset({trajectory}),
+                frozenset(ids[:2]),
+            ),
+            Component(
+                1,
+                frozenset({"r3"}),
+                ids[2],
+                frozenset({trajectory}),
+                frozenset({ids[2]}),
+            ),
+        ],
+    )
+
+    components, robots, _trajectories = render_all(
+        graph,
+        keyframes,
+        RenderConfig(
+            native_map_resolution=0.1,
+            native_map_padding_m=0.2,
+            retain_free_space=False,
+        ),
+    )
+    primary = _occupied_world_points(components[0])
+    orphan = _occupied_world_points(components[1])
+    robot = _occupied_world_points(robots["r3"])
+
+    assert primary[:, 0].max() < 10.0
+    assert orphan[:, 0].min() > 90.0
+    # The robot scope chooses its largest verified component (two keyframes),
+    # rather than superimposing the incompatible one-keyframe orphan.
+    assert robot[:, 0].max() < 10.0
 
 
 def test_merged_component_renders_one_consistent_grid(fleet):

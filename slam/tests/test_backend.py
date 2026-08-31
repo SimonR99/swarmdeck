@@ -19,7 +19,16 @@ from swarmdeck_slam.backend import (
     snapshot_update,
     se2_of,
 )
-from swarmdeck_slam.types import EdgeKind, KeyframeId, quat_xyz_from_se3, se3_inverse
+from swarmdeck_slam.types import (
+    Component,
+    EdgeKind,
+    Keyframe,
+    KeyframeId,
+    OptimizedGraph,
+    TrajectoryId,
+    quat_xyz_from_se3,
+    se3_inverse,
+)
 from swarmdeck_slam.verify import VerifyConfig, verify_candidate
 
 
@@ -411,6 +420,76 @@ def test_gauge_keeps_live_pose_on_reconstructed_occupancy() -> None:
         px, py, _ = se2_of(snapshot.optimized.poses[kf_id])
         err = math.hypot(lx - px, ly - py)
         assert err < 0.05, f"{robot_id} live pose is {err:.2f} m off reconstructed occupancy"
+
+
+def test_odom_free_world_gauge_ignores_pose_origins_and_restarts() -> None:
+    """Only primary reconstructed poses meet surveyed starts; odometry is irrelevant."""
+    alpha_id = KeyframeId("alpha", 0)
+    beta_id = KeyframeId("beta", 0)
+    restarted_id = KeyframeId("alpha", 0, "restart")
+    reconstructed_alpha = synthetic.yaw_pose(2.0, 3.0, 0.2)
+    reconstructed_beta = synthetic.yaw_pose(8.0, 4.0, 0.4)
+    reconstructed_restart = synthetic.yaw_pose(50.0, 20.0, -1.0)
+    world_alpha = synthetic.yaw_pose(-9.0, 0.0, 0.0)
+    gauge = world_alpha @ se3_inverse(reconstructed_alpha)
+    world_beta = gauge @ reconstructed_beta
+
+    # These packet poses intentionally have unrelated, enormous origins. The
+    # result must be unchanged because odometry only drives the live marker
+    # between geometry-corrected keyframes, never the reconstructed world map.
+    included = [
+        Keyframe(
+            alpha_id,
+            1.0,
+            synthetic.yaw_pose(100.0, -70.0, 2.5),
+            np.empty((0, 3), dtype=np.float32),
+        ),
+        Keyframe(
+            beta_id,
+            1.1,
+            synthetic.yaw_pose(-80.0, 40.0, -2.0),
+            np.empty((0, 3), dtype=np.float32),
+        ),
+        Keyframe(
+            restarted_id,
+            20.0,
+            synthetic.yaw_pose(300.0, 200.0, 1.5),
+            np.empty((0, 3), dtype=np.float32),
+        ),
+    ]
+    optimized = OptimizedGraph(
+        poses={
+            alpha_id: reconstructed_alpha,
+            beta_id: reconstructed_beta,
+            restarted_id: reconstructed_restart,
+        },
+        components=[
+            Component(
+                0,
+                frozenset({"alpha", "beta"}),
+                alpha_id,
+                frozenset({TrajectoryId("alpha"), TrajectoryId("beta")}),
+                frozenset({alpha_id, beta_id}),
+            ),
+            Component(
+                1,
+                frozenset({"alpha"}),
+                restarted_id,
+                frozenset({TrajectoryId("alpha", "restart")}),
+                frozenset({restarted_id}),
+            ),
+        ],
+    )
+    backend = CollaborativeBackend(
+        registration_mode="odom_free",
+        t_world_map_hint={"alpha": world_alpha, "beta": world_beta},
+    )
+
+    gauged = backend._gauge_reconstructed_to_world(optimized, included)
+
+    assert np.allclose(gauged.poses[alpha_id], world_alpha)
+    assert np.allclose(gauged.poses[beta_id], world_beta)
+    assert np.allclose(gauged.poses[restarted_id], reconstructed_restart)
 
 
 

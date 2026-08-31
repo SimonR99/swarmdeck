@@ -69,7 +69,16 @@ RENDER = RenderConfig(
     max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "1.80")),
     odometry_as_pose=REGISTRATION_MODE != "odom_free",
     close_occupied=1,
-    hit_weight=5,
+    hit_weight=8,
+    peer_exclusion_radius_m=float(
+        os.environ.get("SWARMDECK_SLAM_PEER_EXCLUSION_RADIUS_M", "0.80")
+    ),
+    peer_exclusion_max_dt_s=float(
+        os.environ.get("SWARMDECK_SLAM_PEER_EXCLUSION_MAX_DT_S", "2.0")
+    ),
+    peer_exclusion_max_interp_gap_s=float(
+        os.environ.get("SWARMDECK_SLAM_PEER_EXCLUSION_MAX_INTERP_GAP_S", "15.0")
+    ),
 )
 
 # gtsam tangent order: rx, ry, rz, tx, ty, tz. Tight enough that a working
@@ -81,10 +90,12 @@ _POSE_PRIOR_SIGMAS = np.array([0.05, 0.05, 0.05, 0.10, 0.10, 0.15])
 def _start_pose_hints(path: str) -> dict[str, np.ndarray] | None:
     """Read ``map.start_poses`` from the session yaml, if present.
 
-    These are the Gazebo spawn poses. Graph mode uses them as ``T_world_map``
-    so onboard maps overlay in the world frame. Odometry-free mode uses them
-    only to gauge reconstructed occupancy, not to pin every keyframe.
-    Absent on hardware, where the field is empty.
+    These are Gazebo spawn poses or surveyed first-observation poses. Graph
+    mode uses them as ``T_world_map`` so onboard maps overlay in the world
+    frame. Odometry-free mode uses them only to choose between already-valid
+    symmetric geometric modes and to rigidly gauge each connected component;
+    they never pin individual keyframes. The field may be empty when hardware
+    starts are unknown.
     """
     if not path or not os.path.isfile(path):
         return None

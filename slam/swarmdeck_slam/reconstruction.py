@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import gtsam
 import numpy as np
@@ -148,7 +148,18 @@ class FragmentMatchConfig:
     min_distinct_frames_per_side: int = 2
     min_spatial_span_m: float = 0.60
     ambiguity_support_margin: int = 1
-    ambiguity_score_margin: float = 0.15
+    # Compared as MEAN score per independent proposal. Comparing summed scores
+    # made the margin depend on cluster size and accepted equal-support 180deg
+    # corridor aliases (8 votes at 4.75 versus 8 at 4.34).
+    ambiguity_score_margin: float = 0.20
+    # Optional surveyed/coarse starts are only a mode-selection veto. They are
+    # never an ICP seed or graph factor and are applied only to the fragment
+    # containing each robot's first observation. These deliberately broad
+    # limits tolerate an imprecise start while rejecting a catastrophic pi
+    # flip; odometry is not read by this gate at all.
+    pose_hint_translation_m: float = 8.0
+    pose_hint_rotation_rad: float = math.radians(75.0)
+    pose_hint_min_fraction: float = 0.50
     boundary_consistency_translation_m: float = 0.75
     boundary_consistency_rotation_rad: float = math.radians(15.0)
     min_boundary_registration_score: float = 0.50
@@ -186,6 +197,7 @@ class FragmentConnection:
     support: int
     score: float
     proposals: tuple[ConnectionProposal, ...]
+    pose_hint_support: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +410,124 @@ def _select_chain(
     ]
 
 
+def _supported_temporal_modes(
+    target: ReconstructionFrame,
+    source: ReconstructionFrame,
+    register: RegistrationFunction,
+    config: TemporalConfig,
+) -> list[RegistrationHypothesis]:
+    dt = source.stamp - target.stamp
+    if not 0.0 < dt <= 2.0 * config.max_contiguous_gap_s:
+        return []
+    return [
+        item
+        for item in register(target, source)
+        if _plausible(item, dt, config)
+        and item.score >= config.min_temporal_registration_score
+    ]
+
+
+def _corroborated_skip_bridge(
+    ordered: Sequence[ReconstructionFrame],
+    edge_index: int,
+    run_frames: Sequence[ReconstructionFrame],
+    run_adjacent: Sequence[list[RegistrationHypothesis]],
+    register: RegistrationFunction,
+    config: TemporalConfig,
+) -> list[RegistrationHypothesis]:
+    """Infer one missing adjacent hop from independent cycles on both sides.
+
+    A partial scan during a turn may expose only the 180-degree corridor alias,
+    even though the preceding-to-current and current-to-following skip pairs
+    overlap strongly.  Continuity is safe only when *both* three-frame cycles
+    imply the same missing transform.  One-sided evidence remains a fragment
+    boundary, preserving the conservative policy for restarts and aliases.
+    """
+    if (
+        edge_index == 0
+        or edge_index + 2 >= len(ordered)
+        or len(run_frames) < 2
+        or not run_adjacent
+    ):
+        return []
+    before = ordered[edge_index - 1]
+    target = ordered[edge_index]
+    source = ordered[edge_index + 1]
+    after = ordered[edge_index + 2]
+    if run_frames[-2].index != before.index or run_frames[-1].index != target.index:
+        return []
+    if [frame.seq for frame in (before, target, source, after)] != list(
+        range(before.seq, before.seq + 4)
+    ):
+        return []
+    adjacent_after = _supported_temporal_modes(source, after, register, config)
+    skip_before = _supported_temporal_modes(before, source, register, config)
+    skip_after = _supported_temporal_modes(target, after, register, config)
+    if not adjacent_after or not skip_before or not skip_after:
+        return []
+
+    dt = source.stamp - target.stamp
+    rescued: list[RegistrationHypothesis] = []
+    for adjacent_before in run_adjacent[-1]:
+        for before_to_source in skip_before:
+            left = (
+                se3_inverse(adjacent_before.t_target_source)
+                @ before_to_source.t_target_source
+            )
+            if not _motion_plausible(left, dt, config):
+                continue
+            for target_to_after in skip_after:
+                for source_to_after in adjacent_after:
+                    right = (
+                        target_to_after.t_target_source
+                        @ se3_inverse(source_to_after.t_target_source)
+                    )
+                    if not _motion_plausible(right, dt, config):
+                        continue
+                    translation, rotation = se3_distance(left, right)
+                    if (
+                        translation > config.cycle_translation_scale_m
+                        or rotation > config.cycle_rotation_scale_rad
+                    ):
+                        continue
+                    witnesses = (
+                        adjacent_before,
+                        before_to_source,
+                        target_to_after,
+                        source_to_after,
+                    )
+                    candidate = RegistrationHypothesis(
+                        t_target_source=left,
+                        yaw_prior=_yaw(left),
+                        descriptor_distance=max(
+                            item.descriptor_distance for item in witnesses
+                        ),
+                        coarse_score=min(item.coarse_score for item in witnesses),
+                        symmetric_overlap=min(
+                            item.symmetric_overlap for item in witnesses
+                        ),
+                        symmetric_rmse=max(item.symmetric_rmse for item in witnesses),
+                        gicp_mean_error=max(
+                            item.gicp_mean_error for item in witnesses
+                        ),
+                        num_inliers=min(item.num_inliers for item in witnesses),
+                        score=min(item.score for item in witnesses),
+                    )
+                    if not any(
+                        se3_distance(candidate.t_target_source, existing.t_target_source)[
+                            0
+                        ]
+                        <= 0.5 * config.cycle_translation_scale_m
+                        and se3_distance(
+                            candidate.t_target_source, existing.t_target_source
+                        )[1]
+                        <= 0.5 * config.cycle_rotation_scale_rad
+                        for existing in rescued
+                    ):
+                        rescued.append(candidate)
+    return rescued
+
+
 def build_temporal_fragments(
     frames: Sequence[ReconstructionFrame],
     register: RegistrationFunction,
@@ -426,7 +556,9 @@ def build_temporal_fragments(
         ] = []
         run_frames = [ordered[0]] if ordered else []
         run_adjacent: list[list[RegistrationHypothesis]] = []
-        for previous, current in zip(ordered, ordered[1:]):
+        for edge_index, (previous, current) in enumerate(
+            zip(ordered, ordered[1:])
+        ):
             dt = current.stamp - previous.stamp
             reason = ""
             candidates: list[RegistrationHypothesis] = []
@@ -442,7 +574,16 @@ def build_temporal_fragments(
                     and item.score >= config.min_temporal_registration_score
                 ]
                 if not candidates:
-                    reason = "no physically plausible registration"
+                    candidates = _corroborated_skip_bridge(
+                        ordered,
+                        edge_index,
+                        run_frames,
+                        run_adjacent,
+                        register,
+                        config,
+                    )
+                    if not candidates:
+                        reason = "no physically plausible registration"
 
             if reason:
                 candidate_runs.append((run_frames, run_adjacent))
@@ -498,6 +639,7 @@ def _candidate_frame_pairs(
     frames: Sequence[ReconstructionFrame],
     fragments: Sequence[Fragment],
     config: FragmentMatchConfig,
+    required_frame_pairs: Sequence[tuple[int, int]] = (),
 ) -> dict[tuple[str, str], list[tuple[int, int, float]]]:
     """Descriptor shortlist plus dense windows across known temporal breaks."""
     frame_by_index = {frame.index: frame for frame in frames}
@@ -507,6 +649,25 @@ def _candidate_frame_pairs(
         for frame_index in fragment.frame_indices
     }
     pairs: dict[tuple[str, str], dict[tuple[int, int], float]] = {}
+
+    # An incremental back-end must not forget a previously verified closure
+    # merely because newer, similar descriptors crowd its support scans out of
+    # a fixed-size nearest-neighbour shortlist.  Retained pairs still pass the
+    # complete registration, clustering, ambiguity, span and cycle gates below;
+    # this only guarantees that the geometric evidence is reconsidered.
+    for first_index, second_index in required_frame_pairs:
+        if (
+            first_index not in fragment_by_frame
+            or second_index not in fragment_by_frame
+        ):
+            continue
+        first_index, second_index = sorted((first_index, second_index))
+        first_fragment = fragment_by_frame[first_index]
+        second_fragment = fragment_by_frame[second_index]
+        if first_fragment.fragment_id == second_fragment.fragment_id:
+            continue
+        key = tuple(sorted((first_fragment.fragment_id, second_fragment.fragment_id)))
+        pairs.setdefault(key, {})[(first_index, second_index)] = -2.0
 
     # Directly inspect several scans on both sides of each temporal break. A
     # restarted SLAM process often resumes at the same physical place, but one
@@ -530,44 +691,124 @@ def _candidate_frame_pairs(
         return {}
     keys = np.stack([ring_key(frame.cloud.descriptor) for frame in frames])
     tree = cKDTree(keys)
-    fetch = min(len(frames), max(config.descriptor_neighbors, 1))
+    all_rows = np.arange(len(frames), dtype=np.int64)
+    rows_by_robot: dict[str, np.ndarray] = {}
+    for robot_id in sorted({frame.robot_id for frame in frames}):
+        rows_by_robot[robot_id] = np.asarray(
+            [row for row, item in enumerate(frames) if item.robot_id == robot_id],
+            dtype=np.int64,
+        )
+    trees_by_robot = {
+        robot_id: cKDTree(keys[rows]) for robot_id, rows in rows_by_robot.items()
+    }
     for row, frame in enumerate(frames):
-        _, neighbor_rows = tree.query(keys[row], k=fetch)
-        ranked: list[tuple[float, int]] = []
-        for neighbor_row in np.atleast_1d(neighbor_rows):
-            neighbor = frames[int(neighbor_row)]
-            if neighbor.index == frame.index:
-                continue
-            first_fragment = fragment_by_frame[frame.index]
-            second_fragment = fragment_by_frame[neighbor.index]
-            if first_fragment.fragment_id == second_fragment.fragment_id:
-                continue
-            _, distance = best_alignment(
-                neighbor.cloud.descriptor, frame.cloud.descriptor
-            )
-            if distance <= config.max_descriptor_distance:
-                ranked.append((distance, neighbor.index))
-        ranked.sort()
-        for distance, neighbor_index in ranked[: config.candidates_per_frame]:
-            first_index, second_index = sorted((frame.index, neighbor_index))
-            first_fragment = fragment_by_frame[first_index]
-            second_fragment = fragment_by_frame[second_index]
-            key = tuple(
-                sorted((first_fragment.fragment_id, second_fragment.fragment_id))
-            )
-            bucket = pairs.setdefault(key, {})
-            old = bucket.get((first_index, second_index), math.inf)
-            bucket[(first_index, second_index)] = min(old, distance)
+        # Preserve the inexpensive global shortlist, then add a balanced
+        # shortlist from each *other robot*. Without this, dozens of nearly
+        # identical scans from the current trajectory can occupy all 24 global
+        # neighbours and a cold reconstruction never even tests the earlier
+        # inter-robot rendezvous that an incremental solve already verified.
+        scopes: list[tuple[cKDTree, np.ndarray]] = [(tree, all_rows)]
+        scopes.extend(
+            (trees_by_robot[robot_id], rows)
+            for robot_id, rows in rows_by_robot.items()
+            if robot_id != frame.robot_id
+        )
+        descriptor_distances: dict[int, float] = {}
+        for scope_tree, scope_rows in scopes:
+            fetch = min(len(scope_rows), max(config.descriptor_neighbors, 1))
+            _, local_neighbor_rows = scope_tree.query(keys[row], k=fetch)
+            ranked: list[tuple[float, int]] = []
+            for local_neighbor_row in np.atleast_1d(local_neighbor_rows):
+                neighbor_row = int(scope_rows[int(local_neighbor_row)])
+                neighbor = frames[neighbor_row]
+                if neighbor.index == frame.index:
+                    continue
+                first_fragment = fragment_by_frame[frame.index]
+                second_fragment = fragment_by_frame[neighbor.index]
+                if first_fragment.fragment_id == second_fragment.fragment_id:
+                    continue
+                distance = descriptor_distances.get(neighbor_row)
+                if distance is None:
+                    _, distance = best_alignment(
+                        neighbor.cloud.descriptor, frame.cloud.descriptor
+                    )
+                    descriptor_distances[neighbor_row] = distance
+                if distance <= config.max_descriptor_distance:
+                    ranked.append((distance, neighbor.index))
+            ranked.sort()
+            for distance, neighbor_index in ranked[: config.candidates_per_frame]:
+                first_index, second_index = sorted((frame.index, neighbor_index))
+                first_fragment = fragment_by_frame[first_index]
+                second_fragment = fragment_by_frame[second_index]
+                key = tuple(
+                    sorted((first_fragment.fragment_id, second_fragment.fragment_id))
+                )
+                bucket = pairs.setdefault(key, {})
+                old = bucket.get((first_index, second_index), math.inf)
+                bucket[(first_index, second_index)] = min(old, distance)
 
     capped: dict[tuple[str, str], list[tuple[int, int, float]]] = {}
     for key, bucket in pairs.items():
-        # Boundary-window entries have distance -1 and are intentionally kept
-        # before descriptor-only candidates when the per-pair cap is reached.
+        # Required entries (-2) and boundary-window entries (-1) are
+        # intentionally kept before descriptor-only candidates. For the rest,
+        # plain descriptor sorting is unsafe: a repeated doorway can occupy all
+        # 24 slots with near-identical views and evict an earlier, distributed
+        # rendezvous. Farthest-point sampling in the two fragment frames keeps
+        # the fixed registration budget while covering both trajectories.
         items = sorted(
             ((a, b, distance) for (a, b), distance in bucket.items()),
             key=lambda item: (item[2], item[0], item[1]),
         )
-        capped[key] = items[: config.max_pairs_per_fragment_pair]
+        limit = config.max_pairs_per_fragment_pair
+        if len(items) <= limit:
+            capped[key] = items
+            continue
+
+        selected = [item for item in items if item[2] < 0.0][:limit]
+        selected_pairs = {(item[0], item[1]) for item in selected}
+        remaining = [
+            item for item in items if (item[0], item[1]) not in selected_pairs
+        ]
+        if not selected and remaining:
+            selected.append(remaining.pop(0))
+
+        fragment_a_id, fragment_b_id = key
+
+        def pair_point(item: tuple[int, int, float]) -> np.ndarray:
+            first_index, second_index, _ = item
+            if fragment_by_frame[first_index].fragment_id == fragment_a_id:
+                a_index, b_index = first_index, second_index
+            else:
+                a_index, b_index = second_index, first_index
+            return np.concatenate(
+                (
+                    fragment_by_frame[a_index].poses[a_index][:3, 3],
+                    fragment_by_frame[b_index].poses[b_index][:3, 3],
+                )
+            )
+
+        selected_points = [pair_point(item) for item in selected]
+        while remaining and len(selected) < limit:
+            best_position = max(
+                range(len(remaining)),
+                key=lambda position: (
+                    min(
+                        float(
+                            np.linalg.norm(
+                                pair_point(remaining[position]) - selected_point
+                            )
+                        )
+                        for selected_point in selected_points
+                    ),
+                    -remaining[position][2],
+                    -remaining[position][0],
+                    -remaining[position][1],
+                ),
+            )
+            item = remaining.pop(best_position)
+            selected.append(item)
+            selected_points.append(pair_point(item))
+        capped[key] = selected
     return capped
 
 
@@ -662,11 +903,44 @@ def _best_boundary_proposal(
     return _proposal(previous, current, registrations[0], fragment_by_frame)
 
 
+def _pose_hint_consistent(
+    proposal: ConnectionProposal,
+    frame_by_index: Mapping[int, ReconstructionFrame],
+    pose_hints: Mapping[str, np.ndarray],
+    config: FragmentMatchConfig,
+) -> bool:
+    """Whether one geometric mode agrees with deliberately coarse starts.
+
+    Fragment frames are anchored at their first geometry-registered keyframe,
+    so the expected transform between two fragment origins is simply the
+    relative surveyed/coarse start transform. It deliberately does not read
+    odometry: arbitrary odometry origins, drift, jumps and resets must not be
+    able to accept or veto an inter-robot merge. Geometry still creates every
+    candidate transform; the hint only rejects a grossly incompatible mode.
+    """
+    frame_a = frame_by_index[proposal.frame_a]
+    frame_b = frame_by_index[proposal.frame_b]
+    hint_a = pose_hints.get(frame_a.robot_id)
+    hint_b = pose_hints.get(frame_b.robot_id)
+    if hint_a is None or hint_b is None:
+        return False
+    expected_fragment_a_fragment_b = se3_inverse(hint_a) @ hint_b
+    translation, rotation = se3_distance(
+        expected_fragment_a_fragment_b, proposal.t_a_b
+    )
+    return (
+        translation <= config.pose_hint_translation_m
+        and rotation <= config.pose_hint_rotation_rad
+    )
+
+
 def find_fragment_connections(
     frames: Sequence[ReconstructionFrame],
     fragments: Sequence[Fragment],
     register: RegistrationFunction,
     config: FragmentMatchConfig | None = None,
+    pose_hints: Mapping[str, np.ndarray] | None = None,
+    required_frame_pairs: Sequence[tuple[int, int]] = (),
 ) -> tuple[list[FragmentConnection], list[RejectedConnection]]:
     """Reconnect fragments only when independent registrations form consensus.
 
@@ -682,7 +956,30 @@ def find_fragment_connections(
         for frame_index in fragment.frame_indices
     }
     fragment_by_id = {fragment.fragment_id: fragment for fragment in fragments}
-    candidates = _candidate_frame_pairs(frames, fragments, config)
+    # A configured start belongs only to the first observation of a physical
+    # robot.  Applying it to a fragment created after a capture gap or SLAM
+    # restart would falsely claim that the robot returned to its spawn.  Such
+    # later fragments must reconnect by geometry/cycles before they inherit an
+    # absolute placement.
+    first_frame_by_robot: dict[str, ReconstructionFrame] = {}
+    for frame in frames:
+        current = first_frame_by_robot.get(frame.robot_id)
+        if current is None or (frame.stamp, frame.seq, frame.index) < (
+            current.stamp,
+            current.seq,
+            current.index,
+        ):
+            first_frame_by_robot[frame.robot_id] = frame
+    primary_fragment_by_robot = {
+        robot_id: fragment_by_frame[frame.index].fragment_id
+        for robot_id, frame in first_frame_by_robot.items()
+    }
+    candidates = _candidate_frame_pairs(
+        frames,
+        fragments,
+        config,
+        required_frame_pairs,
+    )
     accepted: list[FragmentConnection] = []
     rejected: list[RejectedConnection] = []
 
@@ -723,26 +1020,111 @@ def find_fragment_connections(
                 continue
             clusters.append((members, score))
         clusters.sort(key=lambda item: (len(item[0]), item[1]), reverse=True)
-        members, cluster_score = clusters[0]
-        a_indices = {member.frame_a for member in members}
-        b_indices = {member.frame_b for member in members}
         fragment_a = fragment_by_id[fragment_a_id]
         fragment_b = fragment_by_id[fragment_b_id]
-        # Compute a representative before the gates so a temporal-boundary
-        # cross-check can compare the winning cluster with the best direct
-        # registration of the exact last->first scan pair. Several correlated
-        # window matches must not outvote that transition into a 180-degree
-        # repeated-corridor mode.
-        representative = min(
-            members,
-            key=lambda candidate: sum(
-                se3_distance(candidate.t_a_b, other.t_a_b)[0]
-                / config.cluster_translation_m
-                + se3_distance(candidate.t_a_b, other.t_a_b)[1]
-                / config.cluster_rotation_rad
-                for other in members
-            ),
+        pose_hint_reason = ""
+        robots_have_hints = (
+            fragment_by_id[fragment_a_id].robot_id
+            != fragment_by_id[fragment_b_id].robot_id
+            and pose_hints is not None
+            and fragment_by_id[fragment_a_id].robot_id in pose_hints
+            and fragment_by_id[fragment_b_id].robot_id in pose_hints
+            and primary_fragment_by_robot.get(
+                fragment_by_id[fragment_a_id].robot_id
+            )
+            == fragment_a_id
+            and primary_fragment_by_robot.get(
+                fragment_by_id[fragment_b_id].robot_id
+            )
+            == fragment_b_id
         )
+        if robots_have_hints:
+            eligible = []
+            for cluster_members, score in clusters:
+                consistent = sum(
+                    _pose_hint_consistent(
+                        proposal,
+                        frame_by_index,
+                        pose_hints,
+                        config,
+                    )
+                    for proposal in cluster_members
+                )
+                required = max(
+                    config.min_support,
+                    int(math.ceil(config.pose_hint_min_fraction * len(cluster_members))),
+                )
+                if consistent >= required:
+                    eligible.append((cluster_members, score))
+            if eligible:
+                clusters = eligible
+                clusters.sort(
+                    key=lambda item: (len(item[0]), item[1]), reverse=True
+                )
+            else:
+                pose_hint_reason = "all geometric modes contradict coarse pose hints"
+
+        def structural_reason(
+            cluster: tuple[tuple[ConnectionProposal, ...], float],
+        ) -> str:
+            """Reject correlated votes before ranking geometric modes.
+
+            Repeated scans at one doorway can create a larger consensus than a
+            real multi-view rendezvous. Such a cluster is not an alternative
+            layout: it lacks the independent spatial evidence required to
+            estimate one. Letting it win first and applying this gate later
+            caused a valid, spatially distributed mode to be discarded.
+            """
+            cluster_members, _ = cluster
+            if len(cluster_members) < config.min_support:
+                return "insufficient support"
+            cluster_a_indices = {
+                member.frame_a for member in cluster_members
+            }
+            cluster_b_indices = {
+                member.frame_b for member in cluster_members
+            }
+            if (
+                len(cluster_a_indices) < config.min_distinct_frames_per_side
+                or len(cluster_b_indices) < config.min_distinct_frames_per_side
+            ):
+                return "support is not independent"
+            if (
+                _spatial_span(cluster_a_indices, fragment_a)
+                < config.min_spatial_span_m
+                or _spatial_span(cluster_b_indices, fragment_b)
+                < config.min_spatial_span_m
+            ):
+                return "support has insufficient spatial span"
+            return ""
+
+        structural_rejection_reason = ""
+        if not pose_hint_reason:
+            structurally_eligible = [
+                cluster for cluster in clusters if not structural_reason(cluster)
+            ]
+            if structurally_eligible:
+                # Only independent, spatially distributed hypotheses represent
+                # competing transforms for the ambiguity test below.
+                clusters = structurally_eligible
+            else:
+                structural_rejection_reason = structural_reason(clusters[0])
+
+        def cluster_representative(
+            cluster: tuple[tuple[ConnectionProposal, ...], float],
+        ) -> ConnectionProposal:
+            cluster_members, _ = cluster
+            return min(
+                cluster_members,
+                key=lambda candidate: sum(
+                    se3_distance(candidate.t_a_b, other.t_a_b)[0]
+                    / config.cluster_translation_m
+                    + se3_distance(candidate.t_a_b, other.t_a_b)[1]
+                    / config.cluster_rotation_rad
+                    for other in cluster_members
+                ),
+            )
+
         best_boundary = _best_boundary_proposal(
             fragment_a,
             fragment_b,
@@ -750,40 +1132,71 @@ def find_fragment_connections(
             fragment_by_frame,
             register,
         )
-        reason = ""
+        boundary_rejection_reason = ""
         if (
-            best_boundary is not None
-            and best_boundary.score < config.min_boundary_registration_score
+            not pose_hint_reason
+            and not structural_rejection_reason
+            and best_boundary is not None
         ):
-            reason = "adjacent boundary registration is too weak"
-        if len(members) < config.min_support:
-            reason = "insufficient support"
-        elif (
-            len(a_indices) < config.min_distinct_frames_per_side
-            or len(b_indices) < config.min_distinct_frames_per_side
-        ):
-            reason = "support is not independent"
-        elif (
-            _spatial_span(a_indices, fragment_a) < config.min_spatial_span_m
-            or _spatial_span(b_indices, fragment_b) < config.min_spatial_span_m
-        ):
-            reason = "support has insufficient spatial span"
-        elif len(clusters) > 1:
+            if best_boundary.score < config.min_boundary_registration_score:
+                boundary_rejection_reason = (
+                    "adjacent boundary registration is too weak"
+                )
+            else:
+                boundary_eligible = []
+                for cluster in clusters:
+                    candidate = cluster_representative(cluster)
+                    translation, rotation = se3_distance(
+                        candidate.t_a_b, best_boundary.t_a_b
+                    )
+                    if (
+                        translation
+                        <= config.boundary_consistency_translation_m
+                        and rotation <= config.boundary_consistency_rotation_rad
+                    ):
+                        boundary_eligible.append(cluster)
+                if boundary_eligible:
+                    # The exact scan transition is independent evidence and
+                    # selects among already-supported global modes. A larger
+                    # repeated-corridor cluster must not hide the mode that
+                    # actually crosses this temporal boundary.
+                    clusters = boundary_eligible
+                else:
+                    boundary_rejection_reason = (
+                        "boundary consensus contradicts adjacent registration"
+                    )
+
+        members, cluster_score = clusters[0]
+        selected_pose_hint_support = (
+            sum(
+                _pose_hint_consistent(
+                    proposal,
+                    frame_by_index,
+                    pose_hints,
+                    config,
+                )
+                for proposal in members
+            )
+            if robots_have_hints
+            else 0
+        )
+        # Compute a representative before the gates so a temporal-boundary
+        # cross-check can compare the winning cluster with the best direct
+        # registration of the exact last->first scan pair. Several correlated
+        # window matches must not outvote that transition into a 180-degree
+        # repeated-corridor mode.
+        representative = cluster_representative(clusters[0])
+        reason = structural_rejection_reason or boundary_rejection_reason
+        if not reason and len(clusters) > 1:
             runner_members, runner_score = clusters[1]
             if (
                 len(runner_members) >= len(members) - config.ambiguity_support_margin
-                and runner_score >= cluster_score - config.ambiguity_score_margin
+                and runner_score / len(runner_members)
+                >= cluster_score / len(members) - config.ambiguity_score_margin
             ):
                 reason = "ambiguous competing transform"
-        if not reason and best_boundary is not None:
-            translation, rotation = se3_distance(
-                representative.t_a_b, best_boundary.t_a_b
-            )
-            if (
-                translation > config.boundary_consistency_translation_m
-                or rotation > config.boundary_consistency_rotation_rad
-            ):
-                reason = "boundary consensus contradicts adjacent registration"
+        if pose_hint_reason:
+            reason = pose_hint_reason
         if reason:
             rejected.append(
                 RejectedConnection(fragment_a_id, fragment_b_id, len(members), reason)
@@ -800,6 +1213,7 @@ def find_fragment_connections(
                 len(members),
                 cluster_score,
                 members,
+                selected_pose_hint_support,
             )
         )
     return accepted, rejected
@@ -954,6 +1368,12 @@ def filter_inter_robot_connections(
     clustered at one intersection are still rejected.  This distinction is
     necessary because otherwise two robots represented by one fragment each
     could never merge, however much common ground they traversed.
+
+    A pose-hint-corroborated connection is the other safe exception: its scan
+    cluster was already selected from multiple geometric modes using two
+    coarse surveyed starts. That second modality can replace a spatially
+    separated encounter, but never replace geometric support or invent a
+    transform that registration did not produce.
     """
     config = config or FragmentMatchConfig()
     fragment_by_id = {fragment.fragment_id: fragment for fragment in fragments}
@@ -1005,6 +1425,17 @@ def filter_inter_robot_connections(
     kept = list(intra_robot)
     rejected: list[RejectedConnection] = []
     for candidates in grouped.values():
+        def pose_hint_corroborates(connection: FragmentConnection) -> bool:
+            return connection.pose_hint_support >= max(
+                config.min_support,
+                int(
+                    math.ceil(
+                        config.pose_hint_min_fraction
+                        * len(connection.proposals)
+                    )
+                ),
+            )
+
         clusters: list[list[tuple[FragmentConnection, np.ndarray, str]]] = []
         for candidate in sorted(candidates, key=lambda item: item[0].score, reverse=True):
             placed = False
@@ -1021,6 +1452,7 @@ def filter_inter_robot_connections(
                 clusters.append([candidate])
         clusters.sort(
             key=lambda cluster: (
+                any(pose_hint_corroborates(item[0]) for item in cluster),
                 len(cluster),
                 sum(item[0].score for item in cluster),
             ),
@@ -1045,11 +1477,18 @@ def filter_inter_robot_connections(
                 side_b_positions.extend(locations_a)
 
         reason = ""
+        pose_hint_corroborated = any(
+            pose_hint_corroborates(connection)
+            for connection, _, _ in best
+        )
         if (
-            _maximum_separation(side_a_positions)
-            < config.min_inter_robot_separation_m
-            or _maximum_separation(side_b_positions)
-            < config.min_inter_robot_separation_m
+            not pose_hint_corroborated
+            and (
+                _maximum_separation(side_a_positions)
+                < config.min_inter_robot_separation_m
+                or _maximum_separation(side_b_positions)
+                < config.min_inter_robot_separation_m
+            )
         ):
             reason = (
                 "inter-robot merge has no independent cycle"
@@ -1197,11 +1636,10 @@ def optimize_keyframe_poses(
             np.array([0.04, 0.04, 0.03, 0.08, 0.08, 0.10])
         ),
     )
+    closure_sigmas = np.array([0.08, 0.08, 0.06, 0.15, 0.15, 0.20])
     closure_noise = gtsam.noiseModel.Robust.Create(
         gtsam.noiseModel.mEstimator.Huber.Create(1.345),
-        gtsam.noiseModel.Diagonal.Sigmas(
-            np.array([0.08, 0.08, 0.06, 0.15, 0.15, 0.20])
-        ),
+        gtsam.noiseModel.Diagonal.Sigmas(closure_sigmas),
     )
     for fragment in fragments:
         for edge in fragment.edges:
@@ -1216,6 +1654,23 @@ def optimize_keyframe_poses(
     for connection in connections:
         fragment_a = fragment_by_id[connection.fragment_a]
         fragment_b = fragment_by_id[connection.fragment_b]
+        # A scan cluster is one rendezvous measurement with correlated samples,
+        # not ``support`` independent sensors. Without normalization, 24 nearby
+        # matches have eight times the aggregate information of one closure and
+        # visibly deform an already accurate temporal scan chain. Scaling each
+        # sample's sigma by sqrt(N) keeps the cluster's total information
+        # bounded while retaining its spatial distribution and robust losses.
+        # A 4x systematic margin accounts for the shared lidar calibration and
+        # local scan chain. It is the conservative cross-session choice on the
+        # two labelled four-robot captures; hardware still needs recalibration.
+        connection_noise = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Huber.Create(1.345),
+            gtsam.noiseModel.Diagonal.Sigmas(
+                closure_sigmas
+                * 4.0
+                * math.sqrt(max(1, len(connection.proposals)))
+            ),
+        )
         for proposal in connection.proposals:
             # proposal.t_a_b maps fragment B into fragment A.  Remove the two
             # local frame poses to recover the observed frame-A <- frame-B edge.
@@ -1229,7 +1684,7 @@ def optimize_keyframe_poses(
                     proposal.frame_a,
                     proposal.frame_b,
                     gtsam.Pose3(measurement),
-                    closure_noise,
+                    connection_noise,
                 )
             )
     for closure in loop_closures:

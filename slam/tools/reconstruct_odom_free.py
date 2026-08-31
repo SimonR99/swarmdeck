@@ -86,6 +86,14 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--render-resolution", type=float, default=0.08)
+    parser.add_argument(
+        "--pose-hints-json",
+        default="",
+        help=(
+            "optional coarse/surveyed T_world_map mapping as JSON, used only "
+            "to choose among already-valid symmetric registration modes"
+        ),
+    )
     defaults = OdomFreeConfig()
     parser.add_argument(
         "--min-z",
@@ -389,6 +397,30 @@ def _matrix(matrix: np.ndarray) -> list[list[float]]:
     return np.round(matrix, 8).tolist()
 
 
+def _pose_hints(value: str) -> dict[str, np.ndarray] | None:
+    if not value:
+        return None
+    try:
+        payload = json.loads(value)
+        result = {}
+        for robot_id, pose in payload.items():
+            yaw = float(pose.get("yaw", 0.0))
+            result[str(robot_id)] = se3_from_quat_xyz(
+                [
+                    float(pose.get("x", 0.0)),
+                    float(pose.get("y", 0.0)),
+                    0.0,
+                    0.0,
+                    0.0,
+                    math.sin(yaw / 2.0),
+                    math.cos(yaw / 2.0),
+                ]
+            )
+        return result or None
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise SystemExit(f"invalid --pose-hints-json: {exc}") from exc
+
+
 def main() -> None:
     arguments = _arguments()
     if arguments.render_resolution <= 0.0:
@@ -405,6 +437,7 @@ def main() -> None:
         max_contiguous_gap_s=arguments.max_contiguous_gap_s
     )
     match_config = FragmentMatchConfig()
+    pose_hints = _pose_hints(arguments.pose_hints_json)
     print(
         f"loaded {len(packets)} keyframes from dataset "
         f"{arguments.dataset.resolve()}"
@@ -463,7 +496,11 @@ def main() -> None:
     loop_closures = []
     if not arguments.temporal_only:
         connections, rejected_connections = find_fragment_connections(
-            frames, fragments, memo, match_config
+            frames,
+            fragments,
+            memo,
+            match_config,
+            pose_hints=pose_hints,
         )
         connections, rejected_inter_robot = filter_inter_robot_connections(
             fragments, connections, match_config
@@ -546,7 +583,14 @@ def main() -> None:
         "algorithm": "odom-free multi-hypothesis Scan Context + FFT + GICP",
         "dataset": str(arguments.dataset.resolve()),
         "confirmed_hardware_dataset": arguments.dataset.name == "hw-run-01",
-        "recorded_pose_or_odometry_used": False,
+        "recorded_pose_or_odometry_used": (
+            "not read" if arguments.ignore_odom else "weak mode vote only"
+        ),
+        "coarse_pose_hints_used": sorted(pose_hints or {}),
+        "surveyed_start_poses": {
+            robot_id: _matrix(pose)
+            for robot_id, pose in sorted((pose_hints or {}).items())
+        },
         "keyframe_count": len(frames),
         "robots": sorted({frame.robot_id for frame in frames}),
         "selected_trajectories": sorted(arguments.trajectory),
@@ -585,6 +629,7 @@ def main() -> None:
                 "fragment_a": connection.fragment_a,
                 "fragment_b": connection.fragment_b,
                 "support": connection.support,
+                "pose_hint_support": connection.pose_hint_support,
                 "score": connection.score,
                 "t_a_b": _matrix(connection.t_a_b),
             }

@@ -370,6 +370,35 @@ def se3_distance(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     return translation, float(np.arccos(cos_theta))
 
 
+def se3_medoid(
+    candidates: Iterable[np.ndarray],
+    *,
+    translation_scale_m: float = 1.0,
+    rotation_scale_rad: float = 1.0,
+) -> np.ndarray:
+    """Return the observed rigid transform most central to all candidates.
+
+    Unlike averaging matrices, a medoid is always one physically valid input
+    transform. The scales make metres and radians comparable and let a
+    majority of consistent surveyed starts reject one bad survey without
+    deforming any trajectory.
+    """
+    values = list(candidates)
+    if not values:
+        raise ValueError("at least one SE(3) candidate is required")
+    if translation_scale_m <= 0.0 or rotation_scale_rad <= 0.0:
+        raise ValueError("SE(3) medoid scales must be positive")
+    return min(
+        values,
+        key=lambda candidate: sum(
+            translation / translation_scale_m + rotation / rotation_scale_rad
+            for translation, rotation in (
+                se3_distance(candidate, other) for other in values
+            )
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Graph elements
 # --------------------------------------------------------------------------- #

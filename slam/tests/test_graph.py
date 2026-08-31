@@ -715,7 +715,13 @@ def test_t_world_map_beats_the_single_keyframe_snapshot_on_a_drifting_frame() ->
         _rebase_from(robot, len(robot.keyframes) // 2, shift) for robot in robots
     ]
 
-    result = _build_graph(drifting, []).optimize()
+    # Odometry rebuilt from the same rebased poses is exactly self-consistent:
+    # without an independent geometric observation, both the trajectory fit
+    # and newest-frame snapshot have zero residual and the intended regression
+    # is unobservable. Real closures preserve the physical trajectory while
+    # the saved map-frame poses jump, which is the production failure this
+    # fixture is meant to exercise.
+    result = _build_graph(drifting, _find_real_closures(drifting)).optimize()
 
     for robot in drifting:
         published = result.t_world_map[robot.robot_id]
