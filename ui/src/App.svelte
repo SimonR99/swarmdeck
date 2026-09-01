@@ -10,9 +10,9 @@
   import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
   import { startConnection, teardown } from '$lib/api/connection';
   import { fleet } from '$lib/stores/fleet.svelte';
-  import { PanelLeftOpen } from 'lucide-svelte';
+  import { cortexStore } from '$lib/stores/agent.svelte';
+  import { Brain, PanelLeftOpen } from 'lucide-svelte';
 
-  let fleetOpen = $state(true);
   let videoExpanded = $state(false);
   let compactLayout = $state(false);
   let responsiveLayoutInitialised = false;
@@ -20,18 +20,23 @@
   let swarmSlamOpen = $state(false);
 
   function openFleet() {
-    fleetOpen = true;
+    cortexStore.openFleet();
+    if (compactLayout) videoExpanded = false;
+  }
+
+  function openCortex() {
+    cortexStore.openCortex();
     if (compactLayout) videoExpanded = false;
   }
 
   function toggleVideoExpanded() {
     videoExpanded = !videoExpanded;
-    if (videoExpanded && compactLayout) fleetOpen = false;
+    if (videoExpanded && compactLayout) cortexStore.close();
   }
 
   function dismissOverlayPanels() {
     if (!compactLayout) return;
-    fleetOpen = false;
+    cortexStore.close();
     videoExpanded = false;
   }
 
@@ -48,12 +53,21 @@
       compactLayout = media.matches;
       if (!responsiveLayoutInitialised) {
         responsiveLayoutInitialised = true;
-        if (media.matches) fleetOpen = false;
+        if (media.matches) cortexStore.close();
       }
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        cortexStore.toggleCortex();
+        return;
+      }
       if (event.key !== 'Escape') return;
+      if (cortexStore.isOpen && compactLayout) {
+        cortexStore.close();
+        return;
+      }
       if (videoExpanded) videoExpanded = false;
       else dismissOverlayPanels();
     };
@@ -75,7 +89,7 @@
   />
 
   <main class="workspace">
-    {#if compactLayout && fleetOpen}
+    {#if compactLayout && cortexStore.isOpen}
       <button
         class="workspace-scrim"
         aria-label="Close open panel"
@@ -83,16 +97,34 @@
       ></button>
     {/if}
 
-    {#if fleetOpen}
+    {#if cortexStore.isOpen}
       <div class="side-panel fleet-panel">
-        <FleetRail oncollapse={() => (fleetOpen = false)} />
+        <FleetRail oncollapse={() => cortexStore.close()} />
       </div>
     {:else}
-      <button class="panel-tab panel-tab-left" aria-label="Show Fleet panel" onclick={openFleet}>
-        <PanelLeftOpen class="h-4 w-4" />
-        <span>Fleet</span>
-        <span class="panel-tab-count">{fleet.count}</span>
-      </button>
+      <div class="panel-tab panel-tab-left flex items-center gap-1 p-0.5 bg-surface/95 border border-border/80 rounded-full shadow-md backdrop-blur-md z-30">
+        <button
+          class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors hover:bg-surface-3 text-fg"
+          aria-label="Show Fleet panel"
+          onclick={openFleet}
+        >
+          <PanelLeftOpen class="h-3.5 w-3.5 text-fg-dim" />
+          <span>Fleet</span>
+          <span class="panel-tab-count">{fleet.count}</span>
+        </button>
+        <div class="h-3.5 w-px bg-border/80"></div>
+        <button
+          class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors hover:bg-cyan-950/60 text-cyan-300"
+          aria-label="Show Cortex AI Chat"
+          onclick={openCortex}
+        >
+          <Brain class="h-3.5 w-3.5 text-cyan-400" />
+          <span>Cortex</span>
+          {#if cortexStore.isStreaming}
+            <span class="h-1.5 w-1.5 rounded-full bg-cyan-300 animate-ping"></span>
+          {/if}
+        </button>
+      </div>
     {/if}
 
     <section class="map-workspace" aria-label="Fleet map workspace">

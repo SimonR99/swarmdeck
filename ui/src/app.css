@@ -136,7 +136,7 @@
 
 .fleet-panel {
   grid-column: 1;
-  width: clamp(232px, 18vw, 288px);
+  width: clamp(280px, 20vw, 320px);
 }
 
 .control-panel {
@@ -245,6 +245,11 @@
     width: min(280px, calc(100vw - 32px));
     border-radius: var(--radius-panel);
     box-shadow: 0 24px 64px -24px rgb(16 24 40 / 0.48);
+    transition: width 200ms cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .fleet-panel.is-chat {
+    width: min(380px, calc(100vw - 32px));
   }
 
   .panel-tab-left {

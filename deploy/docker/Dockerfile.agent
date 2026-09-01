@@ -1,0 +1,29 @@
+# SwarmDeck Cortex AI Agent Microservice (Port 8085)
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl git procps make openssh-client rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY adapters /app/adapters
+COPY scripts /app/scripts
+COPY agent /app/agent
+RUN mkdir -p /app/sessions /app/sessions/cortex_images
+
+WORKDIR /app/agent
+RUN pip install -e /app/adapters/protocol -e .
+
+WORKDIR /app
+EXPOSE 8085
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:8085/health >/dev/null || exit 1
+
+CMD ["python", "-m", "agent_cortex", "--host", "0.0.0.0", "--port", "8085"]

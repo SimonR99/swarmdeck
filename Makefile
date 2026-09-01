@@ -160,6 +160,9 @@ up-deploy:
 	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
 	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
 
+deploy:
+	./scripts/deploy $(if $(ROBOT),$(ROBOT),all)
+
 down-deploy:
 	docker compose $(ZENOH_COMPOSE) down --remove-orphans
 
