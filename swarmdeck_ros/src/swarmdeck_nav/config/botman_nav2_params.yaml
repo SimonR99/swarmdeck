@@ -107,18 +107,19 @@ controller_server:
       min_vel_x: -0.2
       # Scout's pathFollower is capped at 0.4 m/s. This is the matching
       # physical speed cap for the Bunker's Nav2 controller.
+      # Smooth steering caps and finer angular resolution to prevent skid-steer hunting
       max_vel_x: 0.4
-      max_vel_theta: 0.6
+      max_vel_theta: 0.45
       min_speed_xy: 0.0
       max_speed_xy: 0.4
       min_speed_theta: 0.0
-      max_speed_theta: 0.6
+      max_speed_theta: 0.45
       acc_lim_x: 1.0
-      acc_lim_theta: 1.2
+      acc_lim_theta: 0.8
       decel_lim_x: -1.0
-      decel_lim_theta: -1.2
+      decel_lim_theta: -0.8
       vx_samples: 20
-      vtheta_samples: 20
+      vtheta_samples: 35
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
@@ -129,9 +130,10 @@ controller_server:
         ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
          "PathAlign", "PathDist", "GoalDist", "PreferForward"]
       BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
+      # Look 45 cm ahead instead of 10 cm, with reduced heading twitch scale to eliminate S-curve oscillations
+      PathAlign.scale: 12.0
+      PathAlign.forward_point_distance: 0.45
+      GoalAlign.scale: 10.0
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
       # Prefer driving nose-first, but leave reverse trajectories available
@@ -294,8 +296,8 @@ velocity_smoother:
     velocity_timeout: 0.5
     max_velocity: [0.4, 0.0, 0.6]
     min_velocity: [-0.2, 0.0, -0.6]
-    max_accel: [1.0, 0.0, 1.2]
-    max_decel: [-1.0, 0.0, -1.2]
+    max_accel: [1.0, 0.0, 0.8]
+    max_decel: [-1.0, 0.0, -0.8]
     deadband_velocity: [0.0, 0.0, 0.0]
     odom_topic: /laser_odometry
     odom_duration: 0.1

@@ -99,9 +99,6 @@ def generate_launch_description() -> LaunchDescription:
                 "map_dir": "/tmp/aslan_superodom.pcd",
             },
         ],
-        remappings=[
-            ("laser_odom_to_init", "integrated_to_init"),
-        ],
     )
     imu_preintegration = Node(
         package="super_odometry",
