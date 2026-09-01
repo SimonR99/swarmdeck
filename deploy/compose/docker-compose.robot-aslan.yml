@@ -378,6 +378,10 @@ services:
     runtime: nvidia
     volumes:
       - duck_detector_models:/models
+    # Detection is best-effort: a late duck costs nothing, a late scan costs
+    # odometry. Uncapped it takes a full core, and on this 12-core Jetson that
+    # contends with the DDS reader threads.
+    cpus: 1.5
     restart: unless-stopped
 
 volumes:
