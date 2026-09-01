@@ -40,7 +40,7 @@ _BUNKER_RADIUS = (
 
 # Project the full useful vertical part of the Ouster cloud, measured from the
 # floor, instead of one horizontal ring. The raw cloud's Z origin is the lidar.
-_LIDAR_HEIGHT = 0.520
+_LIDAR_HEIGHT = 0.630
 _OBSTACLE_MIN_HEIGHT = 0.150 - _LIDAR_HEIGHT
 _OBSTACLE_MAX_HEIGHT = 1.800 - _LIDAR_HEIGHT
 _SELF_FILTER_PADDING = 0.050

@@ -43,15 +43,15 @@ footprint:
 # odom -> base_link tree remains disconnected.
 map_frame: map
 base_frame: botman_base_link
-lidar_height_m: 0.520
+lidar_height_m: 0.630
 
 # /registered_scan is already transformed into `map`. SuperOdometry starts the
-# map at the lidar pose (about 0.520 m above the floor). The Bunker's nominal
+# map at the lidar pose (about 0.630 m above the floor). The Bunker's nominal
 # collision height is 0.400 m, so the requested physical obstacle band is
 # 0.150..1.800 m above the floor. With floor_z present, the adapter converts
 # these physical heights into registered-map Z limits.
 map_cloud_height_band:
-  floor_z: -0.520
+  floor_z: -0.630
   min_z: 0.150
   max_z: 1.800
 retain_free_space: true

@@ -850,8 +850,8 @@ def test_hardware_configs_declare_the_live_battery_topics():
 
 def test_hardware_configs_declare_physical_map_height_bands():
     expected = {
-        "bunker": (-0.520, 0.520, 1.800),
-        "aslan_bunker": (-0.520, 0.520, 1.800),
+        "bunker": (-0.630, 0.630, 1.800),
+        "aslan_bunker": (-0.630, 0.630, 1.800),
         "spot": (-0.500, 0.500, 1.800),
         "scout_mini": (-0.575, 0.575, 1.800),
     }

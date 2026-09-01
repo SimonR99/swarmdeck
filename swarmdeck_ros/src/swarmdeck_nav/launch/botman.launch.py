@@ -45,8 +45,8 @@ _BUNKER_RADIUS = (
 )
 
 # Project a physical 0.15..1.80 m vertical obstacle band from the complete
-# Ouster cloud. Raw cloud Z is measured from the lidar, 0.520 m above the floor.
-_LIDAR_HEIGHT = 0.520
+# Ouster cloud. Raw cloud Z is measured from the lidar, 0.630 m above the floor.
+_LIDAR_HEIGHT = 0.630
 _OBSTACLE_MIN_HEIGHT = 0.150 - _LIDAR_HEIGHT
 _OBSTACLE_MAX_HEIGHT = 1.800 - _LIDAR_HEIGHT
 _SELF_FILTER_PADDING = 0.050
