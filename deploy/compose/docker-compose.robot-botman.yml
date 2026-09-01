@@ -362,6 +362,14 @@ services:
     runtime: nvidia
     volumes:
       - duck_detector_models:/models
+    # Detection is best-effort: a late duck costs nothing, a late scan costs
+    # odometry. Uncapped it takes a full core, and on this 12-core Jetson that
+    # contends with the DDS reader threads. Losing one fragment of a ~1 MB
+    # PointCloud2 discards the whole scan, so /ouster/points collapses from its
+    # configured 10 Hz while the single-datagram IMU stays at a clean 100 Hz --
+    # measured 6.1 Hz against 100.01 Hz at load 16.5, with SuperOdometry
+    # following its input down to 4.9 Hz.
+    cpus: 1.5
     restart: unless-stopped
 
   # Production low-latency video path. This process converts the device-encoded
