@@ -198,7 +198,7 @@ metadata is carried by the HTTP request.
 { "type": "stop", "seq": 44 }
 { "type": "set_mode", "seq": 45, "mode": "teleop" }
 { "type": "reset", "seq": 46 }
-{ "type": "body_command", "seq": 47, "action": "stand" }
+{ "type": "body_command", "seq": 47, "action": "stand", "height": 0.0 }
 { "type": "explore", "seq": 48, "enabled": true }
 { "type": "camera_interest", "watched": false }
 ```
@@ -207,8 +207,9 @@ Commands are planner-agnostic. The adapter translates `navigate_to` to Nav2,
 `move_base`, or a vendor API. Local-frame goals are converted by the backend
 before transmission.
 
-`body_command.action` is `claim`, `release`, `sit`, or `stand`. Ignore it without
-the `body` capability.
+`body_command.action` is `claim`, `release`, `sit`, `stand`, or `set_height`
+(with optional `height` in metres relative to default height, e.g. `[-0.15, 0.15]`).
+Ignore it without the `body` capability.
 
 `explore` starts and stops a reactive bootstrap that drives the robot off its
 own obstacle avoidance, and is simulation-only: ignore it without the `explore`

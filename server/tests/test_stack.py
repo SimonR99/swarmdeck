@@ -910,8 +910,8 @@ def test_drive_routing_is_bounded():
             )
         )
         assert sink.messages[0]["type"] == "drive"
-        assert sink.messages[0]["linear"] == 0.45
-        assert sink.messages[0]["angular"] == -1.2
+        assert sink.messages[0]["linear"] == 0.8
+        assert sink.messages[0]["angular"] == -1.5
     finally:
         app_registry.robots.clear()
         app_registry._sinks.clear()
@@ -946,10 +946,19 @@ def test_body_command_requires_the_body_capability():
         assert sink.messages[0]["action"] == "stand"
         asyncio.run(
             handle_gui_message(
+                {"type": "body_command", "robot_id": "r0", "action": "set_height", "height": 0.12}
+            )
+        )
+        assert len(sink.messages) == 2
+        assert sink.messages[1]["type"] == "body_command"
+        assert sink.messages[1]["action"] == "set_height"
+        assert sink.messages[1]["height"] == pytest.approx(0.12)
+        asyncio.run(
+            handle_gui_message(
                 {"type": "body_command", "robot_id": "r0", "action": "leap"}
             )
         )
-        assert len(sink.messages) == 1
+        assert len(sink.messages) == 2
     finally:
         app_registry.robots.clear()
         app_registry._sinks.clear()

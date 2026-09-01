@@ -111,13 +111,40 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
             status_code=409,
         )
 
-    # A collaborative backend supplies one already-fused grid, so this service
-    # has no per-robot cells it could subtract from it. Clearing one robot would
-    # falsely imply that it had been removed. The explicit fleet reset remains
-    # available and clears that fused product wholesale.
+    graph_delete: dict[str, Any] | None = None
+    # Graph mode owns the keyframes that produced the fused grid, so ask it to
+    # remove the selected robot before clearing the server-side projections.
+    # The old implementation rejected this request because the server cannot
+    # subtract pixels from an already-fused grid; deleting graph inputs and
+    # re-rendering the survivors is the exact operation the UI means.
     if (
         robot_id is not None
-        and map_service.merge_mode in ("cslam", "graph")
+        and map_service.merge_mode == "graph"
+        and (
+            robot_id in map_service.slam_graphs
+            or robot_id in map_service.common_poses
+            or robot_id in map_service.cslam_frames
+        )
+    ):
+        from ..mapsvc import graph_bridge
+
+        code, graph_delete = await asyncio.to_thread(graph_bridge.delete_robot, robot_id)
+        if code < 200 or code >= 300:
+            return JSONResponse(
+                {
+                    "error": graph_delete.get(
+                        "error", "pose-graph keyframe deletion failed"
+                    )
+                },
+                status_code=code,
+            )
+
+    # The legacy collaborative backend supplies one already-fused grid and has
+    # no scoped graph-deletion endpoint. Its explicit fleet reset remains the
+    # only truthful operation.
+    if (
+        robot_id is not None
+        and map_service.merge_mode == "cslam"
         and map_service.global_grid is not None
     ):
         return JSONResponse(
@@ -136,6 +163,14 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
         # existed for exactly this and was never called from anywhere.
         reset_optimized_maps()
         await asyncio.to_thread(graph_bridge.post_reset)
+    elif graph_delete is not None:
+        # Every scoped raster and the fused global raster describes the old
+        # graph until its queued re-solve publishes replacement products.
+        reset_optimized_maps()
+        with map_service._state_lock:
+            map_service.global_grid = None
+            map_service.global_map_seq += 1
+        map_service._remerge()
     reset_costmaps(robot_id)
     await broadcast({"type": "costmap_clear", "robot_id": robot_id})
     await broadcast({"type": "network_clear", "robot_id": robot_id})
@@ -148,6 +183,7 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
             "ok": True,
             "scope": scope,
             "robots": reset,
+            "keyframes": graph_delete,
             "info": map_service.map_info(),
         }
     )

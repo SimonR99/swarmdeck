@@ -54,7 +54,7 @@ from typing import Any
 import numpy as np
 import rclpy
 import websockets
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -136,13 +136,19 @@ except ImportError:  # pragma: no cover - depends on the robot's install
     Trigger = None
 
 try:
+    from std_msgs.msg import String
+except ImportError:  # pragma: no cover - depends on the robot's install
+    String = None
+
+try:
     from spot_msgs.action import Trajectory
 except ImportError:  # pragma: no cover - depends on the robot's install
     Trajectory = None
 
 try:
-    from spot_msgs.srv import SetVelocity
+    from spot_msgs.srv import SetStandHeight, SetVelocity
 except ImportError:  # pragma: no cover - depends on the robot's install
+    SetStandHeight = None
     SetVelocity = None
 
 # Spot and Unitree G1 humanoid body services.
@@ -157,6 +163,7 @@ BODY_ACTIONS = (
     "walk_mode",
     "run_mode",
     "wave",
+    "set_height",
 )
 # Trigger names that are not GUI body actions: motors, software e-stop allow,
 # tablet keepalive clear, and the SDK stop used because Clearpath's ROS 2
@@ -191,6 +198,7 @@ class HardwareBridge(
     # so `_on_nav_cmd_vel` can fire against a half-built bridge — and the safe
     # answer to "is the operator there?" before anyone has connected is no.
     _last_link_at: float = 0.0
+    _target_body_height: float = 0.0
 
     def __init__(self, node: Node, robot_id: str, cfg: dict, http_url: str) -> None:
         self.node = node
@@ -203,6 +211,7 @@ class HardwareBridge(
             robot_id,
             http_url,
             min_period_s=float(rates.get("keyframe_period_s", 2.0)),
+            timeout_s=float(cfg.get("upload_timeout_s", 0.5)),
             height_band=cfg.get("map_cloud_height_band"),
             lidar_height_m=cfg.get("lidar_height_m"),
         )
@@ -238,6 +247,13 @@ class HardwareBridge(
         self.goal: dict[str, float] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        # When Spot's lateral velocity is zero, an arbitrary (x, y) body goal
+        # is not executable as one holonomic trajectory. Keep the map target
+        # across a short rotate/drive/rotate sequence instead.
+        self._trajectory_target: dict[str, float] | None = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error: float | None = None
         self._last_drive_at = 0.0
         self._camera_encoding_warned = False
         # Newest frame awaiting detection, as (jpeg, header). The ROS callback
@@ -430,10 +446,28 @@ class HardwareBridge(
                 if name in BODY_SERVICE_NAMES and topic:
                     self._body_clients[name] = node.create_client(Trigger, topic)
 
+        body_cmd_topic = (cfg.get("topics") or {}).get("body_cmd")
+        self.pub_body_cmd = None
+        if body_cmd_topic and String is not None:
+            self.pub_body_cmd = node.create_publisher(String, body_cmd_topic, 10)
+
+        body_pose_topic = (cfg.get("topics") or {}).get("body_pose")
+        self.pub_body_pose = None
+        if body_pose_topic and Pose is not None:
+            self.pub_body_pose = node.create_publisher(Pose, body_pose_topic, 10)
+        self._target_body_height: float = 0.0
+
         max_velocity_name = (cfg.get("services") or {}).get("max_velocity")
         self._velocity_client = None
         if max_velocity_name and SetVelocity is not None:
             self._velocity_client = node.create_client(SetVelocity, max_velocity_name)
+
+        stand_height_name = (cfg.get("services") or {}).get("set_stand_height")
+        self._stand_height_client = None
+        if stand_height_name and SetStandHeight is not None:
+            self._stand_height_client = node.create_client(
+                SetStandHeight, stand_height_name
+            )
 
         # The deadman runs off the ROBOT's clock, not the operator link.
         #
@@ -492,7 +526,12 @@ class HardwareBridge(
         if self.pub_cmd is not None:
             caps.append("estop")
         services = self.cfg.get("services") or {}
-        if any(services.get(name) for name in BODY_ACTIONS):
+        topics = self.cfg.get("topics") or {}
+        if (
+            any(services.get(name) for name in BODY_ACTIONS)
+            or bool(topics.get("body_cmd"))
+            or getattr(self, "pub_body_cmd", None) is not None
+        ):
             caps.append("body")
         return caps
 
@@ -546,10 +585,57 @@ class HardwareBridge(
             self._costmap_dirty.add(kind)
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
-        """Reduce one registered scan for the 2D map and optional 3D view."""
+        """Normalize one cloud into ``map_frame`` before producing map data.
+
+        Most hardware profiles subscribe to an already-registered cloud whose
+        header is the configured map frame.  Asimov's Mid-360 publishes raw
+        sweeps in ``livox_frame`` instead.  Treating those XYZ values as world
+        coordinates makes the keyframe producer apply the inverse robot pose
+        to sensor-frame points; the optimizer then receives contradictory
+        clouds and fans repeated observations into several rotated maps.
+
+        Honour the PointCloud2 header and use the transform at the cloud stamp.
+        A cloud with no header remains the legacy/test-double case and is
+        assumed to already be registered.
+        """
         points = self._cloud_xyz(msg)
         if not len(points):
             return
+
+        header = getattr(msg, "header", None)
+        source = str(getattr(header, "frame_id", "") or "").lstrip("/")
+        target = str(self.map_frame or "").lstrip("/")
+        stamp = getattr(header, "stamp", None) if header is not None else None
+        tf_time = (
+            rclpy.time.Time.from_msg(stamp)
+            if stamp is not None
+            else rclpy.time.Time()
+        )
+        if source and target and source != target:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    target, source, tf_time, timeout=Duration(seconds=0.1)
+                )
+                mapped = transform_points(points, tf.transform)
+                if mapped is None:
+                    raise ValueError("cloud transform produced no points")
+                points = mapped
+            except Exception as exc:
+                now = time.monotonic()
+                warned_at = float(getattr(self, "_map_cloud_frame_warned_at", 0.0))
+                if now - warned_at >= 10.0:
+                    self._map_cloud_frame_warned_at = now
+                    self.node.get_logger().warn(
+                        f"[{self.id}] dropping map cloud: no {target} <- {source} "
+                        f"transform at capture time: {exc}"
+                    )
+                return
+
+        pose = self.pose7(tf_time)
+        if pose is not None:
+            pose = np.asarray(pose, dtype=np.float64)
+            if pose.shape != (7,) or not np.isfinite(pose).all():
+                pose = None
 
         now = time.monotonic()
         cloud_period = max(
@@ -578,10 +664,21 @@ class HardwareBridge(
         # the beam actually left the sensor, carving free space through geometry
         # it never crossed. That corrupts precisely the free/occupied contrast
         # registration.py relies on to break rotational symmetry.
-        self._scan_origin = self.map_pose()
+        if pose is not None:
+            qx, qy, qz, qw = pose[3:]
+            scan_yaw = math.atan2(
+                2.0 * (qw * qz + qx * qy),
+                1.0 - 2.0 * (qy * qy + qz * qz),
+            )
+            self._scan_origin = {
+                "x": float(pose[0]),
+                "y": float(pose[1]),
+                "yaw": float(scan_yaw),
+            }
+        else:
+            self._scan_origin = self.map_pose()
         self._scan_dirty = True
         try:
-            pose = self.pose7()
             if pose is not None:
                 stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
                 self._keyframes.consider(points, pose, stamp)
@@ -932,11 +1029,14 @@ class HardwareBridge(
                 )
             return dict(fallback)
 
-    def pose7(self) -> np.ndarray | None:
+    def pose7(self, stamp: Any | None = None) -> np.ndarray | None:
         """Full ``T_map_base`` as ``[x,y,z,qx,qy,qz,qw]`` for keyframe upload."""
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.map_frame, self.base_frame, rclpy.time.Time()
+                self.map_frame,
+                self.base_frame,
+                stamp if stamp is not None else rclpy.time.Time(),
+                timeout=Duration(seconds=0.1),
             )
             t = tf.transform.translation
             q = tf.transform.rotation
@@ -968,8 +1068,64 @@ class HardwareBridge(
         self.mode = "teleop" if moving else self.mode
         self._last_drive_at = time.monotonic() if moving else 0.0
 
-    def body_command(self, action: str) -> None:
-        """Claim/release the body lease, or sit/stand.
+    def set_stand_height(self, height: float) -> bool:
+        """Command Spot's stand height in range [-0.15, 0.15] meters relative to default."""
+        try:
+            h = float(height)
+        except (ValueError, TypeError):
+            self.node.get_logger().warn(f"[{self.id}] invalid stand height {height!r}")
+            return False
+        clamped_h = max(-0.15, min(0.15, h))
+        self._target_body_height = clamped_h
+
+        # 1. Update Spot mobility parameters via /body_pose so walking (cmd_vel)
+        # and locomotion commands maintain this body height offset.
+        if getattr(self, "pub_body_pose", None) is not None and Pose is not None:
+            pose = Pose()
+            pose.position.x = 0.0
+            pose.position.y = 0.0
+            pose.position.z = float(clamped_h)
+            pose.orientation.x = 0.0
+            pose.orientation.y = 0.0
+            pose.orientation.z = 0.0
+            pose.orientation.w = 1.0
+            self.pub_body_pose.publish(pose)
+
+        # 2. Call /set_stand_height service to immediately update the stand posture if standing.
+        client = self._stand_height_client
+        if client is not None and SetStandHeight is not None:
+            if client.wait_for_service(timeout_sec=1.0):
+                req = SetStandHeight.Request()
+                req.height = float(clamped_h)
+                future = client.call_async(req)
+                deadline = time.monotonic() + 5.0
+                while not future.done() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if future.done():
+                    try:
+                        resp = future.result()
+                        ok = bool(getattr(resp, "success", True))
+                        message = str(getattr(resp, "message", "") or "")
+                        if ok:
+                            self.node.get_logger().info(
+                                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): ok"
+                                + (f" ({message})" if message else "")
+                            )
+                        else:
+                            self.node.get_logger().warn(
+                                f"[{self.id}] set_stand_height({clamped_h:+.2f}m): refused"
+                                + (f" ({message})" if message else "")
+                            )
+                    except Exception as exc:
+                        self.node.get_logger().warn(
+                            f"[{self.id}] set_stand_height failed: {exc}"
+                        )
+        return True
+
+    def body_command(
+        self, action: str, height: float | None = None, **kwargs: Any
+    ) -> None:
+        """Claim/release the body lease, sit/stand, or adjust stand height.
 
         `stand` powers the motors first when `services.power_on` is set —
         Clearpath's `/stand` fails if the robot is still sitting unpowered.
@@ -979,7 +1135,17 @@ class HardwareBridge(
         failures are logged and not retried here.
         """
         action = str(action or "")
+        if action == "set_height" or (action == "stand" and height is not None):
+            if height is not None:
+                self.set_stand_height(float(height))
+                return
         if action not in BODY_ACTIONS:
+            return
+        pub = getattr(self, "pub_body_cmd", None)
+        if pub is not None and String is not None:
+            msg = String()
+            msg.data = action
+            pub.publish(msg)
             return
         if action == "claim":
             self._call_trigger("claim")
@@ -991,6 +1157,8 @@ class HardwareBridge(
             self._call_trigger("clear_keepalive")
             self._call_trigger("power_on")
             self._call_trigger("stand")
+            if self._target_body_height != 0.0:
+                self.set_stand_height(self._target_body_height)
             return
         self._call_trigger(action)
 
@@ -1035,6 +1203,55 @@ class HardwareBridge(
             )
         return ok
 
+    def _call_trigger_async(self, name: str) -> bool:
+        """Start a Trigger request without holding up the control path.
+
+        This is reserved for commands such as Spot's SDK stop where waiting for
+        the service response would delay the operator's next velocity command.
+        Ordinary body transitions remain synchronous so their required order
+        (claim, e-stop release, power on, stand) is preserved.
+        """
+        client = self._body_clients.get(name)
+        if client is None or Trigger is None:
+            if name not in OPTIONAL_BODY_SERVICES:
+                self.node.get_logger().warn(
+                    f"[{self.id}] body command {name!r} has no service configured"
+                )
+            return False
+        try:
+            if not client.wait_for_service(timeout_sec=0.0):
+                self.node.get_logger().warn(
+                    f"[{self.id}] body service {name!r} is not up "
+                    "(is spot_driver running?)"
+                )
+                return False
+            future = client.call_async(Trigger.Request())
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] body service {name!r} failed to start: {exc}"
+            )
+            return False
+
+        def report_result(done) -> None:
+            try:
+                resp = done.result()
+            except Exception as exc:
+                self.node.get_logger().warn(
+                    f"[{self.id}] body service {name!r} failed: {exc}"
+                )
+                return
+            ok = bool(getattr(resp, "success", True))
+            message = str(getattr(resp, "message", "") or "")
+            log = self.node.get_logger().info if ok else self.node.get_logger().warn
+            state = "ok" if ok else "refused"
+            log(
+                f"[{self.id}] body {name}: {state}"
+                + (f" ({message})" if message else "")
+            )
+
+        future.add_done_callback(report_result)
+        return True
+
     def navigate_to(self, goal: dict[str, float]) -> None:
         if self.traj_client is not None:
             self._navigate_trajectory(goal)
@@ -1057,6 +1274,10 @@ class HardwareBridge(
             return
         self._goal_generation += 1
         generation = self._goal_generation
+        self._trajectory_target = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error = None
 
         msg = NavigateToPose.Goal()
         msg.pose.header.frame_id = self.map_frame
@@ -1103,18 +1324,171 @@ class HardwareBridge(
             return
         self._goal_generation += 1
         generation = self._goal_generation
+        self._arm_goal(goal)
+        if self._trajectory_is_diff_drive():
+            self._trajectory_target = {
+                "x": float(goal["x"]),
+                "y": float(goal["y"]),
+            }
+            if "yaw" in goal and goal["yaw"] is not None:
+                self._trajectory_target["yaw"] = float(goal["yaw"])
+            self._trajectory_step_count = 0
+            self._continue_diff_trajectory(generation)
+            return
+        self._trajectory_target = None
+        self._send_trajectory_pose(pose, generation, "holonomic")
+
+    def _trajectory_is_diff_drive(self) -> bool:
+        tcfg = self.cfg.get("trajectory") or {}
+        control_mode = str(tcfg.get("control_mode") or "").strip().lower()
+        if control_mode:
+            return control_mode == "differential"
+        # Backwards compatibility for profiles written before control_mode was
+        # explicit. New Spot profiles keep a small non-zero SDK lateral limit:
+        # an exactly zero-width velocity envelope makes its trajectory planner
+        # report straight goals as BLOCKED on the current robot software.
+        limit = tcfg.get("velocity_limit") or {}
+        try:
+            return math.isclose(float(limit.get("linear_y", 1.0)), 0.0, abs_tol=1e-9)
+        except (TypeError, ValueError):
+            return False
+
+    def _body_trajectory_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.frame_id = str(
+            (self.cfg.get("trajectory") or {}).get("frame") or "body"
+        )
+        pose.header.stamp = self.node.get_clock().now().to_msg()
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.position.z = 0.0
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        return pose
+
+    def _progress_frame(self) -> str:
+        """Frame to read remaining map-frame error from between diff-drive phases.
+
+        Distinct from `trajectory.frame` (the frame_id Spot's driver requires
+        on the outgoing command, and rejects any other value for). This is
+        only ever used to compute numeric dx/dy/yaw internally — those numbers
+        get repackaged by `_body_trajectory_pose` with `trajectory.frame` set
+        again, so pointing this at a different, faster-updating frame never
+        reaches the driver. See spot.yaml's `trajectory.progress_frame`
+        comment for why Spot profiles set this to `body_fast`.
+        """
+        tcfg = self.cfg.get("trajectory") or {}
+        frame = str(tcfg.get("progress_frame") or "").strip()
+        return frame or str(tcfg.get("frame") or "body")
+
+    def _continue_diff_trajectory(self, generation: int) -> None:
+        """Issue the next rotate/straight/rotate step for a map-frame target."""
+        if generation != self._goal_generation or self._trajectory_target is None:
+            return
+        tcfg = self.cfg.get("trajectory") or {}
+        max_steps = max(1, int(tcfg.get("max_diff_drive_steps", 8)))
+        if self._trajectory_step_count >= max_steps:
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot differential trajectory did not converge "
+                f"after {max_steps} steps"
+            )
+            self._finish_goal("failed")
+            return
+
+        relative = self._goal_in_body(
+            self._trajectory_target, frame=self._progress_frame()
+        )
+        if relative is None:
+            self._finish_goal("failed")
+            return
+        dx = float(relative.pose.position.x)
+        dy = float(relative.pose.position.y)
+        distance = math.hypot(dx, dy)
+        position_tolerance = max(
+            0.01, float(tcfg.get("position_tolerance_m", 0.15))
+        )
+        heading_tolerance = max(
+            0.01, float(tcfg.get("heading_tolerance_rad", 0.08))
+        )
+
+        if distance > position_tolerance:
+            bearing = math.atan2(dy, dx)
+            # Do not ask Spot for a tiny in-place Trajectory rotation merely
+            # because the map click is a few degrees off the body axis. The
+            # Clearpath server commonly stops those commands immediately as
+            # `not at goal`. If the resulting lateral miss is already inside
+            # our position tolerance, drive the longitudinal projection now.
+            if abs(dy) > position_tolerance:
+                pose = self._body_trajectory_pose(0.0, 0.0, bearing)
+                step = "align"
+                step_error = abs(bearing)
+            else:
+                # Re-evaluate the map target after every completed action. Once
+                # aligned, a body-x command is the differential-drive segment;
+                # never pass the residual body-y error to Spot.
+                pose = self._body_trajectory_pose(dx, 0.0, 0.0)
+                step = "drive"
+                step_error = distance
+        elif "yaw" in self._trajectory_target:
+            final_yaw = yaw_of(relative.pose.orientation)
+            if abs(final_yaw) <= heading_tolerance:
+                self.node.get_logger().info(
+                    f"[{self.id}] Spot differential trajectory reached goal"
+                )
+                self._finish_goal("succeeded")
+                return
+            pose = self._body_trajectory_pose(0.0, 0.0, final_yaw)
+            step = "final_turn"
+            step_error = abs(final_yaw)
+        else:
+            self.node.get_logger().info(
+                f"[{self.id}] Spot differential trajectory reached goal"
+            )
+            self._finish_goal("succeeded")
+            return
+
+        self._trajectory_step_count += 1
+        self._trajectory_step_error = step_error
+        self._send_trajectory_pose(pose, generation, step)
+
+    def _send_trajectory_pose(
+        self, pose: PoseStamped, generation: int, step: str
+    ) -> None:
         tcfg = self.cfg.get("trajectory") or {}
         dur_s = max(1.0, float(tcfg.get("duration_s", 30.0)))
         msg = Trajectory.Goal()
         msg.target_pose = pose
         msg.duration.sec = int(dur_s)
         msg.duration.nanosec = int((dur_s - int(dur_s)) * 1e9)
-        msg.precise_positioning = bool(tcfg.get("precise_positioning", True))
+        # Each differential phase is followed by a fresh map-frame error
+        # check, so NEAR_GOAL is sufficient. The current Clearpath ROS 2 port
+        # ignores this flag, but setting it correctly also supports newer
+        # driver versions that honour it.
+        msg.precise_positioning = (
+            False
+            if self._trajectory_target is not None
+            else bool(tcfg.get("precise_positioning", True))
+        )
         msg.disable_obstacle_avoidance = bool(
             tcfg.get("disable_obstacle_avoidance", False)
         )
-        self._arm_goal(goal)
-        future = self.traj_client.send_goal_async(msg)
+        self._trajectory_step = step
+        yaw = yaw_of(pose.pose.orientation)
+        self.node.get_logger().info(
+            f"[{self.id}] Spot trajectory step={step} "
+            f"x={float(pose.pose.position.x):.3f} "
+            f"y={float(pose.pose.position.y):.3f} yaw={yaw:.3f}"
+        )
+        try:
+            future = self.traj_client.send_goal_async(msg)
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot trajectory submission failed: {exc}"
+            )
+            self._finish_goal("failed")
+            return
         future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
 
     def _apply_trajectory_velocity_limit(self) -> bool:
@@ -1150,11 +1524,13 @@ class HardwareBridge(
             return False
         if (
             not all(math.isfinite(v) for v in (linear_x, linear_y, angular_z))
-            or min(linear_x, linear_y, angular_z) <= 0.0
+            or linear_x <= 0.0
+            or linear_y < 0.0
+            or angular_z <= 0.0
         ):
             self.node.get_logger().warn(
-                f"[{self.id}] trajectory velocity limits must be positive; "
-                "goal dropped"
+                f"[{self.id}] trajectory linear_x/angular_z limits must be positive "
+                "and linear_y must be non-negative; goal dropped"
             )
             return False
 
@@ -1192,8 +1568,10 @@ class HardwareBridge(
         self.nav_status = "active"
         self.mode = "nav"
 
-    def _goal_in_body(self, goal: dict[str, float]) -> PoseStamped | None:
-        frame = str((self.cfg.get("trajectory") or {}).get("frame") or "body")
+    def _goal_in_body(
+        self, goal: dict[str, float], *, frame: str | None = None
+    ) -> PoseStamped | None:
+        frame = frame or str((self.cfg.get("trajectory") or {}).get("frame") or "body")
         try:
             tf = self.tf_buffer.lookup_transform(
                 frame, self.map_frame, rclpy.time.Time()
@@ -1243,10 +1621,13 @@ class HardwareBridge(
     def _on_goal_response(self, future, generation: int) -> None:
         try:
             handle = future.result()
-        except Exception:
+        except Exception as exc:
             if generation != self._goal_generation:
                 return
-            self.nav_status = "failed"
+            self.node.get_logger().warn(
+                f"[{self.id}] navigation goal response failed: {exc}"
+            )
+            self._finish_goal("failed")
             return
         # A cancellation or newer goal can win while send_goal_async is still
         # in flight. Cancel an accepted stale handle instead of abandoning an
@@ -1256,8 +1637,11 @@ class HardwareBridge(
                 handle.cancel_goal_async()
             return
         if not handle.accepted:
-            self.nav_status = "failed"
-            self.mode = "idle"
+            self.node.get_logger().warn(
+                f"[{self.id}] navigation goal rejected"
+                + (f" during {self._trajectory_step}" if self._trajectory_step else "")
+            )
+            self._finish_goal("failed")
             return
         self._goal_handle = handle
         handle.get_result_async().add_done_callback(
@@ -1270,21 +1654,97 @@ class HardwareBridge(
         from action_msgs.msg import GoalStatus
 
         try:
-            status = future.result().status
-        except Exception:
-            self.nav_status = "failed"
-            self.mode = "idle"
+            outcome = future.result()
+            status = outcome.status
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] navigation result failed: {exc}"
+            )
+            self._finish_goal("failed")
             return
-        self.nav_status = {
-            GoalStatus.STATUS_SUCCEEDED: "succeeded",
-            GoalStatus.STATUS_CANCELED: "cancelled",
-        }.get(status, "failed")
+        result = getattr(outcome, "result", None)
+        reported_success = bool(getattr(result, "success", True))
+        message = str(getattr(result, "message", "") or "")
+        if status == GoalStatus.STATUS_SUCCEEDED and reported_success:
+            if self._trajectory_target is not None:
+                self.node.get_logger().info(
+                    f"[{self.id}] Spot trajectory step={self._trajectory_step} complete"
+                )
+                self._goal_handle = None
+                self._continue_diff_trajectory(generation)
+                return
+            self._finish_goal("succeeded")
+            return
+        if status == GoalStatus.STATUS_CANCELED:
+            self._finish_goal("cancelled")
+            return
+        if (
+            self._trajectory_target is not None
+            and message == "not at goal"
+            and self._diff_trajectory_made_progress()
+        ):
+            self.node.get_logger().info(
+                f"[{self.id}] Spot trajectory step={self._trajectory_step} "
+                "stopped early after making progress; recomputing target"
+            )
+            self._goal_handle = None
+            self._continue_diff_trajectory(generation)
+            return
+        self.node.get_logger().warn(
+            f"[{self.id}] navigation failed status={status}"
+            + (f" step={self._trajectory_step}" if self._trajectory_step else "")
+            + (f": {message}" if message else "")
+        )
+        self._finish_goal("failed")
+
+    def _diff_trajectory_made_progress(self) -> bool:
+        """Accept a driver `not at goal` only when TF proves useful motion."""
+        target = self._trajectory_target
+        before = self._trajectory_step_error
+        if target is None or before is None:
+            return False
+        relative = self._goal_in_body(target, frame=self._progress_frame())
+        if relative is None:
+            return False
+        dx = float(relative.pose.position.x)
+        dy = float(relative.pose.position.y)
+        tcfg = self.cfg.get("trajectory") or {}
+        if self._trajectory_step == "drive":
+            after = math.hypot(dx, dy)
+            tolerance = max(0.01, float(tcfg.get("position_tolerance_m", 0.15)))
+            minimum = max(0.005, float(tcfg.get("minimum_progress_m", 0.03)))
+        elif self._trajectory_step == "align":
+            after = abs(math.atan2(dy, dx))
+            tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
+            minimum = max(
+                0.005, float(tcfg.get("minimum_progress_rad", 0.02))
+            )
+        elif self._trajectory_step == "final_turn":
+            after = abs(yaw_of(relative.pose.orientation))
+            tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
+            minimum = max(
+                0.005, float(tcfg.get("minimum_progress_rad", 0.02))
+            )
+        else:
+            return False
+        self.node.get_logger().info(
+            f"[{self.id}] Spot trajectory step={self._trajectory_step} "
+            f"remaining_error={after:.3f} previous_error={before:.3f}"
+        )
+        return after <= tolerance or after <= before - minimum
+
+    def _finish_goal(self, status: str) -> None:
+        self.nav_status = status
         self.mode = "idle"
         self.goal = None
         self.planned_path = []
         self._local_planned_path = []
         self._global_planned_path = []
         self._goal_handle = None
+        self._trajectory_target = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error = None
 
     def cancel_goal(self) -> None:
         self._goal_generation += 1
@@ -1294,17 +1754,41 @@ class HardwareBridge(
             except Exception:
                 pass
             self._goal_handle = None
-        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
-        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
-        # The SDK `/stop` Trigger is what actually halts the body.
-        if self.traj_client is not None:
-            self._call_trigger("stop")
         self.goal = None
         self.planned_path = []
         self._local_planned_path = []
         self._global_planned_path = []
         self.nav_status = "cancelled"
         self.mode = "idle"
+        self._trajectory_target = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error = None
+        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
+        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
+        # A zero cmd_vel preempts the SDK trajectory immediately. Also enqueue
+        # `/stop` as a backstop, but never wait for that service round trip here:
+        # drive() calls this inline before publishing the operator's command.
+        if self.traj_client is not None:
+            if self.pub_cmd is not None:
+                zero = Twist()
+                zero.linear.x = 0.0
+                zero.linear.y = 0.0
+                zero.angular.z = 0.0
+                self.pub_cmd.publish(zero)
+            self._call_trigger_async("stop")
+
+    def stop_for_exit(self) -> None:
+        """Flush a synchronous SDK stop before the ROS executor is torn down."""
+        for _ in range(3):
+            try:
+                self.cancel_goal()
+                self.drive(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.05)
+        if self.traj_client is not None:
+            self._call_trigger("stop")
 
     # ------------------------------------------------------------- uploads
 

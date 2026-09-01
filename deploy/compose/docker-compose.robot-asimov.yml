@@ -96,6 +96,45 @@ services:
       - ${ROBOT_REPO:-/home/unitree/swarmdeck}/adapters:/app/adapters:ro
     restart: unless-stopped
 
+  # Reuses swarmdeck_ros/src/swarmdeck_nav, with Asimov-specific frames and a
+  # Mid-360 obstacle scan projection. Nav2 writes only cmd_vel_nav; the
+  # adapter remains the sole publisher to the real /cmd_vel and relays
+  # autonomy only while its NavigateToPose goal is active. No standalone
+  # odom_tf service is needed here (unlike Botman/Aslan): Asimov's
+  # world -> base_link TF comes from the onboard Unitree/Livox localization,
+  # independent of whether this container is up.
+  nav2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.robot-nav2
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-asimov-nav2
+    network_mode: host
+    ipc: host
+    environment:
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - launch
+      - swarmdeck_nav
+      - asimov.launch.py
+    # Every ros2 CLI call is wrapped in `timeout`. See
+    # docker-compose.robot-botman.yml's healthcheck comment for the incident
+    # (leaked DDS participants, eventual power cycle) an unbounded call caused.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /nav_ws/install/setup.sh &&
+          timeout 5 ros2 action list | grep -qx '/asimov_0/navigate_to_pose' &&
+          timeout 5 ros2 lifecycle get /asimov_0/bt_navigator | grep -q '^active'
+      interval: 20s
+      timeout: 12s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
   adapter:
     build:
       context: ../..
@@ -104,6 +143,12 @@ services:
     container_name: swarmdeck-asimov-adapter
     depends_on:
       camera:
+        condition: service_started
+      # `service_started`, NOT `service_healthy`: a bt_navigator that never
+      # reaches `active` should not take telemetry/teleop off the dashboard.
+      # capabilities() already only advertises `navigate` once the action
+      # server actually resolves at runtime -- see docker-compose.robot-botman.yml.
+      nav2:
         condition: service_started
     network_mode: host
     ipc: host

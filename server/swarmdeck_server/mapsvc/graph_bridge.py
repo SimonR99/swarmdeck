@@ -14,6 +14,7 @@ from collections import deque
 from typing import Any
 
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SLAM_URL = os.environ.get("SWARMDECK_SLAM_URL", "").rstrip("/")
@@ -128,6 +129,32 @@ def post_reset() -> None:
         ).read()
     except (urllib.error.URLError, TimeoutError, OSError):
         pass
+
+
+def delete_robot(robot_id: str) -> tuple[int, dict[str, Any]]:
+    """Permanently remove one robot's keyframes from the graph service."""
+    if not SLAM_URL:
+        return 503, {"error": "slam service is not configured"}
+    path = urllib.parse.quote(robot_id, safe="")
+    try:
+        request = urllib.request.Request(
+            f"{SLAM_URL}/robots/{path}/keyframes",
+            data=b"",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(request, timeout=FORWARD_TIMEOUT_S) as response:
+            body = json.loads(response.read().decode())
+            if not isinstance(body, dict):
+                return 502, {"error": "slam service returned a non-object"}
+            return int(response.status), body
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode())
+        except Exception:
+            payload = {"error": str(exc)}
+        return int(exc.code), payload if isinstance(payload, dict) else {"error": str(exc)}
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        return 503, {"error": str(exc)}
 
 
 def fetch_json(path: str, timeout: float = 2.0) -> tuple[int, dict[str, Any]]:

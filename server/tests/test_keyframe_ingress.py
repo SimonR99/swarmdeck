@@ -210,6 +210,35 @@ def test_fleet_map_reset_clears_optimized_scopes():
         assert _scopes(c) == set()
 
 
+def test_graph_targeted_reset_deletes_that_robots_keyframes(monkeypatch):
+    from swarmdeck_server.mapsvc import graph_bridge
+
+    calls = []
+    monkeypatch.setattr(
+        graph_bridge,
+        "delete_robot",
+        lambda robot_id: (
+            calls.append(robot_id) or 200,
+            {"ok": True, "robot_id": robot_id, "archived_keyframes": 7},
+        ),
+    )
+    cells = np.zeros((10, 10), dtype=np.int8)
+    meta = GridMeta(0.1, 10, 10, -0.5, -0.5)
+    map_service.set_mode("graph")
+    map_service.set_slam_graph("asimov_0", {"keyframes": 7, "in_common_frame": True})
+    map_service.set_global_grid(meta, cells)
+
+    with TestClient(app) as c:
+        _post_scoped_grid(c, "robot:asimov_0", "asimov_0")
+        response = c.post("/api/map/reset/asimov_0")
+
+    assert response.status_code == 200, response.text
+    assert calls == ["asimov_0"]
+    assert response.json()["keyframes"]["archived_keyframes"] == 7
+    assert "asimov_0" not in map_service.slam_graphs
+    assert map_service.global_grid is None
+
+
 def test_slam_backend_proxy_reports_unreachable_without_a_slam_url():
     from swarmdeck_server.mapsvc import graph_bridge
 

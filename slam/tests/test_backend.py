@@ -102,6 +102,42 @@ def test_duplicate_seq_is_ignored() -> None:
     assert len(backend) == 1
 
 
+def test_delete_robot_removes_keyframes_edges_and_descriptor_candidates() -> None:
+    _, fleet = synthetic.two_robot_fleet()
+    backend = CollaborativeBackend()
+    _ingest_fleet(backend, fleet)
+    removed_robot = fleet[0].robot_id
+    survivor = fleet[1]
+    expected_removed = sum(
+        1 for keyframe_id in backend._keyframes if keyframe_id.robot_id == removed_robot
+    )
+
+    assert backend.delete_robot(removed_robot) == expected_removed
+    assert all(k.robot_id != removed_robot for k in backend._keyframes)
+    assert all(
+        edge.src.robot_id != removed_robot and edge.dst.robot_id != removed_robot
+        for edge in backend._edges
+    )
+    assert all(item.robot_id != removed_robot for item in backend.trajectory_ids())
+
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+    assert set(snapshot.keyframe_counts) == {survivor.robot_id}
+    assert all(removed_robot not in component.robots for component in snapshot.optimized.components)
+
+
+def test_delete_last_robot_returns_backend_to_clean_state() -> None:
+    _, fleet = synthetic.two_robot_fleet()
+    backend = CollaborativeBackend()
+    first = fleet[0].keyframes[0]
+    backend.ingest_keyframe(first)
+
+    assert backend.delete_robot(first.id.robot_id) == 1
+    assert len(backend) == 0
+    assert backend.dirty is False
+    assert backend.optimize_and_render() is None
+
+
 def test_snapshot_update_only_flags_merged_robots(shared_snapshot) -> None:
     snapshot, fleet = shared_snapshot
     update = snapshot_update(snapshot)

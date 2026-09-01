@@ -28,7 +28,13 @@ x-spot-stack: &spot-stack
     - ${ROBOT_REPO:-/home/indro/swarmdeck}:/app/swarmdeck:ro
   environment:
     RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    # Fast DDS SHM ports are host-global while these ROS processes live in
+    # separate containers. A stale/colliding port can leave endpoints visible
+    # in discovery but silently prevent TF and IMU samples from being delivered.
+    # Keep the core Spot graph on host-loopback UDP; camera/media retain SHM.
+    FASTDDS_BUILTIN_TRANSPORTS: UDPv4
     ROS_DOMAIN_ID: *ros_domain
+    ROS_LOCALHOST_ONLY: "1"
   restart: unless-stopped
 
 services:
@@ -36,7 +42,7 @@ services:
     <<: *spot-stack
     container_name: swarmdeck-spot-stack
     command:
-      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=true start_lidar:=false start_slam:=false start_camera:=false
+      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && export ROS_LOCALHOST_ONLY=1 && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=true start_lidar:=false start_slam:=false start_camera:=false
 
   camera:
     build:
@@ -53,6 +59,7 @@ services:
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
+      ROS_LOCALHOST_ONLY: "1"
     command:
       - ros2
       - run
@@ -80,6 +87,10 @@ services:
       - -p
       - align_depth.enable:=true
       - -p
+      - rgb_camera.color_profile:=640x480x15
+      - -p
+      - depth_module.depth_profile:=640x480x15
+      - -p
       - rgb_camera.profile:=640x480x15
       - -p
       - depth_module.profile:=640x480x15
@@ -89,7 +100,7 @@ services:
     <<: *spot-stack
     container_name: swarmdeck-spot-lidar
     command:
-      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=false start_lidar:=true start_slam:=false
+      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && export ROS_LOCALHOST_ONLY=1 && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=false start_lidar:=true start_slam:=false
 
   slam:
     <<: *spot-stack
@@ -102,7 +113,7 @@ services:
       lidar:
         condition: service_started
     command:
-      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=false start_lidar:=false start_slam:=true
+      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && export ROS_LOCALHOST_ONLY=1 && ros2 launch /app/swarmdeck/adapters/adapter_ros2/launch/spot.launch.py start_driver:=false start_lidar:=false start_slam:=true
 
   adapter:
     <<: *spot-stack
@@ -123,11 +134,13 @@ services:
       - ${ROBOT_REPO:-/home/indro/swarmdeck}/.spot_pip:/root/.local
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       ROS_DOMAIN_ID: *ros_domain
+      ROS_LOCALHOST_ONLY: "1"
       PYTHONPATH: "/root/.local/lib/python3.10/site-packages:/app/swarmdeck/adapters/protocol:/app/swarmdeck:/app/adapters/protocol:/app"
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:
-      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && python3 /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py --robot-id spot_0 --config /app/swarmdeck/adapters/adapter_ros2/config/spot.yaml --host ${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host} --port ${BACKEND_PORT:-8080}
+      - . /opt/ros/humble/setup.bash && . /workspace/install/setup.bash && export RMW_IMPLEMENTATION=rmw_fastrtps_cpp && export ROS_LOCALHOST_ONLY=1 && python3 /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py --robot-id spot_0 --config /app/swarmdeck/adapters/adapter_ros2/config/spot.yaml --host ${BACKEND_HOST:?set BACKEND_HOST to the SwarmDeck operator host} --port ${BACKEND_PORT:-8080}
 
   # Production low-latency video. usb_cam may only publish raw rgb8, so
   # --raw-topic JPEG-encodes /d435/camera/color/image_raw when compressed is absent;
@@ -150,6 +163,7 @@ services:
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
+      ROS_LOCALHOST_ONLY: "1"
     command:
       - python3
       - /app/swarmdeck/adapters/media/ros2_rtsp.py

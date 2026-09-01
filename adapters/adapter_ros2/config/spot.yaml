@@ -55,6 +55,7 @@ topics:
   # Point nav uses /trajectory (not Nav2). Joystick uses /cmd_vel. Both need
   # the driver, a claimed lease, and a standing robot.
   cmd_vel: /cmd_vel
+  body_pose: /body_pose
   # Spot's driver publishes one charge record per pack in this custom array.
   # The adapter collapses it to the lowest valid pack percentage for the UI.
   battery: /status/battery_states
@@ -75,17 +76,40 @@ actions:
   navigate_to_pose: ""
   trajectory: /trajectory
 
-# A point goal has no requested yaw, so the adapter keeps the current body
-# heading. These are SDK mobility limits for both forward/lateral walking and
-# turning; the Trajectory duration is only a timeout and does not set speed.
+# A point goal has no requested final yaw. Differential mode decomposes it into
+# rotate, straight-drive, and (when requested) final-rotate actions. Every drive
+# target sent by the adapter has body y=0. Spot's SDK still needs a small,
+# non-zero lateral mobility allowance for its gait/obstacle planner; an exactly
+# zero y velocity limit makes even a straight trajectory report BLOCKED on the
+# current robot software. The duration is each phase's timeout, not its speed.
 trajectory:
   frame: body
+  # Between diff-drive phases the adapter re-checks remaining map-frame error
+  # to decide whether another rotate/drive step is needed (see
+  # _continue_diff_trajectory). `frame` above is fixed at "body" (Spot's
+  # driver rejects any other frame_id on the outgoing command), but body only
+  # updates at LIO-SAM mapOptimization's keyframe rate (~5 Hz). If that
+  # re-check reads a stale, pre-phase position, the adapter concludes the
+  # robot hasn't arrived yet and issues another phase, which looks like the
+  # robot failing to stop. progress_frame is read-only, purely for computing
+  # those numbers faster (~200 Hz, spot.launch.py's tf_imubody_bodyfast) --
+  # it never reaches Spot's driver. Do not point base_frame or anything
+  # feeding the collaborative pose graph at body_fast: its Z drifts
+  # continuously (unlike X/Y, which track body closely) since it rides IMU
+  # dead-reckoning between corrections.
+  progress_frame: body_fast
   duration_s: 30.0
   precise_positioning: true
   disable_obstacle_avoidance: false
+  control_mode: differential
+  position_tolerance_m: 0.15
+  heading_tolerance_rad: 0.08
+  minimum_progress_m: 0.03
+  minimum_progress_rad: 0.02
+  max_diff_drive_steps: 8
   velocity_limit:
     linear_x: 0.25
-    linear_y: 0.25
+    linear_y: 0.05
     angular_z: 0.5
 
 # Clearpath spot_driver services. MIST's spot.yaml leaves `spot_name` empty, so
@@ -97,6 +121,7 @@ services:
   release: /release
   sit: /sit
   stand: /stand
+  set_stand_height: /set_stand_height
   power_on: /power_on
   stop: /stop
   # Software e-stop allow, plus drop a leftover tablet keepalive that holds

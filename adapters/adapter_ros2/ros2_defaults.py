@@ -81,6 +81,14 @@ DEFAULTS: dict[str, Any] = deep_merge(TRANSPORT_DEFAULTS, {
         "duration_s": 30.0,
         "precise_positioning": True,
         "disable_obstacle_avoidance": False,
+        # `differential` decomposes a map goal into turn/straight/turn phases.
+        # Empty preserves the legacy inference from a zero linear_y limit.
+        "control_mode": "",
+        # Frame diff-drive phases re-check remaining error in between steps,
+        # e.g. a robot-specific frame that updates faster than `frame` (which
+        # the driver requires unchanged on the outgoing command). Empty falls
+        # back to `frame`.
+        "progress_frame": "",
         # Optional Spot SDK mobility limit, applied through /max_velocity
         # immediately before each trajectory. `duration_s` is only a timeout;
         # it does not control how quickly Spot walks to the target.
@@ -116,4 +124,3 @@ DEFAULTS: dict[str, Any] = deep_merge(TRANSPORT_DEFAULTS, {
     },
     # Ping, rates, and upload timeouts: TRANSPORT_DEFAULTS.
 })
-

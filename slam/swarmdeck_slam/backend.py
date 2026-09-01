@@ -246,6 +246,10 @@ class LegacySegmenter:
         """How many segment boundaries have been detected across the fleet."""
         return sum(segment.restarts for segment in self._segments.values())
 
+    def delete_robot(self, robot_id: str) -> None:
+        """Forget legacy restart bookkeeping for one deleted robot."""
+        self._segments.pop(robot_id, None)
+
 
 @dataclass(frozen=True, slots=True)
 class TrajectorySummary:
@@ -906,6 +910,99 @@ class CollaborativeBackend:
         wanted = set(trajectories)
         self._excluded = frozenset(t for t in self.trajectory_ids() if t not in wanted)
         self._mark_selection_changed()
+
+    def delete_robot(self, robot_id: str) -> int:
+        """Permanently remove one robot's keyframes and every derived edge.
+
+        Trajectory exclusion is deliberately reversible; this operation is the
+        destructive counterpart used by the map reset API.  Rebuild the place
+        index as well as the graph, otherwise a later keyframe can retrieve a
+        deleted descriptor and try to close a loop against a node that no
+        longer exists.
+
+        The SLAM service calls this only on its worker thread, between solves.
+        """
+        removed_ids = {
+            keyframe_id
+            for keyframe_id in self._keyframes
+            if keyframe_id.robot_id == robot_id
+        }
+        if not removed_ids:
+            self._segmenter.delete_robot(robot_id)
+            return 0
+
+        with self._keyframes_lock:
+            self._keyframes = {
+                keyframe_id: keyframe
+                for keyframe_id, keyframe in self._keyframes.items()
+                if keyframe_id not in removed_ids
+            }
+        removed_count = len(removed_ids)
+        if not self._keyframes:
+            # Keep the configured dataclass fields, but return to the exact
+            # clean state of a fresh process. In particular, do not leave
+            # ``dirty`` true forever when there is nothing a solve can render.
+            self.__post_init__()
+            return removed_count
+        self._edges = [
+            edge
+            for edge in self._edges
+            if edge.src not in removed_ids and edge.dst not in removed_ids
+        ]
+        self._last_of = {
+            trajectory: keyframe_id
+            for trajectory, keyframe_id in self._last_of.items()
+            if trajectory.robot_id != robot_id
+        }
+        self._excluded = frozenset(
+            trajectory
+            for trajectory in self._excluded
+            if trajectory.robot_id != robot_id
+        )
+        self._prepared_clouds = {
+            keyframe_id: cloud
+            for keyframe_id, cloud in self._prepared_clouds.items()
+            if keyframe_id not in removed_ids
+        }
+        self._pair_cache = {
+            pair: hypotheses
+            for pair, hypotheses in self._pair_cache.items()
+            if pair[0] not in removed_ids and pair[1] not in removed_ids
+        }
+        self._retained_odom_free_pairs = {
+            pair
+            for pair in self._retained_odom_free_pairs
+            if pair[0] not in removed_ids and pair[1] not in removed_ids
+        }
+        self._index = ScanContextIndex(
+            rings=DEFAULT_RINGS,
+            sectors=DEFAULT_SECTORS,
+            temporal_window=self.temporal_window,
+        )
+        for keyframe in self._keyframes.values():
+            descriptor = keyframe.descriptor
+            if descriptor is None:
+                descriptor = scan_context_descriptor(keyframe.points)
+                keyframe.descriptor = descriptor
+                keyframe.descriptor_kind = DESCRIPTOR_KIND
+            self._index.add(keyframe.id, descriptor)
+
+        self._segmenter.delete_robot(robot_id)
+        self._graph_stale = True
+        self._last_solved = None
+        self._dirty = True
+        # A delete with no new keyframe must still satisfy the worker's due
+        # threshold immediately and publish the map rebuilt from survivors.
+        self._new_since_optimize = max(1, self._new_since_optimize)
+        self._accepted = sum(
+            1 for edge in self._edges if edge.kind.is_loop_closure
+        )
+        self._inter_robot = sum(
+            1
+            for edge in self._edges
+            if edge.kind.is_loop_closure and edge.is_inter_robot
+        )
+        return removed_count
 
     def _mark_selection_changed(self) -> None:
         """Ask for a rebuild, and for a re-solve, without doing either here.

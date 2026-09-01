@@ -19,7 +19,12 @@ from fastapi.responses import JSONResponse
 
 from ..bus import bus, mark_session_start, session_elapsed, stamps
 from ..config.detection import DETECTION_CLASSES, floor_for
-from ..config.settings import SettingsStore, disabled_robot_ids, is_robot_enabled
+from ..config.settings import (
+    SettingsStore,
+    default_color,
+    disabled_robot_ids,
+    is_robot_enabled,
+)
 from ..detect.review import ReviewStore
 from ..events.logger import events
 from ..fleet.registry import registry
@@ -1171,12 +1176,12 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             registry.robots[rid].planned_path = []
 
     elif kind == "drive":
-        if not registry.can(rid, "navigate"):
+        if not (registry.can(rid, "navigate") or registry.can(rid, "estop")):
             return
-        payload = msg.get("payload") or {}
+        payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else msg
         try:
-            linear = max(-0.45, min(0.45, float(payload.get("linear", 0.0))))
-            angular = max(-1.2, min(1.2, float(payload.get("angular", 0.0))))
+            linear = max(-0.8, min(0.8, float(payload.get("linear", 0.0))))
+            angular = max(-1.5, min(1.5, float(payload.get("angular", 0.0))))
         except (TypeError, ValueError):
             return
         sent = await registry.send(
@@ -1199,11 +1204,18 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             "walk_mode",
             "run_mode",
             "wave",
+            "set_height",
         ):
             return
         if not registry.can(rid, "body"):
             return
-        await registry.send(rid, {"type": "body_command", "action": action, **stamps()})
+        body_msg = {"type": "body_command", "action": action, **stamps()}
+        if "height" in msg:
+            try:
+                body_msg["height"] = float(msg["height"])
+            except (ValueError, TypeError):
+                pass
+        await registry.send(rid, body_msg)
 
     elif kind == "stop_all":
         # Whether each robot was actually REACHED, not merely addressed. A stop

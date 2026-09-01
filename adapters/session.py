@@ -81,8 +81,7 @@ async def dispatch_command(
         latch = getattr(bridge, "note_drive_command", None)
         if callable(latch):
             latch(lin, ang)
-        else:
-            bridge.drive(lin, ang)
+        bridge.drive(lin, ang)
     elif kind == "stop":
         bridge.stop()
     elif kind == "set_mode":
@@ -90,7 +89,12 @@ async def dispatch_command(
     elif kind == "body_command":
         fn = getattr(bridge, "body_command", None)
         if callable(fn):
-            await loop.run_in_executor(None, fn, msg.get("action", ""))
+            action = msg.get("action", "")
+            height = msg.get("height")
+            if height is not None:
+                await loop.run_in_executor(None, lambda: fn(action, height=height))
+            else:
+                await loop.run_in_executor(None, fn, action)
     elif kind == "reset":
         fn = getattr(bridge, "reset", None)
         if callable(fn):

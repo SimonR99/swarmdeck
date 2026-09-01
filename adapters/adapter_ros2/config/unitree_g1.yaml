@@ -15,14 +15,38 @@ footprint:
 
 map_frame: world
 base_frame: base_link
+lidar_height_m: 1.17
+
+# The Mid-360 sweep is published in livox_frame, not world.  The ROS 2 adapter
+# transforms it through the timestamped world <- livox_frame TF before making
+# scans/keyframes.  The live transform places the lidar about 1.17 m above the
+# floor (0.46 m above base_link).
+map_cloud_height_band:
+  floor_z: 0.0
+  min_z: 0.15
+  max_z: 1.80
+retain_free_space: true
 
 topics:
   odom: /odom
   map: ""
   map_cloud: /utlidar/cloud_livox_mid360
-  plan: ""
+  # Nav2's planner_server publishes its global route in the robot namespace.
+  plan: /asimov_0/plan
+  # DWB's selected local trajectory; the adapter displays this over the global
+  # route because it is the path the controller is currently following.
+  local_plan: /asimov_0/local_plan
+  # Nav2 costmaps are visualization-only snapshots; the adapter never
+  # republishes them to the planner or merges them into SwarmDeck's occupancy
+  # map.
+  global_costmap: /asimov_0/global_costmap/costmap
+  local_costmap: /asimov_0/local_costmap/costmap
   cmd_vel: /cmd_vel
-  battery: ""
+  # Nav2 writes only cmd_vel_nav; the adapter relays it to the real /cmd_vel
+  # only while a goal is active (see AdapterLinkMixin._on_nav_cmd_vel).
+  nav_cmd_vel: /asimov_0/cmd_vel_nav
+  body_cmd: /cmd_body
+  battery: /battery_state
   camera: /d435/camera/color/image_raw
   camera_compressed: /d435/camera/color/image_raw/compressed
   # The camera publishes colour at 1280x720 and depth at 848x480. Use the
@@ -33,22 +57,22 @@ topics:
   camera_depth_points: ""
 
 actions:
-  # No Nav2/action server is installed on Asimov; teleop is deliberately the
-  # only motion path until a planner is deployed and verified.
-  navigate_to_pose: ""
+  # asimov.launch.py brings up a full obstacle-aware Nav2 stack (costmap from
+  # the projected Mid-360 cloud, planner, controller, bt_navigator) against
+  # the onboard localization's live world -> base_link TF.
+  navigate_to_pose: /asimov_0/navigate_to_pose
 
 services:
-  # g1_ros2_bridge exposes std_srvs/Trigger services under this node. Start
-  # maps to FSM 500, which is the state required before /cmd_vel is accepted.
-  claim: /g1_loco_bridge/start
-  release: /g1_loco_bridge/damp
-  sit: /g1_loco_bridge/sit
-  stand: /g1_loco_bridge/start
-  stop: /g1_loco_bridge/stop_move
-  damping: /g1_loco_bridge/damp
-  lie_to_stand: /g1_loco_bridge/lie_to_stand
+  # Body actions are dispatched directly via /cmd_body to Asimov's native bridge
+  claim: ""
+  release: ""
+  sit: ""
+  stand: ""
+  stop: ""
+  damping: ""
+  lie_to_stand: ""
   lock_stand: ""
-  walk_mode: /g1_loco_bridge/start
+  walk_mode: ""
   run_mode: ""
   wave: ""
 
@@ -61,4 +85,5 @@ rates:
   camera_period_s: 0.2
   cloud_period_s: 4.0
 
-drive_timeout_s: 0.45
+upload_timeout_s: 0.5
+drive_timeout_s: 1.5

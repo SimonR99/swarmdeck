@@ -8,7 +8,7 @@ import pytest
 import synthetic
 from fastapi.testclient import TestClient
 
-from swarmdeck_protocol import encode_keyframe
+from swarmdeck_protocol import decode_keyframe, encode_keyframe
 from swarmdeck_slam.types import quat_xyz_from_se3
 import swarmdeck_slam.service as svc
 
@@ -248,6 +248,65 @@ def test_capture_restore_rebuilds_without_recapturing(tmp_path, monkeypatch) -> 
     assert svc._restore_capture() == 0
     assert len(restored_backend) == 1
     assert svc._ingested == 1
+
+
+def test_delete_robot_archives_only_its_restorable_keyframes(
+    tmp_path, monkeypatch
+) -> None:
+    _, fleet = synthetic.two_robot_fleet()
+    monkeypatch.setattr(svc, "CAPTURE_DIR", str(tmp_path))
+    monkeypatch.setattr(svc, "_capture_seq", -1)
+    monkeypatch.setattr(svc, "_capture_failed", False)
+
+    for robot in fleet:
+        keyframe = robot.keyframes[0]
+        svc._capture(
+            encode_keyframe(
+                robot_id=keyframe.id.robot_id,
+                seq=keyframe.id.seq,
+                stamp=keyframe.stamp,
+                points=keyframe.points,
+                t_odom_base=quat_xyz_from_se3(keyframe.t_odom_base),
+                session="delete-test",
+            )
+        )
+
+    target = fleet[0].robot_id
+    response = svc.delete_robot_keyframes(target)
+    assert response["ok"] is True
+    assert response["archived_keyframes"] == 1
+    remaining = [
+        decode_keyframe(path.read_bytes()).robot_id
+        for path in (tmp_path / "keyframes").glob("*.kf")
+    ]
+    assert remaining == [fleet[1].robot_id]
+    archived = list((tmp_path / "discarded").glob("*/*.kf"))
+    assert len(archived) == 1
+    assert decode_keyframe(archived[0].read_bytes()).robot_id == target
+    commands, _ = svc._take_controls()
+    assert commands[-1] == ("delete_robot", target)
+
+
+def test_stale_optimization_generation_cannot_publish(monkeypatch) -> None:
+    _, fleet = synthetic.two_robot_fleet()
+    backend = type(svc.backend)(registration_mode="graph")
+    keyframe = fleet[0].keyframes[0]
+    backend.ingest_keyframe(keyframe)
+    snapshot = backend.optimize_and_render()
+    assert snapshot is not None
+
+    monkeypatch.setattr(svc, "SERVER_URL", "http://must-not-be-called")
+    opened = []
+    monkeypatch.setattr(svc.urllib.request, "urlopen", lambda *a, **k: opened.append(a))
+    current = svc._current_generation()
+    svc._enqueue_control("reset")
+
+    svc._publish_snapshot(snapshot, current)
+
+    assert opened == []
+    assert svc._last_snapshot is None
+    commands, _ = svc._take_controls()
+    assert commands[-1] == ("reset", None)
 
 
 def test_config_endpoint_clamps_and_does_not_switch_mode(slam_client) -> None:
