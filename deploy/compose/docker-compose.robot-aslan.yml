@@ -20,11 +20,6 @@ x-aslan-stack: &aslan-stack
   environment:
     ROS_DOMAIN_ID: *ros_domain
     LD_LIBRARY_PATH: "/usr/local/lib:${LD_LIBRARY_PATH:-}"
-    # Raises the FastDDS shared-memory segment from its 512 KiB default to
-    # 16 MB. A 1.57 MB /ouster/points sample does not fit the default, which
-    # held the cloud to 2-5 Hz against a configured 10 Hz and starved
-    # SuperOdometry with it. See deploy/dds/fastdds_large_data.xml.
-    FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
   restart: unless-stopped
 
 services:
@@ -160,6 +155,54 @@ services:
       - use_receive_time:=true
     restart: unless-stopped
 
+  # EKF smoothing of SuperOdometry's ragged /laser_odometry, the same pattern
+  # Scout has run for months (see swarmdeck_nav/config/bunker_ekf.yaml).
+  #
+  # ADDITIVE ON PURPOSE. This publishes /aslan_0/odometry/filtered and nothing
+  # else: publish_tf is false in the config, so swarmdeck-aslan-odom-tf remains
+  # the only broadcaster of map -> aslan_base_link, and the adapter still reads
+  # /laser_odometry. Nothing downstream changes until someone repoints
+  # odom_tf's odom_topic and the adapter's `odom` at the filtered topic, which
+  # is a separate decision to be made against measurements of this output.
+  ekf:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.robot-nav2
+    image: swarmdeck-robot-nav2:local
+    container_name: swarmdeck-aslan-ekf
+    depends_on:
+      slam:
+        condition: service_healthy
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - robot_localization
+      - ekf_node
+      - --ros-args
+      - -r
+      - __node:=aslan_ekf
+      - --params-file
+      - /nav_ws/install/share/swarmdeck_nav/config/bunker_ekf.yaml
+      - -r
+      - /odometry/filtered:=/aslan_0/odometry/filtered
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /nav_ws/install/setup.sh &&
+          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/aslan_0/odometry/filtered'
+      interval: 20s
+      timeout: 12s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
   nav2:
     build:
       context: ../..
@@ -173,15 +216,9 @@ services:
         condition: service_healthy
     network_mode: host
     ipc: host
-    volumes:
-      # Only for the DDS profile below. This image is otherwise self-contained.
-      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
-      # footprint_cloud_to_scan reads the 1.57 MB /ouster/points RELIABLE, so it
-      # needs the same enlarged segment as the writer. See the lidar service.
-      FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     # publish_odom_tf:=false because the odom_tf service above already
     # broadcasts map -> os_lidar. Same split as Botman: keep one bridge
     # independent of Nav2 so costmaps still get a pose if Nav2 restarts,
