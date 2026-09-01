@@ -233,6 +233,41 @@ def generate_launch_description() -> LaunchDescription:
         ],
         condition=IfCondition(start_slam),
     )
+    # lio_sam_imuPreintegration itself looks up `imu_body -> lidar_link` (it
+    # errors "extrapolation into the past" without this static edge present,
+    # confirmed by removing it), so tf_lidar_imubody above must stay exactly
+    # as-is. lio_sam.yaml's baselinkFrame is imu_body, and
+    # lio_sam_imuPreintegration separately, continuously republishes `odom_link
+    # -> imu_body` at IMU rate (~200 Hz) — a dynamic entry for the same child
+    # frame this static one claims.
+    #
+    # body_fast is a second, distinctly-named static child of imu_body,
+    # coincident with body (recomposed from tf_lidar_body's and this node's
+    # values). It does NOT replace body: LIO-SAM's own `os_lidar -> lidar_link`
+    # static bootstrap lookup, Spot's native frames, and body_fast's own X/Y
+    # agree closely with body's, but body_fast's Z drifts continuously
+    # (measured ~0.03 m/s, unbounded — confirmed live 2026-08-31) since it
+    # rides IMU dead-reckoning between LIO-SAM corrections. Do not use it for
+    # anything that reads Z or feeds the collaborative pose graph (base_frame,
+    # pose7); it exists only for consumers that read X/Y/yaw at a faster rate
+    # than mapOptimization's ~5 Hz keyframe throttle allows through body, e.g.
+    # spot.yaml's `trajectory.progress_frame`.
+    tf_imubody_bodyfast = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="tf_imubody_bodyfast",
+        arguments=[
+            "--x", "-0.104",
+            "--y", "-0.062",
+            "--z", "0.04",
+            "--roll", "0.0",
+            "--pitch", "0.0",
+            "--yaw", "-3.14159",
+            "--frame-id", "imu_body",
+            "--child-frame-id", "body_fast",
+        ],
+        condition=IfCondition(start_slam),
+    )
     tf_body_d435 = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
@@ -273,6 +308,7 @@ def generate_launch_description() -> LaunchDescription:
             tf_body_oslidar,
             tf_lidar_body,
             tf_lidar_imubody,
+            tf_imubody_bodyfast,
             tf_body_d435,
             OpaqueFunction(function=_spot_driver),
             OpaqueFunction(function=_spot_camera),

@@ -1,0 +1,294 @@
+# Asimov (Unitree G1) hardware navigation, reusing the same Nav2 nodes as
+# nav2_params.yaml / botman_nav2_params.yaml.
+#
+# Unlike the Bunkers, Asimov's map-frame pose is NOT synthesized here: the
+# onboard Unitree/Livox localization already publishes a live, correctly
+# oriented world -> base_link (and world -> livox_frame) TF, which
+# adapter_ros2.py already depends on today for keyframe/SLAM alignment. This
+# file only has to point Nav2 at that frame under its real name, "world" --
+# NOT "map". nav.launch.py's RewrittenYaml never touches global_frame, so
+# getting this wrong here means every TF lookup in Nav2 silently fails.
+#
+# asimov.launch.py converts the complete /utlidar/cloud_livox_mid360 cloud to
+# a 2.5D LaserScan for Nav2, the same way botman.launch.py/aslan.launch.py
+# convert /ouster/points; /utlidar's own single-ring topics are deliberately
+# not used. All velocity limits below are a conservative first cut for a
+# walking gait, well inside asimov_odom_bridge.py's hard clamps
+# (vx in [-1, 1] m/s, wz in [-1.5, 1.5] rad/s) -- tune after the first
+# supervised on-hardware test, not before.
+
+bt_navigator:
+  ros__parameters:
+    global_frame: world
+    robot_base_frame: base_link
+    odom_topic: /odom
+    transform_tolerance: 0.5
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    # Humble 1.1.x loads the BT nodes explicitly (newer Nav2 releases use the
+    # `navigators` plugin interface found in the simulation configuration).
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+controller_server:
+  ros__parameters:
+    # Lower than the Bunkers' 20 Hz: G1's SetVelocity walking gait is not as
+    # instantaneously responsive as wheel torque, and the onboard computer
+    # already spends most of its budget on balance control.
+    controller_frequency: 10.0
+    odom_topic: /odom
+    min_x_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.2
+      # More lenient than the Bunkers' 15 s: G1 walks slower than either
+      # wheeled platform's cruising speed.
+      movement_time_allowance: 20.0
+
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.4
+      # SwarmDeck sends point goals, not pose goals. NavigateToPose still
+      # requires an orientation, so the adapter fills in yaw=0; accepting the
+      # full planar heading range makes Nav2 finish as soon as XY is reached
+      # instead of turning G1 back to that synthetic heading.
+      yaw_goal_tolerance: 3.2
+      stateful: true
+
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      # The adapter subscribes to this trajectory so the dashboard can show
+      # what DWB selected for the next control cycle.
+      publish_local_plan: true
+      # G1 can strafe (SetVelocity accepts vy), but every other platform this
+      # stack drives is diff-drive, and DWB's forward+turn shape is the
+      # well-understood one. Keep G1 diff-drive here too for a first
+      # deployment; strafing remains available only via manual teleop.
+      min_vel_x: -0.15
+      max_vel_x: 0.25
+      max_vel_theta: 0.3
+      min_speed_xy: 0.0
+      max_speed_xy: 0.25
+      min_speed_theta: 0.0
+      max_speed_theta: 0.3
+      # Gentler than the Bunkers' 1.0/1.2: a walking gait cannot change speed
+      # as crisply as a wheeled drivetrain.
+      acc_lim_x: 0.5
+      acc_lim_theta: 0.6
+      decel_lim_x: -0.5
+      decel_lim_theta: -0.6
+      vx_samples: 20
+      vtheta_samples: 20
+      sim_time: 1.5
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.5
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      critics:
+        ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign",
+         "PathAlign", "PathDist", "GoalDist", "PreferForward"]
+      BaseObstacle.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      PreferForward.scale: 1.0
+      PreferForward.penalty: 1.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: world
+      robot_base_frame: base_link
+      rolling_window: true
+      # Smaller than the Bunkers' 8x8: G1 walks slower, and this fleet's
+      # Jetsons are already CPU-tight.
+      width: 6
+      height: 6
+      resolution: 0.05
+      robot_radius: 0.30
+      # Required for nav.launch.py to inject the real G1 torso polygon.
+      # Without this key RewrittenYaml silently leaves Nav2 on the circular
+      # fallback.
+      footprint: "[]"
+      transform_tolerance: 0.5
+      always_send_full_costmap: true
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          # asimov.launch.py projects /utlidar/cloud_livox_mid360 over a
+          # physical 0.15..1.80 m height band and rejects points inside the
+          # padded G1 footprint BEFORE projection, so a self-return from one
+          # part of the sweep cannot hide a close obstacle seen elsewhere.
+          topic: <obstacle_scan_topic>
+          sensor_frame: <obstacle_sensor_frame>
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          obstacle_min_range: 0.0
+          obstacle_max_range: 11.5
+          raytrace_min_range: 0.0
+          raytrace_max_range: 12.0
+          inf_is_valid: true
+          # LaserScan is already a 2.5D projection; this does not define its
+          # height. The launch's 0.15..1.80 m cloud band does that.
+          max_obstacle_height: 2.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.45
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      # 1 Hz static costmap, matching the Bunkers: the obstacle layer that
+      # reacts quickly is the local costmap above, at 5 Hz.
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: world
+      robot_base_frame: base_link
+      # NOT rolling. A rolling global costmap is a window that follows the
+      # robot; the collaborative map can be much larger than that, and a goal
+      # beyond the window falls outside the costmap entirely with no path
+      # found. See botman_nav2_params.yaml's global_costmap comment for the
+      # measured Bunker failure this avoids.
+      rolling_window: false
+      # Matches configs/hardware_asimov.yaml's map.size_m: 40.0. StaticLayer
+      # resizes the whole costmap to the incoming /global_map's size, origin
+      # and resolution once one arrives, so this is only the size used before
+      # the first upload.
+      width: 40
+      height: 40
+      resolution: 0.05
+      robot_radius: 0.30
+      footprint: "[]"
+      track_unknown_space: true
+      transform_tolerance: 0.5
+      always_send_full_costmap: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        map_topic: /global_map
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: <obstacle_scan_topic>
+          sensor_frame: <obstacle_sensor_frame>
+          data_type: "LaserScan"
+          clearing: true
+          marking: true
+          obstacle_min_range: 0.0
+          obstacle_max_range: 11.5
+          raytrace_min_range: 0.0
+          raytrace_max_range: 12.0
+          inf_is_valid: true
+          max_obstacle_height: 2.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.45
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+behavior_server:
+  ros__parameters:
+    local_frame: world
+    global_frame: world
+    robot_base_frame: base_link
+    transform_tolerance: 0.5
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    feedback: "OPEN_LOOP"
+    scale_velocities: false
+    velocity_timeout: 0.5
+    max_velocity: [0.25, 0.0, 0.3]
+    min_velocity: [-0.15, 0.0, -0.3]
+    max_accel: [0.5, 0.0, 0.6]
+    max_decel: [-0.5, 0.0, -0.6]
+    deadband_velocity: [0.0, 0.0, 0.0]
+    odom_topic: /odom
+    odom_duration: 0.1

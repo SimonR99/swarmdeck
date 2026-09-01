@@ -50,6 +50,14 @@ odometry, joint state, RTSP stream, and backend registration:
 make deploy ROBOT=asimov
 ```
 
-The profile intentionally advertises teleoperation only. Asimov has no verified
-Nav2 action server or battery adapter yet, so those capabilities stay disabled
-until their native producers are installed and tested.
+The profile also brings up a full Nav2 stack (obstacle-aware costmap built
+from the projected Mid-360 cloud, planner, controller, `bt_navigator`)
+against the onboard Unitree/Livox localization's live `world -> base_link` TF,
+the same generic NavigateToPose path Botman and Aslan already run. One detail
+remains unverified on real hardware: `asimov.launch.py`'s
+`_SENSOR_YAW_IN_BASE` assumes the Mid-360's `livox_frame` already agrees with
+`base_link`'s forward axis (0 rad), unlike the Bunkers' confirmed pi-yaw
+mount offset. Confirm this on first bring-up by checking whether the
+projected obstacle scan lines up with the visible world while walking
+forward, and correct it if not before trusting autonomous navigation near
+obstacles.

@@ -246,6 +246,13 @@ class HardwareBridge(
         self.goal: dict[str, float] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        # When Spot's lateral velocity is zero, an arbitrary (x, y) body goal
+        # is not executable as one holonomic trajectory. Keep the map target
+        # across a short rotate/drive/rotate sequence instead.
+        self._trajectory_target: dict[str, float] | None = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error: float | None = None
         self._last_drive_at = 0.0
         self._camera_encoding_warned = False
         # Newest frame awaiting detection, as (jpeg, header). The ROS callback
@@ -1266,6 +1273,10 @@ class HardwareBridge(
             return
         self._goal_generation += 1
         generation = self._goal_generation
+        self._trajectory_target = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error = None
 
         msg = NavigateToPose.Goal()
         msg.pose.header.frame_id = self.map_frame
@@ -1312,18 +1323,171 @@ class HardwareBridge(
             return
         self._goal_generation += 1
         generation = self._goal_generation
+        self._arm_goal(goal)
+        if self._trajectory_is_diff_drive():
+            self._trajectory_target = {
+                "x": float(goal["x"]),
+                "y": float(goal["y"]),
+            }
+            if "yaw" in goal and goal["yaw"] is not None:
+                self._trajectory_target["yaw"] = float(goal["yaw"])
+            self._trajectory_step_count = 0
+            self._continue_diff_trajectory(generation)
+            return
+        self._trajectory_target = None
+        self._send_trajectory_pose(pose, generation, "holonomic")
+
+    def _trajectory_is_diff_drive(self) -> bool:
+        tcfg = self.cfg.get("trajectory") or {}
+        control_mode = str(tcfg.get("control_mode") or "").strip().lower()
+        if control_mode:
+            return control_mode == "differential"
+        # Backwards compatibility for profiles written before control_mode was
+        # explicit. New Spot profiles keep a small non-zero SDK lateral limit:
+        # an exactly zero-width velocity envelope makes its trajectory planner
+        # report straight goals as BLOCKED on the current robot software.
+        limit = tcfg.get("velocity_limit") or {}
+        try:
+            return math.isclose(float(limit.get("linear_y", 1.0)), 0.0, abs_tol=1e-9)
+        except (TypeError, ValueError):
+            return False
+
+    def _body_trajectory_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.frame_id = str(
+            (self.cfg.get("trajectory") or {}).get("frame") or "body"
+        )
+        pose.header.stamp = self.node.get_clock().now().to_msg()
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.position.z = 0.0
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = math.sin(yaw / 2.0)
+        pose.pose.orientation.w = math.cos(yaw / 2.0)
+        return pose
+
+    def _progress_frame(self) -> str:
+        """Frame to read remaining map-frame error from between diff-drive phases.
+
+        Distinct from `trajectory.frame` (the frame_id Spot's driver requires
+        on the outgoing command, and rejects any other value for). This is
+        only ever used to compute numeric dx/dy/yaw internally — those numbers
+        get repackaged by `_body_trajectory_pose` with `trajectory.frame` set
+        again, so pointing this at a different, faster-updating frame never
+        reaches the driver. See spot.yaml's `trajectory.progress_frame`
+        comment for why Spot profiles set this to `body_fast`.
+        """
+        tcfg = self.cfg.get("trajectory") or {}
+        frame = str(tcfg.get("progress_frame") or "").strip()
+        return frame or str(tcfg.get("frame") or "body")
+
+    def _continue_diff_trajectory(self, generation: int) -> None:
+        """Issue the next rotate/straight/rotate step for a map-frame target."""
+        if generation != self._goal_generation or self._trajectory_target is None:
+            return
+        tcfg = self.cfg.get("trajectory") or {}
+        max_steps = max(1, int(tcfg.get("max_diff_drive_steps", 8)))
+        if self._trajectory_step_count >= max_steps:
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot differential trajectory did not converge "
+                f"after {max_steps} steps"
+            )
+            self._finish_goal("failed")
+            return
+
+        relative = self._goal_in_body(
+            self._trajectory_target, frame=self._progress_frame()
+        )
+        if relative is None:
+            self._finish_goal("failed")
+            return
+        dx = float(relative.pose.position.x)
+        dy = float(relative.pose.position.y)
+        distance = math.hypot(dx, dy)
+        position_tolerance = max(
+            0.01, float(tcfg.get("position_tolerance_m", 0.15))
+        )
+        heading_tolerance = max(
+            0.01, float(tcfg.get("heading_tolerance_rad", 0.08))
+        )
+
+        if distance > position_tolerance:
+            bearing = math.atan2(dy, dx)
+            # Do not ask Spot for a tiny in-place Trajectory rotation merely
+            # because the map click is a few degrees off the body axis. The
+            # Clearpath server commonly stops those commands immediately as
+            # `not at goal`. If the resulting lateral miss is already inside
+            # our position tolerance, drive the longitudinal projection now.
+            if abs(dy) > position_tolerance:
+                pose = self._body_trajectory_pose(0.0, 0.0, bearing)
+                step = "align"
+                step_error = abs(bearing)
+            else:
+                # Re-evaluate the map target after every completed action. Once
+                # aligned, a body-x command is the differential-drive segment;
+                # never pass the residual body-y error to Spot.
+                pose = self._body_trajectory_pose(dx, 0.0, 0.0)
+                step = "drive"
+                step_error = distance
+        elif "yaw" in self._trajectory_target:
+            final_yaw = yaw_of(relative.pose.orientation)
+            if abs(final_yaw) <= heading_tolerance:
+                self.node.get_logger().info(
+                    f"[{self.id}] Spot differential trajectory reached goal"
+                )
+                self._finish_goal("succeeded")
+                return
+            pose = self._body_trajectory_pose(0.0, 0.0, final_yaw)
+            step = "final_turn"
+            step_error = abs(final_yaw)
+        else:
+            self.node.get_logger().info(
+                f"[{self.id}] Spot differential trajectory reached goal"
+            )
+            self._finish_goal("succeeded")
+            return
+
+        self._trajectory_step_count += 1
+        self._trajectory_step_error = step_error
+        self._send_trajectory_pose(pose, generation, step)
+
+    def _send_trajectory_pose(
+        self, pose: PoseStamped, generation: int, step: str
+    ) -> None:
         tcfg = self.cfg.get("trajectory") or {}
         dur_s = max(1.0, float(tcfg.get("duration_s", 30.0)))
         msg = Trajectory.Goal()
         msg.target_pose = pose
         msg.duration.sec = int(dur_s)
         msg.duration.nanosec = int((dur_s - int(dur_s)) * 1e9)
-        msg.precise_positioning = bool(tcfg.get("precise_positioning", True))
+        # Each differential phase is followed by a fresh map-frame error
+        # check, so NEAR_GOAL is sufficient. The current Clearpath ROS 2 port
+        # ignores this flag, but setting it correctly also supports newer
+        # driver versions that honour it.
+        msg.precise_positioning = (
+            False
+            if self._trajectory_target is not None
+            else bool(tcfg.get("precise_positioning", True))
+        )
         msg.disable_obstacle_avoidance = bool(
             tcfg.get("disable_obstacle_avoidance", False)
         )
-        self._arm_goal(goal)
-        future = self.traj_client.send_goal_async(msg)
+        self._trajectory_step = step
+        yaw = yaw_of(pose.pose.orientation)
+        self.node.get_logger().info(
+            f"[{self.id}] Spot trajectory step={step} "
+            f"x={float(pose.pose.position.x):.3f} "
+            f"y={float(pose.pose.position.y):.3f} yaw={yaw:.3f}"
+        )
+        try:
+            future = self.traj_client.send_goal_async(msg)
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] Spot trajectory submission failed: {exc}"
+            )
+            self._finish_goal("failed")
+            return
         future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
 
     def _apply_trajectory_velocity_limit(self) -> bool:
@@ -1403,8 +1567,10 @@ class HardwareBridge(
         self.nav_status = "active"
         self.mode = "nav"
 
-    def _goal_in_body(self, goal: dict[str, float]) -> PoseStamped | None:
-        frame = str((self.cfg.get("trajectory") or {}).get("frame") or "body")
+    def _goal_in_body(
+        self, goal: dict[str, float], *, frame: str | None = None
+    ) -> PoseStamped | None:
+        frame = frame or str((self.cfg.get("trajectory") or {}).get("frame") or "body")
         try:
             tf = self.tf_buffer.lookup_transform(
                 frame, self.map_frame, rclpy.time.Time()
@@ -1454,10 +1620,13 @@ class HardwareBridge(
     def _on_goal_response(self, future, generation: int) -> None:
         try:
             handle = future.result()
-        except Exception:
+        except Exception as exc:
             if generation != self._goal_generation:
                 return
-            self.nav_status = "failed"
+            self.node.get_logger().warn(
+                f"[{self.id}] navigation goal response failed: {exc}"
+            )
+            self._finish_goal("failed")
             return
         # A cancellation or newer goal can win while send_goal_async is still
         # in flight. Cancel an accepted stale handle instead of abandoning an
@@ -1467,8 +1636,11 @@ class HardwareBridge(
                 handle.cancel_goal_async()
             return
         if not handle.accepted:
-            self.nav_status = "failed"
-            self.mode = "idle"
+            self.node.get_logger().warn(
+                f"[{self.id}] navigation goal rejected"
+                + (f" during {self._trajectory_step}" if self._trajectory_step else "")
+            )
+            self._finish_goal("failed")
             return
         self._goal_handle = handle
         handle.get_result_async().add_done_callback(
@@ -1481,21 +1653,97 @@ class HardwareBridge(
         from action_msgs.msg import GoalStatus
 
         try:
-            status = future.result().status
-        except Exception:
-            self.nav_status = "failed"
-            self.mode = "idle"
+            outcome = future.result()
+            status = outcome.status
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[{self.id}] navigation result failed: {exc}"
+            )
+            self._finish_goal("failed")
             return
-        self.nav_status = {
-            GoalStatus.STATUS_SUCCEEDED: "succeeded",
-            GoalStatus.STATUS_CANCELED: "cancelled",
-        }.get(status, "failed")
+        result = getattr(outcome, "result", None)
+        reported_success = bool(getattr(result, "success", True))
+        message = str(getattr(result, "message", "") or "")
+        if status == GoalStatus.STATUS_SUCCEEDED and reported_success:
+            if self._trajectory_target is not None:
+                self.node.get_logger().info(
+                    f"[{self.id}] Spot trajectory step={self._trajectory_step} complete"
+                )
+                self._goal_handle = None
+                self._continue_diff_trajectory(generation)
+                return
+            self._finish_goal("succeeded")
+            return
+        if status == GoalStatus.STATUS_CANCELED:
+            self._finish_goal("cancelled")
+            return
+        if (
+            self._trajectory_target is not None
+            and message == "not at goal"
+            and self._diff_trajectory_made_progress()
+        ):
+            self.node.get_logger().info(
+                f"[{self.id}] Spot trajectory step={self._trajectory_step} "
+                "stopped early after making progress; recomputing target"
+            )
+            self._goal_handle = None
+            self._continue_diff_trajectory(generation)
+            return
+        self.node.get_logger().warn(
+            f"[{self.id}] navigation failed status={status}"
+            + (f" step={self._trajectory_step}" if self._trajectory_step else "")
+            + (f": {message}" if message else "")
+        )
+        self._finish_goal("failed")
+
+    def _diff_trajectory_made_progress(self) -> bool:
+        """Accept a driver `not at goal` only when TF proves useful motion."""
+        target = self._trajectory_target
+        before = self._trajectory_step_error
+        if target is None or before is None:
+            return False
+        relative = self._goal_in_body(target, frame=self._progress_frame())
+        if relative is None:
+            return False
+        dx = float(relative.pose.position.x)
+        dy = float(relative.pose.position.y)
+        tcfg = self.cfg.get("trajectory") or {}
+        if self._trajectory_step == "drive":
+            after = math.hypot(dx, dy)
+            tolerance = max(0.01, float(tcfg.get("position_tolerance_m", 0.15)))
+            minimum = max(0.005, float(tcfg.get("minimum_progress_m", 0.03)))
+        elif self._trajectory_step == "align":
+            after = abs(math.atan2(dy, dx))
+            tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
+            minimum = max(
+                0.005, float(tcfg.get("minimum_progress_rad", 0.02))
+            )
+        elif self._trajectory_step == "final_turn":
+            after = abs(yaw_of(relative.pose.orientation))
+            tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
+            minimum = max(
+                0.005, float(tcfg.get("minimum_progress_rad", 0.02))
+            )
+        else:
+            return False
+        self.node.get_logger().info(
+            f"[{self.id}] Spot trajectory step={self._trajectory_step} "
+            f"remaining_error={after:.3f} previous_error={before:.3f}"
+        )
+        return after <= tolerance or after <= before - minimum
+
+    def _finish_goal(self, status: str) -> None:
+        self.nav_status = status
         self.mode = "idle"
         self.goal = None
         self.planned_path = []
         self._local_planned_path = []
         self._global_planned_path = []
         self._goal_handle = None
+        self._trajectory_target = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error = None
 
     def cancel_goal(self) -> None:
         self._goal_generation += 1
@@ -1511,6 +1759,10 @@ class HardwareBridge(
         self._global_planned_path = []
         self.nav_status = "cancelled"
         self.mode = "idle"
+        self._trajectory_target = None
+        self._trajectory_step = ""
+        self._trajectory_step_count = 0
+        self._trajectory_step_error = None
         # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
         # (the ROS 1 path that called spot_wrapper.stop() is commented out).
         # A zero cmd_vel preempts the SDK trajectory immediately. Also enqueue

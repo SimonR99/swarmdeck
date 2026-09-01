@@ -92,6 +92,10 @@ def _bridge(mod, cfg_override=None):
     bridge.goal = None
     bridge._goal_generation = 0
     bridge._goal_handle = None
+    bridge._trajectory_target = None
+    bridge._trajectory_step = ""
+    bridge._trajectory_step_count = 0
+    bridge._trajectory_step_error = None
     bridge._last_drive_at = 0.0
     # A connected robot, which is what every test that is not about the link
     # itself means to model. The class default is deliberately stale.
@@ -430,9 +434,10 @@ def test_trajectory_applies_configured_velocity_limit(mod):
             "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
             "services": {"max_velocity": "/max_velocity"},
             "trajectory": {
+                "control_mode": "differential",
                 "velocity_limit": {
                     "linear_x": 0.25,
-                    "linear_y": 0.0,
+                    "linear_y": 0.05,
                     "angular_z": 0.5,
                 }
             },
@@ -457,9 +462,310 @@ def test_trajectory_applies_configured_velocity_limit(mod):
 
     request = bridge._velocity_client.call_async.call_args[0][0]
     assert request.velocity_limit.linear.x == pytest.approx(0.25)
-    assert request.velocity_limit.linear.y == pytest.approx(0.0)
+    assert request.velocity_limit.linear.y == pytest.approx(0.05)
     assert request.velocity_limit.angular.z == pytest.approx(0.5)
     bridge.traj_client.send_goal_async.assert_called_once()
+
+
+def test_differential_trajectory_turns_before_driving(mod):
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "services": {"max_velocity": "/max_velocity"},
+            "trajectory": {
+                "control_mode": "differential",
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.05,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge.traj_client.server_is_ready.return_value = True
+    bridge._velocity_client.wait_for_service.return_value = True
+    velocity_future = MagicMock()
+    velocity_future.done.return_value = True
+    velocity_future.result.return_value = type(
+        "Response", (), {"success": True, "message": ""}
+    )()
+    bridge._velocity_client.call_async.return_value = velocity_future
+
+    bridge.navigate_to({"x": 0.0, "y": 2.0})
+
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.pose.position.x == pytest.approx(0.0)
+    assert msg.target_pose.pose.position.y == pytest.approx(0.0)
+    assert msg.target_pose.pose.position.z == pytest.approx(0.0)
+    assert msg.target_pose.pose.orientation.z == pytest.approx(
+        math.sin(math.pi / 4.0)
+    )
+    assert msg.target_pose.pose.orientation.w == pytest.approx(
+        math.cos(math.pi / 4.0)
+    )
+    assert bridge._trajectory_step == "align"
+
+
+def test_progress_frame_defaults_to_trajectory_frame(mod):
+    bridge = _bridge(mod, {"trajectory": {"frame": "body"}})
+    assert bridge._progress_frame() == "body"
+
+
+def test_progress_frame_overrides_trajectory_frame(mod):
+    bridge = _bridge(
+        mod, {"trajectory": {"frame": "body", "progress_frame": "body_fast"}}
+    )
+    assert bridge._progress_frame() == "body_fast"
+
+
+def test_diff_drive_progress_check_reads_progress_frame_not_body(mod):
+    """The driver rejects any outgoing frame_id but body; progress_frame must
+    only steer the internal re-check TF lookup, never the sent command."""
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "services": {"max_velocity": "/max_velocity"},
+            "trajectory": {
+                "control_mode": "differential",
+                "progress_frame": "body_fast",
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.05,
+                    "angular_z": 0.5,
+                },
+            },
+        },
+    )
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge.traj_client.server_is_ready.return_value = True
+    bridge._velocity_client.wait_for_service.return_value = True
+    velocity_future = MagicMock()
+    velocity_future.done.return_value = True
+    velocity_future.result.return_value = type(
+        "Response", (), {"success": True, "message": ""}
+    )()
+    bridge._velocity_client.call_async.return_value = velocity_future
+
+    bridge.navigate_to({"x": 0.0, "y": 2.0})
+
+    # The initial validity check (send_trajectory) and the diff-drive
+    # continuation both read TF; the continuation must use body_fast.
+    frames_looked_up = [
+        call.args[0] for call in bridge.tf_buffer.lookup_transform.call_args_list
+    ]
+    assert "body_fast" in frames_looked_up
+
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.header.frame_id == "body"
+
+
+def test_explicit_differential_mode_does_not_depend_on_zero_lateral_limit(mod):
+    bridge = _bridge(
+        mod,
+        {
+            "trajectory": {
+                "control_mode": "differential",
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.05,
+                    "angular_z": 0.5,
+                },
+            }
+        },
+    )
+
+    assert bridge._trajectory_is_diff_drive() is True
+
+
+def test_zero_lateral_trajectory_drives_only_on_body_x(mod):
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "trajectory": {
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.0,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge._trajectory_target = {"x": 2.0, "y": 0.0}
+    bridge._goal_generation = 4
+
+    bridge._continue_diff_trajectory(4)
+
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.pose.position.x == pytest.approx(2.0)
+    assert msg.target_pose.pose.position.y == pytest.approx(0.0)
+    assert msg.target_pose.pose.orientation.z == pytest.approx(0.0)
+    assert msg.target_pose.pose.orientation.w == pytest.approx(1.0)
+    assert bridge._trajectory_step == "drive"
+
+
+def test_small_off_axis_goal_skips_unnecessary_in_place_turn(mod):
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "trajectory": {
+                "position_tolerance_m": 0.15,
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.0,
+                    "angular_z": 0.5,
+                },
+            },
+        },
+    )
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge._trajectory_target = {"x": 1.0, "y": 0.12}
+    bridge._goal_generation = 5
+
+    bridge._continue_diff_trajectory(5)
+
+    msg = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert msg.target_pose.pose.position.x == pytest.approx(1.0)
+    assert msg.target_pose.pose.position.y == pytest.approx(0.0)
+    assert msg.target_pose.pose.orientation.z == pytest.approx(0.0)
+    assert msg.target_pose.pose.orientation.w == pytest.approx(1.0)
+    assert bridge._trajectory_step == "drive"
+
+
+def test_zero_lateral_trajectory_recomputes_target_after_turn(mod, monkeypatch):
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "trajectory": {
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.0,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
+    bridge._trajectory_target = {"x": 0.0, "y": 2.0}
+    bridge._goal_generation = 7
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    bridge._continue_diff_trajectory(7)
+    assert bridge._trajectory_step == "align"
+
+    # After a 90-degree left turn, map->body is rotated -90 degrees. The same
+    # map target is now directly ahead and the next action must be straight.
+    bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-math.pi / 2.0)
+    goal_status = type(
+        "GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5}
+    )
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    result_future = MagicMock()
+    result_future.result.return_value = type(
+        "Outcome",
+        (),
+        {
+            "status": goal_status.STATUS_SUCCEEDED,
+            "result": type("Result", (), {"success": True, "message": ""})(),
+        },
+    )()
+
+    bridge._on_goal_result(result_future, 7)
+
+    assert bridge.traj_client.send_goal_async.call_count == 2
+    drive = bridge.traj_client.send_goal_async.call_args[0][0]
+    assert drive.target_pose.pose.position.x == pytest.approx(2.0)
+    assert drive.target_pose.pose.position.y == pytest.approx(0.0)
+    assert drive.target_pose.pose.orientation.z == pytest.approx(0.0)
+    assert drive.target_pose.pose.orientation.w == pytest.approx(1.0)
+    assert bridge._trajectory_step == "drive"
+
+
+def test_partial_alignment_abort_continues_only_after_progress(mod, monkeypatch):
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "trajectory": {
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.0,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
+    bridge._trajectory_target = {"x": 2.0, "y": 0.4}
+    bridge._goal_generation = 9
+    bridge._trajectory_step = "align"
+    bridge._trajectory_step_error = math.atan2(0.4, 2.0)
+    # A partial turn reduced the bearing from ~0.197 rad to ~0.097 rad.
+    bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.1)
+    goal_status = type(
+        "GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5}
+    )
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    result_future = MagicMock()
+    result_future.result.return_value = type(
+        "Outcome",
+        (),
+        {
+            "status": 6,
+            "result": type(
+                "Result", (), {"success": False, "message": "not at goal"}
+            )(),
+        },
+    )()
+
+    bridge._on_goal_result(result_future, 9)
+
+    bridge.traj_client.send_goal_async.assert_called_once()
+    assert bridge.nav_status != "failed"
+
+
+def test_alignment_abort_fails_when_spot_made_no_progress(mod, monkeypatch):
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {"navigate_to_pose": "", "trajectory": "/trajectory"},
+            "trajectory": {
+                "velocity_limit": {
+                    "linear_x": 0.25,
+                    "linear_y": 0.0,
+                    "angular_z": 0.5,
+                }
+            },
+        },
+    )
+    bridge._trajectory_target = {"x": 2.0, "y": 0.4}
+    bridge._goal_generation = 10
+    bridge._trajectory_step = "align"
+    bridge._trajectory_step_error = math.atan2(0.4, 2.0)
+    bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
+    goal_status = type(
+        "GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5}
+    )
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    result_future = MagicMock()
+    result_future.result.return_value = type(
+        "Outcome",
+        (),
+        {
+            "status": 6,
+            "result": type(
+                "Result", (), {"success": False, "message": "not at goal"}
+            )(),
+        },
+    )()
+
+    bridge._on_goal_result(result_future, 10)
+
+    bridge.traj_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "failed"
 
 
 def test_trajectory_does_not_run_unlimited_when_limit_service_is_down(mod):
@@ -494,9 +800,10 @@ def test_spot_config_enables_conservative_trajectory_limits():
 
     assert config["topics"]["battery"] == "/status/battery_states"
     assert config["services"]["max_velocity"] == "/max_velocity"
+    assert config["trajectory"]["control_mode"] == "differential"
     assert config["trajectory"]["velocity_limit"] == {
         "linear_x": 0.25,
-        "linear_y": 0.0,
+        "linear_y": 0.05,
         "angular_z": 0.5,
     }
 
@@ -827,6 +1134,7 @@ def test_asimov_profile_advertises_transformed_lidar_map(mod):
 
     assert cfg["topics"]["map_cloud"] == "/utlidar/cloud_livox_mid360"
     assert "map" in bridge.capabilities()
+    assert "navigate" in bridge.capabilities()
 
 
 def _plan_msg(frame, points):

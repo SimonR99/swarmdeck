@@ -31,8 +31,20 @@ topics:
   odom: /odom
   map: ""
   map_cloud: /utlidar/cloud_livox_mid360
-  plan: ""
+  # Nav2's planner_server publishes its global route in the robot namespace.
+  plan: /asimov_0/plan
+  # DWB's selected local trajectory; the adapter displays this over the global
+  # route because it is the path the controller is currently following.
+  local_plan: /asimov_0/local_plan
+  # Nav2 costmaps are visualization-only snapshots; the adapter never
+  # republishes them to the planner or merges them into SwarmDeck's occupancy
+  # map.
+  global_costmap: /asimov_0/global_costmap/costmap
+  local_costmap: /asimov_0/local_costmap/costmap
   cmd_vel: /cmd_vel
+  # Nav2 writes only cmd_vel_nav; the adapter relays it to the real /cmd_vel
+  # only while a goal is active (see AdapterLinkMixin._on_nav_cmd_vel).
+  nav_cmd_vel: /asimov_0/cmd_vel_nav
   body_cmd: /cmd_body
   battery: /battery_state
   camera: /d435/camera/color/image_raw
@@ -45,9 +57,10 @@ topics:
   camera_depth_points: ""
 
 actions:
-  # No Nav2/action server is installed on Asimov; teleop is deliberately the
-  # only motion path until a planner is deployed and verified.
-  navigate_to_pose: ""
+  # asimov.launch.py brings up a full obstacle-aware Nav2 stack (costmap from
+  # the projected Mid-360 cloud, planner, controller, bt_navigator) against
+  # the onboard localization's live world -> base_link TF.
+  navigate_to_pose: /asimov_0/navigate_to_pose
 
 services:
   # Body actions are dispatched directly via /cmd_body to Asimov's native bridge
