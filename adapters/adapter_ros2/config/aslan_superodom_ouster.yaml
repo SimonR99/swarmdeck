@@ -44,4 +44,5 @@
         gyr_n: 1.5636343949698187e-03
         acc_w: 6.4356659353532566e-05
         gyr_w: 3.5640318696367613e-05
-        g_norm: 9.80511
+        # Measured static acceleration norm on Aslan's Ouster IMU: 9.667 m/s^2.
+        g_norm: 9.667
