@@ -67,10 +67,23 @@
       extrinsic_R: [-0.04391730,  0.99891056,  0.01577839,
                     -0.99900375, -0.04403570,  0.00723641,
                      0.00792334, -0.01544486,  0.99984933]
-      # Zero on purpose: comparing two gyros gives rotation only, since angular
-      # velocity is identical everywhere on a rigid body. Measure the physical
-      # os_lidar -> vectornav offset with a ruler if the two are far apart.
-      extrinsic_T: [0.0, 0.0, 0.0]
+      # os_lidar expressed in the VectorNav frame: p_imu = extrinsic_R * p_lidar
+      # + extrinsic_T (LIVMapper.cpp: rot * (extR * p_body + extT) + pos).
+      #
+      # X and Y are measured. Two gyros cannot see the offset at all (angular
+      # velocity is identical everywhere on a rigid body) but the accelerometer
+      # pair can, so calibrate_imu_to_imu.py solves it from a spin and it is
+      # composed here with the Ouster factory os_lidar -> os_imu.
+      #
+      # Z IS THE TAPE MEASUREMENT, NOT A CALIBRATION RESULT. The spin that
+      # determines X and Y is exactly the motion that cannot determine Z: both
+      # rigid-body terms vanish along the rotation axis, and the solver reports
+      # observability 0.000 for it. Rotate about a horizontal axis and re-run to
+      # measure it properly. Until then this is "the VectorNav sits at the same
+      # height as the OAK, which is BOTMAN_OAK_Z below the lidar".
+      #
+      # Botman-specific: do not copy to another chassis without re-measuring.
+      extrinsic_T: [-0.060, 0.004, 0.284]
 
       # LiDAR -> Camera, from the 5-pose Spot ChArUco solve on 2026-08-27
       # (per-plane residual <= 1.6 mm, normal misalignment 0.2-1.1 deg),
