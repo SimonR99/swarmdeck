@@ -243,21 +243,6 @@
         <Maximize2 class="h-4 w-4" />
       {/if}
     </Button>
-    <button
-      class="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all border shadow-xs {cortexStore.isOpen
-        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-cyan-500/20'
-        : 'bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-white border-slate-700/60'}"
-      title="Cortex — AI Fleet Intelligence & Codebase Copilot (Ctrl+K)"
-      onclick={() => cortexStore.toggle()}
-    >
-      <Brain class="h-4 w-4 text-cyan-400" />
-      <span class="hidden sm:inline">Cortex</span>
-      {#if cortexStore.isStreaming}
-        <span class="h-2 w-2 rounded-full bg-cyan-400 animate-ping"></span>
-      {:else}
-        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]"></span>
-      {/if}
-    </button>
     <Button variant="ghost" size="sm" title="Settings" onclick={onsettings} class="px-2">
       <Settings2 class="h-4 w-4" />
     </Button>

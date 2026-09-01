@@ -331,7 +331,13 @@ async def post_chat(req: ChatRequest) -> Response:
 
                 elif event_type == "result":
                     res = event_data.get("result", {})
-                    yield f"data: {json.dumps({'type': 'done', 'response': res.get('response', ''), 'status': res.get('status'), 'usage': res.get('usage', {})})}\n\n"
+                    resp_text = res.get("response", "")
+                    status = res.get("status", "SUCCESS")
+                    if status == "ERROR" and not resp_text:
+                        err_bytes = await proc.stderr.read()
+                        err_str = err_bytes.decode(errors="replace").strip()
+                        resp_text = f"⚠️ {err_str or 'Execution stopped or encountered an error'}"
+                    yield f"data: {json.dumps({'type': 'done', 'response': resp_text, 'status': status, 'usage': res.get('usage', {})})}\n\n"
 
             await proc.wait()
         except asyncio.CancelledError:
