@@ -10,12 +10,12 @@
 #
 #   argos        physics, Filament rendering and sensors. No ROS at all.
 #   sim          the ROS 2 Jazzy side: bridge, SLAM Toolbox, Nav2, adapter_sim.
-#   ultrafusion  the odometry front-end, on ROS 2 Humble, in its own DDS domain.
+#   fast_livo2   the odometry front-end (Fast-LIVO2), in its own DDS domain.
 #
 # They talk over Unix sockets on `swarmdeck_runtime`, mounted at /run/swarmdeck
 # in all three, which also carries the generated world and experiment. Sockets
-# rather than DDS because Humble and Jazzy do not have to interoperate this
-# way: Ultra-Fusion's estimate returns through ARGoS as an ordinary odometry
+# rather than DDS because Humble/Jazzy graphs do not have to interoperate this
+# way: Fast-LIVO2's estimate returns through ARGoS as an ordinary odometry
 # sensor reading, and its own ROS traffic never leaves its container.
 
 # Keep the project identity stable when this file is invoked from the repository
@@ -181,6 +181,12 @@ services:
       # four robots, a 17-ring lidar and 320x240 RGB-D cameras.
       SWARMDECK_SOFTWARE_RENDER: "${SWARMDECK_SOFTWARE_RENDER:-true}"
     volumes:
+      # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
+      # which is the layout find_bistro_assets_dir() already looks for. They
+      # are far too large to vendor. Mounted at the same path in both the
+      # generator and the renderer, because the generated .argos embeds the
+      # resolved path and ARGoS must be able to open it too.
+      - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
       - swarmdeck_runtime:/run/swarmdeck
     # A blown-out render or a diverged estimator is not fixed by restarting
     # into the same state, and a restart loop hides the log that says why.
@@ -203,6 +209,13 @@ services:
       duck_detector:
         condition: service_healthy
     environment:
+      # Which sensor channels ARGoS streams to the external estimator.
+      # Ultra-Fusion (lwio) never read the camera; FAST-LIVO2 needs it, and
+      # without it emits no pose at all while logging nothing.
+      # Render cost scales with this; 640,480 gives a photometric estimator
+      # something to track where 320,240 of a sparse scene does not.
+      SWARMDECK_CAMERA_RESOLUTION: "${SWARMDECK_CAMERA_RESOLUTION:-320,240}"
+      SWARMDECK_ESTIMATOR_CHANNELS: "${SWARMDECK_ESTIMATOR_CHANNELS:-imu,lidar,wheels}"
       BACKEND_HOST: server
       BACKEND_PORT: "8080"
       SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
@@ -232,31 +245,36 @@ services:
       ROS_DOMAIN_ID: "42"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
     volumes:
+      # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
+      # which is the layout find_bistro_assets_dir() already looks for. They
+      # are far too large to vendor. Mounted at the same path in both the
+      # generator and the renderer, because the generated .argos embeds the
+      # resolved path and ARGoS must be able to open it too.
+      - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
       - swarmdeck_runtime:/run/swarmdeck
     shm_size: "2gb"
     restart: unless-stopped
 
-  # Ultra-Fusion: lidar-wheel-inertial odometry, on ROS 2 Humble.
+  # Fast-LIVO2: Direct LiDAR-Inertial-Visual Odometry, on ROS 2 (multi-arch AMD64 & ARM64).
   #
   # This is what makes the simulated fleet's drift real rather than modelled.
   # ARGoS's own <odometry implementation="drift"> perturbs ground-truth motion
   # with Gaussian noise: it cannot slip a wheel against an obstacle, lose a
-  # scan to geometric degeneracy, or fail to converge. Ultra-Fusion can, because
+  # scan to geometric degeneracy, or fail to converge. Fast-LIVO2 can, because
   # it is really estimating from the simulated sensors, which is the problem
   # swarmdeck-slam exists to solve.
-  ultrafusion:
+  fast_livo2:
     profiles: ["argos"]
     build:
-      context: ./../docker/ultrafusion
+      context: ./../docker/fast_livo2
       dockerfile: Dockerfile
-    image: swarmdeck-ultrafusion:local
+    image: swarmdeck-fast-livo2:local
     environment:
-      # lwio = LiDAR-Wheel-Inertial Odometry, which is what the generated
-      # experiment's `channels="imu,lidar,wheels"` streams. Changing one
-      # without the other withholds a channel the mode fuses.
-      MODE: "${UF_MODE:-lwio}"
+      # 1 fuses the camera (true LIVO). Only meaningful when the sim is also
+      # streaming it: see SWARMDECK_ESTIMATOR_CHANNELS on the sim service.
+      IMG_EN: "${IMG_EN:-0}"
       RUNTIME_DIR: /run/swarmdeck
       SOCK: /run/swarmdeck/uf.sock
       RESULTS: /results
@@ -264,25 +282,31 @@ services:
       # Its own domain. The estimator's ROS traffic is internal to this
       # container and must not land in the Jazzy graph on domain 42.
       ROS_DOMAIN_ID: "43"
-    # NO sysctls here, and that is not an oversight. net.core.rmem_max is a
-    # global kernel setting, not a per-network-namespace one: a container
-    # inherits the host's value, cannot raise it, and Docker refuses to create
-    # the container at all if you ask it to ("open sysctl
-    # net.core.rmem_default file: permission denied"). The buffer this service
-    # actually needs is therefore a HOST requirement, checked and reported at
-    # startup by run_uf.sh:
-    #
-    #     sudo sysctl -w net.core.rmem_max=8388608
-    #
-    # It matters because one VLP-16 revolution is ~630 KB, larger than the
-    # stock 208 KB socket buffer, so the fragments overflow and the message is
-    # never reassembled. The publisher reports success and nothing logs an
-    # error; the only symptom is the estimator appearing to diverge.
     volumes:
-      - ../../deploy/docker/ultrafusion:/tools:ro
-      - ../../sessions/ultrafusion:/results
+      - ../../deploy/docker/fast_livo2:/tools:ro
+      - ../../sessions/fast_livo2:/results
       - swarmdeck_runtime:/run/swarmdeck
-    command: ["bash", "-c", "exec bash /tools/run_uf.sh"]
+    command: ["bash", "-c", "exec bash /tools/run_fast_livo.sh"]
+    restart: "no"
+
+  # Backward compatibility alias for the ultrafusion service name
+  ultrafusion:
+    profiles: ["argos"]
+    build:
+      context: ./../docker/fast_livo2
+      dockerfile: Dockerfile
+    image: swarmdeck-fast-livo2:local
+    environment:
+      RUNTIME_DIR: /run/swarmdeck
+      SOCK: /run/swarmdeck/uf.sock
+      RESULTS: /results
+      FASTRTPS_DEFAULT_PROFILES_FILE: /tools/fastdds_large.xml
+      ROS_DOMAIN_ID: "43"
+    volumes:
+      - ../../deploy/docker/fast_livo2:/tools:ro
+      - ../../sessions/fast_livo2:/results
+      - swarmdeck_runtime:/run/swarmdeck
+    command: ["bash", "-c", "exec bash /tools/run_fast_livo.sh"]
     restart: "no"
 
   # --- legacy Gazebo profile ----------------------------------------------

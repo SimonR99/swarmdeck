@@ -18,7 +18,7 @@ help:
 	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
 	@echo "  make demo            server + mock + ui, all at once"
 	@echo "  make [build|up|down]-server  Docker: backend + UI only"
-	@echo "  make up-argos        Docker: ARGoS + Ultra-Fusion + SLAM/Nav2/adapter_sim"
+	@echo "  make up-argos        Docker: ARGoS + Fast-LIVO2 + SLAM/Nav2/adapter_sim"
 	@echo "  make up-argos-gpu    as up-argos, rendering on an NVIDIA GPU"
 	@echo "  make up-argos-dri    as up-argos, rendering on an Intel/AMD GPU"
 	@echo "  make up-argos-dev    FAST: 3 robots, drift odometry, no estimator"
@@ -148,18 +148,18 @@ down-server:
 	$(COMPOSE) stop server ui slam
 	$(COMPOSE) rm -f server ui slam
 
-# --- simulated fleet: ARGoS + Ultra-Fusion + SLAM/Nav2 + adapter_sim.
+# --- simulated fleet: ARGoS + Fast-LIVO2 + SLAM/Nav2 + adapter_sim.
 #
 # Three services around one volume; see docker-compose.yml. The first build is
 # long: Dockerfile.argos compiles the ARGoS fork against the Filament SDK.
 build-argos:
-	$(COMPOSE) --profile argos build argos sim ultrafusion
+	$(COMPOSE) --profile argos build argos sim fast_livo2
 
 up-argos:
-	$(COMPOSE) --profile argos up --build -d server ui slam argos sim ultrafusion
+	$(COMPOSE) --profile argos up --build -d server ui slam argos sim fast_livo2
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Fleet:            ARGoS + Ultra-Fusion (allow ~90s for robots to appear)"
+	@echo "Fleet:            ARGoS + Fast-LIVO2 (allow ~90s for robots to appear)"
 	@echo "Rendering:        software Vulkan; use up-argos-gpu or up-argos-dri for a device"
 
 # --- development fleet: three robots, synthetic drift odometry, no estimator.
@@ -173,8 +173,8 @@ up-argos:
 #                           keeps one of every platform rather than dropping
 #                           the Spot.
 #   odometry:=drift         ~4x, measured 0.230x against 0.056x real time. It
-#                           takes Ultra-Fusion out of the lockstep exchange,
-#                           and the ultrafusion service is not started at all.
+#                           takes Fast-LIVO2 out of the lockstep exchange,
+#                           and the estimator service is not started at all.
 #
 # What it costs: the drift model perturbs ground-truth motion with Gaussian
 # noise. It cannot slip a wheel against an obstacle or lose a scan to
@@ -186,7 +186,7 @@ up-argos-dev:
 	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos \
 	    up --build -d server ui slam duck_detector mediamtx sim argos
 	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "Fleet:            3 robots, drift odometry, no Ultra-Fusion"
+	@echo "Fleet:            3 robots, drift odometry, no Fast-LIVO2"
 	@echo "Fidelity:         development only -- see docs/architecture/simulation.md"
 
 DRI_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
@@ -200,10 +200,10 @@ up-argos-gpu:
 
 up-argos-bistro:
 	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
-	  $(COMPOSE) --profile argos up --build -d server ui slam argos sim ultrafusion
+	  $(COMPOSE) --profile argos up --build -d server ui slam argos sim fast_livo2
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Fleet:            ARGoS + Ultra-Fusion (Bistro environment)"
+	@echo "Fleet:            ARGoS + Fast-LIVO2 (Bistro environment)"
 
 up-argos-bistro-dri:
 	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
@@ -216,8 +216,8 @@ up-argos-bistro-gpu:
 	@echo "Fleet:            ARGoS Bistro on the NVIDIA GPU"
 
 down-argos:
-	$(COMPOSE) --profile argos stop argos sim ultrafusion
-	$(COMPOSE) --profile argos rm -f argos sim ultrafusion
+	$(COMPOSE) --profile argos stop argos sim fast_livo2
+	$(COMPOSE) --profile argos rm -f argos sim fast_livo2
 
 # --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
 # docker-compose.yml means this brings the server up too if it isn't already.

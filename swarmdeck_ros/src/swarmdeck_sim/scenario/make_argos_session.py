@@ -141,7 +141,12 @@ EXCHANGE_HZ = 10.0  # how often ROS sees an observation, and the /clock rate
 # The photorealistic camera's resolution is the single biggest render-cost dial
 # in the experiment, ahead of the lidar. 320x240 is the reference figure from
 # argos3-examples' Ultra-Fusion benchmarks.
-CAMERA_RESOLUTION = (320, 240)
+# Overridable so a visual estimator can be given something to work with:
+# FAST-LIVO2 aligns image patches photometrically, and 320x240 of a sparse
+# scene gives it very little. SWARMDECK_CAMERA_RESOLUTION=640,480
+CAMERA_RESOLUTION = tuple(
+    int(v) for v in os.environ.get("SWARMDECK_CAMERA_RESOLUTION", "320,240").split(",")
+)
 CAMERA_FOV_DEG = 60.0
 
 # Ultra-Fusion's lidar-inertial modes register on the vertical structure of the
@@ -284,8 +289,8 @@ def generate_argos_xml(
     lidar = lidar_spec(fleet_cfg)
     if lidar.rings < MIN_LIDAR_RINGS:
         raise ValueError(
-            f"the ARGoS backend fuses odometry with Ultra-Fusion, which is "
-            f"lidar-inertial, but the lidar resolves to {lidar.rings} ring(s) "
+            f"the ARGoS backend fuses odometry with Fast-LIVO2, which is "
+            f"lidar-inertial-visual, but the lidar resolves to {lidar.rings} ring(s) "
             f"in {config_path.name}. A planar scan carries no vertical "
             f"structure to register on, so the estimator never converges and "
             f"every robot stands still with no odometry at all. Set "
@@ -425,7 +430,7 @@ def generate_argos_xml(
 
     if estimator:
         lines.extend([
-        "    <!-- Ultra-Fusion. `channels` names only what the estimator reads:",
+        "    <!-- Fast-LIVO2. `channels` names only what the estimator reads:",
         "         the camera is declared on every robot but not streamed here,",
         "         and an unread VLP-16 revolution is ~630 KB per robot per",
         "         100 ms of traffic that only starves the channels that matter.",
@@ -438,7 +443,15 @@ def generate_argos_xml(
         f'    <external_estimator id="uf" socket={_attr(uf_socket_path)}',
         f'                        robots={_attr(",".join(robot_ids))}',
         '                        lockstep_pose="false"',
-        '                        channels="imu,lidar,wheels"',
+        # Ultra-Fusion ran lwio and never read the camera, so withholding it was
+        # right: an unread frame is pure bandwidth. FAST-LIVO2 is
+        # LiDAR-inertial-VISUAL, and with the camera withheld its sync_packages
+        # never completes, so it emits no pose at all and logs nothing about it.
+        # The camera is declared on every robot either way, which is why it
+        # still reaches the operator UI; this attribute only governs what is
+        # streamed to the estimator socket.
+        # Override: SWARMDECK_ESTIMATOR_CHANNELS=imu,lidar,wheels,camera
+        f'                        channels={_attr(os.environ.get("SWARMDECK_ESTIMATOR_CHANNELS", "imu,lidar,wheels"))}',
         '                        alignment="none"',
         '                        connect_timeout="180" timeout="120" />',
         "",

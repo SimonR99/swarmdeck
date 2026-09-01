@@ -41,9 +41,9 @@ cameras.
 └─────────────────────────────────────────────┘
         │                              │
         ▼                              ▼
-┌─ sim container (Jazzy) ──┐   ┌─ ultrafusion (Humble) ─┐
-│ swarmdeck_argos_bridge   │   │ uf_link.py             │
-│  /clock /ns/scan/points  │   │ uf_node × N  (lwio)    │
+┌─ sim container (Jazzy) ──┐   ┌─ fast_livo2 (ROS 2) ───┐
+│ swarmdeck_argos_bridge   │   │ fast_livo_link.py      │
+│  /clock /ns/scan/points  │   │ fast_livo_node × N     │
 │  /ns/odom /ns/imu /ns/tf │   │ ROS_DOMAIN_ID 43       │
 │  /ns/camera/*            │   └────────────────────────┘
 │ pointcloud_to_laserscan  │
@@ -52,11 +52,13 @@ cameras.
 └──────────────────────────┘
 ```
 
-Three containers around one volume. The split is not incidental: Ultra-Fusion
-ships as a ROS 2 **Humble** binary and the rest of the stack is **Jazzy**, and
-they never have to interoperate, because the estimator's answer returns through
+Three containers around one volume. The split is not incidental: Fast-LIVO2
+runs in its own container on ROS 2 and the rest of the stack is Jazzy, and
+they never have to interoperate over DDS, because the estimator's answer returns through
 ARGoS as an ordinary `CCI_OdometrySensor` reading rather than over DDS. The
-estimator's own ROS traffic stays inside its container.
+estimator's own ROS traffic stays inside its container. Fast-LIVO2 builds from source,
+enabling native deployment across both ARM64 (NVIDIA Jetson / Apple Silicon / ARM servers)
+and AMD64 architectures.
 
 ARGoS dials both sockets; the other two bind them. That decides startup order,
 and `argos-entrypoint.sh` waits for the generated experiment rather than racing.
@@ -69,7 +71,7 @@ and `argos-entrypoint.sh` waits for the generated experiment rather than racing.
 | `<runtime>/indoor_collision.gltf` | same run of the same script | Jolt `<mesh>` (collided with) |
 | `<runtime>/session.argos` | `scenario/make_argos_session.py` | `argos3`, and `argos_mounts.py` for the estimator's extrinsics |
 | `<runtime>/argos.sock` | the ROS bridge (bind) | the loop function (dial) |
-| `<runtime>/uf.sock` | Ultra-Fusion (bind) | the `external_estimator` medium (dial) |
+| `<runtime>/uf.sock` | Fast-LIVO2 (bind) | the `external_estimator` medium (dial) |
 | `argos/assets/props/*.glb` | `make_argos_world.py --props`, committed | both, per detection target |
 
 `<runtime>` is `/run/swarmdeck` under Compose. Keep it short: a Unix socket path
