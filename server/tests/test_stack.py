@@ -2355,3 +2355,26 @@ def test_broadcast_survives_a_dashboard_closing_mid_send():
         assert first.sent, "the surviving dashboard must still receive the message"
     finally:
         _gui_clients.clear()
+
+
+def test_discard_offline_robot_via_gui_and_rest():
+    from swarmdeck_server.api.app import app, registry, handle_gui_message
+    from swarmdeck_server.fleet.registry import Robot
+
+    client = TestClient(app)
+    # Setup robot
+    test_rid = "spot_test_0"
+    registry.robots[test_rid] = Robot(robot_id=test_rid, robot_type="spot")
+    assert test_rid in registry.robots
+
+    # Test DELETE endpoint
+    response = client.delete(f"/api/fleet/{test_rid}")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert test_rid not in registry.robots
+
+    # Re-add and test GUI message discard
+    registry.robots[test_rid] = Robot(robot_id=test_rid, robot_type="spot")
+    assert test_rid in registry.robots
+    asyncio.run(handle_gui_message({"type": "discard_robot", "robot_id": test_rid}))
+    assert test_rid not in registry.robots

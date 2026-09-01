@@ -59,21 +59,46 @@ services:
     network_mode: host
     ipc: host
     privileged: true
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+      # Raises the FastDDS shared-memory segment from its 512 KiB default to
+      # 16 MB. A 1.57 MB /ouster/points sample does not fit the default, which
+      # held the cloud to 2-5 Hz against a configured 10 Hz and starved
+      # SuperOdometry with it. See deploy/dds/fastdds_large_data.xml.
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     volumes:
       - /dev:/dev
       - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
+      # For the DDS profile above and the params file below, both of which have
+      # to live in this repo rather than the read-only MIST workspace.
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     command:
       - ros2
       - launch
       - ouster_ros
       - driver.launch.py
-      - params_file:=/workspace/install/rover_launch/share/rover_launch/config/drivers/driver_ouster.yaml
+      # Repo-owned copy of the MIST file, differing in one line: proc_mask drops
+      # IMG|RAW|TLM. Those eight publishers had no subscribers and shared the
+      # point cloud's shared-memory segment.
+      - params_file:=/app/swarmdeck/adapters/adapter_ros2/config/botman_driver_ouster.yaml
       - ouster_ns:=ouster
       - viz:=False
       - os_driver_name:=os_driver
       - throttle_rate:=0.1
       - input_topic:=/ouster/points
       - output_topic:=/ouster/points_throttled
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /workspace/install/setup.sh 2>/dev/null || true &&
+          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/ouster/points'
+      interval: 20s
+      timeout: 12s
+      retries: 12
+      start_period: 15s
     restart: unless-stopped
 
   # VectorNav VN-100. Started here for the same reason the lidar, SLAM and OAK
@@ -114,14 +139,17 @@ services:
     ipc: host
     privileged: true
     runtime: nvidia
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+      # Raises the FastDDS shared-memory segment from its 512 KiB default to
+      # 16 MB. A 1.57 MB /ouster/points sample does not fit the default, which
+      # held the cloud to 2-5 Hz against a configured 10 Hz and starved
+      # SuperOdometry with it. See deploy/dds/fastdds_large_data.xml.
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     depends_on:
       lidar:
-        condition: service_started
-      # SuperOdometry decides at startup whether it has an IMU. If the driver
-      # is not up yet it settles into lidar-only odometry and says so once,
-      # rather than picking the IMU up when it appears.
-      vectornav:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - /dev:/dev
       - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
@@ -157,6 +185,17 @@ services:
       #     BOTMAN_SUPERODOM_CALIB=botman_superodom_calibration.yaml
       - config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CONFIG:-botman_superodom_ouster.yaml}
       - calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CALIB:-botman_superodom_ouster_calibration.yaml}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /workspace/install/setup.sh 2>/dev/null || true &&
+          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/laser_odometry'
+      interval: 20s
+      timeout: 12s
+      retries: 12
+      start_period: 15s
     restart: unless-stopped
 
   # Botman's physical camera is an OAK-D Pro, which is a DepthAI USB device
@@ -411,14 +450,23 @@ services:
     depends_on:
       # Nav2's pose comes from SLAM's /laser_odometry and its costmaps from the
       # lidar's /ouster/scan; robot_stack alone supplies neither.
-      - robot_stack
-      - lidar
-      - slam
+      robot_stack:
+        condition: service_started
+      lidar:
+        condition: service_healthy
+      slam:
+        condition: service_healthy
     network_mode: host
     ipc: host
+    volumes:
+      # Only for the DDS profile below. This image is otherwise self-contained.
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
+      # footprint_cloud_to_scan reads the 1.57 MB /ouster/points RELIABLE, so it
+      # needs the same enlarged segment as the writer. See the lidar service.
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     command:
       - ros2
       - launch

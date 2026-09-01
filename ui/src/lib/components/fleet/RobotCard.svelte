@@ -124,6 +124,17 @@
       </Badge>
       {#if !robot.online}
         <Badge tone="danger">OFFLINE</Badge>
+        <button
+          class="inline-flex h-5 items-center gap-1 rounded-full bg-surface-3 px-2 text-[9px] font-semibold text-fg-dim transition-colors hover:bg-danger/15 hover:text-danger active:scale-95"
+          title="Dismiss {shortName} from dashboard (reappears automatically when reconnected)"
+          onclick={(e) => {
+            e.stopPropagation();
+            actions.discardRobot(robot.robot_id);
+          }}
+        >
+          <X class="h-2.5 w-2.5" />
+          Dismiss
+        </button>
       {/if}
       {#if fleet.can(robot.robot_id, 'body')}
         <button

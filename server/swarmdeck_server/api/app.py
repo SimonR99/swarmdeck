@@ -749,6 +749,20 @@ async def get_fleet() -> dict[str, Any]:
     return await handler()
 
 
+@app.delete("/api/fleet/{robot_id}")
+async def delete_fleet_robot(robot_id: str) -> dict[str, Any]:
+    from .control_routes import delete_fleet_robot as handler
+
+    return await handler(robot_id)
+
+
+@app.post("/api/fleet/{robot_id}/discard")
+async def post_discard_fleet_robot(robot_id: str) -> dict[str, Any]:
+    from .control_routes import delete_fleet_robot as handler
+
+    return await handler(robot_id)
+
+
 @app.get("/api/session")
 async def get_session() -> dict[str, Any]:
     from .control_routes import get_session as handler
@@ -1255,6 +1269,15 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     elif kind == "switch_camera":
         await set_camera_watch(source, rid)
+
+    elif kind in ("discard_robot", "remove_robot"):
+        if rid and rid in registry.robots:
+            registry.disconnect(rid)
+            registry.remove(rid)
+            if hasattr(map_service, "reset_robot_async"):
+                await map_service.reset_robot_async(rid)
+            events.log("robot_discarded", {"robot_id": rid})
+            await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
 
     elif kind in ("select_robots", "report_target"):
         pass  # logged above; no robot-side effect

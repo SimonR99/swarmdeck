@@ -141,25 +141,22 @@ def test_aslan_uses_the_same_forward_or_reverse_nav_limits():
     assert "PreferForward" in follow_path["critics"]
 
 
-def test_aslan_slam_uses_vectornav_imu():
+def test_aslan_slam_uses_ouster_imu():
     source = ROBOT_LAUNCH.read_text()
     compose = yaml.safe_load(COMPOSE.read_text())
     slam_command = compose["services"]["slam"]["command"][2]
-    vn = yaml.safe_load(
-        (REPO / "adapters/adapter_ros2/config/aslan_vectornav.yaml").read_text()
-    )
 
     assert 'DeclareLaunchArgument("start_imu", default_value="true")' in source
     assert (
-        'DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu")' in source
+        'DeclareLaunchArgument("imu_topic", default_value="/ouster/imu")' in source
     )
-    assert 'executable="vectornav"' in source
-    assert 'executable="vn_sensor_msgs"' in source
+    assert (
+        'DeclareLaunchArgument("start_vectornav", default_value="false")' in source
+    )
     assert "imu_preintegration_node" in source
     assert "launch/os1_128.launch.py" not in source
-    assert "aslan_superodom_calibration.yaml" in source
+    assert "aslan_superodom_ouster_calibration.yaml" in source
     assert ". /workspace/install/setup.bash" in slam_command
     assert "start_imu:=true" in slam_command
-    assert "imu_topic:=/vectornav/imu" in slam_command
-    assert vn["vectornav"]["ros__parameters"]["port"] == "/dev/vectornav"
-    assert vn["vectornav"]["ros__parameters"]["baud"] == 115200
+    assert "imu_topic:=$${ASLAN_IMU_TOPIC:-/ouster/imu}" in slam_command
+    assert "aslan_superodom_ouster_calibration.yaml" in slam_command

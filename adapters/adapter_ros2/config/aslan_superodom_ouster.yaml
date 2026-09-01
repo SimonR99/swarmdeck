@@ -1,0 +1,47 @@
+# SuperOdometry for Aslan with Ouster IMU.
+#
+# imu_topic is /ouster/imu. Pair this with aslan_superodom_ouster_calibration.yaml
+# (which applies 180 degree yaw rotation from os_lidar to os_imu).
+/**:
+  ros__parameters:
+    imu_topic: "/ouster/imu"
+    laser_topic: "/ouster/points"
+    sensor: "ouster"
+    use_imu_roll_pitch: false
+    save_ply: false
+
+    world_frame: "map"
+    world_frame_rot: "map_rot"
+    sensor_frame: "os_lidar"
+    sensor_frame_rot: "os_lidar_rot"
+
+    imu_acc_x_limit: 0.5
+    imu_acc_y_limit: 0.2
+    imu_acc_z_limit: 0.4
+
+    feature_extraction_node:
+        scan_line: 64
+        min_range: 0.2
+        filter_point_size: 3
+
+    laser_mapping_node:
+        mapping_line_resolution: 0.1
+        mapping_plane_resolution: 0.2
+        max_iterations: 5
+        max_surface_features: 2000
+        localization_mode: false
+        read_pose_file: false
+        init_x: 0.0
+        init_y: 0.0
+        init_z: 0.0
+        init_roll: 0.0
+        init_pitch: 0.0
+        init_yaw: 0.0
+
+    imu_preintegration_node:
+        lidar_correction_noise: 0.01
+        acc_n: 3.9939570888238808e-03
+        gyr_n: 1.5636343949698187e-03
+        acc_w: 6.4356659353532566e-05
+        gyr_w: 3.5640318696367613e-05
+        g_norm: 9.80511
