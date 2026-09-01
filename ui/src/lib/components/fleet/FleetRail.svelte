@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { Compass, PanelLeftClose, Square, UsersRound } from 'lucide-svelte';
+  import { PanelLeftClose, UsersRound } from 'lucide-svelte';
   import RobotCard from './RobotCard.svelte';
-  import { actions } from '$lib/api/connection';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { settings } from '$lib/stores/settings.svelte';
 
@@ -48,45 +47,4 @@
     {/if}
   </div>
 
-  <!--
-    Exploration: the reactive bootstrap that drives the fleet before anyone
-    sends a goal. Shown only when a robot advertises `explore`, which only
-    simulation adapters do, exactly as the reset control is gated.
-
-    The label follows what the robots REPORT, not what was last clicked. A
-    start that never reached the adapter leaves this reading "Explore", which
-    is the truth; a button that latched optimistically would claim the fleet
-    was exploring while it sat still.
-  -->
-  {#if fleet.canExplore}
-    <footer class="shrink-0 border-t border-border/70 p-2">
-      {#if fleet.exploring}
-        <button
-          class="flex h-9 w-full touch-target items-center justify-center gap-2
-                 rounded-[--radius-control] border border-border bg-surface-3
-                 text-[11px] font-semibold text-fg transition-colors
-                 hover:bg-surface-4"
-          title="Stop the reactive exploration bootstrap"
-          onclick={() => actions.stopExplore()}
-        >
-          <Square class="h-3.5 w-3.5" />
-          Stop exploring
-        </button>
-      {:else}
-        <button
-          class="flex h-9 w-full touch-target items-center justify-center gap-2
-                 rounded-[--radius-control] bg-accent-container
-                 text-[11px] font-semibold text-accent-container-fg
-                 transition-opacity hover:opacity-90
-                 disabled:cursor-not-allowed disabled:opacity-40"
-          title="Drive the fleet reactively to bootstrap the maps"
-          disabled={fleet.online === 0}
-          onclick={() => actions.startExplore()}
-        >
-          <Compass class="h-3.5 w-3.5" />
-          Explore
-        </button>
-      {/if}
-    </footer>
-  {/if}
 </aside>
