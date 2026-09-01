@@ -168,7 +168,9 @@
     const label = robotId ? robotDisplayName(robotId) : 'every robot';
     const confirmed = window.confirm(
       `Reset the accumulated map for ${label}?\n\n` +
-        'This clears SwarmDeck map data only. Robot-side SLAM and recordings keep running.'
+        (robotId
+          ? "This deletes that robot's live and saved optimisation keyframes. Robot-side SLAM keeps running and can build a new map."
+          : 'This deletes every live and saved optimisation keyframe. Robot-side SLAM keeps running and can build new maps.')
     );
     if (!confirmed) return;
 
@@ -573,7 +575,6 @@
   const resetRobotBlocked = $derived(
     resetPending ||
       !resetRobot ||
-      !resetRobot.capabilities.includes('map') ||
       resetRobot.nav_status === 'active' ||
       resetRobot.goal !== null
   );
@@ -785,8 +786,8 @@
           title={resetRobot
             ? resetRobotBlocked
               ? 'Stop this robot before resetting its map'
-              : `Reset only ${robotDisplayName(resetRobot.robot_id)}`
-            : 'Select exactly one mapping robot'}
+              : `Delete ${robotDisplayName(resetRobot.robot_id)} map and optimisation keyframes`
+            : 'Select exactly one robot'}
           disabled={resetRobotBlocked}
           onclick={() => resetRobotId && void resetMaps(resetRobotId)}
         >

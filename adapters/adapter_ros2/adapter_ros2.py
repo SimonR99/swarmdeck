@@ -577,10 +577,57 @@ class HardwareBridge(
             self._costmap_dirty.add(kind)
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
-        """Reduce one registered scan for the 2D map and optional 3D view."""
+        """Normalize one cloud into ``map_frame`` before producing map data.
+
+        Most hardware profiles subscribe to an already-registered cloud whose
+        header is the configured map frame.  Asimov's Mid-360 publishes raw
+        sweeps in ``livox_frame`` instead.  Treating those XYZ values as world
+        coordinates makes the keyframe producer apply the inverse robot pose
+        to sensor-frame points; the optimizer then receives contradictory
+        clouds and fans repeated observations into several rotated maps.
+
+        Honour the PointCloud2 header and use the transform at the cloud stamp.
+        A cloud with no header remains the legacy/test-double case and is
+        assumed to already be registered.
+        """
         points = self._cloud_xyz(msg)
         if not len(points):
             return
+
+        header = getattr(msg, "header", None)
+        source = str(getattr(header, "frame_id", "") or "").lstrip("/")
+        target = str(self.map_frame or "").lstrip("/")
+        stamp = getattr(header, "stamp", None) if header is not None else None
+        tf_time = (
+            rclpy.time.Time.from_msg(stamp)
+            if stamp is not None
+            else rclpy.time.Time()
+        )
+        if source and target and source != target:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    target, source, tf_time, timeout=Duration(seconds=0.1)
+                )
+                mapped = transform_points(points, tf.transform)
+                if mapped is None:
+                    raise ValueError("cloud transform produced no points")
+                points = mapped
+            except Exception as exc:
+                now = time.monotonic()
+                warned_at = float(getattr(self, "_map_cloud_frame_warned_at", 0.0))
+                if now - warned_at >= 10.0:
+                    self._map_cloud_frame_warned_at = now
+                    self.node.get_logger().warn(
+                        f"[{self.id}] dropping map cloud: no {target} <- {source} "
+                        f"transform at capture time: {exc}"
+                    )
+                return
+
+        pose = self.pose7(tf_time)
+        if pose is not None:
+            pose = np.asarray(pose, dtype=np.float64)
+            if pose.shape != (7,) or not np.isfinite(pose).all():
+                pose = None
 
         now = time.monotonic()
         cloud_period = max(
@@ -609,10 +656,21 @@ class HardwareBridge(
         # the beam actually left the sensor, carving free space through geometry
         # it never crossed. That corrupts precisely the free/occupied contrast
         # registration.py relies on to break rotational symmetry.
-        self._scan_origin = self.map_pose()
+        if pose is not None:
+            qx, qy, qz, qw = pose[3:]
+            scan_yaw = math.atan2(
+                2.0 * (qw * qz + qx * qy),
+                1.0 - 2.0 * (qy * qy + qz * qz),
+            )
+            self._scan_origin = {
+                "x": float(pose[0]),
+                "y": float(pose[1]),
+                "yaw": float(scan_yaw),
+            }
+        else:
+            self._scan_origin = self.map_pose()
         self._scan_dirty = True
         try:
-            pose = self.pose7()
             if pose is not None:
                 stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
                 self._keyframes.consider(points, pose, stamp)
@@ -963,11 +1021,14 @@ class HardwareBridge(
                 )
             return dict(fallback)
 
-    def pose7(self) -> np.ndarray | None:
+    def pose7(self, stamp: Any | None = None) -> np.ndarray | None:
         """Full ``T_map_base`` as ``[x,y,z,qx,qy,qz,qw]`` for keyframe upload."""
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.map_frame, self.base_frame, rclpy.time.Time()
+                self.map_frame,
+                self.base_frame,
+                stamp if stamp is not None else rclpy.time.Time(),
+                timeout=Duration(seconds=0.1),
             )
             t = tf.transform.translation
             q = tf.transform.rotation

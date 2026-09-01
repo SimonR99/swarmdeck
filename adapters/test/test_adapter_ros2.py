@@ -734,7 +734,7 @@ class _FakeField:
         self.offset = offset
 
 
-def _fake_cloud(points, extra_fields=()):
+def _fake_cloud(points, extra_fields=(), frame=""):
     import struct
 
     names = list(extra_fields) + ["x", "y", "z"]
@@ -744,7 +744,13 @@ def _fake_cloud(points, extra_fields=()):
         struct.pack("<%df" % len(names), *([0.0] * len(extra_fields)), *point)
         for point in points
     )
-    return type("M", (), {"fields": fields, "point_step": point_step, "data": data})()
+    attrs = {"fields": fields, "point_step": point_step, "data": data}
+    if frame:
+        header = MagicMock()
+        header.frame_id = frame
+        header.stamp = MagicMock()
+        attrs["header"] = header
+    return type("M", (), attrs)()
 
 
 def test_registered_cloud_uses_declared_offsets_and_height_band(mod):
@@ -784,6 +790,43 @@ def test_registered_cloud_height_band_can_use_a_map_floor_reference(mod):
     bridge._on_map_cloud(msg)
 
     assert bridge._scan_points.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+
+
+def test_sensor_frame_cloud_is_transformed_to_map_before_keyframing(mod):
+    bridge = _bridge(
+        mod,
+        {
+            "map_frame": "world",
+            "base_frame": "base_link",
+            "map_cloud_height_band": {"min_z": 0.0, "max_z": 2.0},
+        },
+    )
+    tf = _yaw_tf(math.pi / 2.0)
+    tf.transform.translation.x = 10.0
+    tf.transform.translation.y = 5.0
+    bridge.tf_buffer.lookup_transform.side_effect = [tf, tf]
+    bridge._keyframes = MagicMock()
+
+    bridge._on_map_cloud(_fake_cloud([(1.0, 0.0, 0.5)], frame="livox_frame"))
+
+    import numpy as np
+
+    np.testing.assert_allclose(bridge._scan_points, [[10.0, 6.0]], atol=1e-6)
+    considered_points = bridge._keyframes.consider.call_args.args[0]
+    np.testing.assert_allclose(considered_points, [[10.0, 6.0, 0.5]], atol=1e-6)
+    assert bridge.tf_buffer.lookup_transform.call_args_list[0].args[:2] == (
+        "world",
+        "livox_frame",
+    )
+
+
+def test_asimov_profile_advertises_transformed_lidar_map(mod):
+    path = REPO / "adapters" / "adapter_ros2" / "config" / "unitree_g1.yaml"
+    cfg = mod.deep_merge(mod.DEFAULTS, yaml.safe_load(path.read_text()))
+    bridge = _bridge(mod, cfg)
+
+    assert cfg["topics"]["map_cloud"] == "/utlidar/cloud_livox_mid360"
+    assert "map" in bridge.capabilities()
 
 
 def _plan_msg(frame, points):

@@ -15,11 +15,22 @@ footprint:
 
 map_frame: world
 base_frame: base_link
+lidar_height_m: 1.17
+
+# The Mid-360 sweep is published in livox_frame, not world.  The ROS 2 adapter
+# transforms it through the timestamped world <- livox_frame TF before making
+# scans/keyframes.  The live transform places the lidar about 1.17 m above the
+# floor (0.46 m above base_link).
+map_cloud_height_band:
+  floor_z: 0.0
+  min_z: 0.15
+  max_z: 1.80
+retain_free_space: true
 
 topics:
   odom: /odom
   map: ""
-  map_cloud: ""
+  map_cloud: /utlidar/cloud_livox_mid360
   plan: ""
   cmd_vel: /cmd_vel
   body_cmd: /cmd_body

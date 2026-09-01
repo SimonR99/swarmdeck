@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
 from collections import deque
 from contextlib import asynccontextmanager
@@ -36,6 +37,7 @@ from swarmdeck_protocol import (
     MAX_KEYFRAME_BYTES,
     ProtocolError,
     decode_keyframe,
+    peek_keyframe_header,
 )
 from swarmdeck_slam.backend import (
     BackendSnapshot,
@@ -140,7 +142,14 @@ backend = CollaborativeBackend(
 
 _queue: deque[bytes] = deque()
 _queue_lock = threading.Lock()
+# Makes capture persistence and admission to the in-memory queue one operation
+# with respect to reset/delete. A blob is therefore unambiguously before the
+# reset (archived + dropped) or after it (kept + queued), never one of each.
+_ingress_lock = threading.Lock()
 _queue_cap = int(os.environ.get("SWARMDECK_SLAM_QUEUE_CAP", "2048"))
+_controls: deque[tuple[str, str | None]] = deque()
+_control_lock = threading.Lock()
+_generation = 0
 _dropped = 0
 _ingested = 0
 _last_error = ""
@@ -218,6 +227,78 @@ def _capture(blob: bytes) -> None:
         _last_error = f"keyframe capture disabled: {exc}"
 
 
+def _archive_capture(robot_id: str | None = None) -> int:
+    """Move captured keyframes out of the restore path, recoverably.
+
+    A map reset that clears only RAM is undone by the next container restart
+    when ``RESTORE_CAPTURE`` is enabled.  Archived blobs live under
+    ``discarded/`` for forensic recovery, but startup only replays
+    ``keyframes/*.kf``.
+    """
+    if not CAPTURE_DIR:
+        return 0
+    source = Path(CAPTURE_DIR) / "keyframes"
+    try:
+        paths = sorted(source.glob("*.kf"))
+    except OSError:
+        return 0
+
+    selected: list[Path] = []
+    for path in paths:
+        if robot_id is None:
+            selected.append(path)
+            continue
+        try:
+            header = peek_keyframe_header(path.read_bytes())
+        except (OSError, ProtocolError):
+            continue
+        if str(header.get("robot_id", "")) == robot_id:
+            selected.append(path)
+    if not selected:
+        return 0
+
+    label = "fleet" if robot_id is None else robot_id
+    destination = (
+        Path(CAPTURE_DIR)
+        / "discarded"
+        / f"{int(time.time())}-{label}-{uuid.uuid4().hex[:8]}"
+    )
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
+        moved = 0
+        for path in selected:
+            path.replace(destination / path.name)
+            moved += 1
+        return moved
+    except OSError as exc:
+        global _last_error
+        _last_error = f"keyframe archive incomplete: {exc}"
+        return 0
+
+
+def _enqueue_control(kind: str, robot_id: str | None = None) -> int:
+    """Invalidate an in-flight solve and queue a worker-owned graph mutation."""
+    global _generation, _last_snapshot
+    with _control_lock:
+        _generation += 1
+        generation = _generation
+        _controls.append((kind, robot_id))
+    _last_snapshot = None
+    return generation
+
+
+def _take_controls() -> tuple[list[tuple[str, str | None]], int]:
+    with _control_lock:
+        commands = list(_controls)
+        _controls.clear()
+        return commands, _generation
+
+
+def _current_generation() -> int:
+    with _control_lock:
+        return _generation
+
+
 def _restore_capture() -> int:
     """Rebuild the in-memory graph from an explicitly selected capture.
 
@@ -265,9 +346,11 @@ OPTIMIZE_EVERY_S = float(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_S", "1.0"))
 PUBLISH_TIMEOUT_S = 5.0
 
 
-def _publish_snapshot(snapshot: BackendSnapshot) -> None:
+def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) -> None:
     """Push origins + the majority-component grid to the SwarmDeck server."""
     global _last_snapshot, _last_error
+    if generation is not None and generation != _current_generation():
+        return
     _last_snapshot = snapshot
     if not SERVER_URL:
         return
@@ -283,6 +366,8 @@ def _publish_snapshot(snapshot: BackendSnapshot) -> None:
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         _last_error = f"slam update failed: {exc}"
         return
+    if generation is not None and generation != _current_generation():
+        return
 
     # Per-robot and per-component grids, then the merged one.
     #
@@ -293,10 +378,14 @@ def _publish_snapshot(snapshot: BackendSnapshot) -> None:
     # looking at. These scoped grids fill that gap without weakening the rule:
     # each is a separate, separately-labelled map, never overlaid.
     for scope, grid in scoped_grids(snapshot):
+        if generation is not None and generation != _current_generation():
+            return
         _publish_grid(scope, grid)
 
     grid = majority_component(snapshot)
     if grid is None:
+        return
+    if generation is not None and generation != _current_generation():
         return
     cells = np.ascontiguousarray(grid.cells)
     payload = zlib.compress(cells.tobytes())
@@ -368,6 +457,12 @@ def _worker_loop() -> None:
     global _ingested, _last_error
     last_optimize = 0.0
     while not _stop.is_set():
+        commands, generation = _take_controls()
+        for kind, robot_id in commands:
+            if kind == "reset":
+                backend.reset()
+            elif kind == "delete_robot" and robot_id:
+                backend.delete_robot(robot_id)
         blobs: list[bytes] = []
         with _queue_lock:
             while _queue:
@@ -394,8 +489,11 @@ def _worker_loop() -> None:
         if backend.dirty and due:
             snapshot = backend.optimize_and_render()
             last_optimize = now
-            if snapshot is not None:
-                _publish_snapshot(snapshot)
+            # A reset/delete can arrive while the CPU-heavy solve is running.
+            # Its generation changes immediately; never let that obsolete solve
+            # republish the map the operator just discarded.
+            if snapshot is not None and generation == _current_generation():
+                _publish_snapshot(snapshot, generation)
 
 
 @asynccontextmanager
@@ -436,6 +534,8 @@ def status() -> dict[str, Any]:
         "anchor_robot": backend.anchor_robot_id,
         "capture_dir": CAPTURE_DIR,
         "restore_capture": RESTORE_CAPTURE,
+        "generation": _current_generation(),
+        "pending_controls": len(_controls),
         "last_error": _last_error,
         "has_snapshot": snapshot is not None,
         "components": (
@@ -575,27 +675,65 @@ async def post_keyframe(request: Request) -> Any:
         return JSONResponse({"error": "empty body"}, status_code=400)
     if len(body) > MAX_KEYFRAME_BYTES:
         return JSONResponse({"error": "keyframe too large"}, status_code=413)
-    _capture(body)
-    with _queue_lock:
-        if len(_queue) >= _queue_cap:
-            _queue.popleft()
-            _dropped += 1
-        _queue.append(body)
+    with _ingress_lock:
+        _capture(body)
+        with _queue_lock:
+            if len(_queue) >= _queue_cap:
+                _queue.popleft()
+                _dropped += 1
+            _queue.append(body)
     return {"ok": True, "queued": _queued(), "dropped": _dropped}
 
 
 @app.post("/reset")
 def post_reset() -> dict[str, Any]:
-    with _queue_lock:
-        _queue.clear()
-    backend.reset()
+    with _ingress_lock:
+        with _queue_lock:
+            _queue.clear()
+        archived = _archive_capture()
+    generation = _enqueue_control("reset")
     global _last_snapshot, _ingested, _dropped, _last_error, _restored
-    _last_snapshot = None
     _ingested = 0
     _restored = 0
     _dropped = 0
     _last_error = ""
-    return {"ok": True}
+    return {"ok": True, "archived_keyframes": archived, "generation": generation}
+
+
+@app.delete("/robots/{robot_id}/keyframes")
+def delete_robot_keyframes(robot_id: str) -> Any:
+    """Delete one robot's live and restorable pose-graph contribution."""
+    robot_id = robot_id.strip()
+    if not robot_id:
+        return JSONResponse({"error": "robot_id required"}, status_code=400)
+
+    with _ingress_lock:
+        with _queue_lock:
+            kept: deque[bytes] = deque()
+            dropped_queued = 0
+            while _queue:
+                blob = _queue.popleft()
+                try:
+                    belongs = (
+                        str(peek_keyframe_header(blob).get("robot_id", ""))
+                        == robot_id
+                    )
+                except ProtocolError:
+                    belongs = False
+                if belongs:
+                    dropped_queued += 1
+                else:
+                    kept.append(blob)
+            _queue.extend(kept)
+        archived = _archive_capture(robot_id)
+    generation = _enqueue_control("delete_robot", robot_id)
+    return {
+        "ok": True,
+        "robot_id": robot_id,
+        "archived_keyframes": archived,
+        "dropped_queued": dropped_queued,
+        "generation": generation,
+    }
 
 
 def _queued() -> int:
