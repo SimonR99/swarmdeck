@@ -25,6 +25,7 @@ let mock: MockFleet | null = null;
 let retry = 0;
 let retryTimer: number | null = null;
 let tickTimer: number | null = null;
+let localMapTimer: number | null = null;
 let started = false;
 
 function dispatch(msg: ServerMessage) {
@@ -276,6 +277,11 @@ export function startConnection() {
   void detectionCatalog.load();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
+  // map_patch carries the merged map only, so the per-robot view has no push
+  // path and would otherwise sit frozen until the operator reselected the
+  // robot. Poll it at the adapter's own map cadence; refreshLocalView is a
+  // no-op unless a robot view is actually on screen.
+  localMapTimer = setInterval(() => void mapStore.refreshLocalView(), 2000) as unknown as number;
 }
 
 export function teardown() {
@@ -283,8 +289,10 @@ export function teardown() {
   started = false;
   if (retryTimer) clearTimeout(retryTimer);
   if (tickTimer) clearInterval(tickTimer);
+  if (localMapTimer) clearInterval(localMapTimer);
   retryTimer = null;
   tickTimer = null;
+  localMapTimer = null;
   if (ws) ws.onclose = null;
   ws?.close();
   ws = null;

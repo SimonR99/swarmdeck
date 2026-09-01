@@ -102,6 +102,7 @@ export interface CostmapLayerEntry {
 }
 const costmapLayers = new Map<string, CostmapLayerEntry>();
 let statusLoading = false;
+let localRefreshInFlight = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
 
@@ -958,6 +959,29 @@ export const mapStore = {
   },
 
   /** Reload whichever full grid is visible after an operator map reset. */
+  /** Re-fetch the robot's own map while it is on screen.
+
+      Live `map_patch` messages carry the MERGED map only. There is no
+      per-robot patch stream, and applyGlobalPatch correctly refuses to paint a
+      merged patch onto a robot's raster, so the local view had no incremental
+      update at all: it repainted only when selected. Leaving the robot and
+      coming back was the only way to see that its map had moved on.
+
+      Nothing on the wire announces that a robot's own map advanced -- robotSeqs
+      is only ever written by this client, after it fetches -- so this polls.
+      The cadence matches the adapter's map_period_s of 2 s; faster would just
+      re-fetch an unchanged raster. */
+  async refreshLocalView() {
+    if (state.viewMode !== 'local' || !state.viewRobot) return;
+    if (localRefreshInFlight) return;
+    localRefreshInFlight = true;
+    try {
+      await this.selectRobotView(state.viewRobot, true, true);
+    } finally {
+      localRefreshInFlight = false;
+    }
+  },
+
   async reloadCurrentView() {
     loadGeneration++;
     clearGrid();
@@ -1001,7 +1025,7 @@ export const mapStore = {
     await this.selectRobotView(robotId, true);
   },
 
-  async selectRobotView(robotId: string | null, force: boolean = false) {
+  async selectRobotView(robotId: string | null, force: boolean = false, quiet: boolean = false) {
     const recommended = state.status?.view_by_robot?.[robotId ?? ''] === 'local';
     const desiredLocal = Boolean(
       robotId &&
@@ -1024,8 +1048,13 @@ export const mapStore = {
       state.revision++;
     } else if (force) {
       loadGeneration++;
-      clearGrid();
-      state.revision++;
+      // A quiet refresh redraws the same view in place. Clearing first would
+      // blank the canvas on every poll, because the render loop draws whatever
+      // is on it at that instant.
+      if (!quiet) {
+        clearGrid();
+        state.revision++;
+      }
     }
 
     if (!desiredLocal) {
