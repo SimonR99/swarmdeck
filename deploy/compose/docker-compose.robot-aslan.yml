@@ -20,6 +20,12 @@ x-aslan-stack: &aslan-stack
   environment:
     ROS_DOMAIN_ID: *ros_domain
     LD_LIBRARY_PATH: "/usr/local/lib:${LD_LIBRARY_PATH:-}"
+    RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    # Raises the FastDDS shared-memory segment from its 512 KiB default to
+    # 16 MB. A 1.57 MB /ouster/points sample does not fit the default, which
+    # held the cloud to 2-5 Hz against a configured 10 Hz and starved
+    # SuperOdometry with it. See deploy/dds/fastdds_large_data.xml.
+    FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
   restart: unless-stopped
 
 services:
@@ -216,9 +222,15 @@ services:
         condition: service_healthy
     network_mode: host
     ipc: host
+    volumes:
+      # Only for the DDS profile below. This image is otherwise self-contained.
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
+      # footprint_cloud_to_scan reads the 1.57 MB /ouster/points RELIABLE, so it
+      # needs the same enlarged segment as the writer. See the lidar service.
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     # publish_odom_tf:=false because the odom_tf service above already
     # broadcasts map -> os_lidar. Same split as Botman: keep one bridge
     # independent of Nav2 so costmaps still get a pose if Nav2 restarts,
