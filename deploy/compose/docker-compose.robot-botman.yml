@@ -409,6 +409,101 @@ services:
       - "${VIDEO_HEIGHT:-480}"
     restart: unless-stopped
 
+  # The Ouster driver publishes os_sensor -> os_lidar and os_sensor -> os_imu,
+  # but nothing anchored os_sensor to the chassis, so tf2 reported "two or more
+  # unconnected trees" and no consumer could relate a lidar-framed point to
+  # botman_base_link. Mast height measured 2026-08-31: os_lidar sits 0.28 m
+  # above base_link and 0.16 m forward, and the factory os_sensor -> os_lidar
+  # is +0.036 m with a 180 deg yaw, so os_sensor is at 0.244 m. os_sensor is
+  # forward-aligned with the chassis; only os_lidar carries that pi.
+  ouster_mount_tf:
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-ouster-tf
+    depends_on:
+      lidar:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - tf2_ros
+      - static_transform_publisher
+      - --x
+      - "${BOTMAN_OUSTER_X:-0.16}"
+      - --y
+      - "${BOTMAN_OUSTER_Y:-0.0}"
+      - --z
+      - "${BOTMAN_OUSTER_Z:-0.244}"
+      - --qx
+      - "0"
+      - --qy
+      - "0"
+      - --qz
+      - "0"
+      - --qw
+      - "1"
+      - --frame-id
+      - botman_base_link
+      - --child-frame-id
+      - os_sensor
+    restart: unless-stopped
+
+  # The VN-100 stamps its messages "vectornav" but nothing published a TF for
+  # that frame, so the IMU could not be related to anything.
+  #
+  # Rotation and X/Y from calibrate_imu_to_imu.py on 2026-08-31: the gyro pair
+  # gives the rotation, the accelerometer pair gives the offset (measured over a
+  # 0.6 rad/s spin, then composed with the Ouster factory os_lidar -> os_imu).
+  # Cross-check: chained through the mast transform above, this yields
+  # botman_base_link -> vectornav with 87.483 deg of yaw against the 87.48 deg
+  # fastlivo_odom_to_base derived independently.
+  #
+  # Z IS NOT MEASURED. A spin about a vertical axis cannot see the vertical
+  # offset: both rigid-body terms vanish along the rotation axis, so the solver
+  # reports observability 0.000 for it however long you record. The value below
+  # is the tape measurement ("the VectorNav is at the same height as the
+  # camera", i.e. BOTMAN_OAK_Z below os_lidar), NOT a calibration result. To
+  # measure it, rotate the sensor head about a horizontal axis and re-run.
+  vectornav_mount_tf:
+    image: swarmdeck-robot-ros2:local
+    container_name: swarmdeck-botman-vectornav-tf
+    depends_on:
+      vectornav:
+        condition: service_started
+    network_mode: host
+    ipc: host
+    environment:
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - ros2
+      - run
+      - tf2_ros
+      - static_transform_publisher
+      - --x
+      - "${BOTMAN_VECTORNAV_X:-0.0010}"
+      - --y
+      - "${BOTMAN_VECTORNAV_Y:-0.0608}"
+      - --z
+      - "${BOTMAN_VECTORNAV_Z:--0.284}"
+      - --qx
+      - "${BOTMAN_VECTORNAV_QX:--0.008202}"
+      - --qy
+      - "${BOTMAN_VECTORNAV_QY:-0.002840}"
+      - --qz
+      - "${BOTMAN_VECTORNAV_QZ:--0.722461}"
+      - --qw
+      - "${BOTMAN_VECTORNAV_QW:-0.691357}"
+      - --frame-id
+      - os_lidar
+      - --child-frame-id
+      - vectornav
+    restart: unless-stopped
+
   # SuperOdometry publishes /laser_odometry but not map -> base TF. Despite
   # naming os_lidar as the message child, its pose is the physical-forward
   # frame; botman.launch.py adds the measured pi-yaw edge to raw os_lidar.
