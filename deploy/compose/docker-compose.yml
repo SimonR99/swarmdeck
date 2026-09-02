@@ -61,7 +61,27 @@ services:
       - "8085:8085"
     environment:
       SWARMDECK_SERVER_URL: http://server:8080
+      SWARMDECK_RTSP_BASE_URL: rtsp://mediamtx:8554
       CORTEX_WORKSPACE: /home/sroy/workspaces/swarmdeck
+      CORTEX_PROVIDER: "${CORTEX_PROVIDER:-agy}"
+      CORTEX_MODEL: "${CORTEX_MODEL:-}"
+      CORTEX_REASONING_EFFORT: "${CORTEX_REASONING_EFFORT:-}"
+      CORTEX_PROVIDER_COMMAND: "${CORTEX_PROVIDER_COMMAND:-}"
+      # Phase 1 is a transparent pass-through: jobs/events are persisted while
+      # AGY keeps the exact operator-facing behavior.
+      CORTEX_SUPERVISOR_MODE: "${CORTEX_SUPERVISOR_MODE:-observe}"
+      CORTEX_STATE_DB: /app/sessions/cortex/state.db
+      # The local planner is opt-in shadow traffic and never executes tools.
+      CORTEX_SHADOW_PLANNER: "${CORTEX_SHADOW_PLANNER:-false}"
+      CORTEX_PLANNER_PROVIDER: "${CORTEX_PLANNER_PROVIDER:-}"
+      CORTEX_PLANNER_MODEL: "${CORTEX_PLANNER_MODEL:-}"
+      CORTEX_OLLAMA_URL: "${CORTEX_OLLAMA_URL:-http://ollama:11434}"
+      CORTEX_OPENCODE_COMMAND: "${CORTEX_OPENCODE_COMMAND:-opencode}"
+      CORTEX_OPENCODE_URL: "${CORTEX_OPENCODE_URL:-}"
+      CORTEX_OPENCODE_AGENT: "${CORTEX_OPENCODE_AGENT:-}"
+      # Reported as a future code-only worker; observe mode never dispatches it.
+      CORTEX_CODING_WORKER: "${CORTEX_CODING_WORKER:-agy}"
+      SSH_AUTH_SOCK: /tmp/ssh-auth.sock
     volumes:
       - ../../sessions:/app/sessions
       - ../../agent:/app/agent
@@ -69,7 +89,8 @@ services:
       - ../..:/home/sroy/workspaces/swarmdeck
       - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
       - /home/sroy/.gemini:/root/.gemini
-      - /home/sroy/.ssh:/root/.ssh:ro
+      - /home/sroy/.ssh:/root/.ssh_host:ro
+      - ${SSH_AUTH_SOCK_REAL:-/dev/null}:/tmp/ssh-auth.sock
     depends_on:
       server:
         condition: service_healthy
@@ -79,6 +100,33 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    restart: unless-stopped
+
+  # Private local inference for opt-in Cortex shadow planning. No host port is
+  # published: the unauthenticated Ollama API stays on the Compose network.
+  ollama:
+    profiles: ["local-ai"]
+    image: "ollama/ollama:${OLLAMA_VERSION:-0.33.2}"
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-32768}"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_KEEP_ALIVE: "10m"
+    volumes:
+      - ollama_models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
 
   slam:
@@ -282,3 +330,4 @@ services:
 
 volumes:
   duck_detector_models:
+  ollama_models:

@@ -76,11 +76,6 @@
     };
   });
 
-  const elapsed = $derived(
-    `${String(Math.floor(session.elapsed_s / 60)).padStart(2, '0')}:${String(
-      Math.floor(session.elapsed_s % 60)
-    ).padStart(2, '0')}`
-  );
 
   const connTone = $derived(
     session.connection === 'live' ? 'ok' : session.connection === 'mock' ? 'warn' : 'danger'
@@ -211,7 +206,6 @@
     {#if session.name}
       <span class="hidden text-[11px] text-fg-dim sm:inline">{session.name}</span>
     {/if}
-    <span class="tabular text-xs font-medium text-fg-muted">{elapsed}</span>
     <Button
       variant="ghost"
       size="sm"

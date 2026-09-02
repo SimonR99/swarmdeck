@@ -12,6 +12,17 @@ set -Eeuo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_DIR="$REPO/deploy/robots"
 FLEET_ENV="$REPO/deploy/fleet.env"
+
+# Recover live SSH agent socket if the current one is disconnected/stale
+if [[ -d /root/.ssh_host/agent ]]; then
+  for _sock in $(ls -t /root/.ssh_host/agent/s.* 2>/dev/null); do
+    if python3 -c "import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(0.5); s.connect(sys.argv[1])" "$_sock" 2>/dev/null; then
+      export SSH_AUTH_SOCK="$_sock"
+      break
+    fi
+  done
+fi
+
 SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new)
 RSYNC_RSH="ssh -o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new"
 
@@ -90,7 +101,23 @@ remote_quote() {
 
 preflight() {
   echo "  checking SSH..."
-  timeout 20 ssh "${SSH_OPTS[@]}" "$DEPLOY_SSH_HOST" true || die "$DEPLOY_SSH_HOST is unreachable"
+  local output status
+  set +e
+  output="$(timeout 20 ssh "${SSH_OPTS[@]}" "$DEPLOY_SSH_HOST" true 2>&1)"
+  status=$?
+  set -e
+  ((status == 0)) && return 0
+  case "${output,,}" in
+    *"permission denied"*|*"no identities"*)
+      die "SSH authentication failed for $DEPLOY_SSH_HOST; verify the mounted/forwarded SSH agent"
+      ;;
+    *"timed out"*|*"no route to host"*|*"could not resolve"*|*"connection refused"*)
+      die "$DEPLOY_SSH_HOST is unreachable: ${output//$'\n'/ }"
+      ;;
+    *)
+      die "SSH preflight failed for $DEPLOY_SSH_HOST: ${output//$'\n'/ }"
+      ;;
+  esac
 }
 
 sync_repo() {

@@ -6,7 +6,7 @@
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
         docker-ps docker-test docker-test-launch \
-        test-slam install-slam slam
+        test-slam install-slam slam local-ai-up local-ai-pull local-ai-down
 
 help:
 	@echo "SwarmDeck"
@@ -28,6 +28,8 @@ help:
 	@echo "  make docker-logs     follow Docker logs"
 	@echo "  make docker-test     run backend tests inside Docker"
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
+	@echo "  make local-ai-up     start the optional private Ollama planner service"
+	@echo "  make local-ai-pull   pull LOCAL_MODEL for shadow-planner evaluation"
 	@echo "  make sim             launch Gazebo simulation (host ROS)"
 	@echo "  make tunnel          publish the running stack on a public URL"
 	@echo "  make test            run all tests (local venv)"
@@ -88,6 +90,7 @@ install-slam:
 # Pin the project name so every Make target shares one network and one set of
 # containers regardless of the directory from which Compose derives its name.
 COMPOSE_PROJECT ?= swarmdeck
+export SSH_AUTH_SOCK_REAL ?= $(shell readlink -f $${SSH_AUTH_SOCK:-/dev/null} 2>/dev/null || echo "/dev/null")
 COMPOSE ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml
 
 # --- operator-side physical robot deployment
@@ -95,21 +98,22 @@ COMPOSE ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose
 # --no-build, --no-reset, etc. The matrix and implementation live in
 # scripts/deploy and deploy/robots/, not in per-robot Make recipes.
 deploy:
-	./scripts/deploy $(ROBOT) $(DEPLOY_ARGS)
+	./scripts/deploy $(if $(ROBOT),$(ROBOT),all) $(DEPLOY_ARGS)
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:
-	$(COMPOSE) build server ui slam
+	$(COMPOSE) build server ui slam agent
 
 up-server:
-	$(COMPOSE) up --build -d server ui slam
+	$(COMPOSE) up --build -d server ui slam agent
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "SLAM back-end:    http://localhost:8090/status"
+	@echo "Cortex:           http://localhost:8085/api/agent/status"
 
 down-server:
-	$(COMPOSE) stop server ui slam
-	$(COMPOSE) rm -f server ui slam
+	$(COMPOSE) stop server ui slam agent
+	$(COMPOSE) rm -f server ui slam agent
 
 # --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
 # docker-compose.yml means this brings the server up too if it isn't already.
@@ -117,7 +121,7 @@ build-sim:
 	$(COMPOSE) --profile gazebo build gazebo
 
 up-sim:
-	$(COMPOSE) --profile gazebo up --build -d server ui slam gazebo
+	$(COMPOSE) --profile gazebo up --build -d server ui slam agent gazebo
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
@@ -144,7 +148,7 @@ down-mock:
 ZENOH_COMPOSE = -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
 
 build-deploy:
-	docker compose $(ZENOH_COMPOSE) build server ui
+	docker compose $(ZENOH_COMPOSE) build server ui agent
 
 up-deploy:
 	SWARMDECK_CONFIG=/app/configs/hardware_fleet.yaml \
@@ -152,19 +156,29 @@ up-deploy:
 	  SWARMDECK_SLAM_ANCHOR_ROBOT=aslan_0 \
 	  SWARMDECK_SLAM_CAPTURE_DIR=/app/sessions/captures/hardware-live \
 	  SWARMDECK_SLAM_RESTORE_CAPTURE=true \
-	  docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router slam
+	  docker compose $(ZENOH_COMPOSE) up --build -d server ui agent mediamtx zenoh-router slam
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "SLAM back-end:    http://localhost:8090/status"
+	@echo "Cortex:           http://localhost:8085/api/agent/status"
 	@echo "Zenoh router:     tcp/<this-host>:7447"
 	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
 	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
 
-deploy:
-	./scripts/deploy $(if $(ROBOT),$(ROBOT),all)
-
 down-deploy:
 	docker compose $(ZENOH_COMPOSE) down --remove-orphans
+
+# Local inference is intentionally opt-in. It is not a replacement for the
+# default AGY coding/runtime path until its shadow decisions pass evaluation.
+LOCAL_MODEL ?= qwen3.5:9b-q4_K_M
+local-ai-up:
+	$(COMPOSE) --profile local-ai up -d ollama
+
+local-ai-pull: local-ai-up
+	$(COMPOSE) --profile local-ai exec ollama ollama pull $(LOCAL_MODEL)
+
+local-ai-down:
+	$(COMPOSE) --profile local-ai stop ollama
 
 # Full stack (server+ui+sim) with Gazebo rendering on the GPU.
 GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml

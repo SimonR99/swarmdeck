@@ -46,8 +46,12 @@ class RosJpegRtspPublisher:
             "sliced-threads=true byte-stream=true "
             "! video/x-h264,profile=baseline "
             "! h264parse config-interval=-1 "
-            "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=100000000 leaky=downstream "
-            f'! rtspclientsink location="{rtsp_url}" protocols=udp latency=0'
+            # Keep the RTP packets on the RTSP TCP connection. The robot and
+            # backend are separated by Wi-Fi, and UDP loss can leave
+            # rtspclientsink's internal reconnect with a live control socket
+            # but no publishing session. TCP also makes a broken session
+            # observable to the bus monitor so the outer loop can rebuild it.
+            f'! rtspclientsink location="{rtsp_url}" protocols=tcp latency=0 tcp-timeout=5000000'
         )
         self.pipeline = Gst.parse_launch(pipeline)
         self.source = self.pipeline.get_by_name("source")
