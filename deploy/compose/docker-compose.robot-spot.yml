@@ -137,6 +137,7 @@ services:
       FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       ROS_DOMAIN_ID: *ros_domain
       ROS_LOCALHOST_ONLY: "1"
+      SWARMDECK_ODOMETRY_BACKEND: ${SPOT_ODOMETRY_BACKEND:-native}
       PYTHONPATH: "/root/.local/lib/python3.10/site-packages:/app/swarmdeck/adapters/protocol:/app/swarmdeck:/app/adapters/protocol:/app"
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
     command:

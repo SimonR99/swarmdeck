@@ -310,6 +310,40 @@ def test_diagnostics_mode_drops_the_estimator_entirely(tree):
         assert block.find("./sensors/odometry").get("implementation") == "drift"
 
 
+def test_heterogeneous_odometry_per_robot(tmp_path):
+    """A fleet with mixed odometry must configure each controller independently
+    and register only Fast-LIVO2 robots on the external estimator medium."""
+    cfg = yaml.safe_load(CONFIG.read_text())
+    cfg["fleet"]["odometry"] = "fast_livo2"
+    cfg["fleet"]["odometry_types"] = {
+        "robot_1": "drift",
+        "robot_3": "drift",
+    }
+    path = tmp_path / "mixed_odom.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+
+    xml = mas.generate_argos_xml(path)
+    tree = ElementTree.fromstring(xml)
+
+    ctrls = controllers(tree)
+    # robot_0 and robot_2 have Fast-LIVO2 (external, uf)
+    assert ctrls["robot_0_ctrl"].find("./sensors/odometry").get("implementation") == "external"
+    assert ctrls["robot_0_ctrl"].find("./sensors/odometry").get("medium") == "uf"
+    assert ctrls["robot_2_ctrl"].find("./sensors/odometry").get("implementation") == "external"
+    assert ctrls["robot_2_ctrl"].find("./sensors/odometry").get("medium") == "uf"
+
+    # robot_1 and robot_3 have synthetic drift
+    assert ctrls["robot_1_ctrl"].find("./sensors/odometry").get("implementation") == "drift"
+    assert ctrls["robot_1_ctrl"].find("./sensors/odometry").get("medium") is None
+    assert ctrls["robot_3_ctrl"].find("./sensors/odometry").get("implementation") == "drift"
+    assert ctrls["robot_3_ctrl"].find("./sensors/odometry").get("medium") is None
+
+    # external_estimator must list ONLY robot_0 and robot_2
+    ext = tree.find("./media/external_estimator")
+    assert ext is not None
+    assert set(ext.get("robots").split(",")) == {"robot_0", "robot_2"}
+
+
 # ------------------------------------------------------------------- refusals
 
 

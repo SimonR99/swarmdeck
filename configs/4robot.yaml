@@ -10,6 +10,18 @@ fleet:
   # Bunkers so teleop and nav behave the same. Mixed Scout/Spot chassis stay on
   # the hardware configs.
   robot_type: bunker
+
+  # Odometry system. `odometry` is the fleet default (fast_livo2 by default in ARGoS).
+  # `odometry_types` can override per robot id for heterogenous benchmarking:
+  #   fast_livo2      LiDAR-inertial-visual front-end via uf socket
+  #   drift           ARGoS synthetic Gaussian noise model (fast dev)
+  #   ekf             robot_localization EKF fusing wheel encoders and IMU
+  #   superodometry   IMU-first LiDAR-inertial odometry
+  #   native          Manufacturer native odometry
+  odometry: fast_livo2
+  # odometry_types:
+  #   robot_0: fast_livo2
+  #   robot_1: drift
   # Mapping lidar. `profile` names an entry in spawn_fleet.py's LIDAR_PROFILES;
   # any individual field may be overridden beneath it.
   #

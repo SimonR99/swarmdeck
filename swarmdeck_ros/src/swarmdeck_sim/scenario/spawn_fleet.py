@@ -17,9 +17,30 @@ import sys
 import tempfile
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Mapping
-
 import yaml
+
+try:
+    from swarmdeck_protocol import (
+        DEFAULT_SIM_ODOMETRY,
+        ODOMETRY_PROFILES,
+        OdometrySpec,
+        get_odometry_spec,
+        resolve_odometry_types,
+    )
+except ImportError:
+    _PROTOCOL = Path(__file__).resolve().parents[5] / "adapters" / "protocol"
+    if str(_PROTOCOL) not in sys.path:
+        sys.path.insert(0, str(_PROTOCOL))
+    from swarmdeck_protocol import (
+        DEFAULT_SIM_ODOMETRY,
+        ODOMETRY_PROFILES,
+        OdometrySpec,
+        get_odometry_spec,
+        resolve_odometry_types,
+    )
+
+odometry_spec = get_odometry_spec
+odometry_types = resolve_odometry_types
 
 COLORS = [
     "0.22 0.74 0.97",  # robot_0

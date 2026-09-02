@@ -470,10 +470,19 @@ def setup(context, *args, **kwargs):
     # noqa: E402 — path set immediately above. Resolved through the spawner's own
     # code so the geometry this file configures SLAM and Nav2 with is the same
     # geometry the simulator was handed; two tables would drift.
-    from spawn_fleet import lidar_spec, robot_spec, robot_types  # noqa: E402
+    from spawn_fleet import (  # noqa: E402
+        lidar_spec,
+        odometry_spec,
+        odometry_types,
+        robot_spec,
+        robot_types,
+    )
 
     spec = lidar_spec(cfg.get("fleet", {}))
     types = robot_types(cfg.get("fleet", {}), count, prefix)
+    odom_types = odometry_types(
+        cfg.get("fleet", {}), count, prefix, default_override=odometry if odometry else None
+    )
     lidar_rings = spec.rings
 
     # RTAB-Map registers against the cloud's vertical structure, which a
@@ -526,6 +535,7 @@ def setup(context, *args, **kwargs):
         # transform is base_link -> lidar either way, so it takes RobotSpec
         # unchanged and the generated experiment adds base_height itself.
         robot = robot_spec(types[i])
+        odom_spec = odometry_spec(odom_types[i])
         if slam_backend == "rtabmap":
             slam_args = {
                 "namespace": ns,
@@ -538,6 +548,11 @@ def setup(context, *args, **kwargs):
             }
             slam_launch = "/launch/slam_rtabmap.launch.py"
         else:
+            if argos:
+                odom_source = "ekf" if odom_spec.source_type == "fused_wheels_imu" else "external"
+            else:
+                odom_source = "ekf" if fuse_imu else "external"
+
             slam_args = {
                 "namespace": ns,
                 "use_sim_time": "true",
@@ -547,10 +562,7 @@ def setup(context, *args, **kwargs):
                 "range_max": str(spec.range_max),
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
-                # ARGoS robots carry one lidar and get their fused pose from
-                # the external estimator; Gazebo robots carry a bumper lidar
-                # and need the EKF. See slam.launch.py.
-                "odometry_source": "external" if argos else "ekf",
+                "odometry_source": odom_source,
                 "proximity_from_cloud": "true" if argos else "false",
                 "proximity_range_max": f"{robot.prox_range_max:.1f}",
                 "floor_z": f"{-robot.base_height:.4f}",

@@ -160,6 +160,7 @@ services:
     environment:
       ROS_DOMAIN_ID: *ros_domain
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
+      SWARMDECK_ODOMETRY_BACKEND: ${ASIMOV_ODOMETRY_BACKEND:-native}
     command:
       - /ros_entrypoint.sh
       - python3

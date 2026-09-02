@@ -258,6 +258,7 @@ services:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
       SWARMDECK_DETECTOR_URL: http://127.0.0.1:8091
+      SWARMDECK_ODOMETRY_BACKEND: ${ASLAN_ODOMETRY_BACKEND:-superodometry}
     command:
       - python3
       - /app/swarmdeck/adapters/adapter_ros2/adapter_ros2.py
