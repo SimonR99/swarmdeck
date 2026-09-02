@@ -55,9 +55,17 @@ BUILTIN_SKILLS: List[CortexSkill] = [
     CortexSkill(
         command="/status",
         name="Fleet Diagnostics",
-        description="Generate a detailed report of battery levels, poses, Wi-Fi link quality, and SLAM health",
+        description="Check online state, camera frames, video publication, and robot services",
         usage="/status",
         examples=["/status"],
+        category="Diagnostics",
+    ),
+    CortexSkill(
+        command="/doctor",
+        name="Robot Doctor",
+        description="Run evidence-based telemetry, camera, RTSP, SSH, and container checks",
+        usage="/doctor [@robot_id | all]",
+        examples=["/doctor all", "/doctor @tars_0"],
         category="Diagnostics",
     ),
     CortexSkill(

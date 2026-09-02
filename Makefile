@@ -8,7 +8,7 @@
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
         docker-ps docker-test docker-test-launch \
-        test-slam install-slam slam
+        test-slam install-slam slam local-ai-up local-ai-pull local-ai-shadow local-ai-eval local-ai-down
 
 help:
 	@echo "SwarmDeck"
@@ -37,6 +37,10 @@ help:
 	@echo "  make docker-ps       list running containers"
 	@echo "  make docker-test     run backend tests inside Docker"
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
+	@echo "  make local-ai-up     start the optional private Ollama planner service"
+	@echo "  make local-ai-pull   pull LOCAL_MODEL for shadow-planner evaluation"
+	@echo "  make local-ai-shadow run Ollama beside AGY without changing chat behavior"
+	@echo "  make local-ai-eval   score the local planner without executing robot tools"
 	@echo "  make sim             launch the ARGoS simulation (host ROS + host argos3)"
 	@echo "  make visual-test     capture per-robot RGB, depth and lidar frames as PNGs"
 	@echo "  make visual-test-bistro capture Bistro scenario RGB, depth and lidar frames"
@@ -127,6 +131,7 @@ GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-comp
 # Pin the project name so every Make target shares one network and one set of
 # containers regardless of the directory from which Compose derives its name.
 COMPOSE_PROJECT ?= swarmdeck
+export SSH_AUTH_SOCK_REAL ?= $(shell readlink -f $${SSH_AUTH_SOCK:-/dev/null} 2>/dev/null || echo "/dev/null")
 COMPOSE ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml
 
 # --- operator-side physical robot deployment
@@ -285,6 +290,30 @@ up-deploy:
 
 down-deploy:
 	docker compose $(ZENOH_COMPOSE) down --remove-orphans
+
+# Local inference is intentionally opt-in. It is not a replacement for the
+# default AGY coding/runtime path until its shadow decisions pass evaluation.
+LOCAL_MODEL ?= qwen3.5:9b-q4_K_M
+local-ai-up:
+	$(COMPOSE) --profile local-ai up -d ollama
+
+local-ai-pull: local-ai-up
+	$(COMPOSE) --profile local-ai exec ollama ollama pull $(LOCAL_MODEL)
+
+local-ai-shadow: local-ai-pull
+	$(COMPOSE) --profile agent build agent
+	CORTEX_SHADOW_PLANNER=true \
+	  CORTEX_PLANNER_PROVIDER=ollama \
+	  CORTEX_PLANNER_MODEL=$(LOCAL_MODEL) \
+	  $(COMPOSE) --profile agent --profile local-ai up -d --no-deps agent
+	@echo "Cortex:           AGY live, Ollama $(LOCAL_MODEL) shadow planning"
+
+local-ai-eval: local-ai-shadow
+	$(COMPOSE) --profile agent --profile local-ai exec -T agent \
+	  python /app/agent/evals/run_planner_eval.py --model $(LOCAL_MODEL)
+
+local-ai-down:
+	$(COMPOSE) --profile local-ai stop ollama
 
 # The default full stack, on a GPU. Kept as an alias for up-argos-gpu because
 # it is the command every doc and every habit already reaches for.

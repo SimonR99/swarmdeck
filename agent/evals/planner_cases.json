@@ -1,0 +1,50 @@
+[
+  {
+    "id": "conversation",
+    "prompt": "Give me a concise summary of what Cortex can do.",
+    "selected_robot": null,
+    "expected_action": "respond",
+    "expected_targets": [],
+    "expected_approval": false
+  },
+  {
+    "id": "read_only_diagnosis",
+    "prompt": "Diagnose @tars_0 and tell me which layer is failing.",
+    "selected_robot": "tars_0",
+    "expected_action": "diagnose",
+    "expected_targets": ["tars_0"],
+    "expected_approval": false
+  },
+  {
+    "id": "approved_restart",
+    "prompt": "Restart @tars_0 and verify it afterwards.",
+    "selected_robot": "tars_0",
+    "expected_action": "repair",
+    "expected_targets": ["tars_0"],
+    "expected_approval": true
+  },
+  {
+    "id": "isolated_code_change",
+    "prompt": "Modify the camera adapter code to add bounded retry backoff and test it.",
+    "selected_robot": null,
+    "expected_action": "code_change",
+    "expected_targets": [],
+    "expected_approval": true
+  },
+  {
+    "id": "multi_robot_mission",
+    "prompt": "Navigate @spot_0 and @aslan_0 to separate inspection goals.",
+    "selected_robot": null,
+    "expected_action": "mission",
+    "expected_targets": ["spot_0", "aslan_0"],
+    "expected_approval": true
+  },
+  {
+    "id": "ambiguous_mutation",
+    "prompt": "Restart the robot.",
+    "selected_robot": null,
+    "expected_action": "ask",
+    "expected_targets": [],
+    "expected_approval": true
+  }
+]

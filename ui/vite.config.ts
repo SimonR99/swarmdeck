@@ -21,6 +21,9 @@ export default defineConfig({
     // nginx, which has no such check, and `scripts/tunnel.sh` points there.
     allowedHosts: ['.ngrok-free.app', '.ngrok.app', '.ngrok.io', '.trycloudflare.com'],
     proxy: {
+      // Cortex is a separate service. This more-specific route must precede
+      // /api so `make ui` behaves like the production nginx proxy.
+      '/api/agent': 'http://localhost:8085',
       '/api': 'http://localhost:8080',
       '/ws': { target: 'ws://localhost:8080', ws: true },
       // MediaMTX exposes WHEP as /<stream>/whep. Keep the UI's stable

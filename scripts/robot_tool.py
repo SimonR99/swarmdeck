@@ -11,22 +11,69 @@ Provides CLI and programmatic tools for Cortex and operators to:
 - Capture live camera snapshots to disk
 - Inspect image files for multimodal understanding
 - Inspect YOLOE live detections and operator proposals
+- Diagnose telemetry, camera, RTSP, SSH, and required robot services in one call
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import shlex
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "http://server:8080").rstrip("/")
+
+REPO_DIR = Path(__file__).resolve().parents[1]
+ROBOT_ALIASES = {
+    "asimov": "asimov_0",
+    "aslan": "aslan_0",
+    "botman": "botman_0",
+    "scout": "tars_0",
+    "spot": "spot_0",
+    "tars": "tars_0",
+}
+PROFILE_BY_ROBOT_ID = {
+    "asimov_0": "asimov",
+    "aslan_0": "aslan",
+    "botman_0": "botman",
+    "spot_0": "spot",
+    "tars_0": "scout",
+}
+
+
+def _get_default_server() -> str:
+    if "SWARMDECK_SERVER_URL" in os.environ:
+        return os.environ["SWARMDECK_SERVER_URL"].rstrip("/")
+    return "http://127.0.0.1:8080"
+
+
+DEFAULT_SERVER_URL = _get_default_server()
+
+
+def _get_default_rtsp_base() -> str:
+    configured = os.environ.get("SWARMDECK_RTSP_BASE_URL")
+    if configured:
+        return configured.rstrip("/")
+    server_host = urllib.parse.urlparse(DEFAULT_SERVER_URL).hostname
+    media_host = "mediamtx" if server_host == "server" else "127.0.0.1"
+    return f"rtsp://{media_host}:8554"
+
+
+DEFAULT_RTSP_BASE_URL = _get_default_rtsp_base()
+
+
+def normalize_robot_id(value: str) -> str:
+    cleaned = value.lower().lstrip("@").replace("-", "_")
+    return ROBOT_ALIASES.get(cleaned, cleaned)
 
 
 def _http_get(endpoint: str, server_url: str = DEFAULT_SERVER_URL) -> Any:
@@ -85,11 +132,12 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("No robots currently connected to SwarmDeck.")
         return
 
-    print(f"{'ROBOT ID':<15} {'TYPE':<16} {'BATTERY':<10} {'MODE':<10} {'NAV STATUS':<12} {'POSE (X, Y, YAW)'}")
-    print("=" * 80)
+    print(f"{'ROBOT ID':<15} {'STATE':<9} {'TYPE':<22} {'BATTERY':<10} {'MODE':<10} {'NAV STATUS':<12} {'POSE (X, Y, YAW)'}")
+    print("=" * 104)
     for r in robots:
         rid = r.get("robot_id", "unknown")
         rtype = r.get("robot_type", "unknown")
+        state = "online" if r.get("online") is True else "OFFLINE"
         batt = f"{int(r.get('battery', 0.0) * 100)}%" if r.get("battery") is not None else "N/A"
         mode = r.get("mode", "idle")
         nav_st = r.get("nav_status", "idle")
@@ -98,7 +146,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         py = f"{pose.get('y', 0.0):.2f}"
         pyaw = f"{pose.get('yaw', 0.0):.2f}"
         pose_str = f"({px}, {py}, {pyaw} rad)"
-        print(f"{rid:<15} {rtype:<16} {batt:<10} {mode:<10} {nav_st:<12} {pose_str}")
+        print(f"{rid:<15} {state:<9} {rtype:<22} {batt:<10} {mode:<10} {nav_st:<12} {pose_str}")
 
 
 def cmd_drive(args: argparse.Namespace) -> None:
@@ -293,21 +341,524 @@ def cmd_detections(args: argparse.Namespace) -> None:
         print(f"  - [{e_id}] {cls_name} at ({pos.get('x',0):.2f}, {pos.get('y',0):.2f})")
 
 
+def _try_http_get(
+    endpoint: str, server_url: str, timeout: float = 5.0
+) -> tuple[Optional[Any], Optional[str]]:
+    url = f"{server_url}{endpoint}"
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode()), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code} {exc.reason}"
+    except Exception as exc:
+        return None, str(exc)
+
+
+def probe_rtsp_stream(robot_id: str, rtsp_base_url: str) -> dict[str, Any]:
+    """Check whether MediaMTX advertises a robot stream.
+
+    DESCRIBE deliberately is not called a decoded-frame check.  The distinction
+    matters: a publishing session can expose valid SDP while its RTP payload is
+    stalled.
+    """
+    url = f"{rtsp_base_url.rstrip('/')}/{urllib.parse.quote(robot_id)}"
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or 554
+    if not host:
+        return {"ok": False, "url": url, "error": "RTSP URL has no host"}
+
+    request = (
+        f"DESCRIBE {url} RTSP/1.0\r\n"
+        "CSeq: 1\r\n"
+        "Accept: application/sdp\r\n"
+        "User-Agent: SwarmDeckDoctor/1.0\r\n\r\n"
+    ).encode()
+    try:
+        with socket.create_connection((host, port), timeout=3.0) as connection:
+            connection.settimeout(3.0)
+            connection.sendall(request)
+            response = connection.recv(4096).decode(errors="replace")
+    except Exception as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
+
+    status_line = response.splitlines()[0] if response else "no response"
+    parts = status_line.split(maxsplit=2)
+    try:
+        status_code = int(parts[1])
+    except (IndexError, ValueError):
+        status_code = None
+    return {
+        "ok": status_code == 200,
+        "url": url,
+        "status": status_code,
+        "status_line": status_line,
+        "evidence": "RTSP publication metadata only; not a decoded-frame check",
+    }
+
+
+def _read_rtsp_response(
+    connection: socket.socket, buffered: bytes = b""
+) -> tuple[int, dict[str, str], bytes, bytes]:
+    while b"\r\n\r\n" not in buffered:
+        chunk = connection.recv(4096)
+        if not chunk:
+            raise RuntimeError("RTSP server closed the connection")
+        buffered += chunk
+    header_block, buffered = buffered.split(b"\r\n\r\n", 1)
+    lines = header_block.decode(errors="replace").split("\r\n")
+    status_parts = lines[0].split(maxsplit=2)
+    if len(status_parts) < 2 or not status_parts[1].isdigit():
+        raise RuntimeError(f"invalid RTSP response: {lines[0]}")
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+    content_length = int(headers.get("content-length", "0"))
+    while len(buffered) < content_length:
+        chunk = connection.recv(4096)
+        if not chunk:
+            raise RuntimeError("RTSP body ended early")
+        buffered += chunk
+    return (
+        int(status_parts[1]),
+        headers,
+        buffered[:content_length],
+        buffered[content_length:],
+    )
+
+
+def probe_video_packets(robot_id: str, rtsp_base_url: str) -> dict[str, Any]:
+    """PLAY the RTSP stream and require progressing interleaved RTP packets."""
+    url = f"{rtsp_base_url.rstrip('/')}/{urllib.parse.quote(robot_id)}"
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.hostname:
+        return {"ok": False, "url": url, "error": "RTSP URL has no host"}
+
+    cseq = 0
+
+    def send_request(
+        connection: socket.socket,
+        method: str,
+        request_url: str,
+        headers: Optional[dict[str, str]] = None,
+    ) -> None:
+        nonlocal cseq
+        cseq += 1
+        lines = [
+            f"{method} {request_url} RTSP/1.0",
+            f"CSeq: {cseq}",
+            "User-Agent: SwarmDeckDoctor/1.0",
+        ]
+        lines.extend(f"{key}: {value}" for key, value in (headers or {}).items())
+        connection.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+
+    try:
+        with socket.create_connection(
+            (parsed.hostname, parsed.port or 554), timeout=3.0
+        ) as connection:
+            connection.settimeout(3.0)
+            send_request(connection, "DESCRIBE", url, {"Accept": "application/sdp"})
+            status, describe_headers, body, buffered = _read_rtsp_response(connection)
+            if status != 200:
+                return {"ok": False, "url": url, "error": f"DESCRIBE returned {status}"}
+
+            sdp = body.decode(errors="replace")
+            control = None
+            in_video = False
+            for line in sdp.splitlines():
+                if line.startswith("m="):
+                    in_video = line.startswith("m=video ")
+                elif in_video and line.startswith("a=control:"):
+                    candidate = line.split(":", 1)[1].strip()
+                    if candidate and candidate != "*":
+                        control = candidate
+                        break
+            if not control:
+                return {"ok": False, "url": url, "error": "SDP has no video control track"}
+            if control.startswith("rtsp://"):
+                track_url = control
+            else:
+                content_base = describe_headers.get("content-base", f"{url}/")
+                track_url = f"{content_base.rstrip('/')}/{control.lstrip('/')}"
+
+            send_request(
+                connection,
+                "SETUP",
+                track_url,
+                {"Transport": "RTP/AVP/TCP;unicast;interleaved=0-1"},
+            )
+            status, setup_headers, _, buffered = _read_rtsp_response(connection, buffered)
+            if status != 200:
+                return {"ok": False, "url": url, "error": f"SETUP returned {status}"}
+            session = setup_headers.get("session", "").split(";", 1)[0]
+            if not session:
+                return {"ok": False, "url": url, "error": "SETUP returned no session"}
+
+            send_request(connection, "PLAY", url, {"Session": session})
+            status, _, _, buffered = _read_rtsp_response(connection, buffered)
+            if status != 200:
+                return {"ok": False, "url": url, "error": f"PLAY returned {status}"}
+
+            sequences: set[int] = set()
+            packet_count = 0
+            byte_count = 0
+            deadline = time.monotonic() + 3.0
+            connection.settimeout(0.5)
+            while time.monotonic() < deadline and len(sequences) < 2:
+                try:
+                    chunk = connection.recv(16384)
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    break
+                buffered += chunk
+                while len(buffered) >= 4:
+                    if buffered[0] != 0x24:
+                        marker = buffered.find(b"$")
+                        buffered = buffered[marker:] if marker >= 0 else b""
+                        if len(buffered) < 4:
+                            break
+                    channel = buffered[1]
+                    packet_length = int.from_bytes(buffered[2:4], "big")
+                    if len(buffered) < 4 + packet_length:
+                        break
+                    packet = buffered[4 : 4 + packet_length]
+                    buffered = buffered[4 + packet_length :]
+                    if channel % 2 == 0 and len(packet) >= 12 and packet[0] >> 6 == 2:
+                        packet_count += 1
+                        byte_count += len(packet)
+                        sequences.add(int.from_bytes(packet[2:4], "big"))
+
+            return {
+                "ok": len(sequences) >= 2,
+                "url": url,
+                "packet_count": packet_count,
+                "bytes": byte_count,
+                "sequence_count": len(sequences),
+                "codec": "H264" if "H264/90000" in sdp.upper() else "unknown",
+                "error": None if len(sequences) >= 2 else "no progressing RTP packets observed",
+            }
+    except Exception as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
+
+
+def _profile_details(robot_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    profile_name = PROFILE_BY_ROBOT_ID.get(robot_id)
+    if not profile_name:
+        return None, f"no deployment profile is mapped to {robot_id}"
+    fleet_env = REPO_DIR / "deploy" / "fleet.env"
+    profile_env = REPO_DIR / "deploy" / "robots" / f"{profile_name}.env"
+    shell = (
+        'source "$1"; source "$2"; '
+        "printf '%s\\0%s\\0%s\\0' \"$DEPLOY_SSH_HOST\" "
+        '"${DEPLOY_CHECK_CONTAINERS:-}" "${DEPLOY_ROBOT_ID:-}"'
+    )
+    try:
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", shell, "_", str(fleet_env), str(profile_env)],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        return None, str(exc)
+    if result.returncode != 0:
+        return None, result.stderr.decode(errors="replace").strip() or "profile load failed"
+    fields = result.stdout.decode(errors="replace").split("\0")
+    if len(fields) < 3:
+        return None, "profile returned incomplete deployment details"
+    return {
+        "profile": profile_name,
+        "ssh_host": fields[0],
+        "containers": fields[1].split(),
+        "robot_id": fields[2],
+    }, None
+
+
+def _classify_ssh_error(stderr: str) -> str:
+    lowered = stderr.lower()
+    if "permission denied" in lowered or "no identities" in lowered:
+        return "SSH authentication failed"
+    if any(
+        marker in lowered
+        for marker in ("timed out", "no route to host", "could not resolve", "connection refused")
+    ):
+        return "robot host is unreachable"
+    return "SSH/service check failed"
+
+
+def check_remote_services(robot_id: str) -> dict[str, Any]:
+    profile, profile_error = _profile_details(robot_id)
+    if not profile:
+        return {"ok": False, "error": profile_error}
+    containers = profile["containers"]
+    if not containers:
+        return {
+            "ok": False,
+            "profile": profile["profile"],
+            "ssh_host": profile["ssh_host"],
+            "error": "deployment profile declares no required containers",
+        }
+
+    _ensure_ssh_agent()
+    inspect_format = (
+        "{{.Name}}|{{.State.Status}}|"
+        "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
+    )
+    remote_command = shlex.join(
+        ["docker", "inspect", "-f", inspect_format, *containers]
+    )
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=4",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                profile["ssh_host"],
+                remote_command,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except Exception as exc:
+        return {**profile, "ok": False, "error": str(exc)}
+
+    observed: dict[str, dict[str, str]] = {}
+    for line in result.stdout.splitlines():
+        fields = line.lstrip("/").split("|")
+        if len(fields) == 3:
+            observed[fields[0]] = {"state": fields[1], "health": fields[2]}
+    service_rows = []
+    for container in containers:
+        state = observed.get(container, {"state": "missing", "health": "unknown"})
+        service_rows.append({"container": container, **state})
+
+    services_ok = result.returncode == 0 and all(
+        item["state"] == "running" and item["health"] in {"healthy", "none"}
+        for item in service_rows
+    )
+    response = {
+        "ok": services_ok,
+        "profile": profile["profile"],
+        "ssh_host": profile["ssh_host"],
+        "containers": service_rows,
+    }
+    if not services_ok:
+        detail = result.stderr.strip()
+        response["error"] = f"{_classify_ssh_error(detail)}: {detail or 'required container is not ready'}"
+    return response
+
+
+def collect_doctor_report(args: argparse.Namespace) -> dict[str, Any]:
+    fleet_payload, fleet_error = _try_http_get("/api/fleet", args.server)
+    if fleet_payload is None:
+        return {
+            "ok": False,
+            "server": {"ok": False, "url": args.server, "error": fleet_error},
+            "robots": [],
+        }
+
+    fleet_robots = fleet_payload.get("robots", []) if isinstance(fleet_payload, dict) else []
+    fleet_by_id = {
+        item.get("robot_id"): item
+        for item in fleet_robots
+        if isinstance(item, dict) and item.get("robot_id")
+    }
+    if args.robot == "all":
+        robot_ids = list(fleet_by_id)
+    else:
+        robot_ids = [normalize_robot_id(args.robot)]
+
+    first_vision: dict[str, Optional[dict[str, Any]]] = {}
+    first_errors: dict[str, Optional[str]] = {}
+    for robot_id in robot_ids:
+        payload, error = _try_http_get(f"/api/robot/{robot_id}/vision", args.server)
+        first_vision[robot_id] = payload if isinstance(payload, dict) else None
+        first_errors[robot_id] = error
+    if robot_ids and args.sample_seconds > 0:
+        time.sleep(args.sample_seconds)
+
+    reports = []
+    for robot_id in robot_ids:
+        robot = fleet_by_id.get(robot_id)
+        second, second_error = _try_http_get(f"/api/robot/{robot_id}/vision", args.server)
+        vision = second if isinstance(second, dict) else None
+        previous = first_vision.get(robot_id)
+        first_seq = previous.get("frame_seq") if previous else None
+        second_seq = vision.get("frame_seq") if vision else None
+        camera_fresh = bool(vision and vision.get("camera_streaming"))
+        camera_progressing = bool(
+            camera_fresh
+            and second_seq is not None
+            and (first_seq is None or second_seq != first_seq)
+        )
+        camera = {
+            "ok": camera_fresh and camera_progressing,
+            "fresh": camera_fresh,
+            "progressing": camera_progressing,
+            "frame_age_ms": vision.get("frame_age_ms") if vision else None,
+            "first_seq": first_seq,
+            "second_seq": second_seq,
+        }
+        if not vision:
+            camera["error"] = second_error or first_errors.get(robot_id) or "no vision response"
+
+        telemetry = {
+            "ok": bool(robot and robot.get("online") is True),
+            "registered": robot is not None,
+            "online": bool(robot and robot.get("online") is True),
+            "battery": robot.get("battery") if robot else None,
+            "mode": robot.get("mode") if robot else None,
+            "nav_status": robot.get("nav_status") if robot else None,
+        }
+        rtsp = probe_rtsp_stream(robot_id, args.rtsp_base_url)
+        if telemetry["online"] and rtsp["ok"]:
+            media = probe_video_packets(robot_id, args.rtsp_base_url)
+        else:
+            media = {
+                "ok": False,
+                "error": "skipped because telemetry or RTSP publication is unavailable",
+            }
+        services = check_remote_services(robot_id) if args.services else {"checked": False}
+        frame_evidence_ok = media["ok"] is True
+        robot_ok = telemetry["ok"] and rtsp["ok"] and frame_evidence_ok
+        if args.services:
+            robot_ok = robot_ok and services.get("ok") is True
+        reports.append(
+            {
+                "robot_id": robot_id,
+                "ok": robot_ok,
+                "telemetry": telemetry,
+                "camera": camera,
+                "rtsp": rtsp,
+                "media": media,
+                "services": services,
+            }
+        )
+
+    return {
+        "ok": bool(reports) and all(item["ok"] for item in reports),
+        "server": {"ok": True, "url": args.server},
+        "robots": reports,
+    }
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    report = collect_doctor_report(args)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        heading = "HEALTHY" if report["ok"] else "DEGRADED"
+        print(f"=== SwarmDeck Doctor: {heading} ===")
+        if not report["server"]["ok"]:
+            print(f"Server: FAIL — {report['server'].get('error', 'unavailable')}")
+        for robot in report["robots"]:
+            label = "HEALTHY" if robot["ok"] else "DEGRADED"
+            print(f"\n{robot['robot_id']}: {label}")
+            telemetry = robot["telemetry"]
+            if telemetry["registered"]:
+                state = "online" if telemetry["online"] else "OFFLINE (stored telemetry only)"
+                print(f"  telemetry: {state}")
+            else:
+                print("  telemetry: not registered")
+            camera = robot["camera"]
+            if camera["ok"]:
+                print(f"  camera frames: fresh and progressing ({camera['frame_age_ms']} ms old)")
+            elif camera["fresh"]:
+                print("  camera frames: fresh but no new frame observed during sample")
+            else:
+                detail = camera.get("error") or "no recent frame"
+                print(f"  camera preview: unavailable — {detail} (separate from RTSP video)")
+            rtsp = robot["rtsp"]
+            if rtsp["ok"]:
+                print("  MediaMTX RTSP: published (DESCRIBE 200)")
+            else:
+                detail = rtsp.get("status_line") or rtsp.get("error") or "unavailable"
+                print(f"  MediaMTX RTSP: FAIL — {detail}")
+            media = robot["media"]
+            if media.get("ok") is True:
+                print(
+                    f"  video packets: progressing {media.get('codec', 'RTP')} "
+                    f"({media.get('packet_count', 0)} packets sampled)"
+                )
+            else:
+                print(f"  video packets: FAIL — {media.get('error', 'no packets observed')}")
+            services = robot["services"]
+            if services.get("checked") is not False:
+                if services.get("ok"):
+                    print(f"  remote services: {len(services['containers'])}/{len(services['containers'])} ready")
+                else:
+                    print(f"  remote services: FAIL — {services.get('error', 'not ready')}")
+                    for item in services.get("containers", []):
+                        print(
+                            f"    {item['container']}: {item['state']} "
+                            f"(health {item['health']})"
+                        )
+        if report["robots"]:
+            print("\nEvidence note: RTSP publication alone is not healthy; progressing media packets are required.")
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def _ensure_ssh_agent() -> None:
+    current_sock = os.environ.get("SSH_AUTH_SOCK")
+    needs_update = True
+    if current_sock and os.path.exists(current_sock):
+        try:
+            with socket.socket(socket.AF_UNIX) as s:
+                s.settimeout(0.5)
+                s.connect(current_sock)
+                needs_update = False
+        except Exception:
+            needs_update = True
+    if needs_update:
+        agent_socks = sorted(glob.glob("/root/.ssh_host/agent/s.*"), key=os.path.getmtime)
+        for sock in reversed(agent_socks):
+            try:
+                with socket.socket(socket.AF_UNIX) as s:
+                    s.settimeout(0.5)
+                    s.connect(sock)
+                    os.environ["SSH_AUTH_SOCK"] = sock
+                    break
+            except Exception:
+                continue
+
+
 def cmd_deploy(args: argparse.Namespace) -> None:
+    _ensure_ssh_agent()
     raw_name = args.robot.lower().replace("@", "")
     base_robot = raw_name.split("_")[0] if "_" in raw_name else raw_name
+    if base_robot == "tars":
+        base_robot = "scout"
     print(f"Deploying robot profile '{base_robot}' via 'make deploy ROBOT={base_robot}'...")
     try:
-        ret = subprocess.run(["make", "deploy", f"ROBOT={base_robot}"], capture_output=True, text=True, timeout=120)
+        ret = subprocess.run(["make", "deploy", f"ROBOT={base_robot}"], capture_output=True, text=True, timeout=300)
         if ret.returncode == 0:
             print(f"✓ Successfully deployed and started '{base_robot}'.")
             if ret.stdout:
                 lines = [l for l in ret.stdout.strip().split("\n") if l.strip()]
                 print("\n".join(lines[-3:]))
         else:
-            print(f"⚠️ Deployment encountered an issue:\n{ret.stderr or ret.stdout}")
+            detail = (ret.stderr + ret.stdout).strip()
+            print(f"⚠️ Deployment failed:\n{detail}", file=sys.stderr)
+            raise SystemExit(ret.returncode or 1)
+    except subprocess.TimeoutExpired:
+        print("Deployment failed: timed out after 300 seconds", file=sys.stderr)
+        raise SystemExit(1)
+    except SystemExit:
+        raise
     except Exception as exc:
-        print(f"Deployment command error: {exc}")
+        print(f"Deployment command error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def main() -> None:
@@ -325,6 +876,35 @@ def main() -> None:
     # list
     p_list = subparsers.add_parser("list", help="List all connected robots and telemetry")
     p_list.set_defaults(func=cmd_list)
+
+    # doctor
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="Check telemetry, progressing camera frames, RTSP, and optional remote services",
+    )
+    p_doctor.add_argument(
+        "robot",
+        default="all",
+        nargs="?",
+        help="Robot profile/id or 'all' (aliases such as scout and tars are accepted)",
+    )
+    p_doctor.add_argument(
+        "--services",
+        action="store_true",
+        help="Also verify required containers over non-interactive SSH",
+    )
+    p_doctor.add_argument(
+        "--rtsp-base-url",
+        default=DEFAULT_RTSP_BASE_URL,
+        help="MediaMTX RTSP base URL",
+    )
+    p_doctor.add_argument(
+        "--sample-seconds",
+        type=float,
+        default=1.0,
+        help="Delay between camera sequence samples (default: 1.0)",
+    )
+    p_doctor.set_defaults(func=cmd_doctor)
 
     # drive
     p_drive = subparsers.add_parser("drive", help="Send velocity commands to a robot")
