@@ -7,7 +7,7 @@
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
         docker-ps docker-test docker-test-launch \
-        test-slam install-slam slam local-ai-up local-ai-pull local-ai-down
+        test-slam install-slam slam local-ai-up local-ai-pull local-ai-shadow local-ai-eval local-ai-down
 
 help:
 	@echo "SwarmDeck"
@@ -32,6 +32,8 @@ help:
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
 	@echo "  make local-ai-up     start the optional private Ollama planner service"
 	@echo "  make local-ai-pull   pull LOCAL_MODEL for shadow-planner evaluation"
+	@echo "  make local-ai-shadow run Ollama beside AGY without changing chat behavior"
+	@echo "  make local-ai-eval   score the local planner without executing robot tools"
 	@echo "  make sim             launch Gazebo simulation (host ROS)"
 	@echo "  make tunnel          publish the running stack on a public URL"
 	@echo "  make test            run all tests (local venv)"
@@ -189,6 +191,18 @@ local-ai-up:
 
 local-ai-pull: local-ai-up
 	$(COMPOSE) --profile local-ai exec ollama ollama pull $(LOCAL_MODEL)
+
+local-ai-shadow: local-ai-pull
+	$(COMPOSE) --profile agent build agent
+	CORTEX_SHADOW_PLANNER=true \
+	  CORTEX_PLANNER_PROVIDER=ollama \
+	  CORTEX_PLANNER_MODEL=$(LOCAL_MODEL) \
+	  $(COMPOSE) --profile agent --profile local-ai up -d --no-deps agent
+	@echo "Cortex:           AGY live, Ollama $(LOCAL_MODEL) shadow planning"
+
+local-ai-eval: local-ai-shadow
+	$(COMPOSE) --profile agent --profile local-ai exec -T agent \
+	  python /app/agent/evals/run_planner_eval.py --model $(LOCAL_MODEL)
 
 local-ai-down:
 	$(COMPOSE) --profile local-ai stop ollama

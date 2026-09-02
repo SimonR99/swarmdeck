@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+from agent_cortex.contracts import PlannerDecision
 from agent_cortex.providers import ProviderRequest
 from agent_cortex.supervisor import (
     CortexSupervisor,
@@ -106,6 +107,42 @@ def test_store_failure_does_not_break_provider_stream(tmp_path, monkeypatch):
 
     assert asyncio.run(collect())[-1]["type"] == "done"
     assert supervisor.last_store_error == "disk unavailable"
+
+
+def test_slow_shadow_plan_finishes_after_fast_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("CORTEX_SHADOW_PLANNER", "false")
+    supervisor = CortexSupervisor(mode="observe", store_path=tmp_path / "state.db")
+
+    class SlowPlanner:
+        async def plan(self, _request):
+            await asyncio.sleep(0.02)
+            return PlannerDecision(
+                action="diagnose",
+                target_robots=["tars_0"],
+                instructions="Run the consolidated doctor check.",
+                confidence=0.9,
+                requires_approval=False,
+            )
+
+    supervisor.shadow_planner = SlowPlanner()
+    request = SupervisorRequest(
+        provider_request=ProviderRequest(prompt="context", workspace="."),
+        operator_prompt="diagnose @tars_0",
+        provider_name="test",
+        selected_robot="tars_0",
+    )
+
+    async def collect_and_wait_for_shadow():
+        events = [event async for event in supervisor.run(Provider(), request)]
+        assert events[-1]["type"] == "done"
+        await asyncio.sleep(0.04)
+
+    asyncio.run(collect_and_wait_for_shadow())
+    job = supervisor.store.list_jobs()[0]
+    event_types = [
+        event["event_type"] for event in supervisor.store.get_events(job["job_id"])
+    ]
+    assert "supervisor.shadow_plan" in event_types
 
 
 def test_job_classification_is_observational_only():

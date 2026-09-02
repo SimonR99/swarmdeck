@@ -122,6 +122,27 @@ def test_chat_rejects_empty_prompt(monkeypatch):
     assert json.loads(response.body) == {"error": "Prompt cannot be empty"}
 
 
+def test_local_planner_context_is_small_structured_and_explicitly_toolless():
+    context = json.loads(
+        server.build_planner_context(
+            [
+                {
+                    "robot_id": "tars_0",
+                    "robot_type": "scout",
+                    "online": True,
+                    "pose": {"x": 12.3, "y": 4.5},
+                }
+            ]
+        )
+    )
+
+    assert context["fleet"] == [
+        {"robot_id": "tars_0", "robot_type": "scout", "online": True}
+    ]
+    assert context["actions"]["diagnose"].startswith("read-only")
+    assert context["execution"] == "shadow only; no proposed action will run"
+
+
 def test_status_keeps_legacy_fields_and_adds_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "HISTORY_DIR", tmp_path / "history")
     monkeypatch.setattr(server, "get_provider", lambda: FakeProvider())

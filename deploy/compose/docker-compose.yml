@@ -85,6 +85,8 @@ services:
       CORTEX_SHADOW_PLANNER: "${CORTEX_SHADOW_PLANNER:-false}"
       CORTEX_PLANNER_PROVIDER: "${CORTEX_PLANNER_PROVIDER:-}"
       CORTEX_PLANNER_MODEL: "${CORTEX_PLANNER_MODEL:-}"
+      CORTEX_PLANNER_CONTEXT_LENGTH: "${CORTEX_PLANNER_CONTEXT_LENGTH:-8192}"
+      CORTEX_PLANNER_MAX_TOKENS: "${CORTEX_PLANNER_MAX_TOKENS:-256}"
       CORTEX_OLLAMA_URL: "${CORTEX_OLLAMA_URL:-http://ollama:11434}"
       CORTEX_OPENCODE_COMMAND: "${CORTEX_OPENCODE_COMMAND:-opencode}"
       CORTEX_OPENCODE_URL: "${CORTEX_OPENCODE_URL:-}"
@@ -122,6 +124,9 @@ services:
       OLLAMA_MAX_LOADED_MODELS: "1"
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_KEEP_ALIVE: "10m"
+      # Inference stays local. Registry pulls remain an explicit operator action
+      # through `make local-ai-pull`; cloud-hosted model execution is disabled.
+      OLLAMA_NO_CLOUD: "true"
     volumes:
       - ollama_models:/root/.ollama
     deploy:

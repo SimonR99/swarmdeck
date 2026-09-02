@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PlannerRequest(BaseModel):
@@ -19,11 +19,23 @@ class PlannerRequest(BaseModel):
 
 
 class PlannerDecision(BaseModel):
-    action: Literal["respond", "diagnose", "repair", "mission", "ask"]
+    action: Literal[
+        "respond", "diagnose", "repair", "code_change", "mission", "ask"
+    ]
     target_robots: List[str] = Field(default_factory=list)
     instructions: str
     confidence: float = Field(ge=0.0, le=1.0)
     requires_approval: bool = True
+
+    @field_validator("target_robots")
+    @classmethod
+    def normalize_robot_mentions(cls, values: List[str]) -> List[str]:
+        normalized: list[str] = []
+        for value in values:
+            robot_id = value.strip().removeprefix("@").strip()
+            if robot_id and robot_id not in normalized:
+                normalized.append(robot_id)
+        return normalized
 
 
 class PlannerModel(Protocol):
@@ -53,8 +65,9 @@ class FleetAction(BaseModel):
     action: Literal["doctor", "deploy", "drive", "navigate", "cancel", "stop", "body"]
     robot_ids: List[str]
     parameters: Dict[str, Any] = Field(default_factory=dict)
-    approved: bool = False
 
 
 class FleetTools(Protocol):
-    async def invoke(self, action: FleetAction) -> Dict[str, Any]: ...
+    async def invoke(
+        self, action: FleetAction, *, operator_approved: bool = False
+    ) -> Dict[str, Any]: ...
