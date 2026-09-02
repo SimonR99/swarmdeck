@@ -27,6 +27,7 @@ def test_ollama_planner_uses_schema_and_returns_typed_decision():
     planner = OllamaPlanner(
         base_url="http://ollama.test",
         model="qwen-test",
+        context_length=4096,
         transport=httpx.MockTransport(handler),
     )
 
@@ -44,4 +45,7 @@ def test_ollama_planner_uses_schema_and_returns_typed_decision():
     assert decision.target_robots == ["tars_0"]
     assert observed["model"] == "qwen-test"
     assert observed["stream"] is False
+    assert observed["options"]["num_ctx"] == 4096
     assert observed["format"]["properties"]["action"]
+    assert planner.status()["tool_execution"] is False
+    assert planner.status()["fleet_authority"] is False

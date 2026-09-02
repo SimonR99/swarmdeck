@@ -81,6 +81,13 @@ The contracts in `agent_cortex/contracts.py` separate three capabilities:
 - `CodingWorker`: edits and tests an isolated source workspace.
 - `FleetTools`: executes typed robot actions after policy/approval.
 
+The first `FleetTools` implementation wraps the existing `robot_tool.py` CLI
+with validated argument vectors (never a shell command). `doctor` is read-only;
+deploy, drive, navigation, cancel, stop, and body commands are rejected unless
+the caller supplies approval separately from the model-proposed action. This
+boundary is present for evaluation but not connected to the shadow planner, so
+Ollama still has zero authority.
+
 This separation is important for multi-robot operation: a local or hosted LLM
 can propose work without automatically inheriting SSH credentials or motion
 authority. Candidate operator memories also remain inactive until explicitly
@@ -108,11 +115,18 @@ published on the host or LAN:
 ```bash
 make local-ai-up
 make local-ai-pull LOCAL_MODEL=qwen3.5:9b-q4_K_M
+make local-ai-shadow LOCAL_MODEL=qwen3.5:9b-q4_K_M
+make local-ai-eval LOCAL_MODEL=qwen3.5:9b-q4_K_M
 ```
 
 Pulling a model is intentionally a separate command because it consumes several
-gigabytes. On the current 10 GiB GPU, start with shadow planning at 16K/32K
-context; keep AGY as the coding worker until local repair evaluations pass.
+gigabytes. The shadow planner defaults to an 8K context on the current 10 GiB
+GPU; keep AGY as the coding worker until local repair evaluations pass.
+`local-ai-shadow` is the gradual-rollout command: chat and every existing AGY
+tool remain unchanged, while Ollama's typed decisions continue in the
+background and are written to the Cortex audit store even when AGY responds
+first. `local-ai-eval` checks conversation, diagnosis, restart, code-change,
+multi-robot, and ambiguous-request routing without executing any tool.
 
 ## OpenCode and MCP
 

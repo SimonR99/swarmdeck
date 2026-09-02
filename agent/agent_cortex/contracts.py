@@ -19,7 +19,9 @@ class PlannerRequest(BaseModel):
 
 
 class PlannerDecision(BaseModel):
-    action: Literal["respond", "diagnose", "repair", "mission", "ask"]
+    action: Literal[
+        "respond", "diagnose", "repair", "code_change", "mission", "ask"
+    ]
     target_robots: List[str] = Field(default_factory=list)
     instructions: str
     confidence: float = Field(ge=0.0, le=1.0)
@@ -53,8 +55,9 @@ class FleetAction(BaseModel):
     action: Literal["doctor", "deploy", "drive", "navigate", "cancel", "stop", "body"]
     robot_ids: List[str]
     parameters: Dict[str, Any] = Field(default_factory=dict)
-    approved: bool = False
 
 
 class FleetTools(Protocol):
-    async def invoke(self, action: FleetAction) -> Dict[str, Any]: ...
+    async def invoke(
+        self, action: FleetAction, *, operator_approved: bool = False
+    ) -> Dict[str, Any]: ...

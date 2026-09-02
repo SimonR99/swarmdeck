@@ -282,6 +282,33 @@ def build_system_prompt(
     )
 
 
+def build_planner_context(fleet_robots: List[Dict[str, Any]]) -> str:
+    """Give a small local planner facts and policy, not the AGY coding prompt."""
+    robots = [
+        {
+            "robot_id": robot.get("robot_id"),
+            "robot_type": robot.get("robot_type"),
+            "online": robot.get("online") is True,
+        }
+        for robot in fleet_robots
+    ]
+    return json.dumps(
+        {
+            "fleet": robots,
+            "actions": {
+                "diagnose": "read-only robot_tool doctor",
+                "repair": "robot restart or deploy; approval required",
+                "code_change": "delegate to isolated coding worker; approval required",
+                "mission": "multi-robot action plan; approval required",
+                "respond": "answer without tools",
+                "ask": "request missing target, intent, or authority",
+            },
+            "execution": "shadow only; no proposed action will run",
+        },
+        separators=(",", ":"),
+    )
+
+
 @app.post("/api/agent/chat")
 async def post_chat(req: ChatRequest) -> Response:
     user_prompt = req.prompt.strip()
@@ -349,6 +376,7 @@ async def post_chat(req: ChatRequest) -> Response:
             operator_prompt=user_prompt,
             provider_name=str(provider_status.get("name") or provider.name),
             selected_robot=target_robot,
+            planner_context=build_planner_context(fleet_robots),
         )
         async for event in SUPERVISOR.run(provider, supervisor_request):
             yield encode_sse(event)

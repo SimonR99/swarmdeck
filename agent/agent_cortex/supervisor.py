@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional
 
 from .contracts import PlannerRequest
+from .fleet_tools import RobotToolFleetTools
 from .models import get_planner
 from .providers import AgentProvider, ProviderRequest
 from .runtime import ProviderRuntime
@@ -71,6 +72,7 @@ class SupervisorRequest:
     operator_prompt: str
     provider_name: str
     selected_robot: Optional[str] = None
+    planner_context: Optional[str] = None
 
 
 class CortexSupervisor:
@@ -90,8 +92,10 @@ class CortexSupervisor:
         self.recovered_jobs = 0
         self.shadow_planner = None
         self.last_planner_error: str | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self.coding_worker = None
         self.last_worker_error: str | None = None
+        self.fleet_tools = RobotToolFleetTools()
 
         if self.mode == "observe":
             try:
@@ -129,8 +133,10 @@ class CortexSupervisor:
             "recovered_jobs": self.recovered_jobs,
             "shadow_planner": planner_status,
             "shadow_planner_error": self.last_planner_error,
+            "shadow_plans_inflight": len(self._background_tasks),
             "coding_worker": worker_status,
             "coding_worker_error": self.last_worker_error,
+            "fleet_tools": self.fleet_tools.status(),
         }
 
     def _store_call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
@@ -152,7 +158,9 @@ class CortexSupervisor:
             decision = await self.shadow_planner.plan(
                 PlannerRequest(
                     operator_prompt=request.operator_prompt,
-                    system_context=request.provider_request.prompt,
+                    system_context=(
+                        request.planner_context or request.provider_request.prompt
+                    ),
                     selected_robot=request.selected_robot,
                 )
             )
@@ -171,6 +179,22 @@ class CortexSupervisor:
                 {"error": str(exc)},
             )
 
+    def _start_shadow_plan(
+        self, request: SupervisorRequest, job_id: Optional[str]
+    ) -> None:
+        """Run evaluation independently of the operator-facing provider stream.
+
+        A local model may be slower than a short AGY response.  Keeping a strong
+        reference here lets its decision reach the audit store after the UI has
+        already received AGY's terminal event.  The task still has no execution
+        authority and is cancelled normally when the server's event loop stops.
+        """
+        if self.shadow_planner is None or job_id is None:
+            return
+        task = asyncio.create_task(self._run_shadow_plan(request, job_id))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def run(
         self, provider: AgentProvider, request: SupervisorRequest
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -183,7 +207,7 @@ class CortexSupervisor:
             selected_robot=request.selected_robot,
             metadata={"routing": "provider_passthrough"},
         )
-        planner_task = asyncio.create_task(self._run_shadow_plan(request, job_id))
+        self._start_shadow_plan(request, job_id)
         terminal_type: str | None = None
         pending_token_text: list[str] = []
         pending_token_size = 0
@@ -239,14 +263,6 @@ class CortexSupervisor:
                     "failed",
                     error_text="provider stream ended with an error",
                 )
-        finally:
-            if not planner_task.done():
-                planner_task.cancel()
-            else:
-                try:
-                    planner_task.result()
-                except (asyncio.CancelledError, Exception):
-                    pass
 
 
 def build_supervisor(history_dir: Path) -> CortexSupervisor:

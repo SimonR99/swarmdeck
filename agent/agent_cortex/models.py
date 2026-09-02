@@ -24,6 +24,7 @@ class OllamaPlanner:
         base_url: str | None = None,
         model: str | None = None,
         timeout: float | None = None,
+        context_length: int | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.base_url = (
@@ -31,6 +32,11 @@ class OllamaPlanner:
         ).rstrip("/")
         self.model = model or os.environ.get("CORTEX_PLANNER_MODEL", "")
         self.timeout = timeout or float(os.environ.get("CORTEX_PLANNER_TIMEOUT", "45"))
+        self.context_length = context_length or int(
+            os.environ.get("CORTEX_PLANNER_CONTEXT_LENGTH", "8192")
+        )
+        if not 1024 <= self.context_length <= 131072:
+            raise ValueError("CORTEX_PLANNER_CONTEXT_LENGTH must be between 1024 and 131072")
         self.transport = transport
 
     def status(self) -> Dict[str, Any]:
@@ -39,7 +45,10 @@ class OllamaPlanner:
             "configured": bool(self.model),
             "url": self.base_url,
             "model": self.model or "not configured",
+            "context_length": self.context_length,
             "role": "shadow planner",
+            "tool_execution": False,
+            "fleet_authority": False,
         }
 
     async def plan(self, request: PlannerRequest) -> PlannerDecision:
@@ -50,15 +59,15 @@ class OllamaPlanner:
             "model": self.model,
             "stream": False,
             "format": schema,
-            "options": {"temperature": 0},
+            "options": {"temperature": 0, "num_ctx": self.context_length},
             "messages": [
                 {
                     "role": "system",
                     "content": (
                         "You are a routing planner. Return only the requested JSON. "
                         "Do not claim that actions ran. Prefer ask when the target or "
-                        "authority is ambiguous. Robot motion, deployment, and code "
-                        "changes require approval."
+                        "authority is ambiguous. Diagnosis is read-only. Robot motion, "
+                        "deployment, repair, and code changes require approval."
                     ),
                 },
                 {
