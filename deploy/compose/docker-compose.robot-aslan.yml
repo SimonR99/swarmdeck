@@ -106,10 +106,10 @@ services:
         start_lidar:=false
         start_slam:=true
         start_imu:=true
-        start_vectornav:=${ASLAN_START_VECTORNAV:-true}
-        imu_topic:=${ASLAN_IMU_TOPIC:-/vectornav/imu}
-        config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CONFIG:-aslan_superodom.yaml}
-        calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CALIB:-aslan_superodom_calibration.yaml}
+        start_vectornav:=${ASLAN_START_VECTORNAV:-false}
+        imu_topic:=${ASLAN_IMU_TOPIC:-/ouster/imu}
+        config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CONFIG:-aslan_superodom_ouster.yaml}
+        calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CALIB:-aslan_superodom_ouster_calibration.yaml}
     healthcheck:
       test:
         - CMD-SHELL

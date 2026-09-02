@@ -2,6 +2,7 @@
         build-server up-server down-server \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
+        up-agent down-agent \
         build-deploy up-deploy down-deploy \
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
@@ -19,6 +20,7 @@ help:
 	@echo "  make [build|up|down]-server  Docker: backend + UI only"
 	@echo "  make [build|up|down]-sim     Docker: Gazebo/SLAM/Nav2/adapter_sim (needs server up)"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
+	@echo "  make [up|down]-agent         Docker: Cortex AI sidecar (opt-in, see compose)"
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
 	@echo "  make deploy ROBOT=botman    operator-side sync + override + build + reset + up"
 	@echo "  make deploy ROBOT=all       deploy every profile in deploy/robots/"
@@ -102,18 +104,17 @@ deploy:
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:
-	$(COMPOSE) build server ui slam agent
+	$(COMPOSE) build server ui slam
 
 up-server:
-	$(COMPOSE) up --build -d server ui slam agent
+	$(COMPOSE) up --build -d server ui slam
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Cortex:           http://localhost:8085/api/agent/status"
 
 down-server:
-	$(COMPOSE) stop server ui slam agent
-	$(COMPOSE) rm -f server ui slam agent
+	$(COMPOSE) stop server ui slam
+	$(COMPOSE) rm -f server ui slam
 
 # --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
 # docker-compose.yml means this brings the server up too if it isn't already.
@@ -121,7 +122,7 @@ build-sim:
 	$(COMPOSE) --profile gazebo build gazebo
 
 up-sim:
-	$(COMPOSE) --profile gazebo up --build -d server ui slam agent gazebo
+	$(COMPOSE) --profile gazebo up --build -d server ui slam gazebo
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
@@ -142,13 +143,26 @@ down-mock:
 	$(COMPOSE) --profile mock stop mock
 	$(COMPOSE) --profile mock rm -f mock
 
+# --- Cortex: the AI fleet-intelligence sidecar, on port 8085.
+#
+# Opt in, because it bind-mounts an operator's personal tooling by absolute
+# path; see the service in docker-compose.yml. Read those mounts before the
+# first run on a new machine.
+up-agent:
+	$(COMPOSE) --profile agent up --build -d agent
+	@echo "Cortex:           http://localhost:8085/health"
+
+down-agent:
+	$(COMPOSE) --profile agent stop agent
+	$(COMPOSE) --profile agent rm -f agent
+
 # --- real fleet deployment: server + UI + a Zenoh router, so robots on other
 # machines can reach both the backend and each other's ROS graph. No Gazebo, no
 # cslam, no mock — this is the actual bring-up target.
 ZENOH_COMPOSE = -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
 
 build-deploy:
-	docker compose $(ZENOH_COMPOSE) build server ui agent
+	docker compose $(ZENOH_COMPOSE) build server ui
 
 up-deploy:
 	SWARMDECK_CONFIG=/app/configs/hardware_fleet.yaml \
@@ -156,11 +170,10 @@ up-deploy:
 	  SWARMDECK_SLAM_ANCHOR_ROBOT=aslan_0 \
 	  SWARMDECK_SLAM_CAPTURE_DIR=/app/sessions/captures/hardware-live \
 	  SWARMDECK_SLAM_RESTORE_CAPTURE=true \
-	  docker compose $(ZENOH_COMPOSE) up --build -d server ui agent mediamtx zenoh-router slam
+	  docker compose $(ZENOH_COMPOSE) up --build -d server ui mediamtx zenoh-router slam
 	@echo "SwarmDeck UI:     http://localhost:5173"
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Cortex:           http://localhost:8085/api/agent/status"
 	@echo "Zenoh router:     tcp/<this-host>:7447"
 	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
 	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
@@ -197,13 +210,13 @@ docker-up-cslam:
 	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
 
 docker-down:
-	$(COMPOSE) --profile gazebo --profile mock down
+	$(COMPOSE) --profile gazebo --profile mock --profile agent down
 
 docker-logs:
-	$(COMPOSE) --profile gazebo --profile mock logs -f
+	$(COMPOSE) --profile gazebo --profile mock --profile agent logs -f
 
 docker-ps:
-	$(COMPOSE) --profile gazebo --profile mock ps
+	$(COMPOSE) --profile gazebo --profile mock --profile agent ps
 
 docker-test:
 	$(COMPOSE) build server
@@ -220,4 +233,4 @@ docker-test-launch:
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log}
-	$(COMPOSE) --profile gazebo --profile mock down --rmi local --volumes --remove-orphans 2>/dev/null || true
+	$(COMPOSE) --profile gazebo --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true

@@ -144,11 +144,14 @@ The operator commands remain unchanged:
 
 ```bash
 make up-server
+make up-agent
 make up-deploy
 python scripts/robot_tool.py doctor all --services
 python scripts/robot_tool.py deploy scout
 ```
 
-The `up-server`, `up-sim`, and `up-deploy` targets now include the Cortex
-service, and local Vite development routes `/api/agent/*` to port 8085 just as
-the production nginx configuration does.
+The Cortex service is deliberately opt-in because it mounts local provider
+credentials and robot SSH material. `make up-agent` is its stable start command;
+the robot deployment and diagnostic commands remain independent. Local Vite
+development routes `/api/agent/*` to port 8085 just as the production nginx
+configuration does.

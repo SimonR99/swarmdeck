@@ -5,15 +5,14 @@ import re
 REPO = Path(__file__).resolve().parents[2]
 
 
-def test_operator_start_targets_include_cortex_agent():
+def test_cortex_has_an_explicit_opt_in_start_target():
     makefile = (REPO / "Makefile").read_text()
+    compose = (REPO / "deploy" / "compose" / "docker-compose.yml").read_text()
 
-    assert "$(COMPOSE) up --build -d server ui slam agent" in makefile
-    assert (
-        "docker compose $(ZENOH_COMPOSE) up --build -d server ui agent "
-        "mediamtx zenoh-router slam"
-    ) in makefile
-    assert "docker compose $(ZENOH_COMPOSE) build server ui agent" in makefile
+    assert "up-agent:" in makefile
+    assert "$(COMPOSE) --profile agent up --build -d agent" in makefile
+    assert 'profiles: ["agent"]' in compose
+    assert "$(COMPOSE) up --build -d server ui slam agent" not in makefile
 
 
 def test_local_ui_has_specific_cortex_proxy_before_generic_api():

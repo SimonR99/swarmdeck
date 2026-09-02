@@ -158,6 +158,5 @@ def test_aslan_slam_uses_ouster_imu():
     assert "aslan_superodom_ouster_calibration.yaml" in source
     assert ". /workspace/install/setup.bash" in slam_command
     assert "start_imu:=true" in slam_command
-    assert "start_vectornav:=${ASLAN_START_VECTORNAV:-true}" in slam_command
-    assert "imu_topic:=${ASLAN_IMU_TOPIC:-/vectornav/imu}" in slam_command
-    assert "aslan_superodom_calibration.yaml" in slam_command
+    assert "imu_topic:=${ASLAN_IMU_TOPIC:-/ouster/imu}" in slam_command
+    assert "aslan_superodom_ouster_calibration.yaml" in slam_command
