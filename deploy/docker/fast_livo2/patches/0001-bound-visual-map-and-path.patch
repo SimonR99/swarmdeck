@@ -1,0 +1,444 @@
+Bound the visual sparse map, the warp cache, and the published path.
+
+Applies to hku-mars/FAST-LIVO2 (verified: the vendored M3DGR copy of the
+visual subsystem is identical to upstream apart from one unrelated line in
+vio.cpp that computes `border`).
+
+Three unbounded containers, all reachable in normal operation:
+
+1. VIOManager::feat_map. generateVisualMapPoints() only skips a grid cell when
+   that cell matched an existing map point in the CURRENT frame (grid_num[i] !=
+   TYPE_MAP). Any cell that fails retrieval therefore allocates a fresh
+   VisualPoint + Feature every frame, forever, even when the platform is
+   stationary and looking at the same scene. Nothing ever erases from
+   voxel_points; feat_map is only freed in ~VIOManager.
+
+   The amplifier is Feature::img_, which is assigned the WHOLE frame
+   (vio.cpp: `ftr_new->img_ = img;` at both add sites). cv::Mat is refcounted,
+   so every retained Feature pins an entire decoded image, not just its patch.
+   The set of frames resident in RAM therefore grows monotonically with runtime.
+
+   Measured on an Ouster OS0-64 + OAK-D platform, STATIONARY, 1280x800:
+     t=20s  550 voxels   363 MiB
+     t=40s  602 voxels   718 MiB
+     t=60s  640 voxels  1.06 GiB
+     t=80s  676 voxels  1.41 GiB
+   Voxel count +23%, memory +288%: the map was not growing in extent, it was
+   densifying, and each new point pinned another full frame. ~18 MiB/s, which
+   is ~6 frames/s at 3.07 MB per decoded frame. A longer run was OOM-killed at
+   21.5 GiB.
+
+   Fix: VIOManager::trimVisualMap(), called at the end of processFrame() once
+   visual_submap is no longer read (retrieveFromVisualSparseMap() resets it
+   before the next frame, so eviction cannot dangle a borrowed pointer). It
+   caps points per voxel, keeping the most recently observed (obs_ is
+   push_front-ed, so obs_.front()->id_ is the last frame that saw the point),
+   which evicts exactly the create-once-never-matched churn. It also adds a
+   position-triggered slide mirroring VoxelMapManager::mapSliding(), which the
+   LiDAR map already has and the visual map does not.
+
+2. VIOManager::warp_map is cleared only when normal_en is false. With
+   normal_en true (the shipped default) it grows one entry per frame forever.
+   It is a cache, so dropping it wholesale is safe.
+
+3. LIVMapper::publish_path appends to path.poses forever AND republishes the
+   entire path every frame, so both the retained message and the per-frame
+   serialisation cost grow without bound.
+
+Every new knob defaults to the previous unbounded behaviour, so this patch is
+a no-op until configured.
+
+--- a/include/vio.h
++++ b/include/vio.h
+@@ -131,6 +131,23 @@
+   FramePtr new_frame_;
+   cv::Mat img_cp, img_rgb, img_test;
+ 
++  // --- Bounded visual map (SwarmDeck patch) --------------------------------
++  // Upstream never evicts from feat_map. In generateVisualMapPoints() a grid
++  // cell that fails to match an existing map point appends a brand new
++  // VisualPoint every frame, and each one pins a whole decoded frame through
++  // Feature::img_ (a refcounted cv::Mat, not just the patch). Standing still
++  // therefore leaks at the camera frame rate. Zero keeps upstream behaviour.
++  int max_pts_per_voxel = 0;          // 0 = unbounded (upstream)
++  int max_warp_cache = 0;             // 0 = unbounded (upstream)
++  int max_point_age = 0;              // frames a point may go unmatched, 0 = unbounded
++  bool visual_map_sliding_en = false;
++  double visual_sliding_thresh = 8.0; // metres of travel between slides
++  double visual_half_map_size = 50.0; // metres, half-extent of retained cube
++  V3D last_visual_slide_pos = V3D(0, 0, 0);
++  bool visual_slide_pos_valid = false;
++  int map_report_every = 200;         // frames between map-size reports, 0 = off
++  long trim_calls_ = 0;               // for the periodic bounded-map report
++
+   enum CellType
+   {
+     TYPE_MAP = 1,
+@@ -161,6 +178,7 @@
+   void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+                   const int pyramid_level, const int halfpatch_size, float *patch);
+   void insertPointIntoVoxelMap(VisualPoint *pt_new);
++  void trimVisualMap();
+   void plotTrackedPoints();
+   void updateFrameState(StatesGroup state);
+   void projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
+--- a/src/vio.cpp
++++ b/src/vio.cpp
+@@ -11,6 +11,7 @@
+ */
+ 
+ #include "vio.h"
++#include <algorithm>
+ 
+ VIOManager::VIOManager()
+ {
+@@ -351,6 +352,10 @@
+ 
+ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
+ {
++  // Reset before the early return: with eviction enabled feat_map can become
++  // empty, and returning early used to leave last frame's freed VisualPoint
++  // pointers in visual_submap for updateVisualMapPoints() to dereference.
++  visual_submap->reset();
+   if (feat_map.size() <= 0) return;
+   double ts0 = omp_get_wtime();
+ 
+@@ -359,7 +364,6 @@
+   // downSizeFilter.filter(*pg_down);
+ 
+   // resetRvizDisplay();
+-  visual_submap->reset();
+ 
+   // Controls whether to include the visual submap from the previous frame.
+   sub_feat_map.clear();
+@@ -762,6 +766,7 @@
+ 
+       if (error > outlier_threshold * patch_size_total) continue;
+ 
++      pt->last_seen_id_ = new_frame_->id_;
+       visual_submap->voxel_points.push_back(pt);
+       visual_submap->propa_errors.push_back(error);
+       visual_submap->search_levels.push_back(search_level);
+@@ -875,6 +880,7 @@
+       getImagePatch(img, pc, patch, 0);
+ 
+       VisualPoint *pt_new = new VisualPoint(pt);
++      pt_new->last_seen_id_ = new_frame_->id_;
+ 
+       Vector3d f = cam->cam2world(pc);
+       Feature *ftr_new = new Feature(pt_new, patch, pc, f, new_frame_->T_f_w_, 0);
+@@ -1783,6 +1789,127 @@
+   cnt++;
+ }
+ 
++void VIOManager::trimVisualMap()
++{
++  // Called at the end of processFrame, once visual_submap is done being read
++  // for this frame. retrieveFromVisualSparseMap() resets the submap before the
++  // next frame touches it, so evicting here can never dangle a borrowed
++  // pointer. Deleting a VOXEL_POINTS cascades: ~VOXEL_POINTS deletes its
++  // VisualPoints, ~VisualPoint deletes its Features, and ~Feature releases the
++  // cv::Mat reference that was pinning a full frame.
++
++  // 1. Bound the points held per voxel, keeping those matched most recently.
++  //    last_seen_id_ is stamped whenever the point is retrieved into the frame's
++  //    submap, so actively tracked points are retained and the
++  //    create-once-never-matched churn ages out first.
++  trim_calls_++;
++  int evicted = 0;
++  int aged = 0;
++  if (max_pts_per_voxel > 0)
++  {
++    for (auto &pair : feat_map)
++    {
++      std::vector<VisualPoint *> &pts = pair.second->voxel_points;
++      if ((int)pts.size() <= max_pts_per_voxel) continue;
++
++      std::nth_element(pts.begin(), pts.begin() + max_pts_per_voxel, pts.end(),
++                       [](const VisualPoint *a, const VisualPoint *b)
++                       {
++                         int ia = (a == nullptr) ? -1 : a->last_seen_id_;
++                         int ib = (b == nullptr) ? -1 : b->last_seen_id_;
++                         return ia > ib;
++                       });
++      for (size_t i = (size_t)max_pts_per_voxel; i < pts.size(); i++)
++      {
++        if (pts[i] != nullptr) { delete pts[i]; pts[i] = nullptr; }
++      }
++      evicted += (int)pts.size() - max_pts_per_voxel;
++      pts.resize((size_t)max_pts_per_voxel);
++      pair.second->count = (int)pts.size();
++    }
++  }
++
++  // 1b. Bound how far back the map still reaches. This, not the point count, is
++  //     what bounds memory: every surviving Feature pins an entire decoded frame
++  //     through Feature::img_ (a refcounted cv::Mat, ~1 MB at 1280x800 grey), so
++  //     resident memory tracks the SPAN of frame ids the map still references.
++  //     Dropping points unmatched for max_point_age frames caps that span, and
++  //     hence caps memory at roughly max_point_age x frame size.
++  if (max_point_age > 0 && new_frame_ != nullptr)
++  {
++    const int cutoff = (int)new_frame_->id_ - max_point_age;
++    for (auto it = feat_map.begin(); it != feat_map.end();)
++    {
++      std::vector<VisualPoint *> &pts = it->second->voxel_points;
++      size_t keep = 0;
++      for (size_t r = 0; r < pts.size(); r++)
++      {
++        VisualPoint *pt = pts[r];
++        if (pt != nullptr && pt->last_seen_id_ < cutoff) { delete pt; aged++; }
++        else pts[keep++] = pt;
++      }
++      pts.resize(keep);
++      it->second->count = (int)keep;
++      if (pts.empty()) { delete it->second; it = feat_map.erase(it); }
++      else { ++it; }
++    }
++  }
++
++  // 2. Slide the visual map with the platform, mirroring
++  //    VoxelMapManager::mapSliding() for the LiDAR map. This is purely
++  //    position triggered, so it frees nothing while stationary; step 1 is
++  //    what bounds the stationary case.
++  if (visual_map_sliding_en && state != nullptr)
++  {
++    const V3D pos = state->pos_end;
++    if (!visual_slide_pos_valid)
++    {
++      last_visual_slide_pos = pos;
++      visual_slide_pos_valid = true;
++    }
++    else if ((pos - last_visual_slide_pos).norm() >= visual_sliding_thresh)
++    {
++      last_visual_slide_pos = pos;
++      const double voxel_size = 0.5; // must match insertPointIntoVoxelMap
++      int removed = 0;
++      for (auto it = feat_map.begin(); it != feat_map.end();)
++      {
++        double cx = ((double)it->first.x + 0.5) * voxel_size;
++        double cy = ((double)it->first.y + 0.5) * voxel_size;
++        double cz = ((double)it->first.z + 0.5) * voxel_size;
++        if (fabs(cx - pos[0]) > visual_half_map_size || fabs(cy - pos[1]) > visual_half_map_size ||
++            fabs(cz - pos[2]) > visual_half_map_size)
++        {
++          delete it->second;
++          it = feat_map.erase(it);
++          removed++;
++        }
++        else { ++it; }
++      }
++      if (removed > 0) printf("[ VIO ] visual map slide: dropped %d voxels, %zu remain\n", removed, feat_map.size());
++    }
++  }
++
++  // 3. warp_map is a cache keyed by frame id that upstream clears only when
++  //    normal_en is false, so with normal_en true it grows one entry per frame
++  //    forever. Dropping it wholesale is safe: it is rebuilt on demand.
++  if (max_warp_cache > 0 && (int)warp_map.size() > max_warp_cache)
++  {
++    for (auto &pair : warp_map) delete pair.second;
++    warp_map.clear();
++  }
++
++  // Periodic proof the bound is actually holding, and what it costs.
++  if (map_report_every > 0 && (trim_calls_ % map_report_every) == 0)
++  {
++    size_t total_pts = 0;
++    for (auto &pair : feat_map) total_pts += pair.second->voxel_points.size();
++    printf("[ VIO ] visual map: %zu voxels, %zu points, %d evicted, %d aged out, warp cache %zu\n",
++           feat_map.size(), total_pts, evicted, aged, warp_map.size());
++  }
++
++}
++
+ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
+ {
+   if (width != img.cols || height != img.rows)
+@@ -1828,6 +1955,8 @@
+   updateReferencePatch(feat_map);
+ 
+   double t7 = omp_get_wtime();
++
++  trimVisualMap();
+   
+   if(colmap_output_en)  dumpDataForColmap();
+ 
+--- a/include/LIVMapper.h
++++ b/include/LIVMapper.h
+@@ -112,6 +112,17 @@
+   bool lidar_pushed = false, imu_en, gravity_est_en, flg_reset = false, ba_bg_est_en = true;
+   bool dense_map_en = false;
+   int img_en = 1, imu_int_frame = 3;
++  // Bounded visual map (see VIOManager::trimVisualMap)
++  int vio_max_pts_per_voxel = 0, vio_max_warp_cache = 0;
++  int vio_max_point_age = 0;
++  bool vio_map_sliding_en = false;
++  int path_max_poses = 0;   // 0 = unbounded (upstream)
++  // Input queues. Upstream leaves all three unbounded, so a sensor stall or a
++  // clock desync turns into unbounded memory growth. 0 = unbounded (upstream).
++  int max_img_buffer = 0, max_lidar_buffer = 0, max_imu_buffer = 0;
++  int img_dropped = 0;
++  int vio_map_report_every = 200;
++  double vio_sliding_thresh = 8.0, vio_half_map_size = 50.0;
+   bool normal_en = true;
+   bool exposure_estimate_en = false;
+   double exposure_time_init = 0.0;
+--- a/src/LIVMapper.cpp
++++ b/src/LIVMapper.cpp
+@@ -67,6 +67,13 @@
+   nh.param<int>("vio/patch_pyrimid_level", patch_pyrimid_level, 3);
+   nh.param<int>("vio/patch_size", patch_size, 8);
+   nh.param<double>("vio/outlier_threshold", outlier_threshold, 1000);
++  nh.param<int>("vio/max_pts_per_voxel", vio_max_pts_per_voxel, 0);
++  nh.param<int>("vio/max_warp_cache", vio_max_warp_cache, 0);
++  nh.param<int>("vio/max_point_age", vio_max_point_age, 0);
++  nh.param<bool>("vio/map_sliding_en", vio_map_sliding_en, false);
++  nh.param<double>("vio/sliding_thresh", vio_sliding_thresh, 8.0);
++  nh.param<double>("vio/half_map_size", vio_half_map_size, 50.0);
++  nh.param<int>("vio/map_report_every", vio_map_report_every, 200);
+ 
+   nh.param<double>("time_offset/exposure_time_init", exposure_time_init, 0.0);
+   nh.param<double>("time_offset/img_time_offset", img_time_offset, 0.0);
+@@ -105,6 +112,10 @@
+   nh.param<int>("publish/pub_scan_num", pub_scan_num, 1);
+   nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
+   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
++  nh.param<int>("publish/path_max_poses", path_max_poses, 0);
++  nh.param<int>("common/max_img_buffer", max_img_buffer, 0);
++  nh.param<int>("common/max_lidar_buffer", max_lidar_buffer, 0);
++  nh.param<int>("common/max_imu_buffer", max_imu_buffer, 0);
+ 
+   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
+ }
+@@ -180,6 +191,13 @@
+   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
+   vio_manager->exposure_estimate_en = exposure_estimate_en;
+   vio_manager->colmap_output_en = colmap_output_en;
++  vio_manager->max_pts_per_voxel = vio_max_pts_per_voxel;
++  vio_manager->max_warp_cache = vio_max_warp_cache;
++  vio_manager->max_point_age = vio_max_point_age;
++  vio_manager->visual_map_sliding_en = vio_map_sliding_en;
++  vio_manager->visual_sliding_thresh = vio_sliding_thresh;
++  vio_manager->visual_half_map_size = vio_half_map_size;
++  vio_manager->map_report_every = vio_map_report_every;
+   vio_manager->initializeVIO();
+ 
+   p_imu->set_extrinsic(extT, extR);
+@@ -747,6 +765,14 @@
+   p_pre->process(msg, ptr);
+   lid_raw_data_buffer.push_back(ptr);
+   lid_header_time_buffer.push_back(ros::toSec(msg->header.stamp));
++  if (max_lidar_buffer > 0)
++  {
++    while ((int)lid_raw_data_buffer.size() > max_lidar_buffer)
++    {
++      lid_raw_data_buffer.pop_front();
++      lid_header_time_buffer.pop_front();
++    }
++  }
+   last_timestamp_lidar = ros::toSec(msg->header.stamp);
+ 
+   mtx_buffer.unlock();
+@@ -786,6 +812,14 @@
+   p_pre->process(msg, ptr);
+   lid_raw_data_buffer.push_back(ptr);
+   lid_header_time_buffer.push_back(cur_head_time);
++  if (max_lidar_buffer > 0)
++  {
++    while ((int)lid_raw_data_buffer.size() > max_lidar_buffer)
++    {
++      lid_raw_data_buffer.pop_front();
++      lid_header_time_buffer.pop_front();
++    }
++  }
+   last_timestamp_lidar = cur_head_time;
+ 
+   mtx_buffer.unlock();
+@@ -834,6 +868,10 @@
+   last_timestamp_imu = timestamp;
+ 
+   imu_buffer.push_back(msg);
++  if (max_imu_buffer > 0)
++  {
++    while ((int)imu_buffer.size() > max_imu_buffer) imu_buffer.pop_front();
++  }
+   // cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
+   mtx_buffer.unlock();
+   if (imu_prop_enable)
+@@ -916,6 +954,24 @@
+   img_buffer.push_back(img_cur);
+   img_time_buffer.push_back(img_time_correct);
+ 
++  // Upstream never bounds this queue. sync_packages() only pops once a LiDAR
++  // and IMU package can be formed around the image, so any sensor stall or
++  // clock desync leaves images accumulating at the camera rate, each holding a
++  // full decoded frame. Measured on Botman with the VectorNav 2.1 s behind the
++  // LiDAR: ~34 MiB/s until the OOM killer intervened. Dropping the oldest
++  // frames is the right degradation: stale images are useless to the filter.
++  if (max_img_buffer > 0)
++  {
++    while ((int)img_buffer.size() > max_img_buffer)
++    {
++      img_buffer.pop_front();
++      img_time_buffer.pop_front();
++      img_dropped++;
++    }
++    if (img_dropped > 0 && (img_dropped % 100) == 0)
++      ROS_WARN("Image buffer over %d frames, dropped %d so far (sensors out of sync?)", max_img_buffer, img_dropped);
++  }
++
+   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
+ 
+   last_timestamp_img = img_time_correct;
+@@ -1328,5 +1384,12 @@
+   msg_body_pose.header.stamp = ros::Time::now();
+   msg_body_pose.header.frame_id = "camera_init";
+   path.poses.push_back(msg_body_pose);
++  // Upstream appends forever AND republishes the entire path every frame, so
++  // both the retained message and the per-frame serialisation cost grow
++  // without bound over a long deployment. Keep a trailing window instead.
++  if (path_max_poses > 0 && (int)path.poses.size() > path_max_poses)
++  {
++    path.poses.erase(path.poses.begin(), path.poses.begin() + (path.poses.size() - (size_t)path_max_poses));
++  }
+   pubPath.publish(path);
+ }
+\ No newline at end of file
+--- a/src/voxel_map.cpp
++++ b/src/voxel_map.cpp
+@@ -925,7 +925,8 @@
+ {
+   if((position_last_ - last_slide_position).norm() < config_setting_.sliding_thresh)
+   {
+-    std::cout<<RED<<"[DEBUG]: Last sliding length "<<(position_last_ - last_slide_position).norm()<<RESET<<"\n";
++    // Upstream logged here on EVERY frame, which floods the log at LiDAR rate
++    // once sliding is enabled. The interesting events are logged below.
+     return false;
+   }
+ 
+--- a/include/visual_point.h
++++ b/include/visual_point.h
+@@ -35,6 +35,10 @@
+   bool is_normal_initialized_;  //!< True if the normal is initialized.
+   bool has_ref_patch_;          //!< True if the point has a reference patch.
+   Feature *ref_patch;           //!< Reference patch of the point.
++  int last_seen_id_;            //!< Frame id that last MATCHED this point.
++                                //!< obs_.front()->id_ only advances when a new
++                                //!< Feature is added, which needs parallax, so a
++                                //!< stationary platform never refreshes it.
+ 
+   VisualPoint(const Vector3d &pos);
+   ~VisualPoint();
+--- a/src/visual_point.cpp
++++ b/src/visual_point.cpp
+@@ -17,7 +17,8 @@
+ 
+ VisualPoint::VisualPoint(const Vector3d &pos)
+     : pos_(pos), previous_normal_(Vector3d::Zero()), normal_(Vector3d::Zero()),
+-      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false)
++      is_converged_(false), is_normal_initialized_(false), has_ref_patch_(false),
++      last_seen_id_(-1)
+ {
+ }
+ 

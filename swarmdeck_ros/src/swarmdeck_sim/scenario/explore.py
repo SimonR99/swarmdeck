@@ -47,6 +47,14 @@ still never drives into a wall.
 `--seconds` is wall-clock, not simulation time, because it exists to bound how long
 an operator waits. Under a real-time factor below 1 the fleet covers proportionally
 less ground.
+
+An operator goal always wins. This node and Nav2's velocity_smoother publish to the
+same `<ns>/cmd_vel`, so while both are commanding one robot it receives interleaved,
+contradictory velocities and follows neither: it lurches along roughly the planned
+path and never reaches the goal. That is what a robot "not following its path" looks
+like, and nothing in the stack reports it. So each robot's NavigateToPose status is
+watched, and exploration stops commanding any robot with an accepted or executing
+goal, resuming when the goal ends. The bootstrap is for robots nobody is driving.
 """
 
 from __future__ import annotations
@@ -60,6 +68,7 @@ import time
 
 import numpy as np
 import rclpy
+from action_msgs.msg import GoalStatus, GoalStatusArray
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -165,6 +174,9 @@ class Explorer(Node):
         self.wedge_until: dict[str, float] = {}
         self.wedge_ref: dict[str, tuple[float, float, float]] = {}
         self.wedge_reported: set[str] = set()
+        # Robots Nav2 currently owns. While true, this node says nothing on
+        # that robot's cmd_vel; see the module docstring.
+        self.nav_busy: dict[str, bool] = {}
         self.cycle = 0
         self.cycle_since = time.monotonic()
 
@@ -199,6 +211,17 @@ class Explorer(Node):
                 10,
             )
             self.pubs[rid] = self.create_publisher(Twist, f"/{rid}/cmd_vel", 10)
+            # Nav2's action status, so an operator goal can take this robot
+            # away from the bootstrap. The topic is one of the action's hidden
+            # ones; subscribing to it is far cheaper than holding an action
+            # client per robot just to learn whether a goal exists.
+            self.nav_busy[rid] = False
+            self.create_subscription(
+                GoalStatusArray,
+                f"/{rid}/navigate_to_pose/_action/status",
+                lambda msg, r=rid: self._on_nav_status(r, msg),
+                10,
+            )
             self.turn_dir[rid] = 1.0
             self.stuck_since[rid] = 0.0
             self.wedge_until[rid] = 0.0
@@ -367,6 +390,26 @@ class Explorer(Node):
             self.phase[rid] = "wander"
             self.phase_since[rid] = now
 
+    def _on_nav_status(self, rid: str, msg: GoalStatusArray) -> None:
+        """Track whether Nav2 currently owns this robot.
+
+        ACCEPTED and EXECUTING both count: a goal that has been accepted but
+        not yet started still ends with the controller writing cmd_vel, and
+        handing it a robot mid-lurch is how a plan starts from the wrong pose.
+        A finished goal leaves its entry in the list with a terminal status,
+        so this cannot latch on.
+        """
+        busy = any(
+            status.status in (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
+            for status in msg.status_list
+        )
+        if busy == self.nav_busy.get(rid):
+            return
+        self.nav_busy[rid] = busy
+        self.get_logger().info(
+            f"{rid}: {'yielding to an operator goal' if busy else 'resuming exploration'}"
+        )
+
     def _advance_cycle(self) -> None:
         """Rotate the pair schedule, at most once per cycle period.
 
@@ -435,6 +478,11 @@ class Explorer(Node):
         self._advance_cycle()
         for rid, pub in self.pubs.items():
             if self.scan.get(rid) is None:
+                continue
+            # Nav2 owns this robot: say nothing at all on cmd_vel. Publishing
+            # even a zero Twist here would land between two controller
+            # commands and stutter the robot.
+            if self.nav_busy.get(rid):
                 continue
             self._advance_phase(rid, now)
 
@@ -521,7 +569,11 @@ class Explorer(Node):
         # Disable the timer first. Otherwise it can overwrite this zero command
         # during the grace period before rclpy shuts down.
         self.running = False
-        for pub in self.pubs.values():
+        for rid, pub in self.pubs.items():
+            # A robot Nav2 is driving was never ours to stop, and a parting
+            # zero would brake it mid-goal.
+            if self.nav_busy.get(rid):
+                continue
             pub.publish(Twist())
 
 

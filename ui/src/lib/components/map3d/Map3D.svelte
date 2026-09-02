@@ -320,8 +320,17 @@
     gl.enable(gl.DEPTH_TEST);
   }
 
+  let renderPending = false;
+  function requestRender() {
+    if (renderPending) return;
+    renderPending = true;
+    raf = requestAnimationFrame(() => {
+      renderPending = false;
+      render();
+    });
+  }
+
   function render() {
-    raf = requestAnimationFrame(render);
     if (!gl || !canvas || !program) return;
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
@@ -348,6 +357,17 @@
     }
     drawRobotMarkers(dpr);
   }
+
+  $effect(() => {
+    void fleet.robots;
+    void fleet.selected;
+    void yaw;
+    void pitch;
+    void distance;
+    void target;
+    void count;
+    requestRender();
+  });
 
   onMount(() => {
     if (!canvas) return;
@@ -392,10 +412,13 @@
     void fetchCloud();
     // Slow: the merged cloud is an accumulated map, not a sensor stream.
     const poll = window.setInterval(() => active && void fetchCloud(), 5000);
-    raf = requestAnimationFrame(render);
+    const ro = new ResizeObserver(() => requestRender());
+    if (canvas) ro.observe(canvas);
+    requestRender();
     return () => {
       window.clearInterval(poll);
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
     };
   });
 

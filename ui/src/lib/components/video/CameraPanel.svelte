@@ -73,6 +73,8 @@
 
   const ROLLING_ALPHA = 0.2;
   let lastFrameTime = 0;
+  let rawFps = 0;
+  let rawLatency = 0;
   let rfcHandle: number | null = null;
   let statsTimer: number | null = null;
 
@@ -81,7 +83,7 @@
       const dt = (now - lastFrameTime) / 1000;
       if (dt >= 0.025 && dt < 1.5) {
         const instantFps = Math.min(30, 1 / dt);
-        fps = fps === 0 ? instantFps : fps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
+        rawFps = rawFps === 0 ? instantFps : rawFps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
       }
     }
     lastFrameTime = now;
@@ -89,10 +91,10 @@
 
   function recordLatency(instantMs: number) {
     if (instantMs >= 0 && instantMs < 10000) {
-      pingLatencyMs =
-        pingLatencyMs === 0
+      rawLatency =
+        rawLatency === 0
           ? instantMs
-          : pingLatencyMs * (1 - ROLLING_ALPHA) + instantMs * ROLLING_ALPHA;
+          : rawLatency * (1 - ROLLING_ALPHA) + instantMs * ROLLING_ALPHA;
     }
   }
 
@@ -154,11 +156,13 @@
               }
               if (rfcHandle === null && typeof report.framesPerSecond === 'number' && report.framesPerSecond > 0) {
                 const instantFps = Math.min(30, report.framesPerSecond);
-                fps = fps === 0 ? instantFps : fps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
+                rawFps = rawFps === 0 ? instantFps : rawFps * (1 - ROLLING_ALPHA) + instantFps * ROLLING_ALPHA;
               }
             }
           });
         }
+        fps = rawFps;
+        pingLatencyMs = rawLatency;
       } catch {
         // Ignored
       }

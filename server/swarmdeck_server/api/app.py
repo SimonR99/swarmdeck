@@ -800,49 +800,49 @@ async def post_agent_snapshot(robot_id: str) -> Any:
 
 @app.post("/api/robot/{robot_id}/drive")
 async def post_robot_drive(robot_id: str, request: Request) -> Any:
-    from .agent_routes import post_robot_drive as handler
+    from .teleop_routes import post_robot_drive as handler
 
     return await handler(robot_id, request)
 
 
 @app.post("/api/robot/{robot_id}/goal")
 async def post_robot_goal(robot_id: str, request: Request) -> Any:
-    from .agent_routes import post_robot_goal as handler
+    from .teleop_routes import post_robot_goal as handler
 
     return await handler(robot_id, request)
 
 
 @app.post("/api/robot/{robot_id}/cancel")
 async def post_robot_cancel(robot_id: str) -> Any:
-    from .agent_routes import post_robot_cancel as handler
+    from .teleop_routes import post_robot_cancel as handler
 
     return await handler(robot_id)
 
 
 @app.post("/api/robot/{robot_id}/stop")
 async def post_robot_stop(robot_id: str) -> Any:
-    from .agent_routes import post_robot_stop as handler
+    from .teleop_routes import post_robot_stop as handler
 
     return await handler(robot_id)
 
 
 @app.post("/api/robot/{robot_id}/body")
 async def post_robot_body(robot_id: str, request: Request) -> Any:
-    from .agent_routes import post_robot_body as handler
+    from .teleop_routes import post_robot_body as handler
 
     return await handler(robot_id, request)
 
 
 @app.get("/api/robot/{robot_id}/vision")
 async def get_robot_vision(robot_id: str) -> Any:
-    from .agent_routes import get_robot_vision as handler
+    from .teleop_routes import get_robot_vision as handler
 
     return await handler(robot_id)
 
 
 @app.get("/api/detections")
 async def get_all_detections() -> Any:
-    from .agent_routes import get_all_detections as handler
+    from .teleop_routes import get_all_detections as handler
 
     return await handler()
 
@@ -1336,6 +1336,48 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 f"STOP did not reach {', '.join(sorted(undelivered))} — "
                 f"they may still be moving",
             )
+
+    elif kind in ("start_explore", "stop_explore"):
+        # Fleet-wide, but sent per robot because that is the only channel the
+        # protocol has. Only robots that advertise `explore` are addressed:
+        # exploration starts a process that drives the whole fleet reactively,
+        # and a hardware adapter must never be asked to do that. `registry.can`
+        # is the same gate `navigate` and `reset` use.
+        enabled = kind == "start_explore"
+        targets = [
+            robot_id
+            for robot_id in list(registry.robots)
+            if registry.can(robot_id, "explore")
+        ]
+        if not targets:
+            await raise_alert(
+                "explore_unsupported",
+                "warn",
+                "fault",
+                "No connected robot supports exploration",
+            )
+        else:
+            undelivered = [
+                robot_id
+                for robot_id in targets
+                if not await registry.send(
+                    robot_id, {"type": "explore", "enabled": enabled, **stamps()}
+                )
+            ]
+            events.log(
+                kind, {"robots": sorted(targets), "undelivered": sorted(undelivered)}
+            )
+            # Stop is the direction worth alerting on. A start that did not
+            # arrive shows up immediately as robots that do not move; a stop
+            # that did not arrive leaves them driving, which is the same class
+            # of problem stop_all names its failures for.
+            if undelivered and not enabled:
+                await raise_alert(
+                    "stop_explore_undelivered",
+                    "warn",
+                    "fault",
+                    f"Stop exploration did not reach {', '.join(sorted(undelivered))}",
+                )
 
     elif kind == "reset_sim":
         # Fire-and-forget: reset_fleet() waits on every adapter, and awaiting it

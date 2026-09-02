@@ -1,0 +1,193 @@
+# FAST-LIVO2 on Botman: Ouster OS0-64 + VectorNav VN-100 + OAK-D Pro.
+#
+# ROS 2 PARAMETER SHAPE. This must be /**: ros__parameters: with the upstream
+# sections nested underneath. The shim maps ROS 1's "common/lid_topic" onto
+# ROS 2's "common.lid_topic", and ROS 2 rejects '/' in a parameter name. A flat
+# ROS 1 style file aborts the node with
+#     "Cannot have a value before ros__parameters at line 2"
+# which is exactly how the previous attempt in this repo died.
+/**:
+  ros__parameters:
+
+    common:
+      lid_topic: "/ouster/points"
+      imu_topic: "/vectornav/imu"
+      img_topic: "/oak/rgb/image_raw/compressed"
+      img_en: 1
+      lidar_en: 1
+      ros_driver_bug_fix: false
+      # Bound the input queues. Upstream leaves all three unbounded and
+      # sync_packages() only drains them once a LiDAR+IMU package can be formed
+      # around an image, so a sensor stall or clock desync accumulates frames at
+      # the sensor rate. Measured on Botman with the VectorNav 2.1 s behind the
+      # LiDAR: ~34 MiB/s until the OOM killer intervened, with an EMPTY visual
+      # map, so no amount of map bounding helps. Dropping the oldest is the right
+      # degradation: stale frames are useless to the filter.
+      max_img_buffer: 30       # ~2 s at 15 Hz, 0 = unbounded (upstream)
+      max_lidar_buffer: 20     # ~2 s at 10 Hz
+      max_imu_buffer: 4000     # ~10 s at 400 Hz
+
+    # Camera model. Upstream read this through vk::camera_loader off the ROS 1
+    # parameter server; the port builds vk::PinholeCamera from these directly.
+    # Intrinsics measured from /oak/rgb/camera_info during the ChArUco
+    # calibration on 2026-08-27.
+    camera:
+      image_width: 1280
+      image_height: 720
+      scale: 1.0
+      # [fx, fy, cx, cy], measured from /oak/rgb/camera_info during the ChArUco
+      # calibration on 2026-08-27.
+      projection_parameters: [1017.6, 1017.6, 612.1, 388.6]
+      # [k1, k2, p1, p2, k3], fitted 2026-08-28.
+      #
+      # The OAK-D publishes distortion_model "rational_polynomial" with EIGHT
+      # coefficients (k1,k2,p1,p2,k3,k4,k5,k6):
+      #   [16.73, -161.59, -0.00096, 0.00052, 504.07, 16.49, -159.79, 498.17]
+      # vk::PinholeCamera takes five in the plumb_bob convention and cannot
+      # represent that model at all, so these are a least-squares fit of
+      # plumb_bob to the manufacturer's rational model. plumb_bob is linear in
+      # (k1,k2,k3,p1,p2), so the fit is exact linear least squares, not an
+      # optimiser guess. Agreement across the full 1280x720 frame:
+      #   mean 0.139 px, 95th 0.235 px, max 0.289 px
+      #
+      # These were zeros until now, which ignored a real distortion of 4.6 px
+      # mean and 11.5 px max. Against an 8x8 photometric patch that aligns the
+      # wrong image content entirely, and it showed: with img_en 1 the shared
+      # LIO/VIO state was corrupted and LiDAR scan matching decayed to zero
+      # effective features (1108 failed of 2020 scans), while img_en 0 ran
+      # 7231 scans with none failed.
+      distortion_parameters: [0.108626, -0.264224, -0.00095531, 0.00052461, 0.196278]
+
+    extrin_calib:
+      # LiDAR -> IMU. Measured by scripts/calibration/calibrate_imu_to_imu.py:
+      # the VN-100's gyro against the Ouster's while the chassis was rocked,
+      # composed with the Ouster's factory os_lidar -> os_imu (a 180 deg yaw).
+      # os_lidar -> vectornav is a -92.52 deg yaw: the VN-100 sits about 90 deg
+      # to the chassis, which neither identity nor 180 deg would have guessed.
+      extrinsic_R: [-0.04391730,  0.99891056,  0.01577839,
+                    -0.99900375, -0.04403570,  0.00723641,
+                     0.00792334, -0.01544486,  0.99984933]
+      # os_lidar expressed in the VectorNav frame: p_imu = extrinsic_R * p_lidar
+      # + extrinsic_T (LIVMapper.cpp: rot * (extR * p_body + extT) + pos).
+      #
+      # X and Y are measured. Two gyros cannot see the offset at all (angular
+      # velocity is identical everywhere on a rigid body) but the accelerometer
+      # pair can, so calibrate_imu_to_imu.py solves it from a spin and it is
+      # composed here with the Ouster factory os_lidar -> os_imu.
+      #
+      # Z IS THE TAPE MEASUREMENT, NOT A CALIBRATION RESULT. The spin that
+      # determines X and Y is exactly the motion that cannot determine Z: both
+      # rigid-body terms vanish along the rotation axis, and the solver reports
+      # observability 0.000 for it. Rotate about a horizontal axis and re-run to
+      # measure it properly. Until then this is "the VectorNav sits at the same
+      # height as the OAK, which is BOTMAN_OAK_Z below the lidar".
+      #
+      # Botman-specific: do not copy to another chassis without re-measuring.
+      extrinsic_T: [-0.060, 0.004, 0.284]
+
+      # LiDAR -> Camera, from the 5-pose Spot ChArUco solve on 2026-08-27
+      # (per-plane residual <= 1.6 mm, normal misalignment 0.2-1.1 deg),
+      # expressed against RAW os_lidar, which is the frame /ouster/points is
+      # stamped in. Note this is NOT the botman_base_link convention used by
+      # deploy/robots/botman.env: that one carries an extra pi of yaw.
+      Rcl: [-0.00310366,  0.99999254, -0.00230000,
+            -0.02038768, -0.00236281, -0.99978936,
+            -0.99978733, -0.00305611,  0.02039486]
+      Pcl: [-0.01092935, -0.28573105, -0.08315837]
+
+    time_offset:
+      imu_time_offset: 0.0
+      # The Ouster cloud is stamped about 0.1 s behind wall clock while the
+      # VN-100 is within 2 ms, measured on the robot. Revisit once running.
+      img_time_offset: 0.0
+      exposure_time_init: 0.0
+
+    preprocess:
+      point_filter_num: 1
+      filter_size_surf: 0.1
+      lidar_type: 3      # OUST64. Selects oust64_handler in preprocess.cpp.
+      scan_line: 64      # OS0-64, lidar_mode 512x10
+      blind: 0.5         # OS0 has a 90 deg vertical FOV and sees the chassis
+
+    vio:
+      max_iterations: 5
+      outlier_threshold: 1000.0
+      img_point_cov: 100.0
+      patch_size: 8
+      patch_pyrimid_level: 4
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      exposure_estimate_en: true
+      inv_expo_cov: 0.1
+
+      # Bound the visual sparse map. Upstream FAST-LIVO2 never evicts from
+      # feat_map: any image grid cell that fails to match an existing map point
+      # appends a new VisualPoint every frame, and each one pins a whole decoded
+      # frame via Feature::img_. Measured on this robot while stationary: memory
+      # climbed 363 MiB -> 1.41 GiB in 60 s (18 MiB/s) with the voxel count
+      # almost flat (550 -> 676), and a longer run was OOM-killed at 21.5 GiB.
+      max_pts_per_voxel: 20    # 0 restores upstream unbounded behaviour
+      max_warp_cache: 2000     # warp_map is never cleared when normal_en: true
+      # THE memory bound: each surviving Feature pins a whole decoded frame via
+      # Feature::img_ (~1 MB at 1280x800 grey), so resident memory tracks the span
+      # of frames the map still references. 300 frames at 15 Hz is 20 s, capping
+      # the pinned set near 300 MB. Measured on Botman: without it the visual path
+      # leaked 4.5 MiB/s even with max_pts_per_voxel active.
+      max_point_age: 300
+      map_sliding_en: true     # drop visual voxels left behind while driving
+      sliding_thresh: 8.0      # metres of travel between slides
+      half_map_size: 50.0      # metres, half-extent of the retained cube
+      map_report_every: 200    # frames between map-size reports, 0 = off
+
+    imu:
+      imu_en: true
+      imu_int_frame: 30
+      # VN-100 static noise measured on Botman: accel 1 sd
+      # [0.0122, 0.0132, 0.0225] m/s^2, gyro bias ~2e-5 rad/s. These are the
+      # filter's tuning covariances rather than the raw figures; start from
+      # upstream and retune against a bench trace.
+      acc_cov: 0.5
+      gyr_cov: 0.3
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+
+    lio:
+      max_iterations: 5
+      dept_err: 0.02
+      beam_err: 0.05
+      min_eigen_value: 0.0025
+      voxel_size: 0.5
+      max_layer: 2
+      max_points_num: 50
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:
+      # Enabled for long deployments: without this the LiDAR voxel map also
+      # grows unbounded as the robot explores. 100 voxels x 0.5 m = +/-50 m.
+      map_sliding_en: true
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      imu_rate_odom: false
+      gravity_align_en: false
+
+    publish:
+      dense_map_en: true
+      # Upstream republishes the whole path every frame; unbounded over a long run.
+      path_max_poses: 2000     # 0 restores upstream unbounded behaviour
+      pub_effect_point_en: false
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      seq_name: "botman"
+      pose_output_en: false
+
+    pcd_save:
+      pcd_save_en: false
+      colmap_output_en: false
+      filter_size_pcd: 0.15
+      interval: -1

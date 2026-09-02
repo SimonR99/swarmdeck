@@ -1,5 +1,6 @@
 .PHONY: help install ui ui-build server mock sim test clean tunnel \
         build-server up-server down-server \
+        build-argos up-argos down-argos up-argos-gpu up-argos-dri up-argos-dev \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
         up-agent down-agent \
@@ -18,19 +19,27 @@ help:
 	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
 	@echo "  make demo            server + mock + ui, all at once"
 	@echo "  make [build|up|down]-server  Docker: backend + UI only"
-	@echo "  make [build|up|down]-sim     Docker: Gazebo/SLAM/Nav2/adapter_sim (needs server up)"
+	@echo "  make up-argos        Docker: ARGoS + Fast-LIVO2 + SLAM/Nav2/adapter_sim"
+	@echo "  make up-argos-gpu    as up-argos, rendering on an NVIDIA GPU"
+	@echo "  make up-argos-dri    as up-argos, rendering on an Intel/AMD GPU"
+	@echo "  make up-argos-dev    FAST: 3 robots, drift odometry, no estimator"
+	@echo "  make up-argos-bistro Docker: 4 robots in Amazon Lumberyard Bistro scenario"
+	@echo "  make [build|up|down]-sim     Docker: LEGACY Gazebo/SLAM/Nav2/adapter_sim"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
 	@echo "  make [up|down]-agent         Docker: Cortex AI sidecar (opt-in, see compose)"
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
 	@echo "  make deploy ROBOT=botman    operator-side sync + override + build + reset + up"
 	@echo "  make deploy ROBOT=all       deploy every profile in deploy/robots/"
-	@echo "  make docker-up-gpu   full stack (server+ui+sim), Gazebo rendering on an NVIDIA GPU"
+	@echo "  make docker-up-gpu   full stack, ARGoS rendering on an NVIDIA GPU"
 	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
 	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
 	@echo "  make docker-logs     follow Docker logs"
+	@echo "  make docker-ps       list running containers"
 	@echo "  make docker-test     run backend tests inside Docker"
 	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
-	@echo "  make sim             launch Gazebo simulation (host ROS)"
+	@echo "  make sim             launch the ARGoS simulation (host ROS + host argos3)"
+	@echo "  make visual-test     capture per-robot RGB, depth and lidar frames as PNGs"
+	@echo "  make visual-test-bistro capture Bistro scenario RGB, depth and lidar frames"
 	@echo "  make tunnel          publish the running stack on a public URL"
 	@echo "  make test            run all tests (local venv)"
 	@echo "  make install-slam    bootstrap the SLAM back-end venv (Python 3.12)"
@@ -63,8 +72,33 @@ demo:
 	@echo "Starting server, mock adapter and ui..."
 	@$(MAKE) -j3 server mock ui
 
+# Host development. `launch_argos:=true` starts argos3 from the launch file
+# rather than leaving it to the `argos` container, and runtime_dir has to be
+# somewhere writable that is SHORT: a Unix socket path over 107 bytes fails to
+# bind, and the failure names neither the socket nor the limit.
+#
+# Needs the ARGoS fork installed (see docs/architecture/simulation.md) and
+# Fast-LIVO2 reachable on RUNTIME_DIR/uf.sock. Without the estimator the
+# fleet has no odometry at all; `make visual-test` is the sensor-only path that
+# needs neither.
+RUNTIME_DIR ?= /tmp/swarmdeck
 sim:
-	cd swarmdeck_ros && . install/setup.bash && ros2 launch swarmdeck_bringup session.launch.py
+	mkdir -p $(RUNTIME_DIR)
+	cd swarmdeck_ros && . install/setup.bash && \
+	  ros2 launch swarmdeck_bringup session.launch.py \
+	    sim_backend:=argos launch_argos:=true runtime_dir:=$(RUNTIME_DIR)
+
+# Sensor frames only: starts ARGoS with the synthetic drift model in place of
+# the estimator, drives the fleet gently, and writes a contact sheet. This is
+# the check that the photorealistic path is wired end to end, and it is the one
+# that catches the failures that are otherwise silent — a robot with no glTF
+# descriptor is invisible to its neighbours, a camera whose frames never arrive
+# publishes black, and neither logs anything.
+visual-test:
+	python3 tests/integration/run_visual_test.py
+
+visual-test-bistro:
+	python3 tests/integration/run_visual_test.py --config configs/4robot_bistro.yaml
 
 # One tunnel to port 5173 publishes the whole app: nginx there serves the UI and
 # proxies /api and /ws. The URL has no authentication — see the script.
@@ -83,8 +117,11 @@ test-slam:
 	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
 
 install-slam:
-	cd slam && uv venv --python 3.12 .venv && \
+	cd slam && uv venv --allow-existing --python 3.12 .venv && \
 	  uv pip install --python .venv/bin/python -e ../adapters/protocol -e ".[dev]"
+
+# Full stack with the simulator rendering on an NVIDIA GPU.
+GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
 
 # --- Base Compose Command
 # Pin the project name so every Make target shares one network and one set of
@@ -113,6 +150,77 @@ down-server:
 	$(COMPOSE) stop server ui slam
 	$(COMPOSE) rm -f server ui slam
 
+# --- simulated fleet: ARGoS + Fast-LIVO2 + SLAM/Nav2 + adapter_sim.
+#
+# Three services around one volume; see docker-compose.yml. The first build is
+# long: Dockerfile.argos compiles the ARGoS fork against the Filament SDK.
+build-argos:
+	$(COMPOSE) --profile argos build argos sim fast_livo2
+
+up-argos:
+	$(COMPOSE) --profile argos up --build -d server ui slam argos sim fast_livo2
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "SLAM back-end:    http://localhost:8090/status"
+	@echo "Fleet:            ARGoS + Fast-LIVO2 (allow ~90s for robots to appear)"
+	@echo "Rendering:        software Vulkan; use up-argos-gpu or up-argos-dri for a device"
+
+# --- development fleet: three robots, synthetic drift odometry, no estimator.
+#
+# The configuration to work against. Two independent savings, both real and
+# both measured:
+#
+#   3 robots instead of 4   almost all the cost is per robot (a SLAM Toolbox
+#                           instance, a Nav2 stack, an estimator and a set of
+#                           rendered sensors each), and configs/3robot.yaml
+#                           keeps one of every platform rather than dropping
+#                           the Spot.
+#   odometry:=drift         ~4x, measured 0.230x against 0.056x real time. It
+#                           takes Fast-LIVO2 out of the lockstep exchange,
+#                           and the estimator service is not started at all.
+#
+# What it costs: the drift model perturbs ground-truth motion with Gaussian
+# noise. It cannot slip a wheel against an obstacle or lose a scan to
+# degeneracy, which are the failures swarmdeck-slam exists to survive. Use this
+# to develop; use `make up-argos` to judge whether mapping actually works.
+up-argos-dev:
+	SWARMDECK_CONFIG=/app/configs/3robot.yaml \
+	SWARMDECK_ODOMETRY=drift \
+	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos \
+	    up --build -d server ui slam duck_detector mediamtx sim argos
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "Fleet:            3 robots, drift odometry, no Fast-LIVO2"
+	@echo "Fidelity:         development only -- see docs/architecture/simulation.md"
+
+DRI_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
+up-argos-dri:
+	docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos up --build -d
+	@echo "Fleet:            ARGoS on the Intel/AMD render node"
+
+up-argos-gpu:
+	docker compose -p $(COMPOSE_PROJECT) $(GPU_COMPOSE) --profile argos up --build -d
+	@echo "Fleet:            ARGoS on the NVIDIA GPU"
+
+up-argos-bistro:
+	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
+	  $(COMPOSE) --profile argos up --build -d server ui slam argos sim fast_livo2
+	@echo "SwarmDeck UI:     http://localhost:5173"
+	@echo "SLAM back-end:    http://localhost:8090/status"
+	@echo "Fleet:            ARGoS + Fast-LIVO2 (Bistro environment)"
+
+up-argos-bistro-dri:
+	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
+	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos up --build -d
+	@echo "Fleet:            ARGoS Bistro on the Intel/AMD render node"
+
+up-argos-bistro-gpu:
+	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
+	  docker compose -p $(COMPOSE_PROJECT) $(GPU_COMPOSE) --profile argos up --build -d
+	@echo "Fleet:            ARGoS Bistro on the NVIDIA GPU"
+
+down-argos:
+	$(COMPOSE) --profile argos stop argos sim fast_livo2
+	$(COMPOSE) --profile argos rm -f argos sim fast_livo2
+
 # --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
 # docker-compose.yml means this brings the server up too if it isn't already.
 build-sim:
@@ -128,13 +236,13 @@ down-sim:
 	$(COMPOSE) --profile gazebo stop gazebo
 	$(COMPOSE) --profile gazebo rm -f gazebo
 
-# --- synthetic fleet: no Gazebo/ROS. Also depends_on: server.
+# --- synthetic fleet: no simulator, no ROS. Also depends_on: server.
 build-mock:
 	$(COMPOSE) --profile mock build mock
 
 up-mock:
 	$(COMPOSE) --profile mock up --build -d mock
-	@echo "Fleet:            mock adapter (no Gazebo)"
+	@echo "Fleet:            mock adapter (no simulator)"
 
 down-mock:
 	$(COMPOSE) --profile mock stop mock
@@ -178,13 +286,10 @@ up-deploy:
 down-deploy:
 	docker compose $(ZENOH_COMPOSE) down --remove-orphans
 
-# Full stack (server+ui+sim) with Gazebo rendering on the GPU.
-GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
-docker-up-gpu:
-	docker compose $(GPU_COMPOSE) --profile gazebo up --build -d
-	@echo "SwarmDeck UI:     http://localhost:5173"
+# The default full stack, on a GPU. Kept as an alias for up-argos-gpu because
+# it is the command every doc and every habit already reaches for.
+docker-up-gpu: up-argos-gpu
 	@echo "Backend API:      http://localhost:8080/api/config"
-	@echo "Fleet:            Gazebo (GPU) + adapter_sim (allow ~45s for robots to appear)"
 
 # Collaborative SLAM: the fleet plus Swarm-SLAM.
 CSLAM_COMPOSE = $(GPU_COMPOSE) -f deploy/compose/docker-compose.cslam.yml
@@ -195,27 +300,27 @@ docker-up-cslam:
 	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
 
 docker-down:
-	$(COMPOSE) --profile gazebo --profile mock --profile agent down
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent down
 
 docker-logs:
-	$(COMPOSE) --profile gazebo --profile mock --profile agent logs -f
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent logs -f
 
 docker-ps:
-	$(COMPOSE) --profile gazebo --profile mock --profile agent ps
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent ps
 
 docker-test:
 	$(COMPOSE) build server
 	$(COMPOSE) run --rm --no-deps server python -m pytest /app/server/tests -q
 
-# Launch files are plain Python that nothing executes until Gazebo starts, so an
-# undefined name in one costs a full stack startup to find. This builds every
-# LaunchDescription in the ROS image, which takes under a second.
+# Launch files are plain Python that nothing executes until the simulator starts,
+# so an undefined name in one costs a full stack startup to find. This builds
+# every LaunchDescription in the ROS image, which takes under a second.
 docker-test-launch:
-	$(COMPOSE) build gazebo
-	$(COMPOSE) run --rm --no-deps --entrypoint bash gazebo -lc \
+	$(COMPOSE) --profile argos build sim
+	$(COMPOSE) --profile argos run --rm --no-deps --entrypoint bash sim -lc \
 	  'source /opt/ros/jazzy/setup.bash && source /app/swarmdeck_ros/install/setup.bash && \
 	   cd /app && python3 -m pytest swarmdeck_ros/src/swarmdeck_bringup/test -q'
 
 clean:
-	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log}
-	$(COMPOSE) --profile gazebo --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true
+	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log} argos/build
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true

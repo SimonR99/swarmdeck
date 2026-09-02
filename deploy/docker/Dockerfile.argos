@@ -1,0 +1,143 @@
+# SwarmDeck ARGoS simulator image.
+#
+# Physics, rendering and sensors, with NO ROS in it at all. The only thing that
+# crosses out of this container is a byte stream on two Unix sockets: one to the
+# ROS bridge in the `sim` service, one to Ultra-Fusion in the `ultrafusion`
+# service. That split is what lets the estimator run on ROS 2 Humble while the
+# rest of the stack runs on Jazzy.
+#
+# Two stages, because the build side is large and almost none of it is needed at
+# runtime: the Filament SDK alone is several hundred megabytes, and the ARGoS
+# build tree more again.
+
+# ---------------------------------------------------------------- build stage
+FROM ubuntu:24.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The LLVM toolchain version is pinned because a PATH is derived from it
+# below. Bumping it is fine; leaving it implicit is not.
+ARG LLVM_VERSION=18
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates curl \
+      libfreeimage-dev libfreeimageplus-dev \
+      liblua5.3-dev lua5.3 \
+      "libc++-${LLVM_VERSION}-dev" "libc++abi-${LLVM_VERSION}-dev" \
+      libsdl2-dev \
+      pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# The photorealism medium is built against the prebuilt Filament SDK, which is
+# compiled with clang/libc++ while ARGoS builds with the system compiler. The
+# plugin's CMakeLists pre-links Filament and the static libc++ runtime into one
+# relocatable object and localizes everything except Filament's public API, so
+# the two C++ runtimes cannot capture each other's symbols. See
+# src/plugins/simulator/photorealism/README.md in the fork.
+ARG FILAMENT_VERSION=1.72.1
+RUN mkdir -p /opt/filament-sdk \
+    && curl -fsSL -o /tmp/filament.tgz \
+       "https://github.com/google/filament/releases/download/v${FILAMENT_VERSION}/filament-v${FILAMENT_VERSION}-linux.tgz" \
+    && tar xzf /tmp/filament.tgz -C /opt/filament-sdk \
+    && rm -f /tmp/filament.tgz
+
+# The fork: photorealism, Jolt, the external_estimator medium, the IMU and
+# drifting odometry sensors, and the bunker / bunker-mini / scout-mini / spot
+# robot plugins. Pinned, because a moving simulator is not a baseline.
+ARG ARGOS_REPO=https://github.com/beltrame/argos3.git
+# Pinned to the commit that added the bunker, scout-mini and spot entities.
+# A branch name here would mean the simulator changes under the stack without
+# anything in this repository recording that it did.
+ARG ARGOS_REF=da70805238285772405b4a4315e65970b69857ce
+RUN git clone "${ARGOS_REPO}" /src/argos3 \
+    && git -C /src/argos3 checkout "${ARGOS_REF}"
+
+# -DARGOS_BUILD_JOLT=ON is not optional here: the generated experiment asks for
+# a <jolt> engine and a <mesh> collision entity, and both live in that plugin.
+#
+# -DFILAMENT_LIBCXX_DIR is not optional either, and the reason is worth keeping.
+# FindFilament.cmake looks for the STATIC libc++ archives, but its fallback
+# search is `find_library(NAMES libc++abi.a c++abi)` over the default library
+# paths, and on Ubuntu 24.04 those paths hold libc++.a but NOT libc++abi.a:
+# the static libc++abi lives under /usr/lib/llvm-N/lib, while
+# /usr/lib/x86_64-linux-gnu holds only libc++abi.so. The `c++abi` alternative
+# then matches the shared object, configure succeeds, and the build dies twelve
+# minutes later linking the symbol-firewall bundle:
+#
+#   /usr/bin/ld: attempted static link of dynamic object `libc++abi.so'
+#
+# Pointing at the LLVM lib directory takes the module's documented first search
+# path, which is NO_DEFAULT_PATH and so cannot fall through to a .so.
+ARG FILAMENT_LIBCXX_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib
+
+# Fail here, in a one-second layer, rather than deep inside the compile.
+RUN test -f "${FILAMENT_LIBCXX_DIR}/libc++.a" \
+      || (echo "no libc++.a in ${FILAMENT_LIBCXX_DIR}" >&2; exit 1) \
+    && test -f "${FILAMENT_LIBCXX_DIR}/libc++abi.a" \
+      || (echo "no libc++abi.a in ${FILAMENT_LIBCXX_DIR}" >&2; exit 1)
+
+RUN cmake -S /src/argos3/src -B /src/argos3/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DARGOS_BUILD_JOLT=ON \
+      -DARGOS_DOCUMENTATION=OFF \
+      -DFILAMENT_DIR=/opt/filament-sdk/filament \
+      -DFILAMENT_LIBCXX_DIR="${FILAMENT_LIBCXX_DIR}" \
+    && cmake --build /src/argos3/build -j"$(nproc)" \
+    && cmake --install /src/argos3/build
+
+# SwarmDeck's own controller and bridge loop function, built against the
+# just-installed ARGoS. One module, not two: the loop function resolves each
+# robot's controller with a dynamic_cast and a separately dlopen'd sibling does
+# not export the typeinfo for it. See argos/CMakeLists.txt.
+# Built OUT of the copied source tree. A developer's local argos/build is
+# excluded by .dockerignore, but building beside it rather than into it means a
+# stray one cannot poison the image even if that exclusion is ever lost: a host
+# CMakeCache.txt carries absolute paths, and the in-image configure refuses
+# outright when they do not match.
+COPY argos /src/swarmdeck/argos
+RUN cmake -S /src/swarmdeck/argos -B /src/swarmdeck/argos-build \
+      -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /src/swarmdeck/argos-build -j"$(nproc)"
+
+# -------------------------------------------------------------- runtime stage
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libfreeimage3 libfreeimageplus3 \
+      liblua5.3-0 \
+      libsdl2-2.0-0 \
+      mesa-vulkan-drivers libvulkan1 vulkan-tools \
+      libgomp1 \
+      python3-minimal \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/local/bin/argos3 /usr/local/bin/argos3
+COPY --from=build /usr/local/lib/argos3 /usr/local/lib/argos3
+COPY --from=build /usr/local/share/argos3 /usr/local/share/argos3
+COPY --from=build /usr/local/include/argos3 /usr/local/include/argos3
+COPY --from=build /src/swarmdeck/argos-build/libswarmdeck_argos.so \
+                  /usr/local/lib/argos3/libswarmdeck_argos.so
+
+# The detection-target models. Static, and referenced by absolute path from the
+# generated experiment, so they are baked in rather than shared through the
+# runtime volume.
+COPY argos/assets /app/argos/assets
+
+# ARGoS installs its libraries into /usr/local/lib/argos3, which is not on the
+# default linker path. The source tree's argos_post_install.sh drops this conf
+# file on a normal install; the multi-stage COPY above brings the libraries
+# across but not that, so without it argos3 starts and immediately dies with
+#   error while loading shared libraries: libargos3core_simulator.so
+RUN echo /usr/local/lib/argos3 > /etc/ld.so.conf.d/argos3.conf && ldconfig \
+    && ldd /usr/local/bin/argos3 | grep -q "libargos3core_simulator.so => /" \
+    || (echo "argos3 cannot resolve its own core library" >&2; exit 1)
+
+COPY deploy/docker/argos-entrypoint.sh /usr/local/bin/argos-entrypoint.sh
+RUN chmod +x /usr/local/bin/argos-entrypoint.sh
+
+WORKDIR /app
+ENTRYPOINT ["/usr/local/bin/argos-entrypoint.sh"]

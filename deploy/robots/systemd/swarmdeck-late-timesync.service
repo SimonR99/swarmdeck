@@ -1,0 +1,8 @@
+[Unit]
+Description=SwarmDeck: report (or repair) a clock correction that landed late
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/swarmdeck-timesync
+ExecStart=/usr/local/bin/swarmdeck-late-timesync

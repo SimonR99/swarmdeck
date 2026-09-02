@@ -10,7 +10,7 @@ flowchart TB
     SLAM["Collaborative SLAM (:8090)<br/>Python 3.12 · GTSAM · GICP · PCM"]
     ROS2["ROS 2 adapter<br/>Botman · Aslan · Spot"]
     ROS1["ROS 1 adapter<br/>Scout Mini"]
-    Sim["Gazebo adapter"]
+    Sim["Simulation adapter"]
     Mock["Synthetic adapter"]
     Detector["YOLOE perception sidecar"]
     Media["MediaMTX (:8554 / :8889)"]
@@ -51,7 +51,8 @@ diagnostics.
 
 - `adapter_ros1`: ROS 1 Noetic hardware, including Scout/LVI-SAM.
 - `adapter_ros2`: ROS 2 Humble/Jazzy hardware, including Bunker and Spot.
-- `adapter_sim`: Gazebo fleet with planar/3D keyframe extraction.
+- `adapter_sim`: simulated fleet with planar/3D keyframe extraction. Backed by
+  ARGoS by default; see [simulation](simulation.md).
 - `adapter_mock`: synthetic fleet without ROS or a GPU.
 
 All use the same [wire protocol](../../adapters/protocol/README.md).

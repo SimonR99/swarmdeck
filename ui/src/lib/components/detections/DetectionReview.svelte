@@ -197,7 +197,7 @@
                 accept(p);
               }}
             >
-              <Check class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
+              <Check class={review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
             </button>
 
             {#if candidates.length}
@@ -217,7 +217,7 @@
                     : (mergeOpen = mergeOpen === p.id ? null : p.id);
                 }}
               >
-                <GitMerge class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
+                <GitMerge class={review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
               </button>
             {/if}
 
@@ -232,7 +232,7 @@
                 ignore(p);
               }}
             >
-              <EyeOff class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
+              <EyeOff class={review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
             </button>
 
             <button
@@ -246,7 +246,7 @@
                 forgetProposal(p);
               }}
             >
-              <Trash2 class="{review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'}" />
+              <Trash2 class={review.selected === p.id ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
             </button>
           </div>
 

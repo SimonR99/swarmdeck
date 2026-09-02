@@ -165,8 +165,12 @@
     <div
       class="panel-glow w-full max-w-xs flex flex-col overflow-hidden rounded-[--radius-dialog] border border-border/80 bg-surface shadow-2xl"
       role="dialog"
+      tabindex="-1"
       aria-modal="true"
       aria-labelledby="body-dialog-title"
+      onkeydown={(e) => {
+        if (e.key === 'Escape') bodyModalOpen = false;
+      }}
       onclick={(e) => e.stopPropagation()}
     >
       <header class="flex h-12 shrink-0 items-center justify-between border-b border-border/70 px-4">

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast DDS transport profile for large point clouds.
+
+  A VLP-16 revolution at 0.2 degrees is 28800 points; at the 26-byte
+  Livox layout Ultra-Fusion reads, one PointCloud2 is about 630 KB. Fast
+  DDS sizes its UDP socket buffer from net.core.rmem_default, which is
+  208 KB on a stock kernel: smaller than a single message. The fragments
+  overflow the socket and the message is never reassembled.
+
+  This does not fail loudly. The publisher reports success, nothing logs
+  an error, and the only symptom is the subscriber quietly receiving a
+  fraction of the messages. It cost a diverged Ultra-Fusion run to find:
+  uf_link published 599 clouds while uf_node's own log reported
+  arrivals{lidar=78}, an 87% loss, which presents as the estimator
+  drifting 47% of distance rather than as a network problem. With this
+  profile the same run receives 578 of 599 and drifts 0.17%.
+
+  The buffers are 7 MB, sized to sit just under this machine's
+  net.core.rmem_max of 7.5 MB. That ceiling is the real constraint:
+  asking for more does NOT get more, because the kernel refuses the
+  request and Fast DDS falls back to a smaller buffer without saying so.
+  Raising net.core.rmem_max (root) is the only way past it.
+
+  4 MB was enough for one robot and overran at four, which appears as
+  "sequence size exceeds remaining buffer" flooding the subscriber and
+  three of four estimators starved. Buffer size alone does not solve
+  that: the durable fix is not to send the channel nobody reads, via
+  the medium's "channels" attribute. A VLP-16 revolution is ~630 KB and
+  four unread copies per 100 ms is the bulk of the traffic in a
+  visual-only run.
+
+  Applied by exporting FASTRTPS_DEFAULT_PROFILES_FILE before launching
+  anything, which run_uf.sh does for both uf_link and every uf_node.
+
+  Note for editors: XML forbids a double hyphen inside a comment, so
+  keep prose here free of it.
+-->
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>large_udp</transport_id>
+        <type>UDPv4</type>
+        <sendBufferSize>7000000</sendBufferSize>
+        <receiveBufferSize>7000000</receiveBufferSize>
+        <!-- Stay under the 65535 byte UDP datagram limit; one cloud is
+             fragmented across many of these. -->
+        <maxMessageSize>65000</maxMessageSize>
+        <maxInitialPeersRange>10</maxInitialPeersRange>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="large_data_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>large_udp</transport_id>
+        </userTransports>
+        <!-- Replace the builtin transports rather than adding to them,
+             so nothing falls back to the default sized sockets. -->
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

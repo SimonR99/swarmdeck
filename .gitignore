@@ -18,6 +18,12 @@ build/
 install/
 log/
 
+# The ARGoS world is generated into the runtime volume at launch, from the seed
+# in the session config, so a copy in the source tree is only ever a stale one.
+# (The Gazebo world SDF IS tracked: generate_world.py rewrites it in place.)
+swarmdeck_ros/src/swarmdeck_sim/worlds/indoor.gltf
+swarmdeck_ros/src/swarmdeck_sim/worlds/indoor.bin
+
 # Sessions (recorded output)
 sessions/*
 !sessions/.gitkeep

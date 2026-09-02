@@ -20,11 +20,21 @@ fleet:
   #               continuous walls.
   #   generic_32  as above plus 33 rings over +/-22.5 deg, so <ns>/scan/points
   #               carries real 3D structure. Needs slam_backend:=rtabmap.
+  #   vlp16       1800 samples/rev (0.2 deg) and 17 rings over +/-15 deg, a
+  #               Velodyne VLP-16 plus a ring at elevation 0. The DEFAULT,
+  #               because the ARGoS backend's odometry comes from Ultra-Fusion,
+  #               which is lidar-inertial: it registers on the cloud's vertical
+  #               structure, and a planar scan has none. The extra ring is what
+  #               keeps the 2D slice honest at range (see below).
   #
   # Rings must be 1 or an odd value: an even count leaves no ring at elevation 0,
   # and the sliced 2D scan then truncates at short range (docs/operations/known-issues.md).
+  #
+  # `generic_2d` still runs on the legacy Gazebo backend and is what this file
+  # used to carry; it is refused by the ARGoS backend, which says so and names
+  # the fix rather than starting a fleet whose estimator can never converge.
   lidar:
-    profile: generic_2d
+    profile: vlp16
 
 map:
   merge_mode: graph         # pose-graph occupancy; no grid registration

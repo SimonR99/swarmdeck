@@ -58,7 +58,6 @@ export const fleet = {
   get online() {
     return this.robots.filter((robot) => robot.online).length;
   },
-
   get(id: string): RobotState | undefined {
     return state.robots[id];
   },

@@ -82,6 +82,7 @@ Capabilities drive the UI and command routing:
 | `estop` | Accept `stop`. |
 | `body` | Accept `body_command`. |
 | `reset` | Accept full simulation reset; never advertise on hardware. |
+| `explore` | Accept `explore`; never advertise on hardware. |
 
 Never advertise a capability the adapter cannot currently honor.
 
@@ -106,7 +107,13 @@ Never advertise a capability the adapter cannot currently honor.
 }
 ```
 
-- `mode`: `idle`, `nav`, `teleop`, or `estop`.
+- `mode`: `idle`, `nav`, `teleop`, `estop`, `recover`, or `explore`.
+  `recover` is the adapter reversing the robot out of a pose the planner
+  could not plan from, and `explore` is a reactive bootstrap driving it.
+  Both move the robot without an operator command, so both have to be
+  named rather than reported as `idle`: an operator watching a moving
+  robot labelled IDLE has been told something false. `explore` only ever
+  replaces `idle`, so a robot under a goal still reports `nav`.
 - `nav_status`: `idle`, `active`, `succeeded`, `failed`, or `cancelled`.
 - `planned_path` is the backward-compatible effective route (local when
   available, otherwise global). `global_planned_path` and
@@ -192,6 +199,7 @@ metadata is carried by the HTTP request.
 { "type": "set_mode", "seq": 45, "mode": "teleop" }
 { "type": "reset", "seq": 46 }
 { "type": "body_command", "seq": 47, "action": "stand", "height": 0.0 }
+{ "type": "explore", "seq": 48, "enabled": true }
 { "type": "camera_interest", "watched": false }
 ```
 
@@ -202,6 +210,19 @@ before transmission.
 `body_command.action` is `claim`, `release`, `sit`, `stand`, or `set_height`
 (with optional `height` in metres relative to default height, e.g. `[-0.15, 0.15]`).
 Ignore it without the `body` capability.
+
+`explore` starts and stops a reactive bootstrap that drives the robot off its
+own obstacle avoidance, and is simulation-only: ignore it without the `explore`
+capability, and never advertise that capability on hardware. It is a FLEET-wide
+operation delivered once per robot, because a per-robot connection is the only
+channel the protocol has, so a handler must be idempotent: the second `enabled:
+true` of a set must not start a second bootstrap. Report `explore` as the mode
+of any robot the bootstrap is actually driving.
+
+An adapter whose bootstrap shares a velocity topic with its navigation stack
+must let the navigation stack win. Both commanding one robot means it receives
+interleaved, contradictory velocities and follows neither, which presents as a
+robot ignoring its planned path rather than as a conflict.
 
 `camera_interest` is retained as a compatibility command and has no effect on
 the H.264 stream or detection. Never gate detection on camera interest.

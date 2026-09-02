@@ -61,6 +61,10 @@ R_LIDAR_TO_OUSTER_IMU = np.diag([-1.0, -1.0, 1.0])
 T_LIDAR_TO_OUSTER_IMU = np.array([-0.006253, 0.011775, 0.028535])
 
 
+def _skew(v: np.ndarray) -> np.ndarray:
+    return np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+
+
 def solve_rotation_svd(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     """Kabsch: returns R with dst ~= R @ src."""
     U, _, Vt = np.linalg.svd(src.T @ dst)
@@ -87,11 +91,16 @@ if HAVE_ROS2:
             self.create_subscription(Imu, topic_b, lambda m: self._on(m, self.b), qos)
 
         @staticmethod
-        def _on(msg: Imu, sink: List[Tuple[float, np.ndarray]]) -> None:
+        def _on(msg: Imu, sink: List[Tuple[float, np.ndarray, np.ndarray]]) -> None:
+            # Accelerometers are kept as well as gyros: the rotation comes from
+            # the gyros, but only the accelerometers can see the translation.
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             sink.append((t, np.array([msg.angular_velocity.x,
                                       msg.angular_velocity.y,
-                                      msg.angular_velocity.z])))
+                                      msg.angular_velocity.z]),
+                         np.array([msg.linear_acceleration.x,
+                                   msg.linear_acceleration.y,
+                                   msg.linear_acceleration.z])))
 
 
 def _resample(t_ref: np.ndarray, t_src: np.ndarray, v_src: np.ndarray) -> np.ndarray:
@@ -154,6 +163,77 @@ def solve_imu_rotation(ta: np.ndarray, va: np.ndarray,
         "R": R, "time_offset": offset, "singular_values": sv, "axis_ratio": ratio,
         "residual_rms": rms, "n_samples": int(len(wa)),
         "observable": ratio >= min_rate,
+    }
+
+
+def solve_translation(ta: np.ndarray, wa: np.ndarray, aa: np.ndarray,
+                      tb: np.ndarray, wb: np.ndarray, ab: np.ndarray,
+                      R_ba: np.ndarray) -> Optional[dict]:
+    """Solve the offset between two IMUs from their accelerometers.
+
+    Gyros cannot see it, but accelerometers can: two points on a rigid body
+    differ in specific force by the rigid-body terms, so in B's frame
+
+        f_B - R_BA f_A = ([alpha_B]x + [omega_B]x^2) r + b
+
+    with r the position of B relative to A expressed in B. This is linear in r.
+
+    The bias column b is what makes it usable. Any error in R_BA leaks gravity
+    into the left-hand side, and at 1 deg that leak is 0.17 m/s^2 against a
+    signal of order omega^2 * r, which for 0.5 rad/s and 0.1 m is 0.025 m/s^2 --
+    seven times smaller. But while the spin axis is vertical the leak is
+    CONSTANT in the body frame, whereas the rigid-body terms vary with omega^2
+    and alpha, so fitting b separates them. Measured on Botman, perturbing R_BA
+    by 1 deg moves r by 0.8-1.5 mm.
+
+    Spin fast (0.3-0.5 rad/s or better) and reverse direction: the signal grows
+    with omega^2, and reversing flips the sign of alpha but not of omega^2,
+    which is what separates the two terms.
+    """
+    if len(ta) < 200 or len(tb) < 200:
+        return None
+    lo, hi = max(ta[0], tb[0]), min(ta[-1], tb[-1])
+    sel = (tb >= lo) & (tb <= hi)
+    t = tb[sel]
+    if len(t) < 200:
+        return None
+    w = wb[sel]
+    f_b = ab[sel]
+    f_a = _resample(t, ta, aa)
+
+    alpha = np.stack([np.gradient(w[:, k], t) for k in range(3)], axis=1)
+    ker = np.ones(9) / 9.0
+    alpha = np.stack([np.convolve(alpha[:, c], ker, mode="same") for c in range(3)], axis=1)
+
+    y = f_b - (R_ba @ f_a.T).T
+    rows = np.empty((len(t) * 3, 6))
+    for i in range(len(t)):
+        M = _skew(alpha[i]) + _skew(w[i]) @ _skew(w[i])
+        rows[3 * i:3 * i + 3, :3] = M
+        rows[3 * i:3 * i + 3, 3:] = np.eye(3)
+    sol, _, rank, _ = np.linalg.lstsq(rows, y.reshape(-1), rcond=None)
+    resid = rows @ sol - y.reshape(-1)
+
+    # Observability, and why the covariance cannot supply it. The bias columns
+    # are a constant per axis, so fitting b is exactly removing the mean of the
+    # rigid-body block; whatever variation is left is all that identifies r.
+    # Centre the block and take its singular values. For a spin about a nearly
+    # vertical axis the r_z direction barely varies, so its singular value
+    # collapses and that component is not measured however many samples are
+    # averaged. np.linalg.pinv hides this: it reports a ~0 standard error for a
+    # direction it has silently dropped, which is worse than no number at all.
+    block = rows[:, :3].reshape(-1, 3, 3)
+    centred = (block - block.mean(axis=0)).reshape(-1, 3)
+    sv = np.linalg.svd(centred, compute_uv=False)
+    observability = sv / sv[0] if sv[0] > 0 else np.zeros(3)
+    return {
+        "r": sol[:3],
+        "bias": sol[3:],
+        "rms": float(np.sqrt((resid ** 2).mean())),
+        "rank": int(rank),
+        "singular_values": sv,
+        "observability": observability,
+        "peak_omega": float(np.linalg.norm(w, axis=1).max()),
     }
 
 
@@ -233,6 +313,7 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
 
         ta = np.array([s[0] for s in node.a]); va = np.array([s[1] for s in node.a])
         tb = np.array([s[0] for s in node.b]); vb = np.array([s[1] for s in node.b])
+        aa = np.array([s[2] for s in node.a]); ab = np.array([s[2] for s in node.b])
         res = solve_imu_rotation(ta, va, tb, vb)
         if res is None:
             print("[ERROR] not enough overlapping motion to solve.", file=sys.stderr)
@@ -261,17 +342,30 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
             return res
 
         R_lidar_target = R @ R_LIDAR_TO_OUSTER_IMU
-        # TRANSLATION IS NOT RECOVERABLE HERE. Comparing two gyros gives the
-        # rotation between them and nothing else: angular velocity is identical
-        # everywhere on a rigid body, so it carries no information about where
-        # on that body either sensor sits. Emitting R @ T_LIDAR_TO_OUSTER_IMU
-        # would hand back the Ouster's own 3 cm internal lever arm dressed up in
-        # the target frame, which is precisely the mistake
-        # aslan_superodom_calibration.yaml warns against: "that lever arm is the
-        # Ouster's internal IMU ... does not apply to a separately mounted
-        # VN-100". Zero is the honest default; measure it with a ruler if the
-        # separation is large.
-        t_lidar_target = np.zeros(3) if target_topic != reference_topic else T_LIDAR_TO_OUSTER_IMU
+        # Comparing two GYROS gives the rotation and nothing else: angular
+        # velocity is identical everywhere on a rigid body, so it says nothing
+        # about where on that body either sensor sits. The ACCELEROMETERS do
+        # carry it, which is what solve_translation() above exploits, so the
+        # offset is measured rather than left at zero or guessed with a ruler.
+        #
+        # What is never emitted is R @ T_LIDAR_TO_OUSTER_IMU: that would hand
+        # back the Ouster's own 3 cm internal lever arm dressed up in the target
+        # frame, the mistake aslan_superodom_calibration.yaml warns against
+        # ("that lever arm is the Ouster's internal IMU ... does not apply to a
+        # separately mounted VN-100").
+        # Gyros cannot see the offset, but the accelerometer pair can. Solve it
+        # rather than defaulting to zero, then compose with the Ouster factory
+        # os_lidar -> os_imu to express it from the lidar.
+        trans = solve_translation(tb, vb, ab, ta, va, aa, R)
+        if target_topic == reference_topic:
+            t_lidar_target = T_LIDAR_TO_OUSTER_IMU
+        elif trans is not None:
+            res["translation_fit"] = trans
+            r_target_ref = trans["r"]
+            # os_lidar relative to the target IMU, in the target frame.
+            t_lidar_target = R_lidar_target @ (-T_LIDAR_TO_OUSTER_IMU) - r_target_ref
+        else:
+            t_lidar_target = np.zeros(3)
         rr, pp, yy = [math.degrees(v) for v in euler_from_matrix(R_lidar_target)]
         print("\n  Composed with the Ouster's factory os_lidar -> os_imu (180 deg yaw):")
         print("  R (os_lidar -> %s): RPY roll=%.2f  pitch=%.2f  yaw=%.2f deg" % (
@@ -281,7 +375,29 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         print("=" * 66)
         print(emit_calibration_yaml(R_lidar_target, t_lidar_target))
         if not np.any(t_lidar_target):
-            print("  NOTE: the translation is zero because two gyros cannot determine it.")
+            tf = res.get("translation_fit")
+            if tf is None:
+                print("  NOTE: the translation is zero: the accelerometer solve did not converge.")
+                print("        Spin the robot in place at 0.3-0.5 rad/s, reversing a few times.")
+            else:
+                print("\n  [Solved] translation from the accelerometer pair:")
+                print("    target relative to reference: [%+.4f, %+.4f, %+.4f] m" % tuple(tf["r"]))
+                obs = tf["observability"]
+                print("    observability (1.0 = fully determined by this motion):")
+                print("                                  [ %.3f,  %.3f,  %.3f]" % tuple(obs))
+                if obs[-1] < 0.1:
+                    print("    [WARN] the weakest direction is not measured by this motion.")
+                    print("           A spin about a vertical axis cannot see the vertical")
+                    print("           offset: both rigid-body terms vanish along the axis.")
+                    print("           Rotate about a HORIZONTAL axis (pitch or roll the")
+                    print("           sensor head) for that component, or take it from CAD.")
+                print("    fitted bias (absorbs any gravity leak): [%+.3f, %+.3f, %+.3f] m/s^2"
+                      % tuple(tf["bias"]))
+                print("    peak |omega| %.3f rad/s, rms residual %.4f m/s^2, rank %d"
+                      % (tf["peak_omega"], tf["rms"], tf["rank"]))
+                if tf["peak_omega"] < 0.3:
+                    print("    [WARN] peak rotation below 0.3 rad/s: the signal scales with")
+                    print("           omega^2, so spin faster and re-run to tighten this.")
             print("        Measure os_lidar -> %s with a ruler and fill it in if the two" % target_topic)
             print("        are more than ~10 cm apart; the rotation above is the load-bearing part.")
         res["R_lidar_target"] = R_lidar_target

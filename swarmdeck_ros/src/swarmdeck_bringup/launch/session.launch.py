@@ -2,9 +2,21 @@
 
     ros2 launch swarmdeck_bringup session.launch.py config:=configs/4robot.yaml
 
-Brings up: Gazebo world -> fleet spawn -> ros_gz bridges -> per-robot odometry
-fusion + SLAM + Nav2. The backend and UI run separately (`make server`, `make ui`)
-because they are ROS-free by design.
+Two simulation backends, selected with `sim_backend`.
+
+**`argos`** (the default). Generates the world glTF and the ARGoS experiment
+from the session config, starts the ROS bridge, and brings up per-robot SLAM
+and Nav2. The simulator itself normally runs in its own container and dials the
+bridge's socket; `launch_argos:=true` starts it here instead, for host
+development. Odometry comes from Fast-LIVO2 through the bridge, so no EKF is
+launched, and `<ns>/proximity_scan` is derived from the 3D cloud because an
+ARGoS robot carries one lidar rather than two.
+
+**`gazebo`** (legacy, kept as an A/B control). World SDF -> `gz sim` -> fleet
+spawn -> `ros_gz` bridges -> EKF + SLAM + Nav2, exactly as before.
+
+The backend and UI run separately (`make server`, `make ui`) because they are
+ROS-free by design.
 
 Arguments worth knowing:
 
@@ -12,14 +24,17 @@ Arguments worth knowing:
 needs a multi-ring lidar — set `fleet.lidar.profile: generic_32` in the study
 config (see spawn_fleet.py's LIDAR_PROFILES).
 
-`fuse_imu:=false` reverts to the drive plugin's raw wheel odometry. Only useful for
-reproducing what unfused odometry does to a map; wheel odometry alone was measured
-8.8-30.5 m and up to 244 deg wrong on a 24 m floor plan.
+`fuse_imu:=false` reverts to the drive plugin's raw wheel odometry. Gazebo
+backend only, and only useful for reproducing what unfused odometry does to a
+map; wheel odometry alone was measured 8.8-30.5 m and up to 244 deg wrong on a
+24 m floor plan.
 
 `explore_seconds:=N` drives the fleet for at most N seconds to bootstrap the
-maps, then stops. ``explore_strategy:=coordinated`` (the default) performs one
-short merge rendezvous and jointly allocates distinct frontiers through Nav2;
-``reactive`` retains the original wandering A/B baseline.
+maps, then stops. Gazebo backend only: on the ARGoS path `adapter_sim` owns the
+explorer process, so the dashboard can start and stop it, and bootstraps one
+run at startup from its own `EXPLORE_SECONDS` environment variable. Two owners
+would be two ways to end up with two copies of a controller that publishes
+cmd_vel directly.
 """
 
 import json
@@ -43,8 +58,8 @@ from launch_ros.substitutions import FindPackageShare
 
 REPO = Path(__file__).resolve().parents[4]
 
-# Seconds after launch before the first robot's bringup, leaving Gazebo and the
-# fleet spawn time to settle.
+# Seconds after launch before the first robot's bringup, leaving the simulator
+# and the fleet spawn time to settle.
 BRINGUP_DELAY = 20.0
 # Gap between successive robots' stacks. See the comment at the loop below: they
 # lose a startup race against each other if brought up simultaneously.
@@ -62,7 +77,7 @@ INFLATION_MARGIN = 0.25
 
 
 def bridge_args(ns: str, lidar_rings: int = 1, fuse_imu: bool = True) -> list[str]:
-    """gz <-> ROS 2 topic bridges for one robot.
+    """gz <-> ROS 2 topic bridges for one robot. Gazebo backend only.
 
     With one ring, Gazebo's own LaserScan on `<ns>/scan` is exactly the planar
     scan SLAM wants, so bridge it. With several rings that message is no longer a
@@ -99,80 +114,145 @@ def bridge_args(ns: str, lidar_rings: int = 1, fuse_imu: bool = True) -> list[st
     return args
 
 
-def setup(context, *args, **kwargs):
-    cfg_arg = LaunchConfiguration("config").perform(context)
-    headless = LaunchConfiguration("headless").perform(context).lower() == "true"
-    slam_backend = LaunchConfiguration("slam_backend").perform(context).lower()
-    fuse_imu = LaunchConfiguration("fuse_imu").perform(context).lower() == "true"
-    fuse_cov = LaunchConfiguration("fuse_covariance").perform(context).lower() == "true"
-    grid_3d = LaunchConfiguration("grid_3d").perform(context).lower() == "true"
-    explore_seconds = float(LaunchConfiguration("explore_seconds").perform(context))
-    explore_strategy = LaunchConfiguration("explore_strategy").perform(context).lower()
-    ground_truth_path = LaunchConfiguration("ground_truth_path").perform(context)
-    if explore_strategy not in {"coordinated", "reactive"}:
-        raise ValueError(
-            f"unknown explore_strategy {explore_strategy!r}; expected "
-            "coordinated or reactive"
-        )
+def world_is_bistro(cfg: dict) -> bool:
+    """Which building the ARGoS backend loads.
 
-    cfg_path = Path(cfg_arg)
-    if not cfg_path.is_absolute():
-        cfg_path = REPO / cfg_arg
-    cfg = yaml.safe_load(cfg_path.read_text())
-
-    count = int(cfg.get("fleet", {}).get("robot_count", 4))
-    # Operator settings are deliberately ROS-independent, but the simulated
-    # fleet consumes the persisted count on its next launch. An explicit
-    # SWARMDECK_ROBOT_COUNT wins so a 2-robot graph test cannot be inflated
-    # by a dashboard left at 7 from a hardware session.
-    env_count = os.environ.get("SWARMDECK_ROBOT_COUNT", "").strip()
-    if env_count:
-        count = int(env_count)
+    `world: bistro` selects the Amazon Lumberyard Bistro scenario, whose assets
+    are mounted rather than generated. Anything else (including no key at all)
+    is the procedural indoor world, which make_argos_world.py writes from the
+    session seed. Accepts the mapping form (`world: {name: bistro}`) because
+    the scenario configs have carried both.
+    """
+    world_cfg = cfg.get("world") or cfg.get("environment") or "procedural"
+    if isinstance(world_cfg, dict):
+        name = world_cfg.get("name") or world_cfg.get("type", "procedural")
     else:
-        try:
-            persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
-            count = int(persisted.get("robot_count", count))
-        except (
-            FileNotFoundError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-            OSError,
-        ):
-            pass
-    count = max(1, min(count, 5))
-    prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
-    seed = cfg.get("seed", 20260801)
+        name = world_cfg
+    return str(name).lower() == "bistro"
 
+
+def argos_actions(
+    cfg,
+    cfg_path,
+    count,
+    seed,
+    runtime_dir,
+    headless,
+    launch_argos,
+    targets,
+    odometry,
+):
+    """Generate the ARGoS world and experiment, then start the bridge.
+
+    Order matters. The bridge BINDS the socket and ARGoS DIALS it, so the
+    bridge has to exist first; the loop function waits (connect_timeout in the
+    generated file) rather than failing, but only for as long as that timeout.
+
+    The world and the experiment are generated here, in the ROS container,
+    because this is where the session config lives. ARGoS reads both from the
+    shared runtime directory. Paths handed to the generator are absolute, so
+    the working directory argos3 happens to start in cannot change which
+    building it loads.
+    """
+    sim_share = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim"
+    scenario = sim_share / "scenario"
+    nodes_dir = sim_share / "nodes"
+    props = REPO / "argos" / "assets" / "props"
+    world = Path(runtime_dir) / "indoor.gltf"
+    experiment = Path(runtime_dir) / "session.argos"
+    socket = Path(runtime_dir) / "argos.sock"
+    uf_socket = Path(runtime_dir) / "uf.sock"
+
+    Path(runtime_dir).mkdir(parents=True, exist_ok=True)
+
+    is_bistro = world_is_bistro(cfg)
+
+    actions = []
+    if not is_bistro:
+        actions.append(
+            ExecuteProcess(
+                cmd=[
+                    "python3",
+                    str(scenario / "make_argos_world.py"),
+                    "--seed",
+                    str(seed),
+                    "-o",
+                    str(world),
+                ],
+                output="screen",
+            )
+        )
+    actions.append(
+        ExecuteProcess(
+            cmd=[
+                "python3",
+                str(scenario / "make_argos_session.py"),
+                "--config",
+                str(cfg_path),
+                "-o",
+                str(experiment),
+                "--robots",
+                str(count),
+                "--world",
+                "bistro" if is_bistro else str(world),
+                "--props-dir",
+                str(props),
+                "--targets",
+                str(targets),
+                "--socket",
+                str(socket),
+                "--uf-socket",
+                str(uf_socket),
+                "--odometry",
+                odometry,
+            ]
+            + ([] if headless else ["--gui"]),
+            output="screen",
+        )
+    )
+    actions.append(
+        TimerAction(
+            period=2.0,
+            actions=[
+                ExecuteProcess(
+                    cmd=[
+                        "python3",
+                        str(nodes_dir / "swarmdeck_argos_bridge.py"),
+                        "--socket",
+                        str(socket),
+                    ],
+                    output="screen",
+                )
+            ],
+        )
+    )
+
+    if launch_argos:
+        # Host development runs the simulator here. Under Compose the `argos`
+        # service owns it, because that container is the one with Vulkan, the
+        # Filament runtime and no ROS at all.
+        actions.append(
+            TimerAction(
+                period=4.0,
+                actions=[
+                    ExecuteProcess(
+                        cmd=["argos3", "-c", str(experiment)],
+                        cwd=str(runtime_dir),
+                        output="screen",
+                    )
+                ],
+            )
+        )
+    return actions
+
+
+def gazebo_actions(
+    cfg_path, count, prefix, seed, headless, lidar_rings, ground_truth_path
+):
+    """The legacy backend, unchanged: world SDF, gz sim, fleet spawn, clock."""
     sim_share = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim"
     world = sim_share / "worlds" / "indoor.sdf"
     scenario = sim_share / "scenario"
-
-    # Resolve the lidar profile through the spawner's own code rather than
-    # re-reading the YAML here, so the ring count this file bridges on and the
-    # geometry Gazebo is actually given can never disagree. Imported lazily:
-    # test_session_launch.py imports this module for `bridge_args` alone and
-    # should not need the sim package on its path.
-    sys.path.insert(0, str(scenario))
-    # noqa: E402 — path set immediately above. Resolved through the spawner's own
-    # code so the geometry this file configures SLAM and Nav2 with is the same
-    # geometry Gazebo was handed; two tables would drift.
-    from spawn_fleet import lidar_spec, robot_spec, robot_types  # noqa: E402
-
-    spec = lidar_spec(cfg.get("fleet", {}))
-    types = robot_types(cfg.get("fleet", {}), min(count, 5), prefix)
-    lidar_rings = spec.rings
-
-    # RTAB-Map registers against the cloud's vertical structure, which a
-    # single-ring lidar does not have. Fail here rather than start a stack that
-    # comes up healthy and maps badly.
-    if slam_backend == "rtabmap" and lidar_rings < 3:
-        raise RuntimeError(
-            f"slam_backend:=rtabmap needs a 3D cloud, but the lidar resolves to "
-            f"{lidar_rings} ring(s) in {cfg_path.name}. Set fleet.lidar.profile "
-            f"to generic_32, or fleet.lidar.rings to an odd value >= 9."
-        )
-
     actions = [
         # Regenerate the world from the seed so the run is reproducible.
         ExecuteProcess(
@@ -220,11 +300,9 @@ def setup(context, *args, **kwargs):
                 )
             ],
         ),
-    ]
-
-    # Gazebo sensor and TF stamps use simulation time. One global clock bridge
-    # serves every namespaced robot stack.
-    actions.append(
+        # Gazebo sensor and TF stamps use simulation time. One global clock
+        # bridge serves every namespaced robot stack. The ARGoS bridge
+        # publishes /clock itself and needs no equivalent.
         TimerAction(
             period=BRINGUP_DELAY,
             actions=[
@@ -236,8 +314,8 @@ def setup(context, *args, **kwargs):
                     output="screen",
                 )
             ],
-        )
-    )
+        ),
+    ]
 
     # Evaluation side channel only. It records Gazebo poses beside captured
     # keyframes so replay can score ATE/RPE; no estimator or planner subscribes
@@ -252,7 +330,7 @@ def setup(context, *args, **kwargs):
                             "python3",
                             str(REPO / "scripts" / "record_ground_truth.py"),
                             "--robots",
-                            str(min(count, 5)),
+                            str(count),
                             "--prefix",
                             prefix,
                             "--out",
@@ -266,6 +344,165 @@ def setup(context, *args, **kwargs):
                 ],
             )
         )
+    return actions
+
+
+def explore_action(
+    cfg, count, prefix, seed, types, robot_spec, explore_seconds, explore_strategy
+):
+    """Bounded exploration to bootstrap the maps, then the fleet stops.
+
+    Gazebo backend only. `adapter_sim` owns this process on the ARGoS path so
+    the dashboard can start and stop it, and starting a second copy here would
+    reintroduce the cmd_vel contention that yielding per robot exists to
+    prevent.
+    """
+    explorer = (
+        "coordinated_explore.py" if explore_strategy == "coordinated" else "explore.py"
+    )
+    scenario = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"
+    cmd = [
+        "python3",
+        str(scenario / explorer),
+        "--robots",
+        str(count),
+        "--prefix",
+        prefix,
+        "--seconds",
+        str(explore_seconds),
+        "--start-poses",
+        json.dumps(cfg.get("map", {}).get("start_poses", {})),
+        "--radii",
+        json.dumps(
+            {
+                f"{prefix}{i}": round(robot_spec(types[i]).footprint_radius, 3)
+                for i in range(count)
+            }
+        ),
+        "--navigation-clearances",
+        json.dumps(
+            {
+                # Coarse reachability should model whether the rectangle
+                # can pass a corridor, not its much larger circumscribed
+                # turning radius. Nav2 still validates the full polygon.
+                f"{prefix}{i}": round(robot_spec(types[i]).width / 2.0 + 0.12, 3)
+                for i in range(count)
+            }
+        ),
+    ]
+    if explore_strategy == "coordinated":
+        cmd += [
+            "--map-size-m",
+            str(float(cfg.get("map", {}).get("size_m", 30.0))),
+            "--resolution",
+            str(float(cfg.get("map", {}).get("resolution", 0.05))),
+            "--metrics",
+            "/app/sessions/exploration-latest.json",
+        ]
+    else:
+        cmd += ["--seed", str(seed)]
+    return TimerAction(
+        period=BRINGUP_DELAY + count * ROBOT_STAGGER + EXPLORE_LEAD_IN,
+        actions=[ExecuteProcess(cmd=cmd, output="screen")],
+    )
+
+
+def setup(context, *args, **kwargs):
+    cfg_arg = LaunchConfiguration("config").perform(context)
+    backend = LaunchConfiguration("sim_backend").perform(context).lower()
+    headless = LaunchConfiguration("headless").perform(context).lower() == "true"
+    slam_backend = LaunchConfiguration("slam_backend").perform(context).lower()
+    fuse_imu = LaunchConfiguration("fuse_imu").perform(context).lower() == "true"
+    fuse_cov = LaunchConfiguration("fuse_covariance").perform(context).lower() == "true"
+    grid_3d = LaunchConfiguration("grid_3d").perform(context).lower() == "true"
+    runtime_dir = LaunchConfiguration("runtime_dir").perform(context)
+    launch_argos = (
+        LaunchConfiguration("launch_argos").perform(context).lower() == "true"
+    )
+    targets = int(LaunchConfiguration("targets").perform(context))
+    odometry = LaunchConfiguration("odometry").perform(context).lower()
+    explore_seconds = float(LaunchConfiguration("explore_seconds").perform(context))
+    explore_strategy = LaunchConfiguration("explore_strategy").perform(context).lower()
+    ground_truth_path = LaunchConfiguration("ground_truth_path").perform(context)
+    if explore_strategy not in {"coordinated", "reactive"}:
+        raise ValueError(
+            f"unknown explore_strategy {explore_strategy!r}; expected "
+            "coordinated or reactive"
+        )
+
+    cfg_path = Path(cfg_arg)
+    if not cfg_path.is_absolute():
+        cfg_path = REPO / cfg_arg
+    cfg = yaml.safe_load(cfg_path.read_text())
+
+    count = int(cfg.get("fleet", {}).get("robot_count", 4))
+    # Operator settings are deliberately ROS-independent, but the simulated
+    # fleet consumes the persisted count on its next launch. An explicit
+    # SWARMDECK_ROBOT_COUNT wins so a 2-robot graph test cannot be inflated
+    # by a dashboard left at 7 from a hardware session.
+    env_count = os.environ.get("SWARMDECK_ROBOT_COUNT", "").strip()
+    if env_count:
+        count = int(env_count)
+    else:
+        try:
+            persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
+            count = int(persisted.get("robot_count", count))
+        except (
+            FileNotFoundError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            OSError,
+        ):
+            pass
+    count = max(1, min(count, 5))
+    prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")
+    seed = cfg.get("seed", 20260801)
+
+    scenario = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"
+
+    # Resolve the lidar profile through the spawner's own code rather than
+    # re-reading the YAML here, so the ring count this file bridges on and the
+    # geometry the simulator is actually given can never disagree. Imported
+    # lazily: test_session_launch.py imports this module for `bridge_args`
+    # alone and should not need the sim package on its path.
+    sys.path.insert(0, str(scenario))
+    # noqa: E402 — path set immediately above. Resolved through the spawner's own
+    # code so the geometry this file configures SLAM and Nav2 with is the same
+    # geometry the simulator was handed; two tables would drift.
+    from spawn_fleet import lidar_spec, robot_spec, robot_types  # noqa: E402
+
+    spec = lidar_spec(cfg.get("fleet", {}))
+    types = robot_types(cfg.get("fleet", {}), count, prefix)
+    lidar_rings = spec.rings
+
+    # RTAB-Map registers against the cloud's vertical structure, which a
+    # single-ring lidar does not have. Fail here rather than start a stack that
+    # comes up healthy and maps badly.
+    if slam_backend == "rtabmap" and lidar_rings < 3:
+        raise RuntimeError(
+            f"slam_backend:=rtabmap needs a 3D cloud, but the lidar resolves to "
+            f"{lidar_rings} ring(s) in {cfg_path.name}. Set fleet.lidar.profile "
+            f"to generic_32, or fleet.lidar.rings to an odd value >= 9."
+        )
+
+    argos = backend == "argos"
+    if argos:
+        actions = argos_actions(
+            cfg,
+            cfg_path,
+            count,
+            seed,
+            runtime_dir,
+            headless,
+            launch_argos,
+            targets,
+            odometry,
+        )
+    else:
+        actions = gazebo_actions(
+            cfg_path, count, prefix, seed, headless, lidar_rings, ground_truth_path
+        )
 
     # Each robot's stack starts on its own offset. Launching four lifecycle
     # managers, four SLAM nodes and four Nav2 stacks at once on a CPU-starved
@@ -273,7 +510,7 @@ def setup(context, *args, **kwargs):
     # `slam_toolbox/get_state`, logs "Failed to bring up all requested nodes", and
     # gives up. The process stays alive but sits in `unconfigured` with no
     # subscribers, so that robot produces no map and nothing else complains.
-    for i in range(min(count, 5)):
+    for i in range(count):
         ns = f"{prefix}{i}"
         # The platform this robot actually is. Its lidar mount has to reach SLAM,
         # because slam.launch.py publishes base_link -> lidar from these numbers
@@ -283,6 +520,11 @@ def setup(context, *args, **kwargs):
         # taken, which is exactly the wrong-extrinsic failure adapter_ros2's
         # notes warn about — it tilts and offsets every scan and SLAM cannot
         # recover from it.
+        #
+        # ARGoS mounts every sensor on the origin anchor, which sits on the
+        # floor; RobotSpec's numbers are relative to base_link. SLAM's static
+        # transform is base_link -> lidar either way, so it takes RobotSpec
+        # unchanged and the generated experiment adds base_height itself.
         robot = robot_spec(types[i])
         if slam_backend == "rtabmap":
             slam_args = {
@@ -305,127 +547,99 @@ def setup(context, *args, **kwargs):
                 "range_max": str(spec.range_max),
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
+                # ARGoS robots carry one lidar and get their fused pose from
+                # the external estimator; Gazebo robots carry a bumper lidar
+                # and need the EKF. See slam.launch.py.
+                "odometry_source": "external" if argos else "ekf",
+                "proximity_from_cloud": "true" if argos else "false",
+                "proximity_range_max": f"{robot.prox_range_max:.1f}",
                 "floor_z": f"{-robot.base_height:.4f}",
             }
             slam_launch = "/launch/slam.launch.py"
 
-        actions.append(
-            TimerAction(
-                period=BRINGUP_DELAY + i * ROBOT_STAGGER,
-                actions=[
-                    Node(
-                        package="ros_gz_bridge",
-                        executable="parameter_bridge",
-                        name=f"bridge_{ns}",
-                        # `owns_odom_tf` rather than `fuse_imu`: with the rtabmap
-                        # backend it is icp_odometry that publishes
-                        # odom -> base_link, so the drive plugin's TF must stay
-                        # unbridged there too, whatever fuse_imu says. Two
-                        # publishers of one transform give a TF tree that
-                        # flickers between estimates, which is worse than either.
-                        arguments=bridge_args(
-                            ns, lidar_rings, fuse_imu or slam_backend == "rtabmap"
-                        ),
-                        output="screen",
+        stack = []
+        if not argos:
+            stack.append(
+                Node(
+                    package="ros_gz_bridge",
+                    executable="parameter_bridge",
+                    name=f"bridge_{ns}",
+                    # `owns_odom_tf` rather than `fuse_imu`: with the rtabmap
+                    # backend it is icp_odometry that publishes
+                    # odom -> base_link, so the drive plugin's TF must stay
+                    # unbridged there too, whatever fuse_imu says. Two
+                    # publishers of one transform give a TF tree that
+                    # flickers between estimates, which is worse than either.
+                    arguments=bridge_args(
+                        ns, lidar_rings, fuse_imu or slam_backend == "rtabmap"
                     ),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            [FindPackageShare("swarmdeck_slam"), slam_launch]
-                        ),
-                        launch_arguments=slam_args.items(),
-                    ),
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            [FindPackageShare("swarmdeck_nav"), "/launch/nav.launch.py"]
-                        ),
-                        launch_arguments={
-                            "namespace": ns,
-                            "use_sim_time": "true",
-                            "robot_base_frame": f"{ns}/base_link",
-                            # Nav2 plans with a circular footprint, so this is
-                            # the circumscribed radius of the chassis — an
-                            # inscribed one lets a 1.02 m Bunker's corner clip a
-                            # wall the planner believed was clear. It also sets
-                            # how far robots keep off EACH OTHER, since the
-                            # bumper scan writes them into the local costmap.
-                            "robot_radius": f"{robot.footprint_radius:.3f}",
-                            # The real chassis rectangle. Without it Nav2 models
-                            # a 0.778 m wide Bunker as a 1.285 m disc and refuses
-                            # gaps it fits through comfortably.
-                            "footprint": robot.footprint,
-                            # Clearance beyond the chassis before cost starts
-                            # decaying. Constant margin rather than a scale
-                            # factor: what it buys is room to manoeuvre next to
-                            # an obstacle, and that is set by the corridor, not
-                            # by how big the robot is. INFLATION_MARGIN is where
-                            # inter-robot spacing is actually tuned.
-                            "inflation_radius": f"{robot.footprint_radius + INFLATION_MARGIN:.3f}",
-                        }.items(),
-                    ),
-                ],
+                    output="screen",
+                )
             )
+        stack.extend(
+            [
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        [FindPackageShare("swarmdeck_slam"), slam_launch]
+                    ),
+                    launch_arguments=slam_args.items(),
+                ),
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        [FindPackageShare("swarmdeck_nav"), "/launch/nav.launch.py"]
+                    ),
+                    launch_arguments={
+                        "namespace": ns,
+                        "use_sim_time": "true",
+                        "robot_base_frame": f"{ns}/base_link",
+                        # Nav2 plans with a circular footprint, so this is
+                        # the circumscribed radius of the chassis — an
+                        # inscribed one lets a 1.02 m Bunker's corner clip a
+                        # wall the planner believed was clear. It also sets
+                        # how far robots keep off EACH OTHER, since the
+                        # bumper scan writes them into the local costmap.
+                        "robot_radius": f"{robot.footprint_radius:.3f}",
+                        # The real chassis rectangle. Without it Nav2 models
+                        # a 0.778 m wide Bunker as a 1.285 m disc and refuses
+                        # gaps it fits through comfortably.
+                        "footprint": robot.footprint,
+                        # Clearance beyond the chassis before cost starts
+                        # decaying. Constant margin rather than a scale
+                        # factor: what it buys is room to manoeuvre next to
+                        # an obstacle, and that is set by the corridor, not
+                        # by how big the robot is. INFLATION_MARGIN is where
+                        # inter-robot spacing is actually tuned.
+                        "inflation_radius": f"{robot.footprint_radius + INFLATION_MARGIN:.3f}",
+                    }.items(),
+                ),
+            ]
+        )
+
+        actions.append(
+            TimerAction(period=BRINGUP_DELAY + i * ROBOT_STAGGER, actions=stack)
         )
 
     # Bounded exploration, then the fleet stops and returns control to the
     # operator. Coordinated frontier allocation is the deployment path; the old
     # reactive controller remains selectable as the measurement baseline.
-    if explore_seconds > 0:
-        explorer_script = (
-            "coordinated_explore.py"
-            if explore_strategy == "coordinated"
-            else "explore.py"
-        )
-        explore_cmd = [
-            "python3",
-            str(scenario / explorer_script),
-            "--robots",
-            str(min(count, 5)),
-            "--prefix",
-            prefix,
-            "--seconds",
-            str(explore_seconds),
-            "--start-poses",
-            json.dumps(cfg.get("map", {}).get("start_poses", {})),
-            "--radii",
-            json.dumps(
-                {
-                    f"{prefix}{i}": round(robot_spec(types[i]).footprint_radius, 3)
-                    for i in range(min(count, 5))
-                }
-            ),
-            "--navigation-clearances",
-            json.dumps(
-                {
-                    # Coarse reachability should model whether the rectangle
-                    # can pass a corridor, not its much larger circumscribed
-                    # turning radius. Nav2 still validates the full polygon.
-                    f"{prefix}{i}": round(robot_spec(types[i]).width / 2.0 + 0.12, 3)
-                    for i in range(min(count, 5))
-                }
-            ),
-        ]
-        if explore_strategy == "coordinated":
-            explore_cmd += [
-                "--map-size-m",
-                str(float(cfg.get("map", {}).get("size_m", 30.0))),
-                "--resolution",
-                str(float(cfg.get("map", {}).get("resolution", 0.05))),
-                "--metrics",
-                "/app/sessions/exploration-latest.json",
-            ]
-        else:
-            explore_cmd += ["--seed", str(seed)]
+    #
+    # The ARGoS path does not start it here. `adapter_sim` owns that process so
+    # the dashboard can start and stop it, and bootstraps one run at startup
+    # when its own `EXPLORE_SECONDS` environment variable is positive, which
+    # sim-entrypoint.sh exports. Setting it from here would not work anyway:
+    # the adapter is this launch file's SIBLING, not its child, and inherits
+    # nothing it sets.
+    if explore_seconds > 0 and not argos:
         actions.append(
-            TimerAction(
-                period=(
-                    BRINGUP_DELAY + min(count, 5) * ROBOT_STAGGER + EXPLORE_LEAD_IN
-                ),
-                actions=[
-                    ExecuteProcess(
-                        cmd=explore_cmd,
-                        output="screen",
-                    )
-                ],
+            explore_action(
+                cfg,
+                count,
+                prefix,
+                seed,
+                types,
+                robot_spec,
+                explore_seconds,
+                explore_strategy,
             )
         )
     return actions
@@ -437,6 +651,52 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("config", default_value="configs/4robot.yaml"),
             DeclareLaunchArgument("headless", default_value="true"),
             DeclareLaunchArgument(
+                "sim_backend",
+                default_value="argos",
+                choices=["argos", "gazebo"],
+                description="argos = ARGoS3 with the Filament photorealism "
+                "medium, Jolt physics and an external lidar-inertial "
+                "estimator; gazebo = the legacy Gazebo Harmonic path, "
+                "kept runnable as an A/B control.",
+            ),
+            DeclareLaunchArgument(
+                "runtime_dir",
+                default_value="/run/swarmdeck",
+                description="ARGoS backend only. Holds the generated world and "
+                "experiment and the two Unix sockets, and is the "
+                "volume shared with the argos and fast_livo2 "
+                "services. Keep it SHORT: a Unix socket path over "
+                "107 bytes fails to bind.",
+            ),
+            DeclareLaunchArgument(
+                "launch_argos",
+                default_value="false",
+                description="ARGoS backend only. Start argos3 from this launch "
+                "file, for host development. Under Compose the "
+                "`argos` service owns the simulator, because it is "
+                "the container with Vulkan and no ROS.",
+            ),
+            DeclareLaunchArgument(
+                "odometry",
+                default_value="external",
+                choices=["external", "drift"],
+                description="ARGoS backend only. external = Fast-LIVO2, a real "
+                "lidar-inertial front-end running outside the "
+                "simulator. drift = ARGoS's synthetic drift model, "
+                "roughly 4x faster because it takes the estimator "
+                "out of the lockstep exchange, and correspondingly "
+                "less faithful: a Gaussian cannot slip a wheel or "
+                "lose a scan. For development, not for judging "
+                "mapping quality.",
+            ),
+            DeclareLaunchArgument(
+                "targets",
+                default_value="10",
+                description="ARGoS backend only. Detection targets to scatter; "
+                "classes are assigned round robin from "
+                "adapters/perception/catalog.py.",
+            ),
+            DeclareLaunchArgument(
                 "slam_backend",
                 default_value="toolbox",
                 choices=["toolbox", "rtabmap"],
@@ -447,16 +707,19 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "fuse_imu",
                 default_value="true",
-                description="EKF-fuse wheel odometry with the gyro and let it own "
-                "odom -> base_link, instead of trusting the drive "
-                "plugin's slip-corrupted heading.",
+                description="Gazebo backend only. EKF-fuse wheel odometry with "
+                "the gyro and let it own odom -> base_link, instead "
+                "of trusting the drive plugin's slip-corrupted "
+                "heading. The ARGoS backend's pose arrives already "
+                "fused and launches no filter.",
             ),
             DeclareLaunchArgument(
                 "fuse_covariance",
                 default_value="false",
-                description="Feed the EKF real per-measurement covariance from "
-                "covariance_relay.py. False reproduces the filter as "
-                "it behaved on Gazebo's all-zero covariance.",
+                description="Gazebo backend only. Feed the EKF real "
+                "per-measurement covariance from covariance_relay.py. "
+                "False reproduces the filter as it behaved on "
+                "Gazebo's all-zero covariance.",
             ),
             DeclareLaunchArgument(
                 "grid_3d",
@@ -468,8 +731,10 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "explore_seconds",
                 default_value="0",
-                description="Run autonomous exploration for at most this many "
-                "seconds after startup. 0 disables it.",
+                description="Gazebo backend only. Run autonomous exploration for "
+                "at most this many seconds after startup. 0 disables "
+                "it. On the ARGoS path adapter_sim owns the explorer "
+                "and reads EXPLORE_SECONDS from its environment.",
             ),
             DeclareLaunchArgument(
                 "explore_strategy",
@@ -480,8 +745,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "ground_truth_path",
                 default_value="",
-                description="Simulation-evaluation CSV path. Empty disables the "
-                "ground-truth recorder; the data never enters SLAM or planning.",
+                description="Gazebo backend only. Simulation-evaluation CSV path. "
+                "Empty disables the ground-truth recorder; the data "
+                "never enters SLAM or planning.",
             ),
             OpaqueFunction(function=setup),
         ]

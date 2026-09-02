@@ -1,0 +1,70 @@
+#!/bin/sh
+# Handle the clock being corrected AFTER the containers started.
+#
+# The Orin has no RTC battery. systemd-timesyncd restores the last-known time
+# from /var/lib/systemd/timesync/clock at boot, so the clock comes up BEHIND by
+# however long the machine was powered off, and the eventual NTP correction is a
+# forward step of that same size. Six hours off the charger means a six hour
+# step.
+#
+# The right response therefore depends on the magnitude, which this measures
+# rather than guesses:
+#
+#   small step  (< SWARMDECK_LATE_TIMESYNC_THRESHOLD, default 2 s)
+#       cosmetic. Log it and leave the stack alone.
+#
+#   large step  (>= threshold)
+#       every driver that started pre-step is stamping in the old frame. TF
+#       buffers (10 s by default) and nav2's message filters are wholly
+#       invalidated, so the session is already broken and a restart is strictly
+#       an improvement. Restart the sensor containers.
+#
+# Set SWARMDECK_LATE_TIMESYNC_RESTART=0 to force log-only regardless of size.
+
+FLAG="${SWARMDECK_TIMESYNC_FLAG:-/run/systemd/timesync/synchronized}"
+MARK=/run/swarmdeck-timesync-unsynced
+RESTART="${SWARMDECK_LATE_TIMESYNC_RESTART:-1}"
+THRESH="${SWARMDECK_LATE_TIMESYNC_THRESHOLD:-2}"
+CONTAINERS="${SWARMDECK_LATE_TIMESYNC_CONTAINERS:-}"
+
+log() { echo "swarmdeck-late-timesync: $*"; }
+
+[ -e "$FLAG" ] || exit 0
+
+# No mark means the wait service saw a synchronized clock before Docker started,
+# which is the good case: nothing straddled a step.
+[ -r "$MARK" ] || exit 0
+
+read -r mark_real mark_up < "$MARK" || exit 0
+now_real=$(date +%s)
+now_up=$(cut -d" " -f1 /proc/uptime)
+
+# Monotonic elapsed vs realtime elapsed. Their difference is the step.
+step=$(awk -v nr="$now_real" -v mr="$mark_real" -v nu="$now_up" -v mu="$mark_up" \
+    'BEGIN { printf "%d", (nr - mr) - (nu - mu) }')
+[ "$step" -lt 0 ] && step=$(( -step ))
+
+log "clock corrected after the stack started; measured step ${step}s"
+
+if [ "$step" -lt "$THRESH" ]; then
+    log "below ${THRESH}s threshold, leaving the stack alone"
+    rm -f "$MARK"
+    exit 0
+fi
+
+log "step of ${step}s invalidates TF buffers and message filters for every"
+log "driver that started beforehand, so those drivers are already useless"
+
+if [ "$RESTART" = "1" ] && [ -n "$CONTAINERS" ]; then
+    log "restarting: $CONTAINERS"
+    # shellcheck disable=SC2086
+    if docker restart $CONTAINERS >/dev/null 2>&1; then
+        log "restarted; drivers now stamp in the corrected frame"
+    else
+        log "restart FAILED, restart the sensor containers by hand"
+    fi
+else
+    log "restart disabled; restart the sensor containers by hand"
+fi
+rm -f "$MARK"
+exit 0

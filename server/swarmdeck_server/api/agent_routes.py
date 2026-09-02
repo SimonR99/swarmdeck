@@ -29,244 +29,17 @@ def _app():
     return app
 
 
-# ----------------------------------------------------------------- Robot Controls
-
-
-async def post_robot_drive(robot_id: str, request: Request) -> Any:
-    app = _app()
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    linear = max(-0.8, min(0.8, float(body.get("linear", 0.0))))
-    angular = max(-1.5, min(1.5, float(body.get("angular", 0.0))))
-    duration = max(0.0, min(60.0, float(body.get("duration", 0.0))))
-
-    robot = app.registry.robots.get(robot_id)
-    if not robot:
-        return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-
-    sent = await app.registry.send(
-        robot_id,
-        {"type": "drive", "linear": linear, "angular": angular, **app.stamps()},
-    )
-    if not sent:
-        return JSONResponse({"error": f"Failed to send drive to '{robot_id}'"}, status_code=502)
-
-    robot.goal = None
-    app.events.log("agent_drive", {"robot_id": robot_id, "linear": linear, "angular": angular, "duration": duration})
-
-    if duration > 0.0 and (linear != 0.0 or angular != 0.0):
-        async def _auto_stop(rid: str, delay: float):
-            await asyncio.sleep(delay)
-            await app.registry.send(
-                rid,
-                {"type": "drive", "linear": 0.0, "angular": 0.0, **app.stamps()},
-            )
-            app.events.log("agent_drive_stop", {"robot_id": rid})
-
-        asyncio.create_task(_auto_stop(robot_id, duration))
-
-    return {
-        "ok": True,
-        "robot_id": robot_id,
-        "linear": linear,
-        "angular": angular,
-        "duration": duration,
-    }
-
-
-async def post_robot_goal(robot_id: str, request: Request) -> Any:
-    app = _app()
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-
-    if "x" not in body or "y" not in body:
-        return JSONResponse({"error": "'x' and 'y' required"}, status_code=400)
-
-    robot = app.registry.robots.get(robot_id)
-    if not robot:
-        return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-
-    if not app.registry.can(robot_id, "navigate"):
-        return JSONResponse({"error": f"Robot '{robot_id}' does not support navigation"}, status_code=400)
-
-    goal = {
-        "x": float(body["x"]),
-        "y": float(body["y"]),
-        "yaw": float(body.get("yaw", 0.0)),
-    }
-
-    taken_by = app.goal_taken(goal, exclude=robot_id)
-    if taken_by:
-        return JSONResponse({"error": f"Goal position is already occupied/assigned to {taken_by}"}, status_code=409)
-
-    local_goal = (
-        goal
-        if robot.coordinate_frame == "merged"
-        else app.map_service.world_to_robot(robot_id, goal)
-    )
-
-    start_pose = (
-        robot.pose
-        if robot.coordinate_frame == "merged"
-        else app.map_service.robot_to_world(robot_id, robot.pose)
-    )
-    world_goal = (
-        goal
-        if robot.coordinate_frame == "merged"
-        else app.map_service.robot_to_world(robot_id, local_goal)
-    )
-    planned_world = app.map_service.plan_path(robot_id, start_pose, world_goal)
-    local_planned = (
-        (
-            planned_world
-            if robot.coordinate_frame == "merged"
-            else [app.map_service.world_to_robot(robot_id, pt) for pt in planned_world]
-        )
-        if planned_world
-        else []
-    )
-
-    sent = await app.registry.send(
-        robot_id,
-        {
-            "type": "navigate_to",
-            "goal": local_goal,
-            "path": local_planned,
-            **app.stamps(),
-        },
-    )
-    if not sent:
-        return JSONResponse({"error": f"Failed to send navigation goal to {robot_id}"}, status_code=502)
-
-    robot.goal = local_goal
-    robot.nav_status = "active"
-    robot.mode = "nav"
-    if local_planned:
-        robot.global_planned_path = local_planned
-        robot.planned_path = local_planned
-
-    app.events.log("agent_goal", {"robot_id": robot_id, "goal": goal})
-    return {"ok": True, "robot_id": robot_id, "goal": goal, "path_length": len(local_planned)}
-
-
-async def post_robot_cancel(robot_id: str) -> Any:
-    app = _app()
-    robot = app.registry.robots.get(robot_id)
-    if not robot:
-        return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-
-    sent = await app.registry.send(robot_id, {"type": "cancel_goal", **app.stamps()})
-    if sent:
-        robot.goal = None
-        robot.global_planned_path = []
-        robot.local_planned_path = []
-        robot.planned_path = []
-        if robot.nav_status == "active":
-            robot.nav_status = "cancelled"
-    app.events.log("agent_cancel", {"robot_id": robot_id})
-    return {"ok": True, "robot_id": robot_id}
-
-
-async def post_robot_stop(robot_id: str) -> Any:
-    app = _app()
-    if robot_id == "all":
-        targets = list(app.registry.robots.keys())
-    else:
-        if robot_id not in app.registry.robots:
-            return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-        targets = [robot_id]
-
-    for rid in targets:
-        await app.registry.send(rid, {"type": "cancel_goal", **app.stamps()})
-        await app.registry.send(
-            rid, {"type": "drive", "linear": 0.0, "angular": 0.0, **app.stamps()}
-        )
-        r = app.registry.robots.get(rid)
-        if r:
-            r.goal = None
-            r.planned_path = []
-            if r.nav_status == "active":
-                r.nav_status = "cancelled"
-
-    app.events.log("agent_stop", {"targets": targets})
-    return {"ok": True, "stopped": targets}
-
-
-async def post_robot_body(robot_id: str, request: Request) -> Any:
-    app = _app()
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
-
-    action = str(body.get("action", ""))
-    if action not in (
-        "claim", "release", "sit", "stand", "damping", "lie_to_stand",
-        "lock_stand", "walk_mode", "run_mode", "wave", "set_height"
-    ):
-        return JSONResponse({"error": f"Unknown body action '{action}'"}, status_code=400)
-
-    robot = app.registry.robots.get(robot_id)
-    if not robot:
-        return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-
-    msg: dict[str, Any] = {"type": "body_command", "action": action, **app.stamps()}
-    if "height" in body:
-        try:
-            msg["height"] = float(body["height"])
-        except (ValueError, TypeError):
-            pass
-
-    sent = await app.registry.send(robot_id, msg)
-    app.events.log("agent_body", {"robot_id": robot_id, "action": action})
-    return {"ok": sent, "robot_id": robot_id, "action": action}
-
-
-async def get_robot_vision(robot_id: str) -> Any:
-    app = _app()
-    robot = app.registry.robots.get(robot_id)
-    if not robot:
-        return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
-
-    # Ensure interest is requested so adapter streams frames if available
-    await app.push_camera_interest({robot_id})
-
-    frame_tuple = app._camera_frames.get(robot_id)
-    has_frame = frame_tuple is not None
-    frame_age_ms = int((time.monotonic() - frame_tuple[1]) * 1000) if frame_tuple else None
-    seq = frame_tuple[2] if frame_tuple else None
-
-    # Retrieve live tracks for this robot
-    tracks = [
-        d for d in app._detections.values()
-        if d.get("robot_id") == robot_id
-    ]
-
-    return {
-        "robot_id": robot_id,
-        "robot_type": robot.robot_type,
-        "pose": robot.pose,
-        "camera_streaming": has_frame and (frame_age_ms is not None and frame_age_ms < 5000),
-        "frame_age_ms": frame_age_ms,
-        "frame_seq": seq,
-        "tracks": tracks,
-    }
-
-
-async def get_all_detections() -> Any:
-    app = _app()
-    snap = app.review_store.snapshot()
-    return {
-        "tracks": list(app._detections.values()),
-        "proposals": snap.get("proposals", []),
-        "entities": snap.get("entities", []),
-        "ignored": snap.get("ignored", []),
-    }
+# ----------------------------------------------------------------- Robot Controls & Perception
+# Re-exported from teleop_routes for modularity and backwards compatibility
+from .teleop_routes import (
+    post_robot_drive,
+    post_robot_goal,
+    post_robot_cancel,
+    post_robot_stop,
+    post_robot_body,
+    get_robot_vision,
+    get_all_detections,
+)
 
 
 # ----------------------------------------------------------------- Cortex Images & Attachments
@@ -355,8 +128,9 @@ async def post_agent_snapshot(robot_id: str) -> Any:
 def _find_agy_binary() -> Optional[str]:
     candidates = [
         os.environ.get("ANTIGRAVITY_AGENTAPI_EXE"),
+        os.environ.get("AGY_BIN"),
         "/usr/local/bin/agy",
-        "/home/sroy/.local/bin/agy",
+        os.path.expanduser("~/.local/bin/agy"),
         shutil.which("agy"),
     ]
     for c in candidates:
@@ -465,7 +239,7 @@ async def post_agent_chat(request: Request) -> Response:
     # Assemble system prefix
     images_info = ""
     if attached_image_paths:
-        images_info = f"- Attached User Images:\n" + "\n".join([f"  * {p}" for p in attached_image_paths]) + "\n  (You can directly inspect these images visually with your `view_file` tool or run `python /app/agent/tools/vision.py inspect <path>`!)\n"
+        images_info = f"- Attached User Images:\n" + "\n".join([f"  * {p}" for p in attached_image_paths]) + "\n  (You can directly inspect these images visually with your `view_file` tool or run `python -m agent_cortex.vision inspect <path>`!)\n"
 
     system_prefix = (
         f"[SYSTEM CONTEXT: You are Cortex, the AI Fleet Intelligence, Perception Engine & Autonomous Operator embedded directly in SwarmDeck.\n"
@@ -475,13 +249,12 @@ async def post_agent_chat(request: Request) -> Response:
         f"- Selected / Mentioned Robot: {effective_target or 'None'}\n"
         f"- SwarmDeck REST API: http://127.0.0.1:8080\n"
         f"{images_info}"
-        f"- You have full multimodal vision understanding capabilities. When user attaches an image or asks about visual details, use `view_file` on the image path or run `python /app/agent/tools/vision.py inspect <path>`.\n"
+        f"- You have full multimodal vision understanding capabilities. When user attaches an image or asks about visual details, use `view_file` on the image path or run `python -m agent_cortex.vision inspect <path>`.\n"
         f"- You can control robots, inspect vision, and capture snapshots via:\n"
-        f"  * `python /app/agent/tools/cortex_cli.py <subcommand>` (list, drive, navigate, cancel, stop, body, snap, inspect, see, detections)\n"
-        f"  * `python /app/agent/tools/vision.py <subcommand>` (inspect, snapshot, see, detections)\n"
-        f"  * `python /app/scripts/robot_tool.py <subcommand>`\n"
+        f"  * `python /app/scripts/robot_tool.py <subcommand>` (drive, goal, cancel, stop, body, vision, status)\n"
+        f"  * `python -m agent_cortex.vision <subcommand>` (inspect, snapshot, see, detections)\n"
         f"- When the user asks to move a robot (e.g. 'move forward', 'turn left', '@aslan_0 drive'), immediately run the appropriate drive command with a duration.\n"
-        f"- When the user asks 'what are you seeing on this robot' or asks for a photo/snapshot, run `python /app/agent/tools/vision.py snapshot <robot_id>` and inspect it with `view_file`.\n"
+        f"- When the user asks 'what are you seeing on this robot' or asks for a photo/snapshot, run `python -m agent_cortex.vision snapshot <robot_id>` and inspect it with `view_file`.\n"
         f"- When the user asks to modify the UI or backend, edit the files directly.]\n\n"
     )
 

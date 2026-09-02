@@ -38,15 +38,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-WORKSPACE_DIR = os.environ.get("CORTEX_WORKSPACE", "/home/sroy/workspaces/swarmdeck")
+WORKSPACE_DIR = os.environ.get("CORTEX_WORKSPACE", "/app")
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "http://server:8080").rstrip("/")
 
 
 def find_agy_binary() -> Optional[str]:
     candidates = [
         os.environ.get("ANTIGRAVITY_AGENTAPI_EXE"),
+        os.environ.get("AGY_BIN"),
         "/usr/local/bin/agy",
-        "/home/sroy/.local/bin/agy",
+        os.path.expanduser("~/.local/bin/agy"),
         shutil.which("agy"),
     ]
     for c in candidates:
@@ -56,12 +57,17 @@ def find_agy_binary() -> Optional[str]:
 
 
 def get_actual_workspace() -> str:
-    if os.path.isdir("/home/sroy/workspaces/swarmdeck"):
-        return "/home/sroy/workspaces/swarmdeck"
+    env_ws = os.environ.get("CORTEX_WORKSPACE")
+    if env_ws and os.path.isdir(env_ws):
+        return env_ws
     if os.path.isdir("/workspace"):
         return "/workspace"
     if os.path.isdir("/app/server"):
         return "/app"
+    # Fallback to repository root relative to this file if running locally
+    repo_root = Path(__file__).resolve().parents[2]
+    if (repo_root / "server").is_dir():
+        return str(repo_root)
     return WORKSPACE_DIR
 
 

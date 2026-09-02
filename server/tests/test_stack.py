@@ -2357,6 +2357,94 @@ def test_broadcast_survives_a_dashboard_closing_mid_send():
         _gui_clients.clear()
 
 
+# --------------------------------------------------------------- exploration
+
+
+def _explore_fleet(app_module):
+    """A simulation robot and a hardware robot, as the registry sees them."""
+    sim = _reset_sink(app_module)
+    hardware = _reset_sink(app_module)
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    app_registry.hello(
+        {"robot_id": "sim_0", "capabilities": ["navigate", "map", "explore"]},
+        sink=sim,
+    )
+    # Exactly what adapter_ros2 advertises: no `explore`, ever.
+    app_registry.hello(
+        {"robot_id": "duckie_0", "capabilities": ["navigate", "map", "battery"]},
+        sink=hardware,
+    )
+    return sim, hardware
+
+
+def test_exploration_is_never_sent_to_a_robot_without_the_capability():
+    """The same safety gate `reset` has, for the same reason.
+
+    Exploration starts a process that drives the whole fleet reactively off its
+    own obstacle avoidance. That is a simulation behaviour; a hardware adapter
+    must never be asked for it.
+    """
+    from swarmdeck_server.api import app as app_module
+
+    sim, hardware = _explore_fleet(app_module)
+    try:
+        asyncio.run(app_module.handle_gui_message({"type": "start_explore"}))
+
+        assert [
+            m["type"] for m in hardware.messages
+        ] == [], "a hardware adapter was asked to explore"
+        explore = [m for m in sim.messages if m["type"] == "explore"]
+        assert len(explore) == 1
+        assert explore[0]["enabled"] is True
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_stop_exploration_reaches_the_same_robots():
+    from swarmdeck_server.api import app as app_module
+
+    sim, hardware = _explore_fleet(app_module)
+    try:
+        asyncio.run(app_module.handle_gui_message({"type": "stop_explore"}))
+
+        assert [m["type"] for m in hardware.messages] == []
+        explore = [m for m in sim.messages if m["type"] == "explore"]
+        assert len(explore) == 1
+        assert explore[0]["enabled"] is False
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_exploring_a_fleet_that_cannot_explore_says_so():
+    """Silence would read as a broken button. A hardware-only fleet has no
+    exploration to start, and the operator should be told rather than left
+    watching robots that were never going to move."""
+    from swarmdeck_server.api import app as app_module
+
+    hardware = _reset_sink(app_module)
+    app_registry.robots.clear()
+    app_registry._sinks.clear()
+    try:
+        app_registry.hello(
+            {"robot_id": "duckie_0", "capabilities": ["navigate", "map"]},
+            sink=hardware,
+        )
+        asyncio.run(app_module.handle_gui_message({"type": "start_explore"}))
+
+        assert [m["type"] for m in hardware.messages] == []
+        assert any(
+            alert.get("id") == "explore_unsupported"
+            for alert in app_module._alerts.values()
+        )
+    finally:
+        app_module._alerts.clear()
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
 def test_discard_offline_robot_via_gui_and_rest():
     from swarmdeck_server.api.app import app, registry, handle_gui_message
     from swarmdeck_server.fleet.registry import Robot

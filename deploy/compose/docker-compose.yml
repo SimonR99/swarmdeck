@@ -1,10 +1,22 @@
 # SwarmDeck Docker stack
 #
-# Default (full sim):  docker compose --profile gazebo up --build -d
-#
+# Full sim (ARGoS):    docker compose --profile argos up --build -d
+# Legacy sim (Gazebo): docker compose --profile gazebo up --build -d
 # Mock fleet only:     docker compose --profile mock up --build -d
 #
 # UI: http://localhost:5173   API: http://localhost:8080
+#
+# The ARGoS profile is three services around one volume:
+#
+#   argos        physics, Filament rendering and sensors. No ROS at all.
+#   sim          the ROS 2 Jazzy side: bridge, SLAM Toolbox, Nav2, adapter_sim.
+#   fast_livo2   the odometry front-end (Fast-LIVO2), in its own DDS domain.
+#
+# They talk over Unix sockets on `swarmdeck_runtime`, mounted at /run/swarmdeck
+# in all three, which also carries the generated world and experiment. Sockets
+# rather than DDS because Humble/Jazzy graphs do not have to interoperate this
+# way: Fast-LIVO2's estimate returns through ARGoS as an ordinary odometry
+# sensor reading, and its own ROS traffic never leaves its container.
 
 # Keep the project identity stable when this file is invoked from the repository
 # root, from deploy/compose, or through the Makefile. Without this, Compose
@@ -41,9 +53,6 @@ services:
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
       - ../../scripts:/app/scripts
-      - ../..:/home/sroy/workspaces/swarmdeck
-      - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
-      - /home/sroy/.gemini:/root/.gemini
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/config"]
       interval: 10s
@@ -53,12 +62,9 @@ services:
     restart: unless-stopped
 
   # Cortex, the AI fleet-intelligence sidecar. Behind its own profile because
-  # it bind-mounts an operator's personal tooling by absolute path (`agy`, a
-  # Gemini config and an SSH key under one developer's home). On any other
-  # machine those paths do not exist, Docker creates them as empty
-  # directories, and the service restart-loops. Without a profile it joined
-  # every `docker compose up` that names no services, which is what
-  # `make docker-up-gpu` and `docker-up-cslam` do.
+  # it bind-mounts an operator's personal tooling (`agy`, a Gemini config and
+  # optional SSH keys). On any machine where those paths are omitted, defaults
+  # prevent Docker from creating unwanted root directories.
   #
   #   docker compose --profile agent up -d agent
   agent:
@@ -71,15 +77,15 @@ services:
       - "8085:8085"
     environment:
       SWARMDECK_SERVER_URL: http://server:8080
-      CORTEX_WORKSPACE: /home/sroy/workspaces/swarmdeck
+      CORTEX_WORKSPACE: "${CORTEX_WORKSPACE:-/app}"
     volumes:
       - ../../sessions:/app/sessions
       - ../../agent:/app/agent
       - ../../scripts:/app/scripts
-      - ../..:/home/sroy/workspaces/swarmdeck
-      - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
-      - /home/sroy/.gemini:/root/.gemini
-      - /home/sroy/.ssh:/root/.ssh:ro
+      - ../..:${CORTEX_WORKSPACE:-/app}
+      - ${HOST_AGY_BIN:-~/.local/bin/agy}:/usr/local/bin/agy:ro
+      - ${HOST_GEMINI_DIR:-~/.gemini}:/root/.gemini
+      - ${HOST_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     depends_on:
       server:
         condition: service_healthy
@@ -181,13 +187,163 @@ services:
       - "8189:8189/tcp" # WebRTC ICE fallback
     restart: unless-stopped
 
-  # Full simulated fleet + 2D SLAM + Nav2 + simulation adapter.
+  # --- ARGoS profile ------------------------------------------------------
+
+  # The simulator. Everything photorealistic happens here.
+  argos:
+    profiles: ["argos"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.argos
+      args:
+        # Pinned: a moving simulator is not a baseline. Bump deliberately, and
+        # only together with whatever in swarmdeck_sim needs the new commit.
+        ARGOS_REF: "${ARGOS_REF:-da70805238285772405b4a4315e65970b69857ce}"
+    image: swarmdeck-argos:local
+    depends_on:
+      # `sim` only, deliberately. Both of ARGoS's sockets are bound by other
+      # containers and it dials them, but the entrypoint does the real waiting:
+      # first for the generated experiment, then for the estimator socket ONLY
+      # when that experiment declares an <external_estimator>.
+      #
+      # Naming fast_livo2 here as well would drag it into every `up`, and the
+      # development path (`make up-argos-dev`, odometry:=drift) has no
+      # estimator to wait for and no reason to pay for one.
+      sim:
+        condition: service_started
+    environment:
+      RUNTIME_DIR: /run/swarmdeck
+      # The portable default. `make up-argos-gpu` turns it off and hands the
+      # container a real device; measured at 0.93x real time on lavapipe with
+      # four robots, a 17-ring lidar and 320x240 RGB-D cameras.
+      SWARMDECK_SOFTWARE_RENDER: "${SWARMDECK_SOFTWARE_RENDER:-true}"
+    volumes:
+      # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
+      # which is the layout find_bistro_assets_dir() already looks for. They
+      # are far too large to vendor. Mounted at the same path in both the
+      # generator and the renderer, because the generated .argos embeds the
+      # resolved path and ARGoS must be able to open it too.
+      - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
+      - swarmdeck_runtime:/run/swarmdeck
+    # A blown-out render or a diverged estimator is not fixed by restarting
+    # into the same state, and a restart loop hides the log that says why.
+    restart: "no"
+
+  # ROS 2 Jazzy: the bridge ARGoS dials, per-robot SLAM and Nav2, adapter_sim.
+  sim:
+    profiles: ["argos"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.sim
+    image: swarmdeck-sim:local
+    depends_on:
+      server:
+        condition: service_healthy
+      slam:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+      duck_detector:
+        condition: service_healthy
+    environment:
+      # Which sensor channels ARGoS streams to the external estimator.
+      # Ultra-Fusion (lwio) never read the camera; FAST-LIVO2 needs it, and
+      # without it emits no pose at all while logging nothing.
+      # Render cost scales with this; 640,480 gives a photometric estimator
+      # something to track where 320,240 of a sparse scene does not.
+      SWARMDECK_CAMERA_RESOLUTION: "${SWARMDECK_CAMERA_RESOLUTION:-320,240}"
+      SWARMDECK_ESTIMATOR_CHANNELS: "${SWARMDECK_ESTIMATOR_CHANNELS:-imu,lidar,wheels}"
+      BACKEND_HOST: server
+      BACKEND_PORT: "8080"
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot.yaml}"
+      SWARMDECK_ROBOT_COUNT: "${SWARMDECK_ROBOT_COUNT:-}"
+      SWARMDECK_SIM_BACKEND: argos
+      RUNTIME_DIR: /run/swarmdeck
+      ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
+      SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
+      GRID_3D: "${GRID_3D:-false}"
+      # Detection targets scattered through the world, classes assigned round
+      # robin from adapters/perception/catalog.py.
+      SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
+      # external = Ultra-Fusion. drift = ARGoS's synthetic model, roughly 4x
+      # faster because it leaves the lockstep exchange, and correspondingly
+      # less faithful. `make up-argos-dev` sets drift; nothing else should.
+      SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-external}"
+      # Diagnostic: log each robot's wheel encoder readings, which are the
+      # only view of what the controller actually commanded. Separates a
+      # controller fault from a physics one when a robot will not turn.
+      SWARMDECK_DEBUG_ENCODERS: "${SWARMDECK_DEBUG_ENCODERS:-}"
+      # Bootstrap the maps by exploring, then stop and hand the fleet to the
+      # operator. Without this nothing drives, and goals issued against an empty
+      # map jam robots into walls where wheel slip destroys their odometry.
+      EXPLORE_SECONDS: "${EXPLORE_SECONDS:-600}"
+      SWARMDECK_KEYFRAME_VOXEL_M: "${SWARMDECK_KEYFRAME_VOXEL_M:-0.05}"
+      SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
+      ROS_DOMAIN_ID: "42"
+      SWARMDECK_DETECTOR_URL: http://duck_detector:8091
+    volumes:
+      # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
+      # which is the layout find_bistro_assets_dir() already looks for. They
+      # are far too large to vendor. Mounted at the same path in both the
+      # generator and the renderer, because the generated .argos embeds the
+      # resolved path and ARGoS must be able to open it too.
+      - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
+      - ../../sessions:/app/sessions
+      - ../../configs:/app/configs:ro
+      - swarmdeck_runtime:/run/swarmdeck
+    shm_size: "2gb"
+    restart: unless-stopped
+
+  # Fast-LIVO2: Direct LiDAR-Inertial-Visual Odometry, on ROS 2 (multi-arch AMD64 & ARM64).
+  #
+  # This is what makes the simulated fleet's drift real rather than modelled.
+  # ARGoS's own <odometry implementation="drift"> perturbs ground-truth motion
+  # with Gaussian noise: it cannot slip a wheel against an obstacle, lose a
+  # scan to geometric degeneracy, or fail to converge. Fast-LIVO2 can, because
+  # it is really estimating from the simulated sensors, which is the problem
+  # swarmdeck-slam exists to solve.
+  fast_livo2:
+    profiles: ["argos"]
+    build:
+      context: ./../docker/fast_livo2
+      dockerfile: Dockerfile
+    image: swarmdeck-fast-livo2:local
+    environment:
+      # 1 fuses the camera (true LIVO). Only meaningful when the sim is also
+      # streaming it: see SWARMDECK_ESTIMATOR_CHANNELS on the sim service.
+      IMG_EN: "${IMG_EN:-0}"
+      RUNTIME_DIR: /run/swarmdeck
+      SOCK: /run/swarmdeck/uf.sock
+      RESULTS: /results
+      FASTRTPS_DEFAULT_PROFILES_FILE: /tools/fastdds_large.xml
+      # Its own domain. The estimator's ROS traffic is internal to this
+      # container and must not land in the Jazzy graph on domain 42.
+      ROS_DOMAIN_ID: "43"
+    volumes:
+      - ../../deploy/docker/fast_livo2:/tools:ro
+      - ../../sessions/fast_livo2:/results
+      - swarmdeck_runtime:/run/swarmdeck
+    command: ["bash", "-c", "exec bash /tools/run_fast_livo.sh"]
+    restart: "no"
+
+  # --- legacy Gazebo profile ----------------------------------------------
+  #
+  # Kept runnable as an A/B control against the ARGoS stack, and only for
+  # that: it renders with `gpu_lidar` raytracing on the CPU at roughly 0.58x
+  # real time, and its odometry is an EKF over simulated wheels and gyro
+  # rather than a real front-end. `configs/4robot.yaml` now selects a 17-ring
+  # lidar for the ARGoS estimator, which is expensive here; use
+  # SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml for the cheap one.
   gazebo:
     profiles: ["gazebo"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.gazebo
-    image: swarmdeck-sim:local
+    # NOT swarmdeck-sim:local. That tag belongs to the `sim` service, which
+    # builds Dockerfile.sim and entrypoints into the ARGoS session; sharing it
+    # meant one `make build-sim` replaced the ARGoS container's image with this
+    # one, and `make up-argos` then started Gazebo without saying so.
+    image: swarmdeck-gazebo:local
     depends_on:
       server:
         condition: service_healthy
@@ -254,15 +410,27 @@ services:
   # camera transport and protocol publication; this sidecar only maps pixels
   # to YOLOE boxes. Hardware compose files use the matching JetPack image.
   duck_detector:
-    profiles: ["gazebo"]
+    profiles: ["argos", "gazebo"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.duck-detector
       args:
         ULTRALYTICS_IMAGE: "${ULTRALYTICS_IMAGE:-ultralytics/ultralytics:8.4.14-cpu}"
     image: swarmdeck-duck-detector:cpu
+    # Bounded, because nothing in torch bounds it. Measured unrestricted on a
+    # 20-core host: 727% CPU for a best-effort perception sidecar, which
+    # starved the estimator and the simulator sharing the machine and dropped
+    # the simulation's real-time factor by 2.4x. The detector runs at 5 Hz on
+    # 320x240 frames; it does not need seven cores to do that.
+    cpus: "3.0"
     environment:
       SWARMDECK_YOLO_DEVICE: cpu
+      # torch and OpenCV each default to one thread per core and multiply.
+      # `cpus` alone would cap the total but leave them thrashing over it.
+      OMP_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      MKL_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      OPENBLAS_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      NUMEXPR_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
     volumes:
       - duck_detector_models:/models
     restart: unless-stopped
@@ -292,3 +460,8 @@ services:
 
 volumes:
   duck_detector_models:
+  # Two Unix sockets, the generated world glTF and the generated
+  # experiment, shared by argos, sim and fast_livo2. A named volume
+  # rather than a bind mount because the path has to be identical and
+  # SHORT in all three: a Unix socket path over 107 bytes fails to bind.
+  swarmdeck_runtime:

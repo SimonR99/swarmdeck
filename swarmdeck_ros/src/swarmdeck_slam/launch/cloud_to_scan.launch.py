@@ -23,6 +23,13 @@ Those two facts are easy to conflate. The truncation argument above is about
 recovering a *planar slice* from tilted rings, and it is correct: no band and no
 choice of frame can do that. It says nothing about flattening 3D structure into
 an obstacle scan, which is a different operation with a different answer.
+
+`output_topic` exists because the ARGoS backend needs `flatten` twice. Gazebo
+carried a second, dedicated bumper lidar at a fixed 0.15 m for
+`<ns>/proximity_scan`; ARGoS robots have one lidar each, so the bumper scan is
+a second flattened projection of the same cloud with a short range instead. The
+costmap parameters in `swarmdeck_nav/config/nav2_params.yaml` are unchanged and
+still name both sources.
 """
 
 from launch import LaunchDescription
@@ -45,6 +52,8 @@ def generate_launch_description() -> LaunchDescription:
     use_sim = LaunchConfiguration("use_sim_time")
     mode = LaunchConfiguration("mode")
     range_max = LaunchConfiguration("range_max")
+    output_topic = LaunchConfiguration("output_topic")
+    node_name = LaunchConfiguration("node_name")
     floor_z = LaunchConfiguration("floor_z")
     flatten = IfCondition(PythonExpression(['"', mode, '" == "flatten"']))
     slice_mode = UnlessCondition(PythonExpression(['"', mode, '" == "flatten"']))
@@ -81,6 +90,15 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("range_max", default_value="30.0"),
             DeclareLaunchArgument(
+                "output_topic",
+                default_value="scan",
+                description="Where the derived LaserScan is published, "
+                "relative to the namespace. The ARGoS backend "
+                "runs a second flatten instance on "
+                "proximity_scan.",
+            ),
+            DeclareLaunchArgument("node_name", default_value="cloud_to_scan"),
+            DeclareLaunchArgument(
                 "floor_z",
                 default_value="0.0",
                 description="Ground height in target_frame. For a simulated "
@@ -89,7 +107,7 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package="pointcloud_to_laserscan",
                 executable="pointcloud_to_laserscan_node",
-                name="cloud_to_scan",
+                name=node_name,
                 namespace=ns,
                 condition=slice_mode,
                 # The /tf remaps are load-bearing in `flatten` mode and inert in
@@ -100,7 +118,7 @@ def generate_launch_description() -> LaunchDescription:
                 # reports only "queue is full", never "no such transform".
                 remappings=[
                     ("cloud_in", "scan/points"),
-                    ("scan", "scan"),
+                    ("scan", output_topic),
                     ("/tf", "tf"),
                     ("/tf_static", "tf_static"),
                 ],
@@ -121,7 +139,7 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package="pointcloud_to_laserscan",
                 executable="pointcloud_to_laserscan_node",
-                name="cloud_to_scan",
+                name=node_name,
                 namespace=ns,
                 condition=flatten,
                 # The /tf remaps are load-bearing in `flatten` mode and inert in
@@ -132,7 +150,7 @@ def generate_launch_description() -> LaunchDescription:
                 # reports only "queue is full", never "no such transform".
                 remappings=[
                     ("cloud_in", "scan/points"),
-                    ("scan", "scan"),
+                    ("scan", output_topic),
                     ("/tf", "tf"),
                     ("/tf_static", "tf_static"),
                 ],

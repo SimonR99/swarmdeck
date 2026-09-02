@@ -1,0 +1,42 @@
+# SwarmDeck session config: Amazon Lumberyard Bistro
+name: 4robot_bistro
+seed: 20260801
+world: bistro
+
+fleet:
+  robot_count: 4
+  robot_prefix: robot_
+  # Mirroring the reference deployment: two Bunkers, one Scout Mini, one Spot.
+  # The mix is the point — the three platforms differ in footprint and lidar height.
+  robot_type: bunker
+  robot_types:
+    robot_2: scout_mini
+    robot_3: spot
+  # 17-ring Velodyne VLP-16 profile required by Ultra-Fusion odometry
+  lidar:
+    profile: vlp16
+
+map:
+  merge_mode: graph         # pose-graph occupancy; no grid registration
+  size_m: 120.0             # merged grid extent for the Bistro street network
+  resolution: 0.05
+  # 4 start poses spaced along the 141 m closed road circuit in Bistro
+  start_poses:
+    robot_0: {x: -10.75, y: 8.25, yaw: -1.4259}    # -81.7 deg
+    robot_1: {x: 14.25, y: -15.75, yaw: -0.3665}   # -21.0 deg
+    robot_2: {x: 40.25, y: -25.75, yaw: 2.8047}    # 160.7 deg
+    robot_3: {x: 11.25, y: -14.75, yaw: 3.1416}    # 180.0 deg
+
+alerts:
+  unattended_threshold_s: 45
+  nav_failure: true
+  adapter_disconnect: true
+
+video:
+  width: 640
+  height: 480
+  fps: 15
+
+recording:
+  enabled: true
+  output_dir: sessions

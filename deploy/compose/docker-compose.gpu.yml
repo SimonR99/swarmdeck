@@ -1,28 +1,44 @@
-# GPU overlay for the Gazebo service.
+# GPU overlay for the simulator services.
 #
-#   docker compose -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml \
-#                  --profile gazebo up --build -d
-#   make docker-up-gpu
+#   docker compose -f deploy/compose/docker-compose.yml \
+#                  -f deploy/compose/docker-compose.gpu.yml \
+#                  --profile argos up --build -d
+#   make up-argos-gpu
 #
 # Why this is a separate file rather than the default: a `devices` reservation
 # with `driver: nvidia` makes `docker compose up` fail outright on a machine
 # with no NVIDIA runtime, so the base compose file has to stay portable. CI and
-# GPU-less workstations use the base Compose command shown above.
+# GPU-less workstations use the base command, which falls back to the lavapipe
+# software rasterizer.
 #
-# What it buys. The base stack runs `LIBGL_ALWAYS_SOFTWARE=1`, so Gazebo's
-# `gpu_lidar` sensors raytrace on the CPU at roughly 0.58x real time. Every
-# sensor-fidelity increase — more rays per revolution, more vertical rings —
-# is paid for out of that budget, which is why the mapping lidar was still at
-# 360 samples per revolution (1.003 deg) and distant walls came out dotted.
-# Moving the raytracing onto the GPU is what makes a realistic lidar
-# affordable; see "Gazebo lidar" in docs/operations/known-issues.md.
+# What it buys. The photorealism medium renders every camera frame and every
+# lidar ray through Vulkan. On the software rasterizer, four robots with a
+# 17-ring lidar and 320x240 RGB-D cameras run at 0.93x real time, which is
+# usable but leaves no headroom: camera resolution is the main cost dial, and
+# every increase comes out of that budget. A real device moves the GPU-wait
+# half of the frame cost off the CPU entirely.
 #
-# Verified on this host: `--gpus all` with NVIDIA_DRIVER_CAPABILITIES=all
-# injects /usr/share/glvnd/egl_vendor.d/10_nvidia.json, which libglvnd loads
-# ahead of 50_mesa.json, so Gazebo's `--headless-rendering` EGL context lands
-# on the discrete GPU rather than llvmpipe.
+# Intel and AMD need no NVIDIA runtime, only the render node; that overlay is
+# docker-compose.dri.yml.
 
 services:
+  argos:
+    environment:
+      SWARMDECK_SOFTWARE_RENDER: "false"
+      NVIDIA_VISIBLE_DEVICES: all
+      # `graphics` is the one that matters: it injects the Vulkan ICD the
+      # photorealism medium needs. `compute` and `utility` come along for
+      # CUDA-based perception and for nvidia-smi being usable inside.
+      NVIDIA_DRIVER_CAPABILITIES: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # The legacy backend's own GPU settings, unchanged.
   gazebo:
     environment:
       # Explicit "0" rather than an empty value: mesa parses this variable as a
@@ -30,9 +46,6 @@ services:
       # sort of thing that silently un-fixes itself later.
       LIBGL_ALWAYS_SOFTWARE: "0"
       NVIDIA_VISIBLE_DEVICES: all
-      # `graphics` is the one that matters here — it injects libEGL_nvidia /
-      # libGLX_nvidia. `compute` and `utility` come along for CUDA-based
-      # perception and for nvidia-smi being usable inside the container.
       NVIDIA_DRIVER_CAPABILITIES: all
       __GLX_VENDOR_LIBRARY_NAME: nvidia
     deploy:
