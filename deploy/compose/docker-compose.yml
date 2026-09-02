@@ -70,7 +70,7 @@ services:
   # machine those paths do not exist, Docker creates them as empty
   # directories, and the service restart-loops. Without a profile it joined
   # every `docker compose up` that names no services, which is what
-  # `make up-argos-gpu` and `up-argos-dri` do.
+  # `make up-argos-gpu`, `up-argos-dri` and `docker-up-cslam` do.
   #
   #   docker compose --profile agent up -d agent
   agent:
