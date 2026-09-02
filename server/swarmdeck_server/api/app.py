@@ -800,49 +800,49 @@ async def post_agent_snapshot(robot_id: str) -> Any:
 
 @app.post("/api/robot/{robot_id}/drive")
 async def post_robot_drive(robot_id: str, request: Request) -> Any:
-    from .agent_routes import post_robot_drive as handler
+    from .teleop_routes import post_robot_drive as handler
 
     return await handler(robot_id, request)
 
 
 @app.post("/api/robot/{robot_id}/goal")
 async def post_robot_goal(robot_id: str, request: Request) -> Any:
-    from .agent_routes import post_robot_goal as handler
+    from .teleop_routes import post_robot_goal as handler
 
     return await handler(robot_id, request)
 
 
 @app.post("/api/robot/{robot_id}/cancel")
 async def post_robot_cancel(robot_id: str) -> Any:
-    from .agent_routes import post_robot_cancel as handler
+    from .teleop_routes import post_robot_cancel as handler
 
     return await handler(robot_id)
 
 
 @app.post("/api/robot/{robot_id}/stop")
 async def post_robot_stop(robot_id: str) -> Any:
-    from .agent_routes import post_robot_stop as handler
+    from .teleop_routes import post_robot_stop as handler
 
     return await handler(robot_id)
 
 
 @app.post("/api/robot/{robot_id}/body")
 async def post_robot_body(robot_id: str, request: Request) -> Any:
-    from .agent_routes import post_robot_body as handler
+    from .teleop_routes import post_robot_body as handler
 
     return await handler(robot_id, request)
 
 
 @app.get("/api/robot/{robot_id}/vision")
 async def get_robot_vision(robot_id: str) -> Any:
-    from .agent_routes import get_robot_vision as handler
+    from .teleop_routes import get_robot_vision as handler
 
     return await handler(robot_id)
 
 
 @app.get("/api/detections")
 async def get_all_detections() -> Any:
-    from .agent_routes import get_all_detections as handler
+    from .teleop_routes import get_all_detections as handler
 
     return await handler()
 

@@ -53,9 +53,6 @@ services:
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
       - ../../scripts:/app/scripts
-      - ../..:/home/sroy/workspaces/swarmdeck
-      - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
-      - /home/sroy/.gemini:/root/.gemini
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/config"]
       interval: 10s
@@ -65,12 +62,9 @@ services:
     restart: unless-stopped
 
   # Cortex, the AI fleet-intelligence sidecar. Behind its own profile because
-  # it bind-mounts an operator's personal tooling by absolute path (`agy`, a
-  # Gemini config and an SSH key under one developer's home). On any other
-  # machine those paths do not exist, Docker creates them as empty
-  # directories, and the service restart-loops. Without a profile it joined
-  # every `docker compose up` that names no services, which is what
-  # `make up-argos-gpu`, `up-argos-dri` and `docker-up-cslam` do.
+  # it bind-mounts an operator's personal tooling (`agy`, a Gemini config and
+  # optional SSH keys). On any machine where those paths are omitted, defaults
+  # prevent Docker from creating unwanted root directories.
   #
   #   docker compose --profile agent up -d agent
   agent:
@@ -83,15 +77,15 @@ services:
       - "8085:8085"
     environment:
       SWARMDECK_SERVER_URL: http://server:8080
-      CORTEX_WORKSPACE: /home/sroy/workspaces/swarmdeck
+      CORTEX_WORKSPACE: "${CORTEX_WORKSPACE:-/app}"
     volumes:
       - ../../sessions:/app/sessions
       - ../../agent:/app/agent
       - ../../scripts:/app/scripts
-      - ../..:/home/sroy/workspaces/swarmdeck
-      - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
-      - /home/sroy/.gemini:/root/.gemini
-      - /home/sroy/.ssh:/root/.ssh:ro
+      - ../..:${CORTEX_WORKSPACE:-/app}
+      - ${HOST_AGY_BIN:-~/.local/bin/agy}:/usr/local/bin/agy:ro
+      - ${HOST_GEMINI_DIR:-~/.gemini}:/root/.gemini
+      - ${HOST_SSH_DIR:-~/.ssh}:/root/.ssh:ro
     depends_on:
       server:
         condition: service_healthy

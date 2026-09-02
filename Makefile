@@ -117,7 +117,7 @@ test-slam:
 	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
 
 install-slam:
-	cd slam && uv venv --python 3.12 .venv && \
+	cd slam && uv venv --allow-existing --python 3.12 .venv && \
 	  uv pip install --python .venv/bin/python -e ../adapters/protocol -e ".[dev]"
 
 # Full stack with the simulator rendering on an NVIDIA GPU.
