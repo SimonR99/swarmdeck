@@ -53,6 +53,10 @@ echo "[gazebo] launching session config=${CONFIG} headless=${HEADLESS}" \
      "ground_truth_path=${GROUND_TRUTH_PATH:-disabled}"
 LAUNCH_ARGS=(
   "config:=${CONFIG}"
+  # Explicit. session.launch.py defaults to the ARGoS backend, and this
+  # container has no ARGoS in it: without this it would generate an experiment
+  # nothing renders and bind a bridge socket nothing dials.
+  "sim_backend:=gazebo"
   "headless:=${HEADLESS}"
   "slam_backend:=${SLAM_BACKEND}"
   "fuse_imu:=${FUSE_IMU}"

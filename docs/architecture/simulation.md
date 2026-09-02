@@ -292,7 +292,7 @@ make docker-test-launch
 
 # The whole stack.
 make up-argos             # or up-argos-dri / up-argos-gpu
-docker logs swarmdeck-ultrafusion-1 2>&1 | grep arrivals
+docker logs swarmdeck-fast_livo2-1 2>&1 | grep arrivals
 ```
 
 `make visual-test` is the one that catches the silent failures. A robot with no

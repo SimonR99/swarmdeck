@@ -76,7 +76,7 @@ demo:
 # bind, and the failure names neither the socket nor the limit.
 #
 # Needs the ARGoS fork installed (see docs/architecture/simulation.md) and
-# Ultra-Fusion reachable on RUNTIME_DIR/uf.sock. Without the estimator the
+# Fast-LIVO2 reachable on RUNTIME_DIR/uf.sock. Without the estimator the
 # fleet has no odometry at all; `make visual-test` is the sensor-only path that
 # needs neither.
 RUNTIME_DIR ?= /tmp/swarmdeck
@@ -234,13 +234,13 @@ down-sim:
 	$(COMPOSE) --profile gazebo stop gazebo
 	$(COMPOSE) --profile gazebo rm -f gazebo
 
-# --- synthetic fleet: no Gazebo/ROS. Also depends_on: server.
+# --- synthetic fleet: no simulator, no ROS. Also depends_on: server.
 build-mock:
 	$(COMPOSE) --profile mock build mock
 
 up-mock:
 	$(COMPOSE) --profile mock up --build -d mock
-	@echo "Fleet:            mock adapter (no Gazebo)"
+	@echo "Fleet:            mock adapter (no simulator)"
 
 down-mock:
 	$(COMPOSE) --profile mock stop mock
@@ -297,9 +297,9 @@ docker-test:
 	$(COMPOSE) build server
 	$(COMPOSE) run --rm --no-deps server python -m pytest /app/server/tests -q
 
-# Launch files are plain Python that nothing executes until Gazebo starts, so an
-# undefined name in one costs a full stack startup to find. This builds every
-# LaunchDescription in the ROS image, which takes under a second.
+# Launch files are plain Python that nothing executes until the simulator starts,
+# so an undefined name in one costs a full stack startup to find. This builds
+# every LaunchDescription in the ROS image, which takes under a second.
 docker-test-launch:
 	$(COMPOSE) --profile argos build sim
 	$(COMPOSE) --profile argos run --rm --no-deps --entrypoint bash sim -lc \

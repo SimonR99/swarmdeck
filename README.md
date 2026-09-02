@@ -6,7 +6,7 @@ camera streams, detections, and alerts in one browser UI.
 
 The FastAPI backend has no ROS dependency. Each robot connects through the
 [adapter protocol](adapters/protocol/README.md), allowing ROS 1, ROS 2, vendor
-SDK, Gazebo, and synthetic robots in the same fleet.
+SDK, simulated, and synthetic robots in the same fleet.
 
 ## What is implemented
 
@@ -17,7 +17,7 @@ SDK, Gazebo, and synthetic robots in the same fleet.
 - 2D occupancy maps, network-quality heatmaps, and an optional WebGL2 3D cloud.
 - WHEP/WebRTC video with a throttled JPEG fallback.
 - YOLOE detections, RGB-D map projection, operator review, and persistence.
-- Mock, Gazebo, ROS 1, and ROS 2 adapters.
+- Mock, simulation, ROS 1, and ROS 2 adapters.
 - Session manifests and timestamped JSONL operator events.
 
 MCAP capture, complete session replay, authentication, and production
@@ -37,14 +37,18 @@ make docker-up-gpu
 Portable/software rendering:
 
 ```bash
-docker compose -f deploy/compose/docker-compose.yml \
-  --profile gazebo up --build -d
+make up-argos
 ```
+
+Both start the ARGoS backend: photorealistic Filament rendering, Jolt physics
+and Fast-LIVO2 odometry. See [simulation](docs/architecture/simulation.md).
+Gazebo Harmonic remains runnable as an A/B control (`make up-sim`, or
+`--profile gazebo`) and is not the default.
 
 Open <http://localhost:5173>. The API is at <http://localhost:8080>; robots can
 take about one minute to appear. Stop the stack with `make docker-down`.
 
-Use a synthetic fleet when Gazebo and ROS are unnecessary:
+Use a synthetic fleet when the simulator and ROS are unnecessary:
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml \
@@ -78,10 +82,10 @@ The UI-only fallback is <http://localhost:5173/?mock=1&robots=4>.
 ### Collaborative SLAM
 
 ```bash
-make up-sim            # Server + UI + SLAM back-end + Gazebo simulation
+make up-argos          # Server + UI + SLAM back-end + ARGoS simulation
 ```
 
-Gazebo adapters stream keyframes to `swarmdeck-slam` on port 8090, which optimizes a joint GTSAM pose graph and renders the merged occupancy grid.
+Simulated adapters stream keyframes to `swarmdeck-slam` on port 8090, which optimizes a joint GTSAM pose graph and renders the merged occupancy grid.
 
 ## Physical robots
 
@@ -135,7 +139,7 @@ flowchart LR
 | `server/swarmdeck_server/mapsvc/` | Map state, immutable publication snapshots, rendering/output, and collaborative-SLAM collaborators. |
 | `ui/` | Svelte 5 dashboard. |
 | `ui/src/lib/components/map2d/` | Map interaction in `MapView.svelte`; canvas layers live in `mapLayers.ts`. |
-| `swarmdeck_ros/src/` | Gazebo, SLAM, Nav2, and collaborative-SLAM packages. |
+| `swarmdeck_ros/src/` | Simulation, SLAM, Nav2, and collaborative-SLAM packages. |
 | `configs/` | Simulation and backend session configuration. |
 | `deploy/` | Docker, operator services, and physical-robot Compose files. |
 | `scripts/` | Deployment, bring-up, networking, and utility commands. |
@@ -210,14 +214,24 @@ see [`deploy/robots/README.md`](deploy/robots/README.md).
 ```bash
 make test
 make docker-test-launch
-bash tests/integration/test_sim_headless.sh
+bash tests/integration/test_argos_headless.sh   # legacy: test_sim_headless.sh
 ```
 
-For manual integration debugging:
+For manual integration debugging, with the ARGoS fork and `argos3` on the host
+(see [simulation](docs/architecture/simulation.md)):
+
+```bash
+make sim                 # session.launch.py with launch_argos:=true
+make visual-test         # per-robot RGB, depth and lidar frames as PNGs
+```
+
+The legacy Gazebo path keeps its own harness, which is also where
+`explore_seconds` is read; on the ARGoS backend `adapter_sim` owns the explorer
+and takes `EXPLORE_SECONDS` from its environment:
 
 ```bash
 bash tests/integration/run_stack.sh 4
-ros2 launch swarmdeck_bringup session.launch.py \
+ros2 launch swarmdeck_bringup session.launch.py sim_backend:=gazebo \
   config:=configs/4robot.yaml \
   explore_seconds:=240 explore_strategy:=coordinated
 bash tests/integration/stop_stack.sh
@@ -229,8 +243,9 @@ bash tests/integration/stop_stack.sh
 ## Dependencies and safety
 
 Docker is the supported path. Host simulation development uses ROS 2 Jazzy,
-Gazebo Harmonic, Nav2, SLAM Toolbox, `robot_localization`, and optionally
-RTAB-Map. ROS 1 Noetic is EOL and must remain in the robot's own environment or
+SwarmDeck's ARGoS3 fork, Nav2, SLAM Toolbox, `robot_localization`, and
+optionally RTAB-Map; the legacy A/B control additionally needs Gazebo Harmonic.
+ROS 1 Noetic is EOL and must remain in the robot's own environment or
 container; the backend does not need a ROS bridge.
 
 `make tunnel` exposes the UI through ngrok or Cloudflare. The generated URL has
