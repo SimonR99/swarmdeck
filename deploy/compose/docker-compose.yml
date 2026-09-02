@@ -52,7 +52,17 @@ services:
       start_period: 8s
     restart: unless-stopped
 
+  # Cortex, the AI fleet-intelligence sidecar. Behind its own profile because
+  # it bind-mounts an operator's personal tooling by absolute path (`agy`, a
+  # Gemini config and an SSH key under one developer's home). On any other
+  # machine those paths do not exist, Docker creates them as empty
+  # directories, and the service restart-loops. Without a profile it joined
+  # every `docker compose up` that names no services, which is what
+  # `make docker-up-gpu` and `docker-up-cslam` do.
+  #
+  #   docker compose --profile agent up -d agent
   agent:
+    profiles: ["agent"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.agent
