@@ -463,6 +463,7 @@ export type ClientMessage =
   | { type: 'detection_forget_all'; include_proposals?: boolean }
   | { type: 'detection_clear_proposals' }
   | { type: 'detection_delete_all' }
-  | { type: 'detection_unignore' };
+  | { type: 'detection_unignore' }
+  | { type: 'discard_robot'; robot_id: string };
 
 export type ClientAction = ClientMessage['type'];

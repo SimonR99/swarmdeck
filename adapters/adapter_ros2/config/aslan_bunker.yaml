@@ -28,12 +28,12 @@ map_frame: map
 # The odom bridge publishes map -> aslan_base_link and Nav2 publishes the
 # explicit aslan_base_link -> os_lidar rotation.
 base_frame: aslan_base_link
-lidar_height_m: 0.520
+lidar_height_m: 0.630
 
 # Same Bunker envelope and SuperOdometry map origin as Botman: nominal chassis
 # height 0.400 m, with the requested 0.150..1.800 m physical obstacle band.
 map_cloud_height_band:
-  floor_z: -0.520
+  floor_z: -0.630
   min_z: 0.150
   max_z: 1.800
 retain_free_space: true

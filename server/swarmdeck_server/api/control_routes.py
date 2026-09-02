@@ -86,6 +86,20 @@ async def get_fleet() -> dict[str, Any]:
     return {"robots": _app().fleet_snapshot()}
 
 
+async def delete_fleet_robot(robot_id: str) -> dict[str, Any]:
+    app = _app()
+    robot = app.registry.robots.get(robot_id)
+    if robot is None:
+        return JSONResponse({"error": f"Robot {robot_id} not found"}, status_code=404)
+    app.registry.disconnect(robot_id)
+    app.registry.remove(robot_id)
+    if hasattr(app.map_service, "reset_robot_async"):
+        await app.map_service.reset_robot_async(robot_id)
+    app.events.log("robot_discarded", {"robot_id": robot_id})
+    await app.broadcast({"type": "fleet_change", "robots": app.fleet_snapshot()})
+    return {"ok": True, "robot_id": robot_id}
+
+
 async def get_session() -> dict[str, Any]:
     return _app().session_state()
 

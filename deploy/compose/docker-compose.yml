@@ -52,12 +52,45 @@ services:
     volumes:
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
+      - ../../scripts:/app/scripts
+      - ../..:/home/sroy/workspaces/swarmdeck
+      - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
+      - /home/sroy/.gemini:/root/.gemini
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/config"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 8s
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    image: swarmdeck-agent:local
+    ports:
+      - "8085:8085"
+    environment:
+      SWARMDECK_SERVER_URL: http://server:8080
+      CORTEX_WORKSPACE: /home/sroy/workspaces/swarmdeck
+    volumes:
+      - ../../sessions:/app/sessions
+      - ../../agent:/app/agent
+      - ../../scripts:/app/scripts
+      - ../..:/home/sroy/workspaces/swarmdeck
+      - /home/sroy/.local/bin/agy:/usr/local/bin/agy:ro
+      - /home/sroy/.gemini:/root/.gemini
+      - /home/sroy/.ssh:/root/.ssh:ro
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8085/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
   slam:

@@ -202,6 +202,11 @@ class Registry:
             return
         self._sinks.pop(robot_id, None)
 
+    def remove(self, robot_id: str) -> bool:
+        """Remove a robot from the registry."""
+        self._sinks.pop(robot_id, None)
+        return self.robots.pop(robot_id, None) is not None
+
     async def send(self, robot_id: str, msg: dict[str, Any]) -> bool:
         sink = self._sinks.get(robot_id)
         if sink is None:

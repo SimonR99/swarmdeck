@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl git procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Preserve repo layout: swarmdeck_server resolves REPO as parents[3] of api/app.py
@@ -19,6 +19,7 @@ COPY server/tests /app/server/tests
 COPY configs /app/configs
 RUN ln -s /app/configs /app/study
 COPY adapters /app/adapters
+COPY scripts /app/scripts
 RUN mkdir -p /app/sessions
 
 WORKDIR /app/server

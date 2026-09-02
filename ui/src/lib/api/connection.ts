@@ -34,7 +34,7 @@ function dispatch(msg: ServerMessage) {
       fleet.apply(msg);
       break;
     case 'fleet_change':
-      msg.robots.forEach((r) => fleet.apply(r));
+      fleet.sync(msg.robots);
       break;
     case 'map_info':
       mapStore.setGlobalInfo(msg.info);
@@ -266,6 +266,13 @@ export const actions = {
   },
   clearIgnoredDetections() {
     sendAction({ type: 'detection_unignore' });
+  },
+  discardRobot(robotId: string) {
+    fleet.remove(robotId);
+    mapStore.clearCostmaps(robotId);
+    mapStore.clearNetwork(robotId);
+    sendAction({ type: 'discard_robot', robot_id: robotId });
+    void fetch(`/api/fleet/${encodeURIComponent(robotId)}`, { method: 'DELETE' }).catch(() => {});
   }
 };
 

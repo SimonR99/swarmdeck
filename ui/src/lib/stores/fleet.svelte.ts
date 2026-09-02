@@ -119,6 +119,16 @@ export const fleet = {
     state.robots[msg.robot_id] = { ...state.robots[msg.robot_id], ...msg };
   },
 
+  sync(robots: RobotState[]) {
+    const presentIds = new Set(robots.map((r) => r.robot_id));
+    for (const id of state.order) {
+      if (!presentIds.has(id)) {
+        this.remove(id);
+      }
+    }
+    robots.forEach((r) => this.apply(r));
+  },
+
   remove(id: string) {
     delete state.robots[id];
     state.order = state.order.filter((r) => r !== id);

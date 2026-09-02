@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -72,7 +73,6 @@ async def lifespan(_: FastAPI):
     ]
     from ..mapsvc import graph_bridge
 
-    graph_bridge.configure()
     await graph_bridge.start_worker()
     yield
     await graph_bridge.stop_worker()
@@ -749,6 +749,104 @@ async def get_fleet() -> dict[str, Any]:
     return await handler()
 
 
+@app.delete("/api/fleet/{robot_id}")
+async def delete_fleet_robot(robot_id: str) -> dict[str, Any]:
+    from .control_routes import delete_fleet_robot as handler
+
+    return await handler(robot_id)
+
+
+@app.post("/api/fleet/{robot_id}/discard")
+async def post_discard_fleet_robot(robot_id: str) -> dict[str, Any]:
+    from .control_routes import delete_fleet_robot as handler
+
+    return await handler(robot_id)
+
+
+@app.get("/api/agent/status")
+async def get_agent_status() -> dict[str, Any]:
+    from .agent_routes import get_agent_status as handler
+
+    return await handler()
+
+
+@app.post("/api/agent/chat")
+async def post_agent_chat(request: Request) -> Response:
+    from .agent_routes import post_agent_chat as handler
+
+    return await handler(request)
+
+
+@app.post("/api/agent/upload")
+async def post_agent_upload(request: Request) -> Any:
+    from .agent_routes import post_agent_upload as handler
+
+    return await handler(request)
+
+
+@app.get("/api/agent/captures/{filename}")
+async def get_agent_capture(filename: str) -> Any:
+    from .agent_routes import get_agent_capture as handler
+
+    return await handler(filename)
+
+
+@app.post("/api/agent/snapshot/{robot_id}")
+async def post_agent_snapshot(robot_id: str) -> Any:
+    from .agent_routes import post_agent_snapshot as handler
+
+    return await handler(robot_id)
+
+
+@app.post("/api/robot/{robot_id}/drive")
+async def post_robot_drive(robot_id: str, request: Request) -> Any:
+    from .agent_routes import post_robot_drive as handler
+
+    return await handler(robot_id, request)
+
+
+@app.post("/api/robot/{robot_id}/goal")
+async def post_robot_goal(robot_id: str, request: Request) -> Any:
+    from .agent_routes import post_robot_goal as handler
+
+    return await handler(robot_id, request)
+
+
+@app.post("/api/robot/{robot_id}/cancel")
+async def post_robot_cancel(robot_id: str) -> Any:
+    from .agent_routes import post_robot_cancel as handler
+
+    return await handler(robot_id)
+
+
+@app.post("/api/robot/{robot_id}/stop")
+async def post_robot_stop(robot_id: str) -> Any:
+    from .agent_routes import post_robot_stop as handler
+
+    return await handler(robot_id)
+
+
+@app.post("/api/robot/{robot_id}/body")
+async def post_robot_body(robot_id: str, request: Request) -> Any:
+    from .agent_routes import post_robot_body as handler
+
+    return await handler(robot_id, request)
+
+
+@app.get("/api/robot/{robot_id}/vision")
+async def get_robot_vision(robot_id: str) -> Any:
+    from .agent_routes import get_robot_vision as handler
+
+    return await handler(robot_id)
+
+
+@app.get("/api/detections")
+async def get_all_detections() -> Any:
+    from .agent_routes import get_all_detections as handler
+
+    return await handler()
+
+
 @app.get("/api/session")
 async def get_session() -> dict[str, Any]:
     from .control_routes import get_session as handler
@@ -1297,6 +1395,15 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     elif kind == "switch_camera":
         await set_camera_watch(source, rid)
+
+    elif kind in ("discard_robot", "remove_robot"):
+        if rid and rid in registry.robots:
+            registry.disconnect(rid)
+            registry.remove(rid)
+            if hasattr(map_service, "reset_robot_async"):
+                await map_service.reset_robot_async(rid)
+            events.log("robot_discarded", {"robot_id": rid})
+            await broadcast({"type": "fleet_change", "robots": fleet_snapshot()})
 
     elif kind in ("select_robots", "report_target"):
         pass  # logged above; no robot-side effect

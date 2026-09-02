@@ -266,7 +266,7 @@ yaw_ratio: 0.0
 """
 
 
-def run(target_topic: str, reference_topic: str, duration: float) -> Optional[dict]:
+def run(target_topic: str, reference_topic: str, duration: float, no_prompt: bool = False) -> Optional[dict]:
     if not HAVE_ROS2:
         print("ERROR: ROS 2 (rclpy, sensor_msgs) is required.", file=sys.stderr)
         return None
@@ -287,7 +287,13 @@ def run(target_topic: str, reference_topic: str, duration: float) -> Optional[di
         print("      2. press down on a side corner and release, ~5 times")
         print("      3. if you can, lift one side a few cm and set it down")
         print("    Firm and brisk beats gentle; the fit wants real angular rate.")
-        input(f"--> Press [ENTER] to record for {int(duration)}s... ")
+        if not no_prompt:
+            try:
+                input(f"--> Press [ENTER] to record for {int(duration)}s... ")
+            except EOFError:
+                pass
+        else:
+            print(f"--> Recording for {int(duration)}s...")
 
         node.a.clear()
         node.b.clear()
@@ -411,8 +417,9 @@ def main() -> None:
     ap.add_argument("--reference", default="/ouster/imu",
                     help="IMU whose lidar extrinsic is already known (default: /ouster/imu)")
     ap.add_argument("--duration", type=float, default=30.0)
+    ap.add_argument("--no-prompt", action="store_true", help="Start recording immediately without waiting for enter")
     a = ap.parse_args()
-    run(a.target, a.reference, a.duration)
+    run(a.target, a.reference, a.duration, a.no_prompt)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,115 @@
+# robot_localization EKF for the Bunkers (Botman, Aslan).
+#
+# WHY. SuperOdometry publishes /laser_odometry at whatever rate the point cloud
+# reaches it, measured 2026-09-01 at 1.9-7.1 Hz with gaps up to 2.3 s. The
+# adapter and odom_to_tf read that topic directly, so every stall lands in the
+# fleet view and in Nav2's transform cache as a jump. This filter runs its own
+# prediction step at a fixed rate and corrects it with each lidar solution as it
+# arrives, turning a ragged input into a steady pose stream.
+#
+# The pattern is copied from what already works on Scout (tars_0), whose
+# /lvi_sam/lidar/mapping/odometry is only 5.0 Hz but whose /odometry/filtered --
+# an EKF exactly like this one -- is a smooth 14.9 Hz, and that is the topic
+# Scout's adapter consumes (adapters/adapter_ros1/config/scout_mini.yaml).
+#
+# WHERE THIS DIFFERS FROM SCOUT. Scout's ekf_agx.yaml has its imu0 block
+# commented out and leans on cmd_vel as a control input instead. The Bunkers
+# have something better: /ouster/imu is a rock-steady 100 Hz (measured 99.97 and
+# 100.01 Hz on Aslan and Botman while their clouds were collapsing to 3 Hz),
+# because it is small enough to be unaffected by whatever starves the 1.57 MB
+# cloud. Fusing its yaw rate gives the prediction real rotation data rather than
+# a commanded velocity, so this should track turns better than Scout does.
+# use_control is therefore left off: cmd_vel would add a worse estimate of the
+# same quantity, and it is not published at all under manual teleop.
+/**:
+  ros__parameters:
+    # 30 Hz out from a 2-7 Hz input. Bounded by the IMU (100 Hz), not by the
+    # lidar, because between corrections the prediction is what is being
+    # published.
+    frequency: 30.0
+
+    # How long to wait for a measurement before predicting anyway. This is the
+    # parameter that does the actual smoothing, and it is what really sets the
+    # output rate -- NOT `frequency`. When the measurement queue is empty the
+    # filter only takes a predict-only step once sensor_timeout has elapsed, so
+    # this value is the floor on the publish interval between lidar updates.
+    #
+    # Set it to match 1/frequency. Measured here 2026-09-01: sensor_timeout 0.1
+    # with frequency 30.0 produced 7.9 Hz output whose minimum period was
+    # exactly 0.100 s -- the timeout, not the 0.033 s the frequency implies.
+    # Scout's pairing (0.03 against frequency 20.0) is the same relationship.
+    sensor_timeout: 0.033
+
+    # The Bunkers are ground robots and odom_to_tf already flattens the pose it
+    # broadcasts (planar:=true), so z/roll/pitch are held at zero here too
+    # rather than being estimated and then discarded downstream.
+    two_d_mode: true
+
+    # NO TF FROM THIS NODE. swarmdeck-<robot>-odom-tf is the single broadcaster
+    # of map -> <robot>_base_link and must stay that way; a second publisher of
+    # one edge makes the tree depend on which message arrived last. Nav2's own
+    # bringup is already kept off this edge for the same reason
+    # (publish_odom_tf:=false in both robot compose files). To adopt the filter,
+    # repoint odom_to_tf's odom_topic at this node's output -- do not turn this
+    # flag on.
+    publish_tf: false
+
+    transform_timeout: 0.0
+
+    # /laser_odometry is stamped map -> os_lidar, so the filter tracks os_lidar
+    # in map and its output is directly comparable to its input: same frames,
+    # same quantity, just smoothed.
+    #
+    # odom_frame is a NAME ONLY and is deliberately one no other node uses.
+    # These robots have no odom frame -- the tree is map -> base_link directly --
+    # but robot_localization rejects its configuration outright ("Invalid frame
+    # configuration! The values for map_frame, odom_frame, and base_link_frame
+    # must be unique.") if any two match, so it cannot simply be set to map.
+    # Nothing is ever published in or transformed through it, because
+    # world_frame is map and publish_tf is false.
+    map_frame: map
+    odom_frame: odom_ekf
+    base_link_frame: os_lidar
+    world_frame: map
+
+    # SuperOdometry's pose. Absolute and already loop-closure corrected, so
+    # differential mode is off: differencing a corrected pose would reintroduce
+    # the jumps this filter exists to remove.
+    #
+    # Order is x, y, z, roll, pitch, yaw, then the velocities and accelerations.
+    # Only the planar pose is taken. The twist SuperOdometry reports alongside
+    # it is not fused: it is derived from the same scan match, so feeding it in
+    # would double-count one measurement as two independent ones.
+    odom0: /laser_odometry
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # Ouster internal IMU, in os_imu. Reachable from os_lidar through a 180 deg
+    # yaw published by the driver's static TF, which is what makes this usable
+    # without any new calibration.
+    #
+    # Yaw rate ONLY. Linear acceleration is deliberately not fused: this IMU is
+    # the noisier of the two on Botman (the VN-100 is quieter, which is why the
+    # SuperOdometry configs prefer it when its extrinsic is known), and double
+    # integrating that noise into position is how a filter drifts while looking
+    # perfectly smooth. Yaw rate is the quantity the lidar is worst at during
+    # the fast turns that skew its clouds, so it is the one worth taking.
+    imu0: /ouster/imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 50
+    imu0_remove_gravitational_acceleration: true
+
+    # cmd_vel is not fused. See the note at the top of this file.
+    use_control: false

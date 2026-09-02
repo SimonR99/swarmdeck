@@ -12,8 +12,8 @@ set -Eeuo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_DIR="$REPO/deploy/robots"
 FLEET_ENV="$REPO/deploy/fleet.env"
-SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
-RSYNC_RSH="ssh -o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+SSH_OPTS=(-o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new)
+RSYNC_RSH="ssh -o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -176,6 +176,38 @@ run_operator_up() {
   env "${assignments[@]}" "$REPO/$DEPLOY_OPERATOR_UP_SCRIPT"
 }
 
+# The sync ships the operator's working tree, not a named revision, so a stale
+# or dirty checkout silently downgrades the robot: on 2026-09-01 a benchbot
+# deploy overwrote deploy/compose/docker-compose.robot-botman.yml with a copy
+# predating the Fast DDS large-data profile, and /ouster/points fell back to
+# 5 Hz with no sign in the deploy output that anything had regressed. Report
+# what is about to be shipped, and say so when it is not what the operator
+# probably expects. This never fetches, so "behind" is against the last fetch.
+report_source() {
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "  source: $REPO (not a git checkout)"
+    return 0
+  }
+  local head branch dirty upstream behind
+  head="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  branch="$(git -C "$REPO" branch --show-current 2>/dev/null || true)"
+  echo "  source: ${branch:-detached HEAD} @ $head"
+
+  dirty="$(git -C "$REPO" status --porcelain -- adapters deploy scripts swarmdeck_ros 2>/dev/null | head -5)"
+  if [[ -n "$dirty" ]]; then
+    echo "  warning: uncommitted changes will be deployed:" >&2
+    printf '%s\n' "$dirty" | sed 's/^/    /' >&2
+  fi
+
+  upstream="$(git -C "$REPO" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  [[ -n "$upstream" ]] || return 0
+  behind="$(git -C "$REPO" rev-list --count "HEAD..$upstream" 2>/dev/null || echo 0)"
+  if [[ "$behind" != 0 ]]; then
+    echo "  warning: $behind commit(s) behind $upstream as of the last fetch;" >&2
+    echo "           the robot will receive this older tree. Pull before deploying." >&2
+  fi
+}
+
 deploy_one() (
   local target="$1" dry="$2" sync="$3" build="$4" reset="$5" up="$6" verify="$7" native_reset="$8" container_reset="$9"
   load_profile "$target"
@@ -248,6 +280,8 @@ main() {
     shift
   done
   [[ "$up" == yes || "$reset" == no ]] || die "--no-up requires --no-reset"
+
+  report_source
 
   local targets=()
   if [[ "$target" == all ]]; then

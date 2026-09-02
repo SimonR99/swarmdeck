@@ -21,15 +21,21 @@ _ADAPTER_CONFIG = Path(__file__).resolve().parents[1] / "config"
 
 
 def generate_launch_description() -> LaunchDescription:
-    mist_config = Path("/workspace/src/control/rover_launch/config")
-    superodom_config = str(mist_config / "superodom/os1_128.yaml")
-    superodom_calib = str(_ADAPTER_CONFIG / "aslan_superodom_calibration.yaml")
+    superodom_config = LaunchConfiguration(
+        "config_file",
+        default=str(_ADAPTER_CONFIG / "aslan_superodom_ouster.yaml"),
+    )
+    superodom_calib = LaunchConfiguration(
+        "calibration_file",
+        default=str(_ADAPTER_CONFIG / "aslan_superodom_ouster_calibration.yaml"),
+    )
     vectornav_params = str(_ADAPTER_CONFIG / "aslan_vectornav.yaml")
 
     start_base = LaunchConfiguration("start_base")
     start_lidar = LaunchConfiguration("start_lidar")
     start_slam = LaunchConfiguration("start_slam")
     start_imu = LaunchConfiguration("start_imu")
+    start_vectornav = LaunchConfiguration("start_vectornav")
     can_interface = LaunchConfiguration("can_interface")
     imu_topic = LaunchConfiguration("imu_topic")
 
@@ -39,33 +45,34 @@ def generate_launch_description() -> LaunchDescription:
     ouster = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(ouster_share / "launch/driver.launch.py")),
         launch_arguments={
-            "params_file": str(mist_config / "drivers/driver_ouster.yaml"),
+            # Repo-owned copy of the robot's own MIST driver_ouster.yaml, which
+            # differs from it in one line: proc_mask drops IMG|RAW|TLM. Those
+            # eight publishers had no subscribers and shared the point cloud's
+            # FastDDS shared-memory segment. The MIST workspace is read-only and
+            # outside this repo, so keeping the override here is what stops it
+            # being lost to the next workspace re-sync.
+            "params_file": str(_ADAPTER_CONFIG / "aslan_driver_ouster.yaml"),
             "ouster_ns": "ouster",
             "viz": "false",
             "os_driver_name": "os_driver",
-            "throttle_rate": "0.1",
-            "input_topic": "/ouster/points",
-            "output_topic": "/ouster/points_throttled",
         }.items(),
         condition=IfCondition(start_lidar),
     )
 
-    # VN-100T-CR on /dev/vectornav. The Ouster IMU stays published but is not
-    # SuperOdom's imu_topic: identity lidar-IMU extrinsics against that sensor
-    # reset preintegration on "Large bias" every ~0.5 s and jumped the map.
+    # VN-100T-CR on /dev/vectornav, started only when start_vectornav is true.
     vectornav = Node(
         package="vectornav",
         executable="vectornav",
         output="screen",
         parameters=[vectornav_params],
-        condition=IfCondition(start_imu),
+        condition=IfCondition(start_vectornav),
     )
     vn_sensor_msgs = Node(
         package="vectornav",
         executable="vn_sensor_msgs",
         output="screen",
         parameters=[vectornav_params],
-        condition=IfCondition(start_imu),
+        condition=IfCondition(start_vectornav),
     )
 
     feature_extraction = Node(
@@ -91,9 +98,6 @@ def generate_launch_description() -> LaunchDescription:
                 "imu_topic": imu_topic,
                 "map_dir": "/tmp/aslan_superodom.pcd",
             },
-        ],
-        remappings=[
-            ("laser_odom_to_init", "integrated_to_init"),
         ],
     )
     imu_preintegration = Node(
@@ -138,7 +142,18 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("start_lidar", default_value="true"),
             DeclareLaunchArgument("start_slam", default_value="true"),
             DeclareLaunchArgument("start_imu", default_value="true"),
-            DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu"),
+            DeclareLaunchArgument("start_vectornav", default_value="false"),
+            DeclareLaunchArgument("imu_topic", default_value="/ouster/imu"),
+            DeclareLaunchArgument(
+                "config_file",
+                default_value=str(_ADAPTER_CONFIG / "aslan_superodom_ouster.yaml"),
+            ),
+            DeclareLaunchArgument(
+                "calibration_file",
+                default_value=str(
+                    _ADAPTER_CONFIG / "aslan_superodom_ouster_calibration.yaml"
+                ),
+            ),
             # Aslan's upstream launch expects a USB-CAN adapter named can2.
             # Keep it explicit and overridable rather than silently selecting
             # one of the Jetson's currently-down native CAN controllers.

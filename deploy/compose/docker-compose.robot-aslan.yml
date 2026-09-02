@@ -20,6 +20,12 @@ x-aslan-stack: &aslan-stack
   environment:
     ROS_DOMAIN_ID: *ros_domain
     LD_LIBRARY_PATH: "/usr/local/lib:${LD_LIBRARY_PATH:-}"
+    RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+    # Raises the FastDDS shared-memory segment from its 512 KiB default to
+    # 16 MB. A 1.57 MB /ouster/points sample does not fit the default, which
+    # held the cloud to 2-5 Hz against a configured 10 Hz and starved
+    # SuperOdometry with it. See deploy/dds/fastdds_large_data.xml.
+    FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
   restart: unless-stopped
 
 services:
@@ -61,6 +67,24 @@ services:
         start_base:=false
         start_lidar:=true
         start_slam:=false
+    # setup.sh, NOT setup.bash. Docker runs CMD-SHELL under /bin/sh, and
+    # sourcing a bash script there aborts the whole shell on the first bash-ism,
+    # which `2>/dev/null || true` cannot rescue -- the probe then exits 2 having
+    # printed nothing and the container never leaves `health: starting`. Colcon
+    # generates setup.sh beside setup.bash for exactly this case. This went
+    # unnoticed because the running containers predated the healthcheck.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /aslan_overlay/setup.sh 2>/dev/null || true &&
+          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/ouster/points'
+      interval: 20s
+      timeout: 12s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
 
   slam:
     <<: *aslan-stack
@@ -68,7 +92,7 @@ services:
     runtime: nvidia
     depends_on:
       lidar:
-        condition: service_started
+        condition: service_healthy
     command:
       - bash
       - -c
@@ -82,7 +106,23 @@ services:
         start_lidar:=false
         start_slam:=true
         start_imu:=true
-        imu_topic:=/vectornav/imu
+        start_vectornav:=${ASLAN_START_VECTORNAV:-true}
+        imu_topic:=${ASLAN_IMU_TOPIC:-/vectornav/imu}
+        config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CONFIG:-aslan_superodom.yaml}
+        calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CALIB:-aslan_superodom_calibration.yaml}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          . /opt/ros/humble/setup.sh &&
+          . /workspace/install/setup.sh 2>/dev/null || true &&
+          . /aslan_overlay/setup.sh 2>/dev/null || true &&
+          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/laser_odometry'
+      interval: 20s
+      timeout: 12s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
 
   # SuperOdometry publishes /laser_odometry but not map -> base TF. Despite
   # naming os_lidar as the message child, its pose is the physical-forward
@@ -121,6 +161,7 @@ services:
       - use_receive_time:=true
     restart: unless-stopped
 
+
   nav2:
     build:
       context: ../..
@@ -128,13 +169,21 @@ services:
     image: swarmdeck-robot-nav2:local
     container_name: swarmdeck-aslan-nav2
     depends_on:
-      - lidar
-      - slam
+      lidar:
+        condition: service_healthy
+      slam:
+        condition: service_healthy
     network_mode: host
     ipc: host
+    volumes:
+      # Only for the DDS profile below. This image is otherwise self-contained.
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     environment:
       RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       ROS_DOMAIN_ID: *ros_domain
+      # footprint_cloud_to_scan reads the 1.57 MB /ouster/points RELIABLE, so it
+      # needs the same enlarged segment as the writer. See the lidar service.
+      FASTRTPS_DEFAULT_PROFILES_FILE: /app/swarmdeck/deploy/dds/fastdds_large_data.xml
     # publish_odom_tf:=false because the odom_tf service above already
     # broadcasts map -> os_lidar. Same split as Botman: keep one bridge
     # independent of Nav2 so costmaps still get a pose if Nav2 restarts,
@@ -329,6 +378,10 @@ services:
     runtime: nvidia
     volumes:
       - duck_detector_models:/models
+    # Detection is best-effort: a late duck costs nothing, a late scan costs
+    # odometry. Uncapped it takes a full core, and on this 12-core Jetson that
+    # contends with the DDS reader threads.
+    cpus: 1.5
     restart: unless-stopped
 
 volumes:

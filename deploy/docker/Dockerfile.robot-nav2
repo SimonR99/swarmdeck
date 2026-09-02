@@ -18,6 +18,17 @@ COPY swarmdeck_ros/src/swarmdeck_nav /nav_ws/src/swarmdeck_nav
 RUN . /opt/ros/humble/setup.sh \
     && colcon build --merge-install --packages-select swarmdeck_nav
 
+# robot_localization supplies ekf_node, which smooths SuperOdometry's ragged
+# 3-7 Hz /laser_odometry into a steady pose stream. Deliberately a SEPARATE
+# layer after the colcon build rather than folded into the apt block above:
+# that block's layer is cached and already holds the exact navigation2 build
+# running on the fleet, and re-running it would let apt resolve a newer
+# navigation2 underneath us. Adding one small layer here keeps that pin intact
+# and makes the rebuild seconds instead of minutes.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ros-humble-robot-localization \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY deploy/docker/robot-nav2-entrypoint.sh /usr/local/bin/robot-nav2-entrypoint.sh
 RUN chmod +x /usr/local/bin/robot-nav2-entrypoint.sh
 

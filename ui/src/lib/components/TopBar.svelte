@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    Brain,
     Bug,
     Circle,
     Globe,
@@ -8,6 +9,7 @@
     Octagon,
     RotateCcw,
     Settings2,
+    Sparkles,
   } from 'lucide-svelte';
   import Button from './ui/Button.svelte';
   import Badge from './ui/Badge.svelte';
@@ -15,6 +17,7 @@
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { session } from '$lib/stores/session.svelte';
+  import { cortexStore } from '$lib/stores/agent.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { actions } from '$lib/api/connection';
 
