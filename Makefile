@@ -3,6 +3,7 @@
         build-argos up-argos down-argos up-argos-gpu up-argos-dri up-argos-dev \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
+        up-agent down-agent \
         build-deploy up-deploy down-deploy \
         deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs \
@@ -25,6 +26,7 @@ help:
 	@echo "  make up-argos-bistro Docker: 4 robots in Amazon Lumberyard Bistro scenario"
 	@echo "  make [build|up|down]-sim     Docker: LEGACY Gazebo/SLAM/Nav2/adapter_sim"
 	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
+	@echo "  make [up|down]-agent         Docker: Cortex AI sidecar (opt-in, see compose)"
 	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
 	@echo "  make deploy ROBOT=botman    operator-side sync + override + build + reset + up"
 	@echo "  make deploy ROBOT=all       deploy every profile in deploy/robots/"
@@ -132,7 +134,7 @@ COMPOSE ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose
 # --no-build, --no-reset, etc. The matrix and implementation live in
 # scripts/deploy and deploy/robots/, not in per-robot Make recipes.
 deploy:
-	./scripts/deploy $(ROBOT) $(DEPLOY_ARGS)
+	./scripts/deploy $(if $(ROBOT),$(ROBOT),all) $(DEPLOY_ARGS)
 
 # --- server + UI: the always-on core. Everything else depends on it being up.
 build-server:
@@ -246,6 +248,19 @@ down-mock:
 	$(COMPOSE) --profile mock stop mock
 	$(COMPOSE) --profile mock rm -f mock
 
+# --- Cortex: the AI fleet-intelligence sidecar, on port 8085.
+#
+# Opt in, because it bind-mounts an operator's personal tooling by absolute
+# path; see the service in docker-compose.yml. Read those mounts before the
+# first run on a new machine.
+up-agent:
+	$(COMPOSE) --profile agent up --build -d agent
+	@echo "Cortex:           http://localhost:8085/health"
+
+down-agent:
+	$(COMPOSE) --profile agent stop agent
+	$(COMPOSE) --profile agent rm -f agent
+
 # --- real fleet deployment: server + UI + a Zenoh router, so robots on other
 # machines can reach both the backend and each other's ROS graph. No Gazebo, no
 # cslam, no mock — this is the actual bring-up target.
@@ -268,9 +283,6 @@ up-deploy:
 	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
 	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
 
-deploy:
-	./scripts/deploy $(if $(ROBOT),$(ROBOT),all)
-
 down-deploy:
 	docker compose $(ZENOH_COMPOSE) down --remove-orphans
 
@@ -288,13 +300,13 @@ docker-up-cslam:
 	@echo "Fleet:            Gazebo (GPU) + RTAB-Map + Swarm-SLAM"
 
 docker-down:
-	$(COMPOSE) --profile argos --profile gazebo --profile mock down
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent down
 
 docker-logs:
-	$(COMPOSE) --profile argos --profile gazebo --profile mock logs -f
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent logs -f
 
 docker-ps:
-	$(COMPOSE) --profile argos --profile gazebo --profile mock ps
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent ps
 
 docker-test:
 	$(COMPOSE) build server
@@ -311,4 +323,4 @@ docker-test-launch:
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log} argos/build
-	$(COMPOSE) --profile argos --profile gazebo --profile mock down --rmi local --volumes --remove-orphans 2>/dev/null || true
+	$(COMPOSE) --profile argos --profile gazebo --profile mock --profile agent down --rmi local --volumes --remove-orphans 2>/dev/null || true
