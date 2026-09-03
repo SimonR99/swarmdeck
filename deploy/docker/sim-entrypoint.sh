@@ -30,7 +30,7 @@ TARGETS="${SWARMDECK_TARGETS:-10}"
 # correspondingly less faithful; see docs/architecture/simulation.md. With
 # drift the generated experiment declares no <external_estimator>, so the
 # ultrafusion service is simply not needed.
-ODOMETRY="${SWARMDECK_ODOMETRY:-external}"
+ODOMETRY="${SWARMDECK_ODOMETRY:-fast_livo2}"
 # Seconds of reactive exploration after startup, to bootstrap the maps before
 # the operator takes over. 0 leaves the fleet stationary until a goal arrives
 # or the operator presses Explore. Read by adapter_sim, which owns the process;

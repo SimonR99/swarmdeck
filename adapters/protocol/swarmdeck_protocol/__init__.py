@@ -20,6 +20,7 @@ from .keyframe import (
 from .odometry import (
     DEFAULT_HARDWARE_ODOMETRY,
     DEFAULT_SIM_ODOMETRY,
+    ODOMETRY_ALIASES,
     ODOMETRY_PROFILES,
     OdometrySpec,
     get_odometry_spec,
@@ -39,6 +40,7 @@ __all__ = [
     "peek_keyframe_header",
     "DEFAULT_HARDWARE_ODOMETRY",
     "DEFAULT_SIM_ODOMETRY",
+    "ODOMETRY_ALIASES",
     "ODOMETRY_PROFILES",
     "OdometrySpec",
     "get_odometry_spec",

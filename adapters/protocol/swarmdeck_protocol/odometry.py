@@ -119,13 +119,18 @@ ODOMETRY_PROFILES: dict[str, OdometrySpec] = {
 DEFAULT_SIM_ODOMETRY = "fast_livo2"
 DEFAULT_HARDWARE_ODOMETRY = "superodometry"
 
+ODOMETRY_ALIASES: dict[str, str] = {
+    "external": "fast_livo2",
+}
+
 
 def get_odometry_spec(name: str) -> OdometrySpec:
     """Look up an odometry specification by canonical name.
 
     Raises ValueError with list of available options if name is unknown.
     """
-    spec = ODOMETRY_PROFILES.get(name)
+    canonical = ODOMETRY_ALIASES.get(name, name)
+    spec = ODOMETRY_PROFILES.get(canonical)
     if spec is None:
         valid = ", ".join(sorted(ODOMETRY_PROFILES))
         raise ValueError(f"unknown odometry profile {name!r}; valid profiles: {valid}")
@@ -158,8 +163,13 @@ def resolve_odometry_types(
     ```
     """
     fleet_cfg = fleet_cfg or {}
-    base_default = fleet_cfg.get("odometry") or DEFAULT_SIM_ODOMETRY
-    default = default_override if default_override else base_default
+    raw_base = fleet_cfg.get("odometry") or DEFAULT_SIM_ODOMETRY
+    base_default = ODOMETRY_ALIASES.get(raw_base, raw_base)
+    if default_override:
+        default = ODOMETRY_ALIASES.get(default_override, default_override)
+    else:
+        default = base_default
+
     if default not in ODOMETRY_PROFILES:
         valid = ", ".join(sorted(ODOMETRY_PROFILES))
         raise ValueError(f"invalid default odometry profile {default!r}; valid: {valid}")
@@ -175,7 +185,8 @@ def resolve_odometry_types(
     resolved: list[str] = []
     for i in range(count):
         rid = f"{prefix}{i}"
-        chosen = per_robot.get(rid, default)
+        raw_chosen = per_robot.get(rid, default)
+        chosen = ODOMETRY_ALIASES.get(raw_chosen, raw_chosen)
         if chosen not in ODOMETRY_PROFILES:
             valid = ", ".join(sorted(ODOMETRY_PROFILES))
             raise ValueError(

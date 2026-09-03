@@ -690,16 +690,9 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "odometry",
-                default_value="external",
-                choices=["external", "drift"],
-                description="ARGoS backend only. external = Fast-LIVO2, a real "
-                "lidar-inertial front-end running outside the "
-                "simulator. drift = ARGoS's synthetic drift model, "
-                "roughly 4x faster because it takes the estimator "
-                "out of the lockstep exchange, and correspondingly "
-                "less faithful: a Gaussian cannot slip a wheel or "
-                "lose a scan. For development, not for judging "
-                "mapping quality.",
+                default_value="fast_livo2",
+                description="ARGoS backend only. Default odometry profile (e.g. fast_livo2, drift, ekf). "
+                "Overrides fleet.odometry in session config if provided.",
             ),
             DeclareLaunchArgument(
                 "targets",

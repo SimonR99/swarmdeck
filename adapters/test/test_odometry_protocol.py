@@ -111,3 +111,16 @@ def test_resolve_odometry_types_invalid_profile_raises():
     }
     with pytest.raises(ValueError, match="invalid odometry profile 'non_existent'"):
         resolve_odometry_types(cfg, 2)
+
+
+def test_external_alias_resolves_to_fast_livo2():
+    spec = get_odometry_spec("external")
+    assert spec.name == "fast_livo2"
+    assert spec.medium == "uf"
+
+    cfg = {"odometry": "external"}
+    assert resolve_odometry_types(cfg, 2) == ["fast_livo2", "fast_livo2"]
+
+    # Also via default_override
+    assert resolve_odometry_types({}, 2, default_override="external") == ["fast_livo2", "fast_livo2"]
+

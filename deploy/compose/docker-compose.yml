@@ -318,10 +318,10 @@ services:
       # Detection targets scattered through the world, classes assigned round
       # robin from adapters/perception/catalog.py.
       SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
-      # external = Ultra-Fusion. drift = ARGoS's synthetic model, roughly 4x
+      # fast_livo2 = Fast-LIVO2. drift = ARGoS's synthetic model, roughly 4x
       # faster because it leaves the lockstep exchange, and correspondingly
       # less faithful. `make up-argos-dev` sets drift; nothing else should.
-      SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-external}"
+      SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-fast_livo2}"
       # Diagnostic: log each robot's wheel encoder readings, which are the
       # only view of what the controller actually commanded. Separates a
       # controller fault from a physics one when a robot will not turn.

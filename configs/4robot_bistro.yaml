@@ -12,6 +12,8 @@ fleet:
   robot_types:
     robot_2: scout_mini
     robot_3: spot
+  # Odometry system. `odometry` is the fleet default (fast_livo2 by default in ARGoS).
+  odometry: fast_livo2
   # 17-ring Velodyne VLP-16 profile required by Ultra-Fusion odometry
   lidar:
     profile: vlp16
