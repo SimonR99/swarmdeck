@@ -30,6 +30,8 @@ services:
       # photorealism medium needs. `compute` and `utility` come along for
       # CUDA-based perception and for nvidia-smi being usable inside.
       NVIDIA_DRIVER_CAPABILITIES: all
+    devices:
+      - /dev/dri:/dev/dri
     deploy:
       resources:
         reservations:

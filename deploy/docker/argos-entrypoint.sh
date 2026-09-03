@@ -47,6 +47,9 @@ fi
 if [ "${SWARMDECK_SOFTWARE_RENDER:-false}" = "true" ]; then
   export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
   echo "[argos] forcing the software Vulkan rasterizer"
+elif [ -f /etc/vulkan/icd.d/nvidia_icd.json ] && [ -e /dev/nvidiactl ]; then
+  export VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json
+  echo "[argos] selected NVIDIA Vulkan driver"
 fi
 
 # The installed plugins plus SwarmDeck's own module, which lives beside them.
