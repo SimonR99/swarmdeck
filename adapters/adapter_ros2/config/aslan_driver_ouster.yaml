@@ -43,7 +43,10 @@ ouster/os_driver:
     # lidar_mode[optional]: resolution and rate; possible values: { 512x10,
     # 512x20, 1024x10, 1024x20, 2048x10, 4096x5 }. Leave empty to remain on
     # current the lidar mode.
-    lidar_mode: 512x10
+    # 512 is the lowest horizontal resolution the sensor offers. 1024 doubles
+    # the sample to ~3.1 MB, which the 16 MB Fast DDS profile in
+    # deploy/dds/fastdds_large_data.xml covers; watch adapter CPU.
+    lidar_mode: 1024x10
     # timestamp_mode[optional]: method used to timestamp measurements; possible
     # values:
     # - TIME_FROM_INTERNAL_OSC
@@ -154,7 +157,16 @@ ouster/os_driver:
     # min_range[optional]: minimum lidar range to consider (meters).
     min_range: 0.0
     # max_range[optional]: maximum lidar range to consider (meters).
-    max_range: 10.0
+    # 10.0 here silently discarded every return past 10 m: measured on aslan
+    # 2026-09-03 the cloud was hard-clipped at exactly 10.00 m with a pile of
+    # points at the boundary, median return 2.82 m. On a 90 deg-FOV OS0 that
+    # leaves mostly nearby floor, which constrains z/roll/pitch but not yaw --
+    # rotation is estimated from the angular displacement of DISTANT features.
+    # 50.0 is the OS0's effective range. The driver default is 1000.0, but
+    # uncapped the sensor emits obvious phantoms -- single returns at 342 m
+    # (aslan) and 464 m (botman) were measured 2026-09-03 -- and a stray
+    # long return is a pure outlier to a scan matcher. Units are metres.
+    max_range: 50.0
     # v_reduction[optional]: vertical beam reduction; available options: {1, 2, 4, 8, 16}.
     v_reduction: 1
     # min_scan_valid_columns_ratio[optional]: The minimum ratio of valid columns for
