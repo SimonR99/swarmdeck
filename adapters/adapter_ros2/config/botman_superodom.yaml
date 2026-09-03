@@ -59,8 +59,17 @@
         # Measured static on Botman 2026-08-27, 1200 samples at 200 Hz:
         #   accel 1 sd [0.0122, 0.0132, 0.0225] m/s^2
         #   gyro  bias [1.7e-5, -1.9e-5, -4e-6] rad/s
-        acc_n: 3.9939570888238808e-03
-        gyr_n: 1.5636343949698187e-03
+# MEASURED on botman's VN-100 2026-09-03: overlapping Allan deviation at
+        # tau = 1 s over a 600 s static log (59.8k samples at 100.2 Hz), RMS
+        # across the three axes. This is the config botman actually runs, so
+        # these are the numbers that matter for its odometry.
+        #
+        # For scale, the same measurement on botman's Ouster IMU gave
+        # acc_n 5.081e-03 and gyr_n 4.482e-04: the VN-100 is 3.5x quieter in
+        # acceleration, 6.9x quieter in rate, and its static gyro bias is
+        # 0.0003 deg/s against the Ouster's 0.696 deg/s.
+        acc_n: 1.446463e-03
+        gyr_n: 6.509476e-05
         acc_w: 6.4356659353532566e-05
         gyr_w: 3.5640318696367613e-05
         # Local gravity at Polytechnique Montreal (45.5048 N, ~80 m), from the
