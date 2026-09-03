@@ -119,9 +119,28 @@ def test_autonomous_velocity_can_only_reach_driver_through_adapter():
 
     adapter_dependencies = compose["services"]["adapter"]["depends_on"]
     assert adapter_dependencies["nav2"]["condition"] == "service_started"
+    assert "robot_stack" not in adapter_dependencies
     healthcheck = compose["services"]["nav2"]["healthcheck"]
     assert ". /opt/ros/humble/setup.sh" in healthcheck["test"][1]
     assert "grep -q '^active'" in healthcheck["test"][1]
+
+
+def test_botman_launch_keeps_mist_workspace_read_only_and_can_explicit():
+    compose = yaml.safe_load(COMPOSE.read_text())
+    volumes = compose["services"]["robot_stack"]["volumes"]
+    command = compose["services"]["robot_stack"]["command"][2]
+    robot_launch = REPO / "adapters/adapter_ros2/launch/botman_bunker.launch.py"
+
+    assert "${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro" in volumes
+    assert "${BOTMAN_CAN_INTERFACE:-can0}" in command
+    assert "start_base:=true" in command
+    assert "start_lidar:=false" in command
+    assert "start_slam:=false" in command
+    assert 'default_value="can0"' in robot_launch.read_text()
+    assert compose["services"]["robot_stack"]["profiles"] == ["base"]
+    assert "profiles" not in compose["services"]["lidar"]
+    assert "profiles" not in compose["services"]["slam"]
+    assert "profiles" not in compose["services"]["adapter"]
 
 
 def test_botman_tf_bridge_accounts_for_live_pipeline_latency():

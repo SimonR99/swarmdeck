@@ -13,20 +13,38 @@
 x-ros-domain: &ros_domain "${BOTMAN_ROS_DOMAIN_ID:-17}"
 
 services:
+  # Base only. Lidar and SuperOdometry are separate services, same split as
+  # Aslan, so mapping can come up without opening the CAN driver. Default
+  # `docker compose up -d` starts lidar + slam + oak_camera + media +
+  # duck_detector + nav2 + adapter. Pass `--profile base` when a person is at
+  # the e-stop and can0 is up. Nav2 writes only cmd_vel_nav; it does not
+  # command the base until a goal is active.
   robot_stack:
     image: bunker_super_odom:dev
+    profiles: ["base"]
     container_name: swarmdeck-botman-stack
     network_mode: host
-    # Fast DDS uses shared memory for same-host ROS 2 traffic. Both services
-    # must share the host IPC namespace or discovery succeeds while large
-    # PointCloud2/Odometry samples never reach the adapter.
     ipc: host
     privileged: true
     runtime: nvidia
     volumes:
       - /dev:/dev
       - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
-    command: ["ros2", "launch", "rover_launch", "bunker_gnm.launch.py"]
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    environment:
+      ROS_DOMAIN_ID: *ros_domain
+    command:
+      - bash
+      - -c
+      - >-
+        export LD_LIBRARY_PATH=/usr/local/lib:$${LD_LIBRARY_PATH:-} &&
+        . /workspace/install/setup.bash 2>/dev/null || true &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/botman_bunker.launch.py
+        start_base:=true
+        start_lidar:=false
+        start_slam:=false
+        can_interface:=${BOTMAN_CAN_INTERFACE:-can0}
     restart: unless-stopped
 
   # Ouster OS0-64 driver and SuperOdometry SLAM.
@@ -74,20 +92,16 @@ services:
       # to live in this repo rather than the read-only MIST workspace.
       - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     command:
-      - ros2
-      - launch
-      - ouster_ros
-      - driver.launch.py
-      # Repo-owned copy of the MIST file, differing in one line: proc_mask drops
-      # IMG|RAW|TLM. Those eight publishers had no subscribers and shared the
-      # point cloud's shared-memory segment.
-      - params_file:=/app/swarmdeck/adapters/adapter_ros2/config/botman_driver_ouster.yaml
-      - ouster_ns:=ouster
-      - viz:=False
-      - os_driver_name:=os_driver
-      - throttle_rate:=0.1
-      - input_topic:=/ouster/points
-      - output_topic:=/ouster/points_throttled
+      - bash
+      - -c
+      - >-
+        export LD_LIBRARY_PATH=/usr/local/lib:$${LD_LIBRARY_PATH:-} &&
+        . /workspace/install/setup.bash 2>/dev/null || true &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/botman_bunker.launch.py
+        start_base:=false
+        start_lidar:=true
+        start_slam:=false
     healthcheck:
       test:
         - CMD-SHELL
@@ -150,41 +164,28 @@ services:
     depends_on:
       lidar:
         condition: service_healthy
+      vectornav:
+        condition: service_started
     volumes:
       - /dev:/dev
       - ${BOTMAN_WORKSPACE:-/ssd/mist_ws}:/workspace:ro
-      # SuperOdometry's configs now come from this checkout, not the read-only
-      # MIST workspace, because the upstream calibration is wrong for this robot
-      # and /ssd/mist_ws cannot be edited. See the note below.
       - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
     command:
-      - ros2
-      - launch
-      - super_odometry
-      - os1_128.launch.py
-      # THE UPSTREAM CALIBRATION IS WRONG ON THIS ROBOT.
-      #
-      # os1_128_calibration.yaml ships extrinsicRotation_imu_laser = IDENTITY.
-      # It is not identity for either IMU here. The Ouster's own metadata gives
-      # lidar_to_sensor_transform = 180 deg yaw, and its IMU sits in the sensor
-      # frame, so os_lidar -> os_imu is a 180 degree yaw. Shipping identity
-      # negates the x and y of every IMU sample handed to the estimator, which
-      # is the "Large bias" preintegration reset already documented in
-      # adapters/adapter_ros2/config/aslan_superodom_calibration.yaml.
-      #
-      # Default below is the Ouster IMU with the factory-exact extrinsic: no
-      # estimation involved, and it is a strict improvement on what shipped.
-      #
-      # To move to the VN-100 (quieter, and SuperOdometry is IMU-first so the
-      # IMU sets the floor), first measure the mounting rotation, which nothing
-      # currently records:
-      #     python3 scripts/calibration/calibrate_imu_to_imu.py --duration 30
-      # paste its output into botman_superodom_calibration.yaml, then set in
-      # deploy/robots/botman.env:
-      #     BOTMAN_SUPERODOM_CONFIG=botman_superodom.yaml
-      #     BOTMAN_SUPERODOM_CALIB=botman_superodom_calibration.yaml
-      - config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CONFIG:-botman_superodom_ouster.yaml}
-      - calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CALIB:-botman_superodom_ouster_calibration.yaml}
+      - bash
+      - -c
+      - >-
+        export LD_LIBRARY_PATH=/usr/local/lib:$${LD_LIBRARY_PATH:-} &&
+        . /workspace/install/setup.bash 2>/dev/null || true &&
+        ros2 launch
+        /app/swarmdeck/adapters/adapter_ros2/launch/botman_bunker.launch.py
+        start_base:=false
+        start_lidar:=false
+        start_slam:=true
+        start_imu:=true
+        start_vectornav:=false
+        imu_topic:=/vectornav/imu
+        config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CONFIG:-botman_superodom.yaml}
+        calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${BOTMAN_SUPERODOM_CALIB:-botman_superodom_calibration.yaml}
     healthcheck:
       test:
         - CMD-SHELL
@@ -384,8 +385,6 @@ services:
     image: swarmdeck-robot-ros2:local
     container_name: swarmdeck-botman-adapter
     depends_on:
-      robot_stack:
-        condition: service_started
       lidar:
         condition: service_started
       slam:

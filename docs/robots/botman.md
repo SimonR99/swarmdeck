@@ -1,7 +1,7 @@
 # Botman
 
-Botman is an AgileX Bunker on ROS 2 Humble with Ouster OS1-128,
-SuperOdometry, Nav2, and an OAK-D Pro RGB-D camera.
+Botman is an AgileX Bunker on ROS 2 Humble with Ouster OS-0-64,
+VectorNav VN-100, SuperOdometry, Nav2, and an OAK-D Pro RGB-D camera.
 
 Prerequisites on the robot:
 
@@ -9,18 +9,16 @@ Prerequisites on the robot:
 - Read-only MIST workspace `/ssd/mist_ws` and image `bunker_super_odom:dev`.
 - ROS domain 17.
 - Measured transform from `os_lidar` to `oak-d-base-frame`.
-
-The profile currently has coarse camera extrinsic defaults. Replace them with
-measured values when available:
+- Measured calibration for `os_lidar` -> `vectornav` (kept in `botman_superodom_calibration.yaml`).
 
 ```bash
-BOTMAN_OAK_X=<m> BOTMAN_OAK_Y=<m> BOTMAN_OAK_Z=<m> \
-BOTMAN_OAK_ROLL=<rad> BOTMAN_OAK_PITCH=<rad> BOTMAN_OAK_YAW=<rad> \
-make deploy ROBOT=botman
+make deploy ROBOT=botman                 # sensing, mapping, UI bridge
+DEPLOY_COMPOSE_PROFILES=base make deploy ROBOT=botman  # include base CAN driver
 ```
 
-This starts the base, lidar, SuperOdometry, camera/TF, Nav2, detection, adapter,
-and media services. Complete the common [pre-flight checks](../operations/hardware-bringup.md).
+The base driver is intentionally excluded by default behind Compose profile `base`
+(matching Aslan). Complete the common [pre-flight checks](../operations/hardware-bringup.md)
+before enabling its profile with a person at the physical e-stop.
 
 Botman navigation uses the Scout-like responsive Nav2 tuning: a `0.4 m/s`
 linear cap and `0.50 m` obstacle-inflation margin. The physical Bunker footprint
