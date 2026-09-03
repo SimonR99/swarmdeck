@@ -54,8 +54,25 @@
     imu_preintegration_node:
         lidar_correction_noise: 0.01
         # Upstream figures, tuned for the Ouster's internal IMU.
-        acc_n: 3.9939570888238808e-03
-        gyr_n: 1.5636343949698187e-03
+# MEASURED on botman 2026-09-03: overlapping Allan deviation at tau = 1 s
+        # over a 600 s static log (59.8k samples at ~99.9 Hz), RMS across the
+        # three axes. The previous values were byte-identical across all four
+        # robot configs to 17 significant figures, VN-100 and Ouster alike, so
+        # they came from an upstream sample rather than from these devices.
+        # They over-stated gyro noise ~4x, which made the estimator discount a
+        # gyro that is better than advertised.
+        acc_n: 5.081168e-03
+        gyr_n: 4.481833e-04
         acc_w: 6.4356659353532566e-05
         gyr_w: 3.5640318696367613e-05
-        g_norm: 9.80511
+# This unit's static |a| reads 9.8445 m/s^2, +0.0381 m/s^2 (+0.389 %) from
+        # local gravity. That offset is device-specific -- the two OS0-64 units
+        # in this fleet disagree with each other by 1.75 % -- so it is left for
+        # the bias state to absorb rather than being folded in here.
+        # Local gravity at Polytechnique Montreal (45.5048 N, ~80 m), from the
+        # Somigliana formula on WGS84 with the free-air correction. This is a
+        # property of WHERE THE ROBOT IS, not of the IMU: it must not be set to
+        # whatever the accelerometer happens to read. GTSAM builds its gravity
+        # vector from this (PreintegrationParams::MakeSharedU) and estimates the
+        # accelerometer bias as a state, which is where a device offset belongs.
+        g_norm: 9.8064
