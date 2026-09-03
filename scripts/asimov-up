@@ -1,37 +1,148 @@
 #!/usr/bin/env bash
-# Start Asimov's host-side Unitree bridge and its SwarmDeck Compose services.
-# This runs on the operator workstation and performs the bring-up over SSH.
+# ==============================================================================
+# SwarmDeck Asimov (Unitree G1) Bring-Up Script (scripts/asimov-up)
+# ==============================================================================
+#
+# Starts Asimov's host-side Unitree G1 ROS 2 bridge (Foxy) and its SwarmDeck
+# Docker Compose services (adapter, media streaming).
+# Runs on the operator workstation and performs bring-up over SSH.
+#
+# Examples:
+#   ./scripts/asimov-up                      # Standard bring-up (reset + start)
+#   ./scripts/asimov-up --dry-run            # Inspect commands without executing
+#   ./scripts/asimov-up --status             # Check running bridge and containers
+#   ./scripts/asimov-up --down               # Stop bridge and containers
+#   ./scripts/asimov-up --no-native-reset    # Keep existing native bridge running
+# ==============================================================================
 
 set -Eeuo pipefail
 
 operator_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck disable=SC1091
-source "${operator_repo}/deploy/fleet.env"
+if [[ -f "${operator_repo}/deploy/fleet.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${operator_repo}/deploy/fleet.env"
+fi
 
-asimov_host=${DEPLOY_SSH_HOST:-asimov}
-asimov_repo=${DEPLOY_REMOTE_REPO:-/home/unitree/swarmdeck}
-compose_file=${DEPLOY_COMPOSE_FILE:-deploy/compose/docker-compose.robot-asimov.yml}
-robot_id=${DEPLOY_ROBOT_ID:-asimov_0}
-backend_host=${BACKEND_HOST:?BACKEND_HOST must be set}
-backend_port=${BACKEND_PORT:?BACKEND_PORT must be set}
-asimov_workspace=${ASIMOV_WORKSPACE:-/home/unitree/workspaces}
-ros_domain=${ASIMOV_ROS_DOMAIN_ID:-0}
-unitree_iface=${ASIMOV_INTERFACE:-eth0}
-native_ws=${ASIMOV_ROS_WORKSPACE:-/home/unitree/workspaces/unitree_g1_ros2}
-native_log=${ASIMOV_NATIVE_LOG:-/tmp/swarmdeck-asimov-g1-bridge.log}
-native_reset=${ASIMOV_NATIVE_RESET:-yes}
-container_reset=${ASIMOV_CONTAINER_RESET:-yes}
+# Configuration defaults
+asimov_host="${DEPLOY_SSH_HOST:-asimov}"
+asimov_repo="${DEPLOY_REMOTE_REPO:-/home/unitree/swarmdeck}"
+compose_file="${DEPLOY_COMPOSE_FILE:-deploy/compose/docker-compose.robot-asimov.yml}"
+robot_id="${DEPLOY_ROBOT_ID:-asimov_0}"
+backend_host="${BACKEND_HOST:-192.168.1.161}"
+backend_port="${BACKEND_PORT:-8080}"
+asimov_workspace="${ASIMOV_WORKSPACE:-/home/unitree/workspaces}"
+ros_domain="${ASIMOV_ROS_DOMAIN_ID:-0}"
+unitree_iface="${ASIMOV_INTERFACE:-eth0}"
+native_ws="${ASIMOV_ROS_WORKSPACE:-/home/unitree/workspaces/unitree_g1_ros2}"
+native_log="${ASIMOV_NATIVE_LOG:-/tmp/swarmdeck-asimov-g1-bridge.log}"
+native_reset="${ASIMOV_NATIVE_RESET:-yes}"
+container_reset="${ASIMOV_CONTAINER_RESET:-yes}"
+action="up"
+
+usage() {
+  cat <<'EOF'
+SwarmDeck Asimov (Unitree G1) Bring-Up (scripts/asimov-up)
+
+Usage:
+  scripts/asimov-up [options]
+
+Lifecycle Actions:
+  (default)           Start native G1 bridge, odom bridge, and Compose services
+  --down, --stop      Stop native G1 bridge and remove Compose containers
+  --status            Check status of native processes, ports, and containers
+  --dry-run           Print connection details and commands without executing
+  -h, --help          Show this help message
+
+Options:
+  --host <ssh_host>   Target SSH host/alias (default: $DEPLOY_SSH_HOST or 'asimov')
+  --no-native-reset   Do not restart native ROS 2 Foxy bridge if already running
+  --no-container-reset
+                      Do not recreate Docker containers (preserve running stack)
+  --backend-host <ip> SwarmDeck backend IP (default: $BACKEND_HOST)
+  --backend-port <p>  SwarmDeck backend port (default: $BACKEND_PORT or 8080)
+
+Environment Variables:
+  DEPLOY_SSH_HOST, DEPLOY_REMOTE_REPO, DEPLOY_COMPOSE_FILE, DEPLOY_ROBOT_ID,
+  BACKEND_HOST, BACKEND_PORT, ASIMOV_INTERFACE, ASIMOV_ROS_DOMAIN_ID
+EOF
+  exit 0
+}
+
+# Parse CLI options
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    --down|--stop)
+      action="down"
+      shift
+      ;;
+    --status)
+      action="status"
+      shift
+      ;;
+    --dry-run)
+      action="dry-run"
+      shift
+      ;;
+    --host)
+      asimov_host="$2"
+      shift 2
+      ;;
+    --backend-host)
+      backend_host="$2"
+      shift 2
+      ;;
+    --backend-port)
+      backend_port="$2"
+      shift 2
+      ;;
+    --no-native-reset)
+      native_reset="no"
+      shift
+      ;;
+    --no-container-reset)
+      container_reset="no"
+      shift
+      ;;
+    *)
+      echo "Error: Unknown argument: $1" >&2
+      echo "Run 'scripts/asimov-up --help' for usage." >&2
+      exit 2
+      ;;
+  esac
+done
 
 case "$native_reset" in
   yes|no) ;;
-  *) echo "ASIMOV_NATIVE_RESET must be yes or no (got '$native_reset')" >&2; exit 2 ;;
+  *) echo "Error: ASIMOV_NATIVE_RESET must be yes or no (got '$native_reset')" >&2; exit 2 ;;
 esac
 case "$container_reset" in
   yes|no) ;;
-  *) echo "ASIMOV_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2; exit 2 ;;
+  *) echo "Error: ASIMOV_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2; exit 2 ;;
 esac
 
-echo "Starting ${robot_id} on ${asimov_host}..."
+if [[ "$action" == "dry-run" ]]; then
+  cat <<EOF
+Asimov Bring-Up Configuration (Dry Run):
+----------------------------------------
+Target Host:        ${asimov_host}
+Remote Repo:        ${asimov_repo}
+Compose File:       ${compose_file}
+Robot ID:           ${robot_id}
+Backend Host:       ${backend_host}:${backend_port}
+ROS Domain:         ${ros_domain}
+Network Interface:  ${unitree_iface}
+Native Workspace:   ${native_ws}
+Native Reset:       ${native_reset}
+Container Reset:    ${container_reset}
+Action:             ${action}
+EOF
+  exit 0
+fi
+
+echo "Connecting to ${asimov_host} (action: ${action}, robot: ${robot_id})..."
 
 ssh \
   -o ConnectTimeout=8 \
@@ -50,7 +161,8 @@ ssh \
   "$native_ws" \
   "$native_log" \
   "$native_reset" \
-  "$container_reset" <<'REMOTE_SCRIPT'
+  "$container_reset" \
+  "$action" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 repo=$1
@@ -65,6 +177,7 @@ native_ws=$9
 native_log=${10}
 native_reset=${11:-yes}
 container_reset=${12:-yes}
+action=${13:-up}
 
 native_pid_file="${repo}/.deploy/asimov-native.pid"
 odom_pid_file="${repo}/.deploy/asimov-odom.pid"
@@ -97,12 +210,13 @@ native_pids() {
   pgrep -f '[a]simov_odom_bridge.py' || true
 }
 
-stop_native() {
-  if [[ "${native_reset}" != yes ]]; then
-    echo "Native G1 bridge reset: skipped"
-    return
-  fi
+compose=(docker compose --project-name swarmdeck)
+if [[ -f "${repo}/.deploy/asimov.env" ]]; then
+  compose+=(--env-file "${repo}/.deploy/asimov.env")
+fi
+compose+=(-f "${repo}/${compose_file}")
 
+stop_native() {
   local -a pids=()
   mapfile -t pids < <(native_pids | sort -nu)
   if ((${#pids[@]} == 0)); then
@@ -137,6 +251,36 @@ stop_native() {
   rm -f -- "${odom_pid_file}"
 }
 
+# --- Action: Status ---
+if [[ "${action}" == "status" ]]; then
+  echo "=== Asimov Native Services ==="
+  mapfile -t pids < <(native_pids | sort -nu)
+  if ((${#pids[@]} > 0)); then
+    echo "Native G1 bridge running (PIDs: ${pids[*]})"
+  else
+    echo "Native G1 bridge: not running"
+  fi
+  echo ""
+  echo "=== Asimov Containers ==="
+  "${compose[@]}" --profile '*' ps --all
+  exit 0
+fi
+
+# --- Action: Down ---
+if [[ "${action}" == "down" || "${action}" == "stop" ]]; then
+  echo "Stopping Asimov stack..."
+  stop_native
+  echo "Stopping Compose containers..."
+  "${compose[@]}" --profile '*' down --remove-orphans
+  echo "Asimov stack stopped."
+  exit 0
+fi
+
+# --- Action: Up ---
+if [[ "${native_reset}" == yes ]]; then
+  stop_native
+fi
+
 start_native() {
   local -a pids=()
   mapfile -t pids < <(native_pids | sort -nu)
@@ -146,9 +290,6 @@ start_native() {
   fi
 
   echo "Starting native G1 bridge on ${unitree_iface}..."
-  # The installed odom child listens to rt/sportmodestate, while Asimov's live
-  # state is on rt/odommodestate. SwarmDeck starts its corrected child below,
-  # so keep the incorrect one disabled.
   nohup bash -c '
     set +u
     source /opt/ros/foxy/setup.bash
@@ -216,67 +357,44 @@ start_odom() {
   echo "Asimov odometry bridge started (log: ${odom_log})"
 }
 
-compose=(docker compose --project-name swarmdeck)
-if [[ -f "${repo}/.deploy/asimov.env" ]]; then
-  compose+=(--env-file "${repo}/.deploy/asimov.env")
-else
-  export ROBOT_REPO="${repo}"
-  export BACKEND_HOST="${backend_host}"
-  export BACKEND_PORT="${backend_port}"
-  export ASIMOV_WORKSPACE="${asimov_workspace}"
-  export ASIMOV_ROS_DOMAIN_ID="${ros_domain}"
-fi
-compose+=(--file "${repo}/${compose_file}")
-
-stop_native
-
-echo "Validating Asimov Compose configuration..."
-"${compose[@]}" config --quiet
-if [[ "${container_reset}" == yes ]]; then
-  echo "Resetting Asimov containers..."
-  "${compose[@]}" --profile '*' down --remove-orphans
-else
-  echo "Asimov container reset: skipped"
-fi
-echo "Starting Asimov containers..."
-"${compose[@]}" up -d --force-recreate --remove-orphans
-
 start_native
 start_odom
 
+echo "Refreshing Compose containers for ${robot_id}..."
+if [[ "${container_reset}" == yes ]]; then
+  "${compose[@]}" --profile '*' down --remove-orphans
+fi
+"${compose[@]}" up -d --remove-orphans
+
 require_service() {
-  local service=$1 label=$2 attempt
+  local name=$1 label=$2 attempt
   for attempt in {1..30}; do
-    if ros2 service list 2>/dev/null | grep -Fq "${service}"; then
-      echo "${label}: available"
+    if ros2 service list 2>/dev/null | grep -Fxq "${name}"; then
+      echo "${label}: available (${name})"
       return
     fi
     sleep 1
   done
-  echo "${label}: service ${service} is unavailable" >&2
-  tail -n 60 "${native_log}" >&2 || true
+  echo "${label} did not become available at ${name}" >&2
   return 1
 }
 
 require_topic() {
-  local topic=$1 label=$2 attempt sample
-  for attempt in {1..15}; do
-    sample="$(timeout 5s ros2 topic echo "${topic}" 2>/dev/null | head -n 1 || true)"
-    if [[ -n "${sample}" ]]; then
-      echo "${label}: receiving data"
+  local name=$1 label=$2 attempt
+  for attempt in {1..30}; do
+    if ros2 topic list 2>/dev/null | grep -Fxq "${name}"; then
+      echo "${label}: publishing (${name})"
       return
     fi
     sleep 1
   done
-  echo "${label}: no data received on ${topic}" >&2
+  echo "${label} did not publish on ${name}" >&2
   return 1
 }
 
 require_cmd_vel_subscriber() {
   local attempt info
   for attempt in {1..30}; do
-    # Foxy's `ros2 topic info` reports endpoint counts but not endpoint names;
-    # node info is the portable way to prove the actual G1 subscriber is there.
     info="$(ros2 node info /g1_cmd_vel_bridge 2>/dev/null || true)"
     if grep -Fq '/cmd_vel: geometry_msgs/msg/Twist' <<<"${info}"; then
       echo "G1 /cmd_vel bridge: subscribed"

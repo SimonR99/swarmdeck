@@ -1,54 +1,116 @@
-.PHONY: help install ui ui-build server mock sim test clean tunnel \
+# ==============================================================================
+# SwarmDeck Makefile
+# ==============================================================================
+#
+# Primary entry point for local development, simulation bring-up, testing,
+# and operator-side physical robot deployment.
+#
+# Quick Reference:
+#   make help                  Show all available targets and options
+#   make up-server             Start Web UI + Server + SLAM back-end
+#   make up-argos              Start ARGoS simulation (software Vulkan)
+#   make up-argos-gpu          Start ARGoS simulation (NVIDIA GPU)
+#   make up-argos-bistro-gpu   Start ARGoS Bistro scenario (NVIDIA GPU)
+#   make up-sim SCENARIO=bistro RENDER=gpu  Modular simulation bring-up
+#   make deploy ROBOT=botman   Deploy stack to a physical robot over SSH
+#   make docker-down           Stop all Docker containers
+# ==============================================================================
+
+.PHONY: help \
+        install ui ui-build server slam install-slam mock demo \
         build-server up-server down-server \
         build-argos up-argos down-argos up-argos-gpu up-argos-dri up-argos-dev \
+        up-argos-bistro up-argos-bistro-dri up-argos-bistro-gpu \
         build-sim up-sim down-sim \
         build-mock up-mock down-mock \
         up-agent down-agent \
-        build-deploy up-deploy down-deploy \
-        deploy \
-        docker-up-gpu docker-up-cslam docker-down docker-logs \
-        docker-ps docker-test docker-test-launch \
-        test-slam install-slam slam local-ai-up local-ai-pull local-ai-shadow local-ai-eval local-ai-down
+        build-deploy up-deploy down-deploy deploy \
+        docker-up-gpu docker-up-cslam docker-down docker-logs docker-ps \
+        docker-test docker-test-launch \
+        test test-slam visual-test visual-test-bistro sim tunnel clean \
+        local-ai-up local-ai-pull local-ai-shadow local-ai-eval local-ai-down
 
+# ------------------------------------------------------------------------------
+# Configurable Parameters (Override inline: make up-sim SCENARIO=bistro RENDER=gpu)
+# ------------------------------------------------------------------------------
+COMPOSE_PROJECT ?= swarmdeck
+SCENARIO        ?= default        # default (4robot) | bistro | 3robot | dev | path/to/cfg.yaml
+RENDER          ?= software       # software | gpu (nvidia) | dri (intel/amd)
+ODOMETRY        ?= fast_livo2     # fast_livo2 | drift
+TARGETS         ?= 10             # Perception targets to scatter
+EXPLORE         ?= 0              # Initial autonomous exploration seconds
+ROBOT           ?= all            # Target robot profile for deploy (botman, aslan, scout, spot, asimov, all)
+DEPLOY_ARGS     ?=                # Additional flags for scripts/deploy (--dry-run, --no-build, etc.)
+N               ?= 4              # Number of robots for mock adapter
+LOCAL_MODEL     ?= qwen3.5:9b-q4_K_M
+
+# Compose definitions
+export SSH_AUTH_SOCK_REAL ?= $(shell readlink -f $${SSH_AUTH_SOCK:-/dev/null} 2>/dev/null || echo "/dev/null")
+COMPOSE       ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml
+GPU_COMPOSE   ?= -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
+DRI_COMPOSE   ?= -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
+ZENOH_COMPOSE ?= -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
+CSLAM_COMPOSE ?= $(GPU_COMPOSE) -f deploy/compose/docker-compose.cslam.yml
+
+# Environment hygiene: prevent host ROS variables from poisoning non-ROS Python backends
+CLEANENV = env -u PYTHONPATH -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH
+
+# ------------------------------------------------------------------------------
+# 1. Help & Discovery
+# ------------------------------------------------------------------------------
 help:
-	@echo "SwarmDeck"
-	@echo "  make install         install ui + server dependencies (local)"
-	@echo "  make ui              run frontend dev server (http://localhost:5173)"
-	@echo "  make ui-build        production build of the frontend"
-	@echo "  make slam            run pose-graph back-end (http://localhost:8090)"
-	@echo "  make mock            run mock adapter (N=4 robots, no ROS needed)"
-	@echo "  make demo            server + mock + ui, all at once"
-	@echo "  make [build|up|down]-server  Docker: backend + UI only"
-	@echo "  make up-argos        Docker: ARGoS + Fast-LIVO2 + SLAM/Nav2/adapter_sim"
-	@echo "  make up-argos-gpu    as up-argos, rendering on an NVIDIA GPU"
-	@echo "  make up-argos-dri    as up-argos, rendering on an Intel/AMD GPU"
-	@echo "  make up-argos-dev    FAST: 3 robots, drift odometry, no estimator"
-	@echo "  make up-argos-bistro Docker: 4 robots in Amazon Lumberyard Bistro scenario"
-	@echo "  make [build|up|down]-sim     Docker: LEGACY Gazebo/SLAM/Nav2/adapter_sim"
-	@echo "  make [build|up|down]-mock    Docker: synthetic mock fleet (needs server up)"
-	@echo "  make [up|down]-agent         Docker: Cortex AI sidecar (opt-in, see compose)"
-	@echo "  make [build|up|down]-deploy  REAL FLEET: server + UI + Zenoh router (see docs/operations/hardware-bringup.md)"
-	@echo "  make deploy ROBOT=botman    operator-side sync + override + build + reset + up"
-	@echo "  make deploy ROBOT=all       deploy every profile in deploy/robots/"
-	@echo "  make docker-up-gpu   full stack, ARGoS rendering on an NVIDIA GPU"
-	@echo "  make docker-up-cslam as docker-up-gpu, plus Swarm-SLAM collaborative SLAM"
-	@echo "  make docker-down     stop everything (server, ui, sim, mock)"
-	@echo "  make docker-logs     follow Docker logs"
-	@echo "  make docker-ps       list running containers"
-	@echo "  make docker-test     run backend tests inside Docker"
-	@echo "  make docker-test-launch  build every LaunchDescription in the ROS image"
-	@echo "  make local-ai-up     start the optional private Ollama planner service"
-	@echo "  make local-ai-pull   pull LOCAL_MODEL for shadow-planner evaluation"
-	@echo "  make local-ai-shadow run Ollama beside AGY without changing chat behavior"
-	@echo "  make local-ai-eval   score the local planner without executing robot tools"
-	@echo "  make sim             launch the ARGoS simulation (host ROS + host argos3)"
-	@echo "  make visual-test     capture per-robot RGB, depth and lidar frames as PNGs"
-	@echo "  make visual-test-bistro capture Bistro scenario RGB, depth and lidar frames"
-	@echo "  make tunnel          publish the running stack on a public URL"
-	@echo "  make test            run all tests (local venv)"
-	@echo "  make install-slam    bootstrap the SLAM back-end venv (Python 3.12)"
-	@echo "  make test-slam       run collaborative SLAM back-end tests only"
+	@echo "================================================================================"
+	@echo "SwarmDeck Development & Operations"
+	@echo "================================================================================"
+	@echo "Local Development:"
+	@echo "  make install             Install frontend (npm) and backend Python dependencies"
+	@echo "  make ui                  Run frontend dev server (http://localhost:5173)"
+	@echo "  make ui-build            Production build of the Svelte frontend"
+	@echo "  make server              Run backend server on host (http://localhost:8080)"
+	@echo "  make slam                Run pose-graph SLAM backend (http://localhost:8090)"
+	@echo "  make mock                Run synthetic mock fleet adapter (N=4, no ROS)"
+	@echo "  make demo                Launch server + mock + ui simultaneously on host"
+	@echo ""
+	@echo "Simulation (Docker Compose + ARGoS 3):"
+	@echo "  make up-sim              Modular launch: SCENARIO=[default|bistro|3robot] RENDER=[software|gpu|dri]"
+	@echo "  make up-argos            4-robot indoor scene with software Vulkan (portable)"
+	@echo "  make up-argos-gpu        4-robot indoor scene with NVIDIA GPU hardware acceleration"
+	@echo "  make up-argos-dri        4-robot indoor scene with Intel/AMD DRI hardware acceleration"
+	@echo "  make up-argos-bistro     Amazon Bistro scene with software Vulkan"
+	@echo "  make up-argos-bistro-gpu Amazon Bistro scene with NVIDIA GPU acceleration"
+	@echo "  make up-argos-bistro-dri Amazon Bistro scene with Intel/AMD DRI acceleration"
+	@echo "  make up-argos-dev        Fast dev mode: 3 robots, synthetic drift, no estimator"
+	@echo "  make down-argos          Stop ARGoS simulation stack"
+	@echo ""
+	@echo "Core Backend Services:"
+	@echo "  make up-server           Docker: Backend server + Web UI + SLAM back-end"
+	@echo "  make down-server         Docker: Stop core backend services"
+	@echo "  make up-mock             Docker: Synthetic mock fleet adapter"
+	@echo ""
+	@echo "Physical Fleet Deployment (over SSH):"
+	@echo "  make up-deploy           Start operator stack (server + UI + SLAM + Zenoh router)"
+	@echo "  make down-deploy         Stop operator deployment stack"
+	@echo "  make deploy ROBOT=name   Deploy to robot: botman, aslan, scout, spot, asimov, all"
+	@echo "                           Options: DEPLOY_ARGS='--dry-run' (or: --no-build, --no-reset)"
+	@echo ""
+	@echo "Docker Stack Utilities:"
+	@echo "  make docker-down         Stop all running SwarmDeck containers"
+	@echo "  make docker-logs         Follow logs across all containers"
+	@echo "  make docker-ps           List running containers and health status"
+	@echo "  make docker-test         Run pytest test suite inside Docker"
+	@echo "  make docker-test-launch  Validate all ROS 2 launch files across robots"
+	@echo ""
+	@echo "Testing & Quality:"
+	@echo "  make test                Run server unit tests, SLAM tests, and UI checks"
+	@echo "  make test-slam           Run collaborative SLAM tests only"
+	@echo "  make visual-test         Capture RGB/Depth/LiDAR contact sheet from ARGoS"
+	@echo "  make visual-test-bistro  Capture contact sheet from Bistro environment"
+	@echo "  make clean               Clean build artifacts, venvs, and local Docker caches"
+	@echo "================================================================================"
 
+# ------------------------------------------------------------------------------
+# 2. Local Development (Host OS)
+# ------------------------------------------------------------------------------
 install:
 	cd ui && npm install
 	cd server && python3 -m venv .venv && .venv/bin/pip install -q -e "../adapters/protocol" -e ".[dev]"
@@ -59,89 +121,26 @@ ui:
 ui-build:
 	cd ui && npm run build
 
-# ROS must NOT be on the path — the backend is ROS-free by design.
-CLEANENV = env -u PYTHONPATH -u AMENT_PREFIX_PATH -u CMAKE_PREFIX_PATH
-
 server:
 	cd server && $(CLEANENV) SWARMDECK_SLAM_URL=http://127.0.0.1:8090 .venv/bin/python -m swarmdeck_server
 
 slam:
 	cd slam && $(CLEANENV) SWARMDECK_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python -m swarmdeck_slam --host 127.0.0.1 --port 8090
 
-N ?= 4
-mock:
-	cd adapters/adapter_mock && $(CLEANENV) ../../server/.venv/bin/python mock_adapter.py --robots $(N)
-
-demo:
-	@echo "Starting server, mock adapter and ui..."
-	@$(MAKE) -j3 server mock ui
-
-# Host development. `launch_argos:=true` starts argos3 from the launch file
-# rather than leaving it to the `argos` container, and runtime_dir has to be
-# somewhere writable that is SHORT: a Unix socket path over 107 bytes fails to
-# bind, and the failure names neither the socket nor the limit.
-#
-# Needs the ARGoS fork installed (see docs/architecture/simulation.md) and
-# Fast-LIVO2 reachable on RUNTIME_DIR/uf.sock. Without the estimator the
-# fleet has no odometry at all; `make visual-test` is the sensor-only path that
-# needs neither.
-RUNTIME_DIR ?= /tmp/swarmdeck
-sim:
-	mkdir -p $(RUNTIME_DIR)
-	cd swarmdeck_ros && . install/setup.bash && \
-	  ros2 launch swarmdeck_bringup session.launch.py \
-	    sim_backend:=argos launch_argos:=true runtime_dir:=$(RUNTIME_DIR)
-
-# Sensor frames only: starts ARGoS with the synthetic drift model in place of
-# the estimator, drives the fleet gently, and writes a contact sheet. This is
-# the check that the photorealistic path is wired end to end, and it is the one
-# that catches the failures that are otherwise silent — a robot with no glTF
-# descriptor is invisible to its neighbours, a camera whose frames never arrive
-# publishes black, and neither logs anything.
-visual-test:
-	python3 tests/integration/run_visual_test.py
-
-visual-test-bistro:
-	python3 tests/integration/run_visual_test.py --config configs/4robot_bistro.yaml
-
-# One tunnel to port 5173 publishes the whole app: nginx there serves the UI and
-# proxies /api and /ws. The URL has no authentication — see the script.
-tunnel:
-	./scripts/tunnel.sh
-
-test:
-	$(CLEANENV) server/.venv/bin/pytest -q
-	$(MAKE) test-slam
-	cd ui && npm run check
-
-# The SLAM back-end runs its own interpreter: gtsam 4.2.2 segfaults under the
-# numpy 2.x the server venv is built on, so it is pinned to Python 3.12 and kept
-# in a separate distribution. Bootstrapped with `make install-slam`.
-test-slam:
-	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
-
 install-slam:
 	cd slam && uv venv --allow-existing --python 3.12 .venv && \
 	  uv pip install --python .venv/bin/python -e ../adapters/protocol -e ".[dev]"
 
-# Full stack with the simulator rendering on an NVIDIA GPU.
-GPU_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.gpu.yml
+mock:
+	cd adapters/adapter_mock && $(CLEANENV) ../../server/.venv/bin/python mock_adapter.py --robots $(N)
 
-# --- Base Compose Command
-# Pin the project name so every Make target shares one network and one set of
-# containers regardless of the directory from which Compose derives its name.
-COMPOSE_PROJECT ?= swarmdeck
-export SSH_AUTH_SOCK_REAL ?= $(shell readlink -f $${SSH_AUTH_SOCK:-/dev/null} 2>/dev/null || echo "/dev/null")
-COMPOSE ?= docker compose -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml
+demo:
+	@echo "Starting server, mock adapter and UI on host..."
+	@$(MAKE) -j3 server mock ui
 
-# --- operator-side physical robot deployment
-# ROBOT is one profile name or `all`; DEPLOY_ARGS can carry --dry-run,
-# --no-build, --no-reset, etc. The matrix and implementation live in
-# scripts/deploy and deploy/robots/, not in per-robot Make recipes.
-deploy:
-	./scripts/deploy $(if $(ROBOT),$(ROBOT),all) $(DEPLOY_ARGS)
-
-# --- server + UI: the always-on core. Everything else depends on it being up.
+# ------------------------------------------------------------------------------
+# 3. Core Docker Stack (Server + Web UI + SLAM backend)
+# ------------------------------------------------------------------------------
 build-server:
 	$(COMPOSE) build server ui slam
 
@@ -155,93 +154,6 @@ down-server:
 	$(COMPOSE) stop server ui slam
 	$(COMPOSE) rm -f server ui slam
 
-# --- simulated fleet: ARGoS + Fast-LIVO2 + SLAM/Nav2 + adapter_sim.
-#
-# Three services around one volume; see docker-compose.yml. The first build is
-# long: Dockerfile.argos compiles the ARGoS fork against the Filament SDK.
-build-argos:
-	$(COMPOSE) --profile argos build argos sim fast_livo2
-
-up-argos:
-	$(COMPOSE) --profile argos up --build -d server ui slam argos sim fast_livo2
-	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Fleet:            ARGoS + Fast-LIVO2 (allow ~90s for robots to appear)"
-	@echo "Rendering:        software Vulkan; use up-argos-gpu or up-argos-dri for a device"
-
-# --- development fleet: three robots, synthetic drift odometry, no estimator.
-#
-# The configuration to work against. Two independent savings, both real and
-# both measured:
-#
-#   3 robots instead of 4   almost all the cost is per robot (a SLAM Toolbox
-#                           instance, a Nav2 stack, an estimator and a set of
-#                           rendered sensors each), and configs/3robot.yaml
-#                           keeps one of every platform rather than dropping
-#                           the Spot.
-#   odometry:=drift         ~4x, measured 0.230x against 0.056x real time. It
-#                           takes Fast-LIVO2 out of the lockstep exchange,
-#                           and the estimator service is not started at all.
-#
-# What it costs: the drift model perturbs ground-truth motion with Gaussian
-# noise. It cannot slip a wheel against an obstacle or lose a scan to
-# degeneracy, which are the failures swarmdeck-slam exists to survive. Use this
-# to develop; use `make up-argos` to judge whether mapping actually works.
-up-argos-dev:
-	SWARMDECK_CONFIG=/app/configs/3robot.yaml \
-	SWARMDECK_ODOMETRY=drift \
-	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos \
-	    up --build -d server ui slam duck_detector mediamtx sim argos
-	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "Fleet:            3 robots, drift odometry, no Fast-LIVO2"
-	@echo "Fidelity:         development only -- see docs/architecture/simulation.md"
-
-DRI_COMPOSE = -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.dri.yml
-up-argos-dri:
-	docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos up --build -d
-	@echo "Fleet:            ARGoS on the Intel/AMD render node"
-
-up-argos-gpu:
-	docker compose -p $(COMPOSE_PROJECT) $(GPU_COMPOSE) --profile argos up --build -d
-	@echo "Fleet:            ARGoS on the NVIDIA GPU"
-
-up-argos-bistro:
-	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
-	  $(COMPOSE) --profile argos up --build -d server ui slam argos sim fast_livo2
-	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Fleet:            ARGoS + Fast-LIVO2 (Bistro environment)"
-
-up-argos-bistro-dri:
-	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
-	  docker compose -p $(COMPOSE_PROJECT) $(DRI_COMPOSE) --profile argos up --build -d
-	@echo "Fleet:            ARGoS Bistro on the Intel/AMD render node"
-
-up-argos-bistro-gpu:
-	SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
-	  docker compose -p $(COMPOSE_PROJECT) $(GPU_COMPOSE) --profile argos up --build -d
-	@echo "Fleet:            ARGoS Bistro on the NVIDIA GPU"
-
-down-argos:
-	$(COMPOSE) --profile argos stop argos sim fast_livo2
-	$(COMPOSE) --profile argos rm -f argos sim fast_livo2
-
-# --- simulated fleet: Gazebo + SLAM/Nav2 + adapter_sim. `depends_on: server` in
-# docker-compose.yml means this brings the server up too if it isn't already.
-build-sim:
-	$(COMPOSE) --profile gazebo build gazebo
-
-up-sim:
-	$(COMPOSE) --profile gazebo up --build -d server ui slam gazebo
-	@echo "SwarmDeck UI:     http://localhost:5173"
-	@echo "SLAM back-end:    http://localhost:8090/status"
-	@echo "Fleet:            Gazebo + adapter_sim (allow ~45s for robots to appear)"
-
-down-sim:
-	$(COMPOSE) --profile gazebo stop gazebo
-	$(COMPOSE) --profile gazebo rm -f gazebo
-
-# --- synthetic fleet: no simulator, no ROS. Also depends_on: server.
 build-mock:
 	$(COMPOSE) --profile mock build mock
 
@@ -253,24 +165,52 @@ down-mock:
 	$(COMPOSE) --profile mock stop mock
 	$(COMPOSE) --profile mock rm -f mock
 
-# --- Cortex: the AI fleet-intelligence sidecar, on port 8085.
-#
-# Opt in, because it bind-mounts an operator's personal tooling by absolute
-# path; see the service in docker-compose.yml. Read those mounts before the
-# first run on a new machine.
-up-agent:
-	$(COMPOSE) --profile agent up --build -d agent
-	@echo "Cortex:           http://localhost:8085/health"
+# ------------------------------------------------------------------------------
+# 4. Simulation Bring-Up (ARGoS 3 / Fast-LIVO2 / SLAM / Nav2 / adapter_sim)
+# ------------------------------------------------------------------------------
+build-argos:
+	$(COMPOSE) --profile argos build argos sim fast_livo2
 
-down-agent:
-	$(COMPOSE) --profile agent stop agent
-	$(COMPOSE) --profile agent rm -f agent
+# Modular simulation target accepting SCENARIO, RENDER, and ODOMETRY overrides:
+up-sim:
+	./scripts/sim-up --scenario $(SCENARIO) --render $(RENDER) --odometry $(ODOMETRY) \
+	  --targets $(TARGETS) --explore $(EXPLORE)
 
-# --- real fleet deployment: server + UI + a Zenoh router, so robots on other
-# machines can reach both the backend and each other's ROS graph. No Gazebo, no
-# cslam, no mock — this is the actual bring-up target.
-ZENOH_COMPOSE = -p $(COMPOSE_PROJECT) -f deploy/compose/docker-compose.yml -f deploy/compose/docker-compose.zenoh.yml
+up-argos:
+	./scripts/sim-up --scenario default --render software --odometry fast_livo2
 
+up-argos-gpu:
+	./scripts/sim-up --scenario default --render gpu --odometry fast_livo2
+
+up-argos-dri:
+	./scripts/sim-up --scenario default --render dri --odometry fast_livo2
+
+up-argos-dev:
+	./scripts/sim-up --scenario 3robot --render dri --odometry drift
+
+up-argos-bistro:
+	./scripts/sim-up --scenario bistro --render software --odometry fast_livo2
+
+up-argos-bistro-gpu:
+	./scripts/sim-up --scenario bistro --render gpu --odometry fast_livo2
+
+up-argos-bistro-dri:
+	./scripts/sim-up --scenario bistro --render dri --odometry fast_livo2
+
+down-argos:
+	./scripts/sim-up --down
+
+# Legacy Gazebo simulation path
+build-sim:
+	$(COMPOSE) --profile gazebo build gazebo
+
+down-sim:
+	$(COMPOSE) --profile gazebo stop gazebo
+	$(COMPOSE) --profile gazebo rm -f gazebo
+
+# ------------------------------------------------------------------------------
+# 5. Physical Fleet Deployment (Operator-Side over SSH)
+# ------------------------------------------------------------------------------
 build-deploy:
 	docker compose $(ZENOH_COMPOSE) build server ui
 
@@ -285,15 +225,25 @@ up-deploy:
 	@echo "Backend API:      http://localhost:8080/api/config"
 	@echo "SLAM back-end:    http://localhost:8090/status"
 	@echo "Zenoh router:     tcp/<this-host>:7447"
-	@echo "On each robot:    RMW_IMPLEMENTATION=rmw_zenoh_cpp, session config -> tcp/<this-host>:7447"
-	@echo "                  then: adapter_ros2.py --robot-id <id> --config <cfg> --host <this-host>"
+	@echo "Deploy robot:     make deploy ROBOT=<botman|aslan|scout|spot|asimov|all>"
 
 down-deploy:
 	docker compose $(ZENOH_COMPOSE) down --remove-orphans
 
-# Local inference is intentionally opt-in. It is not a replacement for the
-# default AGY coding/runtime path until its shadow decisions pass evaluation.
-LOCAL_MODEL ?= qwen3.5:9b-q4_K_M
+deploy:
+	./scripts/deploy $(if $(ROBOT),$(ROBOT),all) $(DEPLOY_ARGS)
+
+# ------------------------------------------------------------------------------
+# 6. Sidecars & AI Extensions (Cortex / Local AI)
+# ------------------------------------------------------------------------------
+up-agent:
+	$(COMPOSE) --profile agent up --build -d agent
+	@echo "Cortex:           http://localhost:8085/health"
+
+down-agent:
+	$(COMPOSE) --profile agent stop agent
+	$(COMPOSE) --profile agent rm -f agent
+
 local-ai-up:
 	$(COMPOSE) --profile local-ai up -d ollama
 
@@ -315,13 +265,12 @@ local-ai-eval: local-ai-shadow
 local-ai-down:
 	$(COMPOSE) --profile local-ai stop ollama
 
-# The default full stack, on a GPU. Kept as an alias for up-argos-gpu because
-# it is the command every doc and every habit already reaches for.
+# ------------------------------------------------------------------------------
+# 7. Docker Cluster Management & Tests
+# ------------------------------------------------------------------------------
 docker-up-gpu: up-argos-gpu
 	@echo "Backend API:      http://localhost:8080/api/config"
 
-# Collaborative SLAM: the fleet plus Swarm-SLAM.
-CSLAM_COMPOSE = $(GPU_COMPOSE) -f deploy/compose/docker-compose.cslam.yml
 docker-up-cslam:
 	SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml SLAM_BACKEND=rtabmap \
 	  docker compose $(CSLAM_COMPOSE) --profile gazebo up --build -d
@@ -341,14 +290,38 @@ docker-test:
 	$(COMPOSE) build server
 	$(COMPOSE) run --rm --no-deps server python -m pytest /app/server/tests -q
 
-# Launch files are plain Python that nothing executes until the simulator starts,
-# so an undefined name in one costs a full stack startup to find. This builds
-# every LaunchDescription in the ROS image, which takes under a second.
 docker-test-launch:
 	$(COMPOSE) --profile argos build sim
 	$(COMPOSE) --profile argos run --rm --no-deps --entrypoint bash sim -lc \
 	  'source /opt/ros/jazzy/setup.bash && source /app/swarmdeck_ros/install/setup.bash && \
 	   cd /app && python3 -m pytest swarmdeck_ros/src/swarmdeck_bringup/test -q'
+
+# ------------------------------------------------------------------------------
+# 8. Testing, Verification & Cleanup
+# ------------------------------------------------------------------------------
+test:
+	$(CLEANENV) server/.venv/bin/pytest -q
+	$(MAKE) test-slam
+	cd ui && npm run check
+
+test-slam:
+	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
+
+visual-test:
+	python3 tests/integration/run_visual_test.py
+
+visual-test-bistro:
+	python3 tests/integration/run_visual_test.py --config configs/4robot_bistro.yaml
+
+RUNTIME_DIR ?= /tmp/swarmdeck
+sim:
+	mkdir -p $(RUNTIME_DIR)
+	cd swarmdeck_ros && . install/setup.bash && \
+	  ros2 launch swarmdeck_bringup session.launch.py \
+	    sim_backend:=argos launch_argos:=true runtime_dir:=$(RUNTIME_DIR)
+
+tunnel:
+	./scripts/tunnel.sh
 
 clean:
 	rm -rf ui/node_modules ui/dist server/.venv swarmdeck_ros/{build,install,log} argos/build

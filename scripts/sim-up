@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# SwarmDeck Simulation Bring-Up Script (scripts/sim-up)
+# ==============================================================================
+#
+# Manages the lifecycle of the SwarmDeck simulation stack (ARGoS / Gazebo,
+# Fast-LIVO2 estimator, per-robot SLAM/Nav2, adapter_sim, and web UI/server).
+#
+# Examples:
+#   ./scripts/sim-up                           # Default 4-robot indoor scene (software render)
+#   ./scripts/sim-up --gpu                     # Default scene with NVIDIA GPU acceleration
+#   ./scripts/sim-up --scenario bistro --gpu   # Amazon Bistro scene with NVIDIA GPU
+#   ./scripts/sim-up --dev                     # Fast dev mode: 3 robots, synthetic drift
+#   ./scripts/sim-up --down                    # Stop the simulation stack
+#   ./scripts/sim-up --status                  # Show container status
+#   ./scripts/sim-up --logs                    # Follow simulator logs
+# ==============================================================================
+
+set -Eeuo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_DIR="${REPO_ROOT}/deploy/compose"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-swarmdeck}"
+
+# Defaults
+SCENARIO="${SCENARIO:-default}"
+RENDER="${RENDER:-software}"
+ODOMETRY="${ODOMETRY:-fast_livo2}"
+TARGETS="${TARGETS:-10}"
+EXPLORE_SECONDS="${EXPLORE_SECONDS:-0}"
+DO_BUILD="yes"
+DO_DETACH="yes"
+ACTION="up"
+
+usage() {
+  cat <<'EOF'
+SwarmDeck Simulation Bring-Up (scripts/sim-up)
+
+Usage:
+  scripts/sim-up [options]
+
+Lifecycle Actions:
+  (default)           Bring up the simulation stack
+  --down              Stop and remove simulation containers
+  --status            Display status of running simulation containers
+  --logs              Follow logs of simulation containers
+  --dry-run           Print Compose command and environment without executing
+  -h, --help          Show this help message
+
+Configuration Options:
+  -s, --scenario <name|path>
+                      Scenario to run:
+                        default | 4robot        Default indoor 4-robot scene (configs/4robot.yaml)
+                        bistro | 4robot_bistro  Amazon Lumberyard Bistro scene (configs/4robot_bistro.yaml)
+                        3robot | dev            3-robot mixed fleet (configs/3robot.yaml)
+                        <path.yaml>             Custom path to scenario YAML configuration
+  -r, --render <mode>
+                      Vulkan rendering backend:
+                        software                CPU rasterizer (Mesa lavapipe; portable fallback)
+                        gpu | nvidia            NVIDIA GPU (requires NVIDIA container runtime)
+                        dri | intel | amd       Intel / AMD render node (/dev/dri)
+  --gpu               Shorthand for --render gpu
+  --dri               Shorthand for --render dri
+  --software          Shorthand for --render software
+
+  -o, --odometry <profile>
+                      Odometry estimator:
+                        fast_livo2              (Default) Real LiDAR-inertial-visual estimator
+                        drift                   Synthetic ARGoS drift model (4x faster, no estimator)
+  --drift             Shorthand for --odometry drift
+  --dev               Shorthand for --scenario 3robot --render dri --odometry drift
+
+  -t, --targets <n>   Number of perception targets to scatter (default: 10)
+  -e, --explore <sec> Seconds of autonomous exploration on startup (default: 0)
+  --no-build          Skip Docker build before starting
+  --no-detach         Run in foreground attached to terminal
+
+Environment Variables:
+  SCENARIO, RENDER, ODOMETRY, TARGETS, EXPLORE_SECONDS, COMPOSE_PROJECT
+EOF
+  exit 0
+}
+
+# Parse CLI arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    --down)
+      ACTION="down"
+      shift
+      ;;
+    --status|--ps)
+      ACTION="status"
+      shift
+      ;;
+    --logs)
+      ACTION="logs"
+      shift
+      ;;
+    --dry-run)
+      ACTION="dry-run"
+      shift
+      ;;
+    -s|--scenario)
+      SCENARIO="$2"
+      shift 2
+      ;;
+    -r|--render)
+      RENDER="$2"
+      shift 2
+      ;;
+    --gpu|--nvidia)
+      RENDER="gpu"
+      shift
+      ;;
+    --dri|--intel|--amd)
+      RENDER="dri"
+      shift
+      ;;
+    --software)
+      RENDER="software"
+      shift
+      ;;
+    -o|--odometry)
+      ODOMETRY="$2"
+      shift 2
+      ;;
+    --drift)
+      ODOMETRY="drift"
+      shift
+      ;;
+    --dev)
+      SCENARIO="3robot"
+      RENDER="dri"
+      ODOMETRY="drift"
+      shift
+      ;;
+    -t|--targets)
+      TARGETS="$2"
+      shift 2
+      ;;
+    -e|--explore)
+      EXPLORE_SECONDS="$2"
+      shift 2
+      ;;
+    --no-build)
+      DO_BUILD="no"
+      shift
+      ;;
+    --build)
+      DO_BUILD="yes"
+      shift
+      ;;
+    --no-detach)
+      DO_DETACH="no"
+      shift
+      ;;
+    *)
+      echo "Error: Unknown argument: $1" >&2
+      echo "Run 'scripts/sim-up --help' for usage." >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Resolve scenario YAML config path
+case "${SCENARIO}" in
+  default|4robot)
+    RESOLVED_CONFIG="/app/configs/4robot.yaml"
+    CONFIG_LABEL="Default 4-Robot (configs/4robot.yaml)"
+    ;;
+  bistro|4robot_bistro)
+    RESOLVED_CONFIG="/app/configs/4robot_bistro.yaml"
+    CONFIG_LABEL="Amazon Lumberyard Bistro (configs/4robot_bistro.yaml)"
+    ;;
+  3robot|dev)
+    RESOLVED_CONFIG="/app/configs/3robot.yaml"
+    CONFIG_LABEL="3-Robot Dev Fleet (configs/3robot.yaml)"
+    ;;
+  *)
+    if [[ -f "${SCENARIO}" ]]; then
+      RESOLVED_CONFIG="/app/${SCENARIO#${REPO_ROOT}/}"
+      CONFIG_LABEL="Custom (${SCENARIO})"
+    elif [[ -f "${REPO_ROOT}/${SCENARIO}" ]]; then
+      RESOLVED_CONFIG="/app/${SCENARIO}"
+      CONFIG_LABEL="Custom (${SCENARIO})"
+    else
+      echo "Error: Scenario config not found: ${SCENARIO}" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+# Normalize rendering backend
+case "${RENDER,,}" in
+  gpu|nvidia)
+    RENDER_LABEL="NVIDIA GPU (Vulkan hardware acceleration)"
+    COMPOSE_FILES=(-f "${COMPOSE_DIR}/docker-compose.yml" -f "${COMPOSE_DIR}/docker-compose.gpu.yml")
+    ;;
+  dri|intel|amd)
+    RENDER_LABEL="Intel/AMD GPU (/dev/dri hardware render node)"
+    COMPOSE_FILES=(-f "${COMPOSE_DIR}/docker-compose.yml" -f "${COMPOSE_DIR}/docker-compose.dri.yml")
+    ;;
+  software)
+    RENDER_LABEL="Software Rasterizer (Mesa lavapipe CPU)"
+    COMPOSE_FILES=(-f "${COMPOSE_DIR}/docker-compose.yml")
+    ;;
+  *)
+    echo "Error: Invalid render backend '${RENDER}'. Valid options: software, gpu, dri." >&2
+    exit 2
+    ;;
+esac
+
+# Compose base execution array
+COMPOSE_CMD=(docker compose -p "${COMPOSE_PROJECT}" "${COMPOSE_FILES[@]}")
+
+# Execute actions
+case "${ACTION}" in
+  down)
+    echo "Stopping SwarmDeck simulation stack (${COMPOSE_PROJECT})..."
+    "${COMPOSE_CMD[@]}" --profile argos stop argos sim fast_livo2
+    "${COMPOSE_CMD[@]}" --profile argos rm -f argos sim fast_livo2
+    echo "Simulation stack stopped."
+    exit 0
+    ;;
+  status)
+    "${COMPOSE_CMD[@]}" --profile argos ps
+    exit 0
+    ;;
+  logs)
+    "${COMPOSE_CMD[@]}" --profile argos logs -f argos sim fast_livo2
+    exit 0
+    ;;
+  dry-run)
+    cat <<EOF
+Simulation Bring-Up Configuration (Dry Run):
+-------------------------------------------
+Project:     ${COMPOSE_PROJECT}
+Scenario:    ${CONFIG_LABEL}
+Config:      ${RESOLVED_CONFIG}
+Render:      ${RENDER_LABEL}
+Odometry:    ${ODOMETRY}
+Targets:     ${TARGETS}
+Explore:     ${EXPLORE_SECONDS}s
+Compose:     ${COMPOSE_CMD[*]} --profile argos
+
+Environment:
+  SWARMDECK_CONFIG=${RESOLVED_CONFIG}
+  SWARMDECK_ODOMETRY=${ODOMETRY}
+  SWARMDECK_TARGETS=${TARGETS}
+  EXPLORE_SECONDS=${EXPLORE_SECONDS}
+EOF
+    exit 0
+    ;;
+  up)
+    ;;
+esac
+
+# Services to bring up
+SERVICES=(server ui slam duck_detector mediamtx sim argos)
+if [[ "${ODOMETRY}" != "drift" ]]; then
+  SERVICES+=(fast_livo2)
+fi
+
+UP_FLAGS=()
+if [[ "${DO_BUILD}" == "yes" ]]; then
+  UP_FLAGS+=(--build)
+fi
+if [[ "${DO_DETACH}" == "yes" ]]; then
+  UP_FLAGS+=(-d)
+fi
+
+cat <<EOF
+============================================================
+SwarmDeck Simulation Bring-Up
+============================================================
+Scenario:   ${CONFIG_LABEL}
+Rendering:  ${RENDER_LABEL}
+Odometry:   ${ODOMETRY}$([[ "${ODOMETRY}" == "drift" ]] && echo " (synthetic drift, no estimator)" || echo " (Fast-LIVO2 multi-robot)")
+Targets:    ${TARGETS}
+Project:    ${COMPOSE_PROJECT}
+============================================================
+EOF
+
+export SWARMDECK_CONFIG="${RESOLVED_CONFIG}"
+export SWARMDECK_ODOMETRY="${ODOMETRY}"
+export SWARMDECK_TARGETS="${TARGETS}"
+export EXPLORE_SECONDS="${EXPLORE_SECONDS}"
+
+"${COMPOSE_CMD[@]}" --profile argos up "${UP_FLAGS[@]}" "${SERVICES[@]}"
+
+cat <<EOF
+
+SwarmDeck Simulation is running!
+  Web Dashboard:  http://localhost:5173
+  Backend API:    http://localhost:8080/api/fleet
+  SLAM Backend:   http://localhost:8090/status
+  Camera Streams: http://localhost:8889
+
+To view logs:   ./scripts/sim-up --logs   (or: make docker-logs)
+To stop stack:  ./scripts/sim-up --down   (or: make down-argos)
+============================================================
+EOF

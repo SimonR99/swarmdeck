@@ -1,52 +1,133 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# SwarmDeck Scout Mini (TARS) Bring-Up Script (scripts/scout-up)
+# ==============================================================================
+#
+# Starts Scout's host-side ROS 1 Noetic stack (LVI-SAM, Ouster OS1, VectorNav,
+# RealSense D435, local planner) and its SwarmDeck Docker Compose services
+# (adapter, media streaming, object detector).
+# Runs on the operator workstation and performs bring-up over SSH.
+#
+# Examples:
+#   ./scripts/scout-up                      # Standard bring-up (reset + start)
+#   ./scripts/scout-up --dry-run            # Inspect commands without executing
+#   ./scripts/scout-up --status             # Check running ROS 1 nodes & containers
+#   ./scripts/scout-up --down               # Stop native nodes and containers
+#   ./scripts/scout-up --no-native-reset    # Keep existing native ROS 1 graph running
+# ==============================================================================
 
 set -Eeuo pipefail
 
-# Use the same server/media defaults as every deployment, including when this
-# low-level helper is run directly instead of through scripts/deploy.
 operator_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck disable=SC1091
-source "${operator_repo}/deploy/fleet.env"
+if [[ -f "${operator_repo}/deploy/fleet.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${operator_repo}/deploy/fleet.env"
+fi
 
-# Run from the operator workstation. Each setting can be overridden inline, e.g.
-# DEPLOY_SSH_HOST=rover@192.168.1.24 BACKEND_HOST=192.168.1.10 \
-#   ./scripts/scout-up
-scout_host=${DEPLOY_SSH_HOST:-scout}
-scout_repo=${DEPLOY_REMOTE_REPO:-${ROBOT_REPO:-/ssd/swarmdeck}}
-robot_id=${ROBOT_ID:-tars_0}
-robot_ip=${ROBOT_IP:-192.168.1.230}
-backend_host=$BACKEND_HOST
-backend_port=$BACKEND_PORT
-media_rtsp_port=${MEDIA_RTSP_PORT:-8554}
-ouster_host=${OUSTER_HOST_NAME:-os-992039000794.local}
-camera_topic=${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}
-robot_config=${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}
-video_bitrate=$VIDEO_BITRATE_KBPS
-video_fps=$VIDEO_FPS
-video_width=$VIDEO_WIDTH
-video_height=$VIDEO_HEIGHT
-native_reset=${SCOUT_NATIVE_RESET:-yes}
-container_reset=${SCOUT_CONTAINER_RESET:-yes}
+# Configuration defaults
+scout_host="${DEPLOY_SSH_HOST:-scout}"
+scout_repo="${DEPLOY_REMOTE_REPO:-${ROBOT_REPO:-/ssd/swarmdeck}}"
+robot_id="${ROBOT_ID:-tars_0}"
+robot_ip="${ROBOT_IP:-192.168.1.230}"
+backend_host="${BACKEND_HOST:-192.168.1.161}"
+backend_port="${BACKEND_PORT:-8080}"
+media_rtsp_port="${MEDIA_RTSP_PORT:-8554}"
+ouster_host="${OUSTER_HOST_NAME:-os-992039000794.local}"
+camera_topic="${CAMERA_TOPIC:-/d400_arm/color/image_raw/compressed}"
+robot_config="${ROBOT_CONFIG:-adapters/adapter_ros1/config/scout_mini.yaml}"
+video_bitrate="${VIDEO_BITRATE_KBPS:-700}"
+video_fps="${VIDEO_FPS:-10}"
+video_width="${VIDEO_WIDTH:-640}"
+video_height="${VIDEO_HEIGHT:-480}"
+native_reset="${SCOUT_NATIVE_RESET:-yes}"
+container_reset="${SCOUT_CONTAINER_RESET:-yes}"
+action="up"
+
+usage() {
+  cat <<'EOF'
+SwarmDeck Scout Mini (TARS) Bring-Up (scripts/scout-up)
+
+Usage:
+  scripts/scout-up [options]
+
+Lifecycle Actions:
+  (default)           Start native ROS 1 nodes, planner, and Compose containers
+  --down, --stop      Stop native Scout ROS 1 nodes and remove Compose containers
+  --status            Check status of native processes, ROS topics, and containers
+  --dry-run           Print connection details and commands without executing
+  -h, --help          Show this help message
+
+Options:
+  --host <ssh_host>   Target SSH host/alias (default: $DEPLOY_SSH_HOST or 'scout')
+  --no-native-reset   Do not restart native ROS 1 nodes (LVI-SAM, camera, planner)
+  --no-container-reset
+                      Do not recreate Docker containers (preserve running stack)
+  --backend-host <ip> SwarmDeck backend IP (default: $BACKEND_HOST)
+  --backend-port <p>  SwarmDeck backend port (default: $BACKEND_PORT or 8080)
+
+Environment Variables:
+  DEPLOY_SSH_HOST, DEPLOY_REMOTE_REPO, ROBOT_ID, ROBOT_IP,
+  BACKEND_HOST, BACKEND_PORT, MEDIA_RTSP_PORT, OUSTER_HOST_NAME,
+  SCOUT_NATIVE_RESET, SCOUT_CONTAINER_RESET
+EOF
+  exit 0
+}
+
+# Parse CLI options
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      ;;
+    --down|--stop)
+      action="down"
+      shift
+      ;;
+    --status)
+      action="status"
+      shift
+      ;;
+    --dry-run)
+      action="dry-run"
+      shift
+      ;;
+    --host)
+      scout_host="$2"
+      shift 2
+      ;;
+    --backend-host)
+      backend_host="$2"
+      shift 2
+      ;;
+    --backend-port)
+      backend_port="$2"
+      shift 2
+      ;;
+    --no-native-reset)
+      native_reset="no"
+      shift
+      ;;
+    --no-container-reset)
+      container_reset="no"
+      shift
+      ;;
+    *)
+      echo "Error: Unknown argument: $1" >&2
+      echo "Run 'scripts/scout-up --help' for usage." >&2
+      exit 2
+      ;;
+  esac
+done
 
 case "$native_reset" in
   yes|no) ;;
-  *)
-    echo "SCOUT_NATIVE_RESET must be yes or no (got '$native_reset')" >&2
-    exit 2
-    ;;
+  *) echo "Error: SCOUT_NATIVE_RESET must be yes or no (got '$native_reset')" >&2; exit 2 ;;
 esac
-
 case "$container_reset" in
   yes|no) ;;
-  *)
-    echo "SCOUT_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2
-    exit 2
-    ;;
+  *) echo "Error: SCOUT_CONTAINER_RESET must be yes or no (got '$container_reset')" >&2; exit 2 ;;
 esac
 
-# These values are also consumed by the operator-side Compose refresh after the
-# SSH session returns. Export them explicitly so direct `scripts/scout-up` calls
-# behave the same as calls made through `scripts/deploy`.
 export ROBOT_ID="$robot_id"
 export ROBOT_IP="$robot_ip"
 export BACKEND_HOST="$backend_host"
@@ -58,7 +139,25 @@ export VIDEO_FPS="$video_fps"
 export VIDEO_WIDTH="$video_width"
 export VIDEO_HEIGHT="$video_height"
 
-echo "Starting ${robot_id} on ${scout_host}..."
+if [[ "$action" == "dry-run" ]]; then
+  cat <<EOF
+Scout Bring-Up Configuration (Dry Run):
+---------------------------------------
+Target Host:        ${scout_host}
+Remote Repo:        ${scout_repo}
+Robot ID:           ${robot_id} (${robot_ip})
+Backend Host:       ${backend_host}:${backend_port}
+RTSP Media Port:    ${media_rtsp_port}
+Ouster Hostname:    ${ouster_host}
+Camera Topic:       ${camera_topic}
+Native Reset:       ${native_reset}
+Container Reset:    ${container_reset}
+Action:             ${action}
+EOF
+  exit 0
+fi
+
+echo "Connecting to ${scout_host} (action: ${action}, robot: ${robot_id})..."
 
 ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${scout_repo}" \
@@ -77,7 +176,8 @@ ssh "${scout_host}" bash --noprofile --norc -s -- \
   "${video_width}" \
   "${video_height}" \
   "${native_reset}" \
-  "${container_reset}" <<'REMOTE_SCRIPT'
+  "${container_reset}" \
+  "${action}" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 repo=$1
@@ -97,6 +197,7 @@ video_width=${14}
 video_height=${15}
 native_reset=${16:-yes}
 container_reset=${17:-yes}
+action=${18:-up}
 
 slam_log=/tmp/swarmdeck-scout-slam.log
 camera_log=/tmp/swarmdeck-scout-camera.log
@@ -105,16 +206,6 @@ slam_launch="${repo}/adapters/adapter_ros1/launch/scout_mini_slam.launch"
 camera_launch="${repo}/adapters/adapter_ros1/launch/scout_camera_low_latency.launch"
 planner_launch="${repo}/adapters/adapter_ros1/launch/local_planner_muxed.launch"
 
-case "$native_reset" in
-  yes|no) ;;
-  *)
-    echo "native ROS reset must be yes or no (got '$native_reset')" >&2
-    exit 2
-    ;;
-esac
-
-# Catkin's generated setup hooks inspect variables before defining them, so nounset
-# must be disabled only while those trusted environment scripts are sourced.
 set +u
 source /opt/ros/noetic/setup.bash
 source "${catkin_ws}/devel/setup.bash"
@@ -162,15 +253,7 @@ stop_matching() {
 }
 
 reset_native_graph() {
-  if [[ "$native_reset" != yes ]]; then
-    echo "Native ROS reset: skipped"
-    return
-  fi
-
-  echo "Resetting known Scout ROS launchers..."
-  # Stop launch parents first so their child nodes receive the normal ROS
-  # shutdown path. The patterns are deliberately tied to Scout's launch files;
-  # roscore and unrelated robot processes are left alone.
+  echo "Stopping known Scout ROS launchers..."
   stop_matching "Local planner" "[l]ocal_planner_muxed.launch"
   stop_matching "D400 mount TF" "[s]tatic_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link"
   stop_matching "RealSense legacy camera" "[r]oslaunch rover_launch rs_d400.launch"
@@ -178,27 +261,58 @@ reset_native_graph() {
   stop_matching "ROS/SLAM" "[r]oslaunch .*${slam_launch}"
 }
 
+compose=(docker compose --project-name swarmdeck-scout)
+if [[ -f "${repo}/.deploy/scout.env" ]]; then
+  compose+=(--env-file "${repo}/.deploy/scout.env")
+fi
+compose+=(--file "${repo}/deploy/compose/docker-compose.robot-ros1.yml")
+
+# --- Action: Status ---
+if [[ "${action}" == "status" ]]; then
+  echo "=== Scout Native ROS 1 Processes ==="
+  for label in "ROS/SLAM" "RealSense camera" "Local planner"; do
+    case "$label" in
+      "ROS/SLAM") p="$(process_ids "[r]oslaunch .*${slam_launch}")" ;;
+      "RealSense camera") p="$(process_ids "[r]oslaunch .*${camera_launch}")" ;;
+      "Local planner") p="$(process_ids "[l]ocal_planner_muxed.launch")" ;;
+    esac
+    if [[ -n "$p" ]]; then
+      echo "$label: running (PIDs: $p)"
+    else
+      echo "$label: not running"
+    fi
+  done
+  echo ""
+  echo "=== Scout Containers ==="
+  "${compose[@]}" ps --all
+  exit 0
+fi
+
+# --- Action: Down ---
+if [[ "${action}" == "down" || "${action}" == "stop" ]]; then
+  echo "Stopping Scout stack..."
+  reset_native_graph
+  echo "Stopping Compose containers..."
+  "${compose[@]}" down --remove-orphans
+  echo "Scout stack stopped."
+  exit 0
+fi
+
+# --- Action: Up ---
+if [[ "$native_reset" == yes ]]; then
+  reset_native_graph
+fi
+
 reset_containers() {
   if ! docker compose version >/dev/null 2>&1; then
     echo "Scout clean refresh requires Docker Compose v2" >&2
     exit 1
   fi
 
-  # This part runs on Scout, so Compose must use the remote checkout. The
-  # operator-side repository path is not defined inside this SSH session.
   export ROBOT_REPO="${repo}"
-  local -a compose=(docker compose --project-name swarmdeck-scout)
-  [[ -f "${repo}/.deploy/scout.env" ]] &&
-    compose+=(--env-file "${repo}/.deploy/scout.env")
-  compose+=(--file "${repo}/deploy/compose/docker-compose.robot-ros1.yml")
-
   if [[ "$container_reset" == yes ]]; then
     echo "Resetting Scout containers..."
     "${compose[@]}" down --remove-orphans
-
-    # Explicit container names allow us to clean containers created by an older
-    # Compose project name as well as containers managed by this one. Do not
-    # remove volumes: detector weights are intentionally cached across deploys.
     for container in swarmdeck-duck-detector swarmdeck-adapter swarmdeck-media; do
       if docker inspect "$container" >/dev/null 2>&1; then
         docker rm -f "$container" >/dev/null
@@ -249,67 +363,52 @@ require_topic() {
     return
   fi
 
-  echo "${label}: no data received on ${topic}" >&2
+  echo "${label} is not publishing on ${topic}" >&2
   return 1
 }
 
 require_subscriber() {
   local topic=$1
-  local subscriber=$2
+  local expected_node=$2
   local label=$3
-  local attempt
+  local attempt info
 
-  for attempt in {1..30}; do
-    if rostopic info "${topic}" 2>/dev/null | grep -Fq "${subscriber}"; then
-      echo "${label}: subscribed"
+  for attempt in {1..15}; do
+    info="$(rostopic info "${topic}" 2>/dev/null || true)"
+    if grep -Fq "${expected_node}" <<<"${info}"; then
+      echo "${label}: subscribed to ${topic}"
       return
     fi
     sleep 1
   done
 
-  echo "${label}: did not subscribe to ${topic}" >&2
+  echo "${label} did not subscribe to ${topic} after 15 attempts" >&2
+  echo "${info}" | sed 's/^/  /' >&2
   return 1
 }
 
-reset_native_graph
 reset_containers
 
 start_detached \
-  "ROS/SLAM" \
+  "ROS master and SLAM" \
   "[r]oslaunch .*${slam_launch}" \
   "${slam_log}" \
   roslaunch "${slam_launch}"
 
 wait_for_master
 
-# Colour publishes immediately. Depth is a slower unsynced stream used only
-# to pin detections on the map. Do not fall back to rs_d400.launch: that
-# vendor profile holds colour until depth on this USB 2.1 camera.
-if pgrep -f "[r]oslaunch rover_launch rs_d400.launch" >/dev/null; then
-  echo "RealSense camera: vendor rs_d400.launch is already running." >&2
-  echo "That profile is why teleop video lags. Stop it and re-run make deploy ROBOT=scout" >&2
-  echo "so scout_camera_low_latency.launch can own the D435i." >&2
-else
-  start_detached \
-    "RealSense camera" \
-    "[r]oslaunch .*${camera_launch}" \
-    "${camera_log}" \
-    roslaunch "${camera_launch}"
-fi
+start_detached \
+  "RealSense camera" \
+  "[r]oslaunch .*${camera_launch}" \
+  "${camera_log}" \
+  roslaunch "${camera_launch}"
 
-# The low-latency launch already publishes this mount TF. Keep a copy for the
-# case where someone started the camera by hand without that launch file.
 start_detached \
   "D400 mount TF" \
   "[s]tatic_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link" \
   /tmp/swarmdeck-d400-mount.log \
   rosrun tf static_transform_publisher 0 0 0 0 0 0 realsense_d435_link d400_arm_link 100
 
-# localPlanner + pathFollower, muxed so pathFollower's continuous ~27 Hz
-# output lands on /cmd_vel_nav instead of the real /cmd_vel — see the launch
-# file's own header for why that remap (and autonomyMode:=false) matter.
-# Starting this does NOT move the robot by itself: the adapter only relays
-# /cmd_vel_nav onto the real /cmd_vel while a nav goal is active.
 start_detached \
   "Local planner" \
   "[l]ocal_planner_muxed.launch" \
