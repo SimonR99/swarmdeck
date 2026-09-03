@@ -69,10 +69,22 @@
         # local gravity. That offset is device-specific -- the two OS0-64 units
         # in this fleet disagree with each other by 1.75 % -- so it is left for
         # the bias state to absorb rather than being folded in here.
-        # Local gravity at Polytechnique Montreal (45.5048 N, ~80 m), from the
-        # Somigliana formula on WGS84 with the free-air correction. This is a
-        # property of WHERE THE ROBOT IS, not of the IMU: it must not be set to
-        # whatever the accelerometer happens to read. GTSAM builds its gravity
-        # vector from this (PreintegrationParams::MakeSharedU) and estimates the
-        # accelerometer bias as a state, which is where a device offset belongs.
-        g_norm: 9.8064
+# g_norm MUST equal what this IMU (botman's Ouster IMU) reads when static, NOT true local gravity.
+        #
+        # That is the opposite of what the name suggests, and it was established
+        # by experiment on aslan 2026-09-03. Setting the physically correct local
+        # value (9.8064, Somigliana on WGS84 for 45.5048 N at ~80 m) made
+        # imu_preintegration diverge: "Large bias, reset IMU-preintegration!"
+        # 1.67 times a second, odometry yaw drifting +7.43 deg/min and position
+        # 0.135 m/min while the robot sat still, with the gyro measuring
+        # -0.085 deg/s. Reverting g_norm alone -- keeping the measured noise
+        # densities -- gave 0 resets, +0.015 deg/min and 0.0007 m/min.
+        #
+        # The reason is that GTSAM gets gravity from this
+        # (PreintegrationParams::MakeSharedU) and the residual against a
+        # miscalibrated accelerometer has to be carried by the bias state.
+        # failureDetection() trips at ba.norm() > 2.0, and with acc_w at 6.4e-05
+        # the bias cannot track a standing offset before the solve runs away.
+        # A device that reads 9.8445 m/s^2 therefore needs g_norm 9.8445, and the
+        # accelerometer's true error stays invisible to the estimator.
+        g_norm: 9.8445

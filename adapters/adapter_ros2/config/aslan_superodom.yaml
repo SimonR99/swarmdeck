@@ -44,10 +44,11 @@
         gyr_n: 1.5636343949698187e-03
         acc_w: 6.4356659353532566e-05
         gyr_w: 3.5640318696367613e-05
-        # Local gravity at Polytechnique Montreal (45.5048 N, ~80 m), from the
-        # Somigliana formula on WGS84 with the free-air correction. This is a
-        # property of WHERE THE ROBOT IS, not of the IMU: it must not be set to
-        # whatever the accelerometer happens to read. GTSAM builds its gravity
-        # vector from this (PreintegrationParams::MakeSharedU) and estimates the
-        # accelerometer bias as a state, which is where a device offset belongs.
-        g_norm: 9.8064
+# g_norm MUST equal what this IMU reads when static, not true local gravity
+        # -- see aslan_superodom_ouster.yaml for the experiment that established
+        # this. UNMEASURED: aslan's VectorNav exists at /dev/vectornav but
+        # ASLAN_START_VECTORNAV=false, so nothing was ever recorded from it.
+        # Before using this config, log /vectornav/imu static and set g_norm to
+        # the mean |accel|. The value below is the upstream default and is
+        # almost certainly wrong for this device.
+        g_norm: 9.80511
