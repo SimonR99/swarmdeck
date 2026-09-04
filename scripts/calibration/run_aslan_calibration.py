@@ -153,7 +153,14 @@ def main() -> None:
             {
                 "ASLAN_START_VECTORNAV": "true",
                 "ASLAN_IMU_TOPIC": "/vectornav/imu",
-                "ASLAN_SUPERODOM_CONFIG": "aslan_vectornav.yaml",
+                # aslan_superodom.yaml, NOT aslan_vectornav.yaml. The latter is
+                # the VN-100 serial driver's parameters (port, baud, binary
+                # output registers), keyed under `vectornav:` and
+                # `vn_sensor_msgs:`. Handing it to SuperOdometry as config_file
+                # gives it a file with no section matching any of its node
+                # names, so none of its own parameters (imu_topic, the noise
+                # densities, the frames) get set.
+                "ASLAN_SUPERODOM_CONFIG": "aslan_superodom.yaml",
                 "ASLAN_SUPERODOM_CALIB": "aslan_superodom_calibration.yaml",
             },
         )

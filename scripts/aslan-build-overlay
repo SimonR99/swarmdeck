@@ -9,6 +9,45 @@ mist_ws=${ASLAN_MIST_WS:-/ssd/mist_ws_ros2}
 overlay=${ASLAN_OVERLAY:-${repo}/.aslan_ros}
 image=${ASLAN_ROS_IMAGE:-bunker:dev}
 
+# REFUSE TO BUILD WITH AN UNMEASURED g_norm.
+#
+# g_norm must equal what this robot's own IMU reads when static, not true local
+# gravity and not another unit's reading (the two OS0-64s in this fleet
+# disagree by 1.75 %). Established by experiment on aslan 2026-09-03: a wrong
+# g_norm makes imu_preintegration reset ~1.67 times a second, with odometry yaw
+# drifting +7.43 deg/min while the robot sits still. It fails as silent drift,
+# not as an error, which is exactly why it is worth blocking here.
+#
+# 9.80511 is the upstream sample value that ships in a config nobody has
+# measured yet. deploy-remote exports the profile env before running this, so
+# ASLAN_SUPERODOM_CONFIG is whichever config is actually about to be deployed.
+superodom_config=${ASLAN_SUPERODOM_CONFIG:-aslan_superodom_ouster.yaml}
+superodom_path="${repo}/adapters/adapter_ros2/config/${superodom_config}"
+if [[ -f "${superodom_path}" ]] && grep -qE '^[[:space:]]*g_norm:[[:space:]]*9\.80511[[:space:]]*$' "${superodom_path}"; then
+  cat >&2 <<EOF
+ERROR: ${superodom_config} still carries the placeholder g_norm 9.80511.
+
+  That value is an upstream sample, not a measurement of this robot's IMU, and
+  SuperOdometry will drift rather than fail if it is wrong.
+
+  With the robot powered, level and completely still, record it:
+
+    python3 scripts/calibration/measure_imu_static.py \\
+        --topic ${ASLAN_IMU_TOPIC:-/vectornav/imu} --duration 600
+
+  then set g_norm in adapters/adapter_ros2/config/${superodom_config} to the
+  reported mean |a| and re-run the deploy.
+
+  To deploy on the Ouster IMU instead, set all four together in
+  deploy/robots/aslan.env:
+    ASLAN_IMU_TOPIC=/ouster/imu
+    ASLAN_START_VECTORNAV=false
+    ASLAN_SUPERODOM_CONFIG=aslan_superodom_ouster.yaml
+    ASLAN_SUPERODOM_CALIB=aslan_superodom_ouster_calibration.yaml
+EOF
+  exit 1
+fi
+
 mkdir -p \
   "${overlay}/build" \
   "${overlay}/install" \
