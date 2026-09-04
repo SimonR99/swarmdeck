@@ -84,6 +84,13 @@
         # botman's value been copied here it would have been 0.105 m/s^2 out,
         # which is most of the offset that made the Ouster diverge.
         #
+        # VALIDATED ON THE ROBOT 2026-09-04, which is the check this value
+        # exists to pass. Deployed on the VN-100 and left standing 180 s:
+        # 1 preintegration reset (a startup transient 2 s after the driver
+        # connected, none after), position drift 0.0042 m/min and yaw drift
+        # 0.0035 deg/min. The divergent case this guards against ran at 1.67
+        # resets a SECOND, 0.135 m/min and 7.43 deg/min.
+        #
         # Re-measure with:
         #   python3 scripts/calibration/measure_imu_static.py \
         #       --topic /vectornav/imu --duration 600
