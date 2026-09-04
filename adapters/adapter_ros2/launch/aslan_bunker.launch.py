@@ -75,6 +75,39 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(start_vectornav),
     )
 
+    # The VN-100 stamps its messages "vectornav" and nothing published a TF for
+    # that frame. Sensor-to-sensor extrinsic, independent of the lidar-origin
+    # base-frame convention; it only ADDS A CHILD to os_lidar, giving it no
+    # second parent, which is why it is safe where base_link -> os_sensor is not.
+    #
+    # Rotation MEASURED 2026-09-01 by scripts/calibration/run_aslan_calibration.py
+    # and recorded in aslan_superodom_calibration.yaml: os_lidar -> vectornav is
+    # roll -0.03, pitch -0.85, yaw -90.65 deg (residual RMS 0.0257 rad/s over
+    # 3416 samples).
+    #
+    # TRANSLATION IS NOT MEASURED. The calibration solved rotation only and
+    # aslan_superodom_calibration.yaml carries a zero translation, so this
+    # publishes zero too rather than inventing a lever arm. Measure the VN-100's
+    # position relative to the lidar before trusting it for anything but
+    # orientation.
+    vectornav_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="aslan_vectornav_tf",
+        output="screen",
+        arguments=[
+            "--x", "0.0",
+            "--y", "0.0",
+            "--z", "0.0",
+            "--roll", "-0.000524",
+            "--pitch", "-0.014835",
+            "--yaw", "-1.582152",
+            "--frame-id", "os_lidar",
+            "--child-frame-id", "vectornav",
+        ],
+        condition=IfCondition(start_vectornav),
+    )
+
     feature_extraction = Node(
         package="super_odometry",
         executable="feature_extraction_node",
@@ -118,6 +151,7 @@ def generate_launch_description() -> LaunchDescription:
             SetParameter(name="use_sim_time", value=False),
             vectornav,
             vn_sensor_msgs,
+            vectornav_tf,
             feature_extraction,
             laser_mapping,
             imu_preintegration,

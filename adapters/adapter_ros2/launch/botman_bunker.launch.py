@@ -65,6 +65,41 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(start_vectornav),
     )
 
+    # The VN-100 stamps its messages "vectornav" and nothing published a TF for
+    # that frame, so the IMU could not be related to anything. This edge is a
+    # sensor-to-sensor extrinsic, independent of the lidar-origin base-frame
+    # convention, and it only ADDS A CHILD to os_lidar -- it gives os_lidar no
+    # second parent, which is why it is safe where a base_link -> os_sensor edge
+    # is not.
+    #
+    # MEASURED 2026-08-31 by scripts/calibration/calibrate_imu_to_imu.py: the
+    # gyro pair gives the rotation, the accelerometer pair the x/y offset, over
+    # a 0.6 rad/s spin, composed with the Ouster factory os_lidar -> os_imu.
+    # The quaternion is a -92.52 deg yaw.
+    #
+    # Z IS NOT MEASURED. A spin about a vertical axis cannot observe the offset
+    # along that axis -- the solver reports observability 0.000 for it however
+    # long you record -- so -0.284 is the tape measurement (same height as the
+    # camera). Rotate the sensor head about a horizontal axis and re-run to fix.
+    vectornav_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="botman_vectornav_tf",
+        output="screen",
+        arguments=[
+            "--x", "0.0010",
+            "--y", "0.0608",
+            "--z", "-0.284",
+            "--qx", "-0.008202",
+            "--qy", "0.002840",
+            "--qz", "-0.722461",
+            "--qw", "0.691357",
+            "--frame-id", "os_lidar",
+            "--child-frame-id", "vectornav",
+        ],
+        condition=IfCondition(start_vectornav),
+    )
+
     feature_extraction = Node(
         package="super_odometry",
         executable="feature_extraction_node",
@@ -108,6 +143,7 @@ def generate_launch_description() -> LaunchDescription:
             SetParameter(name="use_sim_time", value=False),
             vectornav,
             vn_sensor_msgs,
+            vectornav_tf,
             feature_extraction,
             laser_mapping,
             imu_preintegration,
