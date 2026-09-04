@@ -127,7 +127,13 @@ sync_repo() {
 
   local flags=(
     -a --partial -e "$RSYNC_RSH"
-    --exclude=.git/ --exclude=.deploy/ --exclude=.env --exclude=.env.*
+    # .git without a trailing slash, so it matches the FILE a git worktree has
+    # there as well as the directory a normal checkout has. With the slash,
+    # deploying from a worktree tried to replace the robot's .git directory
+    # with that file and rsync exited 23 ("cannot delete non-empty directory:
+    # .git"). deploy_one runs under `|| failed=...`, which suppresses errexit,
+    # so that surfaced as a partial sync behind a "deployment complete."
+    --exclude=.git --exclude=.deploy/ --exclude=.env --exclude=.env.*
     --exclude=__pycache__/ --exclude='*.pyc' --exclude='*.pre-duck-map-*'
     --exclude=sessions/ --exclude=server/.venv/ --exclude=slam/.venv/ --exclude=ui/node_modules/
     --exclude=ui/dist/ --exclude=swarmdeck_ros/build/
