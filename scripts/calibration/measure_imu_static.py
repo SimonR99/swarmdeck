@@ -122,20 +122,35 @@ def analyze(samples: List[Tuple[float, np.ndarray, np.ndarray]], tau: float) -> 
     span = stamps[-1] - stamps[0]
     rate = (len(stamps) - 1) / span if span > 0 else float("nan")
 
+    # DROPPED SAMPLES BIAS THE ALLAN DEVIATION, because the cluster averages
+    # below assume a uniform sample interval. On a loaded Jetson a best-effort
+    # subscriber can miss messages, and the mean rate hides it: 10 % of samples
+    # gone just looks like a 10 % lower rate. Compare against the median
+    # interval, which survives a minority of gaps, and report the shortfall.
+    dt = np.diff(stamps)
+    median_dt = float(np.median(dt)) if len(dt) else float("nan")
+    nominal_rate = 1.0 / median_dt if median_dt > 0 else float("nan")
+    expected = span / median_dt if median_dt > 0 else float("nan")
+    dropped = 1.0 - (len(stamps) - 1) / expected if expected > 0 else float("nan")
+    max_gap = float(dt.max()) if len(dt) else float("nan")
+
     mean_accel = accel.mean(axis=0)
     # The mean of the norms, not the norm of the mean: it is the magnitude each
     # individual sample reports that GTSAM has to reconcile.
     g_norm = float(np.linalg.norm(accel, axis=1).mean())
     gyro_bias = gyro.mean(axis=0)
 
-    acc_dev = allan_deviation_at(accel, rate, tau)
-    gyr_dev = allan_deviation_at(gyro, rate, tau)
+    # The nominal rate, not the mean rate: with gaps present the mean rate is
+    # too low, which would stretch every cluster and inflate the result.
+    acc_dev = allan_deviation_at(accel, nominal_rate, tau)
+    gyr_dev = allan_deviation_at(gyro, nominal_rate, tau)
     # RMS across axes, matching how the fleet's existing figures were reduced.
     acc_n = float(np.sqrt(np.mean(acc_dev ** 2)))
     gyr_n = float(np.sqrt(np.mean(gyr_dev ** 2)))
 
     return {
         "count": len(stamps), "span": span, "rate": rate,
+        "nominal_rate": nominal_rate, "dropped": dropped, "max_gap": max_gap,
         "mean_accel": mean_accel, "g_norm": g_norm, "gyro_bias": gyro_bias,
         "acc_dev": acc_dev, "gyr_dev": gyr_dev, "acc_n": acc_n, "gyr_n": gyr_n,
         "accel_sd": accel.std(axis=0), "gyro_sd": gyro.std(axis=0),
@@ -147,8 +162,10 @@ def report(topic: str, res: dict, tau: float) -> None:
     print("=" * 70)
     print(" STATIC IMU MEASUREMENT: %s" % topic)
     print("=" * 70)
-    print("  samples          : %d over %.1f s (%.2f Hz)"
-          % (res["count"], res["span"], res["rate"]))
+    print("  samples          : %d over %.1f s (%.2f Hz mean, %.2f Hz nominal)"
+          % (res["count"], res["span"], res["rate"], res["nominal_rate"]))
+    print("  dropped          : %.2f %% | largest gap %.3f s"
+          % (100.0 * res["dropped"], res["max_gap"]))
     print("  mean accel       : [%.4f, %.4f, %.4f] m/s^2"
           % tuple(res["mean_accel"]))
     print("  accel 1 sd       : [%.4f, %.4f, %.4f] m/s^2" % tuple(res["accel_sd"]))
@@ -159,6 +176,15 @@ def report(topic: str, res: dict, tau: float) -> None:
           % (tau, *res["acc_dev"]))
     print("                     gyro  [%.3e, %.3e, %.3e]" % tuple(res["gyr_dev"]))
     print()
+
+    if res["dropped"] > 0.02:
+        print("  [WARN] %.1f %% of samples are missing. The Allan deviation "
+              "assumes a uniform" % (100.0 * res["dropped"]))
+        print("         sample interval, so acc_n and gyr_n are biased. g_norm "
+              "and the gyro")
+        print("         bias are averages and stay valid. Re-record on a less "
+              "loaded machine")
+        print("         if you need the noise densities.")
 
     # Sanity: a static log whose acceleration wanders is not static.
     worst_sd = float(np.max(res["accel_sd"]))
