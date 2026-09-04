@@ -169,3 +169,28 @@ def test_nav_map_client_returns_a_grid_nav2_can_load():
         assert grid.header.frame_id == "robot_1/map_frame"
         assert len(grid.data) == downloaded.width * downloaded.height
         assert 100 in grid.data
+
+
+def test_nav_grid_seq_and_cache():
+    assert map_service.nav_grid_seq("robot_0") is None
+    _merged_two_robots()
+    seq = map_service.nav_grid_seq("robot_0")
+    assert seq is not None and seq >= 0
+
+    # First call computes and caches
+    res1 = map_service.nav_grid("robot_0")
+    assert res1 is not None
+    meta1, cells1, seq1 = res1
+    assert seq1 == seq
+
+    # Second call hits cache (same cells object)
+    res2 = map_service.nav_grid("robot_0")
+    assert res2 is not None
+    meta2, cells2, seq2 = res2
+    assert cells1 is cells2
+
+    # Reset clears cache and state
+    map_service.reset()
+    assert map_service.nav_grid_seq("robot_0") is None
+    assert map_service.nav_grid("robot_0") is None
+

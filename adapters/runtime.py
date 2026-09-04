@@ -41,6 +41,7 @@ TRANSPORT_DEFAULTS: dict[str, Any] = {
     "rates": {
         "state_hz": 5.0,
         "map_period_s": 2.0,
+        "nav_map_period_s": 2.0,
         "cloud_period_s": 4.0,
         "camera_period_s": 0.2,
         "keyframe_period_s": 2.0,

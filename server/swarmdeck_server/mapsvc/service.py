@@ -238,6 +238,9 @@ class MapService:
         # work has to leave the upload path. See `registration_worker`.
         self._registration_due: set[str] = set()
         self._registration_wake = asyncio.Event()
+        self._nav_cache: dict[
+            str, tuple[str, int, tuple[float, float, float] | None, GridMeta, np.ndarray]
+        ] = {}
 
         # Precomputed world-cell centre coordinates, for the backward warp.
         cx = self.meta.origin_x + (np.arange(n) + 0.5) * resolution
@@ -328,6 +331,7 @@ class MapService:
                 self.global_map_seq = 0
                 self.common_poses.clear()
                 self.cslam_frames.clear()
+                self._nav_cache.clear()
                 self.transforms = dict(self.transform_priors)
                 self.reference = next(iter(self.transform_priors), None)
             self._remerge()
@@ -366,6 +370,7 @@ class MapService:
             self.common_poses.pop(robot_id, None)
             self.cslam_frames.pop(robot_id, None)
             self._registration_due.discard(robot_id)
+            self._nav_cache.pop(robot_id, None)
 
             prior = self.transform_priors.get(robot_id)
             if prior is None:
@@ -472,6 +477,7 @@ class MapService:
             self.cslam_frames.clear()
             self.global_grid = None
             self.global_map_seq = 0
+            self._nav_cache.clear()
             self.transforms = dict(self.transform_priors)
             # A scan-fed robot has no grid of its own to drop — `_scan_grids` IS
             # its map, accumulated here. Leaving it means the whole pre-reset
@@ -622,6 +628,18 @@ class MapService:
                 if isinstance(pose, dict):
                     self.set_common_pose(str(robot_id), pose)
 
+    def nav_grid_seq(self, robot_id: str) -> int | None:
+        """Current sequence number of ``robot_id``'s nav grid, or None if no map."""
+        with self._state_lock:
+            if (
+                robot_id in self._global_members_unlocked()
+                and self.global_grid is not None
+            ):
+                return int(self.global_map_seq)
+            if robot_id in self.robot_grids:
+                return int(self.robot_revisions.get(robot_id, 0))
+            return None
+
     def nav_grid(self, robot_id: str):
         """Occupancy in ``robot_id``'s map frame, or None if no map available.
 
@@ -633,11 +651,23 @@ class MapService:
         from .nav_map import warp_to_robot_frame
 
         with self._state_lock:
-            if (
+            is_global = (
                 robot_id in self._global_members_unlocked()
                 and self.global_grid is not None
-            ):
-                meta, cells = self.global_grid
+            )
+            if is_global:
+                seq = int(self.global_map_seq)
+                tf = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+                cached = self._nav_cache.get(robot_id)
+                if (
+                    cached is not None
+                    and cached[0] == "global"
+                    and cached[1] == seq
+                    and cached[2] == tf
+                ):
+                    return cached[3], cached[4], seq
+
+                meta, cells = self.global_grid  # type: ignore[misc]
                 stored_meta = GridMeta(
                     meta.resolution,
                     meta.width,
@@ -646,13 +676,19 @@ class MapService:
                     meta.origin_y,
                 )
                 stored_cells = np.array(cells, dtype=np.int8, copy=True)
-                tf = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
-                seq = int(self.global_map_seq)
-                warped_meta, warped = warp_to_robot_frame(stored_meta, stored_cells, tf)
-                return warped_meta, warped, seq
+            else:
+                local_grid = self.robot_grids.get(robot_id)
+                if local_grid is None:
+                    return None
+                seq = int(self.robot_revisions.get(robot_id, 0))
+                cached = self._nav_cache.get(robot_id)
+                if (
+                    cached is not None
+                    and cached[0] == "local"
+                    and cached[1] == seq
+                ):
+                    return cached[3], cached[4], seq
 
-            local_grid = self.robot_grids.get(robot_id)
-            if local_grid is not None:
                 meta, cells = local_grid
                 stored_meta = GridMeta(
                     meta.resolution,
@@ -662,10 +698,15 @@ class MapService:
                     meta.origin_y,
                 )
                 stored_cells = np.array(cells, dtype=np.int8, copy=True)
-                seq = int(self.robot_revisions.get(robot_id, 0))
+                self._nav_cache[robot_id] = ("local", seq, None, stored_meta, stored_cells)
                 return stored_meta, stored_cells, seq
 
-            return None
+        # For global maps, warp OUTSIDE _state_lock to avoid blocking the event loop
+        warped_meta, warped = warp_to_robot_frame(stored_meta, stored_cells, tf)
+        with self._state_lock:
+            if self.global_map_seq == seq:
+                self._nav_cache[robot_id] = ("global", seq, tf, warped_meta, warped)
+        return warped_meta, warped, seq
 
     def robot_to_world(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
         """Transform a pose from one robot's SLAM frame into the merged frame."""

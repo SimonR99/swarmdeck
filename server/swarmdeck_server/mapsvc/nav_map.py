@@ -72,9 +72,8 @@ def warp_to_robot_frame(
 
     xs = min_x + (np.arange(width, dtype=np.float64) + 0.5) * res
     ys = min_y + (np.arange(height, dtype=np.float64) + 0.5) * res
-    mx, my = np.meshgrid(xs, ys)
-    wx = tx + mx * c - my * s
-    wy = ty + mx * s + my * c
+    wx = tx + xs[None, :] * c - ys[:, None] * s
+    wy = ty + xs[None, :] * s + ys[:, None] * c
     col = np.floor((wx - meta.origin_x) / res).astype(np.int64)
     row = np.floor((wy - meta.origin_y) / res).astype(np.int64)
     valid = (col >= 0) & (col < meta.width) & (row >= 0) & (row < meta.height)

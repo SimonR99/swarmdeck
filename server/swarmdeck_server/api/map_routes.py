@@ -556,13 +556,22 @@ async def get_nav_map(request: Request, robot_id: str) -> Response:
     Local costmaps must not subscribe to the OccupancyGrid this becomes.
     """
     wanted = request.headers.get("if-none-match")
-    product = map_service.nav_grid(robot_id)
+    seq = map_service.nav_grid_seq(robot_id)
+    if seq is None:
+        return JSONResponse({"error": "nav map not available"}, status_code=404)
+    if wanted is not None and wanted.strip() == str(seq):
+        return Response(status_code=304)
+
+    product = await asyncio.to_thread(map_service.nav_grid, robot_id)
     if product is None:
         return JSONResponse({"error": "nav map not available"}, status_code=404)
     meta, cells, seq = product
     if wanted is not None and wanted.strip() == str(seq):
         return Response(status_code=304)
-    body = zlib.compress(np.ascontiguousarray(cells).tobytes())
+
+    body = await asyncio.to_thread(
+        zlib.compress, np.ascontiguousarray(cells).tobytes()
+    )
     return Response(
         content=body,
         media_type="application/octet-stream",
