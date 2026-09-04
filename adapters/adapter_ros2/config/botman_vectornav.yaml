@@ -1,17 +1,25 @@
 # VectorNav VN-100 on Botman (/dev/vectornav -> /dev/ttyUSB0).
-# Verified on Botman: 115200 baud, 100 Hz output rate, ENU coordinate frames.
+# Verified on Botman: 921600 baud, 200 Hz output rate, ENU coordinate frames.
 #
-# 200 Hz was measured on 2026-09-04 and rejected. It works electrically --
-# but only at 921600 baud, since the VN-100 refuses 200 Hz on 115200 with
-# 'InsufficientBaudRate' (48 B payload, ~54 B framed, 93.8% of the link).
-# It does not pay for itself: over 120 s static windows, 200 Hz drifted
-# 5.40x more in yaw and 3.25x more in position than 100 Hz, and adding the
-# lever-arm translation only clawed that back to parity. See
-# botman_superodom_calibration.yaml for the translation half of the story.
+# 200 Hz IS REQUIRED, and 921600 baud with it. At 100 Hz the IMU stream loses a
+# sub-millisecond race with the lidar and SuperOdometry throws whole scans away:
+#
+#   meas_end_time 1788550756.131881 < 1788550756.132066 lidar_end_time
+#   All the lidar data is more recent than all the imu data. Will throw away
+#   lidar frame / sync unsuccessfull, skipping scan frame
+#
+# Measured 2026-09-04: the deficit is a median of 0.589 ms, with 153 of 200
+# samples under 1 ms -- the newest IMU sample is a hair behind the scan end.
+# At 100 Hz (10 ms between samples) that cost 237 dropped scans per minute and
+# collapsed /laser_odometry to 2.2 Hz. At 200 Hz (5 ms) it is 0 drops per
+# minute and 10.0-11.1 Hz, sustained.
+#
+# The device refuses 200 Hz on 115200 with 'InsufficientBaudRate': 48 B
+# payload, ~54 B framed, 93.8% of the link. 921600 runs it at 11.7%.
 vectornav:
   ros__parameters:
     port: "/dev/vectornav"
-    baud: 115200
+    baud: 921600
     reconnect_ms: 500
     AsyncDataOutputType: 0           # VNOFF, binary only
     AsyncDataOutputFrequency: 1
@@ -31,7 +39,7 @@ vectornav:
     errorMode: 1
     BO1:
       asyncMode: 1                   # port 1 only
-      rateDivisor: 8                 # 800 Hz / 8 = 100 Hz
+      rateDivisor: 4                 # 800 Hz / 4 = 200 Hz
       # TimeStartup + Qtn + AngularRate + Accel
       commonField: 0x131
       timeField: 0x0000
