@@ -251,7 +251,7 @@ services:
       args:
         # Pinned: a moving simulator is not a baseline. Bump deliberately, and
         # only together with whatever in swarmdeck_sim needs the new commit.
-        ARGOS_REF: "${ARGOS_REF:-da70805238285772405b4a4315e65970b69857ce}"
+        ARGOS_REF: "${ARGOS_REF:-d2741ce7}"
     image: swarmdeck-argos:local
     depends_on:
       # `sim` only, deliberately. Both of ARGoS's sockets are bound by other
