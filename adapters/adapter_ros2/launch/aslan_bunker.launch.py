@@ -85,20 +85,26 @@ def generate_launch_description() -> LaunchDescription:
     # roll -0.03, pitch -0.85, yaw -90.65 deg (residual RMS 0.0257 rad/s over
     # 3416 samples).
     #
-    # TRANSLATION IS NOT MEASURED. The calibration solved rotation only and
-    # aslan_superodom_calibration.yaml carries a zero translation, so this
-    # publishes zero too rather than inventing a lever arm. Measure the VN-100's
-    # position relative to the lidar before trusting it for anything but
-    # orientation.
+    # Translation carried over from botman 2026-09-03: the VN-100 sits in the
+    # same place on the baseplate on both robots and the lidars share x and y,
+    # so x and y transfer exactly.
+    #
+    # Z IS ADJUSTED, NOT MEASURED, AND IS THE WEAKEST NUMBER HERE. It is
+    # botman's -0.284 plus 0.02, because aslan has no Ouster aluminium base and
+    # its lidar therefore sits about 2 cm lower -- closer to the VN-100, so the
+    # gap shrinks. The 0.02 is "a couple of cm" rather than a caliper reading;
+    # measure the base's thickness to firm it up. Botman's own z is itself a
+    # tape measurement, since a spin about a vertical axis cannot observe the
+    # offset along that axis, so this value inherits that uncertainty too.
     vectornav_tf = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
         name="aslan_vectornav_tf",
         output="screen",
         arguments=[
-            "--x", "0.0",
-            "--y", "0.0",
-            "--z", "0.0",
+            "--x", "0.0010",
+            "--y", "0.0608",
+            "--z", "-0.264",
             "--roll", "-0.000524",
             "--pitch", "-0.014835",
             "--yaw", "-1.582152",
