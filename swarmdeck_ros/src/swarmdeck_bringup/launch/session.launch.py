@@ -205,6 +205,8 @@ def argos_actions(
                 str(uf_socket),
                 "--odometry",
                 odometry,
+                "--threads",
+                str(count),
             ]
             + ([] if headless else ["--gui"]),
             output="screen",
