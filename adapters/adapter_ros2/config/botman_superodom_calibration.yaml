@@ -24,10 +24,32 @@
 #   0.99 deg here, against 1.46 deg from the completely independent in-place
 #   spin in calibrate_imu_motion.py. Two methods, 0.47 deg apart.
 #
-# TRANSLATION IS ZERO ON PURPOSE. Two gyros cannot determine it: angular
-#   velocity is the same everywhere on a rigid body. Do NOT copy the Ouster's
-#   internal lever arm here; see aslan_superodom_calibration.yaml. Measure
-#   os_lidar -> vectornav with a ruler if the two are far apart.
+# TRANSLATION IS ZERO ON PURPOSE, AND STAYS ZERO. Do NOT copy the Ouster's
+#   internal lever arm here; see aslan_superodom_calibration.yaml.
+#
+#   The original reason was that two gyros cannot determine it -- angular
+#   velocity is the same everywhere on a rigid body. That reason expired: the
+#   accelerometer-pair solve added to calibrate_imu_to_imu.py measured it on
+#   2026-08-31, and in this file's imu^T_laser convention it is
+#   [-0.05620900, 0.00573200, 0.28488800]. Note that is NOT the vector the TF
+#   publishes; the TF carries laser^T_imu, and imu^T_laser = -imu^R_laser
+#   . laser^T_imu, which for a ~90 deg mount is a very different vector.
+#
+#   It is still zero because filling it in was measured and did not help.
+#   imuPreintegration.cpp:514 applies the lever arm as
+#     acc += ((gyr - gyr_pre) * 200).cross(-T) + gyr.cross(gyr.cross(-T))
+#   with the 200 hard-coded, so at our 100 Hz the tangential half is 2x too
+#   large. Static 120 s windows, |yaw| deg/min and position m/min:
+#
+#     100 Hz, T=0    n=6   0.0113   0.0022   <- what we run
+#     200 Hz, T=0    n=4   0.0612   0.0072
+#     200 Hz, T set  n=6   0.0147   0.0030
+#
+#   Correcting the rate to make the hard-coded 200 true, then enabling T,
+#   lands within noise of where zero already was. The term is worth
+#   sub-millimetre per 100 ms scan interval and the lidar re-anchors before it
+#   accumulates, which is why it does not show up. Enabling it is only worth
+#   revisiting if line 514 is fixed upstream to use the real sample interval.
 
 # Rotation from laser frame to imu frame, imu^R_laser
 extrinsicRotation_imu_laser: !!opencv-matrix
