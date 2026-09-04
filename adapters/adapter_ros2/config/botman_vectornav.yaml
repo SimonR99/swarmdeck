@@ -1,11 +1,17 @@
 # VectorNav VN-100 on Botman (/dev/vectornav -> /dev/ttyUSB0).
-# Verified on Botman: 921600 baud, 200 Hz output rate, ENU coordinate frames.
-# 200 Hz does NOT fit in 115200 baud: the VN-100 rejects it outright with
-# 'InsufficientBaudRate' (48 B payload, ~54 B on the wire, 93.8% of the link).
+# Verified on Botman: 115200 baud, 100 Hz output rate, ENU coordinate frames.
+#
+# 200 Hz was measured on 2026-09-04 and rejected. It works electrically --
+# but only at 921600 baud, since the VN-100 refuses 200 Hz on 115200 with
+# 'InsufficientBaudRate' (48 B payload, ~54 B framed, 93.8% of the link).
+# It does not pay for itself: over 120 s static windows, 200 Hz drifted
+# 5.40x more in yaw and 3.25x more in position than 100 Hz, and adding the
+# lever-arm translation only clawed that back to parity. See
+# botman_superodom_calibration.yaml for the translation half of the story.
 vectornav:
   ros__parameters:
     port: "/dev/vectornav"
-    baud: 921600
+    baud: 115200
     reconnect_ms: 500
     AsyncDataOutputType: 0           # VNOFF, binary only
     AsyncDataOutputFrequency: 1
@@ -25,7 +31,7 @@ vectornav:
     errorMode: 1
     BO1:
       asyncMode: 1                   # port 1 only
-      rateDivisor: 4                 # 800 Hz / 4 = 200 Hz
+      rateDivisor: 8                 # 800 Hz / 8 = 100 Hz
       # TimeStartup + Qtn + AngularRate + Accel
       commonField: 0x131
       timeField: 0x0000
