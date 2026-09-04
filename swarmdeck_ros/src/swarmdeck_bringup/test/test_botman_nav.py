@@ -137,7 +137,7 @@ def test_botman_launch_keeps_mist_workspace_read_only_and_can_explicit():
     assert "start_lidar:=false" in command
     assert "start_slam:=false" in command
     assert 'default_value="can0"' in robot_launch.read_text()
-    assert compose["services"]["robot_stack"]["profiles"] == ["base"]
+    assert "profiles" not in compose["services"]["robot_stack"]
     assert "profiles" not in compose["services"]["lidar"]
     assert "profiles" not in compose["services"]["slam"]
     assert "profiles" not in compose["services"]["adapter"]
@@ -191,7 +191,7 @@ def test_botman_passes_the_bunker_footprint_instead_of_the_scout_default():
     source = BOTMAN_LAUNCH.read_text()
     assert '"robot_radius": _BUNKER_RADIUS' in source
     assert '"footprint": _BUNKER_FOOTPRINT' in source
-    assert "_LIDAR_X = 0.150" in source
+    assert "_LIDAR_X = 0.160" in source
     # Both ends of the chassis must sit inside the polygon in the lidar frame.
     half_l, lidar_x = 1.023 / 2.0, 0.150
     front = half_l - lidar_x

@@ -49,7 +49,7 @@ def test_aslan_launch_keeps_mist_workspace_read_only_and_can_explicit():
     assert "start_lidar:=false" in command
     assert "start_slam:=false" in command
     assert 'default_value="can2"' in ROBOT_LAUNCH.read_text()
-    assert compose["services"]["robot_stack"]["profiles"] == ["base"]
+    assert "profiles" not in compose["services"]["robot_stack"]
     assert "profiles" not in compose["services"]["lidar"]
     assert "profiles" not in compose["services"]["slam"]
     assert "profiles" not in compose["services"]["adapter"]
@@ -75,7 +75,7 @@ def test_aslan_nav_namespace_and_tf_bridge_are_distinct():
     assert '"obstacle_sensor_frame": _SCAN_FRAME' in source
     assert '"robot_radius": _BUNKER_RADIUS' in source
     assert '"footprint": _BUNKER_FOOTPRINT' in source
-    assert "_LIDAR_X = 0.150" in source
+    assert "_LIDAR_X = 0.160" in source
     assert '"inflation_radius": "0.50"' in source
 
 

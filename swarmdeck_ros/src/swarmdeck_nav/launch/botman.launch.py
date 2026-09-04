@@ -30,7 +30,9 @@ _SCAN_TOPIC = "/botman_nav_scan"
 # 0.422 m default, which is how this stack ended up reverse-only.
 _BUNKER_HALF_L = 1.023 / 2.0
 _BUNKER_HALF_W = 0.778 / 2.0
-_LIDAR_X = 0.150
+# Tape measured 2026-09-03 and confirmed identical on both Bunkers.
+# Was 0.150, which understated the rear overhang by 10 mm.
+_LIDAR_X = 0.160
 _FRONT = _BUNKER_HALF_L - _LIDAR_X
 _REAR = -_BUNKER_HALF_L - _LIDAR_X
 _BUNKER_FOOTPRINT = (
