@@ -28,20 +28,20 @@ together (`ASLAN_IMU_TOPIC`, `ASLAN_START_VECTORNAV`, `ASLAN_SUPERODOM_CONFIG`,
 another diverges with no error message. To fall back to the Ouster's internal
 IMU, whose extrinsic is factory-exact, override all four.
 
-**One measurement is outstanding.** `g_norm` in `aslan_superodom.yaml` is still
-the upstream placeholder, because Aslan's VN-100 was never recorded while
-`ASLAN_START_VECTORNAV` was false. It must equal what this specific
-accelerometer reads when static, not true local gravity and not another unit's
-value; a wrong `g_norm` makes `imu_preintegration` reset repeatedly and drift
-rather than fail. `scripts/aslan-build-overlay` refuses to deploy until it is
-set. With the robot powered, level and completely still:
+The IMU's noise densities and `g_norm` were measured on this unit 2026-09-04
+over a 600 s static log (59908 samples at 100.16 Hz, 0.19 % dropped). `g_norm`
+must equal what this specific accelerometer reads when static, not true local
+gravity and not another unit's value: Aslan's VN-100 reads 9.7666 where
+Botman's reads 9.8719, and a wrong `g_norm` makes `imu_preintegration` reset
+repeatedly and drift rather than fail. `scripts/aslan-build-overlay` refuses to
+deploy a config that reverts to the upstream placeholder.
+
+To re-measure, with the robot powered, level and completely still:
 
 ```bash
 python3 scripts/calibration/measure_imu_static.py \
     --topic /vectornav/imu --duration 600
 ```
-
-Set `g_norm` to the reported mean `|a|`, then deploy.
 
 ```bash
 make deploy ROBOT=aslan                 # full stack (base driver, sensing, SLAM, Nav2)

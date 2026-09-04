@@ -238,22 +238,27 @@ def test_aslan_vectornav_driver_and_tf_follow_the_same_switch():
     assert "start_vectornav:=${ASLAN_START_VECTORNAV:-false}" in slam_command
 
 
-def test_aslan_vectornav_g_norm_is_guarded_until_measured():
+def test_aslan_vectornav_g_norm_is_this_units_own_reading():
     """g_norm must be this device's own static reading, not a placeholder.
 
     Established by experiment on aslan 2026-09-03: setting true local gravity
     instead of what the accelerometer reads made imu_preintegration reset 1.67
     times a second, with yaw drifting +7.43 deg/min while the robot sat still.
-    Aslan's VN-100 has never been recorded, so the config still carries the
-    upstream 9.80511 and the deploy hook refuses to ship it. When it is
-    measured, both the config and this test's expectation change together.
+
+    Measured on aslan's VN-100 2026-09-04 over a 600 s static log. It is NOT
+    transferable: botman's VN-100, the same model, reads 9.8719, so copying it
+    would have been 0.105 m/s^2 out. The deploy guard stays in place so a
+    config that reverts to the upstream placeholder is caught before it ships.
     """
     overlay = (REPO / "scripts/aslan-build-overlay").read_text()
-    config = (CONFIG_DIR / "aslan_superodom.yaml").read_text()
+    config = yaml.safe_load((CONFIG_DIR / "aslan_superodom.yaml").read_text())
+    preintegration = config["/**"]["ros__parameters"]["imu_preintegration_node"]
 
-    placeholder = "g_norm: 9.80511"
+    assert preintegration["g_norm"] == 9.7666
+    assert preintegration["g_norm"] != 9.80511, "upstream placeholder"
+    # Botman's VN-100 value, which this must not be.
+    assert preintegration["g_norm"] != 9.8719
+
     assert "9.80511" in overlay, "the deploy guard must name the value it blocks"
-    if placeholder in config:
-        assert "measure_imu_static.py" in config
-        assert "measure_imu_static.py" in overlay
-        assert (REPO / "scripts/calibration/measure_imu_static.py").exists()
+    assert "measure_imu_static.py" in overlay
+    assert (REPO / "scripts/calibration/measure_imu_static.py").exists()

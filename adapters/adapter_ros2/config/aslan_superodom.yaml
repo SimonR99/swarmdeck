@@ -44,24 +44,27 @@
 
     imu_preintegration_node:
         lidar_correction_noise: 0.01
-        # INHERITED from botman's VN-100, not measured on aslan's own unit.
-        # Botman's figures come from an overlapping Allan deviation at tau = 1 s
-        # over a 600 s static log (59.8k samples at 100.2 Hz), RMS across the
-        # three axes, measured 2026-09-03.
+        # MEASURED on aslan's own VN-100 2026-09-04: overlapping Allan
+        # deviation at tau = 1 s over a 600 s static log (59908 samples at
+        # 100.16 Hz, 0.19 % dropped), RMS across the three axes.
         #
-        # This is a same-model transfer (both are VN-100s), which is a far
-        # weaker assumption than the one f2bf0a7 removed: the values these
-        # replace were an upstream sample shared byte-identically by the VN-100
-        # and Ouster configs alike, and they overstate VN-100 gyro noise by 24x
-        # (1.564e-03 against a measured 6.509e-05). Overstating gyro noise makes
-        # the estimator discount a gyro that is better than advertised, so
-        # unit-to-unit spread between two VN-100s is the smaller error by far.
+        #   Allan dev @1s  accel [1.216e-03, 1.170e-03, 1.795e-03]
+        #                  gyro  [7.640e-05, 6.648e-05, 6.568e-05]
+        #   accel 1 sd     [0.0121, 0.0188, 0.0184] m/s^2
+        #   gyro bias      0.0007 deg/s
         #
-        # Re-measure on aslan and replace:
-        #   python3 scripts/calibration/measure_imu_static.py \
-        #       --topic /vectornav/imu --duration 600
-        acc_n: 1.446463e-03
-        gyr_n: 6.509476e-05
+        # These replace an upstream sample shared byte-identically by the
+        # VN-100 and Ouster configs alike, which overstated this gyro's noise
+        # by 22x (1.564e-03 against 6.969e-05) and so made the estimator
+        # discount a gyro far better than advertised.
+        #
+        # For scale, aslan's own Ouster measured 5.835e-03 and 3.681e-04 the
+        # same way: the VN-100 is 4.1x quieter in acceleration and 5.3x quieter
+        # in rate, which is why it is worth the extra driver.
+        acc_n: 1.422605e-03
+        gyr_n: 6.969057e-05
+        # acc_w / gyr_w need the Allan deviation's rising right-hand slope,
+        # which a ten-minute log does not reach. Left as they were.
         acc_w: 6.4356659353532566e-05
         gyr_w: 3.5640318696367613e-05
         # g_norm MUST equal what THIS IMU reads when static, NOT true local
@@ -71,18 +74,17 @@
         # value made imu_preintegration diverge, resetting 1.67 times a second
         # with odometry yaw drifting +7.43 deg/min while the robot sat still.
         #
-        # The offset is device-specific and cannot be borrowed: aslan's Ouster
-        # reads 9.6732, botman's Ouster 9.8445 (1.75 % apart), botman's VN-100
-        # 9.8719. So botman's VN-100 value is NOT valid here either.
+        # MEASURED 2026-09-04 as the mean |a| of the log above. This unit reads
+        # 9.7666 against a local gravity of 9.8064, an offset of -0.406 %.
         #
-        # UNMEASURED. Aslan's VN-100 has never been recorded, because
-        # ASLAN_START_VECTORNAV was false until this config became the default.
-        # The value below is the upstream default and is almost certainly wrong
-        # for this device. scripts/aslan-build-overlay refuses to deploy while
-        # it is still 9.80511.
+        # THE OFFSET IS DEVICE-SPECIFIC AND CANNOT BE BORROWED, and this
+        # measurement is what shows it for the VN-100 rather than assuming it:
+        # botman's VN-100, the same model, reads 9.8719. The two disagree by
+        # 1.08 %, alongside the 1.75 % between the fleet's two OS0-64s. Had
+        # botman's value been copied here it would have been 0.105 m/s^2 out,
+        # which is most of the offset that made the Ouster diverge.
         #
-        # To measure it, with the robot powered, level and completely still:
+        # Re-measure with:
         #   python3 scripts/calibration/measure_imu_static.py \
         #       --topic /vectornav/imu --duration 600
-        # then set g_norm to the reported mean |a|.
-        g_norm: 9.80511
+        g_norm: 9.7666
