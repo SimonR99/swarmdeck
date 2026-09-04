@@ -85,11 +85,25 @@
         # which is most of the offset that made the Ouster diverge.
         #
         # VALIDATED ON THE ROBOT 2026-09-04, which is the check this value
-        # exists to pass. Deployed on the VN-100 and left standing 180 s:
-        # 1 preintegration reset (a startup transient 2 s after the driver
-        # connected, none after), position drift 0.0042 m/min and yaw drift
-        # 0.0035 deg/min. The divergent case this guards against ran at 1.67
-        # resets a SECOND, 0.135 m/min and 7.43 deg/min.
+        # exists to pass. Deployed on the VN-100 and left standing 300 s (2930
+        # samples at 9.76 Hz): position drift 0.0010 m/min, yaw drift
+        # 0.0024 deg/min, and exactly ONE "Large bias, reset
+        # IMU-preintegration!" in 15 minutes, a startup transient 2 s after the
+        # driver connected. The divergent case this guards against ran at 1.67
+        # resets a SECOND, 0.135 m/min and 7.43 deg/min; the corrected Ouster
+        # run gave 0.0007 m/min and 0.015 deg/min, so yaw here is 6x better,
+        # which is what an IMU 5.3x quieter in rate should buy.
+        #
+        # These are STATIONARY figures. They show the estimator does not run
+        # away at rest; drift under motion is a separate question.
+        #
+        # Do not read "Update failed due to underconstrained call to isam2 in
+        # imuPreintegration" (with the failureDetected beside it) as this
+        # value being wrong. It is the stationary degenerate case, not a
+        # g_norm symptom: laser_mapping logs "very small motion, not
+        # accumulating" and adds no lidar constraints, so iSAM2 has nothing to
+        # constrain the new pose and bias. Botman shows the identical
+        # signature on its own VN-100, and it comes with no measurable drift.
         #
         # Re-measure with:
         #   python3 scripts/calibration/measure_imu_static.py \
