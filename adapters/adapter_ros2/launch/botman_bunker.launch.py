@@ -77,10 +77,18 @@ def generate_launch_description() -> LaunchDescription:
     # a 0.6 rad/s spin, composed with the Ouster factory os_lidar -> os_imu.
     # The quaternion is a -92.52 deg yaw.
     #
-    # Z IS NOT MEASURED. A spin about a vertical axis cannot observe the offset
-    # along that axis -- the solver reports observability 0.000 for it however
-    # long you record -- so -0.284 is the tape measurement (same height as the
-    # camera). Rotate the sensor head about a horizontal axis and re-run to fix.
+    # Z IS A CALIBRATION RESULT TOO, not a tape reading. calibrate_imu_to_imu.py
+    # refuses a yaw spin for exactly the reason it would leave z unobservable,
+    # and asks instead for rotation about non-vertical axes: press a front
+    # corner and release ~5 times, press a side corner ~5 times, lift a side.
+    # Run that way across the three-IMU set (OAK-D, Ouster, VN-100), the
+    # accelerometer pair does resolve the vertical component. The camera-lidar
+    # leg of the same session used the ChArUco fiducial panel.
+    #
+    # Z is still the least-constrained of the three: the recorded excitation for
+    # this robot was singular values [16.75, 10.58, 0.77], so the third axis was
+    # driven far less hard than the first two. Treat it as measured but with the
+    # widest error bar, and re-run with brisker rocking if it matters.
     vectornav_tf = Node(
         package="tf2_ros",
         executable="static_transform_publisher",

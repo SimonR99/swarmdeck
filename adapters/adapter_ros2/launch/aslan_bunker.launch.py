@@ -93,9 +93,13 @@ def generate_launch_description() -> LaunchDescription:
     # botman's -0.284 plus 0.02, because aslan has no Ouster aluminium base and
     # its lidar therefore sits about 2 cm lower -- closer to the VN-100, so the
     # gap shrinks. The 0.02 is "a couple of cm" rather than a caliper reading;
-    # measure the base's thickness to firm it up. Botman's own z is itself a
-    # tape measurement, since a spin about a vertical axis cannot observe the
-    # offset along that axis, so this value inherits that uncertainty too.
+    # measure the base's thickness to firm it up.
+    #
+    # Botman's -0.284 is itself a calibration result, not a tape reading: it
+    # comes from the three-IMU set (OAK-D, Ouster, VN-100) rocked about
+    # non-vertical axes, which is what makes the vertical component observable.
+    # It is the least-constrained of its three components, so aslan's z carries
+    # that error bar plus the 0.02 estimate on top.
     vectornav_tf = Node(
         package="tf2_ros",
         executable="static_transform_publisher",
