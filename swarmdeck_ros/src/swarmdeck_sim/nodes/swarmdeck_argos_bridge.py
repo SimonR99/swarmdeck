@@ -53,20 +53,33 @@ import threading
 import time
 from typing import Optional
 
-import rclpy
-from geometry_msgs.msg import Point, Quaternion, TransformStamped, Twist, Vector3
-from nav_msgs.msg import Odometry
-from rclpy.node import Node
-from rclpy.qos import (
-    QoSDurabilityPolicy,
-    QoSHistoryPolicy,
-    QoSProfile,
-    QoSReliabilityPolicy,
-)
-from rosgraph_msgs.msg import Clock
-from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2, PointField
-from std_srvs.srv import Trigger
-from tf2_msgs.msg import TFMessage
+import numpy as np
+try:
+    import rclpy
+    from geometry_msgs.msg import Point, Quaternion, TransformStamped, Twist, Vector3
+    from nav_msgs.msg import Odometry
+    from rclpy.node import Node
+    from rclpy.qos import (
+        QoSDurabilityPolicy,
+        QoSHistoryPolicy,
+        QoSProfile,
+        QoSReliabilityPolicy,
+    )
+    from rosgraph_msgs.msg import Clock
+    from sensor_msgs.msg import (
+        CameraInfo,
+        Image,
+        Imu,
+        LaserScan,
+        PointCloud2,
+        PointField,
+    )
+    from std_srvs.srv import Trigger
+    from tf2_msgs.msg import TFMessage
+except ImportError:
+    rclpy = None
+    Node = object
+    PointField = None
 
 try:
     from robot_localization.srv import SetPose
@@ -92,6 +105,136 @@ COMMAND_MAGIC = b"SDCMD"
 # range f32, x f32, y f32, z f32, ring u16, hit u8. Written field by field on
 # the C++ side, so there is no padding and '<' formats line up exactly.
 LIDAR_READING = struct.Struct("<ffffHB")
+LIDAR_DTYPE = np.dtype([
+    ("range", "<f4"),
+    ("x", "<f4"),
+    ("y", "<f4"),
+    ("z", "<f4"),
+    ("ring", "<u2"),
+    ("hit", "u1"),
+])
+
+if PointField is not None:
+    LIDAR_POINT_FIELDS = [
+        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
+    ]
+else:
+    LIDAR_POINT_FIELDS = []
+
+SCAN_BEAMS = 360
+SCAN_ANGLE_MIN = -3.14159
+SCAN_ANGLE_MAX = 3.14159
+SCAN_ANGLE_INC = 0.0174533
+INV_ANGLE_INC = 1.0 / SCAN_ANGLE_INC
+SCAN_RANGE_MIN = 0.45
+SCAN_TIME = 0.1
+
+PROX_MIN_HEIGHT = 0.15
+PROX_MAX_HEIGHT = 1.80
+
+ROBOT_SPECS = {
+    "bunker": {
+        "lidar_x": -0.07,
+        "lidar_z": 0.402,
+        "base_height": 0.138,
+        "prox_range_max": 8.0,
+    },
+    "scout_mini": {
+        "lidar_x": 0.0,
+        "lidar_z": 0.280,
+        "base_height": 0.100,
+        "prox_range_max": 8.0,
+    },
+    "spot": {
+        "lidar_x": -0.180,
+        "lidar_z": 0.470,
+        "base_height": 0.500,
+        "prox_range_max": 8.0,
+    },
+}
+
+
+def project_laserscan_slice(
+    hit_pts: np.ndarray,
+    range_max: float = 30.0,
+) -> np.ndarray:
+    """Derive a 2D planar slice in the sensor frame for SLAM Toolbox.
+
+    Selects the horizontal ring band [-0.05, 0.05] m in sensor frame.
+    """
+    ranges = np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    if hit_pts.size == 0:
+        return ranges
+
+    hz = hit_pts["z"]
+    slice_mask = (hz >= -0.05) & (hz <= 0.05)
+    if not np.any(slice_mask):
+        return ranges
+
+    sx = hit_pts["x"][slice_mask]
+    sy = hit_pts["y"][slice_mask]
+    sr = np.hypot(sx, sy)
+    valid = (sr >= SCAN_RANGE_MIN) & (sr <= range_max)
+    if not np.any(valid):
+        return ranges
+
+    sr = sr[valid]
+    stheta = np.arctan2(sy[valid], sx[valid])
+    sbins = np.clip(
+        np.floor((stheta - SCAN_ANGLE_MIN) * INV_ANGLE_INC).astype(np.int32),
+        0,
+        SCAN_BEAMS - 1,
+    )
+    np.minimum.at(ranges, sbins, sr)
+    return ranges
+
+
+def project_laserscan_proximity(
+    hit_pts: np.ndarray,
+    lidar_x: float,
+    lidar_z: float,
+    base_height: float,
+    prox_range_max: float = 8.0,
+) -> np.ndarray:
+    """Derive a 2.5D obstacle projection in base_link frame for Nav2 costmaps.
+
+    Projects obstacles in the physical height band [0.15, 1.80] m above ground.
+    """
+    ranges = np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
+    if hit_pts.size == 0:
+        return ranges
+
+    hx = hit_pts["x"]
+    hy = hit_pts["y"]
+    hz = hit_pts["z"]
+
+    px = hx + lidar_x
+    py = hy
+    pz_floor = hz + lidar_z + base_height
+
+    prox_mask = (pz_floor >= PROX_MIN_HEIGHT) & (pz_floor <= PROX_MAX_HEIGHT)
+    if not np.any(prox_mask):
+        return ranges
+
+    px = px[prox_mask]
+    py = py[prox_mask]
+    pr = np.hypot(px, py)
+    valid = (pr >= SCAN_RANGE_MIN) & (pr <= prox_range_max)
+    if not np.any(valid):
+        return ranges
+
+    pr = pr[valid]
+    ptheta = np.arctan2(py[valid], px[valid])
+    pbins = np.clip(
+        np.floor((ptheta - SCAN_ANGLE_MIN) * INV_ANGLE_INC).astype(np.int32),
+        0,
+        SCAN_BEAMS - 1,
+    )
+    np.minimum.at(ranges, pbins, pr)
+    return ranges
 
 
 def recv_exact(sock: socket.socket, count: int) -> bytes:
@@ -145,8 +288,18 @@ class RobotInterface:
                             durability=QoSDurabilityPolicy.VOLATILE)
 
         ns = robot_id
+        spec = node.robot_specs.get(robot_id, ROBOT_SPECS["bunker"])
+        self.lidar_x = float(spec.get("lidar_x", -0.07))
+        self.lidar_z = float(spec.get("lidar_z", 0.402))
+        self.base_height = float(spec.get("base_height", 0.138))
+        self.prox_range_max = float(spec.get("prox_range_max", 8.0))
+
         self.pub_points = node.create_publisher(
             PointCloud2, f"/{ns}/scan/points", reliable)
+        self.pub_scan = node.create_publisher(
+            LaserScan, f"/{ns}/scan", reliable)
+        self.pub_prox = node.create_publisher(
+            LaserScan, f"/{ns}/proximity_scan", reliable)
         self.pub_imu = node.create_publisher(
             Imu, f"/{ns}/imu", reliable)
         self.pub_odom = node.create_publisher(
@@ -225,9 +378,32 @@ class RobotInterface:
 
 
 class ArgosBridge(Node):
-    def __init__(self, socket_path: str):
+    @staticmethod
+    def _load_robot_specs(config_path: str | None) -> dict[str, dict]:
+        specs: dict[str, dict] = {}
+        if config_path and os.path.exists(config_path):
+            try:
+                import yaml
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                fleet = cfg.get("fleet") or {}
+                default_type = fleet.get("robot_type", "bunker")
+                overrides = fleet.get("robot_types") or {}
+                count = int(fleet.get("robot_count", 4))
+                prefix = fleet.get("robot_prefix", "robot_")
+                for i in range(count):
+                    rid = f"{prefix}{i}"
+                    ptype = overrides.get(rid, default_type)
+                    base_spec = ROBOT_SPECS.get(ptype, ROBOT_SPECS["bunker"]).copy()
+                    specs[rid] = base_spec
+            except Exception:
+                pass
+        return specs
+
+    def __init__(self, socket_path: str, config_path: str | None = None):
         super().__init__("swarmdeck_argos_bridge")
         self.socket_path = socket_path
+        self.robot_specs = self._load_robot_specs(config_path)
         self.robots: dict[str, RobotInterface] = {}
         self.running = True
         self.world_reset_pending = False
@@ -402,12 +578,19 @@ class ArgosBridge(Node):
             _scan_tick, _rings, _azimuths, _max_range, readings = struct.unpack(
                 "<IIIfI", recv_exact(sock, 20))
             raw = recv_exact(sock, readings * LIDAR_READING.size)
-            packed = bytearray()
-            hits = 0
-            for x, y, z, ring in self._iter_hits(raw, readings):
-                packed += struct.pack("<ffff", x, y, z, float(ring))
-                hits += 1
+            arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
+            hit_mask = arr["hit"] != 0
+            hits = int(np.count_nonzero(hit_mask))
+            hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
+
+            # 1. PointCloud2 (Fast-LIVO2 & 3D consumers - UNTOUCHED)
             if hits:
+                out = np.empty((hits, 4), dtype="<f4")
+                out[:, 0] = hit_pts["x"]
+                out[:, 1] = hit_pts["y"]
+                out[:, 2] = hit_pts["z"]
+                out[:, 3] = hit_pts["ring"]
+
                 cloud = PointCloud2()
                 cloud.header.stamp = stamp
                 cloud.header.frame_id = robot.frame_lidar
@@ -417,22 +600,49 @@ class ArgosBridge(Node):
                 # return strength there, which this sensor does not model; the
                 # ring is what a 3D SLAM front-end actually wants from the
                 # fourth field, and it costs nothing to carry.
-                cloud.fields = [
-                    PointField(name="x", offset=0,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name="y", offset=4,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name="z", offset=8,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name="intensity", offset=12,
-                               datatype=PointField.FLOAT32, count=1),
-                ]
+                cloud.fields = LIDAR_POINT_FIELDS
                 cloud.is_bigendian = False
                 cloud.point_step = 16
                 cloud.row_step = 16 * hits
                 cloud.is_dense = True
-                cloud.data = bytes(packed)
+                cloud.data = out.tobytes()
                 robot.pub_points.publish(cloud)
+
+            # 2. Planar LaserScan (SLAM Toolbox: horizontal ring slice in sensor frame)
+            scan_ranges = project_laserscan_slice(hit_pts, range_max=float(_max_range))
+            scan_msg = LaserScan()
+            scan_msg.header.stamp = stamp
+            scan_msg.header.frame_id = robot.frame_lidar
+            scan_msg.angle_min = float(SCAN_ANGLE_MIN)
+            scan_msg.angle_max = float(SCAN_ANGLE_MAX)
+            scan_msg.angle_increment = float(SCAN_ANGLE_INC)
+            scan_msg.time_increment = 0.0
+            scan_msg.scan_time = float(SCAN_TIME)
+            scan_msg.range_min = float(SCAN_RANGE_MIN)
+            scan_msg.range_max = float(_max_range)
+            scan_msg.ranges = scan_ranges.tolist()
+            robot.pub_scan.publish(scan_msg)
+
+            # 3. Proximity 2.5D LaserScan (Nav2: 0.15..1.80 m obstacle band in base_link)
+            prox_ranges = project_laserscan_proximity(
+                hit_pts,
+                robot.lidar_x,
+                robot.lidar_z,
+                robot.base_height,
+                prox_range_max=robot.prox_range_max,
+            )
+            prox_msg = LaserScan()
+            prox_msg.header.stamp = stamp
+            prox_msg.header.frame_id = robot.frame_base
+            prox_msg.angle_min = float(SCAN_ANGLE_MIN)
+            prox_msg.angle_max = float(SCAN_ANGLE_MAX)
+            prox_msg.angle_increment = float(SCAN_ANGLE_INC)
+            prox_msg.time_increment = 0.0
+            prox_msg.scan_time = float(SCAN_TIME)
+            prox_msg.range_min = float(SCAN_RANGE_MIN)
+            prox_msg.range_max = float(robot.prox_range_max)
+            prox_msg.ranges = prox_ranges.tolist()
+            robot.pub_prox.publish(prox_msg)
 
         # -- camera ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
@@ -484,12 +694,10 @@ class ArgosBridge(Node):
 
     @staticmethod
     def _iter_hits(raw: bytes, readings: int):
-        size = LIDAR_READING.size
-        unpack = LIDAR_READING.unpack_from
-        for i in range(readings):
-            _range, x, y, z, ring, hit = unpack(raw, i * size)
-            if hit:
-                yield x, y, z, ring
+        arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
+        hit_mask = arr["hit"] != 0
+        for pt in arr[hit_mask]:
+            yield float(pt["x"]), float(pt["y"]), float(pt["z"]), int(pt["ring"])
 
     def _send_commands(self, sock: socket.socket, tick: int, ids,
                        sim_now: float) -> None:
@@ -528,11 +736,12 @@ class ArgosBridge(Node):
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--socket", default="/run/swarmdeck/argos.sock")
+    parser.add_argument("--config", default=None, help="Path to session YAML config")
     args, ros_args = parser.parse_known_args(argv if argv is not None
                                              else sys.argv[1:])
 
     rclpy.init(args=ros_args)
-    node = ArgosBridge(socket_path=args.socket)
+    node = ArgosBridge(socket_path=args.socket, config_path=args.config)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

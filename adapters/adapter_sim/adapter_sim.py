@@ -387,8 +387,16 @@ class RobotBridge(
         self._last_depth_warning_at = 0.0
         self._detector = ObjectDetector()
         self._detection_enabled = True
+        default_period = float(
+            os.environ.get("SWARMDECK_DETECTION_PERIOD_S", "1.0")
+        )
         self._detection_period_s = max(
-            0.05, float((self.cfg.get("rates") or {}).get("camera_period_s", 0.2))
+            0.05,
+            float(
+                (self.cfg.get("rates") or {}).get(
+                    "camera_period_s", default_period
+                )
+            ),
         )
         self._last_detection_at = 0.0
         self._detections: list[dict] | None = None

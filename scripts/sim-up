@@ -222,6 +222,7 @@ case "${ACTION}" in
     echo "Stopping SwarmDeck simulation stack (${COMPOSE_PROJECT})..."
     "${COMPOSE_CMD[@]}" --profile argos stop argos sim fast_livo2
     "${COMPOSE_CMD[@]}" --profile argos rm -f argos sim fast_livo2
+    docker volume rm "${COMPOSE_PROJECT}_swarmdeck_runtime" 2>/dev/null || true
     echo "Simulation stack stopped."
     exit 0
     ;;

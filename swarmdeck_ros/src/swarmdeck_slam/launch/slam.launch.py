@@ -71,7 +71,10 @@ def generate_launch_description() -> LaunchDescription:
     lidar_z = LaunchConfiguration("lidar_z")
     floor_z = LaunchConfiguration("floor_z")
     rings = LaunchConfiguration("lidar_rings")
-    multi_ring = IfCondition(PythonExpression(['"', rings, '" != "1"']))
+    scan_from_cloud = LaunchConfiguration("scan_from_cloud")
+    derive_scan = IfCondition(
+        PythonExpression(['"', rings, '" != "1" and "', scan_from_cloud, '" == "true"'])
+    )
     fuse_imu = LaunchConfiguration("fuse_imu")
     odom_source = LaunchConfiguration("odometry_source")
     proximity = LaunchConfiguration("proximity_from_cloud")
@@ -133,6 +136,13 @@ def generate_launch_description() -> LaunchDescription:
                 description="Derive <ns>/proximity_scan from the 3D cloud as a "
                 "second flattened projection, for fleets with no "
                 "dedicated bumper lidar.",
+            ),
+            DeclareLaunchArgument(
+                "scan_from_cloud",
+                default_value="true",
+                description="Derive <ns>/scan from the 3D cloud when lidar_rings > 1. "
+                "Set to false if the backend bridge (e.g. ARGoS) publishes "
+                "<ns>/scan directly.",
             ),
             DeclareLaunchArgument(
                 "proximity_range_max",
@@ -332,7 +342,7 @@ def generate_launch_description() -> LaunchDescription:
                                 "/launch/cloud_to_scan.launch.py",
                             ]
                         ),
-                        condition=multi_ring,
+                        condition=derive_scan,
                         launch_arguments={
                             "namespace": ns,
                             "use_sim_time": use_sim,

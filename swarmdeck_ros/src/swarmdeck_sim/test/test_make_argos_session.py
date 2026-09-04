@@ -476,3 +476,19 @@ def test_bistro_3robot_dev_config():
     for platform in types:
         assert arena.findall(f"./{platform}"), platform
 
+
+def test_system_threads_matches_default_or_override():
+    # default is 0 for Vulkan thread safety
+    xml = mas.generate_argos_xml(CONFIG)
+    tree = ElementTree.fromstring(xml)
+    system = tree.find("./framework/system")
+    assert system is not None
+    assert int(system.get("threads")) == 0
+
+    # explicit override
+    xml_override = mas.generate_argos_xml(CONFIG, threads=2)
+    tree_override = ElementTree.fromstring(xml_override)
+    system_override = tree_override.find("./framework/system")
+    assert int(system_override.get("threads")) == 2
+
+

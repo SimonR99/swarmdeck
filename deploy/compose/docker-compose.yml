@@ -334,6 +334,11 @@ services:
       SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG: "${SWARMDECK_KEYFRAME_MAX_YAW_RATE_DEG:-8.0}"
       ROS_DOMAIN_ID: "42"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
+      SWARMDECK_DETECTION_PERIOD_S: "${SWARMDECK_DETECTION_PERIOD_S:-1.0}"
+      VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-500}"
+      VIDEO_FPS: "${VIDEO_FPS:-5}"
+      VIDEO_WIDTH: "${VIDEO_WIDTH:-320}"
+      VIDEO_HEIGHT: "${VIDEO_HEIGHT:-240}"
     volumes:
       # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
       # which is the layout find_bistro_assets_dir() already looks for. They
@@ -343,6 +348,8 @@ services:
       - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
+      - ../../swarmdeck_ros/src:/app/swarmdeck_ros/src:ro
+      - ../../adapters:/app/adapters:ro
       - swarmdeck_runtime:/run/swarmdeck
     shm_size: "2gb"
     restart: unless-stopped
@@ -449,10 +456,11 @@ services:
       ROS_DOMAIN_ID: "42"
       LIBGL_ALWAYS_SOFTWARE: "1"
       SWARMDECK_DETECTOR_URL: http://duck_detector:8091
-      VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-700}"
-      VIDEO_FPS: "${VIDEO_FPS:-10}"
-      VIDEO_WIDTH: "${VIDEO_WIDTH:-640}"
-      VIDEO_HEIGHT: "${VIDEO_HEIGHT:-480}"
+      SWARMDECK_DETECTION_PERIOD_S: "${SWARMDECK_DETECTION_PERIOD_S:-1.0}"
+      VIDEO_BITRATE_KBPS: "${VIDEO_BITRATE_KBPS:-500}"
+      VIDEO_FPS: "${VIDEO_FPS:-5}"
+      VIDEO_WIDTH: "${VIDEO_WIDTH:-320}"
+      VIDEO_HEIGHT: "${VIDEO_HEIGHT:-240}"
     volumes:
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
@@ -473,17 +481,17 @@ services:
     # Bounded, because nothing in torch bounds it. Measured unrestricted on a
     # 20-core host: 727% CPU for a best-effort perception sidecar, which
     # starved the estimator and the simulator sharing the machine and dropped
-    # the simulation's real-time factor by 2.4x. The detector runs at 5 Hz on
-    # 320x240 frames; it does not need seven cores to do that.
-    cpus: "3.0"
+    # the simulation's real-time factor by 2.4x. Throttled to 1 Hz per robot
+    # on 320x240 frames and capped to 1 CPU core.
+    cpus: "${SWARMDECK_DETECTOR_CPUS:-1.0}"
     environment:
       SWARMDECK_YOLO_DEVICE: cpu
       # torch and OpenCV each default to one thread per core and multiply.
       # `cpus` alone would cap the total but leave them thrashing over it.
-      OMP_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
-      MKL_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
-      OPENBLAS_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
-      NUMEXPR_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-3}"
+      OMP_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-1}"
+      MKL_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-1}"
+      OPENBLAS_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-1}"
+      NUMEXPR_NUM_THREADS: "${SWARMDECK_DETECTOR_THREADS:-1}"
     volumes:
       - duck_detector_models:/models
     restart: unless-stopped

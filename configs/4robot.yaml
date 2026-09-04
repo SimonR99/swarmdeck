@@ -47,6 +47,7 @@ fleet:
   # the fix rather than starting a fleet whose estimator can never converge.
   lidar:
     profile: vlp16
+    h_samples: 900  # 0.4 deg resolution (15,300 pts/robot vs 30,600) for real-time simulation
 
 map:
   merge_mode: graph         # pose-graph occupancy; no grid registration

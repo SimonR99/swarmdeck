@@ -59,6 +59,18 @@
 static const UInt8 kObservationMagic[4] = {'S', 'D', 'B', '2'};
 static const UInt8 kCommandMagic[5]     = {'S', 'D', 'C', 'M', 'D'};
 
+#pragma pack(push, 1)
+struct SLidarReadingWire {
+   float Range;
+   float X;
+   float Y;
+   float Z;
+   UInt16 Ring;
+   UInt8 Hit;
+};
+#pragma pack(pop)
+static_assert(sizeof(SLidarReadingWire) == 19, "SLidarReadingWire must be 19 bytes matching wire format");
+
 CSwarmdeckBridgeLoopFunctions::CSwarmdeckBridgeLoopFunctions() {
 }
 
@@ -428,21 +440,17 @@ void CSwarmdeckBridgeLoopFunctions::PostStep() {
          Append(&fMaxRange, sizeof(fMaxRange));
          Append(&unNumReadings, sizeof(unNumReadings));
 
-         for(const auto& sReading : sScan.Readings) {
-            float fRange = float(sReading.Range);
-            float fX = float(sReading.Position.GetX());
-            float fY = float(sReading.Position.GetY());
-            float fZ = float(sReading.Position.GetZ());
-            UInt16 unRing = static_cast<UInt16>(sReading.Ring);
-            UInt8 unHit = sReading.Hit ? 1 : 0;
-
-            Append(&fRange, sizeof(fRange));
-            Append(&fX, sizeof(fX));
-            Append(&fY, sizeof(fY));
-            Append(&fZ, sizeof(fZ));
-            Append(&unRing, sizeof(unRing));
-            Append(&unHit, sizeof(unHit));
+         std::vector<SLidarReadingWire> vecReadings(sScan.Readings.size());
+         for(size_t i = 0; i < sScan.Readings.size(); ++i) {
+            const auto& sReading = sScan.Readings[i];
+            vecReadings[i].Range = float(sReading.Range);
+            vecReadings[i].X = float(sReading.Position.GetX());
+            vecReadings[i].Y = float(sReading.Position.GetY());
+            vecReadings[i].Z = float(sReading.Position.GetZ());
+            vecReadings[i].Ring = static_cast<UInt16>(sReading.Ring);
+            vecReadings[i].Hit = sReading.Hit ? 1 : 0;
          }
+         Append(vecReadings.data(), vecReadings.size() * sizeof(SLidarReadingWire));
       }
 
       /* --- camera ---------------------------------------------------------- */

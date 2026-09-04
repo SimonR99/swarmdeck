@@ -220,6 +220,8 @@ def argos_actions(
                         str(nodes_dir / "swarmdeck_argos_bridge.py"),
                         "--socket",
                         str(socket),
+                        "--config",
+                        str(cfg_path),
                     ],
                     output="screen",
                 )
@@ -545,6 +547,7 @@ def setup(context, *args, **kwargs):
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
                 "floor_z": f"{-robot.base_height:.4f}",
+                "scan_from_cloud": "false" if argos else "true",
             }
             slam_launch = "/launch/slam_rtabmap.launch.py"
         else:
@@ -563,7 +566,8 @@ def setup(context, *args, **kwargs):
                 "lidar_x": f"{robot.lidar_x:.4f}",
                 "lidar_z": f"{robot.lidar_z:.4f}",
                 "odometry_source": odom_source,
-                "proximity_from_cloud": "true" if argos else "false",
+                "proximity_from_cloud": "false",
+                "scan_from_cloud": "false" if argos else "true",
                 "proximity_range_max": f"{robot.prox_range_max:.1f}",
                 "floor_z": f"{-robot.base_height:.4f}",
             }

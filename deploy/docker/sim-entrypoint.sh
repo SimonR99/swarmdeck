@@ -123,10 +123,10 @@ PY
       --topic "/${RID}/camera/image/compressed" \
       --raw-topic "/${RID}/camera/image" \
       --rtsp-url "rtsp://${MEDIA_HOST:-mediamtx}:${MEDIA_RTSP_PORT:-8554}/${RID}" \
-      --bitrate-kbps "${VIDEO_BITRATE_KBPS:-700}" \
-      --fps "${VIDEO_FPS:-10}" \
-      --width "${VIDEO_WIDTH:-640}" \
-      --height "${VIDEO_HEIGHT:-480}" &
+      --bitrate-kbps "${VIDEO_BITRATE_KBPS:-500}" \
+      --fps "${VIDEO_FPS:-5}" \
+      --width "${VIDEO_WIDTH:-320}" \
+      --height "${VIDEO_HEIGHT:-240}" &
     MEDIA_PIDS+=($!)
   done
 fi
