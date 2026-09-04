@@ -12,13 +12,12 @@ Prerequisites on the robot:
 - Measured calibration for `os_lidar` -> `vectornav` (kept in `botman_superodom_calibration.yaml`).
 
 ```bash
-make deploy ROBOT=botman                 # sensing, mapping, UI bridge
-DEPLOY_COMPOSE_PROFILES=base make deploy ROBOT=botman  # include base CAN driver
+make deploy ROBOT=botman                 # full stack (base driver, sensing, SLAM, Nav2)
 ```
 
-The base driver is intentionally excluded by default behind Compose profile `base`
-(matching Aslan). Complete the common [pre-flight checks](../operations/hardware-bringup.md)
-before enabling its profile with a person at the physical e-stop.
+The Bunker CAN driver (`robot_stack`) starts up by default alongside sensing and Nav2.
+Complete the common [pre-flight checks](../operations/hardware-bringup.md) with a
+person at the physical e-stop before commanding motion.
 
 Botman navigation uses the Scout-like responsive Nav2 tuning: a `0.4 m/s`
 linear cap and `0.50 m` obstacle-inflation margin. The physical Bunker footprint

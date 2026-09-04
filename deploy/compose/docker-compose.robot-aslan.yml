@@ -30,14 +30,12 @@ x-aslan-stack: &aslan-stack
 
 services:
   # Base only. Lidar and SuperOdometry are separate services, same split as
-  # Botman, so mapping can come up without opening the CAN driver. Default
-  # `docker compose up -d` starts lidar + slam + oak_camera + media +
-  # duck_detector + nav2 + adapter. Pass `--profile base` when a person is at
-  # the e-stop and can2 is up. Nav2 writes only cmd_vel_nav; it does not
-  # command the base until a goal is active.
+  # Botman. Default `docker compose up -d` starts the Bunker CAN driver
+  # (robot_stack) alongside lidar, slam, oak_camera, media, duck_detector,
+  # nav2, and adapter. Nav2 writes only cmd_vel_nav; it does not command the
+  # base until a goal is active.
   robot_stack:
     <<: *aslan-stack
-    profiles: ["base"]
     container_name: swarmdeck-aslan-stack
     runtime: nvidia
     command:

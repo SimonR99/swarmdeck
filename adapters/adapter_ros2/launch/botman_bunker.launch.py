@@ -159,10 +159,12 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(start_slam),
     )
 
+    bunker_launch = bunker_share / "launch/bunker_base.launch.py"
+    if not bunker_launch.exists():
+        bunker_launch = bunker_share / "launch/bunker_gnm.launch.py"
+
     bunker = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            str(bunker_share / "launch/bunker_base.launch.py")
-        ),
+        PythonLaunchDescriptionSource(str(bunker_launch)),
         launch_arguments={
             "port_name": can_interface,
             "use_sim_time": "false",
