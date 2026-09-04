@@ -410,9 +410,7 @@ async def post_global_map(request: Request) -> Any:
         return JSONResponse({"error": "malformed grid"}, status_code=400)
     if cells.size != meta.width * meta.height:
         return JSONResponse({"error": "size mismatch"}, status_code=400)
-    await asyncio.to_thread(
-        map_service.set_global_grid, meta, cells.reshape(meta.height, meta.width)
-    )
+    map_service.set_global_grid(meta, cells.reshape(meta.height, meta.width))
     return {"ok": True, "cells": int(cells.size)}
 
 
@@ -512,7 +510,7 @@ async def post_slam_update(request: Request) -> Any:
     if not isinstance(payload, dict):
         return JSONResponse({"error": "JSON object required"}, status_code=400)
     try:
-        await asyncio.to_thread(map_service.apply_slam_update, payload)
+        map_service.apply_slam_update(payload)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     dropped = _prune_optimized_maps(payload.get("scopes"))
