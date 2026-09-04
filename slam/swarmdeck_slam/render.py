@@ -688,7 +688,12 @@ def _render_component(
         if points_world.shape[0] == 0:
             continue
         grid_x, grid_y = _grid_index(points_world, meta)
-        np.add.at(hit_counts, (grid_y, grid_x), 1)
+        min_gx, max_gx = int(grid_x.min()), int(grid_x.max())
+        min_gy, max_gy = int(grid_y.min()), int(grid_y.max())
+        lw, lh = max_gx - min_gx + 1, max_gy - min_gy + 1
+        flat = (grid_y - min_gy) * lw + (grid_x - min_gx)
+        counts = np.bincount(flat, minlength=lw * lh)
+        hit_counts[min_gy : max_gy + 1, min_gx : max_gx + 1] += counts.reshape(lh, lw).astype(np.int32)
 
     cells = np.full((meta.height, meta.width), UNKNOWN, dtype=np.int8)
     if config.retain_free_space:
@@ -815,19 +820,31 @@ def _rasterize_free(
         start = end
 
         batch_steps = n_steps[rays]
-        step_index = np.arange(int(batch_steps[-1]), dtype=np.float64)[:, None]
+        step_index = np.arange(int(batch_steps[-1]), dtype=np.float32)[:, None]
         valid = step_index < batch_steps[None, :]
-        t = step_index / batch_steps[None, :].astype(np.float64)
+        step_dx = (delta_x[rays] / batch_steps).astype(np.float32)
+        step_dy = (delta_y[rays] / batch_steps).astype(np.float32)
 
-        grid_x = np.floor(origin_x + t * delta_x[rays][None, :]).astype(np.int64)
-        grid_y = np.floor(origin_y + t * delta_y[rays][None, :]).astype(np.int64)
+        grid_x = np.floor(np.float32(origin_x) + step_index * step_dx[None, :]).astype(np.int32)
+        grid_y = np.floor(np.float32(origin_y) + step_index * step_dy[None, :]).astype(np.int32)
         valid &= (
             (grid_x >= 0)
             & (grid_x < meta.width)
             & (grid_y >= 0)
             & (grid_y < meta.height)
         )
-        np.add.at(free, (grid_y[valid], grid_x[valid]), 1)
+        if valid.any():
+            gx = grid_x[valid]
+            gy = grid_y[valid]
+            min_gx = int(gx.min())
+            max_gx = int(gx.max())
+            min_gy = int(gy.min())
+            max_gy = int(gy.max())
+            lw = max_gx - min_gx + 1
+            lh = max_gy - min_gy + 1
+            flat = (gy - min_gy) * lw + (gx - min_gx)
+            counts = np.bincount(flat, minlength=lw * lh)
+            free[min_gy : max_gy + 1, min_gx : max_gx + 1] += counts.reshape(lh, lw).astype(np.int32)
 
 
 def _batch_end(order: np.ndarray, n_steps: np.ndarray, start: int) -> int:

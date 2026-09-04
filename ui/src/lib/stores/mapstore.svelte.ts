@@ -105,6 +105,7 @@ let statusLoading = false;
 let localRefreshInFlight = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
+let pendingSlamRefresh: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * How long the backend has to keep recommending the other view before `auto`
@@ -426,15 +427,21 @@ export const mapStore = {
   applySlamGraph(robotId: string, graph: SlamGraph) {
     state.slamGraphs = { ...state.slamGraphs, [robotId]: graph };
     if (state.mapSource === 'optimized') {
-      void this.loadOptimizedScopes().then(() => {
-        if (state.viewMode === 'local' && state.viewRobot === robotId) {
+      if (state.viewMode === 'local' && state.viewRobot === robotId) {
+        void this.loadOptimizedScopes().then(() => {
           void this.selectRobotView(robotId, true);
-        } else if (state.viewMode === 'global' && globalInfo) {
-          // Optimized grids are snapshots rather than websocket patches. A
-          // graph update is the signal that a fresher component raster exists.
-          void this.loadFullPng(globalInfo);
+        });
+      } else if (state.viewMode === 'global') {
+        if (pendingSlamRefresh !== null) {
+          clearTimeout(pendingSlamRefresh);
         }
-      });
+        pendingSlamRefresh = setTimeout(() => {
+          pendingSlamRefresh = null;
+          if (state.viewMode === 'global' && globalInfo) {
+            void this.loadFullPng(globalInfo);
+          }
+        }, 50);
+      }
     }
   },
   get mapSource() {
@@ -1224,6 +1231,10 @@ export const mapStore = {
     autoView = null;
     autoPending = null;
     globalInfo = null;
+    if (pendingSlamRefresh !== null) {
+      clearTimeout(pendingSlamRefresh);
+      pendingSlamRefresh = null;
+    }
     loadGeneration++;
     canvas = null;
     ctx = null;

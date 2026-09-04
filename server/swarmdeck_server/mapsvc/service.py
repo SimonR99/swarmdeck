@@ -243,9 +243,8 @@ class MapService:
         ] = {}
 
         # Precomputed world-cell centre coordinates, for the backward warp.
-        cx = self.meta.origin_x + (np.arange(n) + 0.5) * resolution
-        cy = self.meta.origin_y + (np.arange(n) + 0.5) * resolution
-        self._wx, self._wy = np.meshgrid(cx, cy)
+        self._cx = (self.meta.origin_x + (np.arange(n, dtype=np.float32) + 0.5) * resolution).astype(np.float32)
+        self._cy = (self.meta.origin_y + (np.arange(n, dtype=np.float32) + 0.5) * resolution).astype(np.float32)
 
     def _publish_map(self) -> None:
         """Publish the current working map without exposing mixed generations."""
@@ -458,9 +457,8 @@ class MapService:
         )
         self.merged = np.full((init_n, init_n), UNKNOWN, dtype=np.int8)
 
-        cx = self.meta.origin_x + (np.arange(init_n) + 0.5) * self.meta.resolution
-        cy = self.meta.origin_y + (np.arange(init_n) + 0.5) * self.meta.resolution
-        self._wx, self._wy = np.meshgrid(cx, cy)
+        self._cx = (self.meta.origin_x + (np.arange(init_n, dtype=np.float32) + 0.5) * self.meta.resolution).astype(np.float32)
+        self._cy = (self.meta.origin_y + (np.arange(init_n, dtype=np.float32) + 0.5) * self.meta.resolution).astype(np.float32)
 
         with self._state_lock:
             self.robot_grids.clear()
@@ -582,11 +580,17 @@ class MapService:
         set_global_grid(self, meta, cells)
 
     def set_cslam_origin(
-        self, robot_id: str, x: float, y: float, yaw: float, frame: str
+        self,
+        robot_id: str,
+        x: float,
+        y: float,
+        yaw: float,
+        frame: str,
+        remerge: bool = True,
     ) -> None:
         from .cslam import set_cslam_origin
 
-        set_cslam_origin(self, robot_id, x, y, yaw, frame)
+        set_cslam_origin(self, robot_id, x, y, yaw, frame, remerge=remerge)
 
     def cslam_majority_frame(self) -> str | None:
         from .cslam import majority_frame
@@ -622,11 +626,13 @@ class MapService:
                 float(origin.get("y", 0.0)),
                 float(origin.get("yaw", 0.0)),
                 str(origin.get("frame") or ""),
+                remerge=False,
             )
         if isinstance(poses, dict):
             for robot_id, pose in poses.items():
                 if isinstance(pose, dict):
                     self.set_common_pose(str(robot_id), pose)
+        self._remerge()
 
     def nav_grid_seq(self, robot_id: str) -> int | None:
         """Current sequence number of ``robot_id``'s nav grid, or None if no map."""
@@ -1416,15 +1422,40 @@ class MapService:
         For every world cell we compute the source cell, rather than scattering
         source cells forward — that leaves no holes when rotating.
         """
-        tx, ty, yaw = tf
-        c, s = math.cos(-yaw), math.sin(-yaw)
-        dx = self._wx - tx
-        dy = self._wy - ty
+        tx, ty, yaw = (float(tf[0]), float(tf[1]), float(tf[2]))
+        res = float(self.meta.resolution)
+
+        # Fast path: when yaw is zero (e.g. graph-mode common_to_world identity or pure translation),
+        # nearest-neighbour sampling is an exact integer slice copy.
+        if abs(yaw) < 1e-5 and abs(res - float(meta.resolution)) < 1e-6:
+            shift_x = int(round((self.meta.origin_x - tx - meta.origin_x) / res))
+            shift_y = int(round((self.meta.origin_y - ty - meta.origin_y) / res))
+            dst_col_start = max(0, -shift_x)
+            dst_col_end = min(self.meta.width, meta.width - shift_x)
+            src_col_start = dst_col_start + shift_x
+            src_col_end = dst_col_end + shift_x
+
+            dst_row_start = max(0, -shift_y)
+            dst_row_end = min(self.meta.height, meta.height - shift_y)
+            src_row_start = dst_row_start + shift_y
+            src_row_end = dst_row_end + shift_y
+
+            out = np.full(self.merged.shape, UNKNOWN, dtype=np.int8)
+            if dst_col_end > dst_col_start and dst_row_end > dst_row_start:
+                out[dst_row_start:dst_row_end, dst_col_start:dst_col_end] = cells[
+                    src_row_start:src_row_end, src_col_start:src_col_end
+                ]
+            return out
+
+        c = np.float32(math.cos(-yaw))
+        s = np.float32(math.sin(-yaw))
+        dx = self._cx[None, :] - np.float32(tx)
+        dy = self._cy[:, None] - np.float32(ty)
         rx = dx * c - dy * s
         ry = dx * s + dy * c
 
-        gx = np.floor((rx - meta.origin_x) / meta.resolution).astype(np.int64)
-        gy = np.floor((ry - meta.origin_y) / meta.resolution).astype(np.int64)
+        gx = np.floor((rx - np.float32(meta.origin_x)) / np.float32(meta.resolution)).astype(np.int32)
+        gy = np.floor((ry - np.float32(meta.origin_y)) / np.float32(meta.resolution)).astype(np.int32)
         valid = (gx >= 0) & (gx < meta.width) & (gy >= 0) & (gy < meta.height)
 
         out = np.full(self.merged.shape, UNKNOWN, dtype=np.int8)
@@ -1481,9 +1512,8 @@ class MapService:
             self.meta = GridMeta(res, new_width, new_height, new_min_x, new_min_y)
             self.merged = np.full((new_height, new_width), UNKNOWN, dtype=np.int8)
 
-            cx = self.meta.origin_x + (np.arange(new_width) + 0.5) * res
-            cy = self.meta.origin_y + (np.arange(new_height) + 0.5) * res
-            self._wx, self._wy = np.meshgrid(cx, cy)
+            self._cx = (self.meta.origin_x + (np.arange(new_width, dtype=np.float32) + 0.5) * res).astype(np.float32)
+            self._cy = (self.meta.origin_y + (np.arange(new_height, dtype=np.float32) + 0.5) * res).astype(np.float32)
 
     def _remerge(self) -> None:
         with self._merge_lock:

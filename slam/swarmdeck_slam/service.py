@@ -343,7 +343,7 @@ def _restore_capture() -> int:
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "").rstrip("/")
 OPTIMIZE_EVERY_N = int(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_EVERY", "1"))
 OPTIMIZE_EVERY_S = float(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_S", "1.0"))
-PUBLISH_TIMEOUT_S = 5.0
+PUBLISH_TIMEOUT_S = 15.0
 
 
 def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) -> None:
@@ -354,21 +354,6 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
     _last_snapshot = snapshot
     if not SERVER_URL:
         return
-    body = snapshot_update(snapshot)
-    try:
-        req = urllib.request.Request(
-            f"{SERVER_URL}/api/slam/update",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=PUBLISH_TIMEOUT_S).read()
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        _last_error = f"slam update failed: {exc}"
-        return
-    if generation is not None and generation != _current_generation():
-        return
-
     # Per-robot and per-component grids, then the merged one.
     #
     # The merged map deliberately shows only the majority component, because
@@ -383,29 +368,44 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
         _publish_grid(scope, grid)
 
     grid = majority_component(snapshot)
-    if grid is None:
-        return
+    if grid is not None:
+        if generation is not None and generation != _current_generation():
+            return
+        cells = np.ascontiguousarray(grid.cells)
+        payload = zlib.compress(cells.tobytes())
+        url = (
+            f"{SERVER_URL}/api/adapter/global_map"
+            f"?resolution={grid.resolution}&width={grid.width}&height={grid.height}"
+            f"&origin_x={grid.origin_x}&origin_y={grid.origin_y}"
+        )
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={"Content-Type": "application/octet-stream"},
+                    method="POST",
+                ),
+                timeout=PUBLISH_TIMEOUT_S,
+            ).read()
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            _last_error = f"global map publish failed: {exc}"
+
     if generation is not None and generation != _current_generation():
         return
-    cells = np.ascontiguousarray(grid.cells)
-    payload = zlib.compress(cells.tobytes())
-    url = (
-        f"{SERVER_URL}/api/adapter/global_map"
-        f"?resolution={grid.resolution}&width={grid.width}&height={grid.height}"
-        f"&origin_x={grid.origin_x}&origin_y={grid.origin_y}"
-    )
+
+    body = snapshot_update(snapshot)
     try:
-        urllib.request.urlopen(
-            urllib.request.Request(
-                url,
-                data=payload,
-                headers={"Content-Type": "application/octet-stream"},
-                method="POST",
-            ),
-            timeout=PUBLISH_TIMEOUT_S,
-        ).read()
+        req = urllib.request.Request(
+            f"{SERVER_URL}/api/slam/update",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=PUBLISH_TIMEOUT_S).read()
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        _last_error = f"global map publish failed: {exc}"
+        _last_error = f"slam update failed: {exc}"
+        return
 
 
 def _publish_grid(scope: str, grid: Any) -> None:

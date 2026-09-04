@@ -484,7 +484,7 @@ async def map_loop() -> None:
     """2 Hz patch emission — never re-sends the whole grid (NFR-6)."""
     while True:
         await asyncio.sleep(0.5)
-        patch = map_service.take_patch()
+        patch = await asyncio.to_thread(map_service.take_patch)
         if patch:
             await broadcast(patch)
 
