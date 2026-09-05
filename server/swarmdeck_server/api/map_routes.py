@@ -600,16 +600,54 @@ async def get_cloud(request: Request | None = None) -> Response:
     """Merged 3D cloud or single robot 3D cloud for the GUI's 3D view."""
     robot_id = str(request.query_params.get("robot_id", "") or "") if request else ""
     points, indices, names = map_service.merged_cloud(robot_id=robot_id or None)
-    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
-    body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
+    if len(points) > 0:
+        quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
+        body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
+        return Response(
+            content=body,
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Cloud-Points": str(len(points)),
+                "X-Cloud-Scale": str(CLOUD_SCALE),
+                "X-Cloud-Robots": ",".join(names),
+            },
+        )
+
+    # Fall back to collaborative SLAM keyframe clouds if available
+    from ..mapsvc.graph_bridge import SLAM_URL
+    import urllib.parse
+    import urllib.request
+
+    if SLAM_URL:
+        try:
+            url = f"{SLAM_URL}/cloud"
+            if robot_id:
+                url += f"?robot_id={urllib.parse.quote(robot_id)}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = resp.read()
+                return Response(
+                    content=data,
+                    media_type="application/octet-stream",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-Cloud-Points": resp.headers.get("X-Cloud-Points", "0"),
+                        "X-Cloud-Scale": resp.headers.get("X-Cloud-Scale", str(CLOUD_SCALE)),
+                        "X-Cloud-Robots": resp.headers.get("X-Cloud-Robots", ""),
+                    },
+                )
+        except Exception:
+            pass
+
     return Response(
-        content=body,
+        content=zlib.compress(b"", 1),
         media_type="application/octet-stream",
         headers={
             "Cache-Control": "no-store",
-            "X-Cloud-Points": str(len(points)),
+            "X-Cloud-Points": "0",
             "X-Cloud-Scale": str(CLOUD_SCALE),
-            "X-Cloud-Robots": ",".join(names),
+            "X-Cloud-Robots": "",
         },
     )
 

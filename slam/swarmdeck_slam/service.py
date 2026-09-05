@@ -30,7 +30,7 @@ from typing import Any
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from swarmdeck_protocol import (
@@ -48,7 +48,7 @@ from swarmdeck_slam.backend import (
     snapshot_update,
 )
 from swarmdeck_slam.render import RenderConfig
-from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz
+from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz, transform_points
 
 # Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
 # dump of every point. With a single-ring lidar the distinction is invisible --
@@ -345,6 +345,99 @@ OPTIMIZE_EVERY_N = int(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_EVERY", "1"))
 OPTIMIZE_EVERY_S = float(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_S", "1.0"))
 PUBLISH_TIMEOUT_S = 15.0
 
+CLOUD_SCALE = 0.01
+CLOUD_VOXEL_M = 0.06
+
+_cloud_cache_lock = threading.Lock()
+_cached_cloud_body: bytes | None = None
+_cached_cloud_headers: dict[str, str] = {}
+_cached_robot_clouds: dict[str, tuple[bytes, dict[str, str]]] = {}
+
+
+def _build_cloud_payload(
+    snapshot: BackendSnapshot | None,
+    robot_id: str | None = None,
+    voxel_size: float = CLOUD_VOXEL_M,
+) -> tuple[bytes, dict[str, str]]:
+    if snapshot is None:
+        empty = zlib.compress(b"", 1)
+        return empty, {
+            "Cache-Control": "no-store",
+            "X-Cloud-Points": "0",
+            "X-Cloud-Scale": str(CLOUD_SCALE),
+            "X-Cloud-Robots": "",
+        }
+
+    if robot_id:
+        target_robots = {robot_id}
+    else:
+        grid = majority_component(snapshot)
+        target_robots = (
+            set(grid.robots)
+            if grid is not None
+            else set(snapshot.keyframe_counts.keys())
+        )
+
+    poses = snapshot.optimized.poses
+    robot_chunks: dict[str, list[np.ndarray]] = {}
+
+    for kf_id, pose in poses.items():
+        if kf_id.robot_id not in target_robots:
+            continue
+        kf = backend._keyframes.get(kf_id)
+        if kf is None or kf.points.size == 0:
+            continue
+        pts_world = transform_points(pose, kf.points.astype(np.float64, copy=False))
+        robot_chunks.setdefault(kf_id.robot_id, []).append(pts_world)
+
+    chunks: list[np.ndarray] = []
+    indices: list[np.ndarray] = []
+    names: list[str] = []
+
+    for rid in sorted(target_robots):
+        pts_list = robot_chunks.get(rid)
+        if not pts_list:
+            continue
+        all_pts = np.concatenate(pts_list, axis=0)
+        keys = np.round(all_pts / voxel_size).astype(np.int32)
+        _, keep = np.unique(keys, axis=0, return_index=True)
+        voxels = all_pts[keep].astype(np.float32)
+        chunks.append(voxels)
+        indices.append(np.full(len(voxels), len(names), dtype=np.uint8))
+        names.append(rid)
+
+    if not chunks:
+        points = np.zeros((0, 3), dtype=np.float32)
+        idx_array = np.zeros(0, dtype=np.uint8)
+    else:
+        points = np.concatenate(chunks, axis=0)
+        idx_array = np.concatenate(indices, axis=0)
+
+    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
+    body = zlib.compress(quantised.tobytes() + idx_array.tobytes(), 1)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Cloud-Points": str(len(points)),
+        "X-Cloud-Scale": str(CLOUD_SCALE),
+        "X-Cloud-Robots": ",".join(names),
+    }
+    return body, headers
+
+
+def _update_cloud_cache(snapshot: BackendSnapshot) -> None:
+    global _cached_cloud_body, _cached_cloud_headers, _cached_robot_clouds
+    try:
+        body, headers = _build_cloud_payload(snapshot, robot_id=None)
+        robot_clouds: dict[str, tuple[bytes, dict[str, str]]] = {}
+        for rid in snapshot.keyframe_counts.keys():
+            robot_clouds[rid] = _build_cloud_payload(snapshot, robot_id=rid)
+        with _cloud_cache_lock:
+            _cached_cloud_body = body
+            _cached_cloud_headers = headers
+            _cached_robot_clouds = robot_clouds
+    except Exception:
+        pass
+
 
 def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) -> None:
     """Push origins + the majority-component grid to the SwarmDeck server."""
@@ -352,6 +445,7 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
     if generation is not None and generation != _current_generation():
         return
     _last_snapshot = snapshot
+    _update_cloud_cache(snapshot)
     if not SERVER_URL:
         return
     # Per-robot and per-component grids, then the merged one.
@@ -569,6 +663,32 @@ def status() -> dict[str, Any]:
         ],
         "server_url": SERVER_URL,
     }
+
+
+@app.get("/cloud")
+def get_cloud(request: Request) -> Response:
+    """Return 3D merged point cloud from solved keyframes in the world frame."""
+    robot_id = str(request.query_params.get("robot_id", "") or "")
+    with _cloud_cache_lock:
+        if robot_id:
+            entry = _cached_robot_clouds.get(robot_id)
+            if entry is not None:
+                body, headers = entry
+                return Response(
+                    content=body, media_type="application/octet-stream", headers=headers
+                )
+        elif _cached_cloud_body is not None:
+            return Response(
+                content=_cached_cloud_body,
+                media_type="application/octet-stream",
+                headers=_cached_cloud_headers,
+            )
+
+    snapshot = _last_snapshot
+    body, headers = _build_cloud_payload(snapshot, robot_id=robot_id or None)
+    return Response(
+        content=body, media_type="application/octet-stream", headers=headers
+    )
 
 
 @app.get("/config")

@@ -29,6 +29,7 @@ export class Robot3DManager {
       showSensors: boolean;
       showLabels: boolean;
       time: number;
+      getGroundZ?: (x: number, y: number) => number;
     }
   ) {
     const activeIds = new Set<string>();
@@ -46,8 +47,9 @@ export class Robot3DManager {
       const isSelected = fleet.isSelected(robot.robot_id);
 
       // Position in world coordinates: x, y, floor clearance
-      // In SwarmDeck, pose.x and pose.y are world metres. Fleet drives on z=0.
-      entry.group.position.set(robot.pose.x, robot.pose.y, 0.0);
+      // Snaps to real terrain or cave ground elevation if available
+      const groundZ = options.getGroundZ ? options.getGroundZ(robot.pose.x, robot.pose.y) : 0.0;
+      entry.group.position.set(robot.pose.x, robot.pose.y, groundZ);
       entry.group.rotation.set(0, 0, robot.pose.yaw);
 
       // 3D Selection Reticle

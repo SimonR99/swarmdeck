@@ -143,13 +143,23 @@ export class Map3DScene {
   }
 
   /**
-   * Raycast ground plane at z=0 to get world XY coordinate for navigation goal placement.
+   * Raycast ground/terrain surface to get world XYZ coordinate for navigation goal placement.
    */
   public raycastGround(ndc: THREE.Vector2): THREE.Vector3 | null {
     this.raycaster.setFromCamera(ndc, this.camera);
+    if (this.terrain.surfaceMesh && this.terrain.surfaceMesh.visible) {
+      const hits = this.raycaster.intersectObject(this.terrain.surfaceMesh, false);
+      if (hits.length > 0 && hits[0].point) {
+        return hits[0].point;
+      }
+    }
     const hit = new THREE.Vector3();
     const intersects = this.raycaster.ray.intersectPlane(this.groundPlane, hit);
-    return intersects ? hit : null;
+    if (intersects) {
+      hit.z = this.terrain.getGroundZ(hit.x, hit.y);
+      return hit;
+    }
+    return null;
   }
 
   /**

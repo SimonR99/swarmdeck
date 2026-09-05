@@ -37,6 +37,7 @@
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { Map3DScene } from './Map3DScene';
   import type { MapRobot } from '../map2d/mapLayers';
+  import type { Map3DRenderMode, Map3DColorMode } from './types';
 
   let {
     active = false,
@@ -74,6 +75,11 @@
   let voxels = $state(0);
   let robotsOnCloud = $state<string[]>([]);
   let error = $state<string | null>(null);
+
+  // Render & Color Modes
+  let renderMode = $state<Map3DRenderMode>('both');
+  let colorMode = $state<Map3DColorMode>('elevation');
+  let pointSize = $state<number>(0.07);
 
   // Ceiling Slider State
   let ceilingMax = $state(2.6);
@@ -172,33 +178,29 @@
     }
   }
 
-  /**
-   * Update the 3D terrain directly from the robots' real map.
-   */
-  function updateFromRealMap() {
-    if (!scene || !mapStore.info) return;
-    const bounds = scene.terrain.buildFromMapGrid(
-      mapStore.canvas,
-      mapStore.info,
-      mapStore.occupied
-    );
-    voxels = scene.terrain.voxelCount;
-    ceilingMin = bounds.minZ;
-    ceilingMax = bounds.maxZ;
-    robotsOnCloud = robotsOnMap().map((r) => r.robot_id);
-    scene.setCeiling(ceilingCutoff);
-    error = null;
-    scene.render();
+  export function setRenderMode(mode: Map3DRenderMode) {
+    renderMode = mode;
+    if (scene) {
+      scene.terrain.setRenderMode(mode);
+      scene.render();
+    }
   }
 
-  // Reactively rebuild 3D structure whenever the robots update the map
-  $effect(() => {
-    void mapStore.revision;
-    void mapStore.info;
-    if (active && scene && points === 0) {
-      updateFromRealMap();
+  export function setColorMode(mode: Map3DColorMode) {
+    colorMode = mode;
+    if (scene) {
+      scene.terrain.setColorMode(mode);
+      scene.render();
     }
-  });
+  }
+
+  export function setPointSize(size: number) {
+    pointSize = size;
+    if (scene) {
+      scene.terrain.setPointSize(size);
+      scene.render();
+    }
+  }
 
   async function fetchCloud() {
     if (!scene) return;
@@ -252,12 +254,14 @@
         error = null;
         scene.render();
       } else {
-        // Point cloud has 0 points: generate 3D map from the real SLAM map of the robots
-        updateFromRealMap();
+        points = 0;
+        voxels = 0;
+        robotsOnCloud = [];
+        scene.terrain.clear();
+        scene.render();
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-      updateFromRealMap();
     }
   }
 
@@ -403,10 +407,13 @@
     }
 
     const robots = robotsOnMap();
+    const getGroundZ = (x: number, y: number) => (scene ? scene.terrain.getGroundZ(x, y) : 0.0);
+
     scene.robotManager.update(robots, {
       showSensors,
       showLabels,
-      time
+      time,
+      getGroundZ
     });
 
     scene.layers.update({
@@ -419,7 +426,8 @@
       showCostmap,
       showNetwork,
       costmapKind,
-      time
+      time,
+      getGroundZ
     });
 
     // Update active detection screen projection for popover
@@ -427,7 +435,8 @@
     if (activeDetId) {
       const activeObj = review.proposalOf(activeDetId) ?? review.entityOf(activeDetId);
       if (activeObj) {
-        const v = new THREE.Vector3(activeObj.position.x, activeObj.position.y, 0.4);
+        const gz = getGroundZ(activeObj.position.x, activeObj.position.y);
+        const v = new THREE.Vector3(activeObj.position.x, activeObj.position.y, gz + 0.4);
         const screenProj = scene.worldToScreen(v);
         detectionScreenPos = screenProj.visible ? { sx: screenProj.sx, sy: screenProj.sy } : null;
       } else {
@@ -452,15 +461,17 @@
 
     try {
       scene = new Map3DScene(canvas);
+      scene.terrain.setRenderMode(renderMode);
+      scene.terrain.setColorMode(colorMode);
+      scene.terrain.setPointSize(pointSize);
       scene.resize();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
       return;
     }
 
-    updateFromRealMap();
     void fetchCloud();
-    const poll = window.setInterval(() => active && void fetchCloud(), 5000);
+    const poll = window.setInterval(() => active && void fetchCloud(), 2000);
 
     const ro = new ResizeObserver(() => {
       scene?.resize();
@@ -497,21 +508,23 @@
            border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl backdrop-blur-xl"
   >
     <div class="flex items-center gap-2">
-      <span class="inline-flex h-2 w-2 rounded-full {error && voxels === 0 ? 'bg-warn' : 'bg-ok'} animate-pulse"></span>
+      <span class="inline-flex h-2 w-2 rounded-full {error && points === 0 ? 'bg-warn' : 'bg-ok'} animate-pulse"></span>
       <span class="font-semibold uppercase tracking-wider text-fg">
         3D Tactical Map
       </span>
     </div>
-    {#if error && voxels === 0}
+    {#if error && points === 0}
       <span class="text-warn">{error}</span>
     {:else}
       <div class="flex items-center gap-2 font-mono text-fg-muted">
-        <span>{voxels.toLocaleString()} structures</span>
+        <span>{points.toLocaleString()} points</span>
+        <span class="text-border">·</span>
+        <span>{voxels.toLocaleString()} voxels</span>
         <span class="text-border">·</span>
         <span>{robotsOnCloud.length} robot{robotsOnCloud.length === 1 ? '' : 's'}</span>
         {#if cursor3D}
           <span class="text-border">·</span>
-          <span class="text-accent font-medium">({cursor3D.x.toFixed(1)}, {cursor3D.y.toFixed(1)}) m</span>
+          <span class="text-accent font-medium">({cursor3D.x.toFixed(1)}, {cursor3D.y.toFixed(1)}, {cursor3D.z.toFixed(1)}) m</span>
         {/if}
       </div>
       <div class="text-[9px] text-fg-dim/80">
@@ -520,8 +533,60 @@
     {/if}
   </div>
 
-  <!-- Ceiling Cutoff Tactical Slider (Top Right) -->
-  <div class="absolute right-3 top-3 z-20 flex items-center gap-2">
+  <!-- 3D Controls Bar (Top Right) -->
+  <div class="absolute right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
+    <!-- Render Mode Selector: Points / Mesh / Both -->
+    <div
+      class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
+             bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
+    >
+      <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">View</span>
+      <button
+        class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'points' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
+        title="Show raw 3D LiDAR point cloud"
+        onclick={() => setRenderMode('points')}
+      >
+        Points
+      </button>
+      <button
+        class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'mesh' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
+        title="Show 3D surface mesh reconstruction (terrain/caves/obstacles)"
+        onclick={() => setRenderMode('mesh')}
+      >
+        Mesh
+      </button>
+      <button
+        class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'both' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
+        title="Show both 3D point cloud and surface mesh"
+        onclick={() => setRenderMode('both')}
+      >
+        Both
+      </button>
+    </div>
+
+    <!-- Color Mode Selector: Team / Elevation -->
+    <div
+      class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
+             bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
+    >
+      <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">Color</span>
+      <button
+        class="rounded px-2 py-0.5 font-medium transition-colors {colorMode === 'elevation' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
+        title="Color by elevation (topography / caves / slope height)"
+        onclick={() => setColorMode('elevation')}
+      >
+        Elevation
+      </button>
+      <button
+        class="rounded px-2 py-0.5 font-medium transition-colors {colorMode === 'robot' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
+        title="Color by robot / team source"
+        onclick={() => setColorMode('robot')}
+      >
+        Team
+      </button>
+    </div>
+
+    <!-- Ceiling Cutoff Slider -->
     <div
       class="panel-glow flex items-center gap-2 rounded-[--radius-control] border border-border/90
              bg-surface/95 px-3 py-1.5 shadow-2xl backdrop-blur-xl"
@@ -537,25 +602,25 @@
         max={ceilingMax + 0.2}
         step="0.05"
         bind:value={ceilingCutoff}
-        class="h-1.5 w-28 cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"
+        class="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"
         title="Slide to remove ceiling / roof and view interior"
       />
 
-      <span class="min-w-10 font-mono text-[10px] font-semibold text-fg">
+      <span class="min-w-9 font-mono text-[10px] font-semibold text-fg">
         {ceilingCutoff.toFixed(2)}m
       </span>
 
       <button
-        class="rounded-[--radius-control] bg-surface-2 px-2 py-0.5 text-[9px] font-medium text-fg-muted
+        class="rounded-[--radius-control] bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium text-fg-muted
                transition-colors hover:bg-accent-container hover:text-accent-container-fg"
-        title="Slice off the roof to view room interior"
+        title="Slice off the roof to view room/cave interior"
         onclick={cutCeilingQuick}
       >
-        Cut Roof
+        Cut
       </button>
 
       <button
-        class="rounded-[--radius-control] bg-surface-2 px-2 py-0.5 text-[9px] font-medium text-fg-muted
+        class="rounded-[--radius-control] bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium text-fg-muted
                transition-colors hover:bg-surface hover:text-fg"
         title="Restore full height ceiling"
         onclick={resetCeiling}

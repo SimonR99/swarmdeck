@@ -137,20 +137,21 @@ export class Map3DLayers {
     showNetwork: boolean;
     costmapKind: 'global' | 'local';
     time: number;
+    getGroundZ?: (x: number, y: number) => number;
   }) {
     this.gridGroup.visible = options.showGrid;
 
     // 1. Navigation Goals & Waypoint Beacons
-    this.updateGoals(options.robots, options.showPlans, options.time);
+    this.updateGoals(options.robots, options.showPlans, options.time, options.getGroundZ);
 
     // 2. Global & Local Planned Paths
-    this.updatePaths(options.robots, options.showPlans);
+    this.updatePaths(options.robots, options.showPlans, options.getGroundZ);
 
     // 3. Movement Trails
-    this.updateTrails(options.trails, options.showTrails);
+    this.updateTrails(options.trails, options.showTrails, options.getGroundZ);
 
     // 4. Reviewed Detections (Proposals & Entities)
-    this.updateDetections(options.time);
+    this.updateDetections(options.time, options.getGroundZ);
 
     // 5. Inter-Robot Loop Closures
     this.updateLoopClosures(options.showPlans);
@@ -159,7 +160,12 @@ export class Map3DLayers {
     this.updateDecals(options.showCostmap, options.showNetwork, options.costmapKind);
   }
 
-  private updateGoals(robots: MapRobot[], showPlans: boolean, time: number) {
+  private updateGoals(
+    robots: MapRobot[],
+    showPlans: boolean,
+    time: number,
+    getGroundZ?: (x: number, y: number) => number
+  ) {
     this.clearGroup(this.goalsGroup);
     if (!showPlans) return;
 
@@ -170,9 +176,11 @@ export class Map3DLayers {
       const color = new THREE.Color(fleet.colorOf(robot.robot_id));
       const goalX = robot.goal.x;
       const goalY = robot.goal.y;
+      const goalZ = getGroundZ ? getGroundZ(goalX, goalY) : 0.0;
+      const robotZ = getGroundZ ? getGroundZ(robot.pose.x, robot.pose.y) : 0.0;
 
       const beaconGroup = new THREE.Group();
-      beaconGroup.position.set(goalX, goalY, 0.02);
+      beaconGroup.position.set(goalX, goalY, goalZ + 0.02);
 
       // Rotating waypoint rally beacon rings
       const outerRingGeo = new THREE.RingGeometry(0.38, 0.44, 24);
@@ -208,8 +216,8 @@ export class Map3DLayers {
 
       // Dashed route line from robot to goal
       const linePts = [
-        new THREE.Vector3(robot.pose.x, robot.pose.y, 0.06),
-        new THREE.Vector3(goalX, goalY, 0.06)
+        new THREE.Vector3(robot.pose.x, robot.pose.y, robotZ + 0.06),
+        new THREE.Vector3(goalX, goalY, goalZ + 0.06)
       ];
       const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
       const lineMat = new THREE.LineDashedMaterial({
@@ -225,7 +233,11 @@ export class Map3DLayers {
     }
   }
 
-  private updatePaths(robots: MapRobot[], showPlans: boolean) {
+  private updatePaths(
+    robots: MapRobot[],
+    showPlans: boolean,
+    getGroundZ?: (x: number, y: number) => number
+  ) {
     this.clearGroup(this.pathsGroup);
     if (!showPlans) return;
 
@@ -243,9 +255,12 @@ export class Map3DLayers {
         : robot.planned_path;
       const localPath = robot.local_planned_path && robot.local_planned_path.length > 0 ? robot.local_planned_path : undefined;
 
-      // 1. Global path (thick dashed glowing route on floor)
+      // 1. Global path (thick dashed glowing route on terrain)
       if (globalPath && globalPath.length >= 2) {
-        const pts = globalPath.map((p) => new THREE.Vector3(p.x, p.y, 0.04));
+        const pts = globalPath.map((p) => {
+          const z = getGroundZ ? getGroundZ(p.x, p.y) : 0.0;
+          return new THREE.Vector3(p.x, p.y, z + 0.04);
+        });
         const geo = new THREE.BufferGeometry().setFromPoints(pts);
         const mat = new THREE.LineDashedMaterial({
           color,
@@ -262,7 +277,10 @@ export class Map3DLayers {
 
       // 2. Local path (solid vibrant trajectory on top)
       if (localPath && localPath.length >= 2) {
-        const pts = localPath.map((p) => new THREE.Vector3(p.x, p.y, 0.05));
+        const pts = localPath.map((p) => {
+          const z = getGroundZ ? getGroundZ(p.x, p.y) : 0.0;
+          return new THREE.Vector3(p.x, p.y, z + 0.05);
+        });
         const geo = new THREE.BufferGeometry().setFromPoints(pts);
         const mat = new THREE.LineBasicMaterial({
           color,
@@ -275,14 +293,21 @@ export class Map3DLayers {
     }
   }
 
-  private updateTrails(trails: Map<string, { x: number; y: number }[]>, showTrails: boolean) {
+  private updateTrails(
+    trails: Map<string, { x: number; y: number }[]>,
+    showTrails: boolean,
+    getGroundZ?: (x: number, y: number) => number
+  ) {
     this.clearGroup(this.trailsGroup);
     if (!showTrails) return;
 
     for (const [robotId, pts] of trails.entries()) {
       if (pts.length < 2) continue;
       const color = new THREE.Color(fleet.colorOf(robotId));
-      const v3s = pts.map((p) => new THREE.Vector3(p.x, p.y, 0.025));
+      const v3s = pts.map((p) => {
+        const z = getGroundZ ? getGroundZ(p.x, p.y) : 0.0;
+        return new THREE.Vector3(p.x, p.y, z + 0.025);
+      });
       const geo = new THREE.BufferGeometry().setFromPoints(v3s);
       const mat = new THREE.LineBasicMaterial({
         color,
@@ -293,7 +318,7 @@ export class Map3DLayers {
     }
   }
 
-  private updateDetections(time: number) {
+  private updateDetections(time: number, getGroundZ?: (x: number, y: number) => number) {
     this.clearGroup(this.detectionsGroup);
 
     const items = [...review.proposals, ...review.entities];
@@ -301,9 +326,10 @@ export class Map3DLayers {
       const isProposal = 'provisional' in item || review.proposals.some((p) => p.id === item.id);
       const color = new THREE.Color(detectionCatalog.colorOf(item.class));
       const isSelected = review.selected === item.id || review.highlighted === item.id;
+      const z = getGroundZ ? getGroundZ(item.position.x, item.position.y) : 0.0;
 
       const group = new THREE.Group();
-      group.position.set(item.position.x, item.position.y, 0.35);
+      group.position.set(item.position.x, item.position.y, z + 0.35);
       group.userData = { detectionId: item.id, isDetection: true };
 
       // 3D Target crystal beacon (Octahedron)
