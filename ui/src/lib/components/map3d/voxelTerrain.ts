@@ -1,42 +1,47 @@
 import * as THREE from 'three';
 import type { CloudBounds } from './types';
+import type { MapInfo } from '$lib/types/protocol';
 
-export interface VoxelData {
+export interface VoxelPoint {
   x: number;
   y: number;
   z: number;
-  color: THREE.Color;
-  ownerIndex: number;
-  isCeiling: boolean;
-  isWall: boolean;
-  isFloor: boolean;
+  color?: THREE.Color;
+  isWall?: boolean;
+  isCeiling?: boolean;
 }
 
 export class VoxelTerrain {
   public group = new THREE.Group();
-  public instancedMesh: THREE.InstancedMesh | null = null;
+  public wallMesh: THREE.InstancedMesh | null = null;
+  public wallCapMesh: THREE.InstancedMesh | null = null;
+  public floorMesh: THREE.Mesh | null = null;
+  public ceilingMesh: THREE.Mesh | null = null;
+  public cloudMesh: THREE.InstancedMesh | null = null;
+
   public ceilingClipPlane: THREE.Plane;
   public bounds: CloudBounds = {
-    minX: -20,
-    maxX: 20,
-    minY: -20,
-    maxY: 20,
+    minX: -16,
+    maxX: 16,
+    minY: -16,
+    maxY: 16,
     minZ: 0,
-    maxZ: 3.0
+    maxZ: 2.6
   };
-  public voxelSize = 0.14;
+  public voxelSize = 0.15; // 15cm blocks match the real 15cm wall thickness
   public voxelCount = 0;
-  private currentCutoff = 3.2;
+  private currentCutoff = 2.3; // Default: interior rooms open
 
-  // Starcraft-style tactical palette
-  private wallBaseColor = new THREE.Color('#465166');
-  private floorBaseColor = new THREE.Color('#1e232c');
-  private ceilingBaseColor = new THREE.Color('#2d3442');
-  private obstacleBaseColor = new THREE.Color('#384252');
+  // High-contrast, bright tactical palette
+  private wallColor = new THREE.Color('#94a3b8'); // Bright titanium/slate (Slate 400)
+  private wallCapColor = new THREE.Color('#f8fafc'); // Pure platinum/white top edge highlight
+  private ceilingColor = new THREE.Color('#8293a7');
+
+  private floorCanvas: HTMLCanvasElement | null = null;
+  private floorTexture: THREE.CanvasTexture | null = null;
 
   constructor() {
-    // Normal (0, 0, -1) with constant `currentCutoff` clips points where dot((x,y,z), (0,0,-1)) + cutoff < 0,
-    // which means -z + cutoff < 0 => z > cutoff gets clipped!
+    // Normal (0, 0, -1) with constant cutoff clips geometry where z > cutoff
     this.ceilingClipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), this.currentCutoff);
   }
 
@@ -46,7 +51,279 @@ export class VoxelTerrain {
   }
 
   /**
-   * Build the 3D voxel terrain using the real 3D map points from the robots.
+   * Build 3D walls, floor, and ceiling directly from the robots' real map.
+   */
+  public buildFromMapGrid(
+    canvas: HTMLCanvasElement | null,
+    info: MapInfo,
+    occupiedArray?: Uint8Array | null
+  ): CloudBounds {
+    this.clear();
+
+    const width = info.width;
+    const height = info.height;
+    const res = info.resolution;
+    const origX = info.origin.x;
+    const origY = info.origin.y;
+
+    // 1. Recover occupancy data if not provided
+    let occupied: Uint8Array | null = occupiedArray ?? null;
+    if (!occupied && canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const imgData = ctx.getImageData(0, 0, width, height).data;
+        occupied = new Uint8Array(width * height);
+        for (let i = 0; i < occupied.length; i++) {
+          occupied[i] = imgData[i * 4] < 100 ? 1 : 0;
+        }
+      }
+    }
+
+    if (!occupied) {
+      return this.bounds;
+    }
+
+    // 2. Downsample to 0.15m voxels (grouping cells to match 15cm wall thickness)
+    const step = Math.max(1, Math.round(this.voxelSize / res)); // 3 cells at 0.05m res
+    const actualVoxelSize = step * res;
+    const wallPositions: { x: number; y: number }[] = [];
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+
+    for (let gy = 0; gy < height - step + 1; gy += step) {
+      for (let gx = 0; gx < width - step + 1; gx += step) {
+        let isOcc = false;
+        for (let dy = 0; dy < step; dy++) {
+          const row = (gy + dy) * width;
+          for (let dx = 0; dx < step; dx++) {
+            if (occupied[row + gx + dx] === 1) {
+              isOcc = true;
+              break;
+            }
+          }
+          if (isOcc) break;
+        }
+
+        if (isOcc) {
+          const wx = origX + (gx + step / 2) * res;
+          const wy = origY + (height - 1 - (gy + step / 2)) * res;
+          wallPositions.push({ x: wx, y: wy });
+
+          if (wx < minX) minX = wx;
+          if (wx > maxX) maxX = wx;
+          if (wy < minY) minY = wy;
+          if (wy > maxY) maxY = wy;
+        }
+      }
+    }
+
+    if (wallPositions.length === 0 || minX === Infinity) {
+      minX = origX;
+      maxX = origX + width * res;
+      minY = origY;
+      maxY = origY + height * res;
+    }
+
+    this.bounds = {
+      minX: minX - 1.0,
+      maxX: maxX + 1.0,
+      minY: minY - 1.0,
+      maxY: maxY + 1.0,
+      minZ: 0,
+      maxZ: 2.6
+    };
+
+    // 3. Build 3D Walls (height 2.4m, centered at z = 1.2)
+    const wallHeight = 2.4;
+    const wallBox = new THREE.BoxGeometry(
+      actualVoxelSize * 0.98,
+      actualVoxelSize * 0.98,
+      wallHeight
+    );
+
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: this.wallColor,
+      roughness: 0.35,
+      metalness: 0.25,
+      clippingPlanes: [this.ceilingClipPlane],
+      clipShadows: true,
+      shadowSide: THREE.DoubleSide
+    });
+
+    this.wallMesh = new THREE.InstancedMesh(wallBox, wallMat, wallPositions.length);
+    this.wallMesh.castShadow = true;
+    this.wallMesh.receiveShadow = true;
+
+    // Top cap highlight: bright platinum border at wall top
+    const capBox = new THREE.BoxGeometry(
+      actualVoxelSize * 1.02,
+      actualVoxelSize * 1.02,
+      0.08
+    );
+    const capMat = new THREE.MeshStandardMaterial({
+      color: this.wallCapColor,
+      emissive: new THREE.Color('#334155'),
+      roughness: 0.2,
+      metalness: 0.4,
+      clippingPlanes: [this.ceilingClipPlane]
+    });
+    this.wallCapMesh = new THREE.InstancedMesh(capBox, capMat, wallPositions.length);
+
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < wallPositions.length; i++) {
+      const pos = wallPositions[i];
+      // Wall column from z=0 to z=wallHeight
+      dummy.position.set(pos.x, pos.y, wallHeight / 2);
+      dummy.updateMatrix();
+      this.wallMesh.setMatrixAt(i, dummy.matrix);
+
+      // Cap at top of wall
+      dummy.position.set(pos.x, pos.y, wallHeight + 0.04);
+      dummy.updateMatrix();
+      this.wallCapMesh.setMatrixAt(i, dummy.matrix);
+    }
+
+    this.wallMesh.instanceMatrix.needsUpdate = true;
+    this.wallCapMesh.instanceMatrix.needsUpdate = true;
+
+    this.group.add(this.wallMesh);
+    this.group.add(this.wallCapMesh);
+
+    // 4. Build Tactical Floor from Real Map Canvas
+    this.buildTacticalFloor(canvas, info);
+
+    // 5. Build Ceiling Slab over Explored Facility
+    this.buildCeiling(minX - 0.5, maxX + 0.5, minY - 0.5, maxY + 0.5, wallHeight);
+
+    this.voxelCount = wallPositions.length;
+    return this.bounds;
+  }
+
+  /**
+   * Build the bright tactical floor using the robot's real explored map texture.
+   */
+  private buildTacticalFloor(canvas: HTMLCanvasElement | null, info: MapInfo) {
+    if (this.floorMesh) {
+      this.group.remove(this.floorMesh);
+      this.floorMesh.geometry.dispose();
+      (this.floorMesh.material as THREE.Material).dispose();
+      this.floorMesh = null;
+    }
+
+    const widthM = info.width * info.resolution;
+    const heightM = info.height * info.resolution;
+    const centerX = info.origin.x + widthM / 2;
+    const centerY = info.origin.y + heightM / 2;
+
+    const floorGeom = new THREE.PlaneGeometry(widthM, heightM);
+
+    // Create styled high-contrast canvas texture
+    if (canvas) {
+      if (!this.floorCanvas) {
+        this.floorCanvas = document.createElement('canvas');
+      }
+      this.floorCanvas.width = canvas.width;
+      this.floorCanvas.height = canvas.height;
+      const fCtx = this.floorCanvas.getContext('2d');
+      if (fCtx) {
+        // Render styled bright tactical floor:
+        // free space (white) -> bright clean tactical tile (#b8c7d9)
+        // occupied space (dark) -> wall base (#475569)
+        // unknown space (grey) -> command background (#22272e)
+        const srcData = canvas.getContext('2d')?.getImageData(0, 0, canvas.width, canvas.height);
+        if (srcData) {
+          const outImg = fCtx.createImageData(canvas.width, canvas.height);
+          const s = srcData.data;
+          const d = outImg.data;
+          for (let i = 0; i < s.length; i += 4) {
+            const r = s[i];
+            if (r < 100) {
+              // Occupied wall base: dark slate
+              d[i] = 71;
+              d[i + 1] = 85;
+              d[i + 2] = 105;
+              d[i + 3] = 255;
+            } else if (r > 240) {
+              // Explored free space: bright clean high-contrast floor
+              // Subtle tile seam pattern every 20 pixels (1 metre)
+              const pixelX = (i / 4) % canvas.width;
+              const pixelY = Math.floor((i / 4) / canvas.width);
+              const isSeam = pixelX % 20 === 0 || pixelY % 20 === 0;
+
+              if (isSeam) {
+                d[i] = 148;
+                d[i + 1] = 163;
+                d[i + 2] = 184;
+              } else {
+                d[i] = 196;
+                d[i + 1] = 207;
+                d[i + 2] = 222;
+              }
+              d[i + 3] = 255;
+            } else {
+              // Unknown/unexplored space: clean subtle dark command floor
+              d[i] = 34;
+              d[i + 1] = 39;
+              d[i + 2] = 46;
+              d[i + 3] = 255;
+            }
+          }
+          fCtx.putImageData(outImg, 0, 0);
+        }
+      }
+
+      if (this.floorTexture) {
+        this.floorTexture.dispose();
+      }
+      this.floorTexture = new THREE.CanvasTexture(this.floorCanvas);
+      this.floorTexture.magFilter = THREE.NearestFilter;
+      this.floorTexture.minFilter = THREE.LinearFilter;
+    }
+
+    const floorMat = new THREE.MeshStandardMaterial({
+      map: this.floorTexture ?? undefined,
+      color: this.floorTexture ? 0xffffff : 0x22272e,
+      roughness: 0.6,
+      metalness: 0.15
+    });
+
+    this.floorMesh = new THREE.Mesh(floorGeom, floorMat);
+    this.floorMesh.position.set(centerX, centerY, 0.0);
+    this.floorMesh.receiveShadow = true;
+    this.group.add(this.floorMesh);
+  }
+
+  /**
+   * Build ceiling slab over the mapped building area at z = 2.4m.
+   */
+  private buildCeiling(minX: number, maxX: number, minY: number, maxY: number, heightZ: number) {
+    if (this.ceilingMesh) {
+      this.group.remove(this.ceilingMesh);
+      this.ceilingMesh.geometry.dispose();
+      (this.ceilingMesh.material as THREE.Material).dispose();
+      this.ceilingMesh = null;
+    }
+
+    const w = Math.max(1, maxX - minX);
+    const h = Math.max(1, maxY - minY);
+    const geom = new THREE.BoxGeometry(w, h, 0.12);
+    const mat = new THREE.MeshStandardMaterial({
+      color: this.ceilingColor,
+      roughness: 0.5,
+      metalness: 0.3,
+      clippingPlanes: [this.ceilingClipPlane],
+      clipShadows: true
+    });
+
+    this.ceilingMesh = new THREE.Mesh(geom, mat);
+    this.ceilingMesh.position.set((minX + maxX) / 2, (minY + maxY) / 2, heightZ + 0.06);
+    this.ceilingMesh.castShadow = true;
+    this.group.add(this.ceilingMesh);
+  }
+
+  /**
+   * Build 3D voxel terrain from registered 3D point clouds (when available).
    */
   public buildFromPoints(
     positions: Float32Array,
@@ -54,17 +331,16 @@ export class VoxelTerrain {
     owners: Uint8Array,
     robotColors: string[]
   ): CloudBounds {
-    this.clear();
-
     if (total === 0) {
-      return this.buildMock3DEnvironment();
+      return this.bounds;
     }
+
+    this.clear();
 
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
     let minZ = Infinity, maxZ = -Infinity;
 
-    // 1. First pass: find real 3D bounds
     for (let i = 0; i < total; i++) {
       const x = positions[i * 3];
       const y = positions[i * 3 + 1];
@@ -77,269 +353,96 @@ export class VoxelTerrain {
       if (z > maxZ) maxZ = z;
     }
 
-    // Guard against degenerate bounds
-    if (minZ === Infinity) {
-      minX = -10; maxX = 10;
-      minY = -10; maxY = 10;
-      minZ = 0; maxZ = 2.8;
-    }
+    this.bounds = { minX, maxX, minY, maxY, minZ: 0, maxZ: Math.max(maxZ, 2.5) };
 
-    this.bounds = { minX, maxX, minY, maxY, minZ, maxZ };
-
-    // 2. Voxel quantization: bin real points into discrete 3D cells
-    const voxelMap = new Map<string, {
-      x: number;
-      y: number;
-      z: number;
-      ownerCounts: Map<number, number>;
-      totalPoints: number;
-    }>();
-
+    // Voxel quantization: bin real points into discrete 3D cells
+    const voxelMap = new Map<string, { x: number; y: number; z: number; count: number }>();
     const V = this.voxelSize;
+
     for (let i = 0; i < total; i++) {
       const x = positions[i * 3];
       const y = positions[i * 3 + 1];
       const z = positions[i * 3 + 2];
-      const owner = owners[i] ?? 0;
-
       const ix = Math.floor(x / V);
       const iy = Math.floor(y / V);
       const iz = Math.floor(z / V);
       const key = `${ix},${iy},${iz}`;
-
       let cell = voxelMap.get(key);
       if (!cell) {
-        cell = {
-          x: (ix + 0.5) * V,
-          y: (iy + 0.5) * V,
-          z: (iz + 0.5) * V,
-          ownerCounts: new Map(),
-          totalPoints: 0
-        };
+        cell = { x: (ix + 0.5) * V, y: (iy + 0.5) * V, z: (iz + 0.5) * V, count: 0 };
         voxelMap.set(key, cell);
       }
-      cell.ownerCounts.set(owner, (cell.ownerCounts.get(owner) ?? 0) + 1);
-      cell.totalPoints++;
+      cell.count++;
     }
 
-    // 3. Assemble VoxelData with StarCraft styling
-    const ceilingThreshold = maxZ - 0.35;
-    const floorThreshold = minZ + 0.25;
-
-    const voxels: VoxelData[] = [];
-    const colorPalette = robotColors.map((c) => new THREE.Color(c));
-
-    for (const cell of voxelMap.values()) {
-      // Determine predominant robot owner
-      let bestOwner = 0;
-      let bestCount = -1;
-      for (const [o, count] of cell.ownerCounts.entries()) {
-        if (count > bestCount) {
-          bestCount = count;
-          bestOwner = o;
-        }
-      }
-
-      const isCeiling = cell.z >= ceilingThreshold && maxZ - minZ > 1.2;
-      const isFloor = cell.z <= floorThreshold;
-      const isWall = !isCeiling && !isFloor && cell.z >= 0.8;
-
-      let color = new THREE.Color();
-      if (isCeiling) {
-        color.copy(this.ceilingBaseColor);
-      } else if (isFloor) {
-        color.copy(this.floorBaseColor);
-      } else if (isWall) {
-        color.copy(this.wallBaseColor);
-        // Subtle team accent along wall edges
-        const teamColor = colorPalette[bestOwner];
-        if (teamColor) {
-          color.lerp(teamColor, 0.22);
-        }
-      } else {
-        color.copy(this.obstacleBaseColor);
-        const teamColor = colorPalette[bestOwner];
-        if (teamColor) {
-          color.lerp(teamColor, 0.25);
-        }
-      }
-
-      voxels.push({
-        x: cell.x,
-        y: cell.y,
-        z: cell.z,
-        color,
-        ownerIndex: bestOwner,
-        isCeiling,
-        isWall,
-        isFloor
-      });
-    }
-
-    this.createInstancedVoxels(voxels);
-    return this.bounds;
-  }
-
-  /**
-   * Generates a rich mock 3D facility (with real walls, doors, pillars, obstacles, and ceiling)
-   * when no live 3D cloud has been published or in mock mode.
-   */
-  public buildMock3DEnvironment(): CloudBounds {
-    this.clear();
-
-    const minX = -18, maxX = 18;
-    const minY = -18, maxY = 18;
-    const minZ = 0.0, maxZ = 2.8;
-    this.bounds = { minX, maxX, minY, maxY, minZ, maxZ };
-
-    const voxels: VoxelData[] = [];
-    const V = this.voxelSize;
-
-    const addVoxel = (x: number, y: number, z: number, color: THREE.Color, isCeil = false, isWall = false) => {
-      voxels.push({
-        x,
-        y,
-        z,
-        color,
-        ownerIndex: 0,
-        isCeiling: isCeil,
-        isWall,
-        isFloor: z <= 0.15
-      });
-    };
-
-    // 1. Perimeter walls (height 0 to 2.8m)
-    const wallColor = new THREE.Color('#444e61');
-    const accentColor = new THREE.Color('#3870a0');
-
-    const makeWall = (x0: number, y0: number, x1: number, y1: number, zMax = 2.8, hasDoor = false) => {
-      const length = Math.hypot(x1 - x0, y1 - y0);
-      const steps = Math.max(1, Math.round(length / V));
-      const zSteps = Math.round(zMax / V);
-
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        // Leave doorway in middle
-        if (hasDoor && t > 0.42 && t < 0.58) continue;
-        const wx = x0 + (x1 - x0) * t;
-        const wy = y0 + (y1 - y0) * t;
-
-        for (let zi = 0; zi <= zSteps; zi++) {
-          const wz = zi * V;
-          const col = (zi % 6 === 0 || i % 8 === 0) ? accentColor : wallColor;
-          addVoxel(wx, wy, wz, col, false, true);
-        }
-      }
-    };
-
-    // Outer perimeter
-    makeWall(-16, -16, 16, -16, 2.8, true);
-    makeWall(16, -16, 16, 16, 2.8, true);
-    makeWall(16, 16, -16, 16, 2.8, true);
-    makeWall(-16, 16, -16, -16, 2.8, true);
-
-    // Interior partitioning rooms
-    makeWall(-6, -16, -6, 2, 2.6, true);
-    makeWall(6, -16, 6, 2, 2.6, true);
-    makeWall(-16, 2, 16, 2, 2.6, true);
-    makeWall(0, 2, 0, 16, 2.6, true);
-
-    // Pillars / Structural columns
-    const pillarColor = new THREE.Color('#55627a');
-    const pillarCoords = [
-      [-10, -8], [10, -8], [-10, 8], [10, 8],
-      [-3, -4], [3, -4], [-3, 8], [3, 8]
-    ];
-    for (const [px, py] of pillarCoords) {
-      for (let dx = -0.15; dx <= 0.15; dx += V) {
-        for (let dy = -0.15; dy <= 0.15; dy += V) {
-          for (let pz = 0; pz <= 2.8; pz += V) {
-            addVoxel(px + dx, py + dy, pz, pillarColor, false, true);
-          }
-        }
-      }
-    }
-
-    // Crates / Sci-fi obstacles inside rooms
-    const crateColor = new THREE.Color('#354050');
-    const crateLocations = [
-      [-12, -12], [-11, -12], [-12, -11],
-      [12, -12], [11, -12],
-      [-12, 12], [12, 12], [8, 10], [-4, 6]
-    ];
-    for (const [cx, cy] of crateLocations) {
-      for (let cz = 0; cz <= 0.9; cz += V) {
-        addVoxel(cx, cy, cz, crateColor, false, false);
-      }
-    }
-
-    // Solid Ceiling slab at z = 2.8m across the facility
-    const ceilingColor = new THREE.Color('#2d3440');
-    for (let cx = -16; cx <= 16; cx += V * 2) {
-      for (let cy = -16; cy <= 16; cy += V * 2) {
-        // Grid pattern ceiling panels
-        addVoxel(cx, cy, 2.8, ceilingColor, true, false);
-      }
-    }
-
-    this.createInstancedVoxels(voxels);
-    return this.bounds;
-  }
-
-  private createInstancedVoxels(voxels: VoxelData[]) {
-    this.voxelCount = voxels.length;
-    if (this.voxelCount === 0) return;
-
-    const V = this.voxelSize;
-    // Box geometry with small gap between voxels gives crisp tactical bevel lines
-    const geom = new THREE.BoxGeometry(V * 0.92, V * 0.92, V * 0.92);
-
+    const geom = new THREE.BoxGeometry(V * 0.94, V * 0.94, V * 0.94);
     const mat = new THREE.MeshStandardMaterial({
-      roughness: 0.42,
-      metalness: 0.32,
+      color: this.wallColor,
+      roughness: 0.35,
+      metalness: 0.25,
       clippingPlanes: [this.ceilingClipPlane],
-      clipShadows: true,
-      shadowSide: THREE.DoubleSide
+      clipShadows: true
     });
 
-    this.instancedMesh = new THREE.InstancedMesh(geom, mat, this.voxelCount);
-    this.instancedMesh.castShadow = true;
-    this.instancedMesh.receiveShadow = true;
+    const cells = Array.from(voxelMap.values());
+    this.cloudMesh = new THREE.InstancedMesh(geom, mat, cells.length);
+    this.cloudMesh.castShadow = true;
+    this.cloudMesh.receiveShadow = true;
 
     const dummy = new THREE.Object3D();
-    for (let i = 0; i < voxels.length; i++) {
-      const v = voxels[i];
-      dummy.position.set(v.x, v.y, v.z);
-      dummy.rotation.set(0, 0, 0);
-      dummy.scale.set(1, 1, 1);
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
+      dummy.position.set(c.x, c.y, c.z);
       dummy.updateMatrix();
-      this.instancedMesh.setMatrixAt(i, dummy.matrix);
-      this.instancedMesh.setColorAt(i, v.color);
+      this.cloudMesh.setMatrixAt(i, dummy.matrix);
     }
+    this.cloudMesh.instanceMatrix.needsUpdate = true;
+    this.group.add(this.cloudMesh);
 
-    this.instancedMesh.instanceMatrix.needsUpdate = true;
-    if (this.instancedMesh.instanceColor) {
-      this.instancedMesh.instanceColor.needsUpdate = true;
-    }
-
-    this.group.add(this.instancedMesh);
+    this.voxelCount = cells.length;
+    return this.bounds;
   }
 
   public clear() {
-    if (this.instancedMesh) {
-      this.group.remove(this.instancedMesh);
-      this.instancedMesh.geometry.dispose();
-      if (Array.isArray(this.instancedMesh.material)) {
-        this.instancedMesh.material.forEach((m) => m.dispose());
-      } else {
-        this.instancedMesh.material.dispose();
-      }
-      this.instancedMesh = null;
+    if (this.wallMesh) {
+      this.group.remove(this.wallMesh);
+      this.wallMesh.geometry.dispose();
+      (this.wallMesh.material as THREE.Material).dispose();
+      this.wallMesh = null;
+    }
+    if (this.wallCapMesh) {
+      this.group.remove(this.wallCapMesh);
+      this.wallCapMesh.geometry.dispose();
+      (this.wallCapMesh.material as THREE.Material).dispose();
+      this.wallCapMesh = null;
+    }
+    if (this.ceilingMesh) {
+      this.group.remove(this.ceilingMesh);
+      this.ceilingMesh.geometry.dispose();
+      (this.ceilingMesh.material as THREE.Material).dispose();
+      this.ceilingMesh = null;
+    }
+    if (this.cloudMesh) {
+      this.group.remove(this.cloudMesh);
+      this.cloudMesh.geometry.dispose();
+      (this.cloudMesh.material as THREE.Material).dispose();
+      this.cloudMesh = null;
     }
     this.voxelCount = 0;
   }
 
   public dispose() {
     this.clear();
+    if (this.floorMesh) {
+      this.group.remove(this.floorMesh);
+      this.floorMesh.geometry.dispose();
+      (this.floorMesh.material as THREE.Material).dispose();
+      this.floorMesh = null;
+    }
+    if (this.floorTexture) {
+      this.floorTexture.dispose();
+      this.floorTexture = null;
+    }
+    this.floorCanvas = null;
   }
 }

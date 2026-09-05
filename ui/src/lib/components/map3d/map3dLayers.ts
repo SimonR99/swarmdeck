@@ -5,7 +5,7 @@ import { review } from '$lib/stores/review.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import type { MapRobot } from '../map2d/mapLayers';
 
-export class StarcraftLayers {
+export class Map3DLayers {
   public group = new THREE.Group();
 
   // Sub-groups
@@ -35,7 +35,7 @@ export class StarcraftLayers {
   }
 
   /**
-   * StarCraft tactical terrain grid at z = 0.
+   * Tactical terrain grid at z = 0.
    */
   public buildTacticalGrid(size = 50, majorStep = 5, minorStep = 1) {
     while (this.gridGroup.children.length) {
@@ -62,13 +62,13 @@ export class StarcraftLayers {
       target.push(-half, y, 0.005, half, y, 0.005);
     }
 
-    // Minor lines: subtle tech grid
+    // Minor lines: clean visible grid
     const minorGeo = new THREE.BufferGeometry();
     minorGeo.setAttribute('position', new THREE.Float32BufferAttribute(minorPts, 3));
     const minorMat = new THREE.LineBasicMaterial({
-      color: 0x223042,
+      color: 0x475569,
       transparent: true,
-      opacity: 0.5
+      opacity: 0.65
     });
     this.gridGroup.add(new THREE.LineSegments(minorGeo, minorMat));
 
@@ -76,9 +76,9 @@ export class StarcraftLayers {
     const majorGeo = new THREE.BufferGeometry();
     majorGeo.setAttribute('position', new THREE.Float32BufferAttribute(majorPts, 3));
     const majorMat = new THREE.LineBasicMaterial({
-      color: 0x3d5370,
+      color: 0x64748b,
       transparent: true,
-      opacity: 0.85
+      opacity: 0.9
     });
     this.gridGroup.add(new THREE.LineSegments(majorGeo, majorMat));
 
@@ -89,9 +89,9 @@ export class StarcraftLayers {
       0, -half, 0.008, 0, half, 0.008
     ], 3));
     const axisMat = new THREE.LineBasicMaterial({
-      color: 0x00d4ff,
+      color: 0x38bdf8,
       transparent: true,
-      opacity: 0.7
+      opacity: 0.9
     });
     this.gridGroup.add(new THREE.LineSegments(axisGeo, axisMat));
   }
@@ -106,10 +106,10 @@ export class StarcraftLayers {
     // Glowing circle
     const ringGeo = new THREE.RingGeometry(0.4, 0.46, 32);
     const ringMat = new THREE.MeshBasicMaterial({
-      color: 0x00ffaa,
+      color: 0x22c55e,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.8
+      opacity: 0.85
     });
     const ring = new THREE.Mesh(ringGeo, ringMat);
     group.add(ring);
@@ -174,7 +174,7 @@ export class StarcraftLayers {
       const beaconGroup = new THREE.Group();
       beaconGroup.position.set(goalX, goalY, 0.02);
 
-      // Rotating StarCraft rally beacon rings
+      // Rotating waypoint rally beacon rings
       const outerRingGeo = new THREE.RingGeometry(0.38, 0.44, 24);
       const ringMat = new THREE.MeshBasicMaterial({
         color,
@@ -306,7 +306,7 @@ export class StarcraftLayers {
       group.position.set(item.position.x, item.position.y, 0.35);
       group.userData = { detectionId: item.id, isDetection: true };
 
-      // 3D StarCraft mineral / target crystal beacon (Octahedron)
+      // 3D Target crystal beacon (Octahedron)
       const crystalGeo = new THREE.OctahedronGeometry(isSelected ? 0.28 : 0.20);
       const crystalMat = new THREE.MeshStandardMaterial({
         color,
@@ -335,6 +335,22 @@ export class StarcraftLayers {
 
       this.detectionsGroup.add(group);
     }
+  }
+
+  public raycastDetection(ndc: THREE.Vector2, camera: THREE.Camera): string | null {
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, camera);
+    const hits = raycaster.intersectObjects(this.detectionsGroup.children, true);
+    for (const hit of hits) {
+      let cur: THREE.Object3D | null = hit.object;
+      while (cur && cur !== this.detectionsGroup) {
+        if (cur.userData?.detectionId) {
+          return cur.userData.detectionId as string;
+        }
+        cur = cur.parent;
+      }
+    }
+    return null;
   }
 
   private updateLoopClosures(showPlans: boolean) {

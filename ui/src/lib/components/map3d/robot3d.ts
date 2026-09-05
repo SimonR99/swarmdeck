@@ -50,7 +50,7 @@ export class Robot3DManager {
       entry.group.position.set(robot.pose.x, robot.pose.y, 0.0);
       entry.group.rotation.set(0, 0, robot.pose.yaw);
 
-      // StarCraft Selection Reticle
+      // 3D Selection Reticle
       entry.selectionRing.visible = true;
       if (isSelected) {
         entry.selectedRingMesh.visible = true;
@@ -116,10 +116,10 @@ export class Robot3DManager {
 
     const chevronMat = new THREE.MeshStandardMaterial({
       color: threeColor,
-      metalness: 0.52,
-      roughness: 0.32,
+      metalness: 0.45,
+      roughness: 0.28,
       emissive: threeColor,
-      emissiveIntensity: 0.08
+      emissiveIntensity: 0.25
     });
 
     const chevronMesh = new THREE.Mesh(chevronGeo, chevronMat);
@@ -164,16 +164,16 @@ export class Robot3DManager {
     });
     baseGeo.translate(0, 0, 0.01);
     const baseMat = new THREE.MeshStandardMaterial({
-      color: 0x181c24,
-      metalness: 0.7,
-      roughness: 0.4
+      color: 0x334155, // Clean slate 700 chassis (not pitch dark)
+      metalness: 0.5,
+      roughness: 0.35
     });
     const baseMesh = new THREE.Mesh(baseGeo, baseMat);
     baseMesh.castShadow = true;
     baseMesh.userData = { robotId: id, isRobot: true };
     robotGroup.add(baseMesh);
 
-    // 5. StarCraft Selection Reticle on the floor
+    // 5. 3D Tactical Selection Reticle on the floor
     const selectionRing = new THREE.Group();
     selectionRing.position.set(0, 0, 0.01);
 
@@ -188,7 +188,7 @@ export class Robot3DManager {
     const groundRingMesh = new THREE.Mesh(groundRingGeo, groundRingMat);
     selectionRing.add(groundRingMesh);
 
-    // StarCraft Tactical Corner Reticle (pulsing green/team brackets when selected)
+    // 3D Tactical Corner Reticle (pulsing green/team brackets when selected)
     const bracketGeo = new THREE.BufferGeometry();
     const bracketPts: number[] = [];
     const R = 0.72;
@@ -206,7 +206,7 @@ export class Robot3DManager {
     }
     bracketGeo.setAttribute('position', new THREE.Float32BufferAttribute(bracketPts, 3));
     const bracketMat = new THREE.LineBasicMaterial({
-      color: 0x00ff88, // Starcraft tactical green
+      color: 0x00ff88, // Tactical selection green
       linewidth: 2,
       transparent: true,
       opacity: 0.95

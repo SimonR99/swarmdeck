@@ -512,6 +512,9 @@ export const mapStore = {
   get canvas() {
     return canvas;
   },
+  get occupied(): Uint8Array | null {
+    return occupied;
+  },
   get networkLayers(): NetworkLayerEntry[] {
     void state.revision;
     return Array.from(networkLayers.values());

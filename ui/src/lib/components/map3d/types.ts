@@ -16,7 +16,7 @@ export interface CloudBounds {
   maxZ: number;
 }
 
-export interface Starcraft3DOptions {
+export interface Map3DOptions {
   showGrid: boolean;
   showTrails: boolean;
   showLabels: boolean;

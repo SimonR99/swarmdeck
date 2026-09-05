@@ -1,10 +1,11 @@
 import * as THREE from 'three';
 import { VoxelTerrain } from './voxelTerrain';
 import { Robot3DManager } from './robot3d';
-import { StarcraftLayers } from './starcraftLayers';
+import { Map3DLayers } from './map3dLayers';
 import type { MapRobot } from '../map2d/mapLayers';
+import type { MapInfo } from '$lib/types/protocol';
 
-export class StarcraftScene {
+export class Map3DScene {
   public canvas: HTMLCanvasElement;
   public renderer: THREE.WebGLRenderer;
   public scene: THREE.Scene;
@@ -13,16 +14,17 @@ export class StarcraftScene {
 
   public terrain: VoxelTerrain;
   public robotManager: Robot3DManager;
-  public layers: StarcraftLayers;
+  public layers: Map3DLayers;
 
-  // RTS Orbit Camera: in world frame, Z is up!
+  // Tactical 3D Orbit Camera: in world frame, Z is up!
   public target = new THREE.Vector3(0, 0, 0.5);
   public yaw = -0.75; // ~45 deg isometric
-  public pitch = 0.95; // ~55 deg high RTS angle
+  public pitch = 0.95; // ~55 deg tactical viewing angle
   public distance = 26.0;
 
   private sunLight: THREE.DirectionalLight;
   private hemiLight: THREE.HemisphereLight;
+  private ambientLight: THREE.AmbientLight;
   private cameraFillLight: THREE.PointLight;
   private groundPlane: THREE.Plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 
@@ -32,7 +34,7 @@ export class StarcraftScene {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
 
-    // Renderer with clipping enabled for the ceiling slider
+    // High-performance renderer with local clipping for ceiling removal
     this.renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: true,
@@ -45,26 +47,33 @@ export class StarcraftScene {
 
     // Scene & Camera
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0f131a); // StarCraft dark space/command center tone
-    this.scene.fog = new THREE.FogExp2(0x0f131a, 0.008);
+    // Clean, high-contrast tactical slate background (not pitch black)
+    this.scene.background = new THREE.Color(0x1e242d);
+    this.scene.fog = new THREE.FogExp2(0x1e242d, 0.003);
 
     const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
     this.camera = new THREE.PerspectiveCamera(42, aspect, 0.2, 500);
     // Crucial: Set camera UP to Z axis so Z is UP everywhere without axis rotation bugs!
     this.camera.up.set(0, 0, 1);
 
-    // StarCraft Sci-Fi RTS Lighting
-    this.hemiLight = new THREE.HemisphereLight(0x405570, 0x141820, 1.4);
+    // Bright, high-visibility 3D Tactical Lighting
+    // 1. Ambient hemisphere light (bright white sky, soft slate ground)
+    this.hemiLight = new THREE.HemisphereLight(0xffffff, 0x94a3b8, 2.2);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff5e4, 2.2);
-    this.sunLight.position.set(20, -25, 40);
+    // 2. Global soft ambient fill to eliminate dark, unreadable shadows
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    this.scene.add(this.ambientLight);
+
+    // 3. Primary directional sun lighting for depth and crisp surface edges
+    this.sunLight = new THREE.DirectionalLight(0xffffff, 2.8);
+    this.sunLight.position.set(25, -20, 35);
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.width = 2048;
     this.sunLight.shadow.mapSize.height = 2048;
     this.sunLight.shadow.camera.near = 1;
     this.sunLight.shadow.camera.far = 120;
-    const d = 30;
+    const d = 35;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
@@ -72,7 +81,8 @@ export class StarcraftScene {
     this.sunLight.shadow.bias = -0.0005;
     this.scene.add(this.sunLight);
 
-    this.cameraFillLight = new THREE.PointLight(0x7090b0, 0.8, 100);
+    // 4. Camera fill light for front-facing facets
+    this.cameraFillLight = new THREE.PointLight(0xf1f5f9, 1.2, 150);
     this.scene.add(this.cameraFillLight);
 
     // Submodules
@@ -82,7 +92,7 @@ export class StarcraftScene {
     this.robotManager = new Robot3DManager();
     this.scene.add(this.robotManager.group);
 
-    this.layers = new StarcraftLayers();
+    this.layers = new Map3DLayers();
     this.scene.add(this.layers.group);
 
     this.updateCamera();
@@ -120,119 +130,119 @@ export class StarcraftScene {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.render();
   }
 
   public render() {
     if (this.isDisposed) return;
-    this.updateCamera();
     this.renderer.render(this.scene, this.camera);
   }
 
+  public setCeiling(cutoffZ: number) {
+    this.terrain.setCeilingCutoff(cutoffZ);
+  }
+
   /**
-   * Raycast from normalized screen pointer (x: -1..1, y: 1..-1) onto the z=0 ground plane.
+   * Raycast ground plane at z=0 to get world XY coordinate for navigation goal placement.
    */
   public raycastGround(ndc: THREE.Vector2): THREE.Vector3 | null {
     this.raycaster.setFromCamera(ndc, this.camera);
-    const target = new THREE.Vector3();
-    const hit = this.raycaster.ray.intersectPlane(this.groundPlane, target);
-    return hit;
+    const hit = new THREE.Vector3();
+    const intersects = this.raycaster.ray.intersectPlane(this.groundPlane, hit);
+    return intersects ? hit : null;
   }
 
   /**
-   * Raycast against scene objects (robots, detections).
+   * Raycast robots to pick selected robot.
    */
-  public raycastInteractive(ndc: THREE.Vector2): {
-    robotId?: string;
-    detectionId?: string;
-    groundPoint?: THREE.Vector3;
-  } {
+  public raycastRobot(ndc: THREE.Vector2): string | null {
     this.raycaster.setFromCamera(ndc, this.camera);
-
-    // 1. Check robots first
-    const robotHits = this.raycaster.intersectObjects(this.robotManager.group.children, true);
-    for (const hit of robotHits) {
+    const hits = this.raycaster.intersectObjects(this.robotManager.group.children, true);
+    for (const hit of hits) {
       let cur: THREE.Object3D | null = hit.object;
       while (cur && cur !== this.robotManager.group) {
         if (cur.userData?.robotId) {
-          return { robotId: cur.userData.robotId };
+          return cur.userData.robotId as string;
         }
         cur = cur.parent;
       }
     }
-
-    // 2. Check detection crystals
-    const detHits = this.raycaster.intersectObjects(this.layers.group.children, true);
-    for (const hit of detHits) {
-      let cur: THREE.Object3D | null = hit.object;
-      while (cur && cur !== this.layers.group) {
-        if (cur.userData?.detectionId) {
-          return { detectionId: cur.userData.detectionId };
-        }
-        cur = cur.parent;
-      }
-    }
-
-    // 3. Fallback to ground
-    const groundPoint = this.raycastGround(ndc);
-    return { groundPoint: groundPoint ?? undefined };
+    return null;
   }
 
   /**
-   * Convert a 3D world coordinate to 2D screen coordinates on the canvas.
+   * Screen coordinate projection (world -> screen pixel) for overlays.
    */
-  public worldToScreen(worldPos: THREE.Vector3): { sx: number; sy: number; visible: boolean } {
-    const v = worldPos.clone().project(this.camera);
-    const sx = ((v.x + 1) / 2) * this.canvas.clientWidth;
-    const sy = ((-v.y + 1) / 2) * this.canvas.clientHeight;
+  public worldToScreen(pos: THREE.Vector3): { sx: number; sy: number; visible: boolean } {
+    const v = pos.clone().project(this.camera);
+    const isBehind = v.z > 1;
+    const sx = ((v.x + 1) * this.canvas.clientWidth) / 2;
+    const sy = ((-v.y + 1) * this.canvas.clientHeight) / 2;
     return {
       sx,
       sy,
-      visible: v.z < 1.0 && sx >= 0 && sx <= this.canvas.clientWidth && sy >= 0 && sy <= this.canvas.clientHeight
+      visible: !isBehind && v.x >= -1.1 && v.x <= 1.1 && v.y >= -1.1 && v.y <= 1.1
     };
   }
 
-  // Camera Actions
-  public centreRobots(robots: MapRobot[], ids?: Set<string>): boolean {
-    const targets = robots.filter((r) => !ids || ids.has(r.robot_id));
-    if (!targets.length) return false;
-    const cx = targets.reduce((sum, r) => sum + r.pose.x, 0) / targets.length;
-    const cy = targets.reduce((sum, r) => sum + r.pose.y, 0) / targets.length;
-    this.target.set(cx, cy, 0.5);
-    return true;
+  // Camera Orbit, Pan & Zoom helpers
+  public orbitBy(deltaYaw: number, deltaPitch: number) {
+    this.yaw -= deltaYaw;
+    this.pitch = Math.max(0.12, Math.min(1.48, this.pitch + deltaPitch));
+    this.updateCamera();
+  }
+
+  public panBy(deltaScreenX: number, deltaScreenY: number) {
+    // Pan in camera plane parallel to ground
+    const forward = new THREE.Vector3();
+    this.camera.getWorldDirection(forward);
+    forward.z = 0;
+    forward.normalize();
+
+    const right = new THREE.Vector3();
+    right.crossVectors(forward, new THREE.Vector3(0, 0, 1)).normalize();
+
+    const panSpeed = this.distance * 0.0018;
+    this.target.addScaledVector(right, -deltaScreenX * panSpeed);
+    this.target.addScaledVector(forward, deltaScreenY * panSpeed);
+    this.updateCamera();
   }
 
   public zoomBy(factor: number) {
     this.distance = Math.max(3.0, Math.min(140.0, this.distance / factor));
+    this.updateCamera();
   }
 
   public rotateBy(angleDelta: number) {
     this.yaw += angleDelta;
+    this.updateCamera();
   }
 
   public resetRotation() {
     this.yaw = -0.75;
     this.pitch = 0.95;
+    this.updateCamera();
   }
 
-  public setCeiling(height: number) {
-    this.terrain.setCeilingCutoff(height);
+  public centreRobots(robots: MapRobot[], ids?: Set<string>) {
+    const targets = robots.filter((r) => !ids || ids.has(r.robot_id));
+    if (!targets.length) return;
+    const avgX = targets.reduce((sum, r) => sum + r.pose.x, 0) / targets.length;
+    const avgY = targets.reduce((sum, r) => sum + r.pose.y, 0) / targets.length;
+    this.target.set(avgX, avgY, 0.4);
+    this.updateCamera();
   }
 
-  public panBy(deltaScreenX: number, deltaScreenY: number) {
-    // Convert screen drag deltas to world pan deltas in the camera's ground plane
-    const factor = (this.distance * 0.0018);
-    const forward = new THREE.Vector2(-Math.cos(this.yaw), -Math.sin(this.yaw));
-    const right = new THREE.Vector2(-Math.sin(this.yaw), Math.cos(this.yaw));
-
-    this.target.x += (right.x * deltaScreenX + forward.x * deltaScreenY) * factor;
-    this.target.y += (right.y * deltaScreenX + forward.y * deltaScreenY) * factor;
+  public fitMap() {
+    const b = this.terrain.bounds;
+    this.target.set((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, 0.4);
+    const span = Math.hypot(b.maxX - b.minX, b.maxY - b.minY);
+    this.distance = Math.max(12, Math.min(120, span * 1.15));
+    this.updateCamera();
   }
 
   public fitCloud() {
-    const b = this.terrain.bounds;
-    this.target.set((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2);
-    const diameter = Math.hypot(b.maxX - b.minX, b.maxY - b.minY, b.maxZ - b.minZ);
-    this.distance = Math.max(8.0, Math.min(140.0, diameter * 1.15));
+    this.fitMap();
   }
 
   public dispose() {
