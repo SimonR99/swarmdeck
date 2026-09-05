@@ -94,6 +94,8 @@ export class VoxelTerrain {
   private rawPositions: Float32Array | null = null;
   private robotColorsBuf: Float32Array | null = null;
   private elevationColorsBuf: Float32Array | null = null;
+  private voxelColorsRobot: Float32Array | null = null;
+  private voxelColorsElevation: Float32Array | null = null;
   private pointTexture: THREE.CanvasTexture | null = null;
 
   // Spatial ground map for robot elevation snapping
@@ -135,23 +137,38 @@ export class VoxelTerrain {
   }
 
   private updateVisibility() {
+    // Points and meshes swapped per user request:
+    // "points" mode displays the discrete 3D voxel terrain (instanced boxes)
+    // "mesh" mode displays the dense LiDAR point cloud surface
     if (this.pointsMesh) {
-      this.pointsMesh.visible = this.renderMode === 'points' || this.renderMode === 'both';
+      this.pointsMesh.visible = this.renderMode === 'mesh' || this.renderMode === 'both';
     }
     if (this.surfaceMesh) {
-      this.surfaceMesh.visible = this.renderMode === 'mesh' || this.renderMode === 'both';
+      this.surfaceMesh.visible = this.renderMode === 'points' || this.renderMode === 'both';
     }
   }
 
   private applyColorMode() {
-    if (!this.pointsMesh) return;
-    const geom = this.pointsMesh.geometry;
-    if (this.colorMode === 'robot' && this.robotColorsBuf) {
-      geom.setAttribute('color', new THREE.BufferAttribute(this.robotColorsBuf, 3));
-      geom.attributes.color.needsUpdate = true;
-    } else if (this.colorMode === 'elevation' && this.elevationColorsBuf) {
-      geom.setAttribute('color', new THREE.BufferAttribute(this.elevationColorsBuf, 3));
-      geom.attributes.color.needsUpdate = true;
+    if (this.pointsMesh) {
+      const geom = this.pointsMesh.geometry;
+      if (this.colorMode === 'robot' && this.robotColorsBuf) {
+        geom.setAttribute('color', new THREE.BufferAttribute(this.robotColorsBuf, 3));
+        geom.attributes.color.needsUpdate = true;
+      } else if (this.colorMode === 'elevation' && this.elevationColorsBuf) {
+        geom.setAttribute('color', new THREE.BufferAttribute(this.elevationColorsBuf, 3));
+        geom.attributes.color.needsUpdate = true;
+      }
+    }
+    if (this.surfaceMesh && this.surfaceMesh.instanceColor) {
+      const colors = this.colorMode === 'robot' ? this.voxelColorsRobot : this.voxelColorsElevation;
+      if (colors) {
+        const col = new THREE.Color();
+        for (let i = 0; i < this.voxelCount; i++) {
+          col.setRGB(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2]);
+          this.surfaceMesh.setColorAt(i, col);
+        }
+        this.surfaceMesh.instanceColor.needsUpdate = true;
+      }
     }
   }
 
@@ -289,7 +306,8 @@ export class VoxelTerrain {
     this.group.add(this.pointsMesh);
 
     // 4. Construct 3D Mesh / Surface Reconstruction (3D Voxel Surfels)
-    const V = 0.12; // 12cm discrete 3D spatial bins
+    // Downsample voxels to keep max 10,000 voxels in view for 60fps performance
+    const V = 0.25; // 25cm discrete 3D spatial bins
     const voxelMap = new Map<string, { x: number; y: number; z: number; owner: number }>();
 
     for (let i = 0; i < total; i++) {
@@ -310,7 +328,16 @@ export class VoxelTerrain {
       }
     }
 
-    const voxels = Array.from(voxelMap.values());
+    const MAX_VOXELS = 10000;
+    let voxels = Array.from(voxelMap.values());
+    if (voxels.length > MAX_VOXELS) {
+      const step = voxels.length / MAX_VOXELS;
+      const sampled: typeof voxels = new Array(MAX_VOXELS);
+      for (let i = 0; i < MAX_VOXELS; i++) {
+        sampled[i] = voxels[Math.floor(i * step)];
+      }
+      voxels = sampled;
+    }
     this.voxelCount = voxels.length;
 
     if (voxels.length > 0) {
@@ -326,6 +353,9 @@ export class VoxelTerrain {
       this.surfaceMesh.castShadow = true;
       this.surfaceMesh.receiveShadow = true;
 
+      this.voxelColorsRobot = new Float32Array(voxels.length * 3);
+      this.voxelColorsElevation = new Float32Array(voxels.length * 3);
+
       const dummy = new THREE.Object3D();
       for (let i = 0; i < voxels.length; i++) {
         const v = voxels[i];
@@ -333,12 +363,20 @@ export class VoxelTerrain {
         dummy.updateMatrix();
         this.surfaceMesh.setMatrixAt(i, dummy.matrix);
 
-        // Instance color based on color mode
+        // Precompute both robot and elevation colors for instant switching
+        const rc = palette[v.owner] ?? fallbackColor;
+        this.voxelColorsRobot[i * 3] = rc.r;
+        this.voxelColorsRobot[i * 3 + 1] = rc.g;
+        this.voxelColorsRobot[i * 3 + 2] = rc.b;
+
+        elevationToRgb(v.z, minZ, maxZ, tmpColor);
+        this.voxelColorsElevation[i * 3] = tmpColor.r;
+        this.voxelColorsElevation[i * 3 + 1] = tmpColor.g;
+        this.voxelColorsElevation[i * 3 + 2] = tmpColor.b;
+
         if (this.colorMode === 'robot') {
-          const col = palette[v.owner] ?? fallbackColor;
-          this.surfaceMesh.setColorAt(i, col);
+          this.surfaceMesh.setColorAt(i, rc);
         } else {
-          elevationToRgb(v.z, minZ, maxZ, tmpColor);
           this.surfaceMesh.setColorAt(i, tmpColor);
         }
       }
@@ -377,6 +415,8 @@ export class VoxelTerrain {
     this.rawPositions = null;
     this.robotColorsBuf = null;
     this.elevationColorsBuf = null;
+    this.voxelColorsRobot = null;
+    this.voxelColorsElevation = null;
   }
 
   public dispose() {

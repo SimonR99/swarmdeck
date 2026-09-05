@@ -47,7 +47,7 @@ from swarmdeck_slam.backend import (
     scoped_grids,
     snapshot_update,
 )
-from swarmdeck_slam.render import RenderConfig
+from swarmdeck_slam.render import RenderConfig, _component_contains
 from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz, transform_points
 
 # Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
@@ -370,23 +370,56 @@ def _build_cloud_payload(
 
     if robot_id:
         target_robots = {robot_id}
+        comp = None
     else:
         grid = majority_component(snapshot)
-        target_robots = (
-            set(grid.robots)
-            if grid is not None
-            else set(snapshot.keyframe_counts.keys())
-        )
+        if grid is not None:
+            target_robots = set(grid.robots)
+            comp = next(
+                (
+                    c
+                    for c in snapshot.optimized.components
+                    if c.component_id == grid.component_id
+                ),
+                None,
+            )
+        elif len(snapshot.keyframe_counts) == 1:
+            target_robots = set(snapshot.keyframe_counts.keys())
+            comp = None
+        else:
+            target_robots = set()
+            comp = None
 
-    poses = snapshot.optimized.poses
     robot_chunks: dict[str, list[np.ndarray]] = {}
 
-    for kf_id, pose in poses.items():
+    for kf_id in snapshot.optimized.poses:
         if kf_id.robot_id not in target_robots:
+            continue
+        if comp is not None and not _component_contains(comp, kf_id):
             continue
         kf = backend._keyframes.get(kf_id)
         if kf is None or kf.points.size == 0:
             continue
+
+        # Use the exact same world pose as render.py to ensure 100% agreement
+        # with the 2D occupancy grid and live fleet coordinates:
+        if backend.render.odometry_as_pose:
+            frame = snapshot.optimized.t_world_trajectory.get(kf_id.trajectory)
+            if frame is None:
+                frame = snapshot.optimized.t_world_map.get(kf_id.robot_id)
+            if frame is not None:
+                pose = frame @ kf.t_odom_base
+            else:
+                pose = snapshot.optimized.poses[kf_id]
+        else:
+            pose = snapshot.optimized.poses[kf_id]
+            if backend.registration_mode != "odom_free":
+                frame = snapshot.optimized.t_world_trajectory.get(kf_id.trajectory)
+                if frame is None:
+                    frame = snapshot.optimized.t_world_map.get(kf_id.robot_id)
+                if frame is not None:
+                    pose = frame @ pose
+
         pts_world = transform_points(pose, kf.points.astype(np.float64, copy=False))
         robot_chunks.setdefault(kf_id.robot_id, []).append(pts_world)
 

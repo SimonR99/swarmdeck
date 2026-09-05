@@ -77,7 +77,7 @@
   let error = $state<string | null>(null);
 
   // Render & Color Modes
-  let renderMode = $state<Map3DRenderMode>('both');
+  let renderMode = $state<Map3DRenderMode>('points');
   let colorMode = $state<Map3DColorMode>('elevation');
   let pointSize = $state<number>(0.07);
 
@@ -543,21 +543,21 @@
       <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">View</span>
       <button
         class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'points' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Show raw 3D LiDAR point cloud"
+        title="Show 3D voxel terrain (tactical blocks)"
         onclick={() => setRenderMode('points')}
       >
         Points
       </button>
       <button
         class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'mesh' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Show 3D surface mesh reconstruction (terrain/caves/obstacles)"
+        title="Show dense 3D LiDAR point cloud surface"
         onclick={() => setRenderMode('mesh')}
       >
         Mesh
       </button>
       <button
         class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'both' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Show both 3D point cloud and surface mesh"
+        title="Show both 3D point cloud and voxel terrain"
         onclick={() => setRenderMode('both')}
       >
         Both
