@@ -50,6 +50,8 @@
     centreSelected: () => void;
     zoomBy: (factor: number) => void;
     fitCloud: () => void;
+    rotateBy?: (angle: number) => void;
+    resetRotation?: () => void;
   } | null>(null);
   let view = $state({ scale: 0.55, tx: 0, ty: 0, rotation: 0, initialised: false });
   let follow = $state(true);
@@ -214,6 +216,11 @@
   }
 
   function rotateBy(angleDelta: number, ax?: number, ay?: number) {
+    if (show3D) {
+      map3D?.rotateBy?.(angleDelta);
+      follow = false;
+      return;
+    }
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const px = ax ?? rect.width / 2;
@@ -229,6 +236,10 @@
   }
 
   function resetRotation() {
+    if (show3D) {
+      map3D?.resetRotation?.();
+      return;
+    }
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     rotateBy(-view.rotation, rect.width / 2, rect.height / 2);
@@ -603,7 +614,21 @@
   -->
   {#if show3D}
     <div class="absolute inset-0 z-10">
-      <Map3D bind:this={map3D} active={show3D} {follow} />
+      <Map3D
+        bind:this={map3D}
+        active={show3D}
+        {follow}
+        {showGrid}
+        {showTrails}
+        {showLabels}
+        {showSensors}
+        {showPlans}
+        {showNetwork}
+        {showCostmap}
+        {costmapKind}
+        {trails}
+        onCursorChange={(coords) => (cursorWorld = coords)}
+      />
     </div>
   {/if}
   <div bind:this={host} class="absolute inset-0">

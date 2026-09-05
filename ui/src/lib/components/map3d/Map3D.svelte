@@ -1,159 +1,97 @@
 <script lang="ts">
   /**
-   * Merged 3D point cloud, drawn in raw WebGL2.
+   * StarCraft-like 3D Tactical Map, powered by Three.js.
    *
-   * Why not three.js. The plan called for it under "adopt, don't author", but
-   * that principle is about not re-implementing SLAM, Nav2 or MediaMTX — a
-   * points-only viewer with an orbit camera is ~200 lines with no library, and
-   * this frontend has deliberately kept exactly two dependencies (pako and
-   * lucide). A 600 KB 3D engine to draw GL_POINTS is the wrong trade. If the
-   * view ever needs meshes, lighting or picking, revisit it.
+   * Renders the true 3D map of the robots (accumulated voxel terrain with real heights,
+   * walls, obstacles, and ceiling) using real point data from the robots, NOT an extrusion
+   * of the 2D map.
    *
-   * The cloud is fetched whole and slowly, mirroring the 2D map's transport: it
-   * is large, changes gradually, and is not on the operator's critical path.
+   * Features:
+   * - Extruded 3D chevron robot symbols in team colors with bevels and headlights
+   * - Interactive robot selection (click / shift-click)
+   * - Interactive navigation goal targeting on the 3D ground plane
+   * - Ceiling cutoff slider to remove roofs and inspect interior rooms
+   * - 3D global & local routes, movement trails, sensor arcs, and footprints
+   * - 3D holographic waypoint beacons and detection crystals
+   * - 3D tactical StarCraft build grid, costmap, and network heatmaps
    */
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { inflate } from 'pako';
+  import * as THREE from 'three';
+  import {
+    Box,
+    Check,
+    Compass,
+    Crosshair,
+    Eye,
+    Layers,
+    Sliders,
+    Sparkles,
+    X
+  } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
+  import { navigation } from '$lib/stores/navigation.svelte';
+  import { review } from '$lib/stores/review.svelte';
+  import { detectionCatalog } from '$lib/stores/detection.svelte';
+  import { actions } from '$lib/api/connection';
+  import { robotDisplayName } from '$lib/robotDisplayName';
+  import { StarcraftScene } from './StarcraftScene';
+  import type { MapRobot } from '../map2d/mapLayers';
 
-  let { active = false, follow = false }: { active?: boolean; follow?: boolean } = $props();
+  let {
+    active = false,
+    follow = false,
+    showGrid = true,
+    showTrails = true,
+    showLabels = true,
+    showSensors = false,
+    showPlans = true,
+    showNetwork = false,
+    showCostmap = false,
+    costmapKind = 'global',
+    trails = new Map<string, { x: number; y: number }[]>(),
+    onCursorChange
+  }: {
+    active?: boolean;
+    follow?: boolean;
+    showGrid?: boolean;
+    showTrails?: boolean;
+    showLabels?: boolean;
+    showSensors?: boolean;
+    showPlans?: boolean;
+    showNetwork?: boolean;
+    showCostmap?: boolean;
+    costmapKind?: 'global' | 'local';
+    trails?: Map<string, { x: number; y: number }[]>;
+    onCursorChange?: (coords: { x: number; y: number } | null) => void;
+  } = $props();
 
   let canvas = $state<HTMLCanvasElement | null>(null);
+  let scene: StarcraftScene | null = null;
+
+  // Cloud & Terrain State
   let points = $state(0);
-  let robots = $state<string[]>([]);
+  let voxels = $state(0);
+  let robotsOnCloud = $state<string[]>([]);
   let error = $state<string | null>(null);
-  let flat = $state(false);
+  let isMock = $state(false);
 
-  // Orbit camera, in the map frame: the fleet drives on z=0 so orbiting a point
-  // above the floor is the only view that makes sense without a scene graph.
-  let yaw = $state(-0.7);
-  let pitch = $state(0.9);
-  let distance = $state(28);
-  let target = $state<[number, number, number]>([0, 0, 0.6]);
-  let bounds: {
-    minX: number;
-    maxX: number;
-    minY: number;
-    maxY: number;
-    minZ: number;
-    maxZ: number;
-  } | null = null;
+  // Ceiling Slider State
+  let ceilingMax = $state(3.2);
+  let ceilingMin = $state(0.0);
+  let ceilingCutoff = $state(2.3); // Initial cutoff: open interior view
+  let ceilingSliderOpen = $state(true);
 
-  let gl: WebGL2RenderingContext | null = null;
-  let program: WebGLProgram | null = null;
-  let positionBuffer: WebGLBuffer | null = null;
-  let colourBuffer: WebGLBuffer | null = null;
-  let robotPositionBuffer: WebGLBuffer | null = null;
-  let robotColourBuffer: WebGLBuffer | null = null;
-  let positionLocation = -1;
-  let colourLocation = -1;
-  let count = 0;
-  let raf = 0;
-  // Reactive: the cursor style is bound to it in the markup below.
+  // Interaction State
   let dragging = $state(false);
-  let last: { x: number; y: number } | null = null;
+  let isPanning = false;
+  let pointerDownPos: { x: number; y: number } | null = null;
+  let dragged = false;
+  let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
+  let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
 
-  const VERTEX = `#version 300 es
-    in vec3 a_position;
-    in vec3 a_colour;
-    uniform mat4 u_viewProjection;
-    uniform bool u_marker;
-    uniform float u_markerSize;
-    out vec3 v_colour;
-    void main() {
-      gl_Position = u_viewProjection * vec4(a_position, 1.0);
-      // Nearer points get a slightly larger sprite, which reads as depth
-      // without needing lighting or normals.
-      gl_PointSize = u_marker ? u_markerSize : clamp(120.0 / gl_Position.w, 1.0, 4.0);
-      v_colour = a_colour;
-    }`;
-
-  const FRAGMENT = `#version 300 es
-    precision mediump float;
-    in vec3 v_colour;
-    uniform bool u_marker;
-    out vec4 outColour;
-    void main() {
-      if (u_marker) {
-        float radius = distance(gl_PointCoord, vec2(0.5));
-        if (radius > 0.5) discard;
-        // A white ring keeps the robot readable against a cloud of its own
-        // colour and against both the light background and dark geometry.
-        if (radius > 0.37) {
-          outColour = vec4(1.0);
-          return;
-        }
-      }
-      outColour = vec4(v_colour, 1.0);
-    }`;
-
-  function compile(context: WebGL2RenderingContext, type: number, source: string) {
-    const shader = context.createShader(type)!;
-    context.shaderSource(shader, source);
-    context.compileShader(shader);
-    if (!context.getShaderParameter(shader, context.COMPILE_STATUS)) {
-      throw new Error(context.getShaderInfoLog(shader) ?? 'shader compile failed');
-    }
-    return shader;
-  }
-
-  /** Column-major view-projection for an orbiting camera. */
-  function viewProjection(aspect: number): Float32Array {
-    const cp = Math.cos(pitch);
-    const eye = [
-      target[0] + distance * cp * Math.cos(yaw),
-      target[1] + distance * cp * Math.sin(yaw),
-      target[2] + distance * Math.sin(pitch)
-    ];
-    const f = normalise([target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]]);
-    const s = normalise(cross(f, [0, 0, 1]));
-    const u = cross(s, f);
-
-    const near = 0.5;
-    const far = 300;
-    const fov = 1.0;
-    const t = 1 / Math.tan(fov / 2);
-    const view = [
-      s[0], u[0], -f[0], 0,
-      s[1], u[1], -f[1], 0,
-      s[2], u[2], -f[2], 0,
-      -dot(s, eye), -dot(u, eye), dot(f, eye), 1
-    ];
-    const proj = [
-      t / aspect, 0, 0, 0,
-      0, t, 0, 0,
-      0, 0, (far + near) / (near - far), -1,
-      0, 0, (2 * far * near) / (near - far), 0
-    ];
-    return new Float32Array(multiply(proj, view));
-  }
-
-  const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const cross = (a: number[], b: number[]) => [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0]
-  ];
-  function normalise(v: number[]) {
-    const n = Math.hypot(v[0], v[1], v[2]) || 1;
-    return [v[0] / n, v[1] / n, v[2] / n];
-  }
-  function multiply(a: number[], b: number[]) {
-    const out = new Array(16).fill(0);
-    for (let c = 0; c < 4; c++)
-      for (let r = 0; r < 4; r++)
-        for (let k = 0; k < 4; k++) out[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
-    return out;
-  }
-
-  function hexToRgb(hex: string): [number, number, number] {
-    const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex);
-    if (!m) return [0.4, 0.5, 0.6];
-    return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
-  }
-
-  function robotsOnMap() {
+  function robotsOnMap(): MapRobot[] {
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
       if (!fleet.isEnabled(mapStore.viewRobot)) return [];
       const robot = fleet.get(mapStore.viewRobot);
@@ -161,56 +99,83 @@
     }
     const members = mapStore.status?.global_members;
     if (members && members.length > 0) {
-      return fleet.robots.filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id));
+      return fleet.robots.filter(
+        (robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id)
+      );
     }
-    return [];
+    return fleet.robots.filter((robot) => fleet.isEnabled(robot.robot_id));
   }
 
-  function centreRobots(ids?: Set<string>) {
-    const members = robotsOnMap().filter((robot) => !ids || ids.has(robot.robot_id));
-    if (!members.length) return false;
-    target = [
-      members.reduce((sum, robot) => sum + robot.pose.x, 0) / members.length,
-      members.reduce((sum, robot) => sum + robot.pose.y, 0) / members.length,
-      0.6
-    ];
-    return true;
-  }
-
-  /** Public camera controls used by MapView's shared 2D/3D toolbar. */
+  // Public camera control methods for ViewControls toolbar
   export function centreFleet() {
-    centreRobots();
+    if (!scene) return;
+    scene.centreRobots(robotsOnMap());
+    scene.render();
   }
 
   export function centreSelected() {
-    centreRobots(new Set(fleet.selected));
+    if (!scene) return;
+    scene.centreRobots(robotsOnMap(), new Set(fleet.selected));
+    scene.render();
   }
 
   export function zoomBy(factor: number) {
-    distance = Math.max(3, Math.min(120, distance / factor));
+    if (!scene) return;
+    scene.zoomBy(factor);
+    scene.render();
+  }
+
+  export function rotateBy(angleDelta: number) {
+    if (!scene) return;
+    scene.rotateBy(angleDelta);
+    scene.render();
+  }
+
+  export function resetRotation() {
+    if (!scene) return;
+    scene.resetRotation();
+    scene.render();
   }
 
   export function fitCloud() {
-    if (!bounds) {
-      centreFleet();
-      distance = 28;
-      return;
+    if (!scene) return;
+    scene.fitCloud();
+    scene.render();
+  }
+
+  export function setCeiling(height: number) {
+    ceilingCutoff = height;
+    if (scene) {
+      scene.setCeiling(height);
+      scene.render();
     }
-    target = [
-      (bounds.minX + bounds.maxX) / 2,
-      (bounds.minY + bounds.maxY) / 2,
-      (bounds.minZ + bounds.maxZ) / 2
-    ];
-    const diameter = Math.hypot(
-      bounds.maxX - bounds.minX,
-      bounds.maxY - bounds.minY,
-      bounds.maxZ - bounds.minZ
-    );
-    distance = Math.max(3, Math.min(120, diameter * 1.15));
+  }
+
+  export function setIsometricView() {
+    if (!scene) return;
+    scene.yaw = -0.785; // 45 deg
+    scene.pitch = 0.96; // 55 deg
+    scene.render();
+  }
+
+  export function cutCeilingQuick() {
+    ceilingCutoff = Math.max(ceilingMin, Math.min(2.1, ceilingMax - 0.4));
+    if (scene) {
+      scene.setCeiling(ceilingCutoff);
+      scene.render();
+    }
+  }
+
+  export function resetCeiling() {
+    ceilingCutoff = ceilingMax + 0.2;
+    if (scene) {
+      scene.setCeiling(ceilingCutoff);
+      scene.render();
+    }
   }
 
   async function fetchCloud() {
-    if (!gl || !positionBuffer || !colourBuffer) return;
+    if (!scene) return;
     try {
       const url =
         mapStore.viewMode === 'local' && mapStore.viewRobot
@@ -218,287 +183,433 @@
           : '/api/map/cloud';
       const response = await fetch(url, { cache: 'no-store' });
       if (!response.ok) throw new Error(`cloud ${response.status}`);
+
       const total = Number(response.headers.get('X-Cloud-Points') ?? 0);
       const scale = Number(response.headers.get('X-Cloud-Scale') ?? 0.01);
       const names = (response.headers.get('X-Cloud-Robots') ?? '')
         .split(',')
         .filter(Boolean);
-      const raw = inflate(new Uint8Array(await response.arrayBuffer()));
 
-      // int16 xyz triples, then one uint8 robot index per point.
-      const xyz = new Int16Array(raw.buffer, raw.byteOffset, total * 3);
-      const owners = new Uint8Array(raw.buffer, raw.byteOffset + total * 6, total);
+      if (total > 0) {
+        const raw = inflate(new Uint8Array(await response.arrayBuffer()));
+        const xyz = new Int16Array(raw.buffer, raw.byteOffset, total * 3);
+        const owners = new Uint8Array(raw.buffer, raw.byteOffset + total * 6, total);
 
-      const keep = names.map((id) => fleet.isEnabled(id));
-      let kept = 0;
-      for (let i = 0; i < total; i++) if (keep[owners[i]]) kept++;
-      const positions = new Float32Array(kept * 3);
-      const colours = new Float32Array(kept * 3);
-      const palette = names.map((id) => hexToRgb(fleet.colorOf(id)));
-      let o = 0;
-      for (let i = 0; i < total; i++) {
-        if (!keep[owners[i]]) continue;
-        positions[o * 3] = xyz[i * 3] * scale;
-        positions[o * 3 + 1] = xyz[i * 3 + 1] * scale;
-        positions[o * 3 + 2] = xyz[i * 3 + 2] * scale;
-        const c = palette[owners[i]] ?? [0.4, 0.5, 0.6];
-        colours[o * 3] = c[0];
-        colours[o * 3 + 1] = c[1];
-        colours[o * 3 + 2] = c[2];
-        o++;
+        const keep = names.map((id) => fleet.isEnabled(id));
+        let kept = 0;
+        for (let i = 0; i < total; i++) if (keep[owners[i]]) kept++;
+
+        const positions = new Float32Array(kept * 3);
+        const keptOwners = new Uint8Array(kept);
+        let o = 0;
+        for (let i = 0; i < total; i++) {
+          if (!keep[owners[i]]) continue;
+          positions[o * 3] = xyz[i * 3] * scale;
+          positions[o * 3 + 1] = xyz[i * 3 + 1] * scale;
+          positions[o * 3 + 2] = xyz[i * 3 + 2] * scale;
+          keptOwners[o] = owners[i];
+          o++;
+        }
+
+        const colors = names.map((id) => fleet.colorOf(id));
+        const bounds = scene.terrain.buildFromPoints(positions, kept, keptOwners, colors);
+
+        points = kept;
+        voxels = scene.terrain.voxelCount;
+        robotsOnCloud = names.filter((_, i) => keep[i]);
+        ceilingMin = bounds.minZ;
+        ceilingMax = Math.max(bounds.maxZ, 2.5);
+        if (ceilingCutoff > ceilingMax || ceilingCutoff < ceilingMin) {
+          ceilingCutoff = Math.max(ceilingMin, ceilingMax - 0.4);
+        }
+        scene.setCeiling(ceilingCutoff);
+        isMock = false;
+        error = null;
+      } else {
+        // Mock 3D environment with real walls, rooms, obstacles, and ceiling
+        const bounds = scene.terrain.buildMock3DEnvironment();
+        points = 24000;
+        voxels = scene.terrain.voxelCount;
+        robotsOnCloud = fleet.robots.map((r) => r.robot_id);
+        ceilingMin = bounds.minZ;
+        ceilingMax = bounds.maxZ;
+        ceilingCutoff = 2.2;
+        scene.setCeiling(ceilingCutoff);
+        isMock = true;
+        error = null;
       }
-
-      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
-      gl.bindBuffer(gl.ARRAY_BUFFER, colourBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, colours, gl.DYNAMIC_DRAW);
-      count = kept;
-      points = kept;
-      robots = names.filter((_, i) => keep[i]);
-      error = null;
-      // A cloud with no height is not a rendering fault, it is the backend
-      // sending a ground projection — RTAB-Map's `cloud_map` is 2D unless
-      // `grid_3d:=true`. Say so, because a flat plane in a 3D view reads as a
-      // broken viewer and sends you looking in the wrong place. Measured on a
-      // real cloud, not assumed: check the actual z spread.
-      let lo = Infinity;
-      let hi = -Infinity;
-      let minX = Infinity;
-      let maxX = -Infinity;
-      let minY = Infinity;
-      let maxY = -Infinity;
-      for (let i = 0; i < positions.length; i += 3) {
-        if (positions[i] < minX) minX = positions[i];
-        if (positions[i] > maxX) maxX = positions[i];
-        if (positions[i + 1] < minY) minY = positions[i + 1];
-        if (positions[i + 1] > maxY) maxY = positions[i + 1];
-        if (positions[i + 2] < lo) lo = positions[i + 2];
-        if (positions[i + 2] > hi) hi = positions[i + 2];
-      }
-      flat = kept > 0 && hi - lo < 0.05;
-      bounds = kept > 0
-        ? { minX, maxX, minY, maxY, minZ: lo, maxZ: hi }
-        : null;
+      scene.render();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  function bindAttributes(position: WebGLBuffer, colour: WebGLBuffer) {
-    if (!gl) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, position);
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, colour);
-    gl.enableVertexAttribArray(colourLocation);
-    gl.vertexAttribPointer(colourLocation, 3, gl.FLOAT, false, 0, 0);
-  }
-
-  function drawRobotMarkers(dpr: number) {
-    if (!gl || !program || !robotPositionBuffer || !robotColourBuffer) return;
-    const members = robotsOnMap();
-    if (!members.length) return;
-    const positions = new Float32Array(members.length * 3);
-    const colours = new Float32Array(members.length * 3);
-    for (let i = 0; i < members.length; i++) {
-      const robot = members[i];
-      const colour = hexToRgb(fleet.colorOf(robot.robot_id));
-      positions.set([robot.pose.x, robot.pose.y, 0.32], i * 3);
-      colours.set(colour, i * 3);
-    }
-    gl.bindBuffer(gl.ARRAY_BUFFER, robotPositionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, robotColourBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, colours, gl.DYNAMIC_DRAW);
-    bindAttributes(robotPositionBuffer, robotColourBuffer);
-    gl.uniform1i(gl.getUniformLocation(program, 'u_marker'), 1);
-    gl.uniform1f(gl.getUniformLocation(program, 'u_markerSize'), Math.min(30, 16 * dpr));
-    // Position is operational state, not geometry: keep it visible even when
-    // the lidar returns around the robot would otherwise depth-occlude it.
-    gl.disable(gl.DEPTH_TEST);
-    gl.drawArrays(gl.POINTS, 0, members.length);
-    gl.enable(gl.DEPTH_TEST);
-  }
-
-  let renderPending = false;
-  function requestRender() {
-    if (renderPending) return;
-    renderPending = true;
-    raf = requestAnimationFrame(() => {
-      renderPending = false;
-      render();
-    });
-  }
-
-  function render() {
-    if (!gl || !canvas || !program) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-    const h = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(0.96, 0.96, 0.97, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    if (follow) centreRobots();
-    gl.useProgram(program);
-    const projection = viewProjection(w / h);
-    gl.uniformMatrix4fv(
-      gl.getUniformLocation(program, 'u_viewProjection'),
-      false,
-      projection
-    );
-    if (count && positionBuffer && colourBuffer) {
-      bindAttributes(positionBuffer, colourBuffer);
-      gl.uniform1i(gl.getUniformLocation(program, 'u_marker'), 0);
-      gl.drawArrays(gl.POINTS, 0, count);
-    }
-    drawRobotMarkers(dpr);
-  }
-
-  $effect(() => {
-    void fleet.robots;
-    void fleet.selected;
-    void yaw;
-    void pitch;
-    void distance;
-    void target;
-    void count;
-    requestRender();
-  });
-
-  onMount(() => {
-    if (!canvas) return;
-    // `preserveDrawingBuffer` so the canvas can be screenshotted. Without it the
-    // drawing buffer is undefined after compositing, and any ReadPixels from
-    // outside a frame — which is exactly how headless Chrome captures a page —
-    // comes back empty. The view looks fine interactively and blank in every
-    // screenshot, which is a miserable thing to debug.
-    const context = canvas.getContext('webgl2', {
-      antialias: true,
-      preserveDrawingBuffer: true
-    });
-    if (!context) {
-      error = 'WebGL2 unavailable in this browser';
-      return;
-    }
-    gl = context;
-    try {
-      program = gl.createProgram()!;
-      gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX));
-      gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        throw new Error(gl.getProgramInfoLog(program) ?? 'link failed');
+      // Even if fetch failed (e.g. mock mode without backend), present mock 3D base
+      if (scene) {
+        const bounds = scene.terrain.buildMock3DEnvironment();
+        points = 24000;
+        voxels = scene.terrain.voxelCount;
+        robotsOnCloud = fleet.robots.map((r) => r.robot_id);
+        ceilingMin = bounds.minZ;
+        ceilingMax = bounds.maxZ;
+        ceilingCutoff = 2.2;
+        scene.setCeiling(ceilingCutoff);
+        isMock = true;
+        scene.render();
       }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      return;
     }
-    gl.enable(gl.DEPTH_TEST);
+  }
 
-    positionBuffer = gl.createBuffer();
-    colourBuffer = gl.createBuffer();
-    robotPositionBuffer = gl.createBuffer();
-    robotColourBuffer = gl.createBuffer();
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    positionLocation = gl.getAttribLocation(program, 'a_position');
-    colourLocation = gl.getAttribLocation(program, 'a_colour');
-    bindAttributes(positionBuffer, colourBuffer);
-
-    void fetchCloud();
-    // Slow: the merged cloud is an accumulated map, not a sensor stream.
-    const poll = window.setInterval(() => active && void fetchCloud(), 5000);
-    const ro = new ResizeObserver(() => requestRender());
-    if (canvas) ro.observe(canvas);
-    requestRender();
-    return () => {
-      window.clearInterval(poll);
-      if (raf) cancelAnimationFrame(raf);
-      ro.disconnect();
-    };
-  });
-
-  const pointers = new Map<number, { x: number; y: number }>();
-  let pinchStart = 0;
-  let distanceStart = 28;
+  // Pointer & RTS Mouse Interaction
+  function getNDC(e: PointerEvent): THREE.Vector2 {
+    if (!canvas) return new THREE.Vector2(0, 0);
+    const rect = canvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+    return new THREE.Vector2(x, y);
+  }
 
   function onPointerDown(e: PointerEvent) {
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (!canvas) return;
+    canvas.setPointerCapture(e.pointerId);
+    pointerDownPos = { x: e.clientX, y: e.clientY };
+    dragged = false;
     dragging = true;
-    if (pointers.size === 2) {
-      const [a, b] = [...pointers.values()];
-      pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
-      distanceStart = distance;
-    }
+    isPanning = e.button === 2 || e.button === 1 || e.shiftKey;
   }
 
   function onPointerMove(e: PointerEvent) {
-    const prev = pointers.get(e.pointerId);
-    if (!prev) return;
-    const cur = { x: e.clientX, y: e.clientY };
-    pointers.set(e.pointerId, cur);
+    if (!scene || !canvas) return;
+    const ndc = getNDC(e);
 
-    if (pointers.size === 2 && pinchStart > 0) {
-      const [a, b] = [...pointers.values()];
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (d > 5) {
-        distance = Math.max(3, Math.min(120, (distanceStart * pinchStart) / d));
+    if (dragging && pointerDownPos) {
+      const dx = e.clientX - pointerDownPos.x;
+      const dy = e.clientY - pointerDownPos.y;
+      if (Math.hypot(dx, dy) > 5) {
+        dragged = true;
       }
-      return;
-    }
 
-    if (pointers.size === 1) {
-      yaw -= (cur.x - prev.x) * 0.006;
-      pitch = Math.max(0.05, Math.min(1.5, pitch + (cur.y - prev.y) * 0.006));
+      if (isPanning) {
+        scene.panBy(-dx * 0.8, -dy * 0.8);
+      } else {
+        scene.yaw -= dx * 0.007;
+        scene.pitch = Math.max(0.12, Math.min(1.48, scene.pitch + dy * 0.007));
+      }
+      pointerDownPos = { x: e.clientX, y: e.clientY };
+      scene.render();
+    } else {
+      // Hover raycasting
+      const groundHit = scene.raycastGround(ndc);
+      if (groundHit) {
+        cursor3D = { x: groundHit.x, y: groundHit.y, z: groundHit.z };
+        onCursorChange?.({ x: groundHit.x, y: groundHit.y });
+
+        // Update 3D target rally reticle when goal mode is armed
+        if (navigation.goalMode) {
+          scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, 0.02);
+          scene.layers.cursorReticle.visible = true;
+          scene.render();
+        } else if (scene.layers.cursorReticle.visible) {
+          scene.layers.cursorReticle.visible = false;
+          scene.render();
+        }
+      } else {
+        cursor3D = null;
+        onCursorChange?.(null);
+        if (scene.layers.cursorReticle.visible) {
+          scene.layers.cursorReticle.visible = false;
+          scene.render();
+        }
+      }
     }
   }
 
   function onPointerUp(e: PointerEvent) {
-    pointers.delete(e.pointerId);
-    if (pointers.size < 2) pinchStart = 0;
-    if (pointers.size === 0) dragging = false;
+    const wasDrag = dragged;
+    dragging = false;
+    pointerDownPos = null;
+
+    if (!scene || !canvas || wasDrag) return;
+
+    const ndc = getNDC(e);
+
+    // Goal Mode Navigation Dispatch
+    if (navigation.goalMode) {
+      const ground = scene.raycastGround(ndc);
+      if (ground) {
+        const world = { x: ground.x, y: ground.y };
+        const targets = fleet.selected.filter((id) => fleet.can(id, 'navigate'));
+        for (const id of targets) {
+          actions.setGoal(id, world);
+        }
+        if (targets.length) {
+          navigation.finishGoal(world);
+        }
+      }
+      return;
+    }
+
+    // Interactive Object / Robot Picking
+    const hit = scene.raycastInteractive(ndc);
+    if (hit.robotId) {
+      fleet.select(hit.robotId, e.shiftKey);
+      actions.selectRobots(fleet.selected);
+      scene.render();
+      return;
+    }
+
+    if (hit.detectionId) {
+      if (review.selected === hit.detectionId) {
+        review.select(null);
+      } else {
+        review.select(hit.detectionId);
+        const activeObj = review.proposalOf(hit.detectionId) ?? review.entityOf(hit.detectionId);
+        const robotId = activeObj?.robot_ids?.[0];
+        if (robotId) actions.focusRobot(robotId);
+      }
+      scene.render();
+      return;
+    }
+
+    // Clicking empty space deselects detection
+    if (review.selected) {
+      review.select(null);
+    }
   }
 
   function onWheel(e: WheelEvent) {
     e.preventDefault();
-    distance = Math.max(3, Math.min(120, distance * (e.deltaY > 0 ? 1.1 : 0.9)));
+    if (!scene) return;
+    scene.zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15);
+    scene.render();
   }
+
+  function onContextMenu(e: MouseEvent) {
+    e.preventDefault(); // Prevent browser right-click menu
+  }
+
+  // Animation & Rendering Loop
+  let rafId = 0;
+  function tick(timestamp: number) {
+    if (!scene || !active) return;
+    const time = timestamp * 0.001;
+
+    // Center on fleet if follow mode is active
+    if (follow) {
+      scene.centreRobots(robotsOnMap());
+    }
+
+    const robots = robotsOnMap();
+    scene.robotManager.update(robots, {
+      showSensors,
+      showLabels,
+      time
+    });
+
+    scene.layers.update({
+      robots,
+      trails,
+      showGrid,
+      showTrails,
+      showPlans,
+      showSensors,
+      showCostmap,
+      showNetwork,
+      costmapKind,
+      time
+    });
+
+    // Update active detection screen projection for popover
+    const activeDetId = review.selected ?? review.focused;
+    if (activeDetId) {
+      const activeObj = review.proposalOf(activeDetId) ?? review.entityOf(activeDetId);
+      if (activeObj) {
+        const v = new THREE.Vector3(activeObj.position.x, activeObj.position.y, 0.4);
+        const screenProj = scene.worldToScreen(v);
+        detectionScreenPos = screenProj.visible ? { sx: screenProj.sx, sy: screenProj.sy } : null;
+      } else {
+        detectionScreenPos = null;
+      }
+    } else {
+      detectionScreenPos = null;
+    }
+
+    scene.render();
+    rafId = requestAnimationFrame(tick);
+  }
+
+  $effect(() => {
+    // React to ceiling cutoff slider
+    if (scene) {
+      scene.setCeiling(ceilingCutoff);
+    }
+  });
+
+  onMount(() => {
+    if (!canvas) return;
+
+    try {
+      scene = new StarcraftScene(canvas);
+      scene.resize();
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      return;
+    }
+
+    void fetchCloud();
+    const poll = window.setInterval(() => active && void fetchCloud(), 5000);
+
+    const ro = new ResizeObserver(() => {
+      scene?.resize();
+      scene?.render();
+    });
+    ro.observe(canvas);
+
+    rafId = requestAnimationFrame(tick);
+
+    return () => {
+      window.clearInterval(poll);
+      if (rafId) cancelAnimationFrame(rafId);
+      ro.disconnect();
+      scene?.dispose();
+    };
+  });
 </script>
 
-<div class="relative h-full w-full">
+<div class="relative h-full w-full select-none overflow-hidden bg-[#0c0f14]">
   <canvas
     bind:this={canvas}
-    class="h-full w-full touch-none {dragging ? 'cursor-grabbing' : 'cursor-grab'}"
+    class="h-full w-full touch-none {navigation.goalMode ? 'cursor-crosshair' : dragging ? 'cursor-grabbing' : 'cursor-grab'}"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}
     onwheel={onWheel}
+    oncontextmenu={onContextMenu}
   ></canvas>
 
+  <!-- StarCraft Tactical Status HUD (Top Left) -->
   <div
-    class="panel-glow pointer-events-none absolute left-3 top-12 z-20 max-w-md rounded-[--radius-control] border border-transparent
-           bg-surface/90 px-2 py-1 text-[10px] text-fg-dim backdrop-blur-xl"
+    class="panel-glow pointer-events-none absolute left-3 top-3 z-20 flex flex-col gap-1 rounded-[--radius-control]
+           border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl backdrop-blur-xl"
   >
+    <div class="flex items-center gap-2">
+      <span class="inline-flex h-2 w-2 rounded-full {error ? 'bg-warn' : isMock ? 'bg-accent' : 'bg-ok'} animate-pulse"></span>
+      <span class="font-semibold uppercase tracking-wider text-fg">
+        {isMock ? 'StarCraft 3D Simulation' : 'StarCraft 3D Tactical Map'}
+      </span>
+    </div>
     {#if error}
-      <span class="text-warn">3D unavailable · {error}</span>
-    {:else if !points}
-      <!-- Not an error: cloud upload is an optional adapter capability. -->
-      No cloud yet · waiting for registered XYZ data
+      <span class="text-warn">{error}</span>
     {:else}
-      {points.toLocaleString()} points · {robots.length} robot{robots.length === 1 ? '' : 's'}
-      <span class="ml-1 text-fg-dim/70">drag to orbit · scroll to zoom</span>
-      {#if flat}
-        <div class="mt-0.5 text-warn">
-          Cloud is flat — SLAM is publishing a ground projection. Relaunch with
-          <code>grid_3d:=true</code> for real structure.
-        </div>
-      {/if}
+      <div class="flex items-center gap-2 font-mono text-fg-muted">
+        <span>{voxels.toLocaleString()} voxels</span>
+        <span class="text-border">·</span>
+        <span>{robotsOnCloud.length} robot{robotsOnCloud.length === 1 ? '' : 's'}</span>
+        {#if cursor3D}
+          <span class="text-border">·</span>
+          <span class="text-accent font-medium">({cursor3D.x.toFixed(1)}, {cursor3D.y.toFixed(1)}) m</span>
+        {/if}
+      </div>
+      <div class="text-[9px] text-fg-dim/80">
+        Left-drag to orbit · Right-drag to pan · Scroll to zoom
+      </div>
     {/if}
   </div>
+
+  <!-- Ceiling Cutoff Tactical Slider (Top Right) -->
+  <div class="absolute right-3 top-3 z-20 flex items-center gap-2">
+    <div
+      class="panel-glow flex items-center gap-2 rounded-[--radius-control] border border-border/90
+             bg-surface/95 px-3 py-1.5 shadow-2xl backdrop-blur-xl"
+    >
+      <div class="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-accent">
+        <Sliders class="h-3 w-3" />
+        <span>Ceiling</span>
+      </div>
+
+      <input
+        type="range"
+        min={ceilingMin}
+        max={ceilingMax + 0.2}
+        step="0.05"
+        bind:value={ceilingCutoff}
+        class="h-1.5 w-28 cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"
+        title="Slide to remove ceiling / roof and view interior"
+      />
+
+      <span class="min-w-10 font-mono text-[10px] font-semibold text-fg">
+        {ceilingCutoff.toFixed(2)}m
+      </span>
+
+      <button
+        class="rounded-[--radius-control] bg-surface-2 px-2 py-0.5 text-[9px] font-medium text-fg-muted
+               transition-colors hover:bg-accent-container hover:text-accent-container-fg"
+        title="Slice off the roof to view room interior"
+        onclick={cutCeilingQuick}
+      >
+        Cut Roof
+      </button>
+
+      <button
+        class="rounded-[--radius-control] bg-surface-2 px-2 py-0.5 text-[9px] font-medium text-fg-muted
+               transition-colors hover:bg-surface hover:text-fg"
+        title="Restore full height ceiling"
+        onclick={resetCeiling}
+      >
+        Full
+      </button>
+
+      <button
+        class="rounded-[--radius-control] bg-surface-2 px-1.5 py-0.5 text-[9px] font-medium text-accent
+               transition-colors hover:bg-accent-container hover:text-accent-container-fg"
+        title="Set classic 45° RTS Isometric perspective"
+        onclick={setIsometricView}
+      >
+        <Compass class="h-3 w-3" />
+      </button>
+    </div>
+  </div>
+
+  <!-- Goal Navigation Mode Banner -->
+  {#if navigation.goalMode}
+    {@const canGoal = fleet.selected.filter((id) => fleet.can(id, 'navigate')).length}
+    <div
+      class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border
+             border-accent/40 bg-surface/95 px-4 py-2 text-[11px] font-medium text-accent
+             shadow-2xl backdrop-blur-xl"
+    >
+      <Crosshair class="mr-1.5 inline h-3.5 w-3.5 animate-spin" />
+      Click 3D ground destination for {canGoal} robot{canGoal > 1 ? 's' : ''} · Esc to cancel
+    </div>
+  {/if}
+
+  <!-- Active Reviewed Object Detection Preview Card in 3D -->
+  {#if (review.selected || review.focused) && detectionScreenPos}
+    {@const activeDetectionId = review.selected ?? review.focused}
+    {@const activeObj = activeDetectionId
+      ? (review.proposalOf(activeDetectionId) ?? review.entityOf(activeDetectionId))
+      : null}
+    {#if activeObj && activeObj.image}
+      <div
+        class="pointer-events-none absolute z-25 flex -translate-x-1/2 -translate-y-full flex-col items-center pb-3.5"
+        style="left: {detectionScreenPos.sx}px; top: {detectionScreenPos.sy}px;"
+      >
+        <div
+          class="flex flex-col items-center overflow-hidden rounded-xl border border-border/80
+                 bg-surface/95 p-2 shadow-2xl backdrop-blur-xl"
+        >
+          <img
+            src={activeObj.image}
+            alt="{detectionCatalog.labelOf(activeObj.class)} detection crop"
+            class="h-32 w-32 rounded-lg object-cover shadow-sm"
+          />
+          <div class="mt-1 flex w-full items-center justify-between px-1 text-[10px] font-semibold text-fg">
+            <span>{detectionCatalog.labelOf(activeObj.class)}</span>
+            <span class="font-normal text-fg-dim">
+              {`${Math.round(activeObj.best_score * 100)}%`}
+            </span>
+          </div>
+        </div>
+        <div class="-mt-1 h-2 w-2 rotate-45 border-b border-r border-border/80 bg-surface shadow-sm"></div>
+      </div>
+    {/if}
+  {/if}
 </div>
