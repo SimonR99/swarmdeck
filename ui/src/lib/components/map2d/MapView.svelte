@@ -61,9 +61,11 @@
   // `?mock=1&robots=4`, so URL-driven view state is the existing idiom here —
   // and it is the only way to reach the 3D view from a headless browser, which
   // is how it gets verified.
+  // Default to 3D Starcraft view on this branch; ?view=2d explicitly requests 2D.
   let show3D = $state(
-    typeof location !== 'undefined' &&
-      new URLSearchParams(location.search).get('view') === '3d'
+    typeof location !== 'undefined'
+      ? new URLSearchParams(location.search).get('view') !== '2d'
+      : true
   );
   let showGrid = $state(true);
   let showTrails = $state(true);
