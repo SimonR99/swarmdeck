@@ -367,10 +367,32 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
             return
         _publish_grid(scope, grid)
 
+    # ORDER MATTERS: poses before pixels.
+    #
+    # /api/slam/update carries the optimised origins and common poses; the
+    # raster is interpreted through them. Publishing the raster first leaves the
+    # server holding new pixels against the PREVIOUS optimisation's poses, and
+    # set_global_grid remerges immediately on arrival -- so until the update
+    # lands the optimised map shows scans projected through stale odometry:
+    # walls rotated, and the same wall ghosted behind itself at two poses.
+    # PUBLISH_TIMEOUT_S is 15 s, so that window is not brief.
+    body = snapshot_update(snapshot)
+    try:
+        req = urllib.request.Request(
+            f"{SERVER_URL}/api/slam/update",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=PUBLISH_TIMEOUT_S).read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _last_error = f"slam update failed: {exc}"
+        return
+    if generation is not None and generation != _current_generation():
+        return
+
     grid = majority_component(snapshot)
     if grid is not None:
-        if generation is not None and generation != _current_generation():
-            return
         cells = np.ascontiguousarray(grid.cells)
         payload = zlib.compress(cells.tobytes())
         url = (
@@ -390,22 +412,6 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
             ).read()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             _last_error = f"global map publish failed: {exc}"
-
-    if generation is not None and generation != _current_generation():
-        return
-
-    body = snapshot_update(snapshot)
-    try:
-        req = urllib.request.Request(
-            f"{SERVER_URL}/api/slam/update",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=PUBLISH_TIMEOUT_S).read()
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        _last_error = f"slam update failed: {exc}"
-        return
 
 
 def _publish_grid(scope: str, grid: Any) -> None:
