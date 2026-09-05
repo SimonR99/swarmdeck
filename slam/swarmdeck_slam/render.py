@@ -688,6 +688,23 @@ def _render_component(
         if points_world.shape[0] == 0:
             continue
         grid_x, grid_y = _grid_index(points_world, meta)
+        # Keep only points inside the grid. np.add.at, which this replaced,
+        # bounds-checked for us: it raised on an index past the end and wrapped
+        # a negative one to the far edge. Deriving the window from min()/max()
+        # instead means a single stray point silently drags the whole batch's
+        # counts somewhere else -- a negative min indexes the slice from the
+        # end. _rasterize_free already masks; this path did not.
+        inside = (
+            (grid_x >= 0)
+            & (grid_x < meta.width)
+            & (grid_y >= 0)
+            & (grid_y < meta.height)
+        )
+        if not bool(inside.all()):
+            grid_x = grid_x[inside]
+            grid_y = grid_y[inside]
+            if grid_x.size == 0:
+                continue
         min_gx, max_gx = int(grid_x.min()), int(grid_x.max())
         min_gy, max_gy = int(grid_y.min()), int(grid_y.max())
         lw, lh = max_gx - min_gx + 1, max_gy - min_gy + 1
