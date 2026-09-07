@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -386,6 +386,8 @@ class KeyframeUploader:
         points_map: np.ndarray,
         t_map_base: np.ndarray,
         stamp: float,
+        *,
+        colorize: Callable[[np.ndarray], np.ndarray | None] | None = None,
     ) -> bool:
         """Non-blocking. Returns True if a keyframe was enqueued."""
         pose = np.asarray(t_map_base, dtype=np.float64).reshape(-1)
@@ -434,6 +436,15 @@ class KeyframeUploader:
             elif not moved:
                 return False
 
+        # Project only accepted, voxel-reduced scans. Missing camera data must
+        # not change geometry, capture timing, or odometry admission.
+        colors = None
+        if colorize is not None:
+            try:
+                colors = colorize(base_points)
+            except (ValueError, TypeError, AttributeError):
+                pass
+
         # The wire cloud is in the base frame at capture. Carry the floor plane
         # in that same frame so the renderer can apply the physical band per
         # robot, even when the fleet uses different chassis/lidar heights.
@@ -457,6 +468,7 @@ class KeyframeUploader:
                 points=base_points,
                 t_odom_base=pose,
                 session=self.session,
+                colors=colors,
                 **height_kwargs,
             )
         except ProtocolError:

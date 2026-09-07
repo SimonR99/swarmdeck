@@ -72,6 +72,7 @@ from adapters.keyframe_producer import (
     laser_scan_to_map_points,
     points_lidar_to_map,
     pose7_from_xy_yaw,
+    se3_from_quat_xyz,
 )
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
@@ -731,10 +732,57 @@ class RobotBridge(
             # up again here races SLAM's map->odom correction; a loop-closure
             # jump between the two lookups turns an otherwise valid scan into
             # metre-long phantom walls after conversion back to base frame.
-            uploader.consider(points_map, t_map_base, stamp)
+            uploader.consider(
+                points_map,
+                t_map_base,
+                stamp,
+                colorize=lambda points: self._keyframe_colors(
+                    points, t_map_base, stamp
+                ),
+            )
         except Exception:
             # Keyframe production must never starve the scan map or Nav2.
             pass
+
+    def _keyframe_colors(self, points, t_map_base, stamp):
+        """Color accepted LiDAR samples with calibrated, synchronized RGB-D."""
+        from adapters.reconstruction import colorize_ros_rgbd
+
+        image = getattr(self, "_camera_frame", None)
+        depth = getattr(self, "_camera_depth", None)
+        info = getattr(self, "_camera_info", None)
+        if image is None or depth is None or info is None:
+            return None
+        at = stamp_seconds(image.header)
+        depth_at = stamp_seconds(depth.header)
+        if (
+            at is None
+            or depth_at is None
+            or abs(at - stamp) > 0.25
+            or abs(at - depth_at) > 0.05
+        ):
+            return None
+        camera_pose = self.map_pose_at(at, require_history=True)
+        if camera_pose is None:
+            return None
+        t_map_camera_base = se3_from_quat_xyz(
+            pose7_from_xy_yaw(camera_pose["x"], camera_pose["y"], camera_pose["yaw"])
+        )
+        # Optical axes: right=-base Y, down=-base Z, forward=base X.
+        optical_from_base = np.array(
+            [
+                [0.0, -1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0, self.camera_z],
+                [1.0, 0.0, 0.0, -self.camera_x],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        transform = (
+            optical_from_base
+            @ np.linalg.inv(t_map_camera_base)
+            @ se3_from_quat_xyz(t_map_base)
+        )
+        return colorize_ros_rgbd(points, image, depth, info, transform)
 
     def _on_scan(self, msg: LaserScan) -> None:
         """2D fallback. Ignored while the 3D ``scan/points`` path is alive."""

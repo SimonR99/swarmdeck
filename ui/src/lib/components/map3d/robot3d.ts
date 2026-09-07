@@ -7,10 +7,11 @@ import type { MapRobot } from '../map2d/mapLayers';
 export interface Robot3DEntry {
   id: string;
   group: THREE.Group;
+  marker: THREE.Group;
   chevronMesh: THREE.Mesh;
   edges: THREE.LineSegments;
   selectionRing: THREE.Group;
-  selectedRingMesh: THREE.LineSegments;
+  selectedRingMesh: THREE.Mesh;
   sensorCone: THREE.Mesh;
   footprintMesh: THREE.LineSegments;
   labelSprite: THREE.Sprite | null;
@@ -30,6 +31,7 @@ export class Robot3DManager {
       showLabels: boolean;
       time: number;
       getGroundZ?: (x: number, y: number) => number;
+      markerScale?: (position: THREE.Vector3, selected: boolean) => number;
     }
   ) {
     const activeIds = new Set<string>();
@@ -43,7 +45,6 @@ export class Robot3DManager {
         this.group.add(entry.group);
       }
 
-      const colorHex = fleet.colorOf(robot.robot_id);
       const isSelected = fleet.isSelected(robot.robot_id);
 
       // Position in world coordinates: x, y, floor clearance
@@ -52,12 +53,14 @@ export class Robot3DManager {
       entry.group.position.set(robot.pose.x, robot.pose.y, groundZ);
       entry.group.rotation.set(0, 0, robot.pose.yaw);
 
+      const scale = options.markerScale?.(entry.group.position, isSelected) ?? 1;
+      entry.marker.scale.setScalar(scale);
+
       // 3D Selection Reticle
-      entry.selectionRing.visible = true;
+      entry.selectionRing.visible = isSelected;
       if (isSelected) {
         entry.selectedRingMesh.visible = true;
-        // Rotate the tactical corner reticle slowly
-        entry.selectedRingMesh.rotation.z = options.time * 0.8;
+        entry.selectedRingMesh.rotation.z = 0;
         // Pulse scale slightly
         const pulse = 1.0 + 0.05 * Math.sin(options.time * 4);
         entry.selectedRingMesh.scale.set(pulse, pulse, 1);
@@ -71,7 +74,10 @@ export class Robot3DManager {
 
       // Label
       if (entry.labelSprite) {
-        entry.labelSprite.visible = options.showLabels;
+        entry.labelSprite.visible = options.showLabels || isSelected;
+        entry.labelSprite.scale.set(1.8 * scale, 0.45 * scale, 1);
+        entry.labelSprite.position.z = 0.85 * scale;
+        (entry.labelSprite.material as THREE.SpriteMaterial).color.set(isSelected ? 0xffffff : 0xbac6d6);
       }
     }
 
@@ -93,6 +99,9 @@ export class Robot3DManager {
     const robotGroup = new THREE.Group();
     robotGroup.name = `robot_${id}`;
     robotGroup.userData = { robotId: id, isRobot: true };
+
+    const marker = new THREE.Group();
+    robotGroup.add(marker);
 
     // 1. Extruded Chevron Symbol (identical to 2D shape, extruded to 3D)
     // 2D shape points: forward tip at (0.50, 0), wings at (-0.32, 0.30) & (-0.32, -0.30), notch at (-0.18, 0)
@@ -121,33 +130,37 @@ export class Robot3DManager {
       metalness: 0.45,
       roughness: 0.28,
       emissive: threeColor,
-      emissiveIntensity: 0.25
+      emissiveIntensity: 0.6,
+      depthTest: false, depthWrite: false
     });
 
     const chevronMesh = new THREE.Mesh(chevronGeo, chevronMat);
-    chevronMesh.castShadow = true;
+    chevronMesh.renderOrder = 91;
+    chevronMesh.castShadow = false;
     chevronMesh.receiveShadow = true;
     chevronMesh.userData = { robotId: id, isRobot: true };
-    robotGroup.add(chevronMesh);
+    marker.add(chevronMesh);
 
     // 2. Crisp White Edge Bevel (matching 2D strokeStyle = '#ffffff')
     const edgesGeo = new THREE.EdgesGeometry(chevronGeo, 24);
     const edgesMat = new THREE.LineBasicMaterial({
       color: 0xffffff,
       transparent: true,
-      opacity: 0.95
+      opacity: 1, depthTest: false, depthWrite: false
     });
     const edges = new THREE.LineSegments(edgesGeo, edgesMat);
-    robotGroup.add(edges);
+    edges.renderOrder = 92;
+    marker.add(edges);
 
     // 3. Glowing cockpit visor / headlights at tip
     const visorGeo = new THREE.SphereGeometry(0.05, 8, 8);
     const visorMat = new THREE.MeshBasicMaterial({
-      color: 0x70ffff
+      color: 0x70ffff, depthTest: false, depthWrite: false
     });
     const visorMesh = new THREE.Mesh(visorGeo, visorMat);
     visorMesh.position.set(0.42, 0, 0.22);
-    robotGroup.add(visorMesh);
+    visorMesh.renderOrder = 93;
+    marker.add(visorMesh);
 
     // 4. Extruded chassis / base platform
     const baseShape = new THREE.Shape();
@@ -168,59 +181,54 @@ export class Robot3DManager {
     const baseMat = new THREE.MeshStandardMaterial({
       color: 0x334155, // Clean slate 700 chassis (not pitch dark)
       metalness: 0.5,
-      roughness: 0.35
+      roughness: 0.35, depthTest: false, depthWrite: false
     });
     const baseMesh = new THREE.Mesh(baseGeo, baseMat);
-    baseMesh.castShadow = true;
+    baseMesh.renderOrder = 90;
+    baseMesh.castShadow = false;
     baseMesh.userData = { robotId: id, isRobot: true };
-    robotGroup.add(baseMesh);
+    marker.add(baseMesh);
 
     // 5. 3D Tactical Selection Reticle on the floor
     const selectionRing = new THREE.Group();
-    selectionRing.position.set(0, 0, 0.01);
+    selectionRing.position.set(0, 0, 0.15);
 
     // Base subtle ground ring
-    const groundRingGeo = new THREE.RingGeometry(0.55, 0.6, 32);
+    const groundRingGeo = new THREE.RingGeometry(0.64, 0.86, 32);
     const groundRingMat = new THREE.MeshBasicMaterial({
       color: threeColor,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.35
+      opacity: 1, depthTest: false, depthWrite: false, toneMapped: false
     });
     const groundRingMesh = new THREE.Mesh(groundRingGeo, groundRingMat);
-    selectionRing.add(groundRingMesh);
+    groundRingMesh.renderOrder = 95;
+    const backing = new THREE.Mesh(
+      new THREE.RingGeometry(0.58, 0.92, 32),
+      new THREE.MeshBasicMaterial({ color: 0x101827, side: THREE.DoubleSide, depthTest: false, depthWrite: false })
+    );
+    backing.renderOrder = 94;
+    selectionRing.add(backing, groundRingMesh);
 
     // 3D Tactical Corner Reticle (pulsing green/team brackets when selected)
-    const bracketGeo = new THREE.BufferGeometry();
     const bracketPts: number[] = [];
-    const R = 0.72;
-    const cornerSize = 0.2;
-
-    // 4 corner L-brackets
-    const corners = [
-      [R, R],
-      [-R, R],
-      [-R, -R],
-      [R, -R]
-    ];
-    for (const [cx, cy] of corners) {
-      const sx = Math.sign(cx);
-      const sy = Math.sign(cy);
-      bracketPts.push(cx, cy - sy * cornerSize, 0, cx, cy, 0);
-      bracketPts.push(cx, cy, 0, cx - sx * cornerSize, cy, 0);
+    const rect = (x: number, y: number, w: number, h: number) => {
+      bracketPts.push(x,y,0, x+w,y,0, x+w,y+h,0, x,y,0, x+w,y+h,0, x,y+h,0);
+    };
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+      rect(sx > 0 ? 0.76 : -1.06, sy > 0 ? 0.97 : -1.06, 0.3, 0.09);
+      rect(sx > 0 ? 0.97 : -1.06, sy > 0 ? 0.76 : -1.06, 0.09, 0.3);
     }
+    const bracketGeo = new THREE.BufferGeometry();
     bracketGeo.setAttribute('position', new THREE.Float32BufferAttribute(bracketPts, 3));
-    const bracketMat = new THREE.LineBasicMaterial({
-      color: 0x00ff88, // Tactical selection green
-      linewidth: 2,
-      transparent: true,
-      opacity: 0.95
-    });
-    const selectedRingMesh = new THREE.LineSegments(bracketGeo, bracketMat);
+    const selectedRingMesh = new THREE.Mesh(bracketGeo, new THREE.MeshBasicMaterial({
+      color: 0xffffff, side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false
+    }));
+    selectedRingMesh.renderOrder = 96;
     selectedRingMesh.visible = false;
     selectionRing.add(selectedRingMesh);
 
-    robotGroup.add(selectionRing);
+    marker.add(selectionRing);
 
     // 6. Sensor FOV Arc (projected onto ground)
     const sensorGeo = new THREE.RingGeometry(0.1, 2.0, 24, 1, -0.6, 1.2);
@@ -259,6 +267,7 @@ export class Robot3DManager {
     return {
       id,
       group: robotGroup,
+      marker,
       chevronMesh,
       edges,
       selectionRing,
@@ -294,10 +303,11 @@ export class Robot3DManager {
     const spriteMat = new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
-      depthTest: false
+      depthTest: false, depthWrite: false
     });
     const sprite = new THREE.Sprite(spriteMat);
-    sprite.scale.set(1.4, 0.35, 1.0);
+    sprite.renderOrder = 100;
+    sprite.scale.set(1.8, 0.45, 1.0);
     return sprite;
   }
 

@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test:map3d": "node --experimental-strip-types --test tests/terrainData.test.ts"
+    "test:map3d": "node --experimental-strip-types --test tests/terrainData.test.ts tests/mapFrames.test.ts"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.4",

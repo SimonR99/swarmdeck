@@ -165,6 +165,7 @@ class KeyframePacket:
     min_height: float | None = None
     max_height: float | None = None
     lidar_height: float | None = None
+    colors: np.ndarray | None = None  # uint8 [n, 4], sRGB + observed mask
 
     @property
     def n_points(self) -> int:
@@ -243,6 +244,7 @@ def encode_keyframe(
     min_height: float | None = None,
     max_height: float | None = None,
     lidar_height: float | None = None,
+    colors: np.ndarray | None = None,
 ) -> bytes:
     """Serialize one keyframe. Raises :class:`ProtocolError` on invalid input.
 
@@ -273,6 +275,11 @@ def encode_keyframe(
         # Reuse the decoder's validation so an encoder cannot emit metadata the
         # backend would reject later.
         _validate_height_band(height_band_spec)
+
+    if colors is not None:
+        colors = np.asarray(colors)
+        if colors.dtype != np.uint8 or colors.shape != (len(pts), 4):
+            raise ProtocolError("colors must be uint8 [n_points, 4]")
 
     quantized = np.rint(pts / scale)
     in_range = (np.abs(quantized) <= _INT16_LIMIT).all(axis=1)
@@ -311,6 +318,10 @@ def encode_keyframe(
             "max_range": float(descriptor.max_range),
         }
         body += descriptor.data.tobytes(order="C")
+
+    if colors is not None:
+        header["color_encoding"] = "rgba8"
+        body += colors[in_range].tobytes(order="C")
 
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
     blob = (
@@ -425,6 +436,17 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
     )
 
     descriptor = _decode_descriptor(header.get("descriptor"), body, points_bytes)
+    colors = None
+    color_encoding = header.get("color_encoding")
+    if color_encoding is not None:
+        if color_encoding != "rgba8":
+            raise ProtocolError("unsupported color encoding")
+        offset = points_bytes + (descriptor.data.size if descriptor is not None else 0)
+        if len(body) != offset + n_points * 4:
+            raise ProtocolError("color payload does not match point count")
+        colors = np.frombuffer(
+            body, dtype=np.uint8, count=n_points * 4, offset=offset
+        ).reshape(n_points, 4)
     pose = _validate_pose(header.get("t_odom_base"))
     height_band = _validate_height_band(header.get("height_band"))
 
@@ -440,6 +462,7 @@ def decode_keyframe(blob: bytes) -> KeyframePacket:
         min_height=height_band[1] if height_band is not None else None,
         max_height=height_band[2] if height_band is not None else None,
         lidar_height=height_band[3] if height_band is not None else None,
+        colors=colors,
     )
 
 

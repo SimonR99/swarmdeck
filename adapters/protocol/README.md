@@ -353,3 +353,11 @@ media publisher decodes it before encoding H.264.
 3. Ignore unknown messages for forward compatibility.
 4. Advertise only capabilities that are currently usable.
 5. Keep `robot_id` stable across reconnects.
+
+Optional keyframe camera colors use `color_encoding: "rgba8"` in the keyframe
+header. The body appends `n_points * 4` uint8 bytes **after** XYZ and any descriptor:
+RGB is sRGB, and alpha is 255 for a measured camera color or 0 for an unobserved
+point. Colors follow exactly the same point filtering/order. Existing uncolored
+packets are unchanged; older readers can ignore the appended color payload.
+Cloud responses use `X-Cloud-RGB: 1` for appended RGB and `X-Cloud-Frame: world`
+or `local` to prevent transforming an already aligned single-robot SLAM cloud twice.

@@ -26,6 +26,7 @@
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
+  import { cloudToWorld } from './mapFrames';
   import { Map3DScene } from './Map3DScene';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
@@ -270,18 +271,9 @@
         if (keptRgb && rgb) keptRgb.set(rgb.subarray(i * 3, i * 3 + 3), j * 3);
         j++;
       }
-      // Keep all overlays and commands in world coordinates, including the local view.
       if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
-        const tf = mapStore.status?.transforms[mapStore.viewRobot];
-        if (tf)
-          for (let i = 0; i < kept; i++) {
-            const x = positions[i * 3],
-              y = positions[i * 3 + 1],
-              c = Math.cos(tf.yaw),
-              sn = Math.sin(tf.yaw);
-            positions[i * 3] = tf.x + x * c - y * sn;
-            positions[i * 3 + 1] = tf.y + x * sn + y * c;
-          }
+        cloudToWorld(positions, response.headers.get('X-Cloud-Frame'),
+          mapStore.status?.transforms[mapStore.viewRobot]);
       }
       const data = await new Promise<TerrainData>((resolve, reject) => {
         worker!.onmessage = (
@@ -586,7 +578,13 @@
       showSensors,
       showLabels,
       time,
-      getGroundZ
+      getGroundZ,
+      markerScale: (position, selected) => {
+        const metresPerPixel = 2 * scene!.camera.position.distanceTo(position)
+          * Math.tan(THREE.MathUtils.degToRad(scene!.camera.fov) / 2)
+          / Math.max(1, scene!.canvas.clientHeight);
+        return Math.max(1, Math.min(12, metresPerPixel * (selected ? 26 : 18)));
+      }
     });
 
     if (timestamp - lastLayers >= 200) {
@@ -817,9 +815,9 @@
           Team
         </button>
         <button
-          class="rounded px-2 py-0.5 text-fg-muted disabled:opacity-40"
+          class="rounded px-2 py-0.5 disabled:opacity-40 {colorMode === 'camera' ? 'bg-accent text-accent-fg' : 'text-fg-muted'}"
           disabled={!hasRgb}
-          title={hasRgb ? 'Calibrated camera colors' : 'This cloud has no camera colors'}
+          title={hasRgb ? 'Calibrated camera colors' : 'No calibrated RGB is available for this map yet. New color keyframes require matching camera images, depth and capture-time poses.'}
           aria-pressed={colorMode === 'camera'}
           onclick={() => setColorMode('camera')}>Camera</button
         >

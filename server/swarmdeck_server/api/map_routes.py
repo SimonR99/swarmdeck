@@ -635,10 +635,17 @@ async def get_cloud(request: Request | None = None) -> Response:
                 data = upstream.read(MAX_UPLOAD_BYTES + 1)
                 if len(data) > MAX_UPLOAD_BYTES:
                     raise ValueError("upstream cloud too large")
-                headers = {k: upstream.headers.get(k, default) for k, default in {
-                    "X-Cloud-Points": "0", "X-Cloud-Scale": str(CLOUD_SCALE),
-                    "X-Cloud-Robots": "", "X-Cloud-Format": "xyz16", "X-Cloud-RGB": "0"
-                }.items()}
+                headers = {
+                    k: upstream.headers.get(k, default)
+                    for k, default in {
+                        "X-Cloud-Points": "0",
+                        "X-Cloud-Scale": str(CLOUD_SCALE),
+                        "X-Cloud-Robots": "",
+                        "X-Cloud-Format": "xyz16",
+                        "X-Cloud-RGB": "0",
+                        "X-Cloud-Frame": "world",
+                    }.items()
+                }
                 return data, headers
         # Uniformly retain coverage across robots. Float32 avoids int16 wrap beyond 327 m.
         if len(points) > 300_000:
@@ -650,9 +657,12 @@ async def get_cloud(request: Request | None = None) -> Response:
         if rgb is not None:
             raw += rgb.tobytes()
         return zlib.compress(raw, 1), {
-            "X-Cloud-Points": str(len(points)), "X-Cloud-Scale": "1",
-            "X-Cloud-Robots": ",".join(names), "X-Cloud-Format": "xyz32",
-            "X-Cloud-RGB": "1" if rgb is not None else "0"
+            "X-Cloud-Points": str(len(points)),
+            "X-Cloud-Scale": "1",
+            "X-Cloud-Robots": ",".join(names),
+            "X-Cloud-Format": "xyz32",
+            "X-Cloud-RGB": "1" if rgb is not None else "0",
+            "X-Cloud-Frame": "local" if robot_id else "world",
         }
     try:
         body, headers = await asyncio.to_thread(prepare)

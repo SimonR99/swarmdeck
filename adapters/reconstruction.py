@@ -64,3 +64,41 @@ def colorize_points(
     mask[idx[visible]] = True
     colors[idx[visible]] = rgb[pixels[visible, 1], pixels[visible, 0]]
     return colors, mask
+
+
+def colorize_ros_rgbd(points, image, depth_image, info, camera_from_points):
+    """RGBA for rectified, aligned ROS RGB-D; alpha marks measured colors only."""
+    from adapters.perception.depth_projection import _depth_metres
+
+    encoding = str(image.encoding).lower()
+    channels = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4}.get(encoding)
+    if channels is None or any(abs(float(d)) > 1e-8 for d in info.d):
+        return None
+    width, height = int(image.width), int(image.height)
+    if (width, height) != (int(info.width), int(info.height)):
+        return None
+    if int(image.step) < width * channels:
+        return None
+    pixels = np.ndarray(
+        (height, width, channels),
+        dtype=np.uint8,
+        buffer=memoryview(image.data),
+        strides=(int(image.step), channels, 1),
+    )
+    rgb = pixels[:, :, :3]
+    if encoding.startswith("bgr"):
+        rgb = rgb[:, :, ::-1]
+    depth = _depth_metres(depth_image)
+    if depth is None or depth.shape != (height, width):
+        return None
+    colors, visible = colorize_points(
+        points,
+        rgb,
+        np.asarray(info.k).reshape(3, 3),
+        camera_from_points,
+        depth=depth,
+        tolerance=0.15,
+    )
+    if not visible.any():
+        return None
+    return np.column_stack((colors, visible.astype(np.uint8) * 255))

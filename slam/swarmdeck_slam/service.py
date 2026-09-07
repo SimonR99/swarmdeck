@@ -423,6 +423,8 @@ def _build_cloud_payload(
             comp = None
 
     robot_chunks: dict[str, list[np.ndarray]] = {}
+    robot_colors: dict[str, list[np.ndarray]] = {}
+    any_color = False
 
     for kf_id in snapshot.optimized.poses:
         if kf_id.robot_id not in target_robots:
@@ -454,8 +456,15 @@ def _build_cloud_payload(
 
         pts_world = transform_points(pose, kf.points.astype(np.float64, copy=False))
         robot_chunks.setdefault(kf_id.robot_id, []).append(pts_world)
+        colors = kf.colors
+        if colors is None:
+            colors = np.zeros((len(kf.points), 4), dtype=np.uint8)
+            colors[:, :3] = 148
+        any_color = any_color or bool(np.any(colors[:, 3]))
+        robot_colors.setdefault(kf_id.robot_id, []).append(colors)
 
     chunks: list[np.ndarray] = []
+    color_chunks: list[np.ndarray] = []
     indices: list[np.ndarray] = []
     names: list[str] = []
 
@@ -464,10 +473,16 @@ def _build_cloud_payload(
         if not pts_list:
             continue
         all_pts = np.concatenate(pts_list, axis=0)
+        rgba = np.concatenate(robot_colors[rid], axis=0)
+        # Prefer an observed camera sample over an earlier uncolored return in
+        # the same voxel. Colors never change point positions or graph inputs.
+        order = np.argsort(rgba[:, 3] == 0, kind="stable")
+        all_pts, rgba = all_pts[order], rgba[order]
         keys = np.round(all_pts / voxel_size).astype(np.int32)
         _, keep = np.unique(keys, axis=0, return_index=True)
         voxels = all_pts[keep].astype(np.float32)
         chunks.append(voxels)
+        color_chunks.append(rgba[keep, :3])
         indices.append(np.full(len(voxels), len(names), dtype=np.uint8))
         names.append(rid)
 
@@ -479,10 +494,15 @@ def _build_cloud_payload(
         idx_array = np.concatenate(indices, axis=0)
 
     quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
-    body = zlib.compress(quantised.tobytes() + idx_array.tobytes(), 1)
+    raw = quantised.tobytes() + idx_array.tobytes()
+    if any_color:
+        raw += np.concatenate(color_chunks, axis=0).tobytes()
+    body = zlib.compress(raw, 1)
     headers = {
         "Cache-Control": "no-store",
         "X-Cloud-Points": str(len(points)),
+        "X-Cloud-RGB": "1" if any_color else "0",
+        "X-Cloud-Frame": "world",
         "X-Cloud-Scale": str(CLOUD_SCALE),
         "X-Cloud-Robots": ",".join(names),
     }

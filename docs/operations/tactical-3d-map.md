@@ -167,3 +167,29 @@ python3 -m pytest server/tests/test_reconstruction.py \
 Geometry/transport/export regressions do not need CUDA. Real camera/TF capture,
 UMAMI training quality, and sustained low-end GPU FPS require hardware runs;
 synthetic browser rendering checks cannot establish those results.
+
+## Overlay frames and camera color
+
+The tactical view uses world coordinates in both global and single-robot views.
+Cloud responses declare `X-Cloud-Frame`: direct robot maps are `local`, while the
+collaborative SLAM cloud is already `world`. Only local XYZ receives the robot's
+map-to-world transform. Robot markers and paths arrive in world coordinates;
+costmaps and network grids receive their source robot's translation and yaw.
+
+Planned routes use screen-space triangle lines with dark outlines, and the
+selected robot has an outlined team ring and white brackets. Robot symbols have
+a minimum display size as the camera zooms out. These overlays render above the
+terrain to remain legible; sensor footprints retain their physical scale.
+
+Simulator keyframes can now carry measured camera colors. The producer projects
+only accepted, voxel-reduced scans using the RGB camera's intrinsics, known
+optical mount, capture-time pose, and aligned depth for occlusion rejection.
+RGB/depth stamps must agree within 50 ms, and the image must be within 250 ms of
+the scan. Missing calibration, historical poses, or valid depth leaves the
+keyframe uncolored. Color does not change geometry or optimizer constraints.
+
+The SLAM cloud prefers a colored observation when several returns share a
+voxel. The Camera control enables when the map supplies RGB; unobserved areas
+remain neutral gray. Existing XYZ-only keyframes cannot gain camera colors
+retroactively. Simulator and SLAM processes must load this version and collect
+new keyframes before Camera becomes available on such a run.

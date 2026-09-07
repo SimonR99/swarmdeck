@@ -143,6 +143,7 @@ def keyframe_from_packet(
         min_height=packet.min_height,
         max_height=packet.max_height,
         lidar_height=packet.lidar_height,
+        colors=packet.colors,
     )
 
 

@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import { decalPose } from './mapFrames';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
 import { review } from '$lib/stores/review.svelte';
@@ -166,6 +170,7 @@ export class Map3DLayers {
     if (
       changed('paths', [
         options.showPlans,
+        fleet.selected,
         robots.map((r) => [
           r.robot_id,
           r.nav_status,
@@ -315,41 +320,39 @@ export class Map3DLayers {
           ? robot.local_planned_path
           : undefined;
 
-      // 1. Global path (thick dashed glowing route on terrain)
-      if (globalPath && globalPath.length >= 2) {
-        const pts = globalPath.map((p) => {
-          const z = getGroundZ ? getGroundZ(p.x, p.y) : 0.0;
-          return new THREE.Vector3(p.x, p.y, z + 0.04);
-        });
-        const geo = new THREE.BufferGeometry().setFromPoints(pts);
-        const mat = new THREE.LineDashedMaterial({
-          color,
-          dashSize: 0.4,
-          gapSize: 0.25,
-          linewidth: 2,
-          transparent: true,
-          opacity: 0.95
-        });
-        const l = new THREE.Line(geo, mat);
-        l.computeLineDistances();
-        this.pathsGroup.add(l);
-      }
+      const selected = fleet.isSelected(robot.robot_id);
+      if (globalPath && globalPath.length >= 2)
+        this.addRoute(globalPath, color, selected ? 6 : 4, true, getGroundZ);
+      if (localPath && localPath.length >= 2)
+        this.addRoute(localPath, new THREE.Color(0xffffff), selected ? 5 : 3, false, getGroundZ);
 
-      // 2. Local path (solid vibrant trajectory on top)
-      if (localPath && localPath.length >= 2) {
-        const pts = localPath.map((p) => {
-          const z = getGroundZ ? getGroundZ(p.x, p.y) : 0.0;
-          return new THREE.Vector3(p.x, p.y, z + 0.05);
-        });
-        const geo = new THREE.BufferGeometry().setFromPoints(pts);
-        const mat = new THREE.LineBasicMaterial({
-          color,
-          linewidth: 3,
-          transparent: true,
-          opacity: 1.0
-        });
-        this.pathsGroup.add(new THREE.Line(geo, mat));
-      }
+    }
+  }
+
+  private addRoute(
+    path: { x: number; y: number }[], color: THREE.Color, width: number,
+    dashed: boolean, getGroundZ?: (x: number, y: number) => number
+  ) {
+    // Triangle-backed screen-space lines: WebGL's native linewidth is not portable.
+    const positions: number[] = [];
+    const count = Math.min(path.length, 1024);
+    for (let i = 0; i < count; i++) {
+      const p = path[Math.round(i * (path.length - 1) / (count - 1))];
+      positions.push(p.x, p.y, (getGroundZ?.(p.x, p.y) ?? 0) + 0.3);
+    }
+    const geometry = new LineGeometry().setPositions(positions);
+    for (const outline of [true, false]) {
+      const material = new LineMaterial({
+        color: outline ? 0x101827 : color.getHex(),
+        linewidth: width + (outline ? 4 : 0),
+        dashed, dashSize: 0.65, gapSize: 0.3,
+        depthTest: false, depthWrite: false, toneMapped: false,
+        transparent: true, opacity: outline ? 0.95 : 1
+      });
+      const line = new Line2(geometry, material);
+      line.computeLineDistances();
+      line.renderOrder = (dashed ? 40 : 42) + (outline ? 0 : 1);
+      this.pathsGroup.add(line);
     }
   }
 
@@ -494,10 +497,10 @@ export class Map3DLayers {
           transparent: true,
           opacity: 0.65,
           side: THREE.DoubleSide,
-          depthWrite: false
+          depthWrite: false, depthTest: false
         });
         this.costmapMesh = new THREE.Mesh(geo, mat);
-        this.costmapMesh.position.z = 0.012;
+        this.costmapMesh.renderOrder = 20;
         this.group.add(this.costmapMesh);
       }
       this.costmapMesh.visible = true;
@@ -507,16 +510,13 @@ export class Map3DLayers {
         material.map = new THREE.CanvasTexture(costmapLayer.canvas);
         material.needsUpdate = true;
       }
-      material.map.needsUpdate = true;
+      if (this.costmapMesh.userData.seq !== costmapLayer.seq) material.map.needsUpdate = true;
+      this.costmapMesh.userData.seq = costmapLayer.seq;
 
-      const w = costmapLayer.info.width * costmapLayer.info.resolution;
-      const h = costmapLayer.info.height * costmapLayer.info.resolution;
-      this.costmapMesh.scale.set(w, h, 1);
-      this.costmapMesh.position.set(
-        costmapLayer.info.origin.x + w / 2,
-        costmapLayer.info.origin.y + h / 2,
-        0.012
-      );
+      const pose = decalPose(costmapLayer.info, mapStore.status?.transforms[costmapLayer.robotId]);
+      this.costmapMesh.scale.set(pose.width, pose.height, 1);
+      this.costmapMesh.rotation.z = pose.yaw;
+      this.costmapMesh.position.set(pose.x, pose.y, 0.2);
     } else if (this.costmapMesh) {
       this.costmapMesh.visible = false;
     }
@@ -545,14 +545,10 @@ export class Map3DLayers {
       }
       material.map.needsUpdate = true;
 
-      const w = networkLayer.info.width * networkLayer.info.resolution;
-      const h = networkLayer.info.height * networkLayer.info.resolution;
-      this.networkMesh.scale.set(w, h, 1);
-      this.networkMesh.position.set(
-        networkLayer.info.origin.x + w / 2,
-        networkLayer.info.origin.y + h / 2,
-        0.014
-      );
+      const pose = decalPose(networkLayer.info, mapStore.status?.transforms[networkLayer.robotId]);
+      this.networkMesh.scale.set(pose.width, pose.height, 1);
+      this.networkMesh.rotation.z = pose.yaw;
+      this.networkMesh.position.set(pose.x, pose.y, 0.21);
     } else if (this.networkMesh) {
       this.networkMesh.visible = false;
     }

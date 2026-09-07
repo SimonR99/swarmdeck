@@ -200,3 +200,44 @@ def test_wire_keyframe_keeps_capture_yaw_for_both_scan_formats(
     (bridge._on_scan_cloud if cloud else bridge._on_scan)(msg)
     assert bridge._keyframes.pending() == 1
     assert bridge._pose_lookup_rejected == 1
+
+
+def test_camera_color_uses_camera_capture_yaw_and_rejects_stale_images(sim_module):
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.camera_x = bridge.camera_z = 0
+    stamp = SimpleNamespace(sec=100, nanosec=0)
+    rgb = np.zeros((3, 3, 3), np.uint8)
+    rgb[1, 1] = [240, 10, 20]
+    depth = np.full((3, 3), 2.0, dtype="<f4")
+    bridge._camera_frame = SimpleNamespace(
+        header=SimpleNamespace(stamp=stamp),
+        encoding="rgb8",
+        width=3,
+        height=3,
+        step=9,
+        data=rgb.tobytes(),
+    )
+    bridge._camera_depth = SimpleNamespace(
+        header=SimpleNamespace(stamp=stamp),
+        encoding="32FC1",
+        width=3,
+        height=3,
+        step=12,
+        is_bigendian=False,
+        data=depth.tobytes(),
+    )
+    bridge._camera_info = SimpleNamespace(
+        width=3, height=3, d=[], k=[1, 0, 1, 0, 1, 1, 0, 0, 1]
+    )
+    bridge.map_pose_at = MagicMock(return_value={"x": 0, "y": 0, "yaw": math.pi / 2})
+    # Scan yaw zero, camera yaw +90: world +Y is in front of the camera.
+    colors = bridge._keyframe_colors(
+        np.array([[0, 2, 0]]), np.array([0, 0, 0, 0, 0, 0, 1]), 100.1
+    )
+    assert colors.tolist() == [[240, 10, 20, 255]]
+    assert (
+        bridge._keyframe_colors(
+            np.array([[0, 2, 0]]), np.array([0, 0, 0, 0, 0, 0, 1]), 101
+        )
+        is None
+    )

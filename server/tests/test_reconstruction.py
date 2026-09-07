@@ -166,6 +166,7 @@ def test_cloud_float_transport_preserves_far_coordinates_and_rgb(monkeypatch):
     )
     response = asyncio.run(map_routes.get_cloud(request))
     assert response.status_code == 200
+    assert response.headers["X-Cloud-Frame"] == "local"
     raw = zlib.decompress(response.body)
     assert np.frombuffer(raw, dtype="<f4", count=3).tolist() == [1000, 2, 3]
     assert list(raw[13:]) == [255, 0, 0]
@@ -177,3 +178,62 @@ def test_cloud_float_transport_preserves_far_coordinates_and_rgb(monkeypatch):
         }
     )
     assert asyncio.run(map_routes.get_cloud(request)).status_code == 304
+
+
+def test_rgbd_projection_preserves_observation_mask_and_rejects_occlusion():
+    from types import SimpleNamespace as NS
+    from adapters.reconstruction import colorize_ros_rgbd
+
+    rgb = np.zeros((3, 3, 3), np.uint8)
+    rgb[1, 1] = [240, 10, 20]
+    depth = np.full((3, 3), 2.0, dtype="<f4")
+    image = NS(encoding="rgb8", width=3, height=3, step=9, data=rgb.tobytes())
+    depth_image = NS(
+        encoding="32FC1",
+        width=3,
+        height=3,
+        step=12,
+        is_bigendian=False,
+        data=depth.tobytes(),
+    )
+    info = NS(width=3, height=3, d=[], k=[1, 0, 1, 0, 1, 1, 0, 0, 1])
+    colors = colorize_ros_rgbd(
+        np.array([[0, 0, 2], [0, 0, 3], [0, 0, -2]]),
+        image,
+        depth_image,
+        info,
+        np.eye(4),
+    )
+    assert colors.tolist() == [
+        [240, 10, 20, 255],
+        [148, 148, 148, 0],
+        [148, 148, 148, 0],
+    ]
+
+
+def test_local_slam_fallback_keeps_world_frame_metadata(monkeypatch):
+    from swarmdeck_server.api import map_routes
+    from swarmdeck_server.mapsvc import graph_bridge
+    import urllib.request
+    from io import BytesIO
+
+    service = MapService()
+    monkeypatch.setattr(map_routes, "map_service", service)
+    monkeypatch.setattr(graph_bridge, "SLAM_URL", "http://unused")
+    body = zlib.compress(np.array([800, 2100, 50], dtype="<i2").tobytes() + bytes([0]))
+
+    class Upstream(BytesIO):
+        headers = {
+            "X-Cloud-Points": "1",
+            "X-Cloud-Robots": "r",
+            "X-Cloud-Scale": "0.01",
+        }
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: Upstream(body))
+    response = asyncio.run(
+        map_routes.get_cloud(
+            Request({"type": "http", "headers": [], "query_string": b"robot_id=r"})
+        )
+    )
+    assert response.headers["X-Cloud-Frame"] == "world"
+    assert response.body == body
