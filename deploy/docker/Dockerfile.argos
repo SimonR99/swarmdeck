@@ -45,10 +45,15 @@ RUN mkdir -p /opt/filament-sdk \
 # drifting odometry sensors, and the bunker / bunker-mini / scout-mini / spot
 # robot plugins. Pinned, because a moving simulator is not a baseline.
 ARG ARGOS_REPO=https://github.com/beltrame/argos3.git
-# Pinned to the commit that added the bunker, scout-mini and spot entities.
+# Pinned to the commit that made drift odometry start-relative, matching the
+# external estimator. Before it, `odometry:=drift` reported arena coordinates
+# while `odometry:=fast_livo2` reported start-relative ones, so the start-pose
+# hints in configs/ landed twice and the merged map came out rotated.
 # A branch name here would mean the simulator changes under the stack without
-# anything in this repository recording that it did.
-ARG ARGOS_REF=da70805238285772405b4a4315e65970b69857ce
+# anything in this repository recording that it did. Keep this and the default
+# in deploy/compose/docker-compose.yml the same: they used to disagree, and the
+# compose value silently won every build made through Compose.
+ARG ARGOS_REF=c236a40f
 RUN git clone "${ARGOS_REPO}" /src/argos3 \
     && git -C /src/argos3 checkout "${ARGOS_REF}"
 
