@@ -424,6 +424,7 @@ class Keyframe:
     min_height: float | None = None
     max_height: float | None = None
     lidar_height: float | None = None
+    colors: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.t_odom_base.shape != (4, 4):

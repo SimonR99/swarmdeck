@@ -40,52 +40,50 @@ def consolidate_voxel_centroids(
 
 
 def merged_cloud(
-    service: Any, robot_id: str | None = None
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    service: Any, robot_id: str | None = None, *, include_rgb: bool = False
+) -> tuple[np.ndarray, np.ndarray, list[str]] | tuple[np.ndarray, np.ndarray, list[str], np.ndarray | None]:
     """Return member clouds transformed into the published merged frame, or one robot's cloud."""
     with service._state_lock:
         robot_clouds = dict(service.robot_clouds)
+        robot_colors = dict(service.robot_cloud_colors) if include_rgb else {}
         transforms = dict(service.transforms)
         cloud_z_offsets = dict(service.cloud_z_offsets)
 
-    if robot_id:
-        if robot_id not in robot_clouds or robot_clouds[robot_id].size == 0:
-            return (
-                np.zeros((0, 3), dtype=np.float32),
-                np.zeros(0, dtype=np.uint8),
-                [],
-            )
-        pts = consolidate_voxel_centroids(robot_clouds[robot_id])
-        return pts, np.zeros(len(pts), dtype=np.uint8), [robot_id]
-
     members = service.global_members()
-    selected_rids = members if members else list(robot_clouds.keys())
-    chunks: list[np.ndarray] = []
-    indices: list[np.ndarray] = []
-    names: list[str] = []
-    for rid in sorted(selected_rids):
-        if rid not in robot_clouds:
+    selected_rids = [robot_id] if robot_id else (members if members else list(robot_clouds))
+    chunks, indices, colors, names = [], [], [], []
+    any_rgb = False
+    for rid in sorted(selected_rids)[:256]:
+        points = robot_clouds.get(rid)
+        if points is None or not points.size:
             continue
-        points = robot_clouds[rid]
-        if points.size == 0:
-            continue
-        tx, ty, yaw = transforms.get(rid, (0.0, 0.0, 0.0))
-        c, s = np.cos(yaw), np.sin(yaw)
-        out = np.empty_like(points)
-        out[:, 0] = tx + points[:, 0] * c - points[:, 1] * s
-        out[:, 1] = ty + points[:, 0] * s + points[:, 1] * c
-        out[:, 2] = points[:, 2] + cloud_z_offsets.get(rid, 0.0)
-        consolidated = consolidate_voxel_centroids(out)
-        chunks.append(consolidated)
-        indices.append(np.full(len(consolidated), len(names), dtype=np.uint8))
+        # Positions and colors use identical voxel membership and averaging.
+        out = points.copy()
+        if not robot_id:
+            tx, ty, yaw = transforms.get(rid, (0., 0., 0.))
+            c, sn = np.cos(yaw), np.sin(yaw)
+            out[:, 0] = tx + points[:, 0]*c - points[:, 1]*sn
+            out[:, 1] = ty + points[:, 0]*sn + points[:, 1]*c
+            out[:, 2] += cloud_z_offsets.get(rid, 0.)
+        keys = np.floor(out / .04).astype(np.int64)
+        _, inverse, counts = np.unique(keys, axis=0, return_inverse=True, return_counts=True)
+        sums = np.zeros((len(counts), 3))
+        np.add.at(sums, inverse, out)
+        chunks.append((sums / counts[:, None]).astype(np.float32))
+        indices.append(np.full(len(counts), len(names), dtype=np.uint8))
         names.append(rid)
-    if not chunks:
-        return (
-            np.zeros((0, 3), dtype=np.float32),
-            np.zeros(0, dtype=np.uint8),
-            [],
-        )
-    return np.concatenate(chunks), np.concatenate(indices), names
+        if include_rgb:
+            rgb = robot_colors.get(rid)
+            color_sums = np.zeros((len(counts), 3))
+            if rgb is not None and rgb.shape == points.shape:
+                any_rgb = True
+                np.add.at(color_sums, inverse, rgb)
+                colors.append(np.round(color_sums / counts[:, None]).astype(np.uint8))
+            else:
+                colors.append(np.full((len(counts), 3), 148, dtype=np.uint8))
+    result = (np.concatenate(chunks) if chunks else np.empty((0, 3), dtype=np.float32),
+              np.concatenate(indices) if indices else np.empty(0, dtype=np.uint8), names)
+    return (*result, np.concatenate(colors) if colors and any_rgb else None) if include_rgb else result
 
 
 def network_robot_ids(service: Any) -> list[str]:

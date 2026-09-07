@@ -410,9 +410,7 @@ async def post_global_map(request: Request) -> Any:
         return JSONResponse({"error": "malformed grid"}, status_code=400)
     if cells.size != meta.width * meta.height:
         return JSONResponse({"error": "size mismatch"}, status_code=400)
-    await asyncio.to_thread(
-        map_service.set_global_grid, meta, cells.reshape(meta.height, meta.width)
-    )
+    map_service.set_global_grid(meta, cells.reshape(meta.height, meta.width))
     return {"ok": True, "cells": int(cells.size)}
 
 
@@ -421,16 +419,35 @@ async def post_cloud(request: Request) -> Any:
     rid = request.query_params.get("robot_id", "")
     if not rid:
         return JSONResponse({"error": "robot_id required"}, status_code=400)
-    scale = float(request.query_params.get("scale", CLOUD_SCALE))
     try:
-        raw = _inflate(await request.body())
-        quantised = np.frombuffer(raw, dtype=np.int16)
+        scale = float(request.query_params.get("scale", CLOUD_SCALE))
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError("positive finite scale required")
+        body = await request.body()
+        if len(body) > MAX_UPLOAD_BYTES:
+            return JSONResponse({"error": "cloud too large"}, status_code=413)
+        raw = _inflate(body)
+        fmt = request.query_params.get("format", "xyz16")
+        rgb = None
+        if fmt == "xyzrgb32":
+            # Planar layout: N float32 xyz triples, followed by N uint8 RGB triples.
+            if len(raw) % 15:
+                raise ValueError("xyzrgb32 records expected")
+            n = len(raw) // 15
+            points = np.frombuffer(raw, dtype="<f4", count=n*3).reshape(-1, 3).copy()
+            rgb = np.frombuffer(raw, dtype=np.uint8, offset=n*12).reshape(-1, 3).copy()
+        elif fmt == "xyz16":
+            points = np.frombuffer(raw, dtype="<i2").reshape(-1, 3).astype(np.float32) * scale
+        else:
+            raise ValueError("unsupported cloud format")
+        if len(points) > 2_000_000 or not np.isfinite(points).all():
+            raise ValueError("cloud exceeds bounds or contains non-finite points")
     except (zlib.error, ValueError) as exc:
         return JSONResponse({"error": f"malformed cloud: {exc}"}, status_code=400)
-    if quantised.size % 3:
-        return JSONResponse({"error": "xyz triples expected"}, status_code=400)
-    points = quantised.reshape(-1, 3).astype(np.float32) * scale
-    await map_service.set_cloud_async(rid, points)
+    if rgb is None:
+        await map_service.set_cloud_async(rid, points)
+    else:
+        await map_service.set_cloud_async(rid, points, rgb=rgb)
     return {"ok": True, "points": int(len(points))}
 
 
@@ -512,7 +529,7 @@ async def post_slam_update(request: Request) -> Any:
     if not isinstance(payload, dict):
         return JSONResponse({"error": "JSON object required"}, status_code=400)
     try:
-        await asyncio.to_thread(map_service.apply_slam_update, payload)
+        map_service.apply_slam_update(payload)
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     dropped = _prune_optimized_maps(payload.get("scopes"))
@@ -599,21 +616,63 @@ async def get_nav_map(request: Request, robot_id: str) -> Response:
 
 
 async def get_cloud(request: Request | None = None) -> Response:
-    """Merged 3D cloud or single robot 3D cloud for the GUI's 3D view."""
+    """Bounded cloud transport. Expensive fusion/compression and upstream I/O run off-loop."""
+    from ..mapsvc.output import merged_cloud
+    from ..mapsvc.graph_bridge import SLAM_URL
+    import hashlib
+    import urllib.parse
+    import urllib.request
+
     robot_id = str(request.query_params.get("robot_id", "") or "") if request else ""
-    points, indices, names = map_service.merged_cloud(robot_id=robot_id or None)
-    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
-    body = zlib.compress(quantised.tobytes() + indices.tobytes(), 1)
-    return Response(
-        content=body,
-        media_type="application/octet-stream",
-        headers={
-            "Cache-Control": "no-store",
+
+    def prepare():
+        points, indices, names, rgb = merged_cloud(map_service, robot_id=robot_id or None, include_rgb=True)
+        if not len(points) and SLAM_URL:
+            url = f"{SLAM_URL}/cloud"
+            if robot_id:
+                url += "?robot_id=" + urllib.parse.quote(robot_id, safe="")
+            with urllib.request.urlopen(url, timeout=3.) as upstream:
+                data = upstream.read(MAX_UPLOAD_BYTES + 1)
+                if len(data) > MAX_UPLOAD_BYTES:
+                    raise ValueError("upstream cloud too large")
+                headers = {
+                    k: upstream.headers.get(k, default)
+                    for k, default in {
+                        "X-Cloud-Points": "0",
+                        "X-Cloud-Scale": str(CLOUD_SCALE),
+                        "X-Cloud-Robots": "",
+                        "X-Cloud-Format": "xyz16",
+                        "X-Cloud-RGB": "0",
+                        "X-Cloud-Frame": "world",
+                    }.items()
+                }
+                return data, headers
+        # Uniformly retain coverage across robots. Float32 avoids int16 wrap beyond 327 m.
+        if len(points) > 300_000:
+            keep = np.linspace(0, len(points)-1, 300_000, dtype=np.int64)
+            points, indices = points[keep], indices[keep]
+            if rgb is not None:
+                rgb = rgb[keep]
+        raw = points.astype("<f4").tobytes() + indices.tobytes()
+        if rgb is not None:
+            raw += rgb.tobytes()
+        return zlib.compress(raw, 1), {
             "X-Cloud-Points": str(len(points)),
-            "X-Cloud-Scale": str(CLOUD_SCALE),
+            "X-Cloud-Scale": "1",
             "X-Cloud-Robots": ",".join(names),
-        },
-    )
+            "X-Cloud-Format": "xyz32",
+            "X-Cloud-RGB": "1" if rgb is not None else "0",
+            "X-Cloud-Frame": "local" if robot_id else "world",
+        }
+    try:
+        body, headers = await asyncio.to_thread(prepare)
+    except Exception as exc:
+        return JSONResponse({"error": f"cloud unavailable: {type(exc).__name__}"}, status_code=503)
+    etag = '"' + hashlib.sha256(body + repr(sorted(headers.items())).encode()).hexdigest() + '"'
+    headers.update({"ETag": etag, "Cache-Control": "no-cache"})
+    if request and request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/octet-stream", headers=headers)
 
 
 async def post_optimized_map(request: Request) -> Any:

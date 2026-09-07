@@ -30,7 +30,7 @@ from typing import Any
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from swarmdeck_protocol import (
@@ -47,8 +47,8 @@ from swarmdeck_slam.backend import (
     scoped_grids,
     snapshot_update,
 )
-from swarmdeck_slam.render import RenderConfig
-from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz
+from swarmdeck_slam.render import RenderConfig, _component_contains
+from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz, transform_points
 
 # Occupancy is a PROJECTION of the keyframe clouds over a height band, never a
 # dump of every point. With a single-ring lidar the distinction is invisible --
@@ -377,6 +377,152 @@ OPTIMIZE_EVERY_N = int(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_EVERY", "1"))
 OPTIMIZE_EVERY_S = float(os.environ.get("SWARMDECK_SLAM_OPTIMIZE_S", "1.0"))
 PUBLISH_TIMEOUT_S = 15.0
 
+CLOUD_SCALE = 0.01
+CLOUD_VOXEL_M = 0.06
+
+_cloud_cache_lock = threading.Lock()
+_cached_cloud_body: bytes | None = None
+_cached_cloud_headers: dict[str, str] = {}
+_cached_robot_clouds: dict[str, tuple[bytes, dict[str, str]]] = {}
+
+
+def _build_cloud_payload(
+    snapshot: BackendSnapshot | None,
+    robot_id: str | None = None,
+    voxel_size: float = CLOUD_VOXEL_M,
+) -> tuple[bytes, dict[str, str]]:
+    if snapshot is None:
+        empty = zlib.compress(b"", 1)
+        return empty, {
+            "Cache-Control": "no-store",
+            "X-Cloud-Points": "0",
+            "X-Cloud-Scale": str(CLOUD_SCALE),
+            "X-Cloud-Robots": "",
+        }
+
+    if robot_id:
+        target_robots = {robot_id}
+        comp = None
+    else:
+        grid = majority_component(snapshot)
+        if grid is not None:
+            target_robots = set(grid.robots)
+            comp = next(
+                (
+                    c
+                    for c in snapshot.optimized.components
+                    if c.component_id == grid.component_id
+                ),
+                None,
+            )
+        elif len(snapshot.keyframe_counts) == 1:
+            target_robots = set(snapshot.keyframe_counts.keys())
+            comp = None
+        else:
+            target_robots = set()
+            comp = None
+
+    robot_chunks: dict[str, list[np.ndarray]] = {}
+    robot_colors: dict[str, list[np.ndarray]] = {}
+    any_color = False
+
+    for kf_id in snapshot.optimized.poses:
+        if kf_id.robot_id not in target_robots:
+            continue
+        if comp is not None and not _component_contains(comp, kf_id):
+            continue
+        kf = backend._keyframes.get(kf_id)
+        if kf is None or kf.points.size == 0:
+            continue
+
+        # Use the exact same world pose as render.py to ensure 100% agreement
+        # with the 2D occupancy grid and live fleet coordinates:
+        if backend.render.odometry_as_pose:
+            frame = snapshot.optimized.t_world_trajectory.get(kf_id.trajectory)
+            if frame is None:
+                frame = snapshot.optimized.t_world_map.get(kf_id.robot_id)
+            if frame is not None:
+                pose = frame @ kf.t_odom_base
+            else:
+                pose = snapshot.optimized.poses[kf_id]
+        else:
+            pose = snapshot.optimized.poses[kf_id]
+            if backend.registration_mode != "odom_free":
+                frame = snapshot.optimized.t_world_trajectory.get(kf_id.trajectory)
+                if frame is None:
+                    frame = snapshot.optimized.t_world_map.get(kf_id.robot_id)
+                if frame is not None:
+                    pose = frame @ pose
+
+        pts_world = transform_points(pose, kf.points.astype(np.float64, copy=False))
+        robot_chunks.setdefault(kf_id.robot_id, []).append(pts_world)
+        colors = kf.colors
+        if colors is None:
+            colors = np.zeros((len(kf.points), 4), dtype=np.uint8)
+            colors[:, :3] = 148
+        any_color = any_color or bool(np.any(colors[:, 3]))
+        robot_colors.setdefault(kf_id.robot_id, []).append(colors)
+
+    chunks: list[np.ndarray] = []
+    color_chunks: list[np.ndarray] = []
+    indices: list[np.ndarray] = []
+    names: list[str] = []
+
+    for rid in sorted(target_robots):
+        pts_list = robot_chunks.get(rid)
+        if not pts_list:
+            continue
+        all_pts = np.concatenate(pts_list, axis=0)
+        rgba = np.concatenate(robot_colors[rid], axis=0)
+        # Prefer an observed camera sample over an earlier uncolored return in
+        # the same voxel. Colors never change point positions or graph inputs.
+        order = np.argsort(rgba[:, 3] == 0, kind="stable")
+        all_pts, rgba = all_pts[order], rgba[order]
+        keys = np.round(all_pts / voxel_size).astype(np.int32)
+        _, keep = np.unique(keys, axis=0, return_index=True)
+        voxels = all_pts[keep].astype(np.float32)
+        chunks.append(voxels)
+        color_chunks.append(rgba[keep, :3])
+        indices.append(np.full(len(voxels), len(names), dtype=np.uint8))
+        names.append(rid)
+
+    if not chunks:
+        points = np.zeros((0, 3), dtype=np.float32)
+        idx_array = np.zeros(0, dtype=np.uint8)
+    else:
+        points = np.concatenate(chunks, axis=0)
+        idx_array = np.concatenate(indices, axis=0)
+
+    quantised = np.round(points / CLOUD_SCALE).astype(np.int16)
+    raw = quantised.tobytes() + idx_array.tobytes()
+    if any_color:
+        raw += np.concatenate(color_chunks, axis=0).tobytes()
+    body = zlib.compress(raw, 1)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Cloud-Points": str(len(points)),
+        "X-Cloud-RGB": "1" if any_color else "0",
+        "X-Cloud-Frame": "world",
+        "X-Cloud-Scale": str(CLOUD_SCALE),
+        "X-Cloud-Robots": ",".join(names),
+    }
+    return body, headers
+
+
+def _update_cloud_cache(snapshot: BackendSnapshot) -> None:
+    global _cached_cloud_body, _cached_cloud_headers, _cached_robot_clouds
+    try:
+        body, headers = _build_cloud_payload(snapshot, robot_id=None)
+        robot_clouds: dict[str, tuple[bytes, dict[str, str]]] = {}
+        for rid in snapshot.keyframe_counts.keys():
+            robot_clouds[rid] = _build_cloud_payload(snapshot, robot_id=rid)
+        with _cloud_cache_lock:
+            _cached_cloud_body = body
+            _cached_cloud_headers = headers
+            _cached_robot_clouds = robot_clouds
+    except Exception:
+        pass
+
 
 def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) -> None:
     """Push origins + the majority-component grid to the SwarmDeck server."""
@@ -384,6 +530,7 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
     if generation is not None and generation != _current_generation():
         return
     _last_snapshot = snapshot
+    _update_cloud_cache(snapshot)
     if not SERVER_URL:
         return
     # Per-robot and per-component grids, then the merged one.
@@ -399,10 +546,32 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
             return
         _publish_grid(scope, grid)
 
+    # ORDER MATTERS: poses before pixels.
+    #
+    # /api/slam/update carries the optimised origins and common poses; the
+    # raster is interpreted through them. Publishing the raster first leaves the
+    # server holding new pixels against the PREVIOUS optimisation's poses, and
+    # set_global_grid remerges immediately on arrival -- so until the update
+    # lands the optimised map shows scans projected through stale odometry:
+    # walls rotated, and the same wall ghosted behind itself at two poses.
+    # PUBLISH_TIMEOUT_S is 15 s, so that window is not brief.
+    body = snapshot_update(snapshot)
+    try:
+        req = urllib.request.Request(
+            f"{SERVER_URL}/api/slam/update",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=PUBLISH_TIMEOUT_S).read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _last_error = f"slam update failed: {exc}"
+        return
+    if generation is not None and generation != _current_generation():
+        return
+
     grid = majority_component(snapshot)
     if grid is not None:
-        if generation is not None and generation != _current_generation():
-            return
         cells = np.ascontiguousarray(grid.cells)
         payload = zlib.compress(cells.tobytes())
         url = (
@@ -422,22 +591,6 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
             ).read()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             _last_error = f"global map publish failed: {exc}"
-
-    if generation is not None and generation != _current_generation():
-        return
-
-    body = snapshot_update(snapshot)
-    try:
-        req = urllib.request.Request(
-            f"{SERVER_URL}/api/slam/update",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=PUBLISH_TIMEOUT_S).read()
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        _last_error = f"slam update failed: {exc}"
-        return
 
 
 def _publish_grid(scope: str, grid: Any) -> None:
@@ -599,6 +752,32 @@ def status() -> dict[str, Any]:
         ],
         "server_url": SERVER_URL,
     }
+
+
+@app.get("/cloud")
+def get_cloud(request: Request) -> Response:
+    """Return 3D merged point cloud from solved keyframes in the world frame."""
+    robot_id = str(request.query_params.get("robot_id", "") or "")
+    with _cloud_cache_lock:
+        if robot_id:
+            entry = _cached_robot_clouds.get(robot_id)
+            if entry is not None:
+                body, headers = entry
+                return Response(
+                    content=body, media_type="application/octet-stream", headers=headers
+                )
+        elif _cached_cloud_body is not None:
+            return Response(
+                content=_cached_cloud_body,
+                media_type="application/octet-stream",
+                headers=_cached_cloud_headers,
+            )
+
+    snapshot = _last_snapshot
+    body, headers = _build_cloud_payload(snapshot, robot_id=robot_id or None)
+    return Response(
+        content=body, media_type="application/octet-stream", headers=headers
+    )
 
 
 @app.get("/config")

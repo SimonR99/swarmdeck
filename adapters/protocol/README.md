@@ -260,6 +260,11 @@ Body: zlib(int16 XYZ triples), coordinates = metres / scale
 Send registered, voxel-downsampled points slowly (about 0.25–0.5 Hz). Only
 robots accepted into the shared frame contribute to the merged 3D view.
 
+Camera-colored uploads may use `format=xyzrgb32`: zlib-compressed N little-endian
+float32 XYZ triples followed by N uint8 RGB triples. Float32 positions are metres.
+The viewer response declares XYZ encoding and RGB availability in its headers;
+see [the 3D transport and reconstruction workflow](../../docs/operations/tactical-3d-map.md).
+
 ### Collaborative global grid
 
 ```text
@@ -348,3 +353,11 @@ media publisher decodes it before encoding H.264.
 3. Ignore unknown messages for forward compatibility.
 4. Advertise only capabilities that are currently usable.
 5. Keep `robot_id` stable across reconnects.
+
+Optional keyframe camera colors use `color_encoding: "rgba8"` in the keyframe
+header. The body appends `n_points * 4` uint8 bytes **after** XYZ and any descriptor:
+RGB is sRGB, and alpha is 255 for a measured camera color or 0 for an unobserved
+point. Colors follow exactly the same point filtering/order. Existing uncolored
+packets are unchanged; older readers can ignore the appended color payload.
+Cloud responses use `X-Cloud-RGB: 1` for appended RGB and `X-Cloud-Frame: world`
+or `local` to prevent transforming an already aligned single-robot SLAM cloud twice.

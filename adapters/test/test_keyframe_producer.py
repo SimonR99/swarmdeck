@@ -339,3 +339,80 @@ def test_gate_disabled_still_means_disabled():
     u = KeyframeUploader("r", "http://x", max_yaw_rate=0.0)
     assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
     assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-90.0)), 100.0)
+
+
+@pytest.mark.parametrize("repeated_stamp", [100.1, 100.0, 100.1005])
+def test_rejected_turn_cannot_be_uploaded_on_a_repeated_stamp(repeated_stamp):
+    uploader = KeyframeUploader(
+        "r",
+        "http://x",
+        min_period_s=0,
+        min_scan_change_m=0,
+        min_yaw_rad=math.radians(1),
+        max_yaw_rate=math.radians(8),
+    )
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), 100.0)
+    turned = pose7_from_xy_yaw(0, 0, math.radians(30))
+    assert not uploader.consider(_wall(), turned, 100.1)
+    assert not uploader.consider(_wall(), turned, repeated_stamp)
+    assert uploader.pending() == 1
+    assert uploader.gate_stats()["max_accepted_yaw_rate_deg_s"] <= 8
+    # A fresh scan after stopping remains usable; reject does not latch forever.
+    assert uploader.consider(_wall(), turned, 100.2)
+    assert decode_keyframe(uploader._queue[-1]).stamp == 100.2
+
+
+@pytest.mark.parametrize("stamp", [float("nan"), float("inf"), -float("inf")])
+def test_invalid_stamp_does_not_poison_the_turn_reference(stamp):
+    uploader = KeyframeUploader("r", "http://x", min_period_s=0)
+    assert not uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), stamp)
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), 100)
+    assert not uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 1), 100.1)
+
+
+def test_camera_colors_follow_voxelized_wire_points():
+    from swarmdeck_protocol import Descriptor, encode_keyframe, ProtocolError
+
+    points = np.array([[1, 2, 3], [1000, 0, 0], [4, 5, 6]], dtype=np.float32)
+    colors = np.array(
+        [[255, 20, 1, 255], [0, 255, 0, 255], [148, 148, 148, 0]], dtype=np.uint8
+    )
+    descriptor = Descriptor("test", np.array([[1, 2], [3, 4]], dtype=np.uint8), 80)
+    packet = decode_keyframe(
+        encode_keyframe(
+            robot_id="r",
+            seq=1,
+            stamp=10,
+            points=points,
+            t_odom_base=pose7_from_xy_yaw(0, 0, 0),
+            descriptor=descriptor,
+            colors=colors,
+        )
+    )
+    np.testing.assert_array_equal(packet.colors, colors[[0, 2]])
+    np.testing.assert_array_equal(packet.descriptor.data, descriptor.data)
+    with pytest.raises(ProtocolError, match="colors"):
+        encode_keyframe(
+            robot_id="r",
+            seq=1,
+            stamp=10,
+            points=points,
+            t_odom_base=pose7_from_xy_yaw(0, 0, 0),
+            colors=colors[:1],
+        )
+
+
+def test_color_projection_runs_only_after_capture_gates():
+    calls = []
+
+    def colorize(points):
+        calls.append(len(points))
+        return np.tile(np.array([255, 0, 0, 255], dtype=np.uint8), (len(points), 1))
+
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=0)
+    pose = pose7_from_xy_yaw(0, 0, 0)
+    assert uploader.consider(_wall(), pose, 100, colorize=colorize)
+    packet = decode_keyframe(uploader._queue[0])
+    assert packet.colors.shape == (len(packet.points), 4)
+    assert not uploader.consider(_wall(), pose, 101, colorize=colorize)
+    assert len(calls) == 1

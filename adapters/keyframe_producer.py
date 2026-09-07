@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -386,12 +386,18 @@ class KeyframeUploader:
         points_map: np.ndarray,
         t_map_base: np.ndarray,
         stamp: float,
+        *,
+        colorize: Callable[[np.ndarray], np.ndarray | None] | None = None,
     ) -> bool:
         """Non-blocking. Returns True if a keyframe was enqueued."""
         pose = np.asarray(t_map_base, dtype=np.float64).reshape(-1)
         if pose.shape != (7,) or not np.isfinite(pose).all():
             return False
-        if self._turning_too_fast(pose, float(stamp)):
+        stamp = float(stamp)
+        if not math.isfinite(stamp):
+            self.unusable_stamps += 1
+            return False
+        if self._turning_too_fast(pose, stamp):
             self.spun += 1
             return False
         now = time.monotonic()
@@ -430,6 +436,15 @@ class KeyframeUploader:
             elif not moved:
                 return False
 
+        # Project only accepted, voxel-reduced scans. Missing camera data must
+        # not change geometry, capture timing, or odometry admission.
+        colors = None
+        if colorize is not None:
+            try:
+                colors = colorize(base_points)
+            except (ValueError, TypeError, AttributeError):
+                pass
+
         # The wire cloud is in the base frame at capture. Carry the floor plane
         # in that same frame so the renderer can apply the physical band per
         # robot, even when the fleet uses different chassis/lidar heights.
@@ -453,6 +468,7 @@ class KeyframeUploader:
                 points=base_points,
                 t_odom_base=pose,
                 session=self.session,
+                colors=colors,
                 **height_kwargs,
             )
         except ProtocolError:
@@ -491,9 +507,9 @@ class KeyframeUploader:
         current sample there would discard the only reference the next call
         has, so a run of duplicate or out-of-order stamps would silently
         disable the gate for as long as it lasted. Keep the old reference and
-        measure across the gap instead: a longer baseline understates a brief
-        peak, which is the safe direction for a gate, whereas no baseline at
-        all fails open.
+        reject that observation. In particular, a duplicate of a rejected
+        turning scan must not get another chance to pass with dt=0. Keeping
+        the reference lets the next fresh scan resume rate estimation.
         """
         yaw = math.atan2(
             2.0 * (pose[6] * pose[5] + pose[3] * pose[4]),

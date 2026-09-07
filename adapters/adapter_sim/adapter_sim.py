@@ -72,6 +72,7 @@ from adapters.keyframe_producer import (
     laser_scan_to_map_points,
     points_lidar_to_map,
     pose7_from_xy_yaw,
+    se3_from_quat_xyz,
 )
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
@@ -381,6 +382,7 @@ class RobotBridge(
         self.pose_lookup_gap = {"odom_base": 0.0, "map_odom": 0.0}
         self.pose_lookup_empty = {"odom_base": 0, "map_odom": 0}
         self.pose_lookup_stale = {"odom_base": 0, "map_odom": 0}
+        self._pose_lookup_rejected = 0
         self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._warned_no_tf_base = False
         self.goal: dict | None = None
@@ -602,7 +604,9 @@ class RobotBridge(
             base = self._odom_topic_pose
         return self._compose(self._map_to_odom, base)
 
-    def map_pose_at(self, at: float | None) -> dict[str, float]:
+    def map_pose_at(
+        self, at: float | None, *, require_history: bool = False
+    ) -> dict[str, float] | None:
         """Where this robot was in its own SLAM map frame at time ``at``.
 
         The same composition as :meth:`map_pose`, but each link is read at the
@@ -617,14 +621,22 @@ class RobotBridge(
         gets it from tf2's own buffer. This node parses ``/tf`` itself, so it
         keeps the short history the lookup needs.
 
-        Falls back to the newest reading when the stamp is missing or older
-        than the history, which is the pre-existing behaviour rather than a
-        refusal to answer.
+        Keyframes require odom->base samples bracketing the scan. Interpolate
+        translation and wrapped yaw: nearest-sample lookup can pair several
+        scans with one frozen yaw and fool the turn-rate gate. With
+        require_history=True, missing history drops the scan. Other callers
+        retain interpolation across gaps up to one second and the latest-pose
+        fallback. Capture-time odom->base interpolation requires a bracket no
+        wider than half a second; map->odom keeps the per-link interpolation.
         """
         if at is None:
-            return self.map_pose()
+            if require_history:
+                self._pose_lookup_rejected = (
+                    getattr(self, "_pose_lookup_rejected", 0) + 1
+                )
+            return None if require_history else self.map_pose()
 
-        def nearest(log, current, link):
+        def lookup(log, current, link, *, require_bracket=False):
             """The pose at ``at``, interpolated between the samples that bracket it.
 
             Snapping to the closest sample makes the error the distance to that
@@ -639,7 +651,9 @@ class RobotBridge(
             """
             if not log:
                 self.pose_lookup_empty[link] += 1
-                return current
+                return None if require_bracket else current
+            # TF callbacks can arrive out of order; bracket a sorted snapshot.
+            log = sorted(log, key=lambda item: item[0])
             before = [s for s in log if s[0] <= at]
             after = [s for s in log if s[0] >= at]
             if before and after:
@@ -650,13 +664,16 @@ class RobotBridge(
                 )
                 if span <= 1e-9:
                     return lo[1]
-                if span <= 1.0:
+                if span <= (0.5 if require_bracket else 1.0):
                     f = (at - lo[0]) / span
-                    dyaw = (hi[1]["yaw"] - lo[1]["yaw"] + math.pi) % (2 * math.pi) - math.pi
+                    dyaw = (hi[1]["yaw"] - lo[1]["yaw"] + math.pi) % (
+                        2 * math.pi
+                    ) - math.pi
                     return {
                         "x": lo[1]["x"] + f * (hi[1]["x"] - lo[1]["x"]),
                         "y": lo[1]["y"] + f * (hi[1]["y"] - lo[1]["y"]),
-                        "yaw": (lo[1]["yaw"] + f * dyaw + math.pi) % (2 * math.pi) - math.pi,
+                        "yaw": (lo[1]["yaw"] + f * dyaw + math.pi) % (2 * math.pi)
+                        - math.pi,
                     }
             # Only one side available: the stamp is outside the history, so
             # extrapolating would be inventing motion. Fall back as before.
@@ -669,6 +686,9 @@ class RobotBridge(
             # at 0.8 deg, yet keyframes were measured 5 deg out. One of those
             # three is wrong, and this is the one nobody could see.
             self.pose_lookup_gap[link] = max(self.pose_lookup_gap[link], gap)
+            if require_bracket:
+                self.pose_lookup_stale[link] += 1
+                return None
             # Beyond the history the newest reading is the honest answer; a
             # far-away sample is worse than no correction at all.
             if gap <= 0.5:
@@ -676,12 +696,19 @@ class RobotBridge(
             self.pose_lookup_stale[link] += 1
             return current
 
-        base = nearest(self._odom_to_base_log, self._odom_to_base, "odom_base")
+        base = lookup(
+            self._odom_to_base_log,
+            self._odom_to_base,
+            "odom_base",
+            require_bracket=require_history,
+        )
+        correction = lookup(self._map_to_odom_log, self._map_to_odom, "map_odom")
+        if require_history and (base is None or not self._map_to_odom_log):
+            self._pose_lookup_rejected = getattr(self, "_pose_lookup_rejected", 0) + 1
+            return None
         if base is None:
             return self.map_pose()
-        return self._compose(
-            nearest(self._map_to_odom_log, self._map_to_odom, "map_odom"), base
-        )
+        return self._compose(correction, base)
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
@@ -748,16 +775,66 @@ class RobotBridge(
             # up again here races SLAM's map->odom correction; a loop-closure
             # jump between the two lookups turns an otherwise valid scan into
             # metre-long phantom walls after conversion back to base frame.
-            uploader.consider(points_map, t_map_base, stamp)
+            uploader.consider(
+                points_map,
+                t_map_base,
+                stamp,
+                colorize=lambda points: self._keyframe_colors(
+                    points, t_map_base, stamp
+                ),
+            )
         except Exception:
             # Keyframe production must never starve the scan map or Nav2.
             pass
+
+    def _keyframe_colors(self, points, t_map_base, stamp):
+        """Color accepted LiDAR samples with calibrated, synchronized RGB-D."""
+        from adapters.reconstruction import colorize_ros_rgbd
+
+        image = getattr(self, "_camera_frame", None)
+        depth = getattr(self, "_camera_depth", None)
+        info = getattr(self, "_camera_info", None)
+        if image is None or depth is None or info is None:
+            return None
+        at = stamp_seconds(image.header)
+        depth_at = stamp_seconds(depth.header)
+        if (
+            at is None
+            or depth_at is None
+            or abs(at - stamp) > 0.25
+            or abs(at - depth_at) > 0.05
+        ):
+            return None
+        camera_pose = self.map_pose_at(at, require_history=True)
+        if camera_pose is None:
+            return None
+        t_map_camera_base = se3_from_quat_xyz(
+            pose7_from_xy_yaw(camera_pose["x"], camera_pose["y"], camera_pose["yaw"])
+        )
+        # Optical axes: right=-base Y, down=-base Z, forward=base X.
+        optical_from_base = np.array(
+            [
+                [0.0, -1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0, self.camera_z],
+                [1.0, 0.0, 0.0, -self.camera_x],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        transform = (
+            optical_from_base
+            @ np.linalg.inv(t_map_camera_base)
+            @ se3_from_quat_xyz(t_map_base)
+        )
+        return colorize_ros_rgbd(points, image, depth, info, transform)
 
     def _on_scan(self, msg: LaserScan) -> None:
         """2D fallback. Ignored while the 3D ``scan/points`` path is alive."""
         if time.monotonic() - getattr(self, "_scan_cloud_at", 0.0) < 1.0:
             return
-        pose = self.map_pose()
+        at = stamp_seconds(msg.header)
+        pose = self.map_pose_at(at, require_history=True)
+        if pose is None:
+            return
         points = laser_scan_to_map_points(
             np.asarray(msg.ranges, dtype=np.float64),
             angle_min=float(msg.angle_min),
@@ -769,9 +846,7 @@ class RobotBridge(
             lidar_z=float(getattr(self, "lidar_z", 0.0)),
         )
         captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
-        self._enqueue_keyframe(
-            points, captured_pose, stamp_seconds(msg.header) or time.time()
-        )
+        self._enqueue_keyframe(points, captured_pose, at)
 
     def _on_scan_cloud(self, msg: PointCloud2) -> None:
         self._scan_cloud_at = time.monotonic()
@@ -780,7 +855,9 @@ class RobotBridge(
             return
         # The pose at the scan's stamp, not the newest one. See map_pose_at().
         at = stamp_seconds(msg.header)
-        pose = self.map_pose_at(at)
+        pose = self.map_pose_at(at, require_history=True)
+        if pose is None:
+            return
         mapped = points_lidar_to_map(
             points,
             (pose["x"], pose["y"], pose["yaw"]),
@@ -788,7 +865,7 @@ class RobotBridge(
             lidar_z=float(getattr(self, "lidar_z", 0.0)),
         )
         captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
-        self._enqueue_keyframe(mapped, captured_pose, at or time.time())
+        self._enqueue_keyframe(mapped, captured_pose, at)
 
     def _log_gate_stats(self, uploader) -> None:
         """Say out loud what the capture gates are doing, at most twice a minute.
@@ -811,15 +888,24 @@ class RobotBridge(
         # turn is the gate doing its job, not a fault: warning on the peak
         # observed fires on every run where anyone turns, which is noise that
         # trains the reader to ignore the line.
-        leaked = stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
+        leaked = (
+            stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
+        )
         # A lookup that had to reach more than one sensor period, or fell back
         # to the newest reading, is the pairing failing quietly.
+        rejected = getattr(self, "_pose_lookup_rejected", 0)
         strayed = (
             self.pose_lookup_gap["odom_base"] > 0.05
             or self.pose_lookup_empty["odom_base"]
             or self.pose_lookup_stale["odom_base"]
+            or rejected
         )
-        if not stats["spun"] and not leaked and not strayed and not stats["unusable_stamps"]:
+        if (
+            not stats["spun"]
+            and not leaked
+            and not strayed
+            and not stats["unusable_stamps"]
+        ):
             return
         now = time.monotonic()
         if now - getattr(self, "_gate_log_at", -1e9) < 30.0:
@@ -835,7 +921,9 @@ class RobotBridge(
             f"empty={self.pose_lookup_empty['odom_base']} "
             f"stale={self.pose_lookup_stale['odom_base']}"
             f" | map->odom: gap {self.pose_lookup_gap['map_odom'] * 1000:.0f} ms "
-            f"empty={self.pose_lookup_empty['map_odom']}"
+            f"empty={self.pose_lookup_empty['map_odom']} "
+            f"stale={self.pose_lookup_stale['map_odom']} "
+            f"rejected_captures={rejected}"
         )
         if leaked:
             self.node.get_logger().warn(

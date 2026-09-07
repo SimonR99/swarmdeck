@@ -1041,6 +1041,12 @@ async def get_nav_map(request: Request, robot_id: str) -> Response:
     return await handler(request, robot_id)
 
 
+@app.get("/api/map/gaussians")
+async def get_gaussians(request: Request) -> Response:
+    from .reconstruction_routes import get_gaussians as handler
+    return await handler(request)
+
+
 @app.get("/api/map/cloud")
 async def get_cloud(request: Request) -> Response:
     from .map_routes import get_cloud as handler

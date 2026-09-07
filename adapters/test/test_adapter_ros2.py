@@ -1988,3 +1988,14 @@ def test_unaligned_depth_without_optical_tf_is_not_treated_as_aligned(mod):
     image_header = type("Header", (), {"stamp": _stamp(10.1)})()
 
     assert bridge._depth_map_position((0.25, 0.25, 0.5, 0.5), image_header) is None
+
+
+def test_timestamped_keyframe_pose_never_falls_back_to_latest_odometry(mod):
+    bridge = _bridge(mod)
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError(
+        "capture TF unavailable"
+    )
+    bridge._odom_pose7 = [0, 0, 0, 0, 0, math.sin(0.5), math.cos(0.5)]
+    assert bridge.pose7(object()) is None
+    # Telemetry's unstamped fallback remains available.
+    assert bridge.pose7() is not None

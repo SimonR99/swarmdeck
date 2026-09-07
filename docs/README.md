@@ -15,6 +15,7 @@ Start with the root [README](../README.md) for setup and package structure.
 | Implemented and remaining work | [Roadmap](architecture/roadmap.md) |
 | Adapter messages and binary payloads | [Adapter protocol](../adapters/protocol/README.md) |
 | Physical fleet hardware | [Fleet matrix](robots/fleet.md) |
+| Tactical 3D maps and RGB-D reconstruction | [3D map workflow](operations/tactical-3d-map.md) |
 | Deployment and safety checks | [Hardware bring-up](operations/hardware-bringup.md) |
 | Active limitations and traps | [Known issues](operations/known-issues.md) |
 

@@ -299,3 +299,68 @@ def test_yaw_interpolation_takes_the_short_way_round(bridge_cls):
         )
     yaw = bridge.map_pose_at(100.05)["yaw"]
     assert abs(abs(yaw) - math.pi) < 1e-6, f"went the long way: {yaw}"
+
+
+def test_pose_lookup_interpolates_yaw_between_tf_samples(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    assert bridge.map_pose_at(100.55)["yaw"] == pytest.approx(0.55)
+
+
+def test_pose_lookup_interpolates_across_yaw_wrap(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log = deque(
+        [
+            (100.0, {"x": 0, "y": 2, "yaw": math.radians(179)}),
+            (100.1, {"x": 2, "y": 4, "yaw": math.radians(-179)}),
+        ]
+    )
+    pose = bridge.map_pose_at(100.05)
+    assert abs(pose["yaw"]) == pytest.approx(math.pi)
+    assert pose["x"] == pytest.approx(1)
+    assert pose["y"] == pytest.approx(3)
+
+
+@pytest.mark.parametrize("stamp", [None, 5.0, 99.95, 101.05])
+def test_keyframe_lookup_refuses_latest_pose_substitution(bridge_cls, stamp):
+    bridge = _turning_bridge(bridge_cls)
+    assert bridge.map_pose_at(stamp, require_history=True) is None
+
+
+def test_keyframe_lookup_refuses_to_interpolate_across_tf_outage(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log = deque(
+        [
+            bridge._odom_to_base_log[0],
+            bridge._odom_to_base_log[-1],
+        ]
+    )
+    assert bridge.map_pose_at(100.5, require_history=True) is None
+
+
+def test_keyframe_lookup_waits_for_map_frame(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._map_to_odom_log.clear()
+    assert bridge.map_pose_at(100.5, require_history=True) is None
+
+
+def test_capture_interpolates_out_of_order_tf_samples(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log.reverse()
+    pose = bridge.map_pose_at(100.55, require_history=True)
+    assert pose["yaw"] == pytest.approx(0.55)
+    assert bridge.pose_lookup_gap["odom_base"] == pytest.approx(0.05)
+
+
+def test_capture_keeps_map_interpolation_and_per_link_diagnostics(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._map_to_odom_log = deque(
+        [
+            (100.4, {"x": 0, "y": 0, "yaw": 0.1}),
+            (100.6, {"x": 2, "y": 0, "yaw": 0.3}),
+        ]
+    )
+    pose = bridge.map_pose_at(100.5, require_history=True)
+    assert pose["yaw"] == pytest.approx(0.7)
+    assert bridge.pose_lookup_gap["odom_base"] == pytest.approx(0)
+    assert bridge.pose_lookup_gap["map_odom"] == pytest.approx(0.1)
+    assert bridge.pose_lookup_stale == {"odom_base": 0, "map_odom": 0}
