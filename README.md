@@ -80,6 +80,8 @@ See [simulation setup](docs/architecture/simulation.md) for scenarios, sensor
 configuration, external assets, and the legacy Gazebo Compose profile.
 The [simulation performance guide](docs/operations/simulation-performance.md)
 covers sensor timestamps, odometry, tuning, measured CPU costs, and regression checks.
+Bistro deploys the fleet together on mesh-based terrain; the
+[robot visuals](argos/assets/robots/README.md) include lightweight Bunker, Scout Mini, and Spot models.
 
 ## Tactical 3D mapping
 

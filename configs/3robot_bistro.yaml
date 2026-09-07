@@ -17,10 +17,11 @@ map:
   merge_mode: graph
   size_m: 120.0
   resolution: 0.05
+  # Shared street deployment; 2 m spacing leaves clearance for every platform.
   start_poses:
-    robot_0: {x: -10.75, y: 8.25, yaw: -1.4259}
-    robot_1: {x: 14.25, y: -15.75, yaw: -0.3665}
-    robot_2: {x: 40.25, y: -25.75, yaw: 2.8047}
+    robot_0: {x: -12.0, y: 4.0, z: 0.15, yaw: -1.5707963268}
+    robot_1: {x: -12.0, y: 6.0, z: 0.15, yaw: -1.5707963268}
+    robot_2: {x: -14.0, y: 4.0, z: 0.15, yaw: -1.5707963268}
 
 alerts:
   unattended_threshold_s: 45

@@ -22,12 +22,12 @@ map:
   merge_mode: graph         # pose-graph occupancy; no grid registration
   size_m: 120.0             # merged grid extent for the Bistro street network
   resolution: 0.05
-  # 4 start poses spaced along the 141 m closed road circuit in Bistro
+  # Shared street deployment; 2 m spacing leaves clearance for every platform.
   start_poses:
-    robot_0: {x: -10.75, y: 8.25, yaw: -1.4259}    # -81.7 deg
-    robot_1: {x: 14.25, y: -15.75, yaw: -0.3665}   # -21.0 deg
-    robot_2: {x: 40.25, y: -25.75, yaw: 2.8047}    # 160.7 deg
-    robot_3: {x: 11.25, y: -14.75, yaw: 3.1416}    # 180.0 deg
+    robot_0: {x: -12.0, y: 4.0, z: 0.15, yaw: -1.5707963268}
+    robot_1: {x: -12.0, y: 6.0, z: 0.15, yaw: -1.5707963268}
+    robot_2: {x: -14.0, y: 4.0, z: 0.15, yaw: -1.5707963268}
+    robot_3: {x: -14.0, y: 6.0, z: 0.15, yaw: -1.5707963268}
 
 alerts:
   unattended_threshold_s: 45

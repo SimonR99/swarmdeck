@@ -75,12 +75,10 @@ BISTRO_APERTURE = 2.0
 BISTRO_SHUTTER = 0.02
 BISTRO_ISO = 400.0
 
-# 4 default start poses (x, y, yaw in radians) along the 141m closed road loop
+# Shared deployment on a clear street patch; z clears the local cobblestones.
 BISTRO_DEFAULT_START_POSES = {
-    "robot_0": {"x": -10.75, "y": 8.25, "yaw": -1.4259},   # -81.7 deg
-    "robot_1": {"x": 14.25, "y": -15.75, "yaw": -0.3665},  # -21.0 deg
-    "robot_2": {"x": 40.25, "y": -25.75, "yaw": 2.8047},   # 160.7 deg
-    "robot_3": {"x": 11.25, "y": -14.75, "yaw": 3.1416},   # 180.0 deg
+    f"robot_{i}": {"x": x, "y": y, "z": 0.15, "yaw": -math.pi / 2}
+    for i, (x, y) in enumerate(((-12, 4), (-12, 6), (-14, 4), (-14, 6)))
 }
 
 # Safe street / sidewalk coordinates for detection targets in Bistro
@@ -366,6 +364,8 @@ def generate_argos_xml(
         "",
     ])
 
+    # Props need a +90-degree roll; Jolt must not also convert Y-up internally.
+    # Set y_up=false on every mesh below to preserve identical world transforms.
     if is_bistro:
         b_dir = find_bistro_assets_dir(bistro_dir)
         bistro_glb_path = (b_dir / "bistro_exterior.glb").resolve()
@@ -375,31 +375,35 @@ def generate_argos_xml(
         ibl_path = b_dir / "san_giuseppe_ibl.ktx"
         lamps_xml = _sanitize_xml_comments(lamps_inc_path.read_text().rstrip()) if lamps_inc_path.exists() else ""
 
-        lines.extend([
-            f'  <arena size="{BISTRO_ARENA_SIZE}" center="{BISTRO_ARENA_CENTER}">',
-            "",
-            "    <!-- Collision geometry: Jolt physics mesh directly from the glTF model. -->",
-            f'    <mesh id="world_mesh" file={_attr(str(bistro_glb_path))}',
-            '          position="0,0,-0.3" orientation="0,0,90" scale="1.0" />',
-        ])
+        lines.extend(
+            [
+                f'  <arena size="{BISTRO_ARENA_SIZE}" center="{BISTRO_ARENA_CENTER}">',
+                "",
+                "    <!-- Collision geometry: Jolt physics mesh directly from the glTF model. -->",
+                f'    <mesh id="world_mesh" y_up="false" file={_attr(str(bistro_glb_path))}',
+                '          position="0,0,-0.3" orientation="0,0,90" scale="1.0" />',
+            ]
+        )
         placements = BISTRO_TARGET_PLACEMENTS[:targets] if targets > 0 else []
     else:
         # 26 m of building plus clearance; nothing in the world reaches 6 m.
-        lines.extend([
-            '  <arena size="30,30,6" center="0,0,3">',
-            "",
-            "    <!-- Collision geometry, at the SAME transform as the photorealism",
-            "         <prop> at the bottom of this file, but NOT the same file.",
-            "         The collision mesh carries no floor slab: the <jolt> engine",
-            "         below already provides the ground as a plane at z=0, and a",
-            "         slab whose top face is also at z=0 puts every robot in",
-            "         contact with two coincident surfaces. Measured cost of that:",
-            "         60-100% of the commanded turn rate, varying with position,",
-            "         while translation is almost unaffected. A robot that drives",
-            "         but will not turn. See make_argos_world.build_indoor_world. -->",
-            f'    <mesh id="world_mesh" file={_attr(world_collision)}',
-            '          position="0,0,0" orientation="0,0,90" scale="1.0" />',
-        ])
+        lines.extend(
+            [
+                '  <arena size="30,30,6" center="0,0,3">',
+                "",
+                "    <!-- Collision geometry, at the SAME transform as the photorealism",
+                "         <prop> at the bottom of this file, but NOT the same file.",
+                "         The collision mesh carries no floor slab: the <jolt> engine",
+                "         below already provides the ground as a plane at z=0, and a",
+                "         slab whose top face is also at z=0 puts every robot in",
+                "         contact with two coincident surfaces. Measured cost of that:",
+                "         60-100% of the commanded turn rate, varying with position,",
+                "         while translation is almost unaffected. A robot that drives",
+                "         but will not turn. See make_argos_world.build_indoor_world. -->",
+                f'    <mesh id="world_mesh" y_up="false" file={_attr(world_collision)}',
+                '          position="0,0,0" orientation="0,0,90" scale="1.0" />',
+            ]
+        )
         placements = place_targets(seed, targets)
 
     classes = target_classes(len(placements))
@@ -412,7 +416,7 @@ def generate_argos_xml(
             model = f"{props_dir}/{name}.glb"
             orientation = _vec(math.degrees(yaw), 0.0, 90.0)
             lines.append(
-                f'    <mesh id={_attr(f"target_{i}_{name}")} file={_attr(model)}'
+                f'    <mesh id={_attr(f"target_{i}_{name}")} y_up="false" file={_attr(model)}'
             )
             lines.append(
                 f'          position={_attr(_vec(x, y, 0.0))} '
@@ -433,29 +437,32 @@ def generate_argos_xml(
             x = float(pose.get("x", (i - count / 2.0) * 3.0))
             y = float(pose.get("y", 0.0))
             yaw_deg = math.degrees(float(pose.get("yaw", 0.0)))
-        # The origin anchor is on the floor and the body stands on it, so z is
-        # zero plus a hair of clearance to settle rather than interpenetrate
-        # the floor on the first physics step.
-        lines.extend([
-            f'    <{entity} id={_attr(rid)}>',
-            f'      <body position={_attr(_vec(x, y, 0.02))} '
-            f'orientation={_attr(_vec(yaw_deg, 0.0, 0.0))} />',
-            f'      <controller config={_attr(rid + "_ctrl")} />',
-            f'    </{entity}>',
-        ])
+        # Bistro has uneven mesh ground. Honour explicit spawn clearance.
+        z = float((pose or {}).get("z", 0.15 if is_bistro else 0.02))
+        lines.extend(
+            [
+                f"    <{entity} id={_attr(rid)}>",
+                f"      <body position={_attr(_vec(x, y, z))} "
+                f"orientation={_attr(_vec(yaw_deg, 0.0, 0.0))} />",
+                f'      <controller config={_attr(rid + "_ctrl")} />',
+                f"    </{entity}>",
+            ]
+        )
 
-    lines.extend([
-        "  </arena>",
-        "",
-        "  <physics_engines>",
-        '    <jolt id="jolt" iterations="10" threads="1">',
-        '      <floor height="0" />',
-        '      <gravity g="9.81" />',
-        "    </jolt>",
-        "  </physics_engines>",
-        "",
-        "  <media>",
-    ])
+    lines.extend(
+        [
+            "  </arena>",
+            "",
+            "  <physics_engines>",
+            '    <jolt id="jolt" iterations="10" threads="1">',
+            *([] if is_bistro else ['      <floor height="0" />']),
+            '      <gravity g="9.81" />',
+            "    </jolt>",
+            "  </physics_engines>",
+            "",
+            "  <media>",
+        ]
+    )
 
     uf_robots = [rid for rid, odom_s in zip(robot_ids, odom_specs) if odom_s.medium == "uf"]
     if uf_robots:
@@ -488,9 +495,11 @@ def generate_argos_xml(
         ])
 
     if is_bistro:
-        lines.extend([
-            '    <photorealism id="pr" backend="vulkan" draw_floor="false">',
-        ])
+        lines.extend(
+            [
+                f'    <photorealism id="pr" backend="vulkan" asset_path={_attr(str(REPO / "argos/assets/robots"))} draw_floor="false">',
+            ]
+        )
         if ibl_path.exists():
             lines.append(f'      <environment ibl={_attr(str(ibl_path))} intensity="{BISTRO_SKY_LUX:g}" />')
         lines.extend([
@@ -522,41 +531,43 @@ def generate_argos_xml(
             '  </media>',
         ])
     else:
-        lines.extend([
-            "    <!-- draw_floor is false because indoor.gltf carries its own floor",
-            "         slab; the built-in one would z-fight with it. -->",
-            '    <photorealism id="pr" backend="vulkan" draw_floor="false">',
-            '      <skybox color="0.53,0.71,0.92" />',
-            "      <!-- Bright overcast, not direct sun. The building has walls but",
-            "           no ceiling, so whatever is in the sky lights the rooms, and",
-            "           the exposure has to be set for it: the renderer is",
-            "           physically based, so illuminance and exposure are one",
-            "           setting made in two places. Filament exposes EV =",
-            "           log2(N^2/t * 100/S), which at f/4, 1/250 s, ISO 100 is",
-            "           EV 12, the right value for roughly 15 klux. The first",
-            "           version of this file paired 70 klux with EV 10.9 and every",
-            "           camera returned a white frame with the geometry burned out",
-            "           of it, while depth and segmentation looked perfect: nothing",
-            "           downstream of a physically based renderer notices that the",
-            "           photograph is unusable. -->",
-            '      <sun direction="0.35,0.25,-0.90" intensity="15000"',
-            '           cast_shadows="true" />',
-            '      <exposure aperture="4" shutter_speed="0.004" sensitivity="100" />',
-            "      <lights>",
-            '        <point position="-9,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="-3,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="3,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="9,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="-9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="-3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="0,0,2.3" intensity="8000" falloff="14" color="1.0,0.98,0.95" />',
-            "      </lights>",
-            "      <scenery>",
-            f'        <prop model={_attr(world_gltf)} position="0,0,0"',
-            '              orientation="0,0,90" scale="1.0" />',
-        ])
+        lines.extend(
+            [
+                "    <!-- draw_floor is false because indoor.gltf carries its own floor",
+                "         slab; the built-in one would z-fight with it. -->",
+                f'    <photorealism id="pr" backend="vulkan" asset_path={_attr(str(REPO / "argos/assets/robots"))} draw_floor="false">',
+                '      <skybox color="0.53,0.71,0.92" />',
+                "      <!-- Bright overcast, not direct sun. The building has walls but",
+                "           no ceiling, so whatever is in the sky lights the rooms, and",
+                "           the exposure has to be set for it: the renderer is",
+                "           physically based, so illuminance and exposure are one",
+                "           setting made in two places. Filament exposes EV =",
+                "           log2(N^2/t * 100/S), which at f/4, 1/250 s, ISO 100 is",
+                "           EV 12, the right value for roughly 15 klux. The first",
+                "           version of this file paired 70 klux with EV 10.9 and every",
+                "           camera returned a white frame with the geometry burned out",
+                "           of it, while depth and segmentation looked perfect: nothing",
+                "           downstream of a physically based renderer notices that the",
+                "           photograph is unusable. -->",
+                '      <sun direction="0.35,0.25,-0.90" intensity="15000"',
+                '           cast_shadows="true" />',
+                '      <exposure aperture="4" shutter_speed="0.004" sensitivity="100" />',
+                "      <lights>",
+                '        <point position="-9,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="-3,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="3,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="9,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="-9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="-3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="0,0,2.3" intensity="8000" falloff="14" color="1.0,0.98,0.95" />',
+                "      </lights>",
+                "      <scenery>",
+                f'        <prop model={_attr(world_gltf)} position="0,0,0"',
+                '              orientation="0,0,90" scale="1.0" />',
+            ]
+        )
 
         for (x, y, yaw), name in zip(placements, classes):
             model = f"{props_dir}/{name}.glb"

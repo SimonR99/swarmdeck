@@ -134,7 +134,7 @@ def test_robots_spawn_on_the_floor_at_their_configured_poses(tree, cfg):
         x, y, z = (float(v) for v in body.get("position").split(","))
         assert x == pytest.approx(pose["x"], abs=1e-3)
         assert y == pytest.approx(pose["y"], abs=1e-3)
-        assert 0.0 <= z <= 0.05
+        assert z == pytest.approx(pose.get("z", 0.02))
         yaw, _p, _r = (float(v) for v in body.get("orientation").split(","))
         assert yaw == pytest.approx(math.degrees(pose["yaw"]), abs=1e-2)
 
@@ -449,7 +449,7 @@ def test_bistro_scenery_and_lighting(bistro_tree):
 
 
 def test_bistro_robot_spawn_poses(bistro_tree, bistro_cfg):
-    """Robots spawn at their designated positions along the 141 m Bistro street tour."""
+    """Robots deploy together with clearance above the uneven Bistro street."""
     starts = bistro_cfg["map"]["start_poses"]
     arena = bistro_tree.find("arena")
     for rid, pose in starts.items():
@@ -457,7 +457,7 @@ def test_bistro_robot_spawn_poses(bistro_tree, bistro_cfg):
         x, y, z = (float(v) for v in body.get("position").split(","))
         assert x == pytest.approx(pose["x"], abs=1e-3)
         assert y == pytest.approx(pose["y"], abs=1e-3)
-        assert 0.0 <= z <= 0.05
+        assert z == pytest.approx(pose.get("z", 0.02))
         yaw, _p, _r = (float(v) for v in body.get("orientation").split(","))
         assert yaw == pytest.approx(math.degrees(pose["yaw"]), abs=1e-2)
 
@@ -492,3 +492,83 @@ def test_system_threads_matches_default_or_override():
     assert int(system_override.get("threads")) == 2
 
 
+def test_collision_applies_axis_conversion_exactly_once(tree, bistro_tree):
+    """Jolt defaults y_up=true; copying the prop roll then rotates twice."""
+    import numpy as np
+
+    for scene in (tree, bistro_tree):
+        props = scene.findall("./media/photorealism/scenery/prop")
+        for mesh in scene.findall("./arena/mesh"):
+            assert mesh.get("y_up") == "false"
+            candidates = [
+                p
+                for p in props
+                if p.get("position") == mesh.get("position")
+                and p.get("orientation") == mesh.get("orientation")
+            ]
+            assert candidates
+            # An asymmetric Y-up point must land in the same Z-up location.
+            point = np.array([2.0, 3.0, 5.0])
+            roll = math.radians(float(mesh.get("orientation").split(",")[2]))
+            rotation = np.array(
+                [
+                    [1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)],
+                ]
+            )
+            np.testing.assert_allclose(rotation @ point, [2.0, -5.0, 3.0], atol=1e-6)
+    assert bistro_tree.find("./physics_engines/jolt/floor") is None
+    assert tree.find("./physics_engines/jolt/floor") is not None
+
+
+def test_bistro_deployment_is_compact_and_separated(bistro_cfg):
+    from itertools import combinations
+
+    poses = list(bistro_cfg["map"]["start_poses"].values())
+    for a, b in combinations(poses, 2):
+        distance = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+        assert 2 <= distance < 3
+        assert a["yaw"] == b["yaw"]
+
+
+def test_robot_visuals_are_packaged_and_selected(tree, bistro_tree, tmp_path):
+    import json
+    import struct
+    import make_robot_visuals as visuals
+
+    for scene in (tree, bistro_tree):
+        assets = Path(scene.find("./media/photorealism").get("asset_path"))
+        for name, build in [
+            ("bunker", visuals.bunker),
+            ("scout_mini", visuals.scout_mini),
+            ("spot", visuals.spot),
+        ]:
+            blob = (assets / (name + ".glb")).read_bytes()
+            magic, version, size, json_length = struct.unpack_from("<4I", blob)
+            assert magic == 0x46546C67 and version == 2 and size == len(blob)
+            doc = json.loads(blob[20 : 20 + json_length])
+            assert len(doc["materials"]) <= 6
+            assert (
+                sum(
+                    doc["accessors"][p["indices"]]["count"] // 3
+                    for p in doc["meshes"][0]["primitives"]
+                )
+                < 3000
+            )
+            model = build()
+            regenerated = tmp_path / (name + ".glb")
+            model.export_glb(regenerated)
+            assert regenerated.read_bytes() == blob
+            # Wound surface normals must agree with triangle orientation.
+            import numpy as np
+
+            for positions, normals, indices in model._groups.values():
+                points = np.array(positions).reshape(-1, 3)
+                triangles = points[np.array(indices).reshape(-1, 3)]
+                cross = np.cross(
+                    triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+                )
+                assert np.all(
+                    np.sum(cross * np.array(normals).reshape(-1, 3)[::3], axis=1) > 0
+                )

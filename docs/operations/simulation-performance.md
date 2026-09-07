@@ -122,3 +122,50 @@ rewinds, RGB channel order, and odometry fallback precedence. They do not replac
 a live ROS/ARGoS trajectory comparison. The Fast-LIVO2 link's single-callback
 non-lockstep polling and lockstep timeout behavior also warrant profiling under
 large fleets before changing executor scheduling.
+
+## Bistro deployment and collision geometry
+
+The `bistro`, `4robot_bistro`, and `3robot_bistro` configurations now deploy the
+fleet together on the street near `(-13, 5)`: a two-metre grid with every robot
+facing south. The four-robot formation spans 2 × 2 m between robot centres.
+The 0.15 m initial anchor height lets the bodies settle onto the uneven street.
+Custom start poses may specify `z`; indoor defaults retain 0.02 m clearance.
+
+The scene uses a visual roll of +90° to convert glTF Y-up to ARGoS Z-up.
+**Jolt's mesh loader also performs this conversion by default.** Previously,
+copying the visual roll to the collision mesh applied the rotation twice,
+putting collision triangles in a different plane from the rendered surfaces.
+All generated world and target meshes now explicitly set `y_up="false"` and
+keep the same position, orientation, and scale as their visual prop. Do not
+remove that attribute merely because the XML transforms already match.
+
+Bistro now uses its triangle mesh as the ground. It no longer has a second,
+invisible infinite plane at z=0. The indoor world keeps that plane because its
+collision asset intentionally excludes its floor slab. In a local query of the
+actual Bistro GLB, 1.3 × 1.3 m patches around the new spawn points had no obstacle
+triangle bounds in the 0.15–1.3 m height band. Nine ground probes per footprint
+ranged from −0.048 to +0.117 m after the scene's −0.3 m translation, which is why
+fixed z=0 spawning and a second flat floor were inappropriate.
+
+Rebuild the ARGoS and simulation images when activating these changes, using
+your chosen rendering/odometry settings. Start a fresh mapping session: an old
+map recorded against the incorrectly rotated geometry is not a validation of
+the corrected scene. XML transform, spawn-spacing, and asset tests run in the
+simulation test suite. An isolated local ARGoS/Jolt run also completed 60 exchanges (six simulation
+seconds) while commanding 0.30 m/s and 0.15 rad/s. All four robots produced RGB,
+depth, and about 30,600 LiDAR hits; final ground-anchor heights were 0.01–0.02 m
+after driving approximately 1.7 m. All three custom visuals loaded successfully.
+This short spawn-area check does not cover every curb or the full street circuit.
+It used local ARGoS build plugins and software Vulkan, not rebuilt deployment
+containers; its 95.4-second wall time includes startup/rendering overhead.
+
+To reproduce with locally built ARGoS plugins:
+
+```sh
+server/.venv/bin/python tests/integration/run_visual_test.py \
+  --config configs/4robot_bistro.yaml --ticks 60 \
+  --outdir /tmp/swarmdeck-bistro-check
+```
+
+The [robot visual assets](../../argos/assets/robots/README.md) describe the new
+Bunker, Scout Mini, and Spot meshes and how to regenerate them.
