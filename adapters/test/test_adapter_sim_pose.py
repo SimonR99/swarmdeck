@@ -178,9 +178,9 @@ def _turning_bridge(bridge_cls):
     bridge = make_bridge(bridge_cls)
     bridge._map_to_odom_log = deque(maxlen=128)
     bridge._odom_to_base_log = deque(maxlen=128)
-    bridge.pose_lookup_gap = 0.0
-    bridge.pose_lookup_age = 0.0
-    bridge._pose_lookup_misses = 0
+    bridge.pose_lookup_gap = {"odom_base": 0.0, "map_odom": 0.0}
+    bridge.pose_lookup_empty = {"odom_base": 0, "map_odom": 0}
+    bridge.pose_lookup_stale = {"odom_base": 0, "map_odom": 0}
     for i in range(11):
         t = 100.0 + i * 0.1
         bridge._on_tf(
@@ -229,11 +229,20 @@ def test_pairing_diagnostics_record_how_far_the_lookup_reached(bridge_cls):
     """
     bridge = _turning_bridge(bridge_cls)
 
-    # A stamp on the sample grid: the lookup should land exactly.
+    # A stamp on the sample grid: odom->base must land exactly. That link is
+    # the one that moves during a turn, so any gap there is a real mismatch.
     bridge.map_pose_at(100.5)
-    assert bridge.pose_lookup_gap == pytest.approx(0.0, abs=1e-9)
-    assert bridge._pose_lookup_misses == 0
+    assert bridge.pose_lookup_gap["odom_base"] == pytest.approx(0.0, abs=1e-9)
+    assert bridge.pose_lookup_stale["odom_base"] == 0
 
-    # A stamp far outside the history: falls back, and says so.
+    # A stamp far outside the history: falls back to the newest, and says so
+    # rather than passing off a distant sample as the pose at that instant.
     bridge.map_pose_at(5.0)
-    assert bridge._pose_lookup_misses > 0
+    assert bridge.pose_lookup_stale["odom_base"] > 0
+
+    # An empty history is a different failure and is counted separately: it
+    # means the pairing never happened at all, silently, which is what a robot
+    # whose map->odom is missing looks like.
+    bridge._odom_to_base_log.clear()
+    bridge.map_pose_at(100.5)
+    assert bridge.pose_lookup_empty["odom_base"] > 0

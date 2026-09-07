@@ -369,10 +369,18 @@ class RobotBridge(
         # bounded so a long run cannot grow it without limit.
         self._map_to_odom_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
         self._odom_to_base_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
-        # Pairing diagnostics, reported beside the gate stats. See nearest().
-        self.pose_lookup_gap = 0.0
-        self.pose_lookup_age = 0.0
-        self._pose_lookup_misses = 0
+        # Pairing diagnostics, per LINK, reported beside the gate stats.
+        #
+        # Split because the two links behave nothing alike and only one of them
+        # matters here. `odom_base` comes from the bridge on the same 0.1 s grid
+        # as the scans, so a correct lookup lands on it exactly and any gap is
+        # a real pose/scan mismatch during a turn. `map_odom` comes from SLAM
+        # Toolbox on its own cadence and barely moves, so a gap there is
+        # expected and harmless. Maxing over both, as this first did, produced
+        # one number that could not distinguish them.
+        self.pose_lookup_gap = {"odom_base": 0.0, "map_odom": 0.0}
+        self.pose_lookup_empty = {"odom_base": 0, "map_odom": 0}
+        self.pose_lookup_stale = {"odom_base": 0, "map_odom": 0}
         self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._warned_no_tf_base = False
         self.goal: dict | None = None
@@ -610,9 +618,9 @@ class RobotBridge(
         if at is None:
             return self.map_pose()
 
-        def nearest(log, current):
+        def nearest(log, current, link):
             if not log:
-                self._pose_lookup_misses += 1
+                self.pose_lookup_empty[link] += 1
                 return current
             best = min(log, key=lambda item: abs(item[0] - at))
             gap = abs(best[0] - at)
@@ -622,20 +630,20 @@ class RobotBridge(
             # the sensor lag is a constant 100 ms, which bounds the pose error
             # at 0.8 deg, yet keyframes were measured 5 deg out. One of those
             # three is wrong, and this is the one nobody could see.
-            self.pose_lookup_gap = max(self.pose_lookup_gap, gap)
-            if log:
-                self.pose_lookup_age = max(self.pose_lookup_age, log[-1][0] - at)
+            self.pose_lookup_gap[link] = max(self.pose_lookup_gap[link], gap)
             # Beyond the history the newest reading is the honest answer; a
             # far-away sample is worse than no correction at all.
             if gap <= 0.5:
                 return best[1]
-            self._pose_lookup_misses += 1
+            self.pose_lookup_stale[link] += 1
             return current
 
-        base = nearest(self._odom_to_base_log, self._odom_to_base)
+        base = nearest(self._odom_to_base_log, self._odom_to_base, "odom_base")
         if base is None:
             return self.map_pose()
-        return self._compose(nearest(self._map_to_odom_log, self._map_to_odom), base)
+        return self._compose(
+            nearest(self._map_to_odom_log, self._map_to_odom, "map_odom"), base
+        )
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
@@ -768,7 +776,11 @@ class RobotBridge(
         leaked = stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
         # A lookup that had to reach more than one sensor period, or fell back
         # to the newest reading, is the pairing failing quietly.
-        strayed = self.pose_lookup_gap > 0.15 or self._pose_lookup_misses > 0
+        strayed = (
+            self.pose_lookup_gap["odom_base"] > 0.05
+            or self.pose_lookup_empty["odom_base"]
+            or self.pose_lookup_stale["odom_base"]
+        )
         if not stats["spun"] and not leaked and not strayed and not stats["unusable_stamps"]:
             return
         now = time.monotonic()
@@ -781,9 +793,11 @@ class RobotBridge(
             f"peak_seen={stats['peak_yaw_rate_deg_s']:.1f} "
             f"max_accepted={stats['max_accepted_yaw_rate_deg_s']:.1f} "
             f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s | "
-            f"pose lookup: worst gap {self.pose_lookup_gap * 1000:.0f} ms, "
-            f"newest was {self.pose_lookup_age * 1000:.0f} ms ahead, "
-            f"fallbacks={self._pose_lookup_misses}"
+            f"pose lookup odom->base: gap {self.pose_lookup_gap['odom_base'] * 1000:.0f} ms "
+            f"empty={self.pose_lookup_empty['odom_base']} "
+            f"stale={self.pose_lookup_stale['odom_base']}"
+            f" | map->odom: gap {self.pose_lookup_gap['map_odom'] * 1000:.0f} ms "
+            f"empty={self.pose_lookup_empty['map_odom']}"
         )
         if leaked:
             self.node.get_logger().warn(
