@@ -33,10 +33,13 @@ antialiasing are disabled. Geometry preparation and Gaussian sorting use workers
 Only selected terrain representations allocate GPU geometry; switching modes
 caches their buffers until the next cloud. Overlays reuse unchanged geometry,
 textures are disposed/reused, and rendering pauses in hidden tabs. The 2D canvas
-pauses behind the 3D view. Three.js is loaded when 3D is first opened.
+pauses behind the 3D view. Three.js is loaded when 3D is first opened. Switching
+to 2D retains the bounded 3D scene, camera, and display settings while stopping
+its animation loop and map requests. Returning to 3D immediately resumes the
+loaded tactical map, including when the server returns 304 or is unavailable.
 
 The viewer polls clouds every two seconds with conditional ETags and cancels
-requests on scope changes/unmount. Gaussian models poll every five seconds while
+requests on scope changes, hiding, and unmount. Gaussian models poll every five seconds while
 selected. Server fusion/compression runs off the async event loop. Gaussian
 sorting runs at most 10 Hz and only when camera orientation changes. DC color
 replaces higher spherical-harmonic bands; a 384-pixel maximum ellipse radius

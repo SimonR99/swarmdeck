@@ -14,7 +14,7 @@
    * - 3D holographic waypoint beacons and detection crystals
    * - 3D tactical terrain grid, costmap, and network heatmaps
    */
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { inflate } from 'pako';
   import * as THREE from 'three';
   import { Box, Check, Compass, Crosshair, Eye, Layers, Sliders, Sparkles, X } from 'lucide-svelte';
@@ -400,7 +400,7 @@
     const enabled = fleet.robots
       .map((r) => `${r.robot_id}:${fleet.isEnabled(r.robot_id)}`)
       .join(',');
-    if (!mounted) return;
+    if (!mounted || !active) return;
     const localTransform = mapStore.viewRobot
       ? mapStore.status?.transforms[mapStore.viewRobot]
       : null;
@@ -567,8 +567,9 @@
   let lastFrame = 0;
   let lastLayers = 0;
   function tick(timestamp: number) {
-    rafId = requestAnimationFrame(tick);
+    rafId = 0;
     if (!scene || !active || document.hidden) return;
+    rafId = requestAnimationFrame(tick);
     if (timestamp - lastFrame < 1000 / QUALITY[quality].fps) return;
     lastFrame = timestamp;
     const time = timestamp * 0.001;
@@ -623,6 +624,35 @@
     scene.render();
   }
 
+  function pauseScene() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+    generation++;
+    pending?.abort();
+    pending = null;
+    gaussianPending?.abort();
+    gaussianPending = null;
+  }
+
+  function resumeScene() {
+    if (!scene || !active || document.hidden) return;
+    scene.resize();
+    if (!rafId) rafId = requestAnimationFrame(tick);
+    void fetchCloud();
+    if (renderMode === 'gaussians') void fetchGaussians();
+  }
+
+  $effect(() => {
+    if (!mounted) return;
+    if (!active) {
+      untrack(pauseScene);
+      return;
+    }
+    // Wait for the parent's hidden class to clear before measuring the canvas.
+    const frame = requestAnimationFrame(resumeScene);
+    return () => cancelAnimationFrame(frame);
+  });
+
   $effect(() => {
     if (scene) {
       scene.setCeiling(ceilingCutoff);
@@ -653,12 +683,14 @@
     const poll = window.setInterval(() => active && void fetchCloud(), 2000);
 
     const ro = new ResizeObserver(() => {
+      if (!active || document.hidden) return;
       scene?.resize();
       scene?.render();
     });
     ro.observe(canvas);
 
-    rafId = requestAnimationFrame(tick);
+    const onVisibility = () => document.hidden ? pauseScene() : resumeScene();
+    document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
       mounted = false;
@@ -670,6 +702,7 @@
       window.clearInterval(splatPoll);
       window.clearInterval(poll);
       if (rafId) cancelAnimationFrame(rafId);
+      document.removeEventListener('visibilitychange', onVisibility);
       ro.disconnect();
       scene?.dispose();
       scene = null;

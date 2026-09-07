@@ -611,11 +611,11 @@
     The 3D view sits over the 2D one rather than replacing it. 2D stays the
     operator's working surface — it is where goals are set and where the fleet
     is supervised — and 3D is a way of inspecting what the robots have actually
-    built. Mounted only while shown, so a fleet on 2D SLAM never pays for a
-    WebGL context it has no cloud to fill.
+    built. Load it on first use, then keep the bounded scene while 2D is shown.
+    Its active prop pauses rendering and requests without losing the map.
   -->
-  {#if show3D}
-    <div class="absolute inset-0 z-10">
+  {#if show3D || Map3D}
+    <div class="absolute inset-0 z-10" class:hidden={!show3D} aria-hidden={!show3D}>
       {#if Map3D}
       <Map3D
         bind:this={map3D}
