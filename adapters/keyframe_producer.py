@@ -367,6 +367,11 @@ class KeyframeUploader:
         self.dropped = 0
         self.sent = 0
         self.spun = 0
+        # Gate diagnostics. See gate_stats(): the counters exist so that a gate
+        # which is not firing is distinguishable from one with nothing to do.
+        self.unusable_stamps = 0
+        self.last_yaw_rate = 0.0
+        self.peak_yaw_rate = 0.0
         # Tracked on EVERY consider(), not just accepted keyframes: yaw rate
         # between two keyframes 2 s apart is an average that hides exactly the
         # brief fast turns this gate exists to catch.
@@ -465,24 +470,61 @@ class KeyframeUploader:
     def _turning_too_fast(self, pose: np.ndarray, stamp: float) -> bool:
         """Yaw rate since the previous scan, against ``max_yaw_rate``.
 
-        Always records the current sample before returning, so the estimate
-        stays anchored to the most recent scan even when a capture is rejected;
+        Records the current sample before returning, so the estimate stays
+        anchored to the most recent scan even when a capture is rejected;
         otherwise a run of fast frames would be compared against an ever more
         stale reference and the rate would read low exactly when it is highest.
+
+        The exception is a stamp that yields no usable interval. Adopting the
+        current sample there would discard the only reference the next call
+        has, so a run of duplicate or out-of-order stamps would silently
+        disable the gate for as long as it lasted. Keep the old reference and
+        measure across the gap instead: a longer baseline understates a brief
+        peak, which is the safe direction for a gate, whereas no baseline at
+        all fails open.
         """
         yaw = math.atan2(
             2.0 * (pose[6] * pose[5] + pose[3] * pose[4]),
             1.0 - 2.0 * (pose[4] * pose[4] + pose[5] * pose[5]),
         )
         previous_yaw, previous_stamp = self._prev_yaw, self._prev_stamp
-        self._prev_yaw, self._prev_stamp = yaw, stamp
-        if self.max_yaw_rate <= 0.0 or previous_yaw is None or previous_stamp is None:
+        if self.max_yaw_rate <= 0.0:
+            self._prev_yaw, self._prev_stamp = yaw, stamp
+            return False
+        if previous_yaw is None or previous_stamp is None:
+            self._prev_yaw, self._prev_stamp = yaw, stamp
             return False
         dt = stamp - previous_stamp
         if dt <= 1e-3:
-            return False  # duplicate or out-of-order stamp: no usable rate
+            self.unusable_stamps += 1
+            return False  # keep the reference; see above
+        self._prev_yaw, self._prev_stamp = yaw, stamp
         delta = abs((yaw - previous_yaw + math.pi) % (2 * math.pi) - math.pi)
-        return (delta / dt) > self.max_yaw_rate
+        rate = delta / dt
+        self.last_yaw_rate = rate
+        self.peak_yaw_rate = max(self.peak_yaw_rate, rate)
+        return rate > self.max_yaw_rate
+
+    def gate_stats(self) -> dict[str, float]:
+        """What the capture gates have been doing, for telemetry.
+
+        ``spun`` was counted from the day the gate was written and reported
+        nowhere, so a gate that was not firing looked exactly like a gate with
+        nothing to reject. Measured on a four-robot ARGoS run: two keyframes
+        were accepted at 55.7 and 25.9 deg/s against an 8 deg/s limit, each
+        carrying a 5 degree pose error that put a rotated copy of the building
+        into the merged map, and nothing anywhere recorded that it had
+        happened.
+        """
+        return {
+            "sent": float(self.sent),
+            "dropped": float(self.dropped),
+            "spun": float(self.spun),
+            "unusable_stamps": float(self.unusable_stamps),
+            "last_yaw_rate_deg_s": math.degrees(self.last_yaw_rate),
+            "peak_yaw_rate_deg_s": math.degrees(self.peak_yaw_rate),
+            "max_yaw_rate_deg_s": math.degrees(self.max_yaw_rate),
+        }
 
     def upload_one(self) -> bool:
         """Blocking POST of at most one queued blob. Safe for an executor."""

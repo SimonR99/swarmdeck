@@ -726,10 +726,50 @@ class RobotBridge(
         captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
         self._enqueue_keyframe(mapped, captured_pose, at or time.time())
 
+    def _log_gate_stats(self, uploader) -> None:
+        """Say out loud what the capture gates are doing, at most twice a minute.
+
+        The turn gate has counted its rejections since it was written and
+        reported them nowhere, which made "the gate is working and there is
+        nothing fast to reject" indistinguishable from "the gate is not
+        working". Those are very different states: on a four-robot ARGoS run
+        two keyframes were accepted at 55.7 and 25.9 deg/s against an 8 deg/s
+        limit, each carrying a 5 degree pose error that drew a rotated copy of
+        the building into the merged map, and the only way anyone found out was
+        by scoring the finished map against a floorplan.
+
+        Logged only when there is something to say, so a healthy run stays
+        quiet: either the gate has rejected something, or a rate above the
+        limit got through, which is the condition that should be impossible.
+        """
+        stats = uploader.gate_stats()
+        leaked = stats["peak_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
+        if not stats["spun"] and not leaked and not stats["unusable_stamps"]:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_gate_log_at", -1e9) < 30.0:
+            return
+        self._gate_log_at = now
+        message = (
+            f"[{self.id}] keyframe gates: sent={stats['sent']:.0f} "
+            f"spun={stats['spun']:.0f} unusable_stamps={stats['unusable_stamps']:.0f} "
+            f"peak_yaw={stats['peak_yaw_rate_deg_s']:.1f} deg/s "
+            f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s"
+        )
+        if leaked:
+            self.node.get_logger().warn(
+                message + " -- a rate ABOVE the limit was observed; if keyframes "
+                "were accepted there, they carry a pose error of that rate times "
+                "the sensor's capture lag"
+            )
+        else:
+            self.node.get_logger().info(message)
+
     def upload_keyframe(self) -> None:
         uploader = getattr(self, "_keyframes", None)
         if uploader is None:
             return
+        self._log_gate_stats(uploader)
         if not self._upload_lock.acquire(blocking=False):
             return
         try:
