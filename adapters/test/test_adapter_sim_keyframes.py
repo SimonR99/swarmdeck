@@ -14,6 +14,18 @@ import pytest
 from adapters.keyframe_producer import KeyframeUploader
 
 
+def test_missing_capture_pose_skips_cloud_decoding(sim_module, monkeypatch):
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.map_pose_at = MagicMock(return_value=None)
+    decode = MagicMock()
+    monkeypatch.setattr(sim_module, "cloud_xyz", decode)
+    msg = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=100, nanosec=0))
+    )
+    bridge._on_scan_cloud(msg)
+    decode.assert_not_called()
+
+
 def test_a_room_scan_enqueues_a_keyframe(sim_module):
     bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
     bridge.id = "robot_0"

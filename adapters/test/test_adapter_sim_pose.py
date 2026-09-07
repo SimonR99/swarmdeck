@@ -320,7 +320,9 @@ def test_pose_lookup_interpolates_across_yaw_wrap(bridge_cls):
     assert pose["y"] == pytest.approx(3)
 
 
-@pytest.mark.parametrize("stamp", [None, 5.0, 99.95, 101.05])
+@pytest.mark.parametrize(
+    "stamp", [None, 5.0, 99.95, 101.05, float("nan"), float("inf")]
+)
 def test_keyframe_lookup_refuses_latest_pose_substitution(bridge_cls, stamp):
     bridge = _turning_bridge(bridge_cls)
     assert bridge.map_pose_at(stamp, require_history=True) is None
@@ -364,3 +366,18 @@ def test_capture_keeps_map_interpolation_and_per_link_diagnostics(bridge_cls):
     assert bridge.pose_lookup_gap["odom_base"] == pytest.approx(0)
     assert bridge.pose_lookup_gap["map_odom"] == pytest.approx(0.1)
     assert bridge.pose_lookup_stale == {"odom_base": 0, "map_odom": 0}
+
+
+def test_capture_accepts_exact_sample_next_to_a_long_tf_outage(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log = deque(
+        [bridge._odom_to_base_log[0], bridge._odom_to_base_log[-1]]
+    )
+    # An exact observation needs no interpolation across the outage.
+    assert bridge.map_pose_at(101.0, require_history=True)["yaw"] == pytest.approx(1)
+
+
+def test_duplicate_tf_stamp_uses_most_recent_arrival(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log.append((100.5, {"x": 0, "y": 0, "yaw": 0.7}))
+    assert bridge.map_pose_at(100.5, require_history=True)["yaw"] == pytest.approx(0.7)

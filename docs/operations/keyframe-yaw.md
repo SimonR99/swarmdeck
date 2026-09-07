@@ -34,7 +34,9 @@ The slowly updated map-to-odom correction interpolates between bracketing
 samples up to one second apart, retaining its nearest-value fallback outside
 that bracket. Pose-lookup diagnostics report gaps, empty history, and stale
 history separately for each TF link, alongside rejected captures.
-The adapter reports skipped captures as `rejected_captures` in its gate log.
+These counters remain available in memory for diagnostics; normal rejections
+do not produce periodic log messages. Lookup searches the bounded TF history
+without sorting and returns immediately on an exact timestamp match.
 A scan that arrives before its required TF is skipped; capture resumes on
 subsequent scans with available history.
 

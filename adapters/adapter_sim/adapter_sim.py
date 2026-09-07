@@ -370,15 +370,7 @@ class RobotBridge(
         # bounded so a long run cannot grow it without limit.
         self._map_to_odom_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
         self._odom_to_base_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
-        # Pairing diagnostics, per LINK, reported beside the gate stats.
-        #
-        # Split because the two links behave nothing alike and only one of them
-        # matters here. `odom_base` comes from the bridge on the same 0.1 s grid
-        # as the scans, so a correct lookup lands on it exactly and any gap is
-        # a real pose/scan mismatch during a turn. `map_odom` comes from SLAM
-        # Toolbox on its own cadence and barely moves, so a gap there is
-        # expected and harmless. Maxing over both, as this first did, produced
-        # one number that could not distinguish them.
+        # Bounded capture diagnostics, available without per-scan logging.
         self.pose_lookup_gap = {"odom_base": 0.0, "map_odom": 0.0}
         self.pose_lookup_empty = {"odom_base": 0, "map_odom": 0}
         self.pose_lookup_stale = {"odom_base": 0, "map_odom": 0}
@@ -629,7 +621,7 @@ class RobotBridge(
         fallback. Capture-time odom->base interpolation requires a bracket no
         wider than half a second; map->odom keeps the per-link interpolation.
         """
-        if at is None:
+        if at is None or not math.isfinite(at):
             if require_history:
                 self._pose_lookup_rejected = (
                     getattr(self, "_pose_lookup_rejected", 0) + 1
@@ -637,27 +629,23 @@ class RobotBridge(
             return None if require_history else self.map_pose()
 
         def lookup(log, current, link, *, require_bracket=False):
-            """The pose at ``at``, interpolated between the samples that bracket it.
-
-            Snapping to the closest sample makes the error the distance to that
-            sample times the turn rate, which is precisely the defect this was
-            added to remove: measured lookups reached 100 to 500 ms past the
-            stamp they asked for, and the rotated copy in the merged map tracked
-            that reach (300 ms -> 4.0 deg, 200 ms -> 3.0 deg, 100 ms -> 2.5 deg).
-            Interpolating between the sample before and the sample after leaves
-            only the curvature over that interval, which for a steady turn is
-            near zero however wide the gap. It is also what tf2 does, and what
-            adapter_ros2 gets for free by using tf2's buffer.
-            """
+            """Find the nearest bracket without sorting or allocating sample lists."""
             if not log:
                 self.pose_lookup_empty[link] += 1
                 return None if require_bracket else current
-            # TF callbacks can arrive out of order; bracket a sorted snapshot.
-            log = sorted(log, key=lambda item: item[0])
-            before = [s for s in log if s[0] <= at]
-            after = [s for s in log if s[0] >= at]
-            if before and after:
-                lo, hi = before[-1], after[0]
+            lo = hi = None
+            # Most captures match a recent TF stamp exactly. Reverse traversal
+            # finds those quickly; a full pass still handles out-of-order TF.
+            for sample in reversed(log):
+                stamp = sample[0]
+                if stamp == at:
+                    return sample[1]
+                if stamp < at:
+                    if lo is None or stamp > lo[0]:
+                        lo = sample
+                elif hi is None or stamp <= hi[0]:
+                    hi = sample
+            if lo is not None and hi is not None:
                 span = hi[0] - lo[0]
                 self.pose_lookup_gap[link] = max(
                     self.pose_lookup_gap[link], min(at - lo[0], hi[0] - at)
@@ -675,16 +663,15 @@ class RobotBridge(
                         "yaw": (lo[1]["yaw"] + f * dyaw + math.pi) % (2 * math.pi)
                         - math.pi,
                     }
-            # Only one side available: the stamp is outside the history, so
-            # extrapolating would be inventing motion. Fall back as before.
-            best = min(log, key=lambda item: abs(item[0] - at))
+            # Outside a usable bracket, captures must wait for another scan.
+            # Display-only callers retain their bounded nearest-pose fallback.
+            if lo is None:
+                best = hi
+            elif hi is None or at - lo[0] <= hi[0] - at:
+                best = lo
+            else:
+                best = hi
             gap = abs(best[0] - at)
-            # How far the lookup had to reach, and how stale the newest reading
-            # would have been. Instrumented because the arithmetic did not add
-            # up without it: the turn gate caps accepted captures at 8 deg/s and
-            # the sensor lag is a constant 100 ms, which bounds the pose error
-            # at 0.8 deg, yet keyframes were measured 5 deg out. One of those
-            # three is wrong, and this is the one nobody could see.
             self.pose_lookup_gap[link] = max(self.pose_lookup_gap[link], gap)
             if require_bracket:
                 self.pose_lookup_stale[link] += 1
@@ -850,13 +837,13 @@ class RobotBridge(
 
     def _on_scan_cloud(self, msg: PointCloud2) -> None:
         self._scan_cloud_at = time.monotonic()
-        points = cloud_xyz(msg)
-        if not len(points):
-            return
         # The pose at the scan's stamp, not the newest one. See map_pose_at().
         at = stamp_seconds(msg.header)
         pose = self.map_pose_at(at, require_history=True)
         if pose is None:
+            return
+        points = cloud_xyz(msg)
+        if not len(points):
             return
         mapped = points_lidar_to_map(
             points,
@@ -867,78 +854,10 @@ class RobotBridge(
         captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
         self._enqueue_keyframe(mapped, captured_pose, at)
 
-    def _log_gate_stats(self, uploader) -> None:
-        """Say out loud what the capture gates are doing, at most twice a minute.
-
-        The turn gate has counted its rejections since it was written and
-        reported them nowhere, which made "the gate is working and there is
-        nothing fast to reject" indistinguishable from "the gate is not
-        working". Those are very different states: on a four-robot ARGoS run
-        two keyframes were accepted at 55.7 and 25.9 deg/s against an 8 deg/s
-        limit, each carrying a 5 degree pose error that drew a rotated copy of
-        the building into the merged map, and the only way anyone found out was
-        by scoring the finished map against a floorplan.
-
-        Logged only when there is something to say, so a healthy run stays
-        quiet: either the gate has rejected something, or a rate above the
-        limit got through, which is the condition that should be impossible.
-        """
-        stats = uploader.gate_stats()
-        # Warn only when a keyframe was ACCEPTED above the limit. Seeing a fast
-        # turn is the gate doing its job, not a fault: warning on the peak
-        # observed fires on every run where anyone turns, which is noise that
-        # trains the reader to ignore the line.
-        leaked = (
-            stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
-        )
-        # A lookup that had to reach more than one sensor period, or fell back
-        # to the newest reading, is the pairing failing quietly.
-        rejected = getattr(self, "_pose_lookup_rejected", 0)
-        strayed = (
-            self.pose_lookup_gap["odom_base"] > 0.05
-            or self.pose_lookup_empty["odom_base"]
-            or self.pose_lookup_stale["odom_base"]
-            or rejected
-        )
-        if (
-            not stats["spun"]
-            and not leaked
-            and not strayed
-            and not stats["unusable_stamps"]
-        ):
-            return
-        now = time.monotonic()
-        if now - getattr(self, "_gate_log_at", -1e9) < 30.0:
-            return
-        self._gate_log_at = now
-        message = (
-            f"[{self.id}] keyframe gates: sent={stats['sent']:.0f} "
-            f"spun={stats['spun']:.0f} unusable_stamps={stats['unusable_stamps']:.0f} "
-            f"peak_seen={stats['peak_yaw_rate_deg_s']:.1f} "
-            f"max_accepted={stats['max_accepted_yaw_rate_deg_s']:.1f} "
-            f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s | "
-            f"pose lookup odom->base: gap {self.pose_lookup_gap['odom_base'] * 1000:.0f} ms "
-            f"empty={self.pose_lookup_empty['odom_base']} "
-            f"stale={self.pose_lookup_stale['odom_base']}"
-            f" | map->odom: gap {self.pose_lookup_gap['map_odom'] * 1000:.0f} ms "
-            f"empty={self.pose_lookup_empty['map_odom']} "
-            f"stale={self.pose_lookup_stale['map_odom']} "
-            f"rejected_captures={rejected}"
-        )
-        if leaked:
-            self.node.get_logger().warn(
-                message + " -- a keyframe was ACCEPTED above the turn limit; it "
-                "carries a pose error of that rate times the sensor capture lag, "
-                "which draws a rotated copy of the scene into the merged map"
-            )
-        else:
-            self.node.get_logger().info(message)
-
     def upload_keyframe(self) -> None:
         uploader = getattr(self, "_keyframes", None)
         if uploader is None:
             return
-        self._log_gate_stats(uploader)
         if not self._upload_lock.acquire(blocking=False):
             return
         try:

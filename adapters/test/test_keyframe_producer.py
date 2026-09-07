@@ -416,3 +416,32 @@ def test_color_projection_runs_only_after_capture_gates():
     assert packet.colors.shape == (len(packet.points), 4)
     assert not uploader.consider(_wall(), pose, 101, colorize=colorize)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_colors", [[], np.zeros((1, 4), dtype=np.uint8), np.zeros((1, 3))]
+)
+def test_invalid_optional_colors_do_not_drop_geometry(bad_colors):
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=0)
+    assert uploader.consider(
+        _wall(), pose7_from_xy_yaw(0, 0, 0), 100, colorize=lambda _: bad_colors
+    )
+    packet = decode_keyframe(uploader._queue[0])
+    assert len(packet.points) > 0
+    assert packet.colors is None
+
+
+def test_period_gate_updates_turn_reference_without_processing_the_cloud():
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=2)
+    wall = _wall()
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=0):
+        assert uploader.consider(wall, pose7_from_xy_yaw(0, 0, 0), 100)
+    with patch("adapters.keyframe_producer.voxel_downsample") as downsample:
+        with patch("adapters.keyframe_producer.time.monotonic", return_value=1.9):
+            assert not uploader.consider(wall, pose7_from_xy_yaw(0, 0, 0), 101.9)
+        with patch("adapters.keyframe_producer.time.monotonic", return_value=2):
+            assert not uploader.consider(
+                wall, pose7_from_xy_yaw(0, 0, math.radians(1)), 102
+            )
+        downsample.assert_not_called()
+    assert uploader.pending() == 1

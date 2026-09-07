@@ -442,8 +442,12 @@ class KeyframeUploader:
         if colorize is not None:
             try:
                 colors = colorize(base_points)
+                if colors is not None and (
+                    colors.dtype != np.uint8 or colors.shape != (len(base_points), 4)
+                ):
+                    colors = None
             except (ValueError, TypeError, AttributeError):
-                pass
+                colors = None
 
         # The wire cloud is in the base frame at capture. Carry the floor plane
         # in that same frame so the renderer can apply the physical band per
@@ -524,18 +528,8 @@ class KeyframeUploader:
             return False
         dt = stamp - previous_stamp
         if dt <= 1e-3:
-            # Fail CLOSED. Returning False here meant "no usable rate, so not
-            # too fast", and a capture that cannot be judged sailed past the
-            # only gate meant to judge it. Measured live: 7 to 12 unusable
-            # stamps per robot per interval, and captures accepted at 170.9 and
-            # 256.9 deg/s against an 8 deg/s limit -- 25 degrees of pose error
-            # at the sensor's 100 ms lag, which is several times what it takes
-            # to draw a visibly rotated copy of the building into the map.
-            #
-            # Dropping a capture costs one keyframe out of several per second.
-            # Accepting an unjudgeable one costs a permanent artefact in the
-            # merged map, because occupancy is never re-derived from corrected
-            # poses. The asymmetry is not close.
+            # Reject unjudgeable observations without losing the last valid
+            # reference. A repeated rejected scan must not bypass the gate.
             self.unusable_stamps += 1
             return True
         self._prev_yaw, self._prev_stamp = yaw, stamp
@@ -546,16 +540,7 @@ class KeyframeUploader:
         return rate > self.max_yaw_rate
 
     def gate_stats(self) -> dict[str, float]:
-        """What the capture gates have been doing, for telemetry.
-
-        ``spun`` was counted from the day the gate was written and reported
-        nowhere, so a gate that was not firing looked exactly like a gate with
-        nothing to reject. Measured on a four-robot ARGoS run: two keyframes
-        were accepted at 55.7 and 25.9 deg/s against an 8 deg/s limit, each
-        carrying a 5 degree pose error that put a rotated copy of the building
-        into the merged map, and nothing anywhere recorded that it had
-        happened.
-        """
+        """On-demand capture counters; no logging or formatting on the scan path."""
         return {
             "sent": float(self.sent),
             "dropped": float(self.dropped),
