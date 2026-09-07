@@ -508,8 +508,20 @@ class KeyframeUploader:
             return False
         dt = stamp - previous_stamp
         if dt <= 1e-3:
+            # Fail CLOSED. Returning False here meant "no usable rate, so not
+            # too fast", and a capture that cannot be judged sailed past the
+            # only gate meant to judge it. Measured live: 7 to 12 unusable
+            # stamps per robot per interval, and captures accepted at 170.9 and
+            # 256.9 deg/s against an 8 deg/s limit -- 25 degrees of pose error
+            # at the sensor's 100 ms lag, which is several times what it takes
+            # to draw a visibly rotated copy of the building into the map.
+            #
+            # Dropping a capture costs one keyframe out of several per second.
+            # Accepting an unjudgeable one costs a permanent artefact in the
+            # merged map, because occupancy is never re-derived from corrected
+            # poses. The asymmetry is not close.
             self.unusable_stamps += 1
-            return False  # keep the reference; see above
+            return True
         self._prev_yaw, self._prev_stamp = yaw, stamp
         delta = abs((yaw - previous_yaw + math.pi) % (2 * math.pi) - math.pi)
         rate = delta / dt

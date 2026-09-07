@@ -311,3 +311,31 @@ def test_lidar_spec_refuses_a_bare_lidar_block():
     assert lidar_spec({"lidar": {"profile": "vlp16"}}).rings == 17
     with pytest.raises(ValueError, match="fleet config, not the lidar block"):
         lidar_spec({"profile": "vlp16", "h_samples": 900})
+
+
+def test_unjudgeable_capture_is_rejected_not_waved_through():
+    """A capture the gate cannot judge must not be treated as slow enough.
+
+    Returning False on an unusable interval read as "no rate, so not too fast",
+    and the capture sailed past the only gate meant to judge it. Measured live
+    with the gate reporting its own numbers: 7 to 12 unusable stamps per robot
+    per interval, and captures accepted at 170.9 and 256.9 deg/s against an
+    8 deg/s limit, which at the simulator's 100 ms capture lag is 17 to 25
+    degrees of pose error apiece.
+    """
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=math.radians(8.0))
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
+    # Same stamp: no usable interval, so no way to know. Reject.
+    assert u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-30.0)), 100.0)
+    assert u.unusable_stamps == 1
+
+
+def test_gate_disabled_still_means_disabled():
+    """max_yaw_rate <= 0 opts out entirely, including out of the fail-closed path."""
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=0.0)
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-90.0)), 100.0)

@@ -278,6 +278,11 @@ class RobotInterface:
         self._expired = False
         self._encoder_log_at = -1e9
         self._scan_age_log_at = -1e9
+        self._duplicate_log_at = -1e9
+        # The tick of the last lidar frame actually published, so a frame the
+        # exchange carries twice is published once. See the lidar block.
+        self.last_scan_tick = -1
+        self.duplicate_scans = 0
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -355,6 +360,16 @@ class RobotInterface:
             return False
         self._encoder_log_at = sim_now
         return True
+
+    def _log_duplicate_scan(self, sim_now: float) -> None:
+        """How often the exchange outruns the lidar, at most once a sim second."""
+        if sim_now - self._duplicate_log_at < 1.0:
+            return
+        self._duplicate_log_at = sim_now
+        self.node.get_logger().info(
+            f"[{self.id}] lidar frame repeated by the exchange "
+            f"({self.duplicate_scans} so far); not republished"
+        )
 
     def _log_scan_age(self, sim_now: float, age_s: float) -> None:
         """How stale the lidar frame in this exchange is, once a sim second."""
@@ -651,76 +666,105 @@ class ArgosBridge(Node):
             else:
                 scan_stamp = stamp
                 self._warn_scan_tick(scan_tick, tick)
+            # The lidar renders on its own schedule and the loop function hands
+            # data over on another. When the render is the slower of the two --
+            # which it is under load, being the expensive one -- consecutive
+            # exchanges carry the SAME frame. Republishing it is not harmless
+            # padding: every consumer then sees two observations where there was
+            # one, and downstream of the honest scan_tick they also carry
+            # identical stamps, which is an interval of zero. adapter_sim's
+            # turn-rate gate cannot compute a rate across that and used to wave
+            # the capture through; measured live, 7 to 12 such stamps per robot
+            # per reporting interval, with captures accepted at up to 256.9
+            # deg/s against an 8 deg/s limit.
+            #
+            # This is the root of it: a duplicate frame is not new information,
+            # so do not publish it. Skipping the whole lidar block rather than
+            # just the stamp keeps the scan and the cloud consistent with each
+            # other, and leaves the gate a monotonically increasing stamp.
             if DEBUG_SCAN_AGE:
                 robot._log_scan_age(
                     seconds, scan_age_ticks / float(ticks_per_second or 1)
                 )
+            # The payload is always drained, duplicate or not: it is framed on
+            # the socket and the next field starts after it either way.
             raw = recv_exact(sock, readings * LIDAR_READING.size)
-            arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
-            hit_mask = arr["hit"] != 0
-            hits = int(np.count_nonzero(hit_mask))
-            hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
+            duplicate = robot.last_scan_tick == scan_tick
+            robot.last_scan_tick = scan_tick
+            if duplicate:
+                robot.duplicate_scans += 1
+                if DEBUG_SCAN_AGE:
+                    robot._log_duplicate_scan(seconds)
+            # A duplicate frame is not a new observation. Publishing it would
+            # hand every consumer two readings where the sensor produced one,
+            # with identical stamps, which is the zero interval that defeats
+            # the turn-rate gate downstream.
+            if not duplicate:
+                arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
+                hit_mask = arr["hit"] != 0
+                hits = int(np.count_nonzero(hit_mask))
+                hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
 
-            # 1. PointCloud2 (Fast-LIVO2 & 3D consumers - UNTOUCHED)
-            if hits:
-                out = np.empty((hits, 4), dtype="<f4")
-                out[:, 0] = hit_pts["x"]
-                out[:, 1] = hit_pts["y"]
-                out[:, 2] = hit_pts["z"]
-                out[:, 3] = hit_pts["ring"]
+                # 1. PointCloud2 (Fast-LIVO2 & 3D consumers - UNTOUCHED)
+                if hits:
+                    out = np.empty((hits, 4), dtype="<f4")
+                    out[:, 0] = hit_pts["x"]
+                    out[:, 1] = hit_pts["y"]
+                    out[:, 2] = hit_pts["z"]
+                    out[:, 3] = hit_pts["ring"]
 
-                cloud = PointCloud2()
-                cloud.header.stamp = scan_stamp
-                cloud.header.frame_id = robot.frame_lidar
-                cloud.height = 1
-                cloud.width = hits
-                # `intensity` carries the laser channel index. A real unit puts
-                # return strength there, which this sensor does not model; the
-                # ring is what a 3D SLAM front-end actually wants from the
-                # fourth field, and it costs nothing to carry.
-                cloud.fields = LIDAR_POINT_FIELDS
-                cloud.is_bigendian = False
-                cloud.point_step = 16
-                cloud.row_step = 16 * hits
-                cloud.is_dense = True
-                cloud.data = out.tobytes()
-                robot.pub_points.publish(cloud)
+                    cloud = PointCloud2()
+                    cloud.header.stamp = scan_stamp
+                    cloud.header.frame_id = robot.frame_lidar
+                    cloud.height = 1
+                    cloud.width = hits
+                    # `intensity` carries the laser channel index. A real unit puts
+                    # return strength there, which this sensor does not model; the
+                    # ring is what a 3D SLAM front-end actually wants from the
+                    # fourth field, and it costs nothing to carry.
+                    cloud.fields = LIDAR_POINT_FIELDS
+                    cloud.is_bigendian = False
+                    cloud.point_step = 16
+                    cloud.row_step = 16 * hits
+                    cloud.is_dense = True
+                    cloud.data = out.tobytes()
+                    robot.pub_points.publish(cloud)
 
-            # 2. Planar LaserScan (SLAM Toolbox: horizontal ring slice in sensor frame)
-            scan_ranges = project_laserscan_slice(hit_pts, range_max=float(_max_range))
-            scan_msg = LaserScan()
-            scan_msg.header.stamp = scan_stamp
-            scan_msg.header.frame_id = robot.frame_lidar
-            scan_msg.angle_min = float(SCAN_ANGLE_MIN)
-            scan_msg.angle_max = float(SCAN_ANGLE_MAX)
-            scan_msg.angle_increment = float(SCAN_ANGLE_INC)
-            scan_msg.time_increment = 0.0
-            scan_msg.scan_time = float(SCAN_TIME)
-            scan_msg.range_min = float(SCAN_RANGE_MIN)
-            scan_msg.range_max = float(_max_range)
-            scan_msg.ranges = scan_ranges.tolist()
-            robot.pub_scan.publish(scan_msg)
+                # 2. Planar LaserScan (SLAM Toolbox: horizontal ring slice in sensor frame)
+                scan_ranges = project_laserscan_slice(hit_pts, range_max=float(_max_range))
+                scan_msg = LaserScan()
+                scan_msg.header.stamp = scan_stamp
+                scan_msg.header.frame_id = robot.frame_lidar
+                scan_msg.angle_min = float(SCAN_ANGLE_MIN)
+                scan_msg.angle_max = float(SCAN_ANGLE_MAX)
+                scan_msg.angle_increment = float(SCAN_ANGLE_INC)
+                scan_msg.time_increment = 0.0
+                scan_msg.scan_time = float(SCAN_TIME)
+                scan_msg.range_min = float(SCAN_RANGE_MIN)
+                scan_msg.range_max = float(_max_range)
+                scan_msg.ranges = scan_ranges.tolist()
+                robot.pub_scan.publish(scan_msg)
 
-            # 3. Proximity 2.5D LaserScan (Nav2: 0.15..1.80 m obstacle band in base_link)
-            prox_ranges = project_laserscan_proximity(
-                hit_pts,
-                robot.lidar_x,
-                robot.lidar_z,
-                robot.base_height,
-                prox_range_max=robot.prox_range_max,
-            )
-            prox_msg = LaserScan()
-            prox_msg.header.stamp = stamp
-            prox_msg.header.frame_id = robot.frame_base
-            prox_msg.angle_min = float(SCAN_ANGLE_MIN)
-            prox_msg.angle_max = float(SCAN_ANGLE_MAX)
-            prox_msg.angle_increment = float(SCAN_ANGLE_INC)
-            prox_msg.time_increment = 0.0
-            prox_msg.scan_time = float(SCAN_TIME)
-            prox_msg.range_min = float(SCAN_RANGE_MIN)
-            prox_msg.range_max = float(robot.prox_range_max)
-            prox_msg.ranges = prox_ranges.tolist()
-            robot.pub_prox.publish(prox_msg)
+                # 3. Proximity 2.5D LaserScan (Nav2: 0.15..1.80 m obstacle band in base_link)
+                prox_ranges = project_laserscan_proximity(
+                    hit_pts,
+                    robot.lidar_x,
+                    robot.lidar_z,
+                    robot.base_height,
+                    prox_range_max=robot.prox_range_max,
+                )
+                prox_msg = LaserScan()
+                prox_msg.header.stamp = stamp
+                prox_msg.header.frame_id = robot.frame_base
+                prox_msg.angle_min = float(SCAN_ANGLE_MIN)
+                prox_msg.angle_max = float(SCAN_ANGLE_MAX)
+                prox_msg.angle_increment = float(SCAN_ANGLE_INC)
+                prox_msg.time_increment = 0.0
+                prox_msg.scan_time = float(SCAN_TIME)
+                prox_msg.range_min = float(SCAN_RANGE_MIN)
+                prox_msg.range_max = float(robot.prox_range_max)
+                prox_msg.ranges = prox_ranges.tolist()
+                robot.pub_prox.publish(prox_msg)
 
         # -- camera ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
