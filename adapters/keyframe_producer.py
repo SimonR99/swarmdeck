@@ -372,6 +372,8 @@ class KeyframeUploader:
         self.unusable_stamps = 0
         self.last_yaw_rate = 0.0
         self.peak_yaw_rate = 0.0
+        self.accepted_yaw_rate = 0.0
+        self.max_accepted_yaw_rate = 0.0
         # Tracked on EVERY consider(), not just accepted keyframes: yaw rate
         # between two keyframes 2 s apart is an average that hides exactly the
         # brief fast turns this gate exists to catch.
@@ -465,6 +467,16 @@ class KeyframeUploader:
             self._last_pose = pose
             self._last_scan_signature = signature
             self._last_at = now
+            # The rate this capture was actually taken at. Distinct from the
+            # peak observed, which is above the limit on any run where the
+            # robot turns and says only that the gate had work to do. What
+            # matters is whether anything got THROUGH while turning, because
+            # that is what a rotated copy in the map is made of, and the size
+            # of the error is this rate times the sensor's capture lag.
+            self.accepted_yaw_rate = self.last_yaw_rate
+            self.max_accepted_yaw_rate = max(
+                self.max_accepted_yaw_rate, self.last_yaw_rate
+            )
         return True
 
     def _turning_too_fast(self, pose: np.ndarray, stamp: float) -> bool:
@@ -523,6 +535,7 @@ class KeyframeUploader:
             "unusable_stamps": float(self.unusable_stamps),
             "last_yaw_rate_deg_s": math.degrees(self.last_yaw_rate),
             "peak_yaw_rate_deg_s": math.degrees(self.peak_yaw_rate),
+            "max_accepted_yaw_rate_deg_s": math.degrees(self.max_accepted_yaw_rate),
             "max_yaw_rate_deg_s": math.degrees(self.max_yaw_rate),
         }
 

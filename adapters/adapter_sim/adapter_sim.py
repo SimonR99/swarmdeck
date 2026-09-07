@@ -743,7 +743,11 @@ class RobotBridge(
         limit got through, which is the condition that should be impossible.
         """
         stats = uploader.gate_stats()
-        leaked = stats["peak_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
+        # Warn only when a keyframe was ACCEPTED above the limit. Seeing a fast
+        # turn is the gate doing its job, not a fault: warning on the peak
+        # observed fires on every run where anyone turns, which is noise that
+        # trains the reader to ignore the line.
+        leaked = stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
         if not stats["spun"] and not leaked and not stats["unusable_stamps"]:
             return
         now = time.monotonic()
@@ -753,14 +757,15 @@ class RobotBridge(
         message = (
             f"[{self.id}] keyframe gates: sent={stats['sent']:.0f} "
             f"spun={stats['spun']:.0f} unusable_stamps={stats['unusable_stamps']:.0f} "
-            f"peak_yaw={stats['peak_yaw_rate_deg_s']:.1f} deg/s "
+            f"peak_seen={stats['peak_yaw_rate_deg_s']:.1f} "
+            f"max_accepted={stats['max_accepted_yaw_rate_deg_s']:.1f} "
             f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s"
         )
         if leaked:
             self.node.get_logger().warn(
-                message + " -- a rate ABOVE the limit was observed; if keyframes "
-                "were accepted there, they carry a pose error of that rate times "
-                "the sensor's capture lag"
+                message + " -- a keyframe was ACCEPTED above the turn limit; it "
+                "carries a pose error of that rate times the sensor capture lag, "
+                "which draws a rotated copy of the scene into the merged map"
             )
         else:
             self.node.get_logger().info(message)

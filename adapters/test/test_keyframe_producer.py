@@ -291,6 +291,9 @@ def test_gate_stats_report_what_the_gate_did():
     assert stats["max_yaw_rate_deg_s"] == pytest.approx(8.0, abs=1e-6)
     assert stats["peak_yaw_rate_deg_s"] > 8.0
     assert stats["last_yaw_rate_deg_s"] == pytest.approx(55.0, abs=0.5)
+    # Nothing was accepted here, only observed. The two must not be conflated:
+    # a fast turn seen is the gate working, a fast turn accepted is the bug.
+    assert stats["max_accepted_yaw_rate_deg_s"] == 0.0
 
 
 def test_lidar_spec_refuses_a_bare_lidar_block():
