@@ -63,6 +63,14 @@ and AMD64 architectures.
 ARGoS dials both sockets; the other two bind them. That decides startup order,
 and `argos-entrypoint.sh` waits for the generated experiment rather than racing.
 
+It waits for a *fresh* one specifically. The runtime directory is a named
+volume that outlives the containers, so the previous run's `session.argos` is
+already on disk at startup and mere existence proves nothing: ARGoS therefore
+refuses any experiment older than its own container start, and the generator
+renames its output into place so that mtime always belongs to a complete file.
+Restarting the `argos` service alone against an already-running `sim` is the
+one legitimate case this rejects; set `ARGOS_ACCEPT_STALE=true` for it.
+
 ## What generates what
 
 | File | Written by | Read by |
