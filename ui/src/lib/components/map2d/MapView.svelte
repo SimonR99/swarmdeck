@@ -61,10 +61,10 @@
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
-  // Start in 2D; Layers > 3D cloud opts into the tactical view.
-  // Preserve the explicit URL shortcut for saved links.
+  // Open the tactical map directly; Layers > 3D cloud switches back to 2D.
+  // Preserve the explicit 2D URL override for lightweight saved views.
   let show3D = $state(
-    typeof location !== 'undefined' && new URLSearchParams(location.search).get('view') === '3d'
+    typeof location === 'undefined' || new URLSearchParams(location.search).get('view') !== '2d'
   );
   let showGrid = $state(true);
   let showTrails = $state(true);

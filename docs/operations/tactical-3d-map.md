@@ -1,8 +1,8 @@
 # Tactical 3D map
 
-The dashboard starts in 2D. Select **Layers → 3D cloud** to open the tactical
-view; deselect it to return to 2D. The explicit `?view=3d` URL shortcut also
-remains available. The map uses registered
+The dashboard opens the tactical 3D map without a URL parameter. Deselect
+**Layers → 3D cloud** to return to 2D, and select it to reopen the tactical map.
+The optional `?view=2d` URL starts directly in 2D. The map uses registered
 robot clouds, with the collaborative SLAM cloud as a fallback. X/Y are world
 metres and Z is up. A local robot cloud is transformed into world coordinates
 for agreement with robot overlays and navigation goals.
