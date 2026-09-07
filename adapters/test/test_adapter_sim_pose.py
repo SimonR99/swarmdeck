@@ -178,6 +178,9 @@ def _turning_bridge(bridge_cls):
     bridge = make_bridge(bridge_cls)
     bridge._map_to_odom_log = deque(maxlen=128)
     bridge._odom_to_base_log = deque(maxlen=128)
+    bridge.pose_lookup_gap = 0.0
+    bridge.pose_lookup_age = 0.0
+    bridge._pose_lookup_misses = 0
     for i in range(11):
         t = 100.0 + i * 0.1
         bridge._on_tf(
@@ -214,3 +217,23 @@ def test_pose_lookup_falls_back_rather_than_reaching_for_a_distant_sample(bridge
     # No stamp at all, and a stamp far outside the retained window.
     assert bridge.map_pose_at(None)["yaw"] == pytest.approx(1.0, abs=1e-6)
     assert bridge.map_pose_at(5.0)["yaw"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_pairing_diagnostics_record_how_far_the_lookup_reached(bridge_cls):
+    """The instrument that resolves the arithmetic, so it cannot go unnoticed.
+
+    The turn gate caps accepted captures at 8 deg/s and the simulator's capture
+    lag is a constant 100 ms, which bounds the pose error at 0.8 deg. Keyframes
+    were measured 5 deg out. Either the gate, the lag, or the pairing is not
+    what it claims, and only the pairing was unmeasured.
+    """
+    bridge = _turning_bridge(bridge_cls)
+
+    # A stamp on the sample grid: the lookup should land exactly.
+    bridge.map_pose_at(100.5)
+    assert bridge.pose_lookup_gap == pytest.approx(0.0, abs=1e-9)
+    assert bridge._pose_lookup_misses == 0
+
+    # A stamp far outside the history: falls back, and says so.
+    bridge.map_pose_at(5.0)
+    assert bridge._pose_lookup_misses > 0
