@@ -14,20 +14,10 @@
    * - 3D holographic waypoint beacons and detection crystals
    * - 3D tactical terrain grid, costmap, and network heatmaps
    */
-  import { onMount, untrack } from 'svelte';
+  import { onMount } from 'svelte';
   import { inflate } from 'pako';
   import * as THREE from 'three';
-  import {
-    Box,
-    Check,
-    Compass,
-    Crosshair,
-    Eye,
-    Layers,
-    Sliders,
-    Sparkles,
-    X
-  } from 'lucide-svelte';
+  import { Box, Check, Compass, Crosshair, Eye, Layers, Sliders, Sparkles, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
@@ -35,6 +25,7 @@
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
+  import { QUALITY, type Quality, type TerrainData } from './terrainData';
   import { Map3DScene } from './Map3DScene';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
@@ -51,6 +42,7 @@
     showCostmap = false,
     costmapKind = 'global',
     trails = new Map<string, { x: number; y: number }[]>(),
+    onCameraInteraction,
     onCursorChange
   }: {
     active?: boolean;
@@ -64,6 +56,7 @@
     showCostmap?: boolean;
     costmapKind?: 'global' | 'local';
     trails?: Map<string, { x: number; y: number }[]>;
+    onCameraInteraction?: () => void;
     onCursorChange?: (coords: { x: number; y: number } | null) => void;
   } = $props();
 
@@ -77,7 +70,12 @@
   let error = $state<string | null>(null);
 
   // Render & Color Modes
-  let renderMode = $state<Map3DRenderMode>('points');
+  let renderMode = $state<Map3DRenderMode>('voxels');
+  let quality = $state<Quality>('low');
+  let hasRgb = $state(false);
+  let gaussianCount = $state(0);
+  let gaussianStatus = $state('No reconstruction loaded');
+  let gaussianBuffer: ArrayBuffer | null = null;
   let colorMode = $state<Map3DColorMode>('elevation');
   let pointSize = $state<number>(0.07);
 
@@ -90,6 +88,7 @@
   // Interaction State
   let dragging = $state(false);
   let isPanning = false;
+  let pointerOrigin: { x: number; y: number } | null = null;
   let pointerDownPos: { x: number; y: number } | null = null;
   let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
@@ -163,7 +162,7 @@
   }
 
   export function cutCeilingQuick() {
-    ceilingCutoff = Math.max(ceilingMin, Math.min(2.1, ceilingMax - 0.4));
+    ceilingCutoff = Math.max(ceilingMin, Math.min(ceilingMin + 2.1, ceilingMax - 0.4));
     if (scene) {
       scene.setCeiling(ceilingCutoff);
       scene.render();
@@ -182,6 +181,8 @@
     renderMode = mode;
     if (scene) {
       scene.terrain.setRenderMode(mode);
+      scene.gaussians.group.visible = mode === 'gaussians';
+      if (mode === 'gaussians') void fetchGaussians();
       scene.render();
     }
   }
@@ -202,68 +203,228 @@
     }
   }
 
-  async function fetchCloud() {
-    if (!scene) return;
-    try {
-      const url =
-        mapStore.viewMode === 'local' && mapStore.viewRobot
-          ? `/api/map/cloud?robot_id=${encodeURIComponent(mapStore.viewRobot)}`
-          : '/api/map/cloud';
-      const response = await fetch(url, { cache: 'no-store' });
-      if (!response.ok) throw new Error(`cloud ${response.status}`);
+  let worker: Worker | null = null;
+  let pending: AbortController | null = null;
+  let generation = 0;
+  let mounted = $state(false);
+  let lastScope = '';
+  let cloudEtag = '';
+  let gaussianEtag = '';
+  let firstCloud = true;
 
+  function scope() {
+    return mapStore.viewMode === 'local' && mapStore.viewRobot
+      ? `?robot_id=${encodeURIComponent(mapStore.viewRobot)}`
+      : '';
+  }
+
+  async function fetchCloud() {
+    if (!scene || !worker || !active || document.hidden || pending) return;
+    const controller = new AbortController();
+    pending = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
+    const id = ++generation;
+    const currentScope = scope();
+    try {
+      const response = await fetch(`/api/map/cloud${currentScope}`, {
+        signal: controller.signal,
+        headers: cloudEtag ? { 'If-None-Match': cloudEtag } : {}
+      });
+      if (response.status === 304) return;
+      if (!response.ok) throw new Error(`Cloud unavailable (${response.status})`);
       const total = Number(response.headers.get('X-Cloud-Points') ?? 0);
       const scale = Number(response.headers.get('X-Cloud-Scale') ?? 0.01);
-      const names = (response.headers.get('X-Cloud-Robots') ?? '')
-        .split(',')
-        .filter(Boolean);
-
-      if (total > 0) {
-        const raw = inflate(new Uint8Array(await response.arrayBuffer()));
-        const xyz = new Int16Array(raw.buffer, raw.byteOffset, total * 3);
-        const owners = new Uint8Array(raw.buffer, raw.byteOffset + total * 6, total);
-
-        const keep = names.map((id) => fleet.isEnabled(id));
-        let kept = 0;
-        for (let i = 0; i < total; i++) if (keep[owners[i]]) kept++;
-
-        const positions = new Float32Array(kept * 3);
-        const keptOwners = new Uint8Array(kept);
-        let o = 0;
-        for (let i = 0; i < total; i++) {
-          if (!keep[owners[i]]) continue;
-          positions[o * 3] = xyz[i * 3] * scale;
-          positions[o * 3 + 1] = xyz[i * 3 + 1] * scale;
-          positions[o * 3 + 2] = xyz[i * 3 + 2] * scale;
-          keptOwners[o] = owners[i];
-          o++;
-        }
-
-        const colors = names.map((id) => fleet.colorOf(id));
-        const bounds = scene.terrain.buildFromPoints(positions, kept, keptOwners, colors);
-
-        points = kept;
-        voxels = scene.terrain.voxelCount;
-        robotsOnCloud = names.filter((_, i) => keep[i]);
-        ceilingMin = bounds.minZ;
-        ceilingMax = Math.max(bounds.maxZ, 2.5);
-        if (ceilingCutoff > ceilingMax || ceilingCutoff < ceilingMin) {
-          ceilingCutoff = Math.max(ceilingMin, ceilingMax - 0.4);
-        }
-        scene.setCeiling(ceilingCutoff);
-        error = null;
-        scene.render();
-      } else {
-        points = 0;
-        voxels = 0;
-        robotsOnCloud = [];
-        scene.terrain.clear();
-        scene.render();
+      const format = response.headers.get('X-Cloud-Format') ?? 'xyz16';
+      const rgbPresent = response.headers.get('X-Cloud-RGB') === '1';
+      if (
+        !Number.isInteger(total) ||
+        total < 0 ||
+        total > 2000000 ||
+        !Number.isFinite(scale) ||
+        scale <= 0
+      )
+        throw new Error('Invalid cloud metadata');
+      const names = (response.headers.get('X-Cloud-Robots') ?? '').split(',').filter(Boolean);
+      const raw = inflate(new Uint8Array(await response.arrayBuffer()));
+      if (id !== generation || !scene) return;
+      const xyzBytes = format === 'xyz32' ? 12 : 6;
+      if (raw.byteLength !== total * (xyzBytes + 1 + (rgbPresent ? 3 : 0)))
+        throw new Error('Invalid cloud payload');
+      const xyz = new DataView(raw.buffer, raw.byteOffset, total * xyzBytes);
+      const owners = raw.subarray(total * xyzBytes, total * (xyzBytes + 1));
+      const rgb = rgbPresent ? raw.subarray(total * (xyzBytes + 1)) : undefined;
+      const keep = names.map((id) => fleet.isEnabled(id));
+      let kept = 0;
+      for (let i = 0; i < total; i++) if (keep[owners[i]]) kept++;
+      const positions = new Float32Array(kept * 3),
+        keptOwners = new Uint8Array(kept);
+      const keptRgb = rgb ? new Uint8Array(kept * 3) : undefined;
+      for (let i = 0, j = 0; i < total; i++) {
+        if (!keep[owners[i]]) continue;
+        for (let k = 0; k < 3; k++)
+          positions[j * 3 + k] =
+            format === 'xyz32'
+              ? xyz.getFloat32(i * 12 + k * 4, true)
+              : xyz.getInt16(i * 6 + k * 2, true) * scale;
+        keptOwners[j] = owners[i];
+        if (keptRgb && rgb) keptRgb.set(rgb.subarray(i * 3, i * 3 + 3), j * 3);
+        j++;
       }
+      // Keep all overlays and commands in world coordinates, including the local view.
+      if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
+        const tf = mapStore.status?.transforms[mapStore.viewRobot];
+        if (tf)
+          for (let i = 0; i < kept; i++) {
+            const x = positions[i * 3],
+              y = positions[i * 3 + 1],
+              c = Math.cos(tf.yaw),
+              sn = Math.sin(tf.yaw);
+            positions[i * 3] = tf.x + x * c - y * sn;
+            positions[i * 3 + 1] = tf.y + x * sn + y * c;
+          }
+      }
+      const data = await new Promise<TerrainData>((resolve, reject) => {
+        worker!.onmessage = (
+          e: MessageEvent<{ id: number; data: TerrainData; error?: string }>
+        ) => {
+          if (e.data.id === id)
+            e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.data);
+        };
+        worker!.onerror = () => reject(new Error('Map preparation failed'));
+        controller.signal.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true }
+        );
+        worker!.postMessage({ id, positions, owners: keptOwners, rgb: keptRgb, quality }, [
+          positions.buffer,
+          keptOwners.buffer,
+          ...(keptRgb ? [keptRgb.buffer] : [])
+        ]);
+      });
+      if (id !== generation || !scene || currentScope !== scope()) return;
+      cloudEtag = response.headers.get('ETag') ?? '';
+      hasRgb = rgbPresent;
+      if (!hasRgb && colorMode === 'camera') setColorMode('elevation');
+      const bounds = scene.terrain.build(
+        data,
+        names.map((id) => fleet.colorOf(id))
+      );
+      scene.layers.invalidate();
+      points = scene.terrain.pointCount;
+      voxels = scene.terrain.voxelCount;
+      robotsOnCloud = names.filter((_, i) => keep[i]);
+      ceilingMin = bounds.minZ;
+      ceilingMax = Math.max(bounds.maxZ, bounds.minZ + 0.1);
+      ceilingCutoff = Math.max(ceilingMin, Math.min(ceilingCutoff, ceilingMax + 0.2));
+      if (firstCloud && points) {
+        ceilingCutoff = Math.min(ceilingMax + 0.2, ceilingMin + 2.3);
+        scene.setCeiling(ceilingCutoff);
+        scene.fitMap();
+        firstCloud = false;
+      }
+      error = null;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (!controller.signal.aborted && id === generation)
+        error = e instanceof Error ? e.message : String(e);
+    } finally {
+      window.clearTimeout(timeout);
+      if (pending === controller) pending = null;
     }
   }
+
+  let gaussianPending: AbortController | null = null;
+  async function fetchGaussians() {
+    if (!scene || !active || document.hidden || gaussianPending) return;
+    const currentScope = scope(),
+      controller = new AbortController();
+    gaussianPending = controller;
+    try {
+      const response = await fetch(`/api/map/gaussians${currentScope}`, {
+        signal: controller.signal,
+        headers: gaussianEtag ? { 'If-None-Match': gaussianEtag } : {}
+      });
+      if (response.status === 304) return;
+      if (response.status === 404) {
+        scene.gaussians.clear();
+        gaussianCount = 0;
+        gaussianBuffer = null;
+        gaussianEtag = '';
+        gaussianStatus = 'No reconstruction available for this map';
+        return;
+      }
+      if (!response.ok) throw new Error(`Reconstruction unavailable (${response.status})`);
+      if (Number(response.headers.get('Content-Length')) > 112000016)
+        throw new Error('Reconstruction exceeds download limit');
+      const buffer = await response.arrayBuffer();
+      if (!scene || currentScope !== scope() || controller.signal.aborted) return;
+      const firstModel = scene.gaussians.count === 0;
+      scene.gaussians.load(buffer, QUALITY[quality].splats);
+      if (!points && firstModel && scene.gaussians.count) {
+        ceilingMin = scene.gaussians.bounds.min.z;
+        ceilingMax = Math.max(ceilingMin + 0.1, scene.gaussians.bounds.max.z);
+        ceilingCutoff = ceilingMax + 0.2;
+        scene.setCeiling(ceilingCutoff);
+        scene.fitMap();
+      }
+      gaussianBuffer = buffer;
+      gaussianEtag = response.headers.get('ETag') ?? '';
+      gaussianCount = scene.gaussians.count;
+      gaussianStatus = `${gaussianCount.toLocaleString()} Gaussians`;
+    } catch (e) {
+      if (!controller.signal.aborted) gaussianStatus = String(e);
+    } finally {
+      if (gaussianPending === controller) gaussianPending = null;
+    }
+  }
+
+  function setQuality(value: Quality) {
+    quality = value;
+    if (scene) {
+      scene.quality = value;
+      scene.resize();
+      if (gaussianBuffer) {
+        scene.gaussians.load(gaussianBuffer, QUALITY[value].splats);
+        gaussianCount = scene.gaussians.count;
+        gaussianStatus = `${gaussianCount.toLocaleString()} Gaussians`;
+      }
+    }
+    pending?.abort();
+    pending = null;
+    cloudEtag = '';
+    void fetchCloud();
+  }
+
+  $effect(() => {
+    const currentScope = scope();
+    const enabled = fleet.robots
+      .map((r) => `${r.robot_id}:${fleet.isEnabled(r.robot_id)}`)
+      .join(',');
+    if (!mounted) return;
+    const localTransform = mapStore.viewRobot
+      ? mapStore.status?.transforms[mapStore.viewRobot]
+      : null;
+    const key = `${currentScope}|${enabled}|${currentScope ? JSON.stringify(localTransform) : ''}`;
+    if (key !== lastScope) {
+      lastScope = key;
+      generation++;
+      pending?.abort();
+      pending = null;
+      cloudEtag = '';
+      firstCloud = true;
+      gaussianPending?.abort();
+      gaussianPending = null;
+      gaussianEtag = '';
+      gaussianBuffer = null;
+      scene?.terrain.clear();
+      scene?.gaussians.clear();
+      points = 0;
+      voxels = 0;
+      gaussianCount = 0;
+      void fetchCloud();
+      if (renderMode === 'gaussians') void fetchGaussians();
+    }
+  });
 
   // Pointer & RTS Mouse Interaction
   function getNDC(e: PointerEvent): THREE.Vector2 {
@@ -278,6 +439,7 @@
     if (!canvas) return;
     canvas.setPointerCapture(e.pointerId);
     pointerDownPos = { x: e.clientX, y: e.clientY };
+    pointerOrigin = pointerDownPos;
     dragged = false;
     dragging = true;
     isPanning = e.button === 2 || e.button === 1 || e.shiftKey;
@@ -290,8 +452,12 @@
     if (dragging && pointerDownPos) {
       const dx = e.clientX - pointerDownPos.x;
       const dy = e.clientY - pointerDownPos.y;
-      if (Math.hypot(dx, dy) > 5) {
+      if (
+        pointerOrigin &&
+        Math.hypot(e.clientX - pointerOrigin.x, e.clientY - pointerOrigin.y) > 5
+      ) {
         dragged = true;
+        onCameraInteraction?.();
       }
 
       if (isPanning) {
@@ -312,7 +478,7 @@
         // Update 3D goal cursor reticle position
         if (navigation.goalMode) {
           scene.layers.cursorReticle.visible = true;
-          scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, 0.015);
+          scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
         } else {
           scene.layers.cursorReticle.visible = false;
         }
@@ -331,7 +497,7 @@
     } catch {}
     dragging = false;
 
-    if (!dragged) {
+    if (!dragged && e.button === 0 && e.type !== 'pointercancel') {
       handleClick(e);
     }
     pointerDownPos = null;
@@ -387,6 +553,7 @@
   function onWheel(e: WheelEvent) {
     e.preventDefault();
     if (!scene) return;
+    onCameraInteraction?.();
     scene.zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15);
     scene.render();
   }
@@ -397,8 +564,13 @@
 
   // Animation & Rendering Loop
   let rafId = 0;
+  let lastFrame = 0;
+  let lastLayers = 0;
   function tick(timestamp: number) {
-    if (!scene || !active) return;
+    rafId = requestAnimationFrame(tick);
+    if (!scene || !active || document.hidden) return;
+    if (timestamp - lastFrame < 1000 / QUALITY[quality].fps) return;
+    lastFrame = timestamp;
     const time = timestamp * 0.001;
 
     // Center on fleet if follow mode is active
@@ -416,20 +588,22 @@
       getGroundZ
     });
 
-    scene.layers.update({
-      robots,
-      trails,
-      showGrid,
-      showTrails,
-      showPlans,
-      showSensors,
-      showCostmap,
-      showNetwork,
-      costmapKind,
-      time,
-      getGroundZ
-    });
-
+    if (timestamp - lastLayers >= 200) {
+      lastLayers = timestamp;
+      scene.layers.update({
+        robots,
+        trails,
+        showGrid,
+        showTrails,
+        showPlans,
+        showSensors,
+        showCostmap,
+        showNetwork,
+        costmapKind,
+        time,
+        getGroundZ
+      });
+    }
     // Update active detection screen projection for popover
     const activeDetId = review.selected ?? review.focused;
     if (activeDetId) {
@@ -447,7 +621,6 @@
     }
 
     scene.render();
-    rafId = requestAnimationFrame(tick);
   }
 
   $effect(() => {
@@ -470,7 +643,13 @@
       return;
     }
 
-    void fetchCloud();
+    worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), { type: 'module' });
+    scene.gaussians.group.visible = renderMode === 'gaussians';
+    mounted = true;
+    const splatPoll = window.setInterval(
+      () => renderMode === 'gaussians' && void fetchGaussians(),
+      5000
+    );
     const poll = window.setInterval(() => active && void fetchCloud(), 2000);
 
     const ro = new ResizeObserver(() => {
@@ -482,10 +661,18 @@
     rafId = requestAnimationFrame(tick);
 
     return () => {
+      mounted = false;
+      generation++;
+      pending?.abort();
+      gaussianPending?.abort();
+      worker?.terminate();
+      worker = null;
+      window.clearInterval(splatPoll);
       window.clearInterval(poll);
       if (rafId) cancelAnimationFrame(rafId);
       ro.disconnect();
       scene?.dispose();
+      scene = null;
     };
   });
 </script>
@@ -493,7 +680,11 @@
 <div class="relative h-full w-full select-none overflow-hidden bg-[#1e242d]">
   <canvas
     bind:this={canvas}
-    class="h-full w-full touch-none {navigation.goalMode ? 'cursor-crosshair' : dragging ? 'cursor-grabbing' : 'cursor-grab'}"
+    class="h-full w-full touch-none {navigation.goalMode
+      ? 'cursor-crosshair'
+      : dragging
+        ? 'cursor-grabbing'
+        : 'cursor-grab'}"
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
@@ -504,16 +695,18 @@
 
   <!-- 3D Tactical Status HUD (Top Left) -->
   <div
-    class="panel-glow pointer-events-none absolute left-3 top-3 z-20 flex flex-col gap-1 rounded-[--radius-control]
+    class="panel-glow pointer-events-none absolute left-3 bottom-12 z-20 flex max-w-[calc(100%_-_1.5rem)] flex-col gap-1 rounded-[--radius-control]
            border border-border/80 bg-surface/92 px-3 py-2 text-[10px] text-fg-dim shadow-xl backdrop-blur-xl"
   >
     <div class="flex items-center gap-2">
-      <span class="inline-flex h-2 w-2 rounded-full {error && points === 0 ? 'bg-warn' : 'bg-ok'} animate-pulse"></span>
-      <span class="font-semibold uppercase tracking-wider text-fg">
-        3D Tactical Map
-      </span>
+      <span
+        class="inline-flex h-2 w-2 rounded-full {error && points === 0
+          ? 'bg-warn'
+          : 'bg-ok'} animate-pulse"
+      ></span>
+      <span class="font-semibold uppercase tracking-wider text-fg"> 3D Tactical Map </span>
     </div>
-    {#if error && points === 0}
+    {#if error}
       <span class="text-warn">{error}</span>
     {:else}
       <div class="flex items-center gap-2 font-mono text-fg-muted">
@@ -524,7 +717,9 @@
         <span>{robotsOnCloud.length} robot{robotsOnCloud.length === 1 ? '' : 's'}</span>
         {#if cursor3D}
           <span class="text-border">·</span>
-          <span class="text-accent font-medium">({cursor3D.x.toFixed(1)}, {cursor3D.y.toFixed(1)}, {cursor3D.z.toFixed(1)}) m</span>
+          <span class="text-accent font-medium"
+            >({cursor3D.x.toFixed(1)}, {cursor3D.y.toFixed(1)}, {cursor3D.z.toFixed(1)}) m</span
+          >
         {/if}
       </div>
       <div class="text-[9px] text-fg-dim/80">
@@ -534,64 +729,82 @@
   </div>
 
   <!-- 3D Controls Bar (Top Right) -->
-  <div class="absolute right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
-    <!-- Render Mode Selector: Points / Mesh / Both -->
+  <div class="absolute left-3 right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
+    <!-- Rendering budgets default to integrated graphics. -->
     <div
       class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
              bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
     >
       <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">View</span>
-      <button
-        class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'points' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Show 3D voxel terrain (tactical blocks)"
-        onclick={() => setRenderMode('points')}
+      {#each [{ id: 'voxels', label: 'Voxels' }, { id: 'mesh', label: 'Mesh' }, { id: 'points', label: 'Points' }, { id: 'gaussians', label: 'Gaussians' }] as mode}
+        <button
+          class="rounded px-2 py-0.5 {renderMode === mode.id
+            ? 'bg-accent text-accent-fg'
+            : 'text-fg-muted'}"
+          aria-pressed={renderMode === mode.id}
+          onclick={() => setRenderMode(mode.id as Map3DRenderMode)}>{mode.label}</button
+        >
+      {/each}
+      <select
+        aria-label="Graphics quality"
+        class="rounded bg-surface px-1 py-0.5 text-fg"
+        value={quality}
+        onchange={(e) => setQuality(e.currentTarget.value as Quality)}
       >
-        Points
-      </button>
-      <button
-        class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'mesh' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Show dense 3D LiDAR point cloud surface"
-        onclick={() => setRenderMode('mesh')}
-      >
-        Mesh
-      </button>
-      <button
-        class="rounded px-2 py-0.5 font-medium transition-colors {renderMode === 'both' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Show both 3D point cloud and voxel terrain"
-        onclick={() => setRenderMode('both')}
-      >
-        Both
-      </button>
+        <option value="low">Low power</option><option value="balanced">Balanced</option><option
+          value="high">High detail</option
+        >
+      </select>
     </div>
 
-    <!-- Color Mode Selector: Team / Elevation -->
-    <div
-      class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
+    {#if renderMode !== 'gaussians'}
+      <!-- Color Mode Selector -->
+      <div
+        class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
              bg-surface/95 p-1 shadow-2xl backdrop-blur-xl text-[10px]"
-    >
-      <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">Color</span>
-      <button
-        class="rounded px-2 py-0.5 font-medium transition-colors {colorMode === 'elevation' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Color by elevation (topography / caves / slope height)"
-        onclick={() => setColorMode('elevation')}
       >
-        Elevation
-      </button>
-      <button
-        class="rounded px-2 py-0.5 font-medium transition-colors {colorMode === 'robot' ? 'bg-accent text-accent-fg shadow-sm' : 'text-fg-muted hover:text-fg'}"
-        title="Color by robot / team source"
-        onclick={() => setColorMode('robot')}
+        <span class="px-1 text-[9px] font-semibold uppercase tracking-wider text-fg-dim">Color</span
+        >
+        <button
+          class="rounded px-2 py-0.5 font-medium transition-colors {colorMode === 'elevation'
+            ? 'bg-accent text-accent-fg shadow-sm'
+            : 'text-fg-muted hover:text-fg'}"
+          title="Color by elevation (topography / caves / slope height)"
+          onclick={() => setColorMode('elevation')}
+        >
+          Elevation
+        </button>
+        <button
+          class="rounded px-2 py-0.5 font-medium transition-colors {colorMode === 'robot'
+            ? 'bg-accent text-accent-fg shadow-sm'
+            : 'text-fg-muted hover:text-fg'}"
+          title="Color by robot / team source"
+          onclick={() => setColorMode('robot')}
+        >
+          Team
+        </button>
+        <button
+          class="rounded px-2 py-0.5 text-fg-muted disabled:opacity-40"
+          disabled={!hasRgb}
+          title={hasRgb ? 'Calibrated camera colors' : 'This cloud has no camera colors'}
+          aria-pressed={colorMode === 'camera'}
+          onclick={() => setColorMode('camera')}>Camera</button
+        >
+      </div>
+    {/if}
+    {#if renderMode === 'gaussians'}
+      <span role="status" class="rounded bg-surface px-2 py-1 text-xs text-fg-muted"
+        >{gaussianStatus}</span
       >
-        Team
-      </button>
-    </div>
-
+    {/if}
     <!-- Ceiling Cutoff Slider -->
     <div
       class="panel-glow flex items-center gap-2 rounded-[--radius-control] border border-border/90
              bg-surface/95 px-3 py-1.5 shadow-2xl backdrop-blur-xl"
     >
-      <div class="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-accent">
+      <div
+        class="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-accent"
+      >
         <Sliders class="h-3 w-3" />
         <span>Ceiling</span>
       </div>
@@ -672,14 +885,18 @@
             alt="{detectionCatalog.labelOf(activeObj.class)} detection crop"
             class="h-32 w-32 rounded-lg object-cover shadow-sm"
           />
-          <div class="mt-1 flex w-full items-center justify-between px-1 text-[10px] font-semibold text-fg">
+          <div
+            class="mt-1 flex w-full items-center justify-between px-1 text-[10px] font-semibold text-fg"
+          >
             <span>{detectionCatalog.labelOf(activeObj.class)}</span>
             <span class="font-normal text-fg-dim">
               {`${Math.round(activeObj.best_score * 100)}%`}
             </span>
           </div>
         </div>
-        <div class="-mt-1 h-2 w-2 rotate-45 border-b border-r border-border/80 bg-surface shadow-sm"></div>
+        <div
+          class="-mt-1 h-2 w-2 rotate-45 border-b border-r border-border/80 bg-surface shadow-sm"
+        ></div>
       </div>
     {/if}
   {/if}

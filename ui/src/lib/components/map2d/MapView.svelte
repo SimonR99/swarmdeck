@@ -19,7 +19,11 @@
     Trash2,
     Wifi
   } from 'lucide-svelte';
-  import Map3D from '$lib/components/map3d/Map3D.svelte';
+  let Map3D = $state<typeof import('../map3d/Map3D.svelte').default | null>(null);
+  let map3DLoadError = $state('');
+  $effect(() => {
+    if(show3D && !Map3D) import('../map3d/Map3D.svelte').then(module=>Map3D=module.default).catch(error=>map3DLoadError=String(error));
+  });
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { session } from '$lib/stores/session.svelte';
@@ -279,6 +283,7 @@
 
   // Canvas layers live in mapLayers.ts; this component owns only viewport state.
   function draw() {
+    if(show3D || document.hidden) return;
     if (!canvas || !host) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -616,6 +621,7 @@
   -->
   {#if show3D}
     <div class="absolute inset-0 z-10">
+      {#if Map3D}
       <Map3D
         bind:this={map3D}
         active={show3D}
@@ -629,8 +635,12 @@
         {showCostmap}
         {costmapKind}
         {trails}
+        onCameraInteraction={() => (follow = false)}
         onCursorChange={(coords) => (cursorWorld = coords)}
       />
+      {:else}
+        <div class="p-4 text-sm text-fg-muted" role="status">{map3DLoadError || 'Loading 3D map…'}</div>
+      {/if}
     </div>
   {/if}
   <div bind:this={host} class="absolute inset-0">

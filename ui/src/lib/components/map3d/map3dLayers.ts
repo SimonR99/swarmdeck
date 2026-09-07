@@ -17,6 +17,7 @@ export class Map3DLayers {
   private loopClosuresGroup = new THREE.Group();
   private costmapMesh: THREE.Mesh | null = null;
   private networkMesh: THREE.Mesh | null = null;
+  private signatures = new Map<string, string>();
   public cursorReticle: THREE.Group;
 
   constructor() {
@@ -84,10 +85,13 @@ export class Map3DLayers {
 
     // Axis crosshairs at (0, 0)
     const axisGeo = new THREE.BufferGeometry();
-    axisGeo.setAttribute('position', new THREE.Float32BufferAttribute([
-      -half, 0, 0.008, half, 0, 0.008,
-      0, -half, 0.008, 0, half, 0.008
-    ], 3));
+    axisGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(
+        [-half, 0, 0.008, half, 0, 0.008, 0, -half, 0.008, 0, half, 0.008],
+        3
+      )
+    );
     const axisMat = new THREE.LineBasicMaterial({
       color: 0x38bdf8,
       transparent: true,
@@ -116,10 +120,13 @@ export class Map3DLayers {
 
     // Crosshairs
     const crossGeo = new THREE.BufferGeometry();
-    crossGeo.setAttribute('position', new THREE.Float32BufferAttribute([
-      -0.6, 0, 0.01, 0.6, 0, 0.01,
-      0, -0.6, 0.01, 0, 0.6, 0.01
-    ], 3));
+    crossGeo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(
+        [-0.6, 0, 0.01, 0.6, 0, 0.01, 0, -0.6, 0.01, 0, 0.6, 0.01],
+        3
+      )
+    );
     const crossMat = new THREE.LineBasicMaterial({ color: 0x00ffaa, linewidth: 2 });
     group.add(new THREE.LineSegments(crossGeo, crossMat));
 
@@ -141,23 +148,69 @@ export class Map3DLayers {
   }) {
     this.gridGroup.visible = options.showGrid;
 
-    // 1. Navigation Goals & Waypoint Beacons
-    this.updateGoals(options.robots, options.showPlans, options.time, options.getGroundZ);
-
-    // 2. Global & Local Planned Paths
-    this.updatePaths(options.robots, options.showPlans, options.getGroundZ);
-
-    // 3. Movement Trails
-    this.updateTrails(options.trails, options.showTrails, options.getGroundZ);
-
-    // 4. Reviewed Detections (Proposals & Entities)
-    this.updateDetections(options.time, options.getGroundZ);
-
-    // 5. Inter-Robot Loop Closures
-    this.updateLoopClosures(options.showPlans);
-
-    // 6. Costmap & Network Decals
+    // Rebuild only when source data changes. Animation never recreates geometry.
+    const changed = (key: string, value: unknown) => {
+      const signature = JSON.stringify(value);
+      if (this.signatures.get(key) === signature) return false;
+      this.signatures.set(key, signature);
+      return true;
+    };
+    const robots = options.robots;
+    if (
+      changed('goals', [
+        options.showPlans,
+        robots.map((r) => [r.robot_id, r.pose, r.goal, r.nav_status, r.mode])
+      ])
+    )
+      this.updateGoals(robots, options.showPlans, options.time, options.getGroundZ);
+    if (
+      changed('paths', [
+        options.showPlans,
+        robots.map((r) => [
+          r.robot_id,
+          r.nav_status,
+          r.mode,
+          r.goal,
+          r.planned_path,
+          r.global_planned_path,
+          r.local_planned_path
+        ])
+      ])
+    )
+      this.updatePaths(robots, options.showPlans, options.getGroundZ);
+    if (
+      changed('trails', [
+        options.showTrails,
+        Array.from(options.trails).filter(([id]) => robots.some((r) => r.robot_id === id))
+      ])
+    )
+      this.updateTrails(
+        new Map(Array.from(options.trails).filter(([id]) => robots.some((r) => r.robot_id === id))),
+        options.showTrails,
+        options.getGroundZ
+      );
+    if (
+      changed('detections', [
+        review.proposals,
+        review.entities,
+        review.selected,
+        review.highlighted
+      ])
+    )
+      this.updateDetections(options.time, options.getGroundZ);
+    if (
+      changed('loops', [
+        options.showPlans,
+        mapStore.slamGraphs,
+        robots.map((r) => [r.robot_id, r.pose])
+      ])
+    )
+      this.updateLoopClosures(options.showPlans);
     this.updateDecals(options.showCostmap, options.showNetwork, options.costmapKind);
+  }
+
+  public invalidate() {
+    this.signatures.clear();
   }
 
   private updateGoals(
@@ -170,7 +223,8 @@ export class Map3DLayers {
     if (!showPlans) return;
 
     for (const robot of robots) {
-      const isNavActive = robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
+      const isNavActive =
+        robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
       if (!isNavActive || !robot.goal) continue;
 
       const color = new THREE.Color(fleet.colorOf(robot.robot_id));
@@ -242,7 +296,8 @@ export class Map3DLayers {
     if (!showPlans) return;
 
     for (const robot of robots) {
-      const isNavActive = robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
+      const isNavActive =
+        robot.nav_status === 'active' || robot.mode === 'nav' || Boolean(robot.goal);
       if (!isNavActive) continue;
 
       const color = new THREE.Color(fleet.colorOf(robot.robot_id));
@@ -251,9 +306,14 @@ export class Map3DLayers {
         (robot.local_planned_path && robot.local_planned_path.length > 0)
       );
       const globalPath = hasSplitPaths
-        ? (robot.global_planned_path && robot.global_planned_path.length > 0 ? robot.global_planned_path : robot.planned_path)
+        ? robot.global_planned_path && robot.global_planned_path.length > 0
+          ? robot.global_planned_path
+          : robot.planned_path
         : robot.planned_path;
-      const localPath = robot.local_planned_path && robot.local_planned_path.length > 0 ? robot.local_planned_path : undefined;
+      const localPath =
+        robot.local_planned_path && robot.local_planned_path.length > 0
+          ? robot.local_planned_path
+          : undefined;
 
       // 1. Global path (thick dashed glowing route on terrain)
       if (globalPath && globalPath.length >= 2) {
@@ -333,7 +393,7 @@ export class Map3DLayers {
       group.userData = { detectionId: item.id, isDetection: true };
 
       // 3D Target crystal beacon (Octahedron)
-      const crystalGeo = new THREE.OctahedronGeometry(isSelected ? 0.28 : 0.20);
+      const crystalGeo = new THREE.OctahedronGeometry(isSelected ? 0.28 : 0.2);
       const crystalMat = new THREE.MeshStandardMaterial({
         color,
         emissive: color,
@@ -413,13 +473,19 @@ export class Map3DLayers {
     }
   }
 
-  private updateDecals(showCostmap: boolean, showNetwork: boolean, costmapKind: 'global' | 'local') {
+  private updateDecals(
+    showCostmap: boolean,
+    showNetwork: boolean,
+    costmapKind: 'global' | 'local'
+  ) {
     // 3D Costmap ground decal
     const viewedCostmapRobotId =
       mapStore.viewMode === 'local' && mapStore.viewRobot
         ? mapStore.viewRobot
-        : fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null;
-    const costmapLayer = viewedCostmapRobotId ? mapStore.costmapLayer(viewedCostmapRobotId, costmapKind) : null;
+        : (fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null);
+    const costmapLayer = viewedCostmapRobotId
+      ? mapStore.costmapLayer(viewedCostmapRobotId, costmapKind)
+      : null;
 
     if (showCostmap && costmapLayer && costmapLayer.canvas) {
       if (!this.costmapMesh) {
@@ -435,9 +501,13 @@ export class Map3DLayers {
         this.group.add(this.costmapMesh);
       }
       this.costmapMesh.visible = true;
-      const texture = new THREE.CanvasTexture(costmapLayer.canvas);
-      (this.costmapMesh.material as THREE.MeshBasicMaterial).map = texture;
-      (this.costmapMesh.material as THREE.MeshBasicMaterial).needsUpdate = true;
+      const material = this.costmapMesh.material as THREE.MeshBasicMaterial;
+      if (!material.map || material.map.image !== costmapLayer.canvas) {
+        material.map?.dispose();
+        material.map = new THREE.CanvasTexture(costmapLayer.canvas);
+        material.needsUpdate = true;
+      }
+      material.map.needsUpdate = true;
 
       const w = costmapLayer.info.width * costmapLayer.info.resolution;
       const h = costmapLayer.info.height * costmapLayer.info.resolution;
@@ -467,9 +537,13 @@ export class Map3DLayers {
         this.group.add(this.networkMesh);
       }
       this.networkMesh.visible = true;
-      const texture = new THREE.CanvasTexture(networkLayer.canvas);
-      (this.networkMesh.material as THREE.MeshBasicMaterial).map = texture;
-      (this.networkMesh.material as THREE.MeshBasicMaterial).needsUpdate = true;
+      const material = this.networkMesh.material as THREE.MeshBasicMaterial;
+      if (!material.map || material.map.image !== networkLayer.canvas) {
+        material.map?.dispose();
+        material.map = new THREE.CanvasTexture(networkLayer.canvas);
+        material.needsUpdate = true;
+      }
+      material.map.needsUpdate = true;
 
       const w = networkLayer.info.width * networkLayer.info.resolution;
       const h = networkLayer.info.height * networkLayer.info.resolution;
@@ -485,31 +559,23 @@ export class Map3DLayers {
   }
 
   private clearGroup(g: THREE.Group) {
-    while (g.children.length) {
-      const c = g.children[0];
-      g.remove(c);
-      if (c instanceof THREE.Mesh || c instanceof THREE.Line || c instanceof THREE.LineSegments) {
-        c.geometry.dispose();
-        if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
-        else c.material.dispose();
+    const geometries = new Set<THREE.BufferGeometry>(),
+      materials = new Set<THREE.Material>();
+    g.traverse((c) => {
+      if (c instanceof THREE.Mesh || c instanceof THREE.Line) {
+        geometries.add(c.geometry);
+        for (const m of Array.isArray(c.material) ? c.material : [c.material]) materials.add(m);
       }
-    }
+    });
+    geometries.forEach((g) => g.dispose());
+    materials.forEach((m) => {
+      (m as THREE.MeshBasicMaterial).map?.dispose();
+      m.dispose();
+    });
+    g.clear();
   }
-
   public dispose() {
-    this.clearGroup(this.gridGroup);
-    this.clearGroup(this.pathsGroup);
-    this.clearGroup(this.goalsGroup);
-    this.clearGroup(this.trailsGroup);
-    this.clearGroup(this.detectionsGroup);
-    this.clearGroup(this.loopClosuresGroup);
-    if (this.costmapMesh) {
-      this.costmapMesh.geometry.dispose();
-      (this.costmapMesh.material as THREE.Material).dispose();
-    }
-    if (this.networkMesh) {
-      this.networkMesh.geometry.dispose();
-      (this.networkMesh.material as THREE.Material).dispose();
-    }
+    this.clearGroup(this.group);
+    this.signatures.clear();
   }
 }

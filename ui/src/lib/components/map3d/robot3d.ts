@@ -158,7 +158,7 @@ export class Robot3DManager {
     baseShape.closePath();
 
     const baseGeo = new THREE.ExtrudeGeometry(baseShape, {
-      depth: 0.10,
+      depth: 0.1,
       bevelEnabled: true,
       bevelSegments: 1,
       bevelSize: 0.015,
@@ -180,7 +180,7 @@ export class Robot3DManager {
     selectionRing.position.set(0, 0, 0.01);
 
     // Base subtle ground ring
-    const groundRingGeo = new THREE.RingGeometry(0.55, 0.60, 32);
+    const groundRingGeo = new THREE.RingGeometry(0.55, 0.6, 32);
     const groundRingMat = new THREE.MeshBasicMaterial({
       color: threeColor,
       side: THREE.DoubleSide,
@@ -194,11 +194,14 @@ export class Robot3DManager {
     const bracketGeo = new THREE.BufferGeometry();
     const bracketPts: number[] = [];
     const R = 0.72;
-    const cornerSize = 0.20;
+    const cornerSize = 0.2;
 
     // 4 corner L-brackets
     const corners = [
-      [R, R], [-R, R], [-R, -R], [R, -R]
+      [R, R],
+      [-R, R],
+      [-R, -R],
+      [R, -R]
     ];
     for (const [cx, cy] of corners) {
       const sx = Math.sign(cx);
@@ -235,10 +238,8 @@ export class Robot3DManager {
     // 7. Footprint Boundary Outline
     const fpGeo = new THREE.BufferGeometry();
     const fpPts = [
-      0.38, 0.28, 0.02,  -0.38, 0.28, 0.02,
-      -0.38, 0.28, 0.02, -0.38, -0.28, 0.02,
-      -0.38, -0.28, 0.02, 0.38, -0.28, 0.02,
-      0.38, -0.28, 0.02,  0.38, 0.28, 0.02
+      0.38, 0.28, 0.02, -0.38, 0.28, 0.02, -0.38, 0.28, 0.02, -0.38, -0.28, 0.02, -0.38, -0.28,
+      0.02, 0.38, -0.28, 0.02, 0.38, -0.28, 0.02, 0.38, 0.28, 0.02
     ];
     fpGeo.setAttribute('position', new THREE.Float32BufferAttribute(fpPts, 3));
     const fpMat = new THREE.LineBasicMaterial({
@@ -301,18 +302,20 @@ export class Robot3DManager {
   }
 
   private disposeEntry(entry: Robot3DEntry) {
-    entry.chevronMesh.geometry.dispose();
-    if (Array.isArray(entry.chevronMesh.material)) {
-      entry.chevronMesh.material.forEach((m) => m.dispose());
-    } else {
-      entry.chevronMesh.material.dispose();
-    }
-    entry.edges.geometry.dispose();
-    (entry.edges.material as THREE.Material).dispose();
-    if (entry.labelSprite) {
-      entry.labelSprite.material.map?.dispose();
-      entry.labelSprite.material.dispose();
-    }
+    const geometries = new Set<THREE.BufferGeometry>(),
+      materials = new Set<THREE.Material>();
+    entry.group.traverse((c) => {
+      if (c instanceof THREE.Mesh || c instanceof THREE.Line || c instanceof THREE.Sprite) {
+        if ('geometry' in c) geometries.add(c.geometry);
+        for (const m of Array.isArray(c.material) ? c.material : [c.material]) materials.add(m);
+      }
+    });
+    geometries.forEach((g) => g.dispose());
+    materials.forEach((m) => {
+      (m as THREE.MeshBasicMaterial).map?.dispose();
+      m.dispose();
+    });
+    entry.group.clear();
   }
 
   public dispose() {

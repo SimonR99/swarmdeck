@@ -181,6 +181,7 @@ class MapService:
         # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
+        self.robot_cloud_colors: dict[str, np.ndarray] = {}
         # Display-only vertical correction per robot, against the reference's
         # cloud. See estimate_z_offset: the SE(2) merge cannot produce this.
         self.cloud_z_offsets: dict[str, float] = {}
@@ -322,6 +323,7 @@ class MapService:
                 self.slam_graphs.clear()
                 self.cslam_disagreement.clear()
                 self.robot_clouds.clear()
+                self.robot_cloud_colors.clear()
                 self._scan_grids.clear()
                 self._network_grids.clear()
                 self._network_prev.clear()
@@ -362,6 +364,7 @@ class MapService:
             self.slam_graphs.pop(robot_id, None)
             self.cslam_disagreement.pop(robot_id, None)
             self.robot_clouds.pop(robot_id, None)
+            self.robot_cloud_colors.pop(robot_id, None)
             self._scan_grids.pop(robot_id, None)
             self._network_grids.pop(robot_id, None)
             self._network_prev.pop(robot_id, None)
@@ -464,6 +467,7 @@ class MapService:
             self.robot_grids.clear()
             self.robot_revisions.clear()
             self.robot_clouds.clear()
+            self.robot_cloud_colors.clear()
             self.registrations.clear()
             self.registration_rejections.clear()
             self.registered.clear()
@@ -519,14 +523,21 @@ class MapService:
         return [rid for rid in candidates if rid in grid_ids]
 
     def set_cloud(
-        self, robot_id: str, points: np.ndarray, *, register: bool = True
+        self, robot_id: str, points: np.ndarray, *, register: bool = True, rgb: np.ndarray | None = None
     ) -> None:
         """Store a cloud and refresh cloud-assisted registration when applicable."""
         # Keep caller-owned buffers out of the worker/read path. Adapters reuse
         # their upload arrays and a mutable reference here would defeat the
         # read-side snapshot guarantees.
         points = np.array(points, dtype=np.float32, copy=True)
-        self._state_set(self.robot_clouds, robot_id, points)
+        if rgb is not None and (rgb.shape != points.shape or rgb.dtype != np.uint8):
+            raise ValueError("RGB must be uint8 with one triple per point")
+        with self._state_lock:
+            self.robot_clouds[robot_id] = points
+            if rgb is None:
+                self.robot_cloud_colors.pop(robot_id, None)
+            else:
+                self.robot_cloud_colors[robot_id] = rgb.copy()
         targets = self.cloud_targets(robot_id)
         if not targets:
             return
@@ -541,10 +552,10 @@ class MapService:
         if register:
             self._remerge()
 
-    async def set_cloud_async(self, robot_id: str, points: np.ndarray) -> None:
+    async def set_cloud_async(self, robot_id: str, points: np.ndarray, rgb: np.ndarray | None = None) -> None:
         """Cloud storage off the event loop; the pairing catches up in the worker."""
         async with self._ingest_lock:
-            await asyncio.to_thread(self.set_cloud, robot_id, points, register=False)
+            await asyncio.to_thread(self.set_cloud, robot_id, points, register=False, rgb=rgb)
             # Cheap dict work, and it must be read under the same lock that just
             # stored the cloud so a concurrent reset cannot empty it in between.
             targets = self.cloud_targets(robot_id)

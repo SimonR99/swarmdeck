@@ -16,8 +16,8 @@ export interface CloudBounds {
   maxZ: number;
 }
 
-export type Map3DRenderMode = 'points' | 'mesh' | 'both';
-export type Map3DColorMode = 'robot' | 'elevation';
+export type Map3DRenderMode = 'points' | 'voxels' | 'mesh' | 'gaussians';
+export type Map3DColorMode = 'robot' | 'elevation' | 'camera';
 
 export interface Map3DOptions {
   showGrid: boolean;

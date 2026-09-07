@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import TopBar from '$lib/components/TopBar.svelte';
   import FleetRail from '$lib/components/fleet/FleetRail.svelte';
   import MapView from '$lib/components/map2d/MapView.svelte';
@@ -40,7 +41,7 @@
     videoExpanded = false;
   }
 
-  $effect(() => {
+  onMount(() => {
     startConnection();
     return () => teardown();
   });

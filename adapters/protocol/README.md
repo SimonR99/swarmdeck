@@ -260,6 +260,11 @@ Body: zlib(int16 XYZ triples), coordinates = metres / scale
 Send registered, voxel-downsampled points slowly (about 0.25–0.5 Hz). Only
 robots accepted into the shared frame contribute to the merged 3D view.
 
+Camera-colored uploads may use `format=xyzrgb32`: zlib-compressed N little-endian
+float32 XYZ triples followed by N uint8 RGB triples. Float32 positions are metres.
+The viewer response declares XYZ encoding and RGB availability in its headers;
+see [the 3D transport and reconstruction workflow](../../docs/operations/tactical-3d-map.md).
+
 ### Collaborative global grid
 
 ```text
