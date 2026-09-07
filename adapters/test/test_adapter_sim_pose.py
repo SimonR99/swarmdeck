@@ -237,3 +237,45 @@ def test_pairing_diagnostics_record_how_far_the_lookup_reached(bridge_cls):
     # A stamp far outside the history: falls back, and says so.
     bridge.map_pose_at(5.0)
     assert bridge._pose_lookup_misses > 0
+
+
+def test_pose_lookup_interpolates_yaw_between_tf_samples(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    assert bridge.map_pose_at(100.55)["yaw"] == pytest.approx(0.55)
+
+
+def test_pose_lookup_interpolates_across_yaw_wrap(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log = deque(
+        [
+            (100.0, {"x": 0, "y": 2, "yaw": math.radians(179)}),
+            (100.1, {"x": 2, "y": 4, "yaw": math.radians(-179)}),
+        ]
+    )
+    pose = bridge.map_pose_at(100.05)
+    assert abs(pose["yaw"]) == pytest.approx(math.pi)
+    assert pose["x"] == pytest.approx(1)
+    assert pose["y"] == pytest.approx(3)
+
+
+@pytest.mark.parametrize("stamp", [None, 5.0, 99.95, 101.05])
+def test_keyframe_lookup_refuses_latest_pose_substitution(bridge_cls, stamp):
+    bridge = _turning_bridge(bridge_cls)
+    assert bridge.map_pose_at(stamp, require_history=True) is None
+
+
+def test_keyframe_lookup_refuses_to_interpolate_across_tf_outage(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._odom_to_base_log = deque(
+        [
+            bridge._odom_to_base_log[0],
+            bridge._odom_to_base_log[-1],
+        ]
+    )
+    assert bridge.map_pose_at(100.5, require_history=True) is None
+
+
+def test_keyframe_lookup_waits_for_map_frame(bridge_cls):
+    bridge = _turning_bridge(bridge_cls)
+    bridge._map_to_odom_log.clear()
+    assert bridge.map_pose_at(100.5, require_history=True) is None

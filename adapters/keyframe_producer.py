@@ -391,7 +391,11 @@ class KeyframeUploader:
         pose = np.asarray(t_map_base, dtype=np.float64).reshape(-1)
         if pose.shape != (7,) or not np.isfinite(pose).all():
             return False
-        if self._turning_too_fast(pose, float(stamp)):
+        stamp = float(stamp)
+        if not math.isfinite(stamp):
+            self.unusable_stamps += 1
+            return False
+        if self._turning_too_fast(pose, stamp):
             self.spun += 1
             return False
         now = time.monotonic()
@@ -491,9 +495,9 @@ class KeyframeUploader:
         current sample there would discard the only reference the next call
         has, so a run of duplicate or out-of-order stamps would silently
         disable the gate for as long as it lasted. Keep the old reference and
-        measure across the gap instead: a longer baseline understates a brief
-        peak, which is the safe direction for a gate, whereas no baseline at
-        all fails open.
+        reject that observation. In particular, a duplicate of a rejected
+        turning scan must not get another chance to pass with dt=0. Keeping
+        the reference lets the next fresh scan resume rate estimation.
         """
         yaw = math.atan2(
             2.0 * (pose[6] * pose[5] + pose[3] * pose[4]),
@@ -509,7 +513,7 @@ class KeyframeUploader:
         dt = stamp - previous_stamp
         if dt <= 1e-3:
             self.unusable_stamps += 1
-            return False  # keep the reference; see above
+            return True  # reject the sample and keep the reference
         self._prev_yaw, self._prev_stamp = yaw, stamp
         delta = abs((yaw - previous_yaw + math.pi) % (2 * math.pi) - math.pi)
         rate = delta / dt

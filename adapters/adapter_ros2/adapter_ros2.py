@@ -1048,6 +1048,10 @@ class HardwareBridge(
             return np.array([t.x, t.y, t.z, q.x, q.y, q.z, q.w], dtype=np.float64)
         except Exception:
             stored = getattr(self, "_odom_pose7", None)
+            # Current odometry cannot replace a historical map pose: a delayed
+            # scan would acquire today's yaw, potentially in a different frame.
+            if stamp is not None:
+                return None
             if stored is not None:
                 return np.asarray(stored, dtype=np.float64)
             fallback = getattr(self, "_odom_pose", None)

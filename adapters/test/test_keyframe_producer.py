@@ -311,3 +311,32 @@ def test_lidar_spec_refuses_a_bare_lidar_block():
     assert lidar_spec({"lidar": {"profile": "vlp16"}}).rings == 17
     with pytest.raises(ValueError, match="fleet config, not the lidar block"):
         lidar_spec({"profile": "vlp16", "h_samples": 900})
+
+
+@pytest.mark.parametrize("repeated_stamp", [100.1, 100.0, 100.1005])
+def test_rejected_turn_cannot_be_uploaded_on_a_repeated_stamp(repeated_stamp):
+    uploader = KeyframeUploader(
+        "r",
+        "http://x",
+        min_period_s=0,
+        min_scan_change_m=0,
+        min_yaw_rad=math.radians(1),
+        max_yaw_rate=math.radians(8),
+    )
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), 100.0)
+    turned = pose7_from_xy_yaw(0, 0, math.radians(30))
+    assert not uploader.consider(_wall(), turned, 100.1)
+    assert not uploader.consider(_wall(), turned, repeated_stamp)
+    assert uploader.pending() == 1
+    assert uploader.gate_stats()["max_accepted_yaw_rate_deg_s"] <= 8
+    # A fresh scan after stopping remains usable; reject does not latch forever.
+    assert uploader.consider(_wall(), turned, 100.2)
+    assert decode_keyframe(uploader._queue[-1]).stamp == 100.2
+
+
+@pytest.mark.parametrize("stamp", [float("nan"), float("inf"), -float("inf")])
+def test_invalid_stamp_does_not_poison_the_turn_reference(stamp):
+    uploader = KeyframeUploader("r", "http://x", min_period_s=0)
+    assert not uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), stamp)
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), 100)
+    assert not uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 1), 100.1)
