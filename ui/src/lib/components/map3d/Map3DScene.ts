@@ -32,7 +32,6 @@ export class Map3DScene {
   private cameraFillLight: THREE.PointLight;
   private groundPlane: THREE.Plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 
-  private raf = 0;
   private isDisposed = false;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -282,7 +281,6 @@ export class Map3DScene {
 
   public dispose() {
     this.isDisposed = true;
-    if (this.raf) cancelAnimationFrame(this.raf);
     this.gaussians.dispose();
     this.terrain.dispose();
     this.robotManager.dispose();

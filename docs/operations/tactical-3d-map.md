@@ -32,7 +32,12 @@ These are workload limits, not measured FPS guarantees. Shadows and multisample
 antialiasing are disabled. Geometry preparation and Gaussian sorting use workers.
 Only selected terrain representations allocate GPU geometry; switching modes
 caches their buffers until the next cloud. Overlays reuse unchanged geometry,
-textures are disposed/reused, and rendering pauses in hidden tabs. The 2D canvas
+and mode switches reuse the current color palette without re-uploading unchanged
+color buffers. Changing color mode or loading a new cloud invalidates that palette;
+only one palette is retained, keeping memory bounded. Terrain preparation avoids
+allocating a typed-array view for every ground sample and mesh vertex.
+
+Overlay textures are disposed/reused, and rendering pauses in hidden tabs. The 2D canvas
 pauses behind the 3D view. Three.js is loaded when 3D is first opened. Switching
 to 2D retains the bounded 3D scene, camera, and display settings while stopping
 its animation loop and map requests. Returning to 3D immediately resumes the

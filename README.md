@@ -1,253 +1,225 @@
 # SwarmDeck
 
-SwarmDeck is a web-based supervision stack for heterogeneous robot fleets. It
-combines live robot state, local and merged maps, navigation, teleoperation,
-camera streams, detections, and alerts in one browser UI.
+**One dashboard for a heterogeneous robot fleet.**
 
-The FastAPI backend has no ROS dependency. Each robot connects through the
-[adapter protocol](adapters/protocol/README.md), allowing ROS 1, ROS 2, vendor
-SDK, simulated, and synthetic robots in the same fleet.
+Supervise robots, inspect their maps, send navigation goals, and review camera
+feeds and detections from a browser. SwarmDeck connects ROS 1, ROS 2, simulated,
+and custom robots through a common adapter protocol; the central server runs
+without ROS.
 
-## What is implemented
+[Quick start](#quick-start) · [3D mapping](#tactical-3d-mapping) ·
+[Physical robots](#physical-robots) · [Documentation](docs/README.md) ·
+[Contributing](CONTRIBUTING.md)
 
-- Dynamic robot registration and capability-driven controls.
-- Per-robot local maps plus `graph` (collaborative GTSAM pose-graph optimization), `static`, `auto` (2D grid registration), and optional `cslam` merge modes.
-- Collaborative SLAM back-end (`slam/` on port 8090) with Scan Context loop candidate lookup, GICP geometric verification, PCM outlier rejection, and joint trajectory-rendered occupancy grids.
-- Navigation goals, cancel, manual drive, stop-all, trails, and planned paths.
-- 2D occupancy maps, network-quality heatmaps, and an optional WebGL2 3D cloud.
-- WHEP/WebRTC video with a throttled JPEG fallback.
-- YOLOE detections, RGB-D map projection, operator review, and persistence.
-- Mock, simulation, ROS 1, and ROS 2 adapters.
-- Session manifests and timestamped JSONL operator events.
+![SwarmDeck dashboard showing four simulated robots on their reconstructed 3D map, with camera video and navigation controls](docs/images/tactical-map.png)
 
-MCAP capture, complete session replay, authentication, and production
-high-availability are not implemented. See [requirements](docs/architecture/requirements.md)
-and the [roadmap](docs/architecture/roadmap.md) for the intended scope.
+*An ARGoS fleet in the tactical view. Geometry comes from robot observations;
+camera colors appear where calibrated image observations are available.*
+
+## What you can do
+
+| Capability | What it provides |
+| --- | --- |
+| Fleet supervision | Live state, capability-aware controls, manual drive, navigation goals, cancel, and stop-all. |
+| Collaborative mapping | Local robot maps, shared occupancy grids, pose-graph alignment, and loop-closure verification. |
+| Tactical 3D | Voxels, surface mesh, points, and published Gaussian reconstructions, with a ceiling cut and readable robot/path overlays. |
+| Video and perception | WebRTC camera feeds, JPEG fallback, RGB-D detection projection, and operator review. |
+| Simulation and hardware | ARGoS with RGB-D and LiDAR, a lightweight mock fleet, and deployment profiles for physical robots. |
+| Session records | Session manifests, timestamped operator events, and optional keyframe capture for offline analysis. |
+| Optional Cortex assistant | An integrated agent service with configurable providers and fleet tools. See [Cortex](agent/README.md). |
 
 ## Quick start
 
-### Docker simulation
+### Try the dashboard without robots
 
-With an NVIDIA container runtime:
-
-```bash
-make docker-up-gpu
-```
-
-Portable/software rendering:
+Install Docker with Compose v2, then run from the repository root:
 
 ```bash
-make up-argos
+docker compose -f deploy/compose/docker-compose.yml --profile mock up --build -d
 ```
 
-Both start the ARGoS backend: photorealistic Filament rendering, Jolt physics
-and Fast-LIVO2 odometry. See [simulation](docs/architecture/simulation.md).
-Gazebo Harmonic remains runnable as an A/B control (`make up-sim`, or
-`--profile gazebo`) and is not the default.
-
-Open <http://localhost:5173>. The API is at <http://localhost:8080>; robots can
-take about one minute to appear. Stop the stack with `make docker-down`.
-
-Use a synthetic fleet when the simulator and ROS are unnecessary:
+Open **[localhost:5173](http://localhost:5173)**. This starts a synthetic fleet
+without ROS or a simulator. The backend API is at
+[localhost:8080](http://localhost:8080). The mock fleet is useful for learning
+the controls; real 3D geometry and RGB capture require sensor data.
 
 ```bash
-docker compose -f deploy/compose/docker-compose.yml \
-  --profile mock up --build -d
+make docker-ps       # service status
+make docker-logs     # follow logs
+make docker-down     # stop the stack
 ```
 
-Useful commands:
+### Run a sensor-equipped simulation
+
+Docker, Compose v2, and `make` are required. The first build downloads and builds
+the simulator and ROS dependencies and can take considerably longer than startup.
+Choose a rendering and odometry configuration:
 
 ```bash
-make docker-logs
-make docker-ps
-make docker-test
+# Portable simulation: software Vulkan and synthetic odometry drift
+make up-sim RENDER=software ODOMETRY=drift
+
+# NVIDIA rendering with the Fast-LIVO2 odometry front end
+make up-argos-gpu
+
+# Intel/AMD rendering with Fast-LIVO2 (requires /dev/dri)
+make up-argos-dri
 ```
 
-### Local development
+The NVIDIA option requires the NVIDIA Container Toolkit. `make up-argos` uses
+software rendering with Fast-LIVO2. Synthetic drift is a lighter development
+option; it does not reproduce an estimator's sensor-driven failures.
 
-Requires Python 3.10+, `venv`, Node.js, and npm:
+ARGoS supplies Jolt physics and Filament camera/LiDAR rendering. The ROS side
+runs the bridge, onboard SLAM, Nav2, and adapters. Allow roughly a minute after
+startup for robots to register. Robots start stationary by default; send a goal
+or enable exploration in the UI. `EXPLORE=120` on `make up-sim` requests a
+120-second autonomous bootstrap.
 
-```bash
-make install           # ui + server venv
-make install-slam      # collaborative SLAM back-end venv (Python 3.12)
-make demo              # server + mock fleet + UI
-```
+See [simulation setup](docs/architecture/simulation.md) for scenarios, sensor
+configuration, external assets, and the legacy Gazebo Compose profile.
 
-> [!IMPORTANT]
-> **Python Environment Isolation:** `slam/` is strictly pinned to Python 3.12 and `numpy<2` because `gtsam==4.2.2` segfaults under NumPy 2.x without Python tracebacks. `server/` runs Python 3.13 / NumPy 2.x. Never combine them into a single virtual environment.
+## Tactical 3D mapping
 
-For separate terminals, use `make server`, `make slam`, `make mock N=4`, and `make ui`.
-The UI-only fallback is <http://localhost:5173/?mock=1&robots=4>.
+The dashboard opens in 3D. Use **Layers → 3D cloud** to switch between the
+2D map and tactical view—no `view=3d` URL parameter is needed. Camera position
+and display settings survive the switch. Use `?view=2d` to start in 2D.
 
-### Collaborative SLAM
+| View | Representation |
+| --- | --- |
+| **Voxels** | Instanced occupied cells, coarsened to a bounded rendering budget. |
+| **Mesh** | Exposed voxel faces, with internal faces removed. This is a block surface, not a watertight reconstruction. |
+| **Points** | Robot point clouds colored by elevation, robot source, or calibrated camera RGB. |
+| **Gaussians** | A separately trained, world-aligned reconstruction published to the server. |
 
-```bash
-make up-argos          # Server + UI + SLAM back-end + ARGoS simulation
-```
+Solid robot markers, outlined paths, and selection brackets remain visible over
+terrain. Costmaps follow their source robot's map transform. The **Ceiling**
+slider clips all four representations to reveal interiors; it changes only the
+view, not navigation data.
 
-Simulated adapters stream keyframes to `swarmdeck-slam` on port 8090, which optimizes a joint GTSAM pose graph and renders the merged occupancy grid.
+**Low power** is the default: up to 60,000 points, 8,000 voxels, or 30,000
+Gaussians, with a 30 FPS cap and device pixel ratio capped at 1. Geometry and
+sorting run in workers; representations and color buffers are reused. Rendering
+and map requests pause when the view is hidden. These are workload limits,
+not guaranteed frame rates. Balanced and High detail profiles raise the limits.
 
-## Physical robots
+### Camera colors and Gaussian reconstruction
 
-Set the operator/server address once in [`deploy/fleet.env`](deploy/fleet.env),
-then start the operator services and deploy robots:
+**Camera** becomes available when the cloud contains RGB. Simulator keyframes
+can project synchronized, calibrated RGB-D onto LiDAR samples using the pose at
+image capture time and depth for occlusion checks. Unobserved surfaces remain
+gray; old XYZ-only keyframes cannot be colored retroactively. Hardware color
+projection is an explicit `map_color.enabled` adapter option.
 
-```bash
-make up-deploy
-make deploy ROBOT=scout       # scout, botman, aslan, spot, or asimov
-make deploy ROBOT=all
-```
+Dense Gaussian reconstruction is an **offline workflow**: capture posed RGB-D,
+export a COLMAP dataset, train externally, and publish a compact `.swgs` model.
+The optional UMAMI-SLAM integration requires access to the private repository
+via `git@github.com:lemonci/UMAMI-SLAM.git` and its CUDA build environment.
+UMAMI is not bundled and is not required for the dashboard or other map modes.
+The initial Gaussian integration supports global, world-aligned models.
 
-Deployment performs an SSH preflight, source sync, override generation, image
-build, Compose reset/start, and bounded post-start checks. Compose profiles must
-have their adapter/media containers running (and healthy when a healthcheck is
-defined), with the expected source mount, and the configured adapter must be
-registered and reporting live state at `/api/fleet`. Scout additionally verifies
-its ROS topics and subscribers before the same backend liveness check. Robot-
-specific workspaces, calibration, and safety options remain in
-`deploy/robots/<name>.env`.
+Follow the [3D mapping and reconstruction guide](docs/operations/tactical-3d-map.md)
+for controls, quality budgets, calibration, capture, and publishing commands.
 
-Read the [hardware procedure](docs/operations/hardware-bringup.md), the
-[fleet matrix](docs/robots/fleet.md), and the individual robot page before
-operating hardware. A deployment reset removes containers; it does not move the
-robot or erase robot-side SLAM.
-
-## Architecture
+## How it fits together
 
 ```mermaid
 flowchart LR
-    Robots["Robots / simulation"] -->|WebSocket + HTTP| Server["FastAPI server (:8080)"]
-    Robots -->|Keyframe blobs| Server
-    Server -->|Forward keyframes| SLAM["SwarmDeck SLAM (:8090)<br/>GTSAM · GICP · PCM"]
-    SLAM -->|Optimized transforms & global grid| Server
-    Robots -->|RTSP video| Media["MediaMTX (:8554)"]
-    Server <-->|REST / WebSocket| UI["Svelte browser UI (:5173)"]
-    Media -->|WHEP / WebRTC| UI
-    Server --> Fleet["Fleet registry and commands"]
-    Server --> Maps["Map accumulation and rendering"]
-    Server --> Review["Detection review and settings"]
-    Server --> Sessions["Session manifest and JSONL events"]
+    Robots["Robots / ARGoS / mock fleet"] --> Adapters["Robot adapters"]
+    Adapters <-->|"State, commands, maps & keyframes"| Server["FastAPI server · 8080"]
+    Server <-->|"Keyframes, alignments & grids"| SLAM["Collaborative SLAM · 8090"]
+    Server <-->|"REST / WebSocket"| UI["Svelte dashboard · 5173"]
+    Adapters -->|RTSP| Media["MediaMTX"]
+    Media -->|"WebRTC / WHEP"| UI
+    RGBD["Posed RGB-D captures"] --> Trainer["Offline reconstruction"]
+    Trainer -->|"Published Gaussian model"| Server
 ```
 
-| Path | Purpose |
-|---|---|
-| `adapters/` | Protocol adapters, media bridges, and perception sidecar. |
-| `adapters/runtime.py` | Shared ROS-independent protocol, sensor, detection, and deadman policy used by hardware bridges. |
-| `server/` | ROS-free FastAPI backend (:8080). |
-| `slam/` | Collaborative SLAM back-end (:8090, Python 3.12 / GTSAM pose graph optimizer). |
-| `server/swarmdeck_server/api/map_routes.py` | Map HTTP transport and upload validation, kept separate from control/websocket handlers. |
-| `server/swarmdeck_server/mapsvc/` | Map state, immutable publication snapshots, rendering/output, and collaborative-SLAM collaborators. |
-| `ui/` | Svelte 5 dashboard. |
-| `ui/src/lib/components/map2d/` | Map interaction in `MapView.svelte`; canvas layers live in `mapLayers.ts`. |
-| `swarmdeck_ros/src/` | Simulation, SLAM, Nav2, and collaborative-SLAM packages. |
-| `configs/` | Simulation and backend session configuration. |
-| `deploy/` | Docker, operator services, and physical-robot Compose files. |
-| `scripts/` | Deployment, bring-up, networking, and utility commands. |
-| `sessions/` | Persistent settings, reviewed detections, and session output. |
-| `docs/` | [Architecture, robot, and operations documentation](docs/README.md). |
+Adapters report data in each robot's local navigation-map frame. The server
+aligns that data for the shared view. The tactical scene uses world coordinates
+even when displaying one robot; cloud frame metadata prevents double transforms.
 
-### Mapping and frames
+The default **graph** mode combines Scan Context candidates, GICP geometric
+verification, PCM outlier rejection, and GTSAM pose-graph optimization. By
+default, rendering preserves onboard trajectories under their shared alignment
+(`odometry_as_pose=true`). A loop closure therefore does not necessarily repair
+a bad individual capture. **Static**, legacy **auto** grid registration, and
+external **cslam** modes remain available for other deployments and comparisons.
 
-Adapters normally report pose, goals, maps, and clouds in each robot's local
-navigation-map frame. The backend converts them to the shared frame used by the
-UI.
+Captures reject duplicate/nonfinite timestamps, excessive turn rates, and
+missing historical poses. Bounded TF interpolation pairs scans with capture-time
+yaw rather than the latest pose. These checks run before expensive work where
+possible; ordinary rejections do not produce recurring debug logs. See
+[capture timing and rotated duplicates](docs/operations/keyframe-yaw.md).
 
-- `graph`: (default in `4robot.yaml`, `2robot.yaml`, and `hardware_fleet.yaml`)
-  trajectory-based collaborative SLAM. Keyframes are sent to `swarmdeck-slam`,
-  loops are closed via Scan Context + GICP, pairwise consistent inter-robot
-  closures are accepted by PCM (minimum clique size 2), GTSAM optimizes the joint
-  graph, and occupancy is rendered from the optimized trajectory. Map and
-  trajectory cannot disagree.
-- `static`: uses configured start transforms.
-- `auto`: (legacy 2D grid stitcher) correlates occupancy grids over SE(2) with
-  score and yaw guards. Kept as an independent diagnostic cross-check.
-- `cslam`: (legacy Swarm-SLAM / RTAB-Map overlay) consumes an external
-  collaborative graph.
+## Physical robots
 
-Auto-registration needs overlapping observations and may refuse ambiguous maps.
-Use the UI's local-map view and `GET /api/map/status` to distinguish a bad local
-map from a rejected merge. Details are in [collaborative SLAM plan](docs/architecture/collaborative-mapping-plan.md).
-
-Simulation supports SLAM Toolbox with a planar lidar (`SLAM_BACKEND=toolbox`,
-default) or RTAB-Map with a multi-ring lidar:
+Deployment profiles cover Scout, Botman, Aslan, Spot, and Asimov. Configure the
+operator address in [`deploy/fleet.env`](deploy/fleet.env) and each robot's
+connection, workspace, and calibration in `deploy/robots/`.
 
 ```bash
-SLAM_BACKEND=rtabmap \
-SWARMDECK_CONFIG=/app/configs/4robot_3d.yaml \
-make docker-up-gpu
+make up-deploy
+make deploy ROBOT=botman DEPLOY_ARGS='--dry-run'  # inspect the deployment
+make deploy ROBOT=botman                         # deploy over SSH
 ```
 
-`GRID_3D=true` retains height in RTAB-Map's cloud but substantially increases
-simulation cost. `EXPLORE_SECONDS` controls the mapping bootstrap duration.
+Start with the [hardware procedure](docs/operations/hardware-bringup.md),
+[fleet matrix](docs/robots/fleet.md), and
+[deployment profiles](deploy/robots/README.md). Deployment changes remote
+containers and services. The UI's simulation reset capability is not advertised
+by physical robot adapters.
 
-### Video and detections
+To add a robot, implement the [adapter protocol](adapters/protocol/README.md):
+register identity and capabilities, publish state, and handle the commands you
+advertise. The [mock adapter](adapters/adapter_mock/mock_adapter.py) is a
+ROS-free reference.
 
-Robots push H.264 to MediaMTX on RTSP port 8554; browsers consume WHEP/WebRTC on
-8889. Adapters can also upload JPEG previews at up to 5 Hz. The YOLOE sidecar
-returns class, score, box, and optional mask; depth-capable adapters transform
-valid detections into map coordinates. Operators accept, ignore, or merge
-proposals. See [perception](docs/architecture/perception.md).
+## Development
 
-### Simulation reset
-
-The UI reset control is shown only when a robot advertises the simulation-only
-`reset` capability. It restores simulated poses and clears simulation SLAM,
-odometry, goals, costmaps, and backend map state after adapter acknowledgement.
-Hardware adapters must never advertise this capability.
-
-## Adding a robot
-
-The backend and UI need no robot-specific code. An adapter must:
-
-1. Connect to `ws://<server>:8080/adapter` and send `hello` with stable identity,
-   coordinate frame, footprint, and capabilities.
-2. Publish `robot_state` at 5 Hz.
-3. Implement only the commands it advertises.
-4. Optionally upload maps/scans, clouds, detections, and camera data.
-
-Use `adapters/adapter_mock/mock_adapter.py` as a ROS-free reference. A physical
-robot also needs a deployment profile, Compose file, and any sensor calibration;
-see [`deploy/robots/README.md`](deploy/robots/README.md).
-
-## Tests
+Use Python 3.10+ for the server, Node.js 22.12+ with npm for the UI, and `make`.
+The optional SLAM environment requires **Python 3.12 and NumPy < 2**;
+`make install-slam` uses `uv` to create it. Keep server and SLAM environments
+separate because the pinned GTSAM binding is incompatible with NumPy 2.
 
 ```bash
-make test
-make docker-test-launch
-bash tests/integration/test_argos_headless.sh   # legacy: test_sim_headless.sh
+make install
+make demo             # local server + mock adapter + UI
+
+# Optional collaborative SLAM, in another terminal
+make install-slam
+make slam
 ```
 
-For manual integration debugging, with the ARGoS fork and `argos3` on the host
-(see [simulation](docs/architecture/simulation.md)):
+For separate processes: `make server`, `make mock N=4`, and `make ui`.
+The UI-only mock is available at `http://localhost:5173/?mock=1&robots=4`.
 
 ```bash
-make sim                 # session.launch.py with launch_argos:=true
-make visual-test         # per-robot RGB, depth and lidar frames as PNGs
+make test-ui          # Svelte checks and 3D map regression tests
+make test             # Python suites, SLAM tests, and UI checks/tests
+make ui-build         # production frontend build
 ```
 
-The legacy Gazebo path keeps its own harness, which is also where
-`explore_seconds` is read; on the ARGoS backend `adapter_sim` owns the explorer
-and takes `EXPLORE_SECONDS` from its environment:
+See [Contributing](CONTRIBUTING.md) for focused tests and change guidelines.
 
-```bash
-bash tests/integration/run_stack.sh 4
-ros2 launch swarmdeck_bringup session.launch.py sim_backend:=gazebo \
-  config:=configs/4robot.yaml \
-  explore_seconds:=240 explore_strategy:=coordinated
-bash tests/integration/stop_stack.sh
-```
+| Directory | Responsibility |
+| --- | --- |
+| [`ui/`](ui/) | Svelte 5 UI, 2D canvas, Three.js tactical view, and rendering workers. |
+| [`server/`](server/) | ROS-free API, fleet state, maps, detections, and sessions. |
+| [`slam/`](slam/) | Collaborative pose graph, registration, and map rendering. |
+| [`adapters/`](adapters/) | Shared protocol, robot bridges, media, and perception. |
+| [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, SLAM, navigation, and bring-up packages. |
+| [`agent/`](agent/) | Optional Cortex assistant service. |
+| [`configs/`](configs/) · [`deploy/`](deploy/) | Session configuration, containers, and hardware profiles. |
+| [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools and detailed documentation. |
 
-`coordinated` is the default joint-frontier planner. Use
-`explore_strategy:=reactive` only for the original wandering A/B baseline.
+## Project status
 
-## Dependencies and safety
+SwarmDeck is a research and development system. Authentication, production high
+availability, MCAP capture, and complete session replay are not implemented.
+Use a trusted network or an authenticating proxy; do not expose robot controls
+directly to the public Internet. See [known issues](docs/operations/known-issues.md)
+and the [roadmap](docs/architecture/roadmap.md).
 
-Docker is the supported path. Host simulation development uses ROS 2 Jazzy,
-SwarmDeck's ARGoS3 fork, Nav2, SLAM Toolbox, `robot_localization`, and
-optionally RTAB-Map; the legacy A/B control additionally needs Gazebo Harmonic.
-ROS 1 Noetic is EOL and must remain in the robot's own environment or
-container; the backend does not need a ROS bridge.
-
-`make tunnel` exposes the UI through ngrok or Cloudflare. The generated URL has
-no SwarmDeck authentication and therefore must not be placed in front of real
-robots without an authenticating proxy.
+The repository does not currently declare a project-wide license. Bundled
+third-party components retain their own licenses.

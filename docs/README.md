@@ -5,7 +5,7 @@ Start with the root [README](../README.md) for setup and package structure.
 | Topic | Document |
 |---|---|
 | Components, data flow, and frames | [Architecture](architecture/overview.md) |
-- [Simulation](architecture/simulation.md) — the ARGoS backend: photorealistic rendering, Jolt physics, and Ultra-Fusion odometry.
+| ARGoS rendering, sensors, and Fast-LIVO2 odometry | [Simulation](architecture/simulation.md) |
 | Pose-graph collaborative SLAM design | [Collaborative mapping plan](architecture/collaborative-mapping-plan.md) |
 | Low-odometry reconstruction and measured accuracy | [Odometry-free reconstruction](architecture/odometry-free-keyframe-reconstruction.md) |
 | Joint frontier allocation and measured exploration | [Coordinated exploration](architecture/coordinated-exploration.md) |
@@ -16,6 +16,8 @@ Start with the root [README](../README.md) for setup and package structure.
 | Adapter messages and binary payloads | [Adapter protocol](../adapters/protocol/README.md) |
 | Physical fleet hardware | [Fleet matrix](robots/fleet.md) |
 | Tactical 3D maps and RGB-D reconstruction | [3D map workflow](operations/tactical-3d-map.md) |
+| Capture-time poses, guards, and rotated duplicates | [Keyframe timing](operations/keyframe-yaw.md) |
+| Development workflow and focused tests | [Contributing](../CONTRIBUTING.md) |
 | Deployment and safety checks | [Hardware bring-up](operations/hardware-bringup.md) |
 | Active limitations and traps | [Known issues](operations/known-issues.md) |
 

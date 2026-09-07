@@ -84,7 +84,6 @@
   let ceilingMax = $state(2.6);
   let ceilingMin = $state(0.0);
   let ceilingCutoff = $state(2.3); // Initial cutoff: open interior view
-  let ceilingSliderOpen = $state(true);
 
   // Interaction State
   let dragging = $state(false);
@@ -163,19 +162,11 @@
   }
 
   export function cutCeilingQuick() {
-    ceilingCutoff = Math.max(ceilingMin, Math.min(ceilingMin + 2.1, ceilingMax - 0.4));
-    if (scene) {
-      scene.setCeiling(ceilingCutoff);
-      scene.render();
-    }
+    setCeiling(Math.max(ceilingMin, Math.min(ceilingMin + 2.1, ceilingMax - 0.4)));
   }
 
   export function resetCeiling() {
-    ceilingCutoff = ceilingMax + 0.2;
-    if (scene) {
-      scene.setCeiling(ceilingCutoff);
-      scene.render();
-    }
+    setCeiling(ceilingMax + 0.2);
   }
 
   export function setRenderMode(mode: Map3DRenderMode) {

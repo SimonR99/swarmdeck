@@ -27,7 +27,7 @@
         build-deploy up-deploy down-deploy deploy \
         docker-up-gpu docker-up-cslam docker-down docker-logs docker-ps \
         docker-test docker-test-launch \
-        test test-slam visual-test visual-test-bistro sim tunnel clean \
+        test test-slam test-ui visual-test visual-test-bistro sim tunnel clean \
         local-ai-up local-ai-pull local-ai-shadow local-ai-eval local-ai-down
 
 # ------------------------------------------------------------------------------
@@ -103,6 +103,7 @@ help:
 	@echo "Testing & Quality:"
 	@echo "  make test                Run server unit tests, SLAM tests, and UI checks"
 	@echo "  make test-slam           Run collaborative SLAM tests only"
+	@echo "  make test-ui             Check Svelte types and run 3D map regressions"
 	@echo "  make visual-test         Capture RGB/Depth/LiDAR contact sheet from ARGoS"
 	@echo "  make visual-test-bistro  Capture contact sheet from Bistro environment"
 	@echo "  make clean               Clean build artifacts, venvs, and local Docker caches"
@@ -302,7 +303,11 @@ docker-test-launch:
 test:
 	$(CLEANENV) server/.venv/bin/pytest -q
 	$(MAKE) test-slam
+	$(MAKE) test-ui
+
+test-ui:
 	cd ui && npm run check
+	cd ui && npm run test:map3d
 
 test-slam:
 	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
