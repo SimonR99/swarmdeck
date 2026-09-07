@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { fleet } from '$lib/stores/fleet.svelte';
-import { mapStore } from '$lib/stores/mapstore.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
 import type { MapRobot } from '../map2d/mapLayers';
 
@@ -9,7 +8,6 @@ export interface Robot3DEntry {
   group: THREE.Group;
   marker: THREE.Group;
   chevronMesh: THREE.Mesh;
-  edges: THREE.LineSegments;
   selectionRing: THREE.Group;
   selectedRingMesh: THREE.Mesh;
   sensorCone: THREE.Mesh;
@@ -125,37 +123,26 @@ export class Robot3DManager {
     // Raise chevron above the chassis
     chevronGeo.translate(0, 0, 0.12);
 
-    const chevronMat = new THREE.MeshStandardMaterial({
+    // Use the transparent render queue at full opacity so terrain, costmaps,
+    // and splats cannot cover the fill while leaving only its outline visible.
+    const chevronMat = new THREE.MeshBasicMaterial({
       color: threeColor,
-      metalness: 0.45,
-      roughness: 0.28,
-      emissive: threeColor,
-      emissiveIntensity: 0.6,
+      transparent: true, opacity: 1,
+      toneMapped: false, fog: false,
       depthTest: false, depthWrite: false
     });
 
     const chevronMesh = new THREE.Mesh(chevronGeo, chevronMat);
     chevronMesh.renderOrder = 91;
     chevronMesh.castShadow = false;
-    chevronMesh.receiveShadow = true;
     chevronMesh.userData = { robotId: id, isRobot: true };
     marker.add(chevronMesh);
-
-    // 2. Crisp White Edge Bevel (matching 2D strokeStyle = '#ffffff')
-    const edgesGeo = new THREE.EdgesGeometry(chevronGeo, 24);
-    const edgesMat = new THREE.LineBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 1, depthTest: false, depthWrite: false
-    });
-    const edges = new THREE.LineSegments(edgesGeo, edgesMat);
-    edges.renderOrder = 92;
-    marker.add(edges);
 
     // 3. Glowing cockpit visor / headlights at tip
     const visorGeo = new THREE.SphereGeometry(0.05, 8, 8);
     const visorMat = new THREE.MeshBasicMaterial({
-      color: 0x70ffff, depthTest: false, depthWrite: false
+      color: 0xffffff, transparent: true, opacity: 1,
+      toneMapped: false, fog: false, depthTest: false, depthWrite: false
     });
     const visorMesh = new THREE.Mesh(visorGeo, visorMat);
     visorMesh.position.set(0.42, 0, 0.22);
@@ -178,10 +165,10 @@ export class Robot3DManager {
       bevelThickness: 0.015
     });
     baseGeo.translate(0, 0, 0.01);
-    const baseMat = new THREE.MeshStandardMaterial({
-      color: 0x334155, // Clean slate 700 chassis (not pitch dark)
-      metalness: 0.5,
-      roughness: 0.35, depthTest: false, depthWrite: false
+    const baseMat = new THREE.MeshBasicMaterial({
+      color: 0x101827,
+      transparent: true, opacity: 1, toneMapped: false, fog: false,
+      depthTest: false, depthWrite: false
     });
     const baseMesh = new THREE.Mesh(baseGeo, baseMat);
     baseMesh.renderOrder = 90;
@@ -199,13 +186,16 @@ export class Robot3DManager {
       color: threeColor,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 1, depthTest: false, depthWrite: false, toneMapped: false
+      opacity: 1, depthTest: false, depthWrite: false, toneMapped: false, fog: false
     });
     const groundRingMesh = new THREE.Mesh(groundRingGeo, groundRingMat);
     groundRingMesh.renderOrder = 95;
     const backing = new THREE.Mesh(
       new THREE.RingGeometry(0.58, 0.92, 32),
-      new THREE.MeshBasicMaterial({ color: 0x101827, side: THREE.DoubleSide, depthTest: false, depthWrite: false })
+      new THREE.MeshBasicMaterial({
+        color: 0x101827, side: THREE.DoubleSide, transparent: true, opacity: 1,
+        depthTest: false, depthWrite: false, toneMapped: false, fog: false
+      })
     );
     backing.renderOrder = 94;
     selectionRing.add(backing, groundRingMesh);
@@ -222,7 +212,8 @@ export class Robot3DManager {
     const bracketGeo = new THREE.BufferGeometry();
     bracketGeo.setAttribute('position', new THREE.Float32BufferAttribute(bracketPts, 3));
     const selectedRingMesh = new THREE.Mesh(bracketGeo, new THREE.MeshBasicMaterial({
-      color: 0xffffff, side: THREE.DoubleSide, depthTest: false, depthWrite: false, toneMapped: false
+      color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 1,
+      depthTest: false, depthWrite: false, toneMapped: false, fog: false
     }));
     selectedRingMesh.renderOrder = 96;
     selectedRingMesh.visible = false;
@@ -269,7 +260,6 @@ export class Robot3DManager {
       group: robotGroup,
       marker,
       chevronMesh,
-      edges,
       selectionRing,
       selectedRingMesh,
       sensorCone,

@@ -652,8 +652,10 @@
   });
 
   $effect(() => {
-    if (scene) {
-      scene.setCeiling(ceilingCutoff);
+    // Subscribe before checking the non-reactive scene, which is created on mount.
+    const cutoff = ceilingCutoff;
+    if (mounted && scene) {
+      scene.setCeiling(cutoff);
     }
   });
 
