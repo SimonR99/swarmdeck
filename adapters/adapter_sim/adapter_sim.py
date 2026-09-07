@@ -63,6 +63,7 @@ from adapters.runtime import (
     cloud_xyz,
     deep_merge,
     stamp_seconds,
+    unique_row_index,
     yaw_of,
 )
 from adapters.session import run_adapter_session
@@ -952,7 +953,7 @@ class RobotBridge(
             return
         # Deduplicate onto a voxel lattice: one point per occupied cell.
         keys = np.round(points / CLOUD_VOXEL).astype(np.int32)
-        _, keep = np.unique(keys, axis=0, return_index=True)
+        keep = unique_row_index(keys)
         quantised = np.round(points[keep] / CLOUD_SCALE).astype(np.int16)
         try:
             urllib.request.urlopen(

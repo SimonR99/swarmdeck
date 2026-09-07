@@ -132,10 +132,10 @@ else:
 
 def _stamp_of(tick: int, ticks_per_second: int):
     """The simulation time of one tick, as a ROS stamp."""
-    seconds = tick / float(ticks_per_second or 1)
+    seconds, remainder = divmod(tick, ticks_per_second or 1)
     stamp = Clock().clock
-    stamp.sec = int(seconds)
-    stamp.nanosec = int(round((seconds - stamp.sec) * 1e9))
+    stamp.sec = seconds
+    stamp.nanosec = remainder * 1_000_000_000 // (ticks_per_second or 1)
     return stamp
 
 SCAN_BEAMS = 360
@@ -252,6 +252,8 @@ def project_laserscan_proximity(
 
 
 def recv_exact(sock: socket.socket, count: int) -> bytes:
+    if count == 0:
+        return b""
     chunks, got = [], 0
     while got < count:
         chunk = sock.recv(min(1 << 20, count - got))
@@ -282,6 +284,8 @@ class RobotInterface:
         # The tick of the last lidar frame actually published, so a frame the
         # exchange carries twice is published once. See the lidar block.
         self.last_scan_tick = -1
+        self.last_camera_tick = -1
+        self.last_odom_tick = -1
         self.duplicate_scans = 0
         self.pending_teleport: Optional[tuple] = None
 
@@ -505,6 +509,7 @@ class ArgosBridge(Node):
         return self.robots[robot_id]
 
     def _handle(self, sock: socket.socket) -> None:
+        previous_tick = None
         while self.running:
             magic, tick, ticks_per_second, count = struct.unpack(
                 "<4sIII", recv_exact(sock, 16))
@@ -514,6 +519,13 @@ class ArgosBridge(Node):
                     f"the ARGoS loop function and this bridge are different "
                     f"protocol versions")
 
+            # A reconnect or clock rewind starts a new sensor epoch.
+            if previous_tick is None or tick < previous_tick:
+                for robot in self.robots.values():
+                    robot.last_scan_tick = -1
+                    robot.last_camera_tick = -1
+                    robot.last_odom_tick = -1
+            previous_tick = tick
             seconds = tick / float(ticks_per_second or 1)
             stamp = _stamp_of(tick, ticks_per_second)
             clock_msg = Clock()
@@ -561,10 +573,13 @@ class ArgosBridge(Node):
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
             valid = struct.unpack("<B", recv_exact(sock, 1))[0]
             odo = struct.unpack("<13d", recv_exact(sock, 13 * 8))
-            struct.unpack("<I", recv_exact(sock, 4))  # estimate tick, unused
-            if valid:
+            (odom_tick,) = struct.unpack("<I", recv_exact(sock, 4))
+            # Repeating an old estimate at a new time fabricates motion history.
+            if valid and robot.last_odom_tick < odom_tick <= tick:
+                robot.last_odom_tick = odom_tick
+                odom_stamp = _stamp_of(odom_tick, ticks_per_second)
                 odom = Odometry()
-                odom.header.stamp = stamp
+                odom.header.stamp = odom_stamp
                 odom.header.frame_id = robot.frame_odom
                 odom.child_frame_id = robot.frame_base
                 odom.pose.pose.position = Point(x=odo[0], y=odo[1], z=odo[2])
@@ -576,14 +591,14 @@ class ArgosBridge(Node):
                 robot.pub_odom.publish(odom)
 
                 transform = TransformStamped()
-                transform.header.stamp = stamp
+                transform.header.stamp = odom_stamp
                 transform.header.frame_id = robot.frame_odom
                 transform.child_frame_id = robot.frame_base
                 transform.transform.translation = Vector3(
                     x=odo[0], y=odo[1], z=odo[2])
                 transform.transform.rotation = odom.pose.pose.orientation
                 robot.pub_tf.publish(TFMessage(transforms=[transform]))
-            elif not robot._warned_invalid:
+            elif not valid and not robot._warned_invalid:
                 robot._warned_invalid = True
                 # Not an error: an external estimator needs motion and a few
                 # seconds of sensor data before it has a pose at all. Publishing
@@ -629,59 +644,17 @@ class ArgosBridge(Node):
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
             scan_tick, _rings, _azimuths, _max_range, readings = struct.unpack(
                 "<IIIfI", recv_exact(sock, 20))
-            # Stamp the scan when it was TAKEN, not when it crossed the socket.
-            #
-            # The lidar renders on its own schedule (`framerate_divider="10"` on
-            # <photorealistic_lidar>, so once per 10 ticks) and the loop function
-            # hands data over on another (`exchange_period="10"`). Those are
-            # independent, so the scan in this frame can be up to a full lidar
-            # period old. ARGoS sends the tick it was rendered at precisely so
-            # the consumer need not guess; this used to unpack it into
-            # `_scan_tick` and throw it away, stamping the cloud with the
-            # exchange tick instead.
-            #
-            # That is a mis-stamp rather than a delay, which is why nothing
-            # downstream could detect it: the cloud and the TF carried the SAME
-            # stamp object, so every timestamp comparison in the system read
-            # exactly zero while both were wrong about the world. What it cost
-            # was a pose/scan mismatch that is invisible in translation (0.1 s
-            # at 0.5 m/s is 5 cm) and severe in rotation: teleop allows
-            # 1.2 rad/s, so one lidar period is up to 6.9 deg, and a keyframe
-            # rendered at a yaw that far out puts a rigidly rotated copy of the
-            # building into the merged map. Measured on a manually driven
-            # bunker: a -4.0 deg copy accounting for 79.7% of the cells that
-            # missed a wall, absent from the same robot's raw SLAM raster
-            # because scan matching re-registers and absorbs a bad prior.
-            # Trust it only where it is plausible. Nothing has ever read this
-            # field, so nothing has ever checked that ARGoS fills it in: a zero
-            # or a wild value here would stamp every scan at simulation time
-            # zero, and the failure mode of THAT is silent, because a scan
-            # whose stamp predates the TF buffer is dropped by the message
-            # filter with no error beyond a full queue. A scan from the future,
-            # or older than a second, is not a scheduling offset -- it is a
-            # protocol disagreement, and the exchange tick is the safe reading.
+            # Rendering and socket exchange run on separate schedules. Use
+            # capture time for every projection of this scan so TF lookup does
+            # not rotate old geometry using the robot's current heading.
+            # Keep the existing one-second compatibility window for LiDAR.
             scan_age_ticks = tick - scan_tick
             if 0 <= scan_age_ticks <= ticks_per_second:
                 scan_stamp = _stamp_of(scan_tick, ticks_per_second)
             else:
                 scan_stamp = stamp
                 self._warn_scan_tick(scan_tick, tick)
-            # The lidar renders on its own schedule and the loop function hands
-            # data over on another. When the render is the slower of the two --
-            # which it is under load, being the expensive one -- consecutive
-            # exchanges carry the SAME frame. Republishing it is not harmless
-            # padding: every consumer then sees two observations where there was
-            # one, and downstream of the honest scan_tick they also carry
-            # identical stamps, which is an interval of zero. adapter_sim's
-            # turn-rate gate cannot compute a rate across that and used to wave
-            # the capture through; measured live, 7 to 12 such stamps per robot
-            # per reporting interval, with captures accepted at up to 256.9
-            # deg/s against an 8 deg/s limit.
-            #
-            # This is the root of it: a duplicate frame is not new information,
-            # so do not publish it. Skipping the whole lidar block rather than
-            # just the stamp keeps the scan and the cloud consistent with each
-            # other, and leaves the gate a monotonically increasing stamp.
+            # Repeated sensor frames must be drained but published only once.
             if DEBUG_SCAN_AGE:
                 robot._log_scan_age(
                     seconds, scan_age_ticks / float(ticks_per_second or 1)
@@ -754,7 +727,7 @@ class ArgosBridge(Node):
                     prox_range_max=robot.prox_range_max,
                 )
                 prox_msg = LaserScan()
-                prox_msg.header.stamp = stamp
+                prox_msg.header.stamp = scan_stamp
                 prox_msg.header.frame_id = robot.frame_base
                 prox_msg.angle_min = float(SCAN_ANGLE_MIN)
                 prox_msg.angle_max = float(SCAN_ANGLE_MAX)
@@ -768,12 +741,21 @@ class ArgosBridge(Node):
 
         # -- camera ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            _cam_tick, width, height, fov_deg = struct.unpack(
-                "<IIIf", recv_exact(sock, 16))
+            cam_tick, width, height, fov_deg = struct.unpack(
+                "<IIIf", recv_exact(sock, 16)
+            )
             rgb = recv_exact(sock, width * height * 3)
+            has_depth = struct.unpack("<B", recv_exact(sock, 1))[0]
+            depth_data = recv_exact(sock, width * height * 4) if has_depth else None
+            # Drain the complete frame before skipping it, keeping the next
+            # robot aligned on the socket. Never relabel stale RGB-D as current.
+            if not robot.last_camera_tick < cam_tick <= tick or not width or not height:
+                return robot_id
+            robot.last_camera_tick = cam_tick
+            camera_stamp = _stamp_of(cam_tick, ticks_per_second)
 
             image = Image()
-            image.header.stamp = stamp
+            image.header.stamp = camera_stamp
             image.header.frame_id = robot.frame_camera
             image.height, image.width = height, width
             image.encoding = "rgb8"
@@ -791,7 +773,7 @@ class ArgosBridge(Node):
             fx = fy
             cx, cy = width / 2.0, height / 2.0
             info = CameraInfo()
-            info.header.stamp = stamp
+            info.header.stamp = camera_stamp
             info.header.frame_id = robot.frame_camera
             info.height, info.width = height, width
             info.distortion_model = "plumb_bob"
@@ -801,15 +783,15 @@ class ArgosBridge(Node):
             info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
             robot.pub_info.publish(info)
 
-            if struct.unpack("<B", recv_exact(sock, 1))[0]:
+            if has_depth:
                 depth = Image()
-                depth.header.stamp = stamp
+                depth.header.stamp = camera_stamp
                 depth.header.frame_id = robot.frame_camera
                 depth.height, depth.width = height, width
                 depth.encoding = "32FC1"
                 depth.is_bigendian = False
                 depth.step = width * 4
-                depth.data = recv_exact(sock, width * height * 4)
+                depth.data = depth_data
                 robot.pub_depth.publish(depth)
 
         return robot_id

@@ -6,6 +6,7 @@ Start with the root [README](../README.md) for setup and package structure.
 |---|---|
 | Components, data flow, and frames | [Architecture](architecture/overview.md) |
 | ARGoS rendering, sensors, and Fast-LIVO2 odometry | [Simulation](architecture/simulation.md) |
+| Simulation timestamps, adapter costs, and tuning | [Simulation performance](operations/simulation-performance.md) |
 | Pose-graph collaborative SLAM design | [Collaborative mapping plan](architecture/collaborative-mapping-plan.md) |
 | Low-odometry reconstruction and measured accuracy | [Odometry-free reconstruction](architecture/odometry-free-keyframe-reconstruction.md) |
 | Joint frontier allocation and measured exploration | [Coordinated exploration](architecture/coordinated-exploration.md) |

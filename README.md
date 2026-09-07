@@ -78,6 +78,8 @@ or enable exploration in the UI. `EXPLORE=120` on `make up-sim` requests a
 
 See [simulation setup](docs/architecture/simulation.md) for scenarios, sensor
 configuration, external assets, and the legacy Gazebo Compose profile.
+The [simulation performance guide](docs/operations/simulation-performance.md)
+covers sensor timestamps, odometry, tuning, measured CPU costs, and regression checks.
 
 ## Tactical 3D mapping
 

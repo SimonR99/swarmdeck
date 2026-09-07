@@ -6,6 +6,9 @@ and the sensors needed to drive an external SLAM stack. The Gazebo Harmonic path
 it replaced is still in the tree as an A/B control; see
 [Legacy Gazebo backend](#legacy-gazebo-backend).
 
+For the current timestamp contract, adapter/estimator optimizations, reproducible
+benchmarks, and tuning tradeoffs, see [Simulation performance](../operations/simulation-performance.md).
+
 ## Why
 
 Three limits of the Gazebo stack are what this change addresses.

@@ -107,3 +107,59 @@ def test_build_reply_with_converged_pose():
     assert wz == pytest.approx(0.1)
     assert valid == 1
     assert dummy_link.poses_returned == 1
+
+
+def test_path_cannot_erase_odometry_velocity_at_same_stamp():
+    from types import SimpleNamespace as NS
+
+    robot = fll.RobotIO.__new__(fll.RobotIO)
+    velocity = (1.0, 0.0, 0.0, 0.0, 0.0, 0.5)
+    robot.estimate = (100, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0), velocity)
+    header = NS(stamp=NS(sec=0, nanosec=100))
+    pose = NS(
+        position=NS(x=0.0, y=0.0, z=0.0), orientation=NS(w=1.0, x=0.0, y=0.0, z=0.0)
+    )
+    robot.on_path(NS(header=header, poses=[NS(header=header, pose=pose)]))
+    assert robot.estimate[-1] == velocity
+    header.stamp.nanosec = 101
+    robot.on_path(NS(header=header, poses=[NS(header=header, pose=pose)]))
+    assert robot.estimate[0] == 101
+    assert robot.estimate[-1] == (0.0,) * 6
+
+
+@pytest.mark.parametrize("subscribers", [0, 1])
+@pytest.mark.parametrize("raw_subscribers", [0, 1])
+def test_camera_compresses_only_on_demand_and_preserves_rgb(
+    monkeypatch, subscribers, raw_subscribers
+):
+    from types import SimpleNamespace as NS
+    from unittest.mock import Mock
+    import zlib
+
+    def message():
+        return NS(header=NS(stamp=NS(sec=0, nanosec=0)))
+
+    for name in ("Image", "CompressedImage", "CameraInfo"):
+        monkeypatch.setattr(fll, name, message)
+    encoder = Mock(wraps=fll.png_encode_rgb)
+    monkeypatch.setattr(fll, "png_encode_rgb", encoder)
+    pubs = NS(frame_id="camera", color_compressed=Mock(), color_raw=Mock(), info=Mock())
+    pubs.color_compressed.get_subscription_count.return_value = subscribers
+    pubs.color_raw.get_subscription_count.return_value = raw_subscribers
+    fll.FastLivoLink.publish_frame(None, pubs, 1, 1, b"\xff\x00\x00", 60.0, 1, 2)
+    assert encoder.call_count == subscribers
+    assert pubs.color_compressed.publish.call_count == subscribers
+    assert pubs.color_raw.publish.call_count == raw_subscribers
+    pubs.info.publish.assert_called_once()
+    if raw_subscribers:
+        raw = pubs.color_raw.publish.call_args.args[0]
+        assert raw.encoding == "bgr8" and raw.data == b"\x00\x00\xff"
+    if subscribers:
+        compressed = pubs.color_compressed.publish.call_args.args[0]
+        assert compressed.format == "rgb8; png compressed rgb8"
+        start = compressed.data.index(b"IDAT")
+        length = struct.unpack(">I", compressed.data[start - 4 : start])[0]
+        assert (
+            zlib.decompress(compressed.data[start + 4 : start + 4 + length])
+            == b"\x00\xff\x00\x00"
+        )
