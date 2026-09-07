@@ -369,6 +369,10 @@ class RobotBridge(
         # bounded so a long run cannot grow it without limit.
         self._map_to_odom_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
         self._odom_to_base_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
+        # Pairing diagnostics, reported beside the gate stats. See nearest().
+        self.pose_lookup_gap = 0.0
+        self.pose_lookup_age = 0.0
+        self._pose_lookup_misses = 0
         self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._warned_no_tf_base = False
         self.goal: dict | None = None
@@ -608,11 +612,25 @@ class RobotBridge(
 
         def nearest(log, current):
             if not log:
+                self._pose_lookup_misses += 1
                 return current
             best = min(log, key=lambda item: abs(item[0] - at))
+            gap = abs(best[0] - at)
+            # How far the lookup had to reach, and how stale the newest reading
+            # would have been. Instrumented because the arithmetic did not add
+            # up without it: the turn gate caps accepted captures at 8 deg/s and
+            # the sensor lag is a constant 100 ms, which bounds the pose error
+            # at 0.8 deg, yet keyframes were measured 5 deg out. One of those
+            # three is wrong, and this is the one nobody could see.
+            self.pose_lookup_gap = max(self.pose_lookup_gap, gap)
+            if log:
+                self.pose_lookup_age = max(self.pose_lookup_age, log[-1][0] - at)
             # Beyond the history the newest reading is the honest answer; a
             # far-away sample is worse than no correction at all.
-            return best[1] if abs(best[0] - at) <= 0.5 else current
+            if gap <= 0.5:
+                return best[1]
+            self._pose_lookup_misses += 1
+            return current
 
         base = nearest(self._odom_to_base_log, self._odom_to_base)
         if base is None:
@@ -748,7 +766,10 @@ class RobotBridge(
         # observed fires on every run where anyone turns, which is noise that
         # trains the reader to ignore the line.
         leaked = stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
-        if not stats["spun"] and not leaked and not stats["unusable_stamps"]:
+        # A lookup that had to reach more than one sensor period, or fell back
+        # to the newest reading, is the pairing failing quietly.
+        strayed = self.pose_lookup_gap > 0.15 or self._pose_lookup_misses > 0
+        if not stats["spun"] and not leaked and not strayed and not stats["unusable_stamps"]:
             return
         now = time.monotonic()
         if now - getattr(self, "_gate_log_at", -1e9) < 30.0:
@@ -759,7 +780,10 @@ class RobotBridge(
             f"spun={stats['spun']:.0f} unusable_stamps={stats['unusable_stamps']:.0f} "
             f"peak_seen={stats['peak_yaw_rate_deg_s']:.1f} "
             f"max_accepted={stats['max_accepted_yaw_rate_deg_s']:.1f} "
-            f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s"
+            f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s | "
+            f"pose lookup: worst gap {self.pose_lookup_gap * 1000:.0f} ms, "
+            f"newest was {self.pose_lookup_age * 1000:.0f} ms ahead, "
+            f"fallbacks={self._pose_lookup_misses}"
         )
         if leaked:
             self.node.get_logger().warn(
