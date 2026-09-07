@@ -18,6 +18,7 @@ import math
 import sys
 import types
 from pathlib import Path
+from collections import deque
 from unittest.mock import MagicMock
 
 import pytest
@@ -160,3 +161,56 @@ def test_transforms_for_other_robots_are_ignored(bridge_cls):
     )
     assert bridge._odom_to_base is None
     assert bridge._map_to_odom == {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+
+def stamped_tf(pairs, stamp):
+    """`tf_message`, but with a ROS 2 stamp on every transform."""
+    msg = tf_message(pairs)
+    for transform in msg.transforms:
+        transform.header.stamp = types.SimpleNamespace(
+            sec=int(stamp), nanosec=int(round((stamp - int(stamp)) * 1e9))
+        )
+    return msg
+
+
+def _turning_bridge(bridge_cls):
+    """A robot spinning in place at 1.0 rad/s, sampled every 100 ms."""
+    bridge = make_bridge(bridge_cls)
+    bridge._map_to_odom_log = deque(maxlen=128)
+    bridge._odom_to_base_log = deque(maxlen=128)
+    for i in range(11):
+        t = 100.0 + i * 0.1
+        bridge._on_tf(
+            stamped_tf(
+                [
+                    ("robot_0/map_frame", "robot_0/odom", 0.0, 0.0, 0.0),
+                    ("robot_0/odom", "robot_0/base_link", 0.0, 0.0, i * 0.1),
+                ],
+                t,
+            )
+        )
+    return bridge
+
+
+def test_scan_is_posed_at_its_own_stamp_not_the_newest_one(bridge_cls):
+    """A scan taken mid-turn must not be registered at the pose it arrives at.
+
+    The bridge hands over a lidar frame that can be up to one lidar period old,
+    so pairing it with the newest TF rotates every return about the robot by
+    the yaw accrued in between. That is what puts a rigidly rotated copy of the
+    building into the merged map, and only ever while turning.
+    """
+    bridge = _turning_bridge(bridge_cls)
+
+    # Newest reading is yaw 1.0 rad; the scan was taken 0.5 s earlier at 0.5.
+    assert bridge.map_pose()["yaw"] == pytest.approx(1.0, abs=1e-6)
+    assert bridge.map_pose_at(100.5)["yaw"] == pytest.approx(0.5, abs=1e-6)
+
+
+def test_pose_lookup_falls_back_rather_than_reaching_for_a_distant_sample(bridge_cls):
+    """Outside the history the newest reading is the honest answer."""
+    bridge = _turning_bridge(bridge_cls)
+
+    # No stamp at all, and a stamp far outside the retained window.
+    assert bridge.map_pose_at(None)["yaw"] == pytest.approx(1.0, abs=1e-6)
+    assert bridge.map_pose_at(5.0)["yaw"] == pytest.approx(1.0, abs=1e-6)

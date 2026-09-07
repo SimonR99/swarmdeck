@@ -98,6 +98,11 @@ CMD_VEL_TIMEOUT_SIM_S = 0.5
 
 # Diagnostic only. See the encoder block in _read_robot().
 DEBUG_ENCODERS = os.environ.get("SWARMDECK_DEBUG_ENCODERS", "") == "1"
+# SWARMDECK_DEBUG_SCAN_AGE=1 reports how far the lidar frame lags the exchange
+# that carried it. Zero means the two schedules happen to coincide; anything
+# else is the pose/scan mismatch that stamping at the exchange tick used to
+# hide, and it converts directly to a yaw error at the current turn rate.
+DEBUG_SCAN_AGE = os.environ.get("SWARMDECK_DEBUG_SCAN_AGE", "") == "1"
 
 OBSERVATION_MAGIC = b"SDB2"
 COMMAND_MAGIC = b"SDCMD"
@@ -123,6 +128,15 @@ if PointField is not None:
     ]
 else:
     LIDAR_POINT_FIELDS = []
+
+
+def _stamp_of(tick: int, ticks_per_second: int):
+    """The simulation time of one tick, as a ROS stamp."""
+    seconds = tick / float(ticks_per_second or 1)
+    stamp = Clock().clock
+    stamp.sec = int(seconds)
+    stamp.nanosec = int(round((seconds - stamp.sec) * 1e9))
+    return stamp
 
 SCAN_BEAMS = 360
 SCAN_ANGLE_MIN = -3.14159
@@ -263,6 +277,7 @@ class RobotInterface:
         self._cmd_at_sim: float | None = None
         self._expired = False
         self._encoder_log_at = -1e9
+        self._scan_age_log_at = -1e9
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -340,6 +355,16 @@ class RobotInterface:
             return False
         self._encoder_log_at = sim_now
         return True
+
+    def _log_scan_age(self, sim_now: float, age_s: float) -> None:
+        """How stale the lidar frame in this exchange is, once a sim second."""
+        if sim_now - self._scan_age_log_at < 1.0:
+            return
+        self._scan_age_log_at = sim_now
+        self.node.get_logger().info(
+            f"[{self.id}] lidar frame is {age_s * 1000.0:.0f} ms older "
+            f"than the exchange carrying it"
+        )
 
     def velocity_at(self, sim_now: float) -> tuple[float, float]:
         """The velocity to command, zeroed once the last one has gone stale."""
@@ -475,19 +500,31 @@ class ArgosBridge(Node):
                     f"protocol versions")
 
             seconds = tick / float(ticks_per_second or 1)
-            stamp = Clock().clock
-            stamp.sec = int(seconds)
-            stamp.nanosec = int(round((seconds - stamp.sec) * 1e9))
+            stamp = _stamp_of(tick, ticks_per_second)
             clock_msg = Clock()
             clock_msg.clock = stamp
             self.pub_clock.publish(clock_msg)
 
             ids = []
             for _ in range(count):
-                ids.append(self._read_robot(sock, stamp, ticks_per_second, seconds))
+                ids.append(
+                    self._read_robot(sock, stamp, ticks_per_second, seconds, tick)
+                )
             self._send_commands(sock, tick, ids, seconds)
 
-    def _read_robot(self, sock, stamp, ticks_per_second, seconds=0.0) -> str:
+    def _warn_scan_tick(self, scan_tick: int, tick: int) -> None:
+        """Say once that the lidar tick is unusable and the exchange one is in use."""
+        if getattr(self, "_warned_scan_tick", False):
+            return
+        self._warned_scan_tick = True
+        self.get_logger().warn(
+            f"lidar scan_tick {scan_tick} is not a plausible age against exchange "
+            f"tick {tick}; stamping scans at the exchange instead. Scans taken "
+            f"mid-turn will be posed at the wrong yaw. Check that the ARGoS loop "
+            f"function and this bridge are the same protocol version."
+        )
+
+    def _read_robot(self, sock, stamp, ticks_per_second, seconds=0.0, tick=0) -> str:
         robot_id = recv_exact(
             sock, struct.unpack("<B", recv_exact(sock, 1))[0]).decode("utf-8")
         robot = self._robot(robot_id)
@@ -575,8 +612,49 @@ class ArgosBridge(Node):
 
         # -- lidar ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            _scan_tick, _rings, _azimuths, _max_range, readings = struct.unpack(
+            scan_tick, _rings, _azimuths, _max_range, readings = struct.unpack(
                 "<IIIfI", recv_exact(sock, 20))
+            # Stamp the scan when it was TAKEN, not when it crossed the socket.
+            #
+            # The lidar renders on its own schedule (`framerate_divider="10"` on
+            # <photorealistic_lidar>, so once per 10 ticks) and the loop function
+            # hands data over on another (`exchange_period="10"`). Those are
+            # independent, so the scan in this frame can be up to a full lidar
+            # period old. ARGoS sends the tick it was rendered at precisely so
+            # the consumer need not guess; this used to unpack it into
+            # `_scan_tick` and throw it away, stamping the cloud with the
+            # exchange tick instead.
+            #
+            # That is a mis-stamp rather than a delay, which is why nothing
+            # downstream could detect it: the cloud and the TF carried the SAME
+            # stamp object, so every timestamp comparison in the system read
+            # exactly zero while both were wrong about the world. What it cost
+            # was a pose/scan mismatch that is invisible in translation (0.1 s
+            # at 0.5 m/s is 5 cm) and severe in rotation: teleop allows
+            # 1.2 rad/s, so one lidar period is up to 6.9 deg, and a keyframe
+            # rendered at a yaw that far out puts a rigidly rotated copy of the
+            # building into the merged map. Measured on a manually driven
+            # bunker: a -4.0 deg copy accounting for 79.7% of the cells that
+            # missed a wall, absent from the same robot's raw SLAM raster
+            # because scan matching re-registers and absorbs a bad prior.
+            # Trust it only where it is plausible. Nothing has ever read this
+            # field, so nothing has ever checked that ARGoS fills it in: a zero
+            # or a wild value here would stamp every scan at simulation time
+            # zero, and the failure mode of THAT is silent, because a scan
+            # whose stamp predates the TF buffer is dropped by the message
+            # filter with no error beyond a full queue. A scan from the future,
+            # or older than a second, is not a scheduling offset -- it is a
+            # protocol disagreement, and the exchange tick is the safe reading.
+            scan_age_ticks = tick - scan_tick
+            if 0 <= scan_age_ticks <= ticks_per_second:
+                scan_stamp = _stamp_of(scan_tick, ticks_per_second)
+            else:
+                scan_stamp = stamp
+                self._warn_scan_tick(scan_tick, tick)
+            if DEBUG_SCAN_AGE:
+                robot._log_scan_age(
+                    seconds, scan_age_ticks / float(ticks_per_second or 1)
+                )
             raw = recv_exact(sock, readings * LIDAR_READING.size)
             arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
             hit_mask = arr["hit"] != 0
@@ -592,7 +670,7 @@ class ArgosBridge(Node):
                 out[:, 3] = hit_pts["ring"]
 
                 cloud = PointCloud2()
-                cloud.header.stamp = stamp
+                cloud.header.stamp = scan_stamp
                 cloud.header.frame_id = robot.frame_lidar
                 cloud.height = 1
                 cloud.width = hits
@@ -611,7 +689,7 @@ class ArgosBridge(Node):
             # 2. Planar LaserScan (SLAM Toolbox: horizontal ring slice in sensor frame)
             scan_ranges = project_laserscan_slice(hit_pts, range_max=float(_max_range))
             scan_msg = LaserScan()
-            scan_msg.header.stamp = stamp
+            scan_msg.header.stamp = scan_stamp
             scan_msg.header.frame_id = robot.frame_lidar
             scan_msg.angle_min = float(SCAN_ANGLE_MIN)
             scan_msg.angle_max = float(SCAN_ANGLE_MAX)
