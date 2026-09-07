@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import urllib.request
 import zlib
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -362,6 +363,12 @@ class RobotBridge(
         # guaranteed to be consistent with each other. See map_pose().
         self._map_to_odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._odom_to_base: dict[str, float] | None = None
+        # Short history of each link, keyed by the TF stamp, so a cloud can be
+        # paired with the pose it was captured AT rather than the newest one.
+        # See map_pose_at(). Two seconds at the bridge's ~50 Hz is ample, and
+        # bounded so a long run cannot grow it without limit.
+        self._map_to_odom_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
+        self._odom_to_base_log: deque[tuple[float, dict[str, float]]] = deque(maxlen=128)
         self._odom_topic_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._warned_no_tf_base = False
         self.goal: dict | None = None
@@ -515,16 +522,21 @@ class RobotBridge(
                 "y": t.translation.y,
                 "yaw": yaw_of(t.rotation),
             }
+            at = stamp_seconds(stamped.header)
             if (
                 stamped.header.frame_id == map_frame
                 and stamped.child_frame_id == odom_frame
             ):
                 self._map_to_odom = value
+                if at is not None:
+                    self._map_to_odom_log.append((at, value))
             elif (
                 stamped.header.frame_id == odom_frame
                 and stamped.child_frame_id == base_frame
             ):
                 self._odom_to_base = value
+                if at is not None:
+                    self._odom_to_base_log.append((at, value))
 
     @staticmethod
     def _compose(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
@@ -571,6 +583,41 @@ class RobotBridge(
                 )
             base = self._odom_topic_pose
         return self._compose(self._map_to_odom, base)
+
+    def map_pose_at(self, at: float | None) -> dict[str, float]:
+        """Where this robot was in its own SLAM map frame at time ``at``.
+
+        The same composition as :meth:`map_pose`, but each link is read at the
+        requested stamp rather than at whatever arrived most recently. That
+        matters only while turning, and there it matters a great deal: a scan
+        registered with a pose from a different instant is rotated about the
+        robot by the yaw accrued in between, and the merged map gets a rigidly
+        rotated copy of everything that scan saw. Translation is forgiving by
+        comparison, which is exactly the asymmetry the symptom showed.
+
+        ``adapter_ros2._on_map_cloud`` states the same rule for hardware and
+        gets it from tf2's own buffer. This node parses ``/tf`` itself, so it
+        keeps the short history the lookup needs.
+
+        Falls back to the newest reading when the stamp is missing or older
+        than the history, which is the pre-existing behaviour rather than a
+        refusal to answer.
+        """
+        if at is None:
+            return self.map_pose()
+
+        def nearest(log, current):
+            if not log:
+                return current
+            best = min(log, key=lambda item: abs(item[0] - at))
+            # Beyond the history the newest reading is the honest answer; a
+            # far-away sample is worse than no correction at all.
+            return best[1] if abs(best[0] - at) <= 0.5 else current
+
+        base = nearest(self._odom_to_base_log, self._odom_to_base)
+        if base is None:
+            return self.map_pose()
+        return self._compose(nearest(self._map_to_odom_log, self._map_to_odom), base)
 
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
@@ -667,7 +714,9 @@ class RobotBridge(
         points = cloud_xyz(msg)
         if not len(points):
             return
-        pose = self.map_pose()
+        # The pose at the scan's stamp, not the newest one. See map_pose_at().
+        at = stamp_seconds(msg.header)
+        pose = self.map_pose_at(at)
         mapped = points_lidar_to_map(
             points,
             (pose["x"], pose["y"], pose["yaw"]),
@@ -675,14 +724,57 @@ class RobotBridge(
             lidar_z=float(getattr(self, "lidar_z", 0.0)),
         )
         captured_pose = pose7_from_xy_yaw(pose["x"], pose["y"], pose["yaw"])
-        self._enqueue_keyframe(
-            mapped, captured_pose, stamp_seconds(msg.header) or time.time()
+        self._enqueue_keyframe(mapped, captured_pose, at or time.time())
+
+    def _log_gate_stats(self, uploader) -> None:
+        """Say out loud what the capture gates are doing, at most twice a minute.
+
+        The turn gate has counted its rejections since it was written and
+        reported them nowhere, which made "the gate is working and there is
+        nothing fast to reject" indistinguishable from "the gate is not
+        working". Those are very different states: on a four-robot ARGoS run
+        two keyframes were accepted at 55.7 and 25.9 deg/s against an 8 deg/s
+        limit, each carrying a 5 degree pose error that drew a rotated copy of
+        the building into the merged map, and the only way anyone found out was
+        by scoring the finished map against a floorplan.
+
+        Logged only when there is something to say, so a healthy run stays
+        quiet: either the gate has rejected something, or a rate above the
+        limit got through, which is the condition that should be impossible.
+        """
+        stats = uploader.gate_stats()
+        # Warn only when a keyframe was ACCEPTED above the limit. Seeing a fast
+        # turn is the gate doing its job, not a fault: warning on the peak
+        # observed fires on every run where anyone turns, which is noise that
+        # trains the reader to ignore the line.
+        leaked = stats["max_accepted_yaw_rate_deg_s"] > stats["max_yaw_rate_deg_s"] > 0.0
+        if not stats["spun"] and not leaked and not stats["unusable_stamps"]:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_gate_log_at", -1e9) < 30.0:
+            return
+        self._gate_log_at = now
+        message = (
+            f"[{self.id}] keyframe gates: sent={stats['sent']:.0f} "
+            f"spun={stats['spun']:.0f} unusable_stamps={stats['unusable_stamps']:.0f} "
+            f"peak_seen={stats['peak_yaw_rate_deg_s']:.1f} "
+            f"max_accepted={stats['max_accepted_yaw_rate_deg_s']:.1f} "
+            f"limit={stats['max_yaw_rate_deg_s']:.1f} deg/s"
         )
+        if leaked:
+            self.node.get_logger().warn(
+                message + " -- a keyframe was ACCEPTED above the turn limit; it "
+                "carries a pose error of that rate times the sensor capture lag, "
+                "which draws a rotated copy of the scene into the merged map"
+            )
+        else:
+            self.node.get_logger().info(message)
 
     def upload_keyframe(self) -> None:
         uploader = getattr(self, "_keyframes", None)
         if uploader is None:
             return
+        self._log_gate_stats(uploader)
         if not self._upload_lock.acquire(blocking=False):
             return
         try:

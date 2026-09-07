@@ -645,7 +645,17 @@ def main() -> int:
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(xml)
+    # Rename into place rather than truncating in place. The argos container
+    # polls this path on a shared volume and reads it as soon as it looks
+    # ready, and an in-place write gives it a window in which the file exists
+    # but holds half an experiment. It also moves the mtime at the START of the
+    # write, and argos-entrypoint.sh uses that mtime to tell this run's
+    # experiment from the previous one's. os.replace is atomic within a
+    # filesystem, so a reader sees either the old file or a complete new one,
+    # and the mtime it checks belongs to a file that is fully written.
+    tmp = out.with_name(f".{out.name}.tmp")
+    tmp.write_text(xml)
+    os.replace(tmp, out)
     print(f"[make_argos_session] {cfg_path.name} -> {out} ({len(xml)} bytes)")
     return 0
 

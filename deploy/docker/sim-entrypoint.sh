@@ -42,13 +42,20 @@ mkdir -p /app/sessions "${RUNTIME_DIR}"
 
 # Clear the previous run's generated experiment BEFORE anything regenerates it.
 #
-# The runtime directory is a named volume and outlives the containers, and the
-# argos service waits for session.argos to exist and then reads it. Left in
-# place, a stale file is one it can read and act on before this launch has
-# rewritten it: switching to `odometry:=drift` left ARGoS waiting on the
+# The runtime directory is a named volume and outlives the containers, so a
+# stale file is one the argos service can read and act on before this launch
+# has rewritten it: switching to `odometry:=drift` left ARGoS waiting on the
 # estimator socket named in the PREVIOUS run's experiment, which nothing was
 # ever going to bind. Any change of robot count, world seed or fleet config has
 # the same hazard.
+#
+# This delete does NOT on its own close that window, and must not be relied on
+# to. It lands only after the two ROS setup scripts above, seconds into this
+# container's startup, while argos-entrypoint.sh reaches its first check in
+# milliseconds and wins the race essentially every time. The guarantee lives
+# there instead: argos refuses any session.argos older than its own start.
+# Deleting here is still worth doing, so that a failed generation leaves no
+# file at all rather than a plausible-looking wrong one.
 rm -f "${RUNTIME_DIR}/session.argos" "${RUNTIME_DIR}/indoor.gltf" \
       "${RUNTIME_DIR}/indoor.bin" "${RUNTIME_DIR}/indoor_collision.gltf" \
       "${RUNTIME_DIR}/indoor_collision.bin"

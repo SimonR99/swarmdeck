@@ -253,3 +253,61 @@ def test_keyframe_carries_ground_relative_band_and_lidar_height():
     assert header_band["min_height"] == pytest.approx(0.150)
     assert header_band["max_height"] == pytest.approx(1.800)
     assert header_band["lidar_height"] == pytest.approx(0.520)
+
+
+def test_duplicate_stamps_do_not_disable_the_turn_gate():
+    """A run of unusable stamps must not leave the gate with no reference.
+
+    The gate used to adopt the current sample even when the interval was
+    unusable, so consecutive duplicate stamps replaced the only baseline the
+    next call had. A fast turn sampled that way reads as no turn at all, and
+    the gate fails open exactly when it matters.
+    """
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=math.radians(8.0))
+    # Establish a reference at 100.0, then turn 50 degrees while the stamp is
+    # stuck, and coast the last half degree once it moves again. Adopting the
+    # unusable samples leaves the final interval measuring 0.5 deg over 0.1 s,
+    # a comfortable 5 deg/s, and the gate waves through a keyframe taken in the
+    # middle of a 50 degree swing.
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
+    for i in range(1, 4):
+        u._turning_too_fast(
+            pose7_from_xy_yaw(0, 0, math.radians(-50.0 * i / 3.0)), 100.0
+        )
+    assert u.unusable_stamps == 3
+    assert u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-50.5)), 100.1)
+
+
+def test_gate_stats_report_what_the_gate_did():
+    """spun was counted and reported nowhere; a silent gate cannot be audited."""
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=math.radians(8.0))
+    for i in range(6):
+        u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-55.0 * i * 0.1)), 100.0 + i * 0.1)
+    stats = u.gate_stats()
+    assert stats["max_yaw_rate_deg_s"] == pytest.approx(8.0, abs=1e-6)
+    assert stats["peak_yaw_rate_deg_s"] > 8.0
+    assert stats["last_yaw_rate_deg_s"] == pytest.approx(55.0, abs=0.5)
+    # Nothing was accepted here, only observed. The two must not be conflated:
+    # a fast turn seen is the gate working, a fast turn accepted is the bug.
+    assert stats["max_accepted_yaw_rate_deg_s"] == 0.0
+
+
+def test_lidar_spec_refuses_a_bare_lidar_block():
+    """Passing the lidar block instead of the fleet config used to disable the
+    turn gate, via a planar default, in a different module entirely."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(
+        0, str(Path(__file__).resolve().parents[2] / "swarmdeck_ros" / "src"
+               / "swarmdeck_sim" / "scenario")
+    )
+    from spawn_fleet import lidar_spec
+
+    assert lidar_spec({"lidar": {"profile": "vlp16"}}).rings == 17
+    with pytest.raises(ValueError, match="fleet config, not the lidar block"):
+        lidar_spec({"profile": "vlp16", "h_samples": 900})

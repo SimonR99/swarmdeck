@@ -581,3 +581,98 @@ def test_operator_settings_clamp_and_mark_dirty() -> None:
     assert backend.dirty is True
     assert backend.match_config.min_support == 2
     assert backend.temporal_config.max_contiguous_gap_s == 180.0
+
+
+def _hinted_graph() -> tuple[CollaborativeBackend, list[Keyframe], OptimizedGraph, np.ndarray, np.ndarray]:
+    """One robot, three keyframes, a solver gauge unrelated to the known start."""
+    traj = TrajectoryId("alpha")
+    ids = [KeyframeId("alpha", seq, "") for seq in range(3)]
+    odom = [
+        synthetic.yaw_pose(0.0, 0.0, 0.0),
+        synthetic.yaw_pose(1.0, 0.0, 0.3),
+        synthetic.yaw_pose(2.0, 0.5, 0.6),
+    ]
+    included = [
+        Keyframe(kf_id, float(i), pose, np.empty((0, 3), dtype=np.float32))
+        for i, (kf_id, pose) in enumerate(zip(ids, odom))
+    ]
+    # The gauge the solver happened to settle in, and the start we actually know.
+    solver_frame = synthetic.yaw_pose(4.0, -7.0, 1.1)
+    hint = synthetic.yaw_pose(-9.0, 0.0, 0.0)
+    optimized = OptimizedGraph(
+        poses={kf_id: solver_frame @ pose for kf_id, pose in zip(ids, odom)},
+        t_world_trajectory={traj: solver_frame},
+        t_world_map={"alpha": solver_frame},
+        components=[Component(0, frozenset({"alpha"}), ids[0], frozenset({traj}))],
+    )
+    backend = CollaborativeBackend(t_world_map_hint={"alpha": hint})
+    return backend, included, optimized, hint, solver_frame
+
+
+def test_world_hint_moves_the_poses_with_the_frame() -> None:
+    """Frames and poses must name ONE gauge after the hint is applied.
+
+    The renderer picks between them on ``odometry_as_pose``. If applying the
+    hint moves only ``t_world_trajectory``, the two choices disagree by the
+    whole fit-versus-hint rigid, and occupancy silently depends on a flag that
+    is supposed to trade loop-closure deformation for rigidity, not to
+    relocate the map.
+    """
+    backend, included, optimized, hint, solver_frame = _hinted_graph()
+
+    gauged = backend._apply_world_hints(optimized, included)
+
+    assert np.allclose(gauged.t_world_map["alpha"], hint)
+    assert np.allclose(gauged.t_world_trajectory[TrajectoryId("alpha")], hint)
+    # This graph carries no deformation, so the two render paths must agree
+    # exactly: frame @ t_odom_base is the pose.
+    for keyframe in included:
+        assert np.allclose(gauged.poses[keyframe.id], hint @ keyframe.t_odom_base)
+    # Guard the regression directly: leaving the poses in the solver's gauge
+    # is what this test exists to catch.
+    assert not np.allclose(
+        gauged.poses[included[0].id], optimized.poses[included[0].id]
+    )
+
+
+def test_world_hint_keeps_the_graph_it_regauges() -> None:
+    """The hint fixes the common frame; it says nothing about trajectory shape.
+
+    Every accepted loop closure lives in the RELATIVE pose between keyframes of
+    one trajectory, and a rigid regauge cannot touch that. If it does, the hint
+    is silently overruling the solver rather than placing it.
+    """
+    backend, included, optimized, hint, _ = _hinted_graph()
+    # Bend the middle pose off the odometry so the graph carries a correction.
+    bent = dict(optimized.poses)
+    bent[included[1].id] = bent[included[1].id] @ synthetic.yaw_pose(0.2, -0.1, 0.05)
+    optimized = replace(optimized, poses=bent)
+
+    gauged = backend._apply_world_hints(optimized, included)
+
+    for a, b in zip(included, included[1:]):
+        before = se3_inverse(optimized.poses[a.id]) @ optimized.poses[b.id]
+        after = se3_inverse(gauged.poses[a.id]) @ gauged.poses[b.id]
+        assert np.allclose(before, after)
+    # And the correction genuinely survived rather than being flattened onto
+    # the rigid frame_@_odometry answer.
+    assert not np.allclose(
+        gauged.poses[included[1].id], hint @ included[1].t_odom_base
+    )
+
+
+def test_world_hint_leaves_the_solver_output_alone() -> None:
+    """``_last_solved`` feeds the registration prior and must stay one gauge.
+
+    That prior reads a pose from ``poses`` and a frame from
+    ``t_world_trajectory`` and composes them. Mutating the graph in place here
+    handed it one of each from different worlds.
+    """
+    backend, included, optimized, hint, solver_frame = _hinted_graph()
+    before = {kf_id: pose.copy() for kf_id, pose in optimized.poses.items()}
+
+    backend._apply_world_hints(optimized, included)
+
+    assert np.allclose(optimized.t_world_trajectory[TrajectoryId("alpha")], solver_frame)
+    for kf_id, pose in before.items():
+        assert np.allclose(optimized.poses[kf_id], pose)

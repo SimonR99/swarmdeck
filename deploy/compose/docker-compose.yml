@@ -180,6 +180,12 @@ services:
       # their verified closure residuals by default.
       SWARMDECK_SLAM_REGISTRATION_MODE: "${SWARMDECK_SLAM_REGISTRATION_MODE:-graph}"
       SWARMDECK_SLAM_ANCHOR_ROBOT: "${SWARMDECK_SLAM_ANCHOR_ROBOT:-}"
+      # Draw occupancy at onboard odometry (the default, "odometry as
+      # suggestion") or at the solver's optimized poses. Empty keeps the
+      # default. Set to 0 to let accepted loop closures actually move occupied
+      # cells, which today they never do. Pair it with a capture and replay the
+      # same keyframes both ways rather than eyeballing two live runs.
+      SWARMDECK_SLAM_ODOMETRY_AS_POSE: "${SWARMDECK_SLAM_ODOMETRY_AS_POSE:-}"
       # Opt-in replay for production captures.  A deployment can point both
       # variables at one durable session directory and restart without losing
       # the in-memory graph.  Empty capture remains the normal simulation
@@ -251,7 +257,7 @@ services:
       args:
         # Pinned: a moving simulator is not a baseline. Bump deliberately, and
         # only together with whatever in swarmdeck_sim needs the new commit.
-        ARGOS_REF: "${ARGOS_REF:-d2741ce7}"
+        ARGOS_REF: "${ARGOS_REF:-c236a40f}"
     image: swarmdeck-argos:local
     depends_on:
       # `sim` only, deliberately. Both of ARGoS's sockets are bound by other
@@ -315,6 +321,11 @@ services:
       ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
       SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
       GRID_3D: "${GRID_3D:-false}"
+      # Diagnostic. Reports how far each lidar frame lags the exchange that
+      # carried it, which is the pose/scan mismatch that shows up as a rotated
+      # copy of the map when a robot is turning. Off by default; it logs once
+      # per robot per simulated second.
+      SWARMDECK_DEBUG_SCAN_AGE: "${SWARMDECK_DEBUG_SCAN_AGE:-}"
       # Detection targets scattered through the world, classes assigned round
       # robin from adapters/perception/catalog.py.
       SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
