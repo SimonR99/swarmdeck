@@ -66,11 +66,43 @@ from swarmdeck_slam.types import TrajectoryId, se3_from_quat_xyz
 # when replaying such legacy captures.
 REGISTRATION_MODE = os.environ.get("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
 ANCHOR_ROBOT = os.environ.get("SWARMDECK_SLAM_ANCHOR_ROBOT", "").strip() or None
+
+
+def _odometry_as_pose() -> bool:
+    """Whether occupancy is drawn at onboard odometry or at the solver's poses.
+
+    The default is unchanged: True for every mode but ``odom_free``, which is
+    "odometry as suggestion" occupancy, deliberately treating each onboard
+    trajectory as rigid so that loop closures cannot smear a working map.
+
+    It is overridable because that default is a trade, not a fact, and the
+    trade has never been measured on real data. Setting it False renders from
+    ``optimized.poses`` instead, which is the only way the accepted closures
+    reach occupancy at all: on a four-robot ARGoS run the backend held 74
+    accepted closures, 18 of them inter-robot, and not one moved a single
+    occupied cell. The residual on that run was a rigid +2.5 degree rotation of
+    part of one robot's contribution, which is exactly the error class a pose
+    graph removes and this flag currently declines to let it remove.
+
+    Measure before changing the default. A synthetic fixture put the two within
+    a couple of points under smooth drift and favoured the solver by 6 to 8
+    points under gauge jumps, which is not enough to decide anything; replaying
+    one real capture both ways is (see SWARMDECK_SLAM_CAPTURE_DIR and
+    tools/replay.py).
+    """
+    raw = os.environ.get("SWARMDECK_SLAM_ODOMETRY_AS_POSE", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return REGISTRATION_MODE != "odom_free"
+
+
 RENDER = RenderConfig(
     floor_z=float(os.environ.get("SWARMDECK_SLAM_FLOOR_Z", "0.0")),
     min_z=float(os.environ.get("SWARMDECK_SLAM_MIN_Z", "0.15")),
     max_z=float(os.environ.get("SWARMDECK_SLAM_MAX_Z", "1.80")),
-    odometry_as_pose=REGISTRATION_MODE != "odom_free",
+    odometry_as_pose=_odometry_as_pose(),
     close_occupied=1,
     hit_weight=8,
     peer_exclusion_radius_m=float(
@@ -534,6 +566,10 @@ def status() -> dict[str, Any]:
         "anchor_robot": backend.anchor_robot_id,
         "capture_dir": CAPTURE_DIR,
         "restore_capture": RESTORE_CAPTURE,
+        # Reported because it decides whether occupancy came from the solver or
+        # from raw onboard odometry, and the two look identical in a PNG. A
+        # replay comparison that cannot tell which it is measuring is worthless.
+        "odometry_as_pose": RENDER.odometry_as_pose,
         "generation": _current_generation(),
         "pending_controls": len(_controls),
         "last_error": _last_error,
