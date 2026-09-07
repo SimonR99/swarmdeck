@@ -168,7 +168,7 @@
         ? 'bg-accent text-white shadow-[0_2px_6px_-4px_rgb(47_99_199/0.8)]'
         : 'text-fg-dim hover:text-fg-muted'}"
       aria-pressed={!isLocal}
-      title="The merged fleet map — every registered robot's grid in one frame"
+      title="The merged fleet map"
       onclick={showGlobal}
     >
       <Globe class="h-3 w-3" />
@@ -183,7 +183,7 @@
       aria-pressed={isLocal}
       disabled={!selected}
       title={selected
-        ? "This robot's own SLAM map, in its own frame — how you tell a bad merge from a bad map"
+        ? "This robot's own SLAM map, in its own frame"
         : 'Select a robot to view its own map'}
       onclick={showLocal}
     >

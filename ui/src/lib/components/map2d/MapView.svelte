@@ -61,15 +61,10 @@
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
-  // `?view=3d` opens straight into the point cloud. The frontend already takes
-  // `?mock=1&robots=4`, so URL-driven view state is the existing idiom here —
-  // and it is the only way to reach the 3D view from a headless browser, which
-  // is how it gets verified.
-  // Default to 3D map view on this branch; ?view=2d explicitly requests 2D.
+  // Start in 2D; Layers > 3D cloud opts into the tactical view.
+  // Preserve the explicit URL shortcut for saved links.
   let show3D = $state(
-    typeof location !== 'undefined'
-      ? new URLSearchParams(location.search).get('view') !== '2d'
-      : true
+    typeof location !== 'undefined' && new URLSearchParams(location.search).get('view') === '3d'
   );
   let showGrid = $state(true);
   let showTrails = $state(true);
@@ -763,9 +758,10 @@
         </div>
         <button
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
+          aria-pressed={show3D}
           onclick={() => (show3D = !show3D)}
         >
-          <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D Map</span>
+          <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D cloud</span>
           <span class="font-semibold {show3D ? 'text-accent' : 'text-fg-dim'}">{show3D ? 'ON' : 'OFF'}</span>
         </button>
         <button
