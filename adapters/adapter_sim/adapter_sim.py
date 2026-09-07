@@ -440,7 +440,13 @@ class RobotBridge(
         self._start_pose: dict | None = None
 
         node.create_subscription(Odometry, f"/{robot_id}/odom", self._on_odom, 10)
-        node.create_subscription(TFMessage, f"/{robot_id}/tf", self._on_tf, 20)
+        # Depth chosen for the executor, not the publisher. TF arrives at 10 Hz,
+        # but this node does the cloud work in the same executor, so under load
+        # the callback is starved and a shallow queue silently drops the samples
+        # a pose lookup then cannot find. Measured with a depth of 20: lookups
+        # reaching 100 to 500 ms past the stamp they asked for, and the rotated
+        # copy in the merged map tracked how far they reached.
+        node.create_subscription(TFMessage, f"/{robot_id}/tf", self._on_tf, 200)
 
         latched = QoSProfile(
             depth=1,
@@ -619,9 +625,41 @@ class RobotBridge(
             return self.map_pose()
 
         def nearest(log, current, link):
+            """The pose at ``at``, interpolated between the samples that bracket it.
+
+            Snapping to the closest sample makes the error the distance to that
+            sample times the turn rate, which is precisely the defect this was
+            added to remove: measured lookups reached 100 to 500 ms past the
+            stamp they asked for, and the rotated copy in the merged map tracked
+            that reach (300 ms -> 4.0 deg, 200 ms -> 3.0 deg, 100 ms -> 2.5 deg).
+            Interpolating between the sample before and the sample after leaves
+            only the curvature over that interval, which for a steady turn is
+            near zero however wide the gap. It is also what tf2 does, and what
+            adapter_ros2 gets for free by using tf2's buffer.
+            """
             if not log:
                 self.pose_lookup_empty[link] += 1
                 return current
+            before = [s for s in log if s[0] <= at]
+            after = [s for s in log if s[0] >= at]
+            if before and after:
+                lo, hi = before[-1], after[0]
+                span = hi[0] - lo[0]
+                self.pose_lookup_gap[link] = max(
+                    self.pose_lookup_gap[link], min(at - lo[0], hi[0] - at)
+                )
+                if span <= 1e-9:
+                    return lo[1]
+                if span <= 1.0:
+                    f = (at - lo[0]) / span
+                    dyaw = (hi[1]["yaw"] - lo[1]["yaw"] + math.pi) % (2 * math.pi) - math.pi
+                    return {
+                        "x": lo[1]["x"] + f * (hi[1]["x"] - lo[1]["x"]),
+                        "y": lo[1]["y"] + f * (hi[1]["y"] - lo[1]["y"]),
+                        "yaw": (lo[1]["yaw"] + f * dyaw + math.pi) % (2 * math.pi) - math.pi,
+                    }
+            # Only one side available: the stamp is outside the history, so
+            # extrapolating would be inventing motion. Fall back as before.
             best = min(log, key=lambda item: abs(item[0] - at))
             gap = abs(best[0] - at)
             # How far the lookup had to reach, and how stale the newest reading

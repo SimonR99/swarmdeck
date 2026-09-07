@@ -246,3 +246,56 @@ def test_pairing_diagnostics_record_how_far_the_lookup_reached(bridge_cls):
     bridge._odom_to_base_log.clear()
     bridge.map_pose_at(100.5)
     assert bridge.pose_lookup_empty["odom_base"] > 0
+
+
+def test_pose_between_samples_is_interpolated_not_snapped(bridge_cls):
+    """A stamp falling between TF samples must not take the nearer one whole.
+
+    Snapping makes the pose error the distance to the chosen sample times the
+    turn rate. Measured live, lookups reached 100 to 500 ms past the stamp they
+    asked for and the rotated copy in the merged map tracked that reach: 300 ms
+    gave 4.0 deg, 200 ms gave 3.0 deg, 100 ms gave 2.5 deg. Interpolation
+    leaves only the curvature over the interval, which for a steady turn is
+    nothing.
+    """
+    bridge = _turning_bridge(bridge_cls)  # 1.0 rad/s, sampled every 100 ms
+
+    # 100.55 is squarely between the 100.5 and 100.6 samples.
+    yaw = bridge.map_pose_at(100.55)["yaw"]
+    assert yaw == pytest.approx(0.55, abs=1e-6)
+    # Snapping would have returned one of the endpoints.
+    assert abs(yaw - 0.5) > 1e-3 and abs(yaw - 0.6) > 1e-3
+
+
+def test_interpolation_survives_a_hole_in_the_history(bridge_cls):
+    """A dropped sample is the case this exists for, so cover it explicitly."""
+    bridge = _turning_bridge(bridge_cls)
+    # Drop the samples around 100.4-100.6, as a starved executor would.
+    kept = [s for s in bridge._odom_to_base_log if not (100.35 < s[0] < 100.65)]
+    bridge._odom_to_base_log.clear()
+    bridge._odom_to_base_log.extend(kept)
+
+    # Still linear across the hole, because the bracket is still there.
+    assert bridge.map_pose_at(100.5)["yaw"] == pytest.approx(0.5, abs=1e-6)
+
+
+def test_yaw_interpolation_takes_the_short_way_round(bridge_cls):
+    """Wrapping must not send the pose the long way through 2 pi."""
+    bridge = make_bridge(bridge_cls)
+    bridge._map_to_odom_log = deque(maxlen=128)
+    bridge._odom_to_base_log = deque(maxlen=128)
+    bridge.pose_lookup_gap = {"odom_base": 0.0, "map_odom": 0.0}
+    bridge.pose_lookup_empty = {"odom_base": 0, "map_odom": 0}
+    bridge.pose_lookup_stale = {"odom_base": 0, "map_odom": 0}
+    for t, yaw in ((100.0, math.pi - 0.1), (100.1, -math.pi + 0.1)):
+        bridge._on_tf(
+            stamped_tf(
+                [
+                    ("robot_0/map_frame", "robot_0/odom", 0.0, 0.0, 0.0),
+                    ("robot_0/odom", "robot_0/base_link", 0.0, 0.0, yaw),
+                ],
+                t,
+            )
+        )
+    yaw = bridge.map_pose_at(100.05)["yaw"]
+    assert abs(abs(yaw) - math.pi) < 1e-6, f"went the long way: {yaw}"
