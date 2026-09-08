@@ -96,3 +96,18 @@ specific object and its users first; preserve a verified old, empty port outside
 the DDS naming scheme when recovering it. Processes already waiting on its old
 file descriptor need restarting. Changing ROS domain is a diagnostic only;
 robot services must remain on their configured domain to communicate.
+
+### LiDAR return range
+
+Botman, Aslan, and TARS are configured for a **30 m maximum return range**.
+Botman and Aslan set `max_range` in their repo-owned Ouster driver YAML files;
+TARS overrides `/os_cloud_node/max_range` after its vendor Ouster launch include.
+The ROS 1 parameter is the cloud processor's private `max_range`, measured in
+metres ([Ouster implementation](https://github.com/ouster-lidar/ouster-ros/blob/master/src/os_cloud_nodelet.cpp)).
+This is distance from the sensor at capture time, not distance from the map
+origin. Navigation can retain its shorter obstacle/raytrace horizon.
+
+Apply these startup parameters by restarting the corresponding LiDAR driver.
+Check the published cloud's range afterward, particularly on TARS where the
+installed vendor driver version must support this parameter. Existing spurious
+returns already accumulated in a SLAM/server map are not removed retroactively.
