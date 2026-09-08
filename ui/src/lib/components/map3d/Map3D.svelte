@@ -199,7 +199,8 @@
   let pending: AbortController | null = null;
   let generation = 0;
   let mounted = $state(false);
-  let lastScope = '';
+  let lastScope: string | null = null;
+  let lastCloudRevision = '';
   let cloudEtag = '';
   let gaussianEtag = '';
   let firstCloud = true;
@@ -217,6 +218,7 @@
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     const id = ++generation;
     const currentScope = scope();
+    const revision = lastCloudRevision;
     try {
       const response = await fetch(`/api/map/cloud${currentScope}`, {
         signal: controller.signal,
@@ -286,7 +288,7 @@
         ]);
       });
       if (id !== generation || !scene || currentScope !== scope()) return;
-      cloudEtag = response.headers.get('ETag') ?? '';
+      cloudEtag = revision === lastCloudRevision ? response.headers.get('ETag') ?? '' : '';
       hasRgb = rgbPresent;
       if (!hasRgb && colorMode === 'camera') setColorMode('elevation');
       const bounds = scene.terrain.build(
@@ -299,7 +301,6 @@
       robotsOnCloud = names.filter((_, i) => keep[i]);
       ceilingMin = bounds.minZ;
       ceilingMax = Math.max(bounds.maxZ, bounds.minZ + 0.1);
-      ceilingCutoff = Math.max(ceilingMin, Math.min(ceilingCutoff, ceilingMax + 0.2));
       if (firstCloud && points) {
         ceilingCutoff = Math.min(ceilingMax + 0.2, ceilingMin + 2.3);
         scene.setCeiling(ceilingCutoff);
@@ -388,8 +389,10 @@
       ? mapStore.status?.transforms[mapStore.viewRobot]
       : null;
     const key = `${currentScope}|${enabled}|${currentScope ? JSON.stringify(localTransform) : ''}`;
-    if (key !== lastScope) {
-      lastScope = key;
+    if (key === lastCloudRevision) return;
+    lastCloudRevision = key;
+    if (currentScope !== lastScope) {
+      lastScope = currentScope;
       generation++;
       pending?.abort();
       pending = null;
@@ -406,6 +409,12 @@
       gaussianCount = 0;
       void fetchCloud();
       if (renderMode === 'gaussians') void fetchGaussians();
+    } else {
+      // Registration and fleet visibility updates replace terrain in place.
+      // They are not a new map: retain the camera, clipping height and scene
+      // while the next cloud is prepared. Do not abort an in-flight build.
+      cloudEtag = '';
+      void fetchCloud();
     }
   });
 
@@ -835,8 +844,8 @@
 
       <input
         type="range"
-        min={ceilingMin}
-        max={ceilingMax + 0.2}
+        min={Math.min(ceilingMin, ceilingCutoff)}
+        max={Math.max(ceilingMax + 0.2, ceilingCutoff)}
         step="0.05"
         bind:value={ceilingCutoff}
         class="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"

@@ -107,7 +107,9 @@ and display settings survive the switch. Use `?view=2d` to start in 2D.
 Solid robot markers, outlined paths, and selection brackets remain visible over
 terrain. Costmaps follow their source robot's map transform. The **Ceiling**
 slider clips all four representations to reveal interiors; it changes only the
-view, not navigation data.
+view, not navigation data. Live map refreshes retain the last valid map while
+loading and preserve the 3D camera and ceiling height through registration
+updates.
 
 **Low power** is the default: up to 60,000 points, 8,000 voxels, or 30,000
 Gaussians, with a 30 FPS cap and device pixel ratio capped at 1. Geometry and
