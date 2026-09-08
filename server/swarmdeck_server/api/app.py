@@ -484,7 +484,7 @@ async def map_loop() -> None:
     """2 Hz patch emission — never re-sends the whole grid (NFR-6)."""
     while True:
         await asyncio.sleep(0.5)
-        patch = map_service.take_patch()
+        patch = await asyncio.to_thread(map_service.take_patch)
         if patch:
             await broadcast(patch)
 
@@ -1041,6 +1041,13 @@ async def get_nav_map(request: Request, robot_id: str) -> Response:
     return await handler(request, robot_id)
 
 
+@app.get("/api/map/gaussians")
+async def get_gaussians(request: Request) -> Response:
+    from .reconstruction_routes import get_gaussians as handler
+
+    return await handler(request)
+
+
 @app.get("/api/map/cloud")
 async def get_cloud(request: Request) -> Response:
     from .map_routes import get_cloud as handler
@@ -1338,16 +1345,13 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             )
 
     elif kind in ("start_explore", "stop_explore"):
-        # Fleet-wide, but sent per robot because that is the only channel the
-        # protocol has. Only robots that advertise `explore` are addressed:
-        # exploration starts a process that drives the whole fleet reactively,
-        # and a hardware adapter must never be asked to do that. `registry.can`
-        # is the same gate `navigate` and `reset` use.
+        # A robot card addresses one configured explorer. Legacy fleet-wide
+        # commands remain supported; capability gating also applies to hardware.
         enabled = kind == "start_explore"
         targets = [
             robot_id
             for robot_id in list(registry.robots)
-            if registry.can(robot_id, "explore")
+            if registry.can(robot_id, "explore") and (not rid or robot_id == rid)
         ]
         if not targets:
             await raise_alert(

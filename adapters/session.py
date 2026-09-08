@@ -63,6 +63,23 @@ async def dispatch_command(
 ) -> None:
     """Map one adapter-protocol command onto the bridge. Unknown types: no-op."""
     kind = msg.get("type")
+    exploration = getattr(bridge, "exploration", None)
+    if exploration is not None:
+        if kind == "explore":
+            if msg.get("enabled") is True:
+                exploration.start()
+            else:
+                exploration.stop()
+            return
+        if kind in (
+            "navigate_to",
+            "cancel_goal",
+            "drive",
+            "stop",
+            "reset",
+            "body_command",
+        ):
+            exploration.stop()
     if kind == "navigate_to":
         fn = bridge.navigate_to
         goal = msg.get("goal", {})
@@ -116,6 +133,9 @@ async def _tx_state(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
     period = 1.0 / float(cfg["rates"]["state_hz"])
     while True:
         await send(bridge.state())
+        exploration = getattr(bridge, "exploration", None)
+        if exploration is not None:
+            exploration.last_link = time.monotonic()
         extra = _call(bridge, "session_state_tick")
         if extra is not None:
             await send(extra)
@@ -130,6 +150,7 @@ async def _tx_maps(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
     last_map = 0.0
     last_cloud = 0.0
     last_settings = 0.0
+    last_nav_map = 0.0
     while True:
         now = time.monotonic()
         if now - last_map > float(rates["map_period_s"]):
@@ -143,7 +164,11 @@ async def _tx_maps(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
             await _offload(loop, bridge, "upload_cloud")
             last_cloud = time.monotonic()
         await _offload(loop, bridge, "upload_keyframe")
-        await _offload(loop, bridge, "pull_nav_map")
+        if now - last_nav_map > float(
+            rates.get("nav_map_period_s", rates.get("map_period_s", 2.0))
+        ):
+            await _offload(loop, bridge, "pull_nav_map")
+            last_nav_map = time.monotonic()
         extra = getattr(bridge, "session_maps_tick", None)
         if callable(extra):
             await extra(now, send, loop)
@@ -178,6 +203,9 @@ def _stop_on_disconnect(bridge: Any) -> None:
     # Cancel first: while nav is active, a zero Twist is overwritten by the
     # next autonomy sample and the robot never actually stops.
     try:
+        exploration = getattr(bridge, "exploration", None)
+        if exploration is not None:
+            exploration.stop()
         (getattr(bridge, "cancel_goal", None) or getattr(bridge, "cancel"))()
         bridge.drive(0.0, 0.0)
     except Exception:

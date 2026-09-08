@@ -143,6 +143,7 @@ def keyframe_from_packet(
         min_height=packet.min_height,
         max_height=packet.max_height,
         lidar_height=packet.lidar_height,
+        colors=packet.colors,
     )
 
 
@@ -630,6 +631,7 @@ class CollaborativeBackend:
         self.ambiguous_matches = 0
         self.implausible_hops = 0
         self.primed_verifications = 0
+        self.verification_stats: dict[str, dict[str, int]] = {"intra": {}, "inter": {}}
         self._last_solved: OptimizedGraph | None = None
         self._accepted = 0
         self._inter_robot = 0
@@ -737,6 +739,9 @@ class CollaborativeBackend:
                 yaw_prior=candidate.yaw,
                 config=self.verify,
                 t_target_source_prior=prior,
+                diagnostics=self.verification_stats[
+                    "inter" if target.id.robot_id != keyframe.id.robot_id else "intra"
+                ],
             )
             if edge is None:
                 continue
@@ -1359,7 +1364,41 @@ class CollaborativeBackend:
     def _apply_world_hints(
         self, optimized: OptimizedGraph, included: list[Keyframe]
     ) -> OptimizedGraph:
-        """Pose occupancy at known ``T_world_map`` rather than the solver fit."""
+        """Gauge occupancy to a known ``T_world_map`` without discarding the graph.
+
+        A surveyed or simulated start pose is a better estimate of the common
+        frame than the solver's fit of it, which is the whole reason the hint
+        wins here. It is not a better estimate of the SHAPE of a trajectory,
+        and in fact says nothing whatever about one.
+
+        So compose, do not replace, for exactly the reason
+        :meth:`_gauge_reconstructed_to_world` already states for the odom-free
+        path: the frames and the poses have to name one gauge. This used to
+        overwrite ``t_world_trajectory`` and leave ``poses`` sitting in the
+        solver's, so the two described different worlds. That went unnoticed
+        because ``RenderConfig.odometry_as_pose`` is True for every mode but
+        ``odom_free``, and it renders from ``t_world_trajectory @ t_odom_base``
+        and never reads ``poses`` at all -- so occupancy silently became the
+        raw hint composed onto capture-time onboard poses, with every accepted
+        loop closure discarded. Measured on a four-robot ARGoS run with 5444
+        accepted closures, against the true floorplan at 15 cm tolerance: the
+        three parked robots scored 97.0-98.5% either way, while the one robot
+        that had actually driven scored 66.8% where its own onboard raster
+        scored 98.5%.
+
+        ``t_world_trajectory`` is a least-squares fit over the whole
+        trajectory (see :meth:`GtsamPoseGraph._t_world_trajectory`), so the
+        correction below is exactly the rigid difference between the fitted
+        common frame and the known one. Applying it per trajectory leaves
+        every relative pose within that trajectory untouched, which is to say
+        it moves the gauge and keeps the graph.
+
+        Returns a new graph rather than mutating in place. ``_last_solved`` is
+        assigned before this runs and feeds the registration prior in
+        :meth:`_pose_prior`, which reads a pose from ``poses`` and a frame from
+        ``t_world_trajectory`` and composes them: mutating one of the two here
+        handed that prior a pose and a frame from different gauges.
+        """
         hints = self.t_world_map_hint or {}
         traj_frames = {
             kf.id.trajectory: hints[kf.id.robot_id]
@@ -1368,15 +1407,40 @@ class CollaborativeBackend:
         }
         if not traj_frames:
             return optimized
+
+        by_trajectory: dict[TrajectoryId, list[KeyframeId]] = {}
+        for kf_id in optimized.poses:
+            by_trajectory.setdefault(kf_id.trajectory, []).append(kf_id)
+
+        poses = dict(optimized.poses)
+        for trajectory, hint in traj_frames.items():
+            fitted = optimized.t_world_trajectory.get(trajectory)
+            if fitted is None:
+                fitted = optimized.t_world_map.get(trajectory.robot_id)
+            if fitted is None:
+                # No fitted frame to correct from: the frame below still lands
+                # the occupancy, which is the pre-existing behaviour.
+                continue
+            correction = hint @ se3_inverse(fitted)
+            for kf_id in by_trajectory.get(trajectory, ()):
+                poses[kf_id] = correction @ poses[kf_id]
+
         robots = frozenset(trajectory.robot_id for trajectory in traj_frames)
-        optimized.t_world_trajectory.update(traj_frames)
-        optimized.t_world_map.update({robot_id: hints[robot_id] for robot_id in robots})
+        t_world_trajectory = dict(optimized.t_world_trajectory)
+        t_world_trajectory.update(traj_frames)
+        t_world_map = dict(optimized.t_world_map)
+        t_world_map.update({robot_id: hints[robot_id] for robot_id in robots})
+        components = optimized.components
         if len(robots) >= 2:
             anchor = min(kf.id for kf in included if kf.id.robot_id in hints)
-            optimized.components = [
-                Component(0, robots, anchor, frozenset(traj_frames))
-            ]
-        return optimized
+            components = [Component(0, robots, anchor, frozenset(traj_frames))]
+        return replace(
+            optimized,
+            poses=poses,
+            t_world_map=t_world_map,
+            t_world_trajectory=t_world_trajectory,
+            components=components,
+        )
 
     def reset(self) -> None:
         """Forget the session. Config (verify/render) stays."""

@@ -75,6 +75,57 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(start_vectornav),
     )
 
+    # The VN-100 stamps its messages "vectornav" and nothing published a TF for
+    # that frame. Sensor-to-sensor extrinsic, independent of the lidar-origin
+    # base-frame convention; it only ADDS A CHILD to os_lidar, giving it no
+    # second parent, which is why it is safe where base_link -> os_sensor is not.
+    #
+    # Rotation MEASURED 2026-09-01 by scripts/calibration/run_aslan_calibration.py
+    # and recorded in aslan_superodom_calibration.yaml: os_lidar -> vectornav is
+    # roll -0.03, pitch -0.85, yaw -90.65 deg (residual RMS 0.0257 rad/s over
+    # 3416 samples).
+    #
+    # Translation carried over from botman 2026-09-03: the VN-100 sits in the
+    # same place on the baseplate on both robots and the lidars share x and y,
+    # so x and y transfer exactly.
+    #
+    # Z IS ADJUSTED, NOT MEASURED, AND IS THE WEAKEST NUMBER HERE. It is
+    # botman's -0.284 plus 0.02, because aslan has no Ouster aluminium base and
+    # its lidar therefore sits about 2 cm lower -- closer to the VN-100, so the
+    # gap shrinks. The 0.02 is "a couple of cm" rather than a caliper reading;
+    # measure the base's thickness to firm it up.
+    #
+    # Botman's -0.284 is itself a calibration result, not a tape reading: it
+    # comes from the three-IMU set (OAK-D, Ouster, VN-100) rocked about
+    # non-vertical axes, which is what makes the vertical component observable.
+    # It is the least-constrained of its three components, so aslan's z carries
+    # that error bar plus the 0.02 estimate on top.
+    vectornav_tf = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="aslan_vectornav_tf",
+        output="screen",
+        arguments=[
+            "--x",
+            "0.0010",
+            "--y",
+            "0.0608",
+            "--z",
+            "-0.264",
+            "--roll",
+            "-0.000524",
+            "--pitch",
+            "-0.014835",
+            "--yaw",
+            "-1.582152",
+            "--frame-id",
+            "os_lidar",
+            "--child-frame-id",
+            "vectornav",
+        ],
+        condition=IfCondition(start_vectornav),
+    )
+
     feature_extraction = Node(
         package="super_odometry",
         executable="feature_extraction_node",
@@ -118,6 +169,7 @@ def generate_launch_description() -> LaunchDescription:
             SetParameter(name="use_sim_time", value=False),
             vectornav,
             vn_sensor_msgs,
+            vectornav_tf,
             feature_extraction,
             laser_mapping,
             imu_preintegration,

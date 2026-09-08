@@ -17,6 +17,15 @@ from .keyframe import (
     encode_keyframe,
     peek_keyframe_header,
 )
+from .odometry import (
+    DEFAULT_HARDWARE_ODOMETRY,
+    DEFAULT_SIM_ODOMETRY,
+    ODOMETRY_ALIASES,
+    ODOMETRY_PROFILES,
+    OdometrySpec,
+    get_odometry_spec,
+    resolve_odometry_types,
+)
 
 __all__ = [
     "KEYFRAME_MAGIC",
@@ -29,4 +38,11 @@ __all__ = [
     "decode_keyframe",
     "encode_keyframe",
     "peek_keyframe_header",
+    "DEFAULT_HARDWARE_ODOMETRY",
+    "DEFAULT_SIM_ODOMETRY",
+    "ODOMETRY_ALIASES",
+    "ODOMETRY_PROFILES",
+    "OdometrySpec",
+    "get_odometry_spec",
+    "resolve_odometry_types",
 ]

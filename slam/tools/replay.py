@@ -454,6 +454,21 @@ def main() -> int:
     parser.add_argument("--floor-z", type=float, default=-0.1225)
     parser.add_argument("--min-z", type=float, default=0.150)
     parser.add_argument("--max-z", type=float, default=0.395)
+    # Occupancy rendering. The defaults below are RenderConfig's own, which is
+    # what this tool has always used and what existing ablation baselines were
+    # measured against, so they are left alone. They are NOT what the service
+    # runs: swarmdeck_slam.service builds close_occupied=1, hit_weight=8 and
+    # odometry_as_pose=True. Pass --close-occupied 1 --hit-weight 8
+    # --odometry-as-pose to reproduce production occupancy from a capture.
+    parser.add_argument(
+        "--odometry-as-pose",
+        action="store_true",
+        help="draw occupancy at onboard odometry rather than the solver's "
+        "poses, as the service does; run the same dataset with and "
+        "without this to measure what the accepted closures are worth",
+    )
+    parser.add_argument("--close-occupied", type=int, default=0)
+    parser.add_argument("--hit-weight", type=int, default=3)
     parser.add_argument(
         "--only",
         nargs="+",
@@ -501,7 +516,12 @@ def main() -> int:
         )
     truth = load_ground_truth(dataset / "ground_truth.csv")
     render_config = RenderConfig(
-        floor_z=args.floor_z, min_z=args.min_z, max_z=args.max_z
+        floor_z=args.floor_z,
+        min_z=args.min_z,
+        max_z=args.max_z,
+        odometry_as_pose=args.odometry_as_pose,
+        close_occupied=args.close_occupied,
+        hit_weight=args.hit_weight,
     )
     print(
         f"dataset {dataset}: {len(packets)} keyframes, "

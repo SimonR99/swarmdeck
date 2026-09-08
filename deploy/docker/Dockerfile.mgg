@@ -1,0 +1,20 @@
+FROM ros:jazzy-perception
+SHELL ["/bin/bash", "-c"]
+ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git python3-colcon-common-extensions python3-yaml \
+    libeigen3-dev libboost-dev libyaml-cpp-dev ros-jazzy-octomap \
+    ros-jazzy-octomap-msgs ros-jazzy-octomap-ros ros-jazzy-tf2-ros \
+    ros-jazzy-tf2-geometry-msgs ros-jazzy-rosidl-default-generators \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --branch ros2 --single-branch https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
+    && git -C /opt/mgg checkout "$MGG_REV"
+WORKDIR /opt/mgg/ros2
+RUN source /opt/ros/jazzy/setup.bash && \
+    CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
+    --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+COPY deploy/mgg /app/deploy/mgg
+COPY adapters/protocol /app/adapters/protocol
+COPY swarmdeck_ros/src/swarmdeck_sim /app/swarmdeck_ros/src/swarmdeck_sim
+COPY configs /app/configs
+CMD ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/mgg/ros2/install/setup.bash && ros2 launch /app/deploy/mgg/fleet.launch.py"]

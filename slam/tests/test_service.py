@@ -322,3 +322,55 @@ def test_config_endpoint_clamps_and_does_not_switch_mode(slam_client) -> None:
     assert (
         body["settings"]["registration_mode"] == before["settings"]["registration_mode"]
     )
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("0", False),
+        ("false", False),
+        ("off", False),
+        ("no", False),
+        ("1", True),
+        ("true", True),
+        ("on", True),
+        ("yes", True),
+        ("", True),
+        ("  ", True),
+        ("banana", True),
+    ],
+)
+def test_odometry_as_pose_override(monkeypatch, value, expected) -> None:
+    """The override has to actually override, and unset has to keep the default.
+
+    A flag that silently does nothing is worse than no flag: it invites a
+    replay comparison whose two halves are identical and reads the null result
+    as evidence. Unparseable values fall back to the mode-derived default
+    rather than guessing.
+    """
+    import importlib
+    import swarmdeck_slam.service as service
+
+    monkeypatch.setenv("SWARMDECK_SLAM_ODOMETRY_AS_POSE", value)
+    monkeypatch.setenv("SWARMDECK_SLAM_REGISTRATION_MODE", "graph")
+    reloaded = importlib.reload(service)
+    try:
+        assert reloaded.RENDER.odometry_as_pose is expected
+    finally:
+        monkeypatch.delenv("SWARMDECK_SLAM_ODOMETRY_AS_POSE", raising=False)
+        importlib.reload(service)
+
+
+def test_odom_free_still_defaults_to_solver_poses(monkeypatch) -> None:
+    """The pre-existing rule survives: odom_free never poses from odometry."""
+    import importlib
+    import swarmdeck_slam.service as service
+
+    monkeypatch.delenv("SWARMDECK_SLAM_ODOMETRY_AS_POSE", raising=False)
+    monkeypatch.setenv("SWARMDECK_SLAM_REGISTRATION_MODE", "odom_free")
+    reloaded = importlib.reload(service)
+    try:
+        assert reloaded.RENDER.odometry_as_pose is False
+    finally:
+        monkeypatch.delenv("SWARMDECK_SLAM_REGISTRATION_MODE", raising=False)
+        importlib.reload(service)

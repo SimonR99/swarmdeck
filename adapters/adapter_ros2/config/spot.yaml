@@ -141,3 +141,13 @@ rates:
   keyframe_period_s: 2.0
 
 drive_timeout_s: 0.45
+
+# Onboard MGG selects goals; the existing navigation backend executes them.
+# Nominal body envelope and local site bounds: adjust before a new deployment.
+exploration:
+  enabled: true
+  planner:
+    cloud_topic: /ouster/points
+    body_height_m: 0.6
+    bounds_min: [-60.0, -60.0, -3.0]
+    bounds_max: [60.0, 60.0, 3.0]

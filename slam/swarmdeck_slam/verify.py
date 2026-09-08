@@ -426,6 +426,7 @@ def verify_candidate(
     yaw_prior: float,
     config: VerifyConfig | None = None,
     t_target_source_prior: np.ndarray | None = None,
+    diagnostics: dict[str, int] | None = None,
 ) -> Edge | None:
     """Geometrically verify a proposed loop closure between two keyframes.
 
@@ -468,9 +469,15 @@ def verify_candidate(
     that keeps a seeded GICP from simply handing the prior back as if it were
     a measurement.
     """
+
+    def reject(reason: str):
+        if diagnostics is not None:
+            diagnostics[reason] = diagnostics.get(reason, 0) + 1
+        return None
+
     config = config or VerifyConfig()
     if len(source.points) < config.min_points or len(target.points) < config.min_points:
-        return None
+        return reject("too_few_points")
 
     source_points = np.asarray(source.points, dtype=np.float64)
     target_points = np.asarray(target.points, dtype=np.float64)
@@ -504,9 +511,9 @@ def verify_candidate(
         max_iterations=config.max_iterations,
     )
     if not result.converged:
-        return None
+        return reject("not_converged")
     if result.num_inliers < config.min_inliers:
-        return None
+        return reject("too_few_inliers")
 
     # num_threads=1 unconditionally: this is only a denominator for the
     # inlier ratio, and small_gicp's multi-threaded downsampling is
@@ -517,11 +524,11 @@ def verify_candidate(
     )
     inlier_ratio = result.num_inliers / max(downsampled_source.size(), 1)
     if inlier_ratio < config.min_inlier_ratio:
-        return None
+        return reject("inlier_ratio")
 
     mean_error = result.error / result.num_inliers
     if mean_error > config.max_mean_error:
-        return None
+        return reject("mean_error")
 
     # T_target_source maps `source` points into `target`'s frame; invert to
     # get t_src_dst = T_source_target, matching this function's own
@@ -533,17 +540,17 @@ def verify_candidate(
 
     translation_m, _ = se3_distance(se3_identity(), t_src_dst)
     if translation_m > config.max_translation_m:
-        return None
+        return reject("translation")
 
     achieved_yaw = _yaw_of(t_target_source[:3, :3])
     yaw_deviation = abs(_wrap_angle(achieved_yaw - yaw_prior))
     if yaw_deviation > config.max_yaw_deviation_from_prior_rad:
-        return None
+        return reject("yaw_deviation")
 
     fitness = 1.0 / (1.0 + mean_error / config.fitness_error_scale)
     information = _build_information(result.H, result.num_inliers, fitness, config)
     if information is None:
-        return None
+        return reject("degenerate")
     if config.information == "isotropic":
         # Degeneracy already rejected the match; this only replaces the
         # (over-rotated) Hessian with a weight the solver can actually use.
@@ -556,6 +563,8 @@ def verify_candidate(
         if source.id.robot_id != target.id.robot_id
         else EdgeKind.INTRA_LOOP
     )
+    if diagnostics is not None:
+        diagnostics["accepted"] = diagnostics.get("accepted", 0) + 1
     return Edge(
         kind=kind,
         src=source.id,

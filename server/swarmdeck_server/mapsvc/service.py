@@ -181,6 +181,7 @@ class MapService:
         # (N, 3) float32 array of metres. Optional: a fleet on 2D SLAM never
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
+        self.robot_cloud_colors: dict[str, np.ndarray] = {}
         # Display-only vertical correction per robot, against the reference's
         # cloud. See estimate_z_offset: the SE(2) merge cannot produce this.
         self.cloud_z_offsets: dict[str, float] = {}
@@ -238,11 +239,18 @@ class MapService:
         # work has to leave the upload path. See `registration_worker`.
         self._registration_due: set[str] = set()
         self._registration_wake = asyncio.Event()
+        self._nav_cache: dict[
+            str,
+            tuple[str, int, tuple[float, float, float] | None, GridMeta, np.ndarray],
+        ] = {}
 
         # Precomputed world-cell centre coordinates, for the backward warp.
-        cx = self.meta.origin_x + (np.arange(n) + 0.5) * resolution
-        cy = self.meta.origin_y + (np.arange(n) + 0.5) * resolution
-        self._wx, self._wy = np.meshgrid(cx, cy)
+        self._cx = (
+            self.meta.origin_x + (np.arange(n, dtype=np.float32) + 0.5) * resolution
+        ).astype(np.float32)
+        self._cy = (
+            self.meta.origin_y + (np.arange(n, dtype=np.float32) + 0.5) * resolution
+        ).astype(np.float32)
 
     def _publish_map(self) -> None:
         """Publish the current working map without exposing mixed generations."""
@@ -320,6 +328,7 @@ class MapService:
                 self.slam_graphs.clear()
                 self.cslam_disagreement.clear()
                 self.robot_clouds.clear()
+                self.robot_cloud_colors.clear()
                 self._scan_grids.clear()
                 self._network_grids.clear()
                 self._network_prev.clear()
@@ -328,6 +337,7 @@ class MapService:
                 self.global_map_seq = 0
                 self.common_poses.clear()
                 self.cslam_frames.clear()
+                self._nav_cache.clear()
                 self.transforms = dict(self.transform_priors)
                 self.reference = next(iter(self.transform_priors), None)
             self._remerge()
@@ -359,6 +369,7 @@ class MapService:
             self.slam_graphs.pop(robot_id, None)
             self.cslam_disagreement.pop(robot_id, None)
             self.robot_clouds.pop(robot_id, None)
+            self.robot_cloud_colors.pop(robot_id, None)
             self._scan_grids.pop(robot_id, None)
             self._network_grids.pop(robot_id, None)
             self._network_prev.pop(robot_id, None)
@@ -366,6 +377,7 @@ class MapService:
             self.common_poses.pop(robot_id, None)
             self.cslam_frames.pop(robot_id, None)
             self._registration_due.discard(robot_id)
+            self._nav_cache.pop(robot_id, None)
 
             prior = self.transform_priors.get(robot_id)
             if prior is None:
@@ -453,14 +465,20 @@ class MapService:
         )
         self.merged = np.full((init_n, init_n), UNKNOWN, dtype=np.int8)
 
-        cx = self.meta.origin_x + (np.arange(init_n) + 0.5) * self.meta.resolution
-        cy = self.meta.origin_y + (np.arange(init_n) + 0.5) * self.meta.resolution
-        self._wx, self._wy = np.meshgrid(cx, cy)
+        self._cx = (
+            self.meta.origin_x
+            + (np.arange(init_n, dtype=np.float32) + 0.5) * self.meta.resolution
+        ).astype(np.float32)
+        self._cy = (
+            self.meta.origin_y
+            + (np.arange(init_n, dtype=np.float32) + 0.5) * self.meta.resolution
+        ).astype(np.float32)
 
         with self._state_lock:
             self.robot_grids.clear()
             self.robot_revisions.clear()
             self.robot_clouds.clear()
+            self.robot_cloud_colors.clear()
             self.registrations.clear()
             self.registration_rejections.clear()
             self.registered.clear()
@@ -472,6 +490,7 @@ class MapService:
             self.cslam_frames.clear()
             self.global_grid = None
             self.global_map_seq = 0
+            self._nav_cache.clear()
             self.transforms = dict(self.transform_priors)
             # A scan-fed robot has no grid of its own to drop — `_scan_grids` IS
             # its map, accumulated here. Leaving it means the whole pre-reset
@@ -515,14 +534,26 @@ class MapService:
         return [rid for rid in candidates if rid in grid_ids]
 
     def set_cloud(
-        self, robot_id: str, points: np.ndarray, *, register: bool = True
+        self,
+        robot_id: str,
+        points: np.ndarray,
+        *,
+        register: bool = True,
+        rgb: np.ndarray | None = None,
     ) -> None:
         """Store a cloud and refresh cloud-assisted registration when applicable."""
         # Keep caller-owned buffers out of the worker/read path. Adapters reuse
         # their upload arrays and a mutable reference here would defeat the
         # read-side snapshot guarantees.
         points = np.array(points, dtype=np.float32, copy=True)
-        self._state_set(self.robot_clouds, robot_id, points)
+        if rgb is not None and (rgb.shape != points.shape or rgb.dtype != np.uint8):
+            raise ValueError("RGB must be uint8 with one triple per point")
+        with self._state_lock:
+            self.robot_clouds[robot_id] = points
+            if rgb is None:
+                self.robot_cloud_colors.pop(robot_id, None)
+            else:
+                self.robot_cloud_colors[robot_id] = rgb.copy()
         targets = self.cloud_targets(robot_id)
         if not targets:
             return
@@ -537,10 +568,14 @@ class MapService:
         if register:
             self._remerge()
 
-    async def set_cloud_async(self, robot_id: str, points: np.ndarray) -> None:
+    async def set_cloud_async(
+        self, robot_id: str, points: np.ndarray, rgb: np.ndarray | None = None
+    ) -> None:
         """Cloud storage off the event loop; the pairing catches up in the worker."""
         async with self._ingest_lock:
-            await asyncio.to_thread(self.set_cloud, robot_id, points, register=False)
+            await asyncio.to_thread(
+                self.set_cloud, robot_id, points, register=False, rgb=rgb
+            )
             # Cheap dict work, and it must be read under the same lock that just
             # stored the cloud so a concurrent reset cannot empty it in between.
             targets = self.cloud_targets(robot_id)
@@ -576,11 +611,17 @@ class MapService:
         set_global_grid(self, meta, cells)
 
     def set_cslam_origin(
-        self, robot_id: str, x: float, y: float, yaw: float, frame: str
+        self,
+        robot_id: str,
+        x: float,
+        y: float,
+        yaw: float,
+        frame: str,
+        remerge: bool = True,
     ) -> None:
         from .cslam import set_cslam_origin
 
-        set_cslam_origin(self, robot_id, x, y, yaw, frame)
+        set_cslam_origin(self, robot_id, x, y, yaw, frame, remerge=remerge)
 
     def cslam_majority_frame(self) -> str | None:
         from .cslam import majority_frame
@@ -616,11 +657,25 @@ class MapService:
                 float(origin.get("y", 0.0)),
                 float(origin.get("yaw", 0.0)),
                 str(origin.get("frame") or ""),
+                remerge=False,
             )
         if isinstance(poses, dict):
             for robot_id, pose in poses.items():
                 if isinstance(pose, dict):
                     self.set_common_pose(str(robot_id), pose)
+        self._remerge()
+
+    def nav_grid_seq(self, robot_id: str) -> int | None:
+        """Current sequence number of ``robot_id``'s nav grid, or None if no map."""
+        with self._state_lock:
+            if (
+                robot_id in self._global_members_unlocked()
+                and self.global_grid is not None
+            ):
+                return int(self.global_map_seq)
+            if robot_id in self.robot_grids:
+                return int(self.robot_revisions.get(robot_id, 0))
+            return None
 
     def nav_grid(self, robot_id: str):
         """Occupancy in ``robot_id``'s map frame, or None if no map available.
@@ -633,11 +688,23 @@ class MapService:
         from .nav_map import warp_to_robot_frame
 
         with self._state_lock:
-            if (
+            is_global = (
                 robot_id in self._global_members_unlocked()
                 and self.global_grid is not None
-            ):
-                meta, cells = self.global_grid
+            )
+            if is_global:
+                seq = int(self.global_map_seq)
+                tf = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
+                cached = self._nav_cache.get(robot_id)
+                if (
+                    cached is not None
+                    and cached[0] == "global"
+                    and cached[1] == seq
+                    and cached[2] == tf
+                ):
+                    return cached[3], cached[4], seq
+
+                meta, cells = self.global_grid  # type: ignore[misc]
                 stored_meta = GridMeta(
                     meta.resolution,
                     meta.width,
@@ -646,13 +713,15 @@ class MapService:
                     meta.origin_y,
                 )
                 stored_cells = np.array(cells, dtype=np.int8, copy=True)
-                tf = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
-                seq = int(self.global_map_seq)
-                warped_meta, warped = warp_to_robot_frame(stored_meta, stored_cells, tf)
-                return warped_meta, warped, seq
+            else:
+                local_grid = self.robot_grids.get(robot_id)
+                if local_grid is None:
+                    return None
+                seq = int(self.robot_revisions.get(robot_id, 0))
+                cached = self._nav_cache.get(robot_id)
+                if cached is not None and cached[0] == "local" and cached[1] == seq:
+                    return cached[3], cached[4], seq
 
-            local_grid = self.robot_grids.get(robot_id)
-            if local_grid is not None:
                 meta, cells = local_grid
                 stored_meta = GridMeta(
                     meta.resolution,
@@ -662,10 +731,21 @@ class MapService:
                     meta.origin_y,
                 )
                 stored_cells = np.array(cells, dtype=np.int8, copy=True)
-                seq = int(self.robot_revisions.get(robot_id, 0))
+                self._nav_cache[robot_id] = (
+                    "local",
+                    seq,
+                    None,
+                    stored_meta,
+                    stored_cells,
+                )
                 return stored_meta, stored_cells, seq
 
-            return None
+        # For global maps, warp OUTSIDE _state_lock to avoid blocking the event loop
+        warped_meta, warped = warp_to_robot_frame(stored_meta, stored_cells, tf)
+        with self._state_lock:
+            if self.global_map_seq == seq:
+                self._nav_cache[robot_id] = ("global", seq, tf, warped_meta, warped)
+        return warped_meta, warped, seq
 
     def robot_to_world(self, robot_id: str, pose: dict[str, float]) -> dict[str, float]:
         """Transform a pose from one robot's SLAM frame into the merged frame."""
@@ -1375,15 +1455,44 @@ class MapService:
         For every world cell we compute the source cell, rather than scattering
         source cells forward — that leaves no holes when rotating.
         """
-        tx, ty, yaw = tf
-        c, s = math.cos(-yaw), math.sin(-yaw)
-        dx = self._wx - tx
-        dy = self._wy - ty
+        tx, ty, yaw = (float(tf[0]), float(tf[1]), float(tf[2]))
+        res = float(self.meta.resolution)
+
+        # Fast path: when yaw is zero (e.g. graph-mode common_to_world identity or pure translation),
+        # nearest-neighbour sampling is an exact integer slice copy.
+        if abs(yaw) < 1e-5 and abs(res - float(meta.resolution)) < 1e-6:
+            shift_x = int(round((self.meta.origin_x - tx - meta.origin_x) / res))
+            shift_y = int(round((self.meta.origin_y - ty - meta.origin_y) / res))
+            dst_col_start = max(0, -shift_x)
+            dst_col_end = min(self.meta.width, meta.width - shift_x)
+            src_col_start = dst_col_start + shift_x
+            src_col_end = dst_col_end + shift_x
+
+            dst_row_start = max(0, -shift_y)
+            dst_row_end = min(self.meta.height, meta.height - shift_y)
+            src_row_start = dst_row_start + shift_y
+            src_row_end = dst_row_end + shift_y
+
+            out = np.full(self.merged.shape, UNKNOWN, dtype=np.int8)
+            if dst_col_end > dst_col_start and dst_row_end > dst_row_start:
+                out[dst_row_start:dst_row_end, dst_col_start:dst_col_end] = cells[
+                    src_row_start:src_row_end, src_col_start:src_col_end
+                ]
+            return out
+
+        c = np.float32(math.cos(-yaw))
+        s = np.float32(math.sin(-yaw))
+        dx = self._cx[None, :] - np.float32(tx)
+        dy = self._cy[:, None] - np.float32(ty)
         rx = dx * c - dy * s
         ry = dx * s + dy * c
 
-        gx = np.floor((rx - meta.origin_x) / meta.resolution).astype(np.int64)
-        gy = np.floor((ry - meta.origin_y) / meta.resolution).astype(np.int64)
+        gx = np.floor(
+            (rx - np.float32(meta.origin_x)) / np.float32(meta.resolution)
+        ).astype(np.int32)
+        gy = np.floor(
+            (ry - np.float32(meta.origin_y)) / np.float32(meta.resolution)
+        ).astype(np.int32)
         valid = (gx >= 0) & (gx < meta.width) & (gy >= 0) & (gy < meta.height)
 
         out = np.full(self.merged.shape, UNKNOWN, dtype=np.int8)
@@ -1440,9 +1549,14 @@ class MapService:
             self.meta = GridMeta(res, new_width, new_height, new_min_x, new_min_y)
             self.merged = np.full((new_height, new_width), UNKNOWN, dtype=np.int8)
 
-            cx = self.meta.origin_x + (np.arange(new_width) + 0.5) * res
-            cy = self.meta.origin_y + (np.arange(new_height) + 0.5) * res
-            self._wx, self._wy = np.meshgrid(cx, cy)
+            self._cx = (
+                self.meta.origin_x
+                + (np.arange(new_width, dtype=np.float32) + 0.5) * res
+            ).astype(np.float32)
+            self._cy = (
+                self.meta.origin_y
+                + (np.arange(new_height, dtype=np.float32) + 0.5) * res
+            ).astype(np.float32)
 
     def _remerge(self) -> None:
         with self._merge_lock:

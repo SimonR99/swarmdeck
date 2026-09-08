@@ -15,13 +15,12 @@ Prerequisites on the robot:
   e-stop supervision.
 
 ```bash
-make deploy ROBOT=aslan                 # sensing, mapping, UI bridge
-DEPLOY_COMPOSE_PROFILES=base make deploy ROBOT=aslan  # include base driver
+make deploy ROBOT=aslan                 # full stack (base driver, sensing, SLAM, Nav2)
 ```
 
-The deployment builds the Aslan overlay. The base is intentionally excluded by
-default. Complete the common [pre-flight checks](../operations/hardware-bringup.md)
-before enabling its profile.
+The deployment builds the Aslan overlay. The Bunker base driver (`robot_stack`) starts
+up by default alongside sensing and Nav2. Complete the common [pre-flight checks](../operations/hardware-bringup.md)
+before commanding motion.
 
 ```bash
 ssh aslan 'cd /ssd/swarmdeck && docker compose --env-file .deploy/aslan.env \

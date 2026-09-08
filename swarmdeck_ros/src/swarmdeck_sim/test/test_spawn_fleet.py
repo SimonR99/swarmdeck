@@ -15,12 +15,15 @@ from spawn_fleet import (  # noqa: E402
     CHASSIS_SECTIONS,
     IDENTITY_COLORS,
     LIDAR_PROFILES,
+    ODOMETRY_PROFILES,
     PROXIMITY_SCAN_HEIGHT,
     ROBOT_PROFILES,
     LidarSpec,
     chassis_sections,
     color_for,
     lidar_spec,
+    odometry_spec,
+    odometry_types,
     render,
     robot_spec,
     robot_types,
@@ -263,6 +266,35 @@ def test_a_typo_in_robot_types_is_refused_rather_than_ignored():
 def test_an_unknown_platform_is_refused():
     with pytest.raises(ValueError, match="unknown robot profile"):
         robot_spec("wall_e")
+
+
+def test_mixed_fleet_resolves_per_robot_odometry_overrides():
+    cfg = {
+        "odometry": "fast_livo2",
+        "odometry_types": {"robot_1": "drift", "robot_2": "ekf"},
+    }
+    assert odometry_types(cfg, 3, "robot_") == ["fast_livo2", "drift", "ekf"]
+
+
+def test_odometry_spec_returns_expected_attributes():
+    spec = odometry_spec("fast_livo2")
+    assert spec.publishes_tf is True
+    assert spec.source_type == "livo"
+    assert spec.medium == "uf"
+
+    super_spec = odometry_spec("superodometry")
+    assert super_spec.publishes_tf is False
+    assert super_spec.topic == "laser_odometry"
+
+
+def test_a_typo_in_odometry_types_is_refused():
+    with pytest.raises(ValueError, match="not in this fleet"):
+        odometry_types({"odometry_types": {"robot_9": "drift"}}, 4, "robot_")
+
+
+def test_unknown_odometry_profile_is_refused():
+    with pytest.raises(ValueError, match="unknown odometry profile"):
+        odometry_spec("gps_only")
 
 
 def test_spawn_height_clears_the_floor_for_every_platform():

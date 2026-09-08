@@ -1,0 +1,4 @@
+<visual>
+  <model path="scout_mini.glb" scale="1" position="0,0,0" orientation="0,0,90" />
+  <segmentation class="8" />
+</visual>

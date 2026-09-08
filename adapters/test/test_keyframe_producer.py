@@ -253,3 +253,247 @@ def test_keyframe_carries_ground_relative_band_and_lidar_height():
     assert header_band["min_height"] == pytest.approx(0.150)
     assert header_band["max_height"] == pytest.approx(1.800)
     assert header_band["lidar_height"] == pytest.approx(0.520)
+
+
+def test_duplicate_stamps_do_not_disable_the_turn_gate():
+    """A run of unusable stamps must not leave the gate with no reference.
+
+    The gate used to adopt the current sample even when the interval was
+    unusable, so consecutive duplicate stamps replaced the only baseline the
+    next call had. A fast turn sampled that way reads as no turn at all, and
+    the gate fails open exactly when it matters.
+    """
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=math.radians(8.0))
+    # Establish a reference at 100.0, then turn 50 degrees while the stamp is
+    # stuck, and coast the last half degree once it moves again. Adopting the
+    # unusable samples leaves the final interval measuring 0.5 deg over 0.1 s,
+    # a comfortable 5 deg/s, and the gate waves through a keyframe taken in the
+    # middle of a 50 degree swing.
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
+    for i in range(1, 4):
+        u._turning_too_fast(
+            pose7_from_xy_yaw(0, 0, math.radians(-50.0 * i / 3.0)), 100.0
+        )
+    assert u.unusable_stamps == 3
+    assert u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-50.5)), 100.1)
+
+
+def test_gate_stats_report_what_the_gate_did():
+    """spun was counted and reported nowhere; a silent gate cannot be audited."""
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=math.radians(8.0))
+    for i in range(6):
+        u._turning_too_fast(
+            pose7_from_xy_yaw(0, 0, math.radians(-55.0 * i * 0.1)), 100.0 + i * 0.1
+        )
+    stats = u.gate_stats()
+    assert stats["max_yaw_rate_deg_s"] == pytest.approx(8.0, abs=1e-6)
+    assert stats["peak_yaw_rate_deg_s"] > 8.0
+    assert stats["last_yaw_rate_deg_s"] == pytest.approx(55.0, abs=0.5)
+    # Nothing was accepted here, only observed. The two must not be conflated:
+    # a fast turn seen is the gate working, a fast turn accepted is the bug.
+    assert stats["max_accepted_yaw_rate_deg_s"] == 0.0
+
+
+def test_lidar_spec_refuses_a_bare_lidar_block():
+    """Passing the lidar block instead of the fleet config used to disable the
+    turn gate, via a planar default, in a different module entirely."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(
+        0,
+        str(
+            Path(__file__).resolve().parents[2]
+            / "swarmdeck_ros"
+            / "src"
+            / "swarmdeck_sim"
+            / "scenario"
+        ),
+    )
+    from spawn_fleet import lidar_spec
+
+    assert lidar_spec({"lidar": {"profile": "vlp16"}}).rings == 17
+    with pytest.raises(ValueError, match="fleet config, not the lidar block"):
+        lidar_spec({"profile": "vlp16", "h_samples": 900})
+
+
+def test_unjudgeable_capture_is_rejected_not_waved_through():
+    """A capture the gate cannot judge must not be treated as slow enough.
+
+    Returning False on an unusable interval read as "no rate, so not too fast",
+    and the capture sailed past the only gate meant to judge it. Measured live
+    with the gate reporting its own numbers: 7 to 12 unusable stamps per robot
+    per interval, and captures accepted at 170.9 and 256.9 deg/s against an
+    8 deg/s limit, which at the simulator's 100 ms capture lag is 17 to 25
+    degrees of pose error apiece.
+    """
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=math.radians(8.0))
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
+    # Same stamp: no usable interval, so no way to know. Reject.
+    assert u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-30.0)), 100.0)
+    assert u.unusable_stamps == 1
+
+
+def test_gate_disabled_still_means_disabled():
+    """max_yaw_rate <= 0 opts out entirely, including out of the fail-closed path."""
+    from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
+
+    u = KeyframeUploader("r", "http://x", max_yaw_rate=0.0)
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, 0.0), 100.0)
+    assert not u._turning_too_fast(pose7_from_xy_yaw(0, 0, math.radians(-90.0)), 100.0)
+
+
+@pytest.mark.parametrize("repeated_stamp", [100.1, 100.0, 100.1005])
+def test_rejected_turn_cannot_be_uploaded_on_a_repeated_stamp(repeated_stamp):
+    uploader = KeyframeUploader(
+        "r",
+        "http://x",
+        min_period_s=0,
+        min_scan_change_m=0,
+        min_yaw_rad=math.radians(1),
+        max_yaw_rate=math.radians(8),
+    )
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), 100.0)
+    turned = pose7_from_xy_yaw(0, 0, math.radians(30))
+    assert not uploader.consider(_wall(), turned, 100.1)
+    assert not uploader.consider(_wall(), turned, repeated_stamp)
+    assert uploader.pending() == 1
+    assert uploader.gate_stats()["max_accepted_yaw_rate_deg_s"] <= 8
+    # A fresh scan after stopping remains usable; reject does not latch forever.
+    assert uploader.consider(_wall(), turned, 100.2)
+    assert decode_keyframe(uploader._queue[-1]).stamp == 100.2
+
+
+@pytest.mark.parametrize("stamp", [float("nan"), float("inf"), -float("inf")])
+def test_invalid_stamp_does_not_poison_the_turn_reference(stamp):
+    uploader = KeyframeUploader("r", "http://x", min_period_s=0)
+    assert not uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), stamp)
+    assert uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 0), 100)
+    assert not uploader.consider(_wall(), pose7_from_xy_yaw(0, 0, 1), 100.1)
+
+
+def test_camera_colors_follow_voxelized_wire_points():
+    from swarmdeck_protocol import Descriptor, encode_keyframe, ProtocolError
+
+    points = np.array([[1, 2, 3], [1000, 0, 0], [4, 5, 6]], dtype=np.float32)
+    colors = np.array(
+        [[255, 20, 1, 255], [0, 255, 0, 255], [148, 148, 148, 0]], dtype=np.uint8
+    )
+    descriptor = Descriptor("test", np.array([[1, 2], [3, 4]], dtype=np.uint8), 80)
+    packet = decode_keyframe(
+        encode_keyframe(
+            robot_id="r",
+            seq=1,
+            stamp=10,
+            points=points,
+            t_odom_base=pose7_from_xy_yaw(0, 0, 0),
+            descriptor=descriptor,
+            colors=colors,
+        )
+    )
+    np.testing.assert_array_equal(packet.colors, colors[[0, 2]])
+    np.testing.assert_array_equal(packet.descriptor.data, descriptor.data)
+    with pytest.raises(ProtocolError, match="colors"):
+        encode_keyframe(
+            robot_id="r",
+            seq=1,
+            stamp=10,
+            points=points,
+            t_odom_base=pose7_from_xy_yaw(0, 0, 0),
+            colors=colors[:1],
+        )
+
+
+def test_color_projection_runs_only_after_capture_gates():
+    calls = []
+
+    def colorize(points):
+        calls.append(len(points))
+        return np.tile(np.array([255, 0, 0, 255], dtype=np.uint8), (len(points), 1))
+
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=0)
+    pose = pose7_from_xy_yaw(0, 0, 0)
+    assert uploader.consider(_wall(), pose, 100, colorize=colorize)
+    packet = decode_keyframe(uploader._queue[0])
+    assert packet.colors.shape == (len(packet.points), 4)
+    assert not uploader.consider(_wall(), pose, 101, colorize=colorize)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_colors", [[], np.zeros((1, 4), dtype=np.uint8), np.zeros((1, 3))]
+)
+def test_invalid_optional_colors_do_not_drop_geometry(bad_colors):
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=0)
+    assert uploader.consider(
+        _wall(), pose7_from_xy_yaw(0, 0, 0), 100, colorize=lambda _: bad_colors
+    )
+    packet = decode_keyframe(uploader._queue[0])
+    assert len(packet.points) > 0
+    assert packet.colors is None
+
+
+def test_period_gate_updates_turn_reference_without_processing_the_cloud():
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=2)
+    wall = _wall()
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=0):
+        assert uploader.consider(wall, pose7_from_xy_yaw(0, 0, 0), 100)
+    with patch("adapters.keyframe_producer.voxel_downsample") as downsample:
+        with patch("adapters.keyframe_producer.time.monotonic", return_value=1.9):
+            assert not uploader.consider(wall, pose7_from_xy_yaw(0, 0, 0), 101.9)
+        with patch("adapters.keyframe_producer.time.monotonic", return_value=2):
+            assert not uploader.consider(
+                wall, pose7_from_xy_yaw(0, 0, math.radians(1)), 102
+            )
+        downsample.assert_not_called()
+    assert uploader.pending() == 1
+
+
+def test_ground_ring_does_not_mask_changing_walls():
+    """A flat street moves through the sensor but its near-ground ring is constant."""
+    angles = np.linspace(-math.pi, math.pi, 720, endpoint=False)
+    ground = np.column_stack(
+        (np.cos(angles), np.sin(angles), np.full(720, -0.3))
+    ).astype(np.float32)
+    walls = np.column_stack(
+        (5 * np.cos(angles), 5 * np.sin(angles), np.full(720, 0.5))
+    ).astype(np.float32)
+    first = np.vstack((ground, walls))
+    second = np.vstack((ground, walls + np.array([1.0, 0.0, 0.0], dtype=np.float32)))
+    uploader = KeyframeUploader(
+        "r0",
+        "http://backend",
+        min_period_s=0.0,
+        height_band={"floor_z": -0.3, "min_z": 0.15, "max_z": 1.8},
+    )
+    pose = pose7_from_xy_yaw(0.0, 0.0, 0.0)
+    assert uploader.consider(first, pose, 1.0)
+    packet = decode_keyframe(uploader._queue[-1])
+    assert np.any(packet.points[:, 2] < 0.0)  # Ground stays in the uploaded map.
+    assert not uploader.consider(first, pose, 2.0)
+    assert uploader.consider(second, pose, 3.0)
+    # Translating the map and pose together still represents the same observation.
+    shift = np.array([2.0, 3.0, 0.2], dtype=np.float32)
+    corrected = pose.copy()
+    corrected[:3] += shift
+    # floor_z is map-relative, so the map's ground reference moves with the gauge.
+    uploader._height_band["floor_z"] += 0.2
+    assert not uploader.consider(second + shift, corrected, 4.0)
+
+
+def test_slow_simulation_keeps_capture_period_in_sensor_time():
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=2)
+    pose = pose7_from_xy_yaw(0, 0, 0)
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=0):
+        assert uploader.consider(_wall(), pose, 100)
+    changed = _wall() + np.array([2, 0, 0])
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=10):
+        assert not uploader.consider(changed, pose, 100.5)
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=11):
+        assert uploader.consider(changed, pose, 102)

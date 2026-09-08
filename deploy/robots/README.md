@@ -30,8 +30,7 @@ helper additionally verifies its ROS data before checking backend liveness.
 `--dry-run` previews without writes; `--no-build`, `--no-reset`, `--no-up`, and
 `--no-verify` skip stages.
 
-Aslan's base driver is safety-gated behind a Compose profile:
-`DEPLOY_COMPOSE_PROFILES=base make deploy ROBOT=aslan`.
+The Bunker base driver starts up by default alongside sensing and navigation.
 
 Adding a Compose robot requires `deploy/robots/<name>.env`, a robot Compose file,
 and adapter/sensor configuration. `ROBOT=all` discovers the profile automatically.

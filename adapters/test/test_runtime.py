@@ -204,3 +204,17 @@ def test_detections_message_stamps_t_mono():
         "camera": "front",
         "items": [{"id": "a"}],
     }
+
+
+def test_exploration_state_outranks_its_navigation_goal():
+    from types import SimpleNamespace
+
+    bridge = _ProtocolBridge("adapter_ros2/0.1.0", extra_caps=["explore"])
+    bridge.mode = "nav"
+    bridge.nav_status = "active"
+    bridge.exploration = SimpleNamespace(active=True)
+    assert bridge.state()["mode"] == "explore"
+    assert bridge.state()["nav_status"] == "active"
+    bridge.exploration.active = False
+    bridge.mode = "estop"
+    assert bridge.state()["mode"] == "estop"

@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -366,9 +366,17 @@ class KeyframeUploader:
         self._last_pose: np.ndarray | None = None
         self._last_scan_signature: np.ndarray | None = None
         self._last_at = 0.0
+        self._last_capture_stamp = -math.inf
         self.dropped = 0
         self.sent = 0
         self.spun = 0
+        # Gate diagnostics. See gate_stats(): the counters exist so that a gate
+        # which is not firing is distinguishable from one with nothing to do.
+        self.unusable_stamps = 0
+        self.last_yaw_rate = 0.0
+        self.peak_yaw_rate = 0.0
+        self.accepted_yaw_rate = 0.0
+        self.max_accepted_yaw_rate = 0.0
         # Tracked on EVERY consider(), not just accepted keyframes: yaw rate
         # between two keyframes 2 s apart is an average that hides exactly the
         # brief fast turns this gate exists to catch.
@@ -381,17 +389,28 @@ class KeyframeUploader:
         points_map: np.ndarray,
         t_map_base: np.ndarray,
         stamp: float,
+        *,
+        colorize: Callable[[np.ndarray], np.ndarray | None] | None = None,
     ) -> bool:
         """Non-blocking. Returns True if a keyframe was enqueued."""
         pose = np.asarray(t_map_base, dtype=np.float64).reshape(-1)
         if pose.shape != (7,) or not np.isfinite(pose).all():
             return False
-        if self._turning_too_fast(pose, float(stamp)):
+        stamp = float(stamp)
+        if not math.isfinite(stamp):
+            self.unusable_stamps += 1
+            return False
+        if self._turning_too_fast(pose, stamp):
             self.spun += 1
             return False
         now = time.monotonic()
         if self._last_pose is not None:
-            if now - self._last_at < self.min_period_s:
+            # Bound both acquisition density and upload work. Wall time alone
+            # admits near-adjacent captures when simulation runs below real time.
+            if (
+                now - self._last_at < self.min_period_s
+                or stamp - self._last_capture_stamp < self.min_period_s
+            ):
                 return False
         pts = np.asarray(points_map)
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < self.min_points:
@@ -402,7 +421,18 @@ class KeyframeUploader:
             return False
         if base_points.shape[0] < self.min_points:
             return False
-        signature = _scan_signature(base_points)
+        signature_points = base_points
+        if self._height_band is not None:
+            # Ground returns form a nearly constant near ring as a robot moves.
+            # They must not hide changing walls in the nearest-range signature.
+            # This only filters novelty detection; the full 3D cloud is uploaded.
+            ground_z = self._height_band["floor_z"] - float(pose[2])
+            min_z = ground_z + self._height_band["min_height"]
+            max_z = ground_z + self._height_band["max_height"]
+            signature_points = base_points[
+                (base_points[:, 2] >= min_z) & (base_points[:, 2] <= max_z)
+            ]
+        signature = _scan_signature(signature_points)
         if self._last_pose is not None:
             moved = _moved(
                 self._last_pose, pose, self.min_translation_m, self.min_yaw_rad
@@ -421,6 +451,19 @@ class KeyframeUploader:
                     return False
             elif not moved:
                 return False
+
+        # Project only accepted, voxel-reduced scans. Missing camera data must
+        # not change geometry, capture timing, or odometry admission.
+        colors = None
+        if colorize is not None:
+            try:
+                colors = colorize(base_points)
+                if colors is not None and (
+                    colors.dtype != np.uint8 or colors.shape != (len(base_points), 4)
+                ):
+                    colors = None
+            except (ValueError, TypeError, AttributeError):
+                colors = None
 
         # The wire cloud is in the base frame at capture. Carry the floor plane
         # in that same frame so the renderer can apply the physical band per
@@ -445,6 +488,7 @@ class KeyframeUploader:
                 points=base_points,
                 t_odom_base=pose,
                 session=self.session,
+                colors=colors,
                 **height_kwargs,
             )
         except ProtocolError:
@@ -459,29 +503,71 @@ class KeyframeUploader:
             self._last_pose = pose
             self._last_scan_signature = signature
             self._last_at = now
+            self._last_capture_stamp = stamp
+            # The rate this capture was actually taken at. Distinct from the
+            # peak observed, which is above the limit on any run where the
+            # robot turns and says only that the gate had work to do. What
+            # matters is whether anything got THROUGH while turning, because
+            # that is what a rotated copy in the map is made of, and the size
+            # of the error is this rate times the sensor's capture lag.
+            self.accepted_yaw_rate = self.last_yaw_rate
+            self.max_accepted_yaw_rate = max(
+                self.max_accepted_yaw_rate, self.last_yaw_rate
+            )
         return True
 
     def _turning_too_fast(self, pose: np.ndarray, stamp: float) -> bool:
         """Yaw rate since the previous scan, against ``max_yaw_rate``.
 
-        Always records the current sample before returning, so the estimate
-        stays anchored to the most recent scan even when a capture is rejected;
+        Records the current sample before returning, so the estimate stays
+        anchored to the most recent scan even when a capture is rejected;
         otherwise a run of fast frames would be compared against an ever more
         stale reference and the rate would read low exactly when it is highest.
+
+        The exception is a stamp that yields no usable interval. Adopting the
+        current sample there would discard the only reference the next call
+        has, so a run of duplicate or out-of-order stamps would silently
+        disable the gate for as long as it lasted. Keep the old reference and
+        reject that observation. In particular, a duplicate of a rejected
+        turning scan must not get another chance to pass with dt=0. Keeping
+        the reference lets the next fresh scan resume rate estimation.
         """
         yaw = math.atan2(
             2.0 * (pose[6] * pose[5] + pose[3] * pose[4]),
             1.0 - 2.0 * (pose[4] * pose[4] + pose[5] * pose[5]),
         )
         previous_yaw, previous_stamp = self._prev_yaw, self._prev_stamp
-        self._prev_yaw, self._prev_stamp = yaw, stamp
-        if self.max_yaw_rate <= 0.0 or previous_yaw is None or previous_stamp is None:
+        if self.max_yaw_rate <= 0.0:
+            self._prev_yaw, self._prev_stamp = yaw, stamp
+            return False
+        if previous_yaw is None or previous_stamp is None:
+            self._prev_yaw, self._prev_stamp = yaw, stamp
             return False
         dt = stamp - previous_stamp
         if dt <= 1e-3:
-            return False  # duplicate or out-of-order stamp: no usable rate
+            # Reject unjudgeable observations without losing the last valid
+            # reference. A repeated rejected scan must not bypass the gate.
+            self.unusable_stamps += 1
+            return True
+        self._prev_yaw, self._prev_stamp = yaw, stamp
         delta = abs((yaw - previous_yaw + math.pi) % (2 * math.pi) - math.pi)
-        return (delta / dt) > self.max_yaw_rate
+        rate = delta / dt
+        self.last_yaw_rate = rate
+        self.peak_yaw_rate = max(self.peak_yaw_rate, rate)
+        return rate > self.max_yaw_rate
+
+    def gate_stats(self) -> dict[str, float]:
+        """On-demand capture counters; no logging or formatting on the scan path."""
+        return {
+            "sent": float(self.sent),
+            "dropped": float(self.dropped),
+            "spun": float(self.spun),
+            "unusable_stamps": float(self.unusable_stamps),
+            "last_yaw_rate_deg_s": math.degrees(self.last_yaw_rate),
+            "peak_yaw_rate_deg_s": math.degrees(self.peak_yaw_rate),
+            "max_accepted_yaw_rate_deg_s": math.degrees(self.max_accepted_yaw_rate),
+            "max_yaw_rate_deg_s": math.degrees(self.max_yaw_rate),
+        }
 
     def upload_one(self) -> bool:
         """Blocking POST of at most one queued blob. Safe for an executor."""

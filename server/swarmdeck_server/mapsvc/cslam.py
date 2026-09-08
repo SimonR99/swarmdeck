@@ -87,7 +87,13 @@ def set_global_grid(service: Any, meta: GridMeta, cells: np.ndarray) -> None:
 
 
 def set_cslam_origin(
-    service: Any, robot_id: str, x: float, y: float, yaw: float, frame: str
+    service: Any,
+    robot_id: str,
+    x: float,
+    y: float,
+    yaw: float,
+    frame: str,
+    remerge: bool = True,
 ) -> None:
     """Record a graph-provided robot transform and cluster frame."""
     with service._state_lock:
@@ -97,7 +103,8 @@ def set_cslam_origin(
         service.transforms[robot_id] = (x, y, yaw)
         if service.reference is None:
             service.reference = robot_id
-    service._remerge()
+    if remerge:
+        service._remerge()
 
 
 def majority_frame(service: Any) -> str | None:

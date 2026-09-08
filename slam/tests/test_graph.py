@@ -772,11 +772,9 @@ def test_t_world_map_beats_the_single_keyframe_snapshot_on_a_drifting_frame() ->
 def test_t_world_map_never_loses_to_the_snapshot_it_replaced() -> None:
     """The fit is accepted only when it actually explains the poses better.
 
-    A trajectory-wide fit is the right default but not unconditionally
-    better: a robot that has barely moved, or driven straight down a
-    corridor, leaves the fit free to rotate about the travel axis. Selecting
-    on residual means this change can never be a regression for any fixture,
-    which is what makes it safe to apply to every robot unconditionally.
+    For an observable trajectory, fitting still must improve position error.
+    The separate observability regressions cover stationary and straight paths;
+    position error alone cannot detect an arbitrary rotation about the path.
     """
     _scene, robots = two_robot_fleet(seed=3)
     result = _build_graph(robots, _find_real_closures(robots)).optimize()
@@ -866,3 +864,58 @@ def test_pose_priors_keep_a_working_slam_trajectory_from_folding() -> None:
     ).optimize()
     assert max_move(pinned) < 0.5
     assert max_move(pinned) <= max_move(free) + 1e-6
+
+
+@pytest.mark.parametrize("shape", ["line", "narrow", "stationary", "target_line"])
+def test_frame_fit_rejects_unobservable_tilt(shape):
+    """Low position error does not establish the orientation of a narrow path."""
+    x = np.linspace(-5, 5, 20)
+    y = 0.002 * np.sin(x)
+    if shape == "line":
+        y *= 0
+    if shape == "stationary":
+        x *= 0.001
+    if shape == "target_line":
+        y = np.sin(x)
+    source = np.column_stack((x, y, np.zeros_like(x)))
+    angle = np.deg2rad(65)
+    rotation = np.array(
+        [
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)],
+        ]
+    )
+    target = source @ rotation.T
+    if shape == "target_line":
+        target[:, 1:] = 0
+    graph = GtsamPoseGraph()
+    poses = {}
+    for seq, (a, b) in enumerate(zip(source, target)):
+        key = KeyframeId("robot", seq)
+        onboard = se3_identity()
+        onboard[:3, 3] = a
+        graph.add_keyframe(Keyframe(key, float(seq), onboard, np.empty((0, 3))))
+        poses[key] = se3_identity()
+        poses[key][:3, 3] = b
+    result = graph._t_world_trajectory(poses)
+    snapshot = poses[key] @ se3_inverse(onboard)
+    np.testing.assert_allclose(result[key.trajectory], snapshot, atol=1e-12)
+
+
+def test_frame_fit_accepts_observable_planar_trajectory():
+    """Normal planar motion determines a full rotation; do not require 3D rank."""
+    graph = GtsamPoseGraph()
+    poses = {}
+    angle = 0.3
+    frame = se3_identity()
+    frame[:2, :2] = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+    frame[:3, 3] = [2, -3, 0.2]
+    for seq, xy in enumerate([(0, 0), (3, 0), (3, 4), (0, 4)]):
+        key = KeyframeId("robot", seq)
+        onboard = se3_identity()
+        onboard[:2, 3] = xy
+        graph.add_keyframe(Keyframe(key, float(seq), onboard, np.empty((0, 3))))
+        poses[key] = frame @ onboard
+    fitted = graph._best_t_world_map(list(poses), poses, se3_identity())
+    np.testing.assert_allclose(fitted, frame, atol=1e-12)

@@ -45,10 +45,15 @@ RUN mkdir -p /opt/filament-sdk \
 # drifting odometry sensors, and the bunker / bunker-mini / scout-mini / spot
 # robot plugins. Pinned, because a moving simulator is not a baseline.
 ARG ARGOS_REPO=https://github.com/beltrame/argos3.git
-# Pinned to the commit that added the bunker, scout-mini and spot entities.
+# Pinned to the commit that made drift odometry start-relative, matching the
+# external estimator. Before it, `odometry:=drift` reported arena coordinates
+# while `odometry:=fast_livo2` reported start-relative ones, so the start-pose
+# hints in configs/ landed twice and the merged map came out rotated.
 # A branch name here would mean the simulator changes under the stack without
-# anything in this repository recording that it did.
-ARG ARGOS_REF=da70805238285772405b4a4315e65970b69857ce
+# anything in this repository recording that it did. Keep this and the default
+# in deploy/compose/docker-compose.yml the same: they used to disagree, and the
+# compose value silently won every build made through Compose.
+ARG ARGOS_REF=c236a40f
 RUN git clone "${ARGOS_REPO}" /src/argos3 \
     && git -C /src/argos3 checkout "${ARGOS_REF}"
 
@@ -110,9 +115,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libfreeimage3 libfreeimageplus3 \
       liblua5.3-0 \
       libsdl2-2.0-0 \
-      mesa-vulkan-drivers libvulkan1 vulkan-tools \
+      mesa-vulkan-drivers libvulkan1 vulkan-tools libegl1 \
       libgomp1 \
       python3-minimal \
+    && mkdir -p /etc/vulkan/icd.d /usr/share/glvnd/egl_vendor.d \
+    && echo '{"file_format_version":"1.0.1","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3"}}' > /etc/vulkan/icd.d/nvidia_icd.json \
+    && echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/local/bin/argos3 /usr/local/bin/argos3

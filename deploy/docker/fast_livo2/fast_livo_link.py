@@ -93,8 +93,8 @@ def recv_exactly(sock: socket.socket, n: int) -> bytes | None:
     return b"".join(chunks)
 
 
-def png_encode_rgb(w: int, h: int, rgb: bytes, bgr: bool = True) -> bytes:
-    """Lossless PNG encoder for raw RGB/BGR frame buffers."""
+def png_encode_rgb(w: int, h: int, rgb: bytes, bgr: bool = False) -> bytes:
+    """Encode RGB pixels as PNG; ``bgr=True`` accepts BGR input instead."""
     if bgr:
         buf = bytearray(rgb)
         buf[0::3], buf[2::3] = buf[2::3], buf[0::3]
@@ -175,8 +175,12 @@ class RobotIO:
     def _stamp_ns(header) -> int:
         return header.stamp.sec * 1_000_000_000 + header.stamp.nanosec
 
-    def _offer(self, stamp_ns: int, pos, quat, twist):
-        if self.estimate is None or stamp_ns >= self.estimate[0]:
+    def _offer(self, stamp_ns: int, pos, quat, twist, *, replace_equal=True):
+        if (
+            self.estimate is None
+            or stamp_ns > self.estimate[0]
+            or (replace_equal and stamp_ns == self.estimate[0])
+        ):
             self.estimate = (stamp_ns, pos, quat, twist)
 
     def on_odometry(self, msg: Odometry):
@@ -191,6 +195,8 @@ class RobotIO:
         )
 
     def on_path(self, msg: Path):
+        # Path is a pose-only fallback: it must not erase measured velocity
+        # when odometry for the same timestamp has already arrived.
         if not msg.poses:
             return
         last = msg.poses[-1]
@@ -198,7 +204,11 @@ class RobotIO:
         q = last.pose.orientation
         stamp = self._stamp_ns(last.header) or self._stamp_ns(msg.header)
         self._offer(
-            stamp, (p.x, p.y, p.z), (q.w, q.x, q.y, q.z), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            stamp,
+            (p.x, p.y, p.z),
+            (q.w, q.x, q.y, q.z),
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            replace_equal=False,
         )
 
 
@@ -353,28 +363,31 @@ class FastLivoLink(Node):
         sec: int,
         nanosec: int,
     ):
-        # 1. Publish CompressedImage (bgr8; png compressed)
+        # Compress only for an active subscriber. PNG stores RGB pixels;
+        # swapping to BGR here reverses red/blue when standard decoders read it.
         img_c = CompressedImage()
         img_c.header.stamp.sec = sec
         img_c.header.stamp.nanosec = nanosec
         img_c.header.frame_id = pubs.frame_id
-        img_c.format = "bgr8; png compressed bgr8"
-        img_c.data = png_encode_rgb(w, h, rgb, bgr=True)
-        pubs.color_compressed.publish(img_c)
+        if pubs.color_compressed.get_subscription_count():
+            img_c.format = "rgb8; png compressed rgb8"
+            img_c.data = png_encode_rgb(w, h, rgb)
+            pubs.color_compressed.publish(img_c)
 
         # 2. Publish raw Image
-        img_raw = Image()
-        img_raw.header = img_c.header
-        img_raw.width = w
-        img_raw.height = h
-        img_raw.encoding = "bgr8"
-        img_raw.is_bigendian = 0
-        img_raw.step = w * 3
-        # Swap RGB -> BGR
-        bgr_buf = bytearray(rgb)
-        bgr_buf[0::3], bgr_buf[2::3] = bgr_buf[2::3], bgr_buf[0::3]
-        img_raw.data = bytes(bgr_buf)
-        pubs.color_raw.publish(img_raw)
+        if pubs.color_raw.get_subscription_count():
+            img_raw = Image()
+            img_raw.header = img_c.header
+            img_raw.width = w
+            img_raw.height = h
+            img_raw.encoding = "bgr8"
+            img_raw.is_bigendian = 0
+            img_raw.step = w * 3
+            # Swap RGB -> BGR
+            bgr_buf = bytearray(rgb)
+            bgr_buf[0::3], bgr_buf[2::3] = bgr_buf[2::3], bgr_buf[0::3]
+            img_raw.data = bytes(bgr_buf)
+            pubs.color_raw.publish(img_raw)
 
         # 3. Publish CameraInfo
         fy = h / (2.0 * math.tan(math.radians(fov) / 2.0))

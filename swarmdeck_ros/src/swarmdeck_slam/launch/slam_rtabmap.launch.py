@@ -261,6 +261,12 @@ def generate_launch_description() -> LaunchDescription:
                 "is unaffected either way.",
             ),
             DeclareLaunchArgument("range_max", default_value="30.0"),
+            DeclareLaunchArgument(
+                "scan_from_cloud",
+                default_value="true",
+                description="Derive <ns>/scan from the 3D cloud. Set to false if "
+                "the backend bridge (e.g. ARGoS) publishes <ns>/scan directly.",
+            ),
             # Nav2's costmap observation sources are LaserScan topics, so
             # <ns>/scan must exist even though SLAM works from the full cloud.
             # `flatten`, not `slice`: nothing here needs a planar slice any more,
@@ -272,6 +278,7 @@ def generate_launch_description() -> LaunchDescription:
                         "/launch/cloud_to_scan.launch.py",
                     ]
                 ),
+                condition=IfCondition(LaunchConfiguration("scan_from_cloud")),
                 launch_arguments={
                     "namespace": ns,
                     "use_sim_time": use_sim,

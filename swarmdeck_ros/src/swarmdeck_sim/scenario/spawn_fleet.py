@@ -17,9 +17,30 @@ import sys
 import tempfile
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Mapping
-
 import yaml
+
+try:
+    from swarmdeck_protocol import (
+        DEFAULT_SIM_ODOMETRY,
+        ODOMETRY_PROFILES,
+        OdometrySpec,
+        get_odometry_spec,
+        resolve_odometry_types,
+    )
+except ImportError:
+    _PROTOCOL = Path(__file__).resolve().parents[5] / "adapters" / "protocol"
+    if str(_PROTOCOL) not in sys.path:
+        sys.path.insert(0, str(_PROTOCOL))
+    from swarmdeck_protocol import (
+        DEFAULT_SIM_ODOMETRY,
+        ODOMETRY_PROFILES,
+        OdometrySpec,
+        get_odometry_spec,
+        resolve_odometry_types,
+    )
+
+odometry_spec = get_odometry_spec
+odometry_types = resolve_odometry_types
 
 COLORS = [
     "0.22 0.74 0.97",  # robot_0
@@ -446,6 +467,21 @@ def lidar_spec(
     ring count on top of whichever profile is in force.
     """
     fleet_cfg = fleet_cfg or {}
+    # A bare lidar block is a caller error, not a fleet that has no lidar, and
+    # the two are otherwise indistinguishable here: `lidar` is missing either
+    # way, so the mis-shaped call falls through to DEFAULT_LIDAR_PROFILE. That
+    # default is planar, and a planar spec is not a harmless approximation
+    # downstream: adapter_sim reads `rings == 1` as "instantaneous scan, no
+    # motion skew possible" and disables its turn-rate gate on the strength of
+    # it. One wrong argument shape therefore turns off a safety check, silently,
+    # somewhere else entirely. Refuse instead.
+    if "lidar" not in fleet_cfg and (
+        {"profile", "h_samples", "rings", "vfov", "range_max"} & set(fleet_cfg)
+    ):
+        raise ValueError(
+            "lidar_spec() takes the fleet config, not the lidar block itself: "
+            f"got keys {sorted(fleet_cfg)}. Pass {{'lidar': {{...}}}}."
+        )
     block = dict(fleet_cfg.get("lidar") or {})
     name = block.pop("profile", DEFAULT_LIDAR_PROFILE)
     if name not in LIDAR_PROFILES:

@@ -1,0 +1,4 @@
+<visual>
+  <model path="spot.glb" scale="1" position="0,0,0" orientation="0,0,90" />
+  <segmentation class="9" />
+</visual>

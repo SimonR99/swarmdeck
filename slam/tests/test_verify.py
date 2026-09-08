@@ -264,7 +264,9 @@ def test_true_inter_robot_pair_is_accepted_and_accurate() -> None:
     truth = _true_relative_pose(alpha, source_kf, beta, target_kf)
     yaw_prior = _exact_yaw_prior(truth) + math.radians(8.0)
 
-    edge = verify_candidate(source_kf, target_kf, yaw_prior)
+    diagnostics = {}
+    edge = verify_candidate(source_kf, target_kf, yaw_prior, diagnostics=diagnostics)
+    assert diagnostics == {"accepted": 1}
 
     assert edge is not None
     assert edge.kind is EdgeKind.INTER_LOOP
@@ -435,8 +437,16 @@ def test_too_few_points_is_rejected() -> None:
     _, robots = two_robot_fleet(seed=0)
     normal_kf = robots[0].keyframes[0]
 
-    assert verify_candidate(sparse_kf, normal_kf, yaw_prior=0.0) is None
-    assert verify_candidate(normal_kf, sparse_kf, yaw_prior=0.0) is None
+    diagnostics = {}
+    assert (
+        verify_candidate(sparse_kf, normal_kf, yaw_prior=0.0, diagnostics=diagnostics)
+        is None
+    )
+    assert (
+        verify_candidate(normal_kf, sparse_kf, yaw_prior=0.0, diagnostics=diagnostics)
+        is None
+    )
+    assert diagnostics == {"too_few_points": 2}
 
 
 # --------------------------------------------------------------------------- #

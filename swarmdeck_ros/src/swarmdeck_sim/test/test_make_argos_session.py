@@ -134,7 +134,7 @@ def test_robots_spawn_on_the_floor_at_their_configured_poses(tree, cfg):
         x, y, z = (float(v) for v in body.get("position").split(","))
         assert x == pytest.approx(pose["x"], abs=1e-3)
         assert y == pytest.approx(pose["y"], abs=1e-3)
-        assert 0.0 <= z <= 0.05
+        assert z == pytest.approx(pose.get("z", 0.02))
         yaw, _p, _r = (float(v) for v in body.get("orientation").split(","))
         assert yaw == pytest.approx(math.degrees(pose["yaw"]), abs=1e-2)
 
@@ -185,7 +185,7 @@ def test_physics_collides_with_the_floorless_copy_of_the_world(tree):
     assert mesh.get("file") == str(maw.collision_path(Path(prop.get("model"))))
 
 
-def test_every_detection_target_is_both_collidable_and_visible(tree):
+def test_only_large_detection_targets_are_collidable(tree):
     """A prop with no mesh is driven through; a mesh with no prop is invisible
     to the cameras and to the photorealistic lidar, which raytrace the render
     scene rather than the collision geometry."""
@@ -208,7 +208,9 @@ def test_every_detection_target_is_both_collidable_and_visible(tree):
 
     world_props = {m for m in props if str(maw.collision_path(Path(m))) == world}
     assert len(world_props) == 1, world_props
-    assert set(meshes) == set(props) - world_props
+    small = {m for m in props if Path(m).stem in mas.NONBLOCKING_TARGET_CLASSES}
+    assert small
+    assert set(meshes) == set(props) - world_props - small
     for model, mesh in meshes.items():
         for attr in ("position", "orientation", "scale"):
             assert mesh.get(attr) == props[model].get(attr), (model, attr)
@@ -313,6 +315,52 @@ def test_diagnostics_mode_drops_the_estimator_entirely(tree):
     assert diag.find("./media/external_estimator") is None
     for block in controllers(diag).values():
         assert block.find("./sensors/odometry").get("implementation") == "drift"
+
+
+def test_heterogeneous_odometry_per_robot(tmp_path):
+    """A fleet with mixed odometry must configure each controller independently
+    and register only Fast-LIVO2 robots on the external estimator medium."""
+    cfg = yaml.safe_load(CONFIG.read_text())
+    cfg["fleet"]["odometry"] = "fast_livo2"
+    cfg["fleet"]["odometry_types"] = {
+        "robot_1": "drift",
+        "robot_3": "drift",
+    }
+    path = tmp_path / "mixed_odom.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+
+    xml = mas.generate_argos_xml(path)
+    tree = ElementTree.fromstring(xml)
+
+    ctrls = controllers(tree)
+    # robot_0 and robot_2 have Fast-LIVO2 (external, uf)
+    assert (
+        ctrls["robot_0_ctrl"].find("./sensors/odometry").get("implementation")
+        == "external"
+    )
+    assert ctrls["robot_0_ctrl"].find("./sensors/odometry").get("medium") == "uf"
+    assert (
+        ctrls["robot_2_ctrl"].find("./sensors/odometry").get("implementation")
+        == "external"
+    )
+    assert ctrls["robot_2_ctrl"].find("./sensors/odometry").get("medium") == "uf"
+
+    # robot_1 and robot_3 have synthetic drift
+    assert (
+        ctrls["robot_1_ctrl"].find("./sensors/odometry").get("implementation")
+        == "drift"
+    )
+    assert ctrls["robot_1_ctrl"].find("./sensors/odometry").get("medium") is None
+    assert (
+        ctrls["robot_3_ctrl"].find("./sensors/odometry").get("implementation")
+        == "drift"
+    )
+    assert ctrls["robot_3_ctrl"].find("./sensors/odometry").get("medium") is None
+
+    # external_estimator must list ONLY robot_0 and robot_2
+    ext = tree.find("./media/external_estimator")
+    assert ext is not None
+    assert set(ext.get("robots").split(",")) == {"robot_0", "robot_2"}
 
 
 # ------------------------------------------------------------------- refusals
@@ -421,7 +469,7 @@ def test_bistro_scenery_and_lighting(bistro_tree):
 
 
 def test_bistro_robot_spawn_poses(bistro_tree, bistro_cfg):
-    """Robots spawn at their designated positions along the 141 m Bistro street tour."""
+    """Robots deploy together with clearance above the uneven Bistro street."""
     starts = bistro_cfg["map"]["start_poses"]
     arena = bistro_tree.find("arena")
     for rid, pose in starts.items():
@@ -429,7 +477,7 @@ def test_bistro_robot_spawn_poses(bistro_tree, bistro_cfg):
         x, y, z = (float(v) for v in body.get("position").split(","))
         assert x == pytest.approx(pose["x"], abs=1e-3)
         assert y == pytest.approx(pose["y"], abs=1e-3)
-        assert 0.0 <= z <= 0.05
+        assert z == pytest.approx(pose.get("z", 0.02))
         yaw, _p, _r = (float(v) for v in body.get("orientation").split(","))
         assert yaw == pytest.approx(math.degrees(pose["yaw"]), abs=1e-2)
 
@@ -447,3 +495,154 @@ def test_bistro_3robot_dev_config():
     arena = tree.find("arena")
     for platform in types:
         assert arena.findall(f"./{platform}"), platform
+
+
+def test_system_threads_matches_default_or_override():
+    # default is 0 for Vulkan thread safety
+    xml = mas.generate_argos_xml(CONFIG)
+    tree = ElementTree.fromstring(xml)
+    system = tree.find("./framework/system")
+    assert system is not None
+    assert int(system.get("threads")) == 0
+
+    # explicit override
+    xml_override = mas.generate_argos_xml(CONFIG, threads=2)
+    tree_override = ElementTree.fromstring(xml_override)
+    system_override = tree_override.find("./framework/system")
+    assert int(system_override.get("threads")) == 2
+
+
+def test_collision_applies_axis_conversion_exactly_once(tree, bistro_tree):
+    """Jolt defaults y_up=true; copying the prop roll then rotates twice."""
+    import numpy as np
+
+    for scene in (tree, bistro_tree):
+        props = scene.findall("./media/photorealism/scenery/prop")
+        for mesh in scene.findall("./arena/mesh"):
+            assert mesh.get("y_up") == "false"
+            candidates = [
+                p
+                for p in props
+                if p.get("position") == mesh.get("position")
+                and p.get("orientation") == mesh.get("orientation")
+            ]
+            assert candidates
+            # An asymmetric Y-up point must land in the same Z-up location.
+            point = np.array([2.0, 3.0, 5.0])
+            roll = math.radians(float(mesh.get("orientation").split(",")[2]))
+            rotation = np.array(
+                [
+                    [1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)],
+                ]
+            )
+            np.testing.assert_allclose(rotation @ point, [2.0, -5.0, 3.0], atol=1e-6)
+    assert bistro_tree.find("./physics_engines/jolt/floor") is None
+    assert tree.find("./physics_engines/jolt/floor") is not None
+
+
+def test_bistro_deployment_is_compact_and_separated(bistro_cfg):
+    from itertools import combinations
+
+    poses = list(bistro_cfg["map"]["start_poses"].values())
+    for a, b in combinations(poses, 2):
+        distance = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
+        assert 2 <= distance < 3
+        assert a["yaw"] == b["yaw"]
+
+
+def test_robot_visuals_are_packaged_and_selected(tree, bistro_tree, tmp_path):
+    import json
+    import struct
+    import make_robot_visuals as visuals
+
+    for scene in (tree, bistro_tree):
+        assets = Path(scene.find("./media/photorealism").get("asset_path"))
+        for name, build in [
+            ("bunker", visuals.bunker),
+            ("scout_mini", visuals.scout_mini),
+            ("spot", visuals.spot),
+        ]:
+            blob = (assets / (name + ".glb")).read_bytes()
+            magic, version, size, json_length = struct.unpack_from("<4I", blob)
+            assert magic == 0x46546C67 and version == 2 and size == len(blob)
+            doc = json.loads(blob[20 : 20 + json_length])
+            assert len(doc["materials"]) <= 6
+            assert (
+                sum(
+                    doc["accessors"][p["indices"]]["count"] // 3
+                    for p in doc["meshes"][0]["primitives"]
+                )
+                < 3000
+            )
+            model = build()
+            regenerated = tmp_path / (name + ".glb")
+            model.export_glb(regenerated)
+            assert regenerated.read_bytes() == blob
+            # Wound surface normals must agree with triangle orientation.
+            import numpy as np
+
+            for positions, normals, indices in model._groups.values():
+                points = np.array(positions).reshape(-1, 3)
+                triangles = points[np.array(indices).reshape(-1, 3)]
+                cross = np.cross(
+                    triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+                )
+                assert np.all(
+                    np.sum(cross * np.array(normals).reshape(-1, 3)[::3], axis=1) > 0
+                )
+
+
+def test_targets_stay_upright_when_rotated(tree, bistro_tree):
+    import numpy as np
+
+    for scene in (tree, bistro_tree):
+        for mesh in scene.findall("./arena/mesh"):
+            if not mesh.get("id").startswith("target_"):
+                continue
+            z, y, x = map(math.radians, map(float, mesh.get("orientation").split(",")))
+            rx = np.array(
+                [
+                    [1, 0, 0],
+                    [0, math.cos(x), -math.sin(x)],
+                    [0, math.sin(x), math.cos(x)],
+                ]
+            )
+            ry = np.array(
+                [
+                    [math.cos(y), 0, math.sin(y)],
+                    [0, 1, 0],
+                    [-math.sin(y), 0, math.cos(y)],
+                ]
+            )
+            rz = np.array(
+                [
+                    [math.cos(z), -math.sin(z), 0],
+                    [math.sin(z), math.cos(z), 0],
+                    [0, 0, 1],
+                ]
+            )
+            # glTF up must stay world up under ARGoS's actual Rx*Ry*Rz order.
+            np.testing.assert_allclose(rx @ ry @ rz @ [0, 1, 0], [0, 0, 1], atol=1e-6)
+
+
+def test_bistro_duck_is_raised_above_brick_road(bistro_tree):
+    mesh = bistro_tree.find('./arena/mesh[@id="target_0_rubber_duck"]')
+    z = float(mesh.get("position").split(",")[2])
+    assert 0.075 < z < 0.09
+    prop = next(
+        p
+        for p in bistro_tree.findall("./media/photorealism/scenery/prop")
+        if p.get("position") == mesh.get("position")
+    )
+    assert prop.get("orientation") == mesh.get("orientation")
+
+
+def test_bistro_small_props_remain_visible_without_static_colliders(bistro_tree):
+    meshes = bistro_tree.findall("./arena/mesh")
+    props = bistro_tree.findall("./media/photorealism/scenery/prop")
+    for name in mas.NONBLOCKING_TARGET_CLASSES:
+        assert any(Path(p.get("model")).stem == name for p in props)
+        assert not any(Path(m.get("file")).stem == name for m in meshes)
+    assert sum("rubber_duck" in m.get("file") for m in meshes) == 2

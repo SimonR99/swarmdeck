@@ -19,7 +19,11 @@
     Trash2,
     Wifi
   } from 'lucide-svelte';
-  import Map3D from '$lib/components/map3d/Map3D.svelte';
+  let Map3D = $state<typeof import('../map3d/Map3D.svelte').default | null>(null);
+  let map3DLoadError = $state('');
+  $effect(() => {
+    if(show3D && !Map3D) import('../map3d/Map3D.svelte').then(module=>Map3D=module.default).catch(error=>map3DLoadError=String(error));
+  });
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { session } from '$lib/stores/session.svelte';
@@ -50,18 +54,17 @@
     centreSelected: () => void;
     zoomBy: (factor: number) => void;
     fitCloud: () => void;
+    rotateBy?: (angle: number) => void;
+    resetRotation?: () => void;
   } | null>(null);
   let view = $state({ scale: 0.55, tx: 0, ty: 0, rotation: 0, initialised: false });
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
-  // `?view=3d` opens straight into the point cloud. The frontend already takes
-  // `?mock=1&robots=4`, so URL-driven view state is the existing idiom here —
-  // and it is the only way to reach the 3D view from a headless browser, which
-  // is how it gets verified.
+  // Open the tactical map directly; Layers > 3D cloud switches back to 2D.
+  // Preserve the explicit 2D URL override for lightweight saved views.
   let show3D = $state(
-    typeof location !== 'undefined' &&
-      new URLSearchParams(location.search).get('view') === '3d'
+    typeof location === 'undefined' || new URLSearchParams(location.search).get('view') !== '2d'
   );
   let showGrid = $state(true);
   let showTrails = $state(true);
@@ -214,6 +217,11 @@
   }
 
   function rotateBy(angleDelta: number, ax?: number, ay?: number) {
+    if (show3D) {
+      map3D?.rotateBy?.(angleDelta);
+      follow = false;
+      return;
+    }
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const px = ax ?? rect.width / 2;
@@ -229,6 +237,10 @@
   }
 
   function resetRotation() {
+    if (show3D) {
+      map3D?.resetRotation?.();
+      return;
+    }
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     rotateBy(-view.rotation, rect.width / 2, rect.height / 2);
@@ -266,6 +278,7 @@
 
   // Canvas layers live in mapLayers.ts; this component owns only viewport state.
   function draw() {
+    if(show3D || document.hidden) return;
     if (!canvas || !host) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -598,12 +611,31 @@
     The 3D view sits over the 2D one rather than replacing it. 2D stays the
     operator's working surface — it is where goals are set and where the fleet
     is supervised — and 3D is a way of inspecting what the robots have actually
-    built. Mounted only while shown, so a fleet on 2D SLAM never pays for a
-    WebGL context it has no cloud to fill.
+    built. Load it on first use, then keep the bounded scene while 2D is shown.
+    Its active prop pauses rendering and requests without losing the map.
   -->
-  {#if show3D}
-    <div class="absolute inset-0 z-10">
-      <Map3D bind:this={map3D} active={show3D} {follow} />
+  {#if show3D || Map3D}
+    <div class="absolute inset-0 z-10" class:hidden={!show3D} aria-hidden={!show3D}>
+      {#if Map3D}
+      <Map3D
+        bind:this={map3D}
+        active={show3D}
+        {follow}
+        {showGrid}
+        {showTrails}
+        {showLabels}
+        {showSensors}
+        {showPlans}
+        {showNetwork}
+        {showCostmap}
+        {costmapKind}
+        {trails}
+        onCameraInteraction={() => (follow = false)}
+        onCursorChange={(coords) => (cursorWorld = coords)}
+      />
+      {:else}
+        <div class="p-4 text-sm text-fg-muted" role="status">{map3DLoadError || 'Loading 3D map…'}</div>
+      {/if}
     </div>
   {/if}
   <div bind:this={host} class="absolute inset-0">
@@ -726,6 +758,7 @@
         </div>
         <button
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
+          aria-pressed={show3D}
           onclick={() => (show3D = !show3D)}
         >
           <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D cloud</span>

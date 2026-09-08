@@ -334,7 +334,8 @@ def se3_kabsch(source_points: np.ndarray, target_points: np.ndarray) -> np.ndarr
     driven a straight corridor is collinear, and that is a real trajectory
     shape rather than a degenerate one. Note that a collinear fit leaves
     rotation about the travel axis unconstrained: the result is *a* best fit,
-    not a unique one, so callers that care should check the residual.
+    not a unique one. Callers publishing a frame must check observability;
+    translation residual alone cannot detect this arbitrary rotation.
 
     Raises ``ValueError`` for fewer than 2 points, where there is nothing to
     determine a rotation from.
@@ -424,6 +425,7 @@ class Keyframe:
     min_height: float | None = None
     max_height: float | None = None
     lidar_height: float | None = None
+    colors: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.t_odom_base.shape != (4, 4):
