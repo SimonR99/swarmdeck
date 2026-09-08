@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { rebaseViewport } from './mapViewport';
   import {
     Box,
     Compass,
@@ -308,18 +309,8 @@
         centreOnFleet();
       }
     } else if (view.initialised && lastRenderedInfo && info) {
-      if (
-        lastRenderedInfo.origin.x !== info.origin.x ||
-        lastRenderedInfo.origin.y !== info.origin.y ||
-        lastRenderedInfo.width !== info.width ||
-        lastRenderedInfo.height !== info.height
-      ) {
-        const offGx = (lastRenderedInfo.origin.x - info.origin.x) / info.resolution;
-        const offGy =
-          (info.height - lastRenderedInfo.height) +
-          (lastRenderedInfo.origin.y - info.origin.y) / info.resolution;
-        view.tx -= offGx * view.scale;
-        view.ty -= offGy * view.scale;
+      if (lastRenderedInfo !== info) {
+        Object.assign(view, rebaseViewport(view, lastRenderedInfo, info));
       }
       lastRenderedInfo = info;
     } else if (info) {

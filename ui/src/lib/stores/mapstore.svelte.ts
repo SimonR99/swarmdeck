@@ -1,4 +1,5 @@
 import { inflate } from 'pako';
+import { mapSnapshotInfo } from './mapSnapshot';
 import { fleet } from '$lib/stores/fleet.svelte';
 import type {
   CostmapKind,
@@ -679,13 +680,13 @@ export const mapStore = {
         bitmap.close();
         return true;
       }
-      const info = {
+      const info = mapSnapshotInfo(response.headers, {
         resolution: scope.resolution,
         width: scope.width,
         height: scope.height,
         origin: scope.origin,
         seq: state.globalSeq
-      } as MapInfo;
+      } as MapInfo);
       ensureCanvas(info.width, info.height);
       ctx?.clearRect(0, 0, info.width, info.height);
       ctx?.drawImage(bitmap, 0, 0, info.width, info.height);
@@ -728,6 +729,7 @@ export const mapStore = {
     try {
       const response = await fetch('/api/map', { cache: 'no-store' });
       if (!response.ok) throw new Error(`map ${response.status}`);
+      info = mapSnapshotInfo(response.headers, info);
       const seq = Number(response.headers.get('X-Map-Seq') ?? info.seq);
       const bitmap = await createImageBitmap(await response.blob());
 
@@ -1121,6 +1123,7 @@ export const mapStore = {
         });
       }
       if (!mapResponse.ok) throw new Error(`local map ${mapResponse.status}`);
+      info = mapSnapshotInfo(mapResponse.headers, info);
       const bitmap = await createImageBitmap(await mapResponse.blob());
       if (
         generation !== loadGeneration ||
