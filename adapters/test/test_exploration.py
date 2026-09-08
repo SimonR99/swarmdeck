@@ -22,6 +22,7 @@ def rig():
     explorer.started_ns = 0
     explorer.pending = None
     explorer.pending_stop = None
+    explorer.stop_deadline = 0
     explorer.deadline = 0
     explorer.last_link = time.monotonic()
     explorer.frame = "map"
@@ -153,3 +154,20 @@ def test_manual_goal_preempts_exploration():
     assert not explorer.active
     bridge.navigate_to.assert_called_once()
     assert bridge.navigate_to.call_args.args[0] == goal
+
+
+def test_orphaned_requests_expire_after_planner_restart():
+    bridge, explorer = rig()
+    explorer.start()
+    abandoned_start = explorer.pending
+    explorer.stop()
+    abandoned_stop = explorer.pending_stop
+    explorer.deadline = explorer.stop_deadline = 0
+    explorer.tick()
+    assert abandoned_start.cancelled() and abandoned_stop.cancelled()
+    assert explorer.pending is None and explorer.pending_stop is None
+    explorer.on_path(path())
+    bridge.navigate_to.assert_not_called()
+    explorer.start_client.call_async.return_value = Future()
+    explorer.start()
+    assert explorer.active

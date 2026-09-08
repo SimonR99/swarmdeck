@@ -24,6 +24,7 @@ class MggExploration:
         self.pending = None
         self.pending_stop = None
         self.deadline = 0.0
+        self.stop_deadline = 0.0
         self.last_link = time.monotonic()
         self.request_type = Trigger.Request
         self.frame = str(
@@ -104,6 +105,7 @@ class MggExploration:
             try:
                 if self.stop_client.service_is_ready():
                     self.pending_stop = self.stop_client.call_async(self.request_type())
+                    self.stop_deadline = time.monotonic() + 30.0
                 else:
                     self.warn(
                         "MGG stop service unavailable; navigation stopped locally"
@@ -114,13 +116,20 @@ class MggExploration:
             self.bridge.drive(0.0, 0.0)
 
     def tick(self):
-        if (
-            self.active
-            and self.pending is not None
-            and time.monotonic() > self.deadline
-        ):
-            self.warn("MGG start timed out")
-            self.stop()
+        # A planner restart can orphan a DDS request forever. Retire expired
+        # futures even after Stop, so a later operator start can recover.
+        now = time.monotonic()
+        if self.pending is not None and now > self.deadline:
+            future, self.pending = self.pending, None
+            if self.active:
+                self.warn("MGG start timed out")
+                self.stop()
+            self.start_client.remove_pending_request(future)
+            future.cancel()
+        if self.pending_stop is not None and now > self.stop_deadline:
+            future, self.pending_stop = self.pending_stop, None
+            self.stop_client.remove_pending_request(future)
+            future.cancel()
         if self.active and time.monotonic() - self.last_link > float(
             self.bridge.cfg.get("link_timeout_s", 5.0)
         ):

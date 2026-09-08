@@ -19,6 +19,8 @@ def robot_nodes(
     robot_index=1,
     size=None,
     planner_overrides=None,
+    sim_depth=False,
+    camera_offset=(0.0, 0.0),
 ):
     ns = f"{robot}/mgg"
     common = {"use_sim_time": sim_time}
@@ -42,6 +44,18 @@ def robot_nodes(
                 f"map_frame:={frame}",
                 "-p",
                 f"use_sim_time:={str(sim_time).lower()}",
+                "-p",
+                f"sim_depth:={str(sim_depth).lower()}",
+                "-p",
+                f"camera_x:={camera_offset[0]}",
+                "-p",
+                f"camera_z:={camera_offset[1]}",
+                "-p",
+                f"base_frame:={robot}/base_link",
+                "-r",
+                f"depth:=/{robot}/camera/depth_image",
+                "-r",
+                f"camera_info:=/{robot}/camera/camera_info",
                 "-r",
                 f"input_odometry:={odom}",
                 "-r",

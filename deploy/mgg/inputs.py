@@ -2,14 +2,16 @@
 """Supply MGG with map-frame odometry and bounded live sensor clouds."""
 
 import copy
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from tf2_ros import Buffer, TransformListener, TransformException
+from tf2_ros import Buffer, TransformListener, TransformException, StaticTransformBroadcaster
+from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
 
 
 class Inputs(Node):
@@ -23,6 +25,31 @@ class Inputs(Node):
             PointCloud2, "mapping_cloud", qos_profile_sensor_data
         )
         self.latest = None
+        self.depth = None
+        self.intrinsics = None
+        if self.declare_parameter("sim_depth", False).value:
+            # Share the relay's node for the missing ARGoS camera extrinsic,
+            # instead of starting another ROS process per robot.
+            self.camera_tf = StaticTransformBroadcaster(self)
+            transform = TransformStamped()
+            transform.header.frame_id = self.declare_parameter(
+                "base_frame", "base_link"
+            ).value
+            transform.child_frame_id = transform.header.frame_id + "/camera"
+            transform.transform.translation.x = self.declare_parameter(
+                "camera_x", 0.0
+            ).value
+            transform.transform.translation.z = self.declare_parameter(
+                "camera_z", 0.0
+            ).value
+            transform.transform.rotation.w = 1.0
+            self.camera_tf.sendTransform(transform)
+            self.create_subscription(
+                Image, "depth", self.on_depth, qos_profile_sensor_data
+            )
+            self.create_subscription(
+                CameraInfo, "camera_info", self.on_info, qos_profile_sensor_data
+            )
         self.create_subscription(
             Odometry, "input_odometry", self.on_odom, qos_profile_sensor_data
         )
@@ -52,10 +79,51 @@ class Inputs(Node):
     def on_cloud(self, msg):
         self.latest = msg
 
+    def on_depth(self, msg):
+        self.depth = msg
+
+    def on_info(self, msg):
+        self.intrinsics = msg
+
     def publish_cloud(self):
         if self.latest is not None:
             self.cloud.publish(self.latest)
             self.latest = None
+        depth, info = self.depth, self.intrinsics
+        self.depth = None
+        if depth is None or info is None or depth.encoding != "32FC1":
+            return
+        if (depth.width, depth.height) != (info.width, info.height):
+            return
+        fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
+        if fx <= 0 or fy <= 0:
+            return
+        # ARGoS depth is axial metres; its camera TF uses forward/left/up.
+        # Retain that frame and capture time so MGG raycasts from the camera.
+        z = np.ndarray(
+            (depth.height, depth.width),
+            dtype=">f4" if depth.is_bigendian else "<f4",
+            buffer=depth.data,
+            strides=(depth.step, 4),
+        )[::4, ::4]
+        v, u = np.mgrid[0:depth.height:4, 0:depth.width:4]
+        valid = np.isfinite(z) & (z > 0.05) & (z < 20.0)
+        points = np.column_stack((
+            z[valid],
+            -(u[valid] - cx) * z[valid] / fx,
+            -(v[valid] - cy) * z[valid] / fy,
+        )).astype("<f4")
+        cloud = PointCloud2()
+        cloud.header = depth.header
+        cloud.height, cloud.width = 1, len(points)
+        cloud.fields = [
+            PointField(name=name, offset=i * 4, datatype=PointField.FLOAT32, count=1)
+            for i, name in enumerate(("x", "y", "z"))
+        ]
+        cloud.point_step, cloud.row_step = 12, 12 * len(points)
+        cloud.is_dense = True
+        cloud.data = points.tobytes()
+        self.cloud.publish(cloud)
 
 
 def main():

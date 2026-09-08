@@ -28,7 +28,7 @@ Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 | `command_path` | `nav_msgs/msg/Path` | PCI's current exploration path; transient-local QoS |
 | `mggplanner` | `mgg_msgs/srv/PlannerSrv` | Internal PCI-to-planner request |
 | `map_odometry` | `nav_msgs/msg/Odometry` | Robot pose in the planner's map frame |
-| `mapping_cloud` | `sensor_msgs/msg/PointCloud2` | Live LiDAR cloud, retaining its sensor frame/stamp |
+| `mapping_cloud` | `sensor_msgs/msg/PointCloud2` | Live sensor clouds, retaining each sensor’s frame/stamp |
 
 The adapter passes each path's **final goal** to its existing navigation backend
 (Nav2 or the configured hardware trajectory action). The navigation backend
@@ -40,13 +40,18 @@ stops local navigation and requests PCI stop.
 Stops disable path intake first, cancel navigation, and issue zero velocity,
 even if PCI's stop service is unavailable. Old latched paths and late service
 responses cannot re-enable the session. A new start waits for earlier start/stop
-requests to finish. No independent path follower should also consume
+requests to finish (or expire after 30 seconds if the planner restarted).
+No independent path follower should also consume
 `command_path`: that would bypass SwarmDeck's stop gate.
 
 ## ARGoS simulation
 
-Add the MGG overlay to the same Compose files and environment used for the
-simulation. For Bistro with NVIDIA rendering and synthetic drift, from the
+`scripts/sim-up` (and the `make up-argos*` targets) starts MGG automatically.
+For example, `./scripts/sim-up --dri --drift` starts the default scene with
+exploration available; MGG remains idle until you press Explore.
+
+For direct Compose invocations, add the MGG overlay to the same files and
+environment used for the simulation. For Bistro with NVIDIA rendering and synthetic drift, from the
 repository root:
 
 ```bash
@@ -64,11 +69,19 @@ loads the adapter's exploration support. The overlay enables
 `SWARMDECK_MGG_ENABLED=1`, builds a pinned MGG image, and starts one planner/PCI per
 configured robot. MGG stays idle until Explore is pressed.
 
-The sidecar shares the simulator's network/IPC namespace and ROS domain 42.
+The sidecar shares the simulator's network namespace and ROS domain 42.
+It uses Fast DDS UDP transport to avoid stale shared-memory ports after sidecar
+restarts; the simulator keeps its default transport for internal communication.
 It uses the existing ARGoS sensor bridge, not MGG's separate demo simulator.
 An input relay resolves `map_frame <- base_link` at each odometry stamp and caps
-cloud publication at 2 Hz. Missing historical TF suppresses the observation.
-Planner and PCI use simulation time. Robot dimensions and sensor offsets come
+LiDAR publication at 2 Hz. In ARGoS it also projects the depth camera at
+2 Hz, sampling every fourth pixel, to observe ground inside the elevated
+LiDAR’s blind region. Camera extrinsics come from the same platform table
+as the simulated sensor. No synthetic floor is inserted. Missing historical TF
+suppresses the observation.
+Planner and PCI use simulation time. The collision-box clearance includes the
+0.15 m OctoMap voxel thickness;
+the simulation slope limit is 30 degrees. Robot dimensions and sensor offsets come
 from SwarmDeck's platform table. The supplied simulation planning bounds are
 ±60 m horizontally; adjust `fleet.launch.py` for another site. Hardware requires
 its own site and robot parameter file.

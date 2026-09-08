@@ -213,6 +213,8 @@ case "${RENDER,,}" in
     ;;
 esac
 
+COMPOSE_FILES+=(-f "${COMPOSE_DIR}/docker-compose.mgg.yml")
+
 # Compose base execution array
 COMPOSE_CMD=(docker compose -p "${COMPOSE_PROJECT}" "${COMPOSE_FILES[@]}")
 
@@ -220,8 +222,8 @@ COMPOSE_CMD=(docker compose -p "${COMPOSE_PROJECT}" "${COMPOSE_FILES[@]}")
 case "${ACTION}" in
   down)
     echo "Stopping SwarmDeck simulation stack (${COMPOSE_PROJECT})..."
-    "${COMPOSE_CMD[@]}" --profile argos stop argos sim fast_livo2
-    "${COMPOSE_CMD[@]}" --profile argos rm -f argos sim fast_livo2
+    "${COMPOSE_CMD[@]}" --profile argos stop mgg argos sim fast_livo2
+    "${COMPOSE_CMD[@]}" --profile argos rm -f mgg argos sim fast_livo2
     docker volume rm "${COMPOSE_PROJECT}_swarmdeck_runtime" 2>/dev/null || true
     echo "Simulation stack stopped."
     exit 0
@@ -231,7 +233,7 @@ case "${ACTION}" in
     exit 0
     ;;
   logs)
-    "${COMPOSE_CMD[@]}" --profile argos logs -f argos sim fast_livo2
+    "${COMPOSE_CMD[@]}" --profile argos logs -f argos sim fast_livo2 mgg
     exit 0
     ;;
   dry-run)
@@ -260,7 +262,7 @@ EOF
 esac
 
 # Services to bring up
-SERVICES=(server ui slam duck_detector mediamtx sim argos)
+SERVICES=(server ui slam duck_detector mediamtx sim argos mgg)
 if [[ "${ODOMETRY}" != "drift" ]]; then
   SERVICES+=(fast_livo2)
 fi

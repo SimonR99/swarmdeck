@@ -31,7 +31,8 @@ camera colors appear where calibrated image observations are available.*
 A single **Explore** button at the bottom of **Fleet** starts exploration for
 all connected, enabled robots with MGG configured. It changes to **Stop exploration**
 while any robot is exploring, and **Stop All** also
-stops exploration. See [MGG exploration setup](docs/operations/mgg-exploration.md)
+stops exploration. The ARGoS startup script includes MGG automatically.
+See [MGG exploration setup](docs/operations/mgg-exploration.md)
 for simulation and ROS 2 hardware wiring.
 
 ## Quick start

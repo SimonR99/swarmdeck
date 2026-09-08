@@ -1,6 +1,7 @@
 """MGG sidecar for the existing ARGoS fleet; never starts a second simulator."""
 
 import importlib.util
+import math
 import os
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ def generate_launch_description():
     from swarmdeck_sim.scenario.spawn_fleet import robot_types, robot_spec
 
     with open(
-        os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot_bistro.yaml")
+        os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot.yaml")
     ) as stream:
         fleet = yaml.safe_load(stream)["fleet"]
     count = int(os.environ.get("SWARMDECK_ROBOT_COUNT") or fleet.get("robot_count", 4))
@@ -43,9 +44,13 @@ def generate_launch_description():
             [spec.length, spec.width, 2 * spec.base_height],
             {
                 "SensorParams.VLP16.center_offset": [spec.lidar_x, 0.0, spec.lidar_z],
-                "PlanningParams.max_ground_height": spec.base_height + 0.05,
+                # Keep the extended body box above the occupied floor voxel.
+                "PlanningParams.max_ground_height": spec.base_height + 0.15 + 0.025,
                 "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
                 "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
+                "PlanningParams.max_inclination": math.radians(30),
             },
+            sim_depth=True,
+            camera_offset=[spec.camera_x, spec.camera_z],
         )
     return LaunchDescription(nodes)
