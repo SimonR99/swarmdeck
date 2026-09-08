@@ -199,6 +199,11 @@ def test_aslan_overlay_removes_the_invalid_acceleration_assertion(tmp_path):
         "    // 2. Handle IMU initialization for LIVOX sensor\n"
         "    if (!handleIMUInitialization(imu_raw, thisImu)) {\n"
     )
-    subprocess.run(["patch", "--batch", "-p1", "-i", str(patch)], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["patch", "--batch", "-p1", "-i", str(patch)],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
     assert "assert(" not in source.read_text()
     assert "thisImu = imuConverter(*imu_raw)" in source.read_text()
