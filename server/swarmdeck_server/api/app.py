@@ -1344,16 +1344,13 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             )
 
     elif kind in ("start_explore", "stop_explore"):
-        # Fleet-wide, but sent per robot because that is the only channel the
-        # protocol has. Only robots that advertise `explore` are addressed:
-        # exploration starts a process that drives the whole fleet reactively,
-        # and a hardware adapter must never be asked to do that. `registry.can`
-        # is the same gate `navigate` and `reset` use.
+        # A robot card addresses one configured explorer. Legacy fleet-wide
+        # commands remain supported; capability gating also applies to hardware.
         enabled = kind == "start_explore"
         targets = [
             robot_id
             for robot_id in list(registry.robots)
-            if registry.can(robot_id, "explore")
+            if registry.can(robot_id, "explore") and (not rid or robot_id == rid)
         ]
         if not targets:
             await raise_alert(

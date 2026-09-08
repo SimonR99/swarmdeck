@@ -28,6 +28,11 @@ camera colors appear where calibrated image observations are available.*
 | Session records | Session manifests, timestamped operator events, and optional keyframe capture for offline analysis. |
 | Optional Cortex assistant | An integrated agent service with configurable providers and fleet tools. See [Cortex](agent/README.md). |
 
+Under **Fleet**, each configured robot has an **Explore** button. It changes to
+**Stop exploration** while MGG controls goal selection, and **Stop All** also
+stops exploration. See [MGG exploration setup](docs/operations/mgg-exploration.md)
+for simulation and ROS 2 hardware wiring.
+
 ## Quick start
 
 ### Try the dashboard without robots

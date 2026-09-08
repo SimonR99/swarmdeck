@@ -82,7 +82,7 @@ Capabilities drive the UI and command routing:
 | `estop` | Accept `stop`. |
 | `body` | Accept `body_command`. |
 | `reset` | Accept full simulation reset; never advertise on hardware. |
-| `explore` | Accept `explore`; never advertise on hardware. |
+| `explore` | Start/stop configured autonomous exploration (simulation or ROS 2 hardware). |
 
 Never advertise a capability the adapter cannot currently honor.
 
@@ -108,12 +108,9 @@ Never advertise a capability the adapter cannot currently honor.
 ```
 
 - `mode`: `idle`, `nav`, `teleop`, `estop`, `recover`, or `explore`.
-  `recover` is the adapter reversing the robot out of a pose the planner
-  could not plan from, and `explore` is a reactive bootstrap driving it.
-  Both move the robot without an operator command, so both have to be
-  named rather than reported as `idle`: an operator watching a moving
-  robot labelled IDLE has been told something false. `explore` only ever
-  replaces `idle`, so a robot under a goal still reports `nav`.
+  `recover` is a navigation recovery. `explore` means operator-enabled MGG
+  exploration is active, including while the navigation stack executes its
+  current goal. `nav_status` independently reports that goal's progress.
 - `nav_status`: `idle`, `active`, `succeeded`, `failed`, or `cancelled`.
 - `planned_path` is the backward-compatible effective route (local when
   available, otherwise global). `global_planned_path` and
@@ -211,18 +208,16 @@ before transmission.
 (with optional `height` in metres relative to default height, e.g. `[-0.15, 0.15]`).
 Ignore it without the `body` capability.
 
-`explore` starts and stops a reactive bootstrap that drives the robot off its
-own obstacle avoidance, and is simulation-only: ignore it without the `explore`
-capability, and never advertise that capability on hardware. It is a FLEET-wide
-operation delivered once per robot, because a per-robot connection is the only
-channel the protocol has, so a handler must be idempotent: the second `enabled:
-true` of a set must not start a second bootstrap. Report `explore` as the mode
-of any robot the bootstrap is actually driving.
+`explore` enables or stops autonomous exploration on the addressed robot.
+Advertise it only when an exploration controller is configured. Simulation and
+ROS 2 hardware use the same MGG PCI integration; ROS 1 remains unsupported.
+Repeated starts are idempotent. Stop, manual navigation, teleoperation, reset,
+and operator-link loss disable planner-path intake and cancel navigation.
+Delayed paths and service replies must not restart a stopped session.
 
-An adapter whose bootstrap shares a velocity topic with its navigation stack
-must let the navigation stack win. Both commanding one robot means it receives
-interleaved, contradictory velocities and follows neither, which presents as a
-robot ignoring its planned path rather than as a conflict.
+The GUI sends `start_explore` or `stop_explore` with `robot_id`. Omitting the ID
+retains the legacy fleet-wide command for capable robots. Stop All sends `stop`
+to every robot, whether or not it advertises exploration.
 
 `camera_interest` is retained as a compatibility command and has no effect on
 the H.264 stream or detection. Never gate detection on camera interest.

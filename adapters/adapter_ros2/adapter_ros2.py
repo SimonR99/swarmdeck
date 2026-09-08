@@ -491,6 +491,9 @@ class HardwareBridge(
         # 20 Hz: fast enough that latching adds at most 50 ms to teleop response
         # (the GUI only repeats every 120 ms), and finer than `drive_timeout_s`.
         self._watchdog_timer = node.create_timer(0.05, self._watchdogs)
+        from adapters.exploration import configure_exploration
+
+        configure_exploration(self)
 
     # ------------------------------------------------------------- capabilities
 
@@ -513,6 +516,8 @@ class HardwareBridge(
     def capabilities(self) -> list[str]:
         """Only what this robot can actually honour (protocol rule 4)."""
         caps: list[str] = []
+        if getattr(self, "exploration", None) is not None:
+            caps.append("explore")
         if self.nav_client is not None or self.traj_client is not None:
             caps.append("navigate")
         if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):

@@ -603,11 +603,17 @@ class AdapterLinkMixin:
         self.drive(0.0, 0.0)
 
     def stop(self) -> None:
+        exploration = getattr(self, "exploration", None)
+        if exploration is not None:
+            exploration.stop()
         self.drive(0.0, 0.0)
         self.cancel_goal()
         self.mode = "estop"
 
     def stop_for_exit(self) -> None:
+        exploration = getattr(self, "exploration", None)
+        if exploration is not None:
+            exploration.stop()
         for _ in range(3):
             try:
                 self.cancel_goal()
@@ -655,7 +661,11 @@ class AdapterTelemetryMixin:
             "t_mono": round(time.monotonic() - self.t0, 4),
             "pose": self.map_pose(),
             "battery": self.battery,
-            "mode": self.mode,
+            "mode": (
+                "explore"
+                if getattr(getattr(self, "exploration", None), "active", False)
+                else self.mode
+            ),
             "nav_status": self.nav_status,
             "goal": self.goal,
             # Backward-compatible effective route: local when available,

@@ -2370,7 +2370,7 @@ def _explore_fleet(app_module):
         {"robot_id": "sim_0", "capabilities": ["navigate", "map", "explore"]},
         sink=sim,
     )
-    # Exactly what adapter_ros2 advertises: no `explore`, ever.
+    # A hardware adapter with no exploration controller configured.
     app_registry.hello(
         {"robot_id": "duckie_0", "capabilities": ["navigate", "map", "battery"]},
         sink=hardware,
@@ -2379,12 +2379,8 @@ def _explore_fleet(app_module):
 
 
 def test_exploration_is_never_sent_to_a_robot_without_the_capability():
-    """The same safety gate `reset` has, for the same reason.
+    """Only adapters configured for exploration receive the command."""
 
-    Exploration starts a process that drives the whole fleet reactively off its
-    own obstacle avoidance. That is a simulation behaviour; a hardware adapter
-    must never be asked for it.
-    """
     from swarmdeck_server.api import app as app_module
 
     sim, hardware = _explore_fleet(app_module)
@@ -2466,3 +2462,25 @@ def test_discard_offline_robot_via_gui_and_rest():
     assert test_rid in registry.robots
     asyncio.run(handle_gui_message({"type": "discard_robot", "robot_id": test_rid}))
     assert test_rid not in registry.robots
+
+
+def test_exploration_button_targets_one_capable_hardware_robot():
+    from swarmdeck_server.api import app as app_module
+
+    sim, hardware = _explore_fleet(app_module)
+    app_registry.robots["duckie_0"].capabilities.append("explore")
+    try:
+        asyncio.run(
+            app_module.handle_gui_message(
+                {"type": "start_explore", "robot_id": "duckie_0"}
+            )
+        )
+        assert not sim.messages
+        assert hardware.messages[-1]["type"] == "explore"
+        assert hardware.messages[-1]["enabled"] is True
+        asyncio.run(app_module.handle_gui_message({"type": "stop_all"}))
+        assert hardware.messages[-1]["type"] == "stop"
+        assert sim.messages[-1]["type"] == "stop"
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()

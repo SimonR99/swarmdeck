@@ -169,6 +169,10 @@ export function sendAction(msg: ClientMessage) {
 }
 
 export const actions = {
+  explore(robotId: string, enabled: boolean) {
+    if (enabled && !fleet.isEnabled(robotId)) return;
+    sendAction({ type: enabled ? 'start_explore' : 'stop_explore', robot_id: robotId });
+  },
   setGoal(robotId: string, p: Point) {
     if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'set_goal', robot_id: robotId, payload: p });

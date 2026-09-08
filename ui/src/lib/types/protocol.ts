@@ -18,12 +18,13 @@ export type Capability =
   | 'network'
   | 'estop'
   | 'reset'
-  | 'body';
+  | 'body'
+  | 'explore';
 export type NavStatus = 'idle' | 'active' | 'succeeded' | 'failed' | 'cancelled';
 // `recover` is the adapter reversing a robot out of a pose Nav2 could not plan
 // from. It moves on its own, briefly and without an operator command, so it has
 // to be a mode the GUI can name rather than an unexplained lurch.
-export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover';
+export type RobotMode = 'idle' | 'nav' | 'teleop' | 'estop' | 'recover' | 'explore';
 export type AlertLevel = 'info' | 'warn' | 'critical';
 
 export interface Pose {
@@ -454,6 +455,7 @@ export type ClientMessage =
   | { type: 'acknowledge_alert'; id: string }
   | { type: 'report_target'; robot_id: string; payload: Point }
   | { type: 'stop_all' }
+  | { type: 'start_explore' | 'stop_explore'; robot_id: string }
   | { type: 'reset_sim' }
   | { type: 'body_command'; robot_id: string; action: string; height?: number }
   | { type: 'detection_accept'; proposal_id: string }

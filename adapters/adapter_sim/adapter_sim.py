@@ -306,6 +306,7 @@ class RobotBridge(
         platform: str | None = None,
         *,
         instantaneous_planar_scan: bool = False,
+        exploration_config: dict | None = None,
     ) -> None:
         self.node = node
         self.id = robot_id
@@ -325,6 +326,7 @@ class RobotBridge(
                 "footprint_radius": round(spec.footprint_radius, 3),
                 "footprint": json.loads(spec.footprint),
                 "network_iface": "",
+                "exploration": exploration_config or {},
             },
         )
         self.robot_type = self.cfg["robot_type"]
@@ -513,6 +515,9 @@ class RobotBridge(
             node, NavigateToPose, f"/{robot_id}/navigate_to_pose"
         )
         self.pub_cmd = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)
+        from adapters.exploration import configure_exploration
+
+        configure_exploration(self)
 
     def _on_odom(self, msg: Odometry) -> None:
         """Wheel odometry — a FALLBACK only. See map_pose() for why."""
@@ -1050,7 +1055,10 @@ class RobotBridge(
 
     def capabilities(self) -> list[str]:
         """Advertise only what this process honours. `reset` is simulation-only."""
-        return ["navigate", "map", "camera", "estop", "reset"]
+        caps = ["navigate", "map", "camera", "estop", "reset"]
+        if getattr(self, "exploration", None) is not None:
+            caps.append("explore")
+        return caps
 
     def _cfg_timeout(self, key: str) -> float:
         cfg = getattr(self, "cfg", None) or TRANSPORT_DEFAULTS
@@ -1269,6 +1277,9 @@ class RobotBridge(
         self._clear_escape()
 
     def stop(self) -> None:
+        exploration = getattr(self, "exploration", None)
+        if exploration is not None:
+            exploration.stop()
         self._cancel_nav()
         self.pub_cmd.publish(Twist())
         self.goal = None
@@ -1806,6 +1817,10 @@ def main() -> None:
             http_url,
             platforms[i],
             instantaneous_planar_scan=instantaneous_planar_scan,
+            exploration_config={
+                "enabled": os.environ.get("SWARMDECK_MGG_ENABLED", "0").lower()
+                in ("1", "true", "yes")
+            },
         )
         for i in range(robot_count)
     ]

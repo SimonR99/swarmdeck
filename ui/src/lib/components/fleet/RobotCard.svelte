@@ -31,7 +31,7 @@
         ? 'danger'
         : robot.nav_status === 'failed'
           ? 'warn'
-          : robot.nav_status === 'active'
+          : (robot.nav_status === 'active' || robot.mode === 'explore')
             ? 'ok'
             : 'idle'
   );
@@ -41,13 +41,15 @@
   const modeLabel = $derived(
     robot.mode === 'estop'
       ? 'E-STOP'
-      : robot.mode === 'recover'
-        ? 'BACKING OFF'
-        : robot.nav_status === 'active'
-          ? 'NAVIGATING'
-          : robot.nav_status === 'failed'
-            ? 'NAV FAILED'
-            : robot.mode.toUpperCase()
+      : robot.mode === 'explore'
+        ? 'EXPLORING'
+        : robot.mode === 'recover'
+          ? 'BACKING OFF'
+          : robot.nav_status === 'active'
+            ? 'NAVIGATING'
+            : robot.nav_status === 'failed'
+              ? 'NAV FAILED'
+              : robot.mode.toUpperCase()
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));
@@ -70,7 +72,7 @@
   <div class="flex items-start justify-between gap-2">
     <div class="min-w-0">
       <div class="flex items-center gap-1.5">
-        <StatusDot tone={statusTone as never} pulse={robot.nav_status === 'active'} />
+        <StatusDot tone={statusTone as never} pulse={robot.nav_status === 'active' || robot.mode === 'explore'} />
         <span class="truncate text-[12.5px] font-semibold tracking-tight" style="color:{color}">
           {shortName}
         </span>
@@ -114,7 +116,7 @@
           ? 'danger'
           : robot.mode === 'recover'
             ? 'warn'
-            : robot.nav_status === 'active'
+            : (robot.nav_status === 'active' || robot.mode === 'explore')
               ? 'accent'
               : robot.nav_status === 'failed'
                 ? 'warn'
@@ -136,6 +138,18 @@
           Dismiss
         </button>
       {/if}
+      <button
+        class="inline-flex h-7 items-center rounded-full bg-accent-container px-2.5 text-[10px] font-semibold text-accent-container-fg disabled:opacity-40"
+        disabled={!robot.online || !fleet.can(robot.robot_id, 'explore')}
+        aria-pressed={robot.mode === 'explore'}
+        title={fleet.can(robot.robot_id, 'explore') ? 'Autonomous exploration' : 'Exploration planner is not configured'}
+        onclick={(e) => {
+          e.stopPropagation();
+          actions.explore(robot.robot_id, robot.mode !== 'explore');
+        }}
+      >
+        {robot.mode === 'explore' ? 'Stop exploration' : 'Explore'}
+      </button>
       {#if fleet.can(robot.robot_id, 'body')}
         <button
           class="inline-flex h-5 items-center gap-1 rounded-full bg-surface-3 px-2 text-[9px] font-semibold text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg active:scale-95"
