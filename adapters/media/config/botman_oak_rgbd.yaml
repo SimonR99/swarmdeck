@@ -8,10 +8,11 @@
 #     BOTMAN_OAK_PARAMS=botman_oak_rgb.yaml docker compose \
 #       -f deploy/compose/docker-compose.robot-botman.yml up -d
 #
-# UNVERIFIED ON THE ROBOT. Written against depthai_ros_driver's documented
-# parameters, not against the copy installed in /ssd/mist_ws. Confirm the names
-# with `ros2 param list /oak` and the streams with `ros2 topic hz
-# /oak/stereo/image_raw` before trusting a marker this produces.
+# Stream validation 2026-09-08 on Botman and Aslan: 1280x720 compressed RGB,
+# RGB CameraInfo with rational-polynomial distortion, aligned stereo CameraInfo
+# with zero distortion. Colorization uses /oak/rgb/camera_info, not stereo info.
+# The driver leaves RGB CameraInfo.frame_id empty; map_color.camera_frame pins
+# the verified oak_rgb_camera_optical_frame explicitly in each adapter profile.
 /oak:
   ros__parameters:
     camera:

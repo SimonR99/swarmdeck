@@ -122,8 +122,14 @@ not guaranteed frame rates. Balanced and High detail profiles raise the limits.
 **Camera** becomes available when the cloud contains RGB. Simulator keyframes
 can project synchronized, calibrated RGB-D onto LiDAR samples using the pose at
 image capture time and depth for occlusion checks. Unobserved surfaces remain
-gray; old XYZ-only keyframes cannot be colored retroactively. Hardware color
-projection is an explicit `map_color.enabled` adapter option.
+gray; old XYZ-only keyframes cannot be colored retroactively.
+
+Hardware adapters match delayed registered scans to buffered camera frames,
+apply RGB lens calibration and capture-time TF, and upload colors for both
+live maps and new optimized keyframes. Botman, Aslan, and TARS enable this via
+`map_color.enabled`; camera images stay on the robot. See the
+[hardware colorization guide](docs/operations/tactical-3d-map.md#colorize-lidar-with-camera-images)
+for topics, TF conventions, calibration limits, and the passive checker.
 
 Dense Gaussian reconstruction is an **offline workflow**: capture posed RGB-D,
 export a COLMAP dataset, train externally, and publish a compact `.swgs` model.
