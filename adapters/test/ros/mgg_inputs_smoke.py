@@ -31,3 +31,41 @@ for endian in (False, True):
     node.publish_cloud()
     assert node.cloud.publish.call_count == count  # no stale depth replay
 print('MGG depth projection smoke passed')
+
+# Matching TF may arrive after odometry. Retry the original timestamp, and
+# expire unavailable history without using a newer transform.
+from collections import deque
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformException
+
+node.pending_odom = deque(maxlen=10)
+node.frame = 'robot_0/map_frame'
+node.odom = Mock()
+node.buffer = Mock()
+node.get_clock = Mock()
+node.get_clock.return_value.now.return_value.nanoseconds = 42_500_000_000
+odom = Odometry()
+odom.header.stamp.sec = 42
+odom.child_frame_id = 'robot_0/base_link'
+node.on_odom(odom)
+node.buffer.lookup_transform.side_effect = TransformException('TF not here yet')
+node.publish_odom()
+assert len(node.pending_odom) == 1
+node.odom.publish.assert_not_called()
+tf = TransformStamped()
+tf.transform.translation.x = 3.0
+node.buffer.lookup_transform.side_effect = None
+node.buffer.lookup_transform.return_value = tf
+node.publish_odom()
+assert not node.pending_odom
+output = node.odom.publish.call_args.args[0]
+assert output.header.stamp == odom.header.stamp
+assert output.header.frame_id == node.frame and output.pose.pose.position.x == 3.0
+assert node.buffer.lookup_transform.call_args.args[2].nanoseconds == 42_000_000_000
+node.on_odom(odom)
+node.get_clock.return_value.now.return_value.nanoseconds = 44_000_000_000
+node.buffer.lookup_transform.side_effect = TransformException('history expired')
+node.publish_odom()
+assert not node.pending_odom and node.odom.publish.call_count == 1
+print('MGG delayed TF smoke passed')

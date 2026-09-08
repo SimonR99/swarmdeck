@@ -78,7 +78,9 @@ LiDAR publication at 2 Hz. In ARGoS it also projects the depth camera at
 2 Hz, sampling every fourth pixel, to observe ground inside the elevated
 LiDAR’s blind region. Camera extrinsics come from the same platform table
 as the simulated sensor. No synthetic floor is inserted. Missing historical TF
-suppresses the observation.
+suppresses the observation. Odometry waits in a bounded ten-message queue
+for up to one simulated second for its matching TF, avoiding callback-order
+races without substituting a newer pose.
 Planner and PCI use simulation time. The collision-box clearance includes the
 0.15 m OctoMap voxel thickness;
 the simulation slope limit is 30 degrees. Robot dimensions and sensor offsets come

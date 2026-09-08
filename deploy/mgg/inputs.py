@@ -2,6 +2,7 @@
 """Supply MGG with map-frame odometry and bounded live sensor clouds."""
 
 import copy
+from collections import deque
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -24,6 +25,7 @@ class Inputs(Node):
         self.cloud = self.create_publisher(
             PointCloud2, "mapping_cloud", qos_profile_sensor_data
         )
+        self.pending_odom = deque(maxlen=10)
         self.latest = None
         self.depth = None
         self.intrinsics = None
@@ -56,25 +58,36 @@ class Inputs(Node):
         self.create_subscription(
             PointCloud2, "input_cloud", self.on_cloud, qos_profile_sensor_data
         )
+        self.create_timer(0.1, self.publish_odom)
         self.create_timer(0.5, self.publish_cloud)
 
     def on_odom(self, msg):
-        try:
-            tf = self.buffer.lookup_transform(
-                self.frame, msg.child_frame_id, Time.from_msg(msg.header.stamp)
-            )
-        except TransformException:
-            return  # No latest-TF fallback: one pose and one capture time.
-        output = copy.deepcopy(msg)
-        output.header.frame_id = self.frame
-        t = tf.transform.translation
-        (
-            output.pose.pose.position.x,
-            output.pose.pose.position.y,
-            output.pose.pose.position.z,
-        ) = (t.x, t.y, t.z)
-        output.pose.pose.orientation = tf.transform.rotation
-        self.odom.publish(output)
+        self.pending_odom.append(msg)
+
+    def publish_odom(self):
+        # Odometry can arrive before the TF broadcast for that same tick.
+        # Wait briefly for that exact transform; never substitute latest TF.
+        while self.pending_odom:
+            msg = self.pending_odom[0]
+            stamp = Time.from_msg(msg.header.stamp)
+            try:
+                tf = self.buffer.lookup_transform(self.frame, msg.child_frame_id, stamp)
+            except TransformException:
+                if self.get_clock().now().nanoseconds - stamp.nanoseconds > 1_000_000_000:
+                    self.pending_odom.popleft()
+                    continue
+                return
+            self.pending_odom.popleft()
+            output = copy.deepcopy(msg)
+            output.header.frame_id = self.frame
+            t = tf.transform.translation
+            (
+                output.pose.pose.position.x,
+                output.pose.pose.position.y,
+                output.pose.pose.position.z,
+            ) = (t.x, t.y, t.z)
+            output.pose.pose.orientation = tf.transform.rotation
+            self.odom.publish(output)
 
     def on_cloud(self, msg):
         self.latest = msg
