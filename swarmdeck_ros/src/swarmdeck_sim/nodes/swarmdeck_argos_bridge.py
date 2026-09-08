@@ -662,8 +662,12 @@ class ArgosBridge(Node):
             # The payload is always drained, duplicate or not: it is framed on
             # the socket and the next field starts after it either way.
             raw = recv_exact(sock, readings * LIDAR_READING.size)
+            # ARGoS's unrendered SScan starts with MaxRange=0. Publishing it
+            # can make SLAM Toolbox cache an unusable laser model for this frame.
+            usable_scan = math.isfinite(_max_range) and _max_range > SCAN_RANGE_MIN
             duplicate = robot.last_scan_tick == scan_tick
-            robot.last_scan_tick = scan_tick
+            if usable_scan:
+                robot.last_scan_tick = scan_tick
             if duplicate:
                 robot.duplicate_scans += 1
                 if DEBUG_SCAN_AGE:
@@ -672,7 +676,7 @@ class ArgosBridge(Node):
             # hand every consumer two readings where the sensor produced one,
             # with identical stamps, which is the zero interval that defeats
             # the turn-rate gate downstream.
-            if not duplicate:
+            if not duplicate and usable_scan:
                 arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
                 hit_mask = arr["hit"] != 0
                 hits = int(np.count_nonzero(hit_mask))

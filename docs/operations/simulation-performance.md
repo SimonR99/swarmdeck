@@ -231,3 +231,14 @@ targets: they remain visible to RGB-D and LiDAR but have no static collision
 mesh. These 6–9 cm objects otherwise acted as infinite-mass barriers below the
 navigation proximity scan's 15 cm cutoff. The large ducks remain collidable.
 This does not simulate pushing, rolling, or deforming the small objects.
+
+An additional startup failure can produce an active mapper with a **0×0 map**.
+ARGoS initializes an unrendered LiDAR scan with `MaxRange=0`; passing that scan
+to SLAM Toolbox can initialize an unusable laser model. The bridge now drains
+such packets but withholds scans until the range is finite and greater than the
+minimum range. A real empty scan with valid range metadata still publishes, and
+the first valid render is accepted even if it shares the placeholder's tick.
+For an already affected empty mapper, deactivate, clean up, configure, and
+activate only that node once valid sensor data is arriving. Cleanup discards
+that node's map, so this recovery is appropriate for an empty map, not a routine
+operation on a working trajectory.

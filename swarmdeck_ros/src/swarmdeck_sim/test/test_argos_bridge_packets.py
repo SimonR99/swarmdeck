@@ -79,7 +79,7 @@ def rig(monkeypatch):
     return node, robot
 
 
-def packet(sensor_tick=90, valid=True, hits=0):
+def packet(sensor_tick=90, valid=True, hits=0, max_range=30.0):
     pose = (1.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0) + (0.0,) * 6
     points = np.zeros(hits, dtype=bridge.LIDAR_DTYPE)
     points["x"] = 2.0
@@ -89,7 +89,7 @@ def packet(sensor_tick=90, valid=True, hits=0):
         + struct.pack("<13d", *pose)
         + struct.pack("<BB13dI", 1, valid, *pose, sensor_tick)
         + b"\x00\x00"  # No encoders or IMU.
-        + struct.pack("<BIIIfI", 1, sensor_tick, 1, 1, 30.0, hits)
+        + struct.pack("<BIIIfI", 1, sensor_tick, 1, 1, max_range, hits)
         + points.tobytes()
         + struct.pack("<BIIIf", 1, sensor_tick, 1, 1, 60.0)
         + b"\xff\x00\x00\x01"
@@ -179,3 +179,17 @@ def test_reconnect_and_clock_rewind_clear_sensor_epoch(rig):
         node._handle(sock)
     for name in ("odom", "image", "scan"):
         assert getattr(robot, "pub_" + name).publish.call_count == 2
+
+
+@pytest.mark.parametrize("max_range", [0.0, float("nan"), float("inf")])
+def test_unrendered_scan_does_not_poison_laser_calibration(rig, max_range):
+    node, robot = rig
+    sock = Socket(packet(max_range=max_range) + packet(hits=1))
+    read(node, sock)
+    robot.pub_scan.publish.assert_not_called()
+    robot.pub_prox.publish.assert_not_called()
+    robot.pub_image.publish.assert_called_once()  # The packet was fully drained.
+    # The valid first render can share the placeholder's tick.
+    read(node, sock)
+    robot.pub_scan.publish.assert_called_once()
+    robot.pub_points.publish.assert_called_once()
