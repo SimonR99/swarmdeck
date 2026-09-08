@@ -1,7 +1,6 @@
 from pathlib import Path
 import re
 
-
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -25,14 +24,16 @@ def test_local_ai_shadow_keeps_agy_live_and_ollama_toolless():
     makefile = (REPO / "Makefile").read_text()
     compose = (REPO / "deploy" / "compose" / "docker-compose.yml").read_text()
 
-    shadow_target = makefile.split("local-ai-shadow:", 1)[1].split(
-        "local-ai-down:", 1
-    )[0]
+    shadow_target = makefile.split("local-ai-shadow:", 1)[1].split("local-ai-down:", 1)[
+        0
+    ]
     assert "CORTEX_SHADOW_PLANNER=true" in shadow_target
     assert "CORTEX_PLANNER_PROVIDER=ollama" in shadow_target
     assert "CORTEX_PROVIDER=" not in shadow_target
     assert "up -d --no-deps agent" in shadow_target
-    assert "The local planner is opt-in shadow traffic and never executes tools" in compose
+    assert (
+        "The local planner is opt-in shadow traffic and never executes tools" in compose
+    )
     assert 'OLLAMA_NO_CLOUD: "true"' in compose
 
 

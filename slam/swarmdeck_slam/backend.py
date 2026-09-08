@@ -578,7 +578,9 @@ class CollaborativeBackend:
 
     def __post_init__(self) -> None:
         self._prepared_clouds: dict[KeyframeId, PreparedCloud] = {}
-        self._pair_cache: dict[tuple[KeyframeId, KeyframeId], list[RegistrationHypothesis]] = {}
+        self._pair_cache: dict[
+            tuple[KeyframeId, KeyframeId], list[RegistrationHypothesis]
+        ] = {}
         # Support pairs from closures that passed every geometric/cycle gate.
         # Reconsidering these pairs on later incremental solves prevents a
         # verified merge from disappearing when new, repetitive scans crowd a
@@ -994,9 +996,7 @@ class CollaborativeBackend:
         # A delete with no new keyframe must still satisfy the worker's due
         # threshold immediately and publish the map rebuilt from survivors.
         self._new_since_optimize = max(1, self._new_since_optimize)
-        self._accepted = sum(
-            1 for edge in self._edges if edge.kind.is_loop_closure
-        )
+        self._accepted = sum(1 for edge in self._edges if edge.kind.is_loop_closure)
         self._inter_robot = sum(
             1
             for edge in self._edges
@@ -1196,9 +1196,7 @@ class CollaborativeBackend:
         t_world_traj: dict[TrajectoryId, np.ndarray] = {}
         for traj, kf_ids in by_traj.items():
             kf_ids.sort(key=lambda k: k.seq)
-            snapshot = poses[kf_ids[-1]] @ se3_inverse(
-                kf_map[kf_ids[-1]].t_odom_base
-            )
+            snapshot = poses[kf_ids[-1]] @ se3_inverse(kf_map[kf_ids[-1]].t_odom_base)
             if len(kf_ids) >= _MIN_FIT_KEYFRAMES:
                 src = np.array([kf_map[k].t_odom_base[:3, 3] for k in kf_ids])
                 tgt = np.array([poses[k][:3, 3] for k in kf_ids])
@@ -1338,9 +1336,7 @@ class CollaborativeBackend:
             candidates = [
                 hints[robot_id] @ se3_inverse(poses[keyframe.id])
                 for robot_id, keyframe in sorted(first_by_robot.items())
-                if robot_id in hints
-                and keyframe.id in members
-                and keyframe.id in poses
+                if robot_id in hints and keyframe.id in members and keyframe.id in poses
             ]
             if not candidates:
                 continue
@@ -1376,9 +1372,7 @@ class CollaborativeBackend:
         optimized.t_world_trajectory.update(traj_frames)
         optimized.t_world_map.update({robot_id: hints[robot_id] for robot_id in robots})
         if len(robots) >= 2:
-            anchor = min(
-                kf.id for kf in included if kf.id.robot_id in hints
-            )
+            anchor = min(kf.id for kf in included if kf.id.robot_id in hints)
             optimized.components = [
                 Component(0, robots, anchor, frozenset(traj_frames))
             ]

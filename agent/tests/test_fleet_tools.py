@@ -11,9 +11,7 @@ def test_doctor_builds_read_only_consolidated_check_without_approval():
         script="/app/scripts/robot_tool.py", server_url="http://server:8080"
     )
 
-    commands = tools.build_commands(
-        FleetAction(action="doctor", robot_ids=["tars_0"])
-    )
+    commands = tools.build_commands(FleetAction(action="doctor", robot_ids=["tars_0"]))
 
     _, argv, timeout = commands[0]
     assert argv[-3:] == ["doctor", "tars_0", "--services"]

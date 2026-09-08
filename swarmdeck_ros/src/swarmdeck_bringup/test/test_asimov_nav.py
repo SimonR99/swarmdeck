@@ -82,7 +82,12 @@ def test_asimov_passes_its_own_g1_footprint_not_a_bunker_default():
     assert '"robot_radius": f"{_FOOTPRINT_RADIUS:.3f}"' in source
     assert '"footprint": _G1_FOOTPRINT' in source
     assert g1["footprint_radius"] == 0.30
-    assert g1["footprint"] == [[0.18, 0.22], [0.18, -0.22], [-0.18, -0.22], [-0.18, 0.22]]
+    assert g1["footprint"] == [
+        [0.18, 0.22],
+        [0.18, -0.22],
+        [-0.18, -0.22],
+        [-0.18, 0.22],
+    ]
 
 
 def test_asimov_uses_isolated_navigation_output():

@@ -18,7 +18,6 @@ from typing import Any, Awaitable, Callable, Dict
 
 from .contracts import FleetAction
 
-
 CommandResult = Dict[str, Any]
 CommandRunner = Callable[[list[str], float], Awaitable[CommandResult]]
 

@@ -73,7 +73,10 @@ BUILTIN_SKILLS: List[CortexSkill] = [
         name="Codebase Modification",
         description="Instruct Cortex to inspect, edit, refactor, or test SwarmDeck files",
         usage="/code <task_description>",
-        examples=["/code add a battery warning icon to the topbar", "/code verify server endpoints with pytest"],
+        examples=[
+            "/code add a battery warning icon to the topbar",
+            "/code verify server endpoints with pytest",
+        ],
         category="Development",
     ),
     CortexSkill(

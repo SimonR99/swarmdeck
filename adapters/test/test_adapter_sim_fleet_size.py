@@ -30,7 +30,11 @@ def test_hello_matches_the_hardware_protocol_envelope(sim_module):
     bridge.id = "robot_0"
     bridge.cfg = sim_module.deep_merge(
         TRANSPORT_DEFAULTS,
-        {"robot_type": "agilex_bunker", "ros_distro": "jazzy", "footprint_radius": 0.643},
+        {
+            "robot_type": "agilex_bunker",
+            "ros_distro": "jazzy",
+            "footprint_radius": 0.643,
+        },
     )
     msg = bridge.hello()
     assert msg["protocol"] == PROTOCOL_VERSION

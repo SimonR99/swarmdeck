@@ -32,8 +32,12 @@ def test_navigate_to_passes_path_only_when_the_bridge_accepts_it():
 
     async def run():
         loop = asyncio.get_running_loop()
-        await dispatch_command(ros2, {"type": "navigate_to", "goal": goal, "path": path}, loop)
-        await dispatch_command(ros1, {"type": "navigate_to", "goal": goal, "path": path}, loop)
+        await dispatch_command(
+            ros2, {"type": "navigate_to", "goal": goal, "path": path}, loop
+        )
+        await dispatch_command(
+            ros1, {"type": "navigate_to", "goal": goal, "path": path}, loop
+        )
 
     asyncio.run(run())
     assert ros2.calls == [("nav", goal)]
@@ -44,6 +48,8 @@ def test_unknown_command_types_are_ignored():
     bridge = SimpleNamespace()
 
     async def run():
-        await dispatch_command(bridge, {"type": "not_a_command"}, asyncio.get_running_loop())
+        await dispatch_command(
+            bridge, {"type": "not_a_command"}, asyncio.get_running_loop()
+        )
 
     asyncio.run(run())

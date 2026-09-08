@@ -241,9 +241,7 @@ def render_per_trajectory(
     worth paying twice to publish the same picture under two names.
     """
     config = config or RenderConfig()
-    return _trajectory_grids(
-        graph, _contributions_of(graph, keyframes, config), config
-    )
+    return _trajectory_grids(graph, _contributions_of(graph, keyframes, config), config)
 
 
 def render_all(
@@ -606,7 +604,10 @@ def _keyframe_contributions(
         component_id = component_of.get(kf_id.trajectory)
         if component_id is not None and config.peer_exclusion_radius_m > 0.0:
             keep_world = np.ones(points_world.shape[0], dtype=bool)
-            for (track_component, peer_robot), (stamps, positions) in peer_tracks.items():
+            for (track_component, peer_robot), (
+                stamps,
+                positions,
+            ) in peer_tracks.items():
                 if track_component != component_id or peer_robot == kf_id.robot_id:
                     continue
                 peer_position = _track_position_at(

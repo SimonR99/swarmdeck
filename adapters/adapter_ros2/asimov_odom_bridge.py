@@ -74,7 +74,9 @@ class AsimovOdomBridge(Node):
         self.bms_subscriber = None
 
         self.create_subscription(String, "/cmd_body", self.on_body_command, qos)
-        self.create_subscription(Int32, "/g1_loco_bridge/set_fsm_id", self.on_fsm_id, qos)
+        self.create_subscription(
+            Int32, "/g1_loco_bridge/set_fsm_id", self.on_fsm_id, qos
+        )
         self.create_subscription(Twist, "/cmd_vel", self.on_cmd_vel, qos)
 
     def send_keys(self, keys: int, duration: float = 0.4) -> None:
@@ -91,7 +93,9 @@ class AsimovOdomBridge(Node):
         vx = max(-1.0, min(1.0, float(msg.linear.x)))
         vy = max(-0.6, min(0.6, float(msg.linear.y)))
         wz = max(-1.5, min(1.5, float(msg.angular.z)))
-        self.get_logger().info(f"[asimov_bridge] cmd_vel: vx={vx:.2f}, vy={vy:.2f}, wz={wz:.2f}")
+        self.get_logger().info(
+            f"[asimov_bridge] cmd_vel: vx={vx:.2f}, vy={vy:.2f}, wz={wz:.2f}"
+        )
         try:
             if self.wireless_pub is not None:
                 c_msg = WirelessController_(float(vy), float(vx), -float(wz), 0.0, 0)
@@ -252,7 +256,9 @@ def main() -> None:
     except Exception as exc:
         node.get_logger().warn(f"LocoClient initialization failed: {exc}")
     try:
-        node.wireless_pub = ChannelPublisher("rt/wirelesscontroller", WirelessController_)
+        node.wireless_pub = ChannelPublisher(
+            "rt/wirelesscontroller", WirelessController_
+        )
         node.wireless_pub.Init()
     except Exception as exc:
         node.get_logger().warn(f"Wireless publisher initialization failed: {exc}")

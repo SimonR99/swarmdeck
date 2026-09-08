@@ -15,7 +15,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-
 SCHEMA_VERSION = 1
 
 
@@ -36,8 +35,7 @@ class CortexStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript(
-                """
+            connection.executescript("""
                 CREATE TABLE IF NOT EXISTS schema_info (
                     version INTEGER NOT NULL
                 );
@@ -87,9 +85,10 @@ class CortexStore:
                     summary TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
-                """
-            )
-            row = connection.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
+                """)
+            row = connection.execute(
+                "SELECT version FROM schema_info LIMIT 1"
+            ).fetchone()
             if row is None:
                 connection.execute(
                     "INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,)
@@ -273,10 +272,7 @@ class CortexStore:
             rows = connection.execute(
                 f"SELECT * FROM memories{where} ORDER BY created_at DESC", values
             ).fetchall()
-        return [
-            self._memory_dict(row)
-            for row in rows
-        ]
+        return [self._memory_dict(row) for row in rows]
 
     def add_compaction(
         self, *, job_id: str, through_sequence: int, summary: str

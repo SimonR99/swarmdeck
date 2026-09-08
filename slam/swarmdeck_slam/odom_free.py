@@ -259,9 +259,10 @@ def _translation_peaks(
     peaks: list[tuple[np.ndarray, float]] = []
     for index in order[: config.translation_hypotheses_per_yaw]:
         y, x = locations[index]
-        translation = np.array(
-            [shift_x[y, x], shift_y[y, x]], dtype=np.float64
-        ) * config.grid_resolution
+        translation = (
+            np.array([shift_x[y, x], shift_y[y, x]], dtype=np.float64)
+            * config.grid_resolution
+        )
         peaks.append((translation, float(correlation[y, x] / normalizer)))
     return peaks
 
@@ -277,8 +278,11 @@ def _symmetric_fit(
     target_distances = cKDTree(transformed).query(target_points, workers=1)[0]
     source_overlap = float(np.mean(source_distances <= distance))
     target_overlap = float(np.mean(target_distances <= distance))
-    overlap = 2.0 * source_overlap * target_overlap / max(
-        source_overlap + target_overlap, 1e-12
+    overlap = (
+        2.0
+        * source_overlap
+        * target_overlap
+        / max(source_overlap + target_overlap, 1e-12)
     )
     inlier_distances = np.concatenate(
         [
@@ -379,7 +383,10 @@ def register_clouds(
                 transform,
                 config.overlap_distance,
             )
-            if overlap < config.min_symmetric_overlap or rmse > config.max_symmetric_rmse:
+            if (
+                overlap < config.min_symmetric_overlap
+                or rmse > config.max_symmetric_rmse
+            ):
                 continue
             mean_error = float(result.error / max(result.num_inliers, 1))
             # Ranking is deliberately dominated by a metric independent of

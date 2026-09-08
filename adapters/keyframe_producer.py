@@ -237,7 +237,9 @@ def _scan_signature(points_base: np.ndarray, sectors: int = 60) -> np.ndarray:
     return signature
 
 
-def _scan_changed(previous: np.ndarray, current: np.ndarray, threshold_m: float) -> bool:
+def _scan_changed(
+    previous: np.ndarray, current: np.ndarray, threshold_m: float
+) -> bool:
     """Return whether common angular sectors changed enough to keep a scan."""
     if threshold_m <= 0.0:
         return False
@@ -405,11 +407,8 @@ class KeyframeUploader:
             moved = _moved(
                 self._last_pose, pose, self.min_translation_m, self.min_yaw_rad
             )
-            scan_changed = (
-                self._last_scan_signature is not None
-                and _scan_changed(
-                    self._last_scan_signature, signature, self.min_scan_change_m
-                )
+            scan_changed = self._last_scan_signature is not None and _scan_changed(
+                self._last_scan_signature, signature, self.min_scan_change_m
             )
             # A SLAM loop closure can move both the reported map pose and the
             # map-frame cloud by metres while the robot is physically still.

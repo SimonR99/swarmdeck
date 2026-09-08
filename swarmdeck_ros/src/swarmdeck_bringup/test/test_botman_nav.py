@@ -14,10 +14,7 @@ PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
 BUNKER = REPO / "adapters/adapter_ros2/config/bunker.yaml"
 COMPOSE = REPO / "deploy/compose/docker-compose.robot-botman.yml"
 BOTMAN_LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/botman.launch.py"
-PROJECTOR = (
-    REPO
-    / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
-)
+PROJECTOR = REPO / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
 
 
 def test_botman_uses_live_superodom_and_ouster_interfaces():
@@ -142,10 +139,7 @@ def test_botman_tf_bridge_accounts_for_live_pipeline_latency():
     assert '"footprint_padding": _SELF_FILTER_PADDING' in launch_source
     assert '"obstacle_scan_topic": _SCAN_TOPIC' in launch_source
     assert '"obstacle_sensor_frame": _SCAN_FRAME' in launch_source
-    assert (
-        "child_frame:=botman_base_link"
-        in compose["services"]["odom_tf"]["command"]
-    )
+    assert "child_frame:=botman_base_link" in compose["services"]["odom_tf"]["command"]
     assert bunker["base_frame"] == "botman_base_link"
     assert compose["services"]["oak_mount_tf"]["command"][-3:] == [
         "botman_base_link",

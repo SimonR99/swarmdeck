@@ -44,7 +44,6 @@ WORKSPACE_DIR = os.environ.get("CORTEX_WORKSPACE", "/app")
 SERVER_URL = os.environ.get("SWARMDECK_SERVER_URL", "http://server:8080").rstrip("/")
 
 
-
 def get_actual_workspace() -> str:
     env_ws = os.environ.get("CORTEX_WORKSPACE")
     if env_ws and os.path.isdir(env_ws):
@@ -140,14 +139,16 @@ async def list_threads() -> Dict[str, Any]:
     for f in h_dir.glob("*.json"):
         try:
             data = json.loads(f.read_text())
-            threads.append({
-                "id": data.get("id", f.stem),
-                "title": data.get("title", "New Conversation"),
-                "createdAt": data.get("createdAt", 0),
-                "updatedAt": data.get("updatedAt", 0),
-                "messageCount": len(data.get("messages", [])),
-                "conversationId": data.get("conversationId"),
-            })
+            threads.append(
+                {
+                    "id": data.get("id", f.stem),
+                    "title": data.get("title", "New Conversation"),
+                    "createdAt": data.get("createdAt", 0),
+                    "updatedAt": data.get("updatedAt", 0),
+                    "messageCount": len(data.get("messages", [])),
+                    "conversationId": data.get("conversationId"),
+                }
+            )
         except Exception:
             continue
     threads.sort(key=lambda x: x.get("updatedAt", 0), reverse=True)
@@ -328,7 +329,9 @@ async def post_chat(req: ChatRequest) -> Response:
         return JSONResponse({"error": str(exc)}, status_code=500)
     if not provider_status.get("available"):
         return JSONResponse(
-            {"error": f"Cortex provider '{provider_status.get('name')}' is unavailable"},
+            {
+                "error": f"Cortex provider '{provider_status.get('name')}' is unavailable"
+            },
             status_code=503,
         )
 
@@ -345,7 +348,11 @@ async def post_chat(req: ChatRequest) -> Response:
         rid = r.get("robot_id")
         rtype = r.get("robot_type")
         state = "online" if r.get("online") is True else "OFFLINE/stale"
-        batt = f"{int(r.get('battery', 0.0) * 100)}%" if r.get("battery") is not None else "N/A"
+        batt = (
+            f"{int(r.get('battery', 0.0) * 100)}%"
+            if r.get("battery") is not None
+            else "N/A"
+        )
         pose = r.get("pose") or {}
         px, py = pose.get("x", 0.0), pose.get("y", 0.0)
         fleet_summary_list.append(
@@ -360,7 +367,11 @@ async def post_chat(req: ChatRequest) -> Response:
         for att in req.attachments:
             p = att.get("path") or att.get("filename")
             attachment_lines.append(f"- Attached image file: {p}")
-        attachment_text = "\nAttached Media/Images:\n" + "\n".join(attachment_lines) + "\n(You can use view_file to inspect image details or pixel contents.)\n"
+        attachment_text = (
+            "\nAttached Media/Images:\n"
+            + "\n".join(attachment_lines)
+            + "\n(You can use view_file to inspect image details or pixel contents.)\n"
+        )
 
     system_prefix = build_system_prompt(
         workspace=ws_dir,

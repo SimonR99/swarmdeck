@@ -124,9 +124,7 @@ def raw_graph(keyframes: list[Keyframe]) -> OptimizedGraph:
 
 def spawn_aligned_graph(keyframes: list[Keyframe]) -> OptimizedGraph:
     """Upper bound: each robot's SLAM map placed at its Gazebo spawn pose."""
-    frames = {
-        robot_id: yaw_se3(x, y, yaw) for robot_id, (x, y, yaw) in SPAWN.items()
-    }
+    frames = {robot_id: yaw_se3(x, y, yaw) for robot_id, (x, y, yaw) in SPAWN.items()}
     by_traj: dict = defaultdict(list)
     poses = {}
     traj_frames = {}

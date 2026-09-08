@@ -12,7 +12,6 @@ from typing import Any
 from agent_cortex.contracts import PlannerRequest
 from agent_cortex.models import OllamaPlanner
 
-
 DEFAULT_CASES = Path(__file__).with_name("planner_cases.json")
 PLANNER_CONTEXT = json.dumps(
     {

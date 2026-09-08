@@ -236,9 +236,7 @@ def _yaw(transform: np.ndarray) -> float:
     return float(math.atan2(transform[1, 0], transform[0, 0]))
 
 
-def _motion_plausible(
-    transform: np.ndarray, dt: float, config: TemporalConfig
-) -> bool:
+def _motion_plausible(transform: np.ndarray, dt: float, config: TemporalConfig) -> bool:
     translation = float(np.linalg.norm(transform[:2, 3]))
     max_translation = config.translation_slack_m + config.max_linear_speed_mps * dt
     max_yaw = min(math.pi, config.yaw_slack_rad + config.max_yaw_rate_rad_s * dt)
@@ -273,10 +271,9 @@ def _cycle_penalty(
             + (value[1] / config.cycle_rotation_scale_rad) ** 2
         ),
     )
-    normalized = (
-        (translation / config.cycle_translation_scale_m) ** 2
-        + (rotation / config.cycle_rotation_scale_rad) ** 2
-    )
+    normalized = (translation / config.cycle_translation_scale_m) ** 2 + (
+        rotation / config.cycle_rotation_scale_rad
+    ) ** 2
     return config.cycle_weight * min(config.max_cycle_penalty, normalized)
 
 
@@ -313,9 +310,7 @@ def _odom_relative(
     return se3_relative(previous.t_odom_base, current.t_odom_base)
 
 
-def _odom_hop_usable(
-    rel: np.ndarray, dt: float, config: TemporalConfig
-) -> bool:
+def _odom_hop_usable(rel: np.ndarray, dt: float, config: TemporalConfig) -> bool:
     """True when the recorded hop could have been physical robot motion."""
     return _motion_plausible(rel, dt, config)
 
@@ -340,9 +335,10 @@ def _unary_cost(
             # the zero-yaw prior so a real 180-degree turn odometry reports
             # can beat path_yaw_weight; a hop that matches no mode is ignored.
             yaw_term = rotation
-            odom_term = config.odom_hint_weight * (
-                translation / config.odom_hint_translation_m
-            ) ** 2
+            odom_term = (
+                config.odom_hint_weight
+                * (translation / config.odom_hint_translation_m) ** 2
+            )
     return (
         -config.registration_weight * hypothesis.score
         + config.path_speed_weight * speed
@@ -478,9 +474,8 @@ def _corroborated_skip_bridge(
                 continue
             for target_to_after in skip_after:
                 for source_to_after in adjacent_after:
-                    right = (
-                        target_to_after.t_target_source
-                        @ se3_inverse(source_to_after.t_target_source)
+                    right = target_to_after.t_target_source @ se3_inverse(
+                        source_to_after.t_target_source
                     )
                     if not _motion_plausible(right, dt, config):
                         continue
@@ -507,16 +502,14 @@ def _corroborated_skip_bridge(
                             item.symmetric_overlap for item in witnesses
                         ),
                         symmetric_rmse=max(item.symmetric_rmse for item in witnesses),
-                        gicp_mean_error=max(
-                            item.gicp_mean_error for item in witnesses
-                        ),
+                        gicp_mean_error=max(item.gicp_mean_error for item in witnesses),
                         num_inliers=min(item.num_inliers for item in witnesses),
                         score=min(item.score for item in witnesses),
                     )
                     if not any(
-                        se3_distance(candidate.t_target_source, existing.t_target_source)[
-                            0
-                        ]
+                        se3_distance(
+                            candidate.t_target_source, existing.t_target_source
+                        )[0]
                         <= 0.5 * config.cycle_translation_scale_m
                         and se3_distance(
                             candidate.t_target_source, existing.t_target_source
@@ -556,9 +549,7 @@ def build_temporal_fragments(
         ] = []
         run_frames = [ordered[0]] if ordered else []
         run_adjacent: list[list[RegistrationHypothesis]] = []
-        for edge_index, (previous, current) in enumerate(
-            zip(ordered, ordered[1:])
-        ):
+        for edge_index, (previous, current) in enumerate(zip(ordered, ordered[1:])):
             dt = current.stamp - previous.stamp
             reason = ""
             candidates: list[RegistrationHypothesis] = []
@@ -615,14 +606,10 @@ def build_temporal_fragments(
                 poses[current.index] = (
                     poses[previous.index] @ registration.t_target_source
                 )
-                edges.append(
-                    FragmentEdge(previous.index, current.index, registration)
-                )
+                edges.append(FragmentEdge(previous.index, current.index, registration))
             fragments.append(
                 Fragment(
-                    fragment_id=(
-                        f"{trajectory_id}:{trajectory_fragment_number:03d}"
-                    ),
+                    fragment_id=(f"{trajectory_id}:{trajectory_fragment_number:03d}"),
                     robot_id=robot_id,
                     frame_indices=tuple(frame.index for frame in run_frames),
                     poses=poses,
@@ -766,9 +753,7 @@ def _candidate_frame_pairs(
 
         selected = [item for item in items if item[2] < 0.0][:limit]
         selected_pairs = {(item[0], item[1]) for item in selected}
-        remaining = [
-            item for item in items if (item[0], item[1]) not in selected_pairs
-        ]
+        remaining = [item for item in items if (item[0], item[1]) not in selected_pairs]
         if not selected and remaining:
             selected.append(remaining.pop(0))
 
@@ -869,13 +854,13 @@ def _cluster_from_seed(
     )
 
 
-def _spatial_span(
-    indices: set[int], fragment: Fragment
-) -> float:
+def _spatial_span(indices: set[int], fragment: Fragment) -> float:
     positions = np.stack([fragment.poses[index][:3, 3] for index in indices])
     if len(positions) < 2:
         return 0.0
-    return float(np.max(np.linalg.norm(positions[:, None] - positions[None, :], axis=2)))
+    return float(
+        np.max(np.linalg.norm(positions[:, None] - positions[None, :], axis=2))
+    )
 
 
 def _best_boundary_proposal(
@@ -925,9 +910,7 @@ def _pose_hint_consistent(
     if hint_a is None or hint_b is None:
         return False
     expected_fragment_a_fragment_b = se3_inverse(hint_a) @ hint_b
-    translation, rotation = se3_distance(
-        expected_fragment_a_fragment_b, proposal.t_a_b
-    )
+    translation, rotation = se3_distance(expected_fragment_a_fragment_b, proposal.t_a_b)
     return (
         translation <= config.pose_hint_translation_m
         and rotation <= config.pose_hint_rotation_rad
@@ -1007,8 +990,7 @@ def find_fragment_connections(
             score = sum(member.score for member in members)
             member_signature = frozenset(id(member) for member in members)
             if any(
-                member_signature
-                == frozenset(id(member) for member in existing[0])
+                member_signature == frozenset(id(member) for member in existing[0])
                 or (
                     se3_distance(seed.t_a_b, existing[0][0].t_a_b)[0]
                     < config.cluster_translation_m / 2.0
@@ -1029,13 +1011,9 @@ def find_fragment_connections(
             and pose_hints is not None
             and fragment_by_id[fragment_a_id].robot_id in pose_hints
             and fragment_by_id[fragment_b_id].robot_id in pose_hints
-            and primary_fragment_by_robot.get(
-                fragment_by_id[fragment_a_id].robot_id
-            )
+            and primary_fragment_by_robot.get(fragment_by_id[fragment_a_id].robot_id)
             == fragment_a_id
-            and primary_fragment_by_robot.get(
-                fragment_by_id[fragment_b_id].robot_id
-            )
+            and primary_fragment_by_robot.get(fragment_by_id[fragment_b_id].robot_id)
             == fragment_b_id
         )
         if robots_have_hints:
@@ -1052,15 +1030,15 @@ def find_fragment_connections(
                 )
                 required = max(
                     config.min_support,
-                    int(math.ceil(config.pose_hint_min_fraction * len(cluster_members))),
+                    int(
+                        math.ceil(config.pose_hint_min_fraction * len(cluster_members))
+                    ),
                 )
                 if consistent >= required:
                     eligible.append((cluster_members, score))
             if eligible:
                 clusters = eligible
-                clusters.sort(
-                    key=lambda item: (len(item[0]), item[1]), reverse=True
-                )
+                clusters.sort(key=lambda item: (len(item[0]), item[1]), reverse=True)
             else:
                 pose_hint_reason = "all geometric modes contradict coarse pose hints"
 
@@ -1078,20 +1056,15 @@ def find_fragment_connections(
             cluster_members, _ = cluster
             if len(cluster_members) < config.min_support:
                 return "insufficient support"
-            cluster_a_indices = {
-                member.frame_a for member in cluster_members
-            }
-            cluster_b_indices = {
-                member.frame_b for member in cluster_members
-            }
+            cluster_a_indices = {member.frame_a for member in cluster_members}
+            cluster_b_indices = {member.frame_b for member in cluster_members}
             if (
                 len(cluster_a_indices) < config.min_distinct_frames_per_side
                 or len(cluster_b_indices) < config.min_distinct_frames_per_side
             ):
                 return "support is not independent"
             if (
-                _spatial_span(cluster_a_indices, fragment_a)
-                < config.min_spatial_span_m
+                _spatial_span(cluster_a_indices, fragment_a) < config.min_spatial_span_m
                 or _spatial_span(cluster_b_indices, fragment_b)
                 < config.min_spatial_span_m
             ):
@@ -1139,9 +1112,7 @@ def find_fragment_connections(
             and best_boundary is not None
         ):
             if best_boundary.score < config.min_boundary_registration_score:
-                boundary_rejection_reason = (
-                    "adjacent boundary registration is too weak"
-                )
+                boundary_rejection_reason = "adjacent boundary registration is too weak"
             else:
                 boundary_eligible = []
                 for cluster in clusters:
@@ -1150,8 +1121,7 @@ def find_fragment_connections(
                         candidate.t_a_b, best_boundary.t_a_b
                     )
                     if (
-                        translation
-                        <= config.boundary_consistency_translation_m
+                        translation <= config.boundary_consistency_translation_m
                         and rotation <= config.boundary_consistency_rotation_rad
                     ):
                         boundary_eligible.append(cluster)
@@ -1248,10 +1218,7 @@ def find_intra_fragment_loops(
             ranked: list[tuple[float, int]] = []
             for neighbor_row in np.atleast_1d(neighbors):
                 neighbor = fragment_frames[int(neighbor_row)]
-                if (
-                    abs(neighbor.seq - frame.seq)
-                    < config.loop_min_sequence_separation
-                ):
+                if abs(neighbor.seq - frame.seq) < config.loop_min_sequence_separation:
                     continue
                 _, distance = best_alignment(
                     neighbor.cloud.descriptor, frame.cloud.descriptor
@@ -1273,8 +1240,7 @@ def find_intra_fragment_loops(
         if fragment is not fragment_by_frame[source_index]:
             continue
         predicted = (
-            se3_inverse(fragment.poses[target_index])
-            @ fragment.poses[source_index]
+            se3_inverse(fragment.poses[target_index]) @ fragment.poses[source_index]
         )
         alternatives = register(
             frame_by_index[target_index], frame_by_index[source_index]
@@ -1313,9 +1279,7 @@ def _component_frame_position(
     fragment: Fragment,
     frame_index: int,
 ) -> np.ndarray:
-    return (
-        placement.poses[fragment.fragment_id] @ fragment.poses[frame_index]
-    )[:3, 3]
+    return (placement.poses[fragment.fragment_id] @ fragment.poses[frame_index])[:3, 3]
 
 
 def _connection_proposal_locations(
@@ -1342,9 +1306,7 @@ def _maximum_separation(positions: Sequence[np.ndarray]) -> float:
     if len(positions) < 2:
         return 0.0
     stacked = np.stack(positions)
-    return float(
-        np.max(np.linalg.norm(stacked[:, None] - stacked[None, :], axis=2))
-    )
+    return float(np.max(np.linalg.norm(stacked[:, None] - stacked[None, :], axis=2)))
 
 
 def filter_inter_robot_connections(
@@ -1401,9 +1363,9 @@ def filter_inter_robot_connections(
 
     # Express every provisional cross-robot edge between canonical local
     # component frames, then group edges that could form a corroborating cycle.
-    grouped: dict[
-        tuple[int, int], list[tuple[FragmentConnection, np.ndarray, str]]
-    ] = {}
+    grouped: dict[tuple[int, int], list[tuple[FragmentConnection, np.ndarray, str]]] = (
+        {}
+    )
     for connection in inter_robot:
         component_a = component_of[connection.fragment_a]
         component_b = component_of[connection.fragment_b]
@@ -1425,19 +1387,19 @@ def filter_inter_robot_connections(
     kept = list(intra_robot)
     rejected: list[RejectedConnection] = []
     for candidates in grouped.values():
+
         def pose_hint_corroborates(connection: FragmentConnection) -> bool:
             return connection.pose_hint_support >= max(
                 config.min_support,
                 int(
-                    math.ceil(
-                        config.pose_hint_min_fraction
-                        * len(connection.proposals)
-                    )
+                    math.ceil(config.pose_hint_min_fraction * len(connection.proposals))
                 ),
             )
 
         clusters: list[list[tuple[FragmentConnection, np.ndarray, str]]] = []
-        for candidate in sorted(candidates, key=lambda item: item[0].score, reverse=True):
+        for candidate in sorted(
+            candidates, key=lambda item: item[0].score, reverse=True
+        ):
             placed = False
             for cluster in clusters:
                 translation, rotation = se3_distance(cluster[0][1], candidate[1])
@@ -1478,17 +1440,12 @@ def filter_inter_robot_connections(
 
         reason = ""
         pose_hint_corroborated = any(
-            pose_hint_corroborates(connection)
-            for connection, _, _ in best
+            pose_hint_corroborates(connection) for connection, _, _ in best
         )
-        if (
-            not pose_hint_corroborated
-            and (
-                _maximum_separation(side_a_positions)
-                < config.min_inter_robot_separation_m
-                or _maximum_separation(side_b_positions)
-                < config.min_inter_robot_separation_m
-            )
+        if not pose_hint_corroborated and (
+            _maximum_separation(side_a_positions) < config.min_inter_robot_separation_m
+            or _maximum_separation(side_b_positions)
+            < config.min_inter_robot_separation_m
         ):
             reason = (
                 "inter-robot merge has no independent cycle"
@@ -1666,9 +1623,7 @@ def optimize_keyframe_poses(
         connection_noise = gtsam.noiseModel.Robust.Create(
             gtsam.noiseModel.mEstimator.Huber.Create(1.345),
             gtsam.noiseModel.Diagonal.Sigmas(
-                closure_sigmas
-                * 4.0
-                * math.sqrt(max(1, len(connection.proposals)))
+                closure_sigmas * 4.0 * math.sqrt(max(1, len(connection.proposals)))
             ),
         )
         for proposal in connection.proposals:

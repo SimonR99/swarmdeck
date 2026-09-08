@@ -26,8 +26,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-OAK_ENV_KEYS = ("BOTMAN_OAK_X", "BOTMAN_OAK_Y", "BOTMAN_OAK_Z",
-                "BOTMAN_OAK_ROLL", "BOTMAN_OAK_PITCH", "BOTMAN_OAK_YAW")
+OAK_ENV_KEYS = (
+    "BOTMAN_OAK_X",
+    "BOTMAN_OAK_Y",
+    "BOTMAN_OAK_Z",
+    "BOTMAN_OAK_ROLL",
+    "BOTMAN_OAK_PITCH",
+    "BOTMAN_OAK_YAW",
+)
 
 
 def check_sensor_health() -> None:
@@ -35,12 +41,16 @@ def check_sensor_health() -> None:
     print(" STEP 1: SENSOR & NETWORK CONNECTIVITY CHECK")
     print("=" * 65)
 
-    vn_dev = next((d for d in ("/dev/vectornav", "/dev/ttyUSB0") if os.path.exists(d)), None)
+    vn_dev = next(
+        (d for d in ("/dev/vectornav", "/dev/ttyUSB0") if os.path.exists(d)), None
+    )
     if vn_dev:
         print(f"  [OK] VectorNav serial device is present locally ({vn_dev})")
     else:
-        print("  [INFO] VectorNav serial not directly in container /dev "
-              "(subscribing via ROS 2 topic /vectornav/imu)")
+        print(
+            "  [INFO] VectorNav serial not directly in container /dev "
+            "(subscribing via ROS 2 topic /vectornav/imu)"
+        )
 
     ouster_ip = "192.168.2.199"
     try:
@@ -52,17 +62,22 @@ def check_sensor_health() -> None:
     if os.path.exists("/sys/class/net/can2"):
         print("  [OK] Bunker CAN interface can2 is present locally")
     else:
-        print("  [INFO] can2 not in container sysfs (subscribing via ROS 2 topic /odom)")
+        print(
+            "  [INFO] can2 not in container sysfs (subscribing via ROS 2 topic /odom)"
+        )
 
     # The camera stage needs OpenCV's aruco module; report it here rather than
     # letting Phase 3 fail 20 minutes into the session.
     try:
         import cv2
         import cv2.aruco  # noqa: F401
+
         print(f"  [OK] OpenCV {cv2.__version__} with aruco module")
     except ImportError as exc:
-        print(f"  [FAIL] OpenCV aruco unavailable ({exc}). Phase 3 cannot run; "
-              "install opencv-contrib-python.")
+        print(
+            f"  [FAIL] OpenCV aruco unavailable ({exc}). Phase 3 cannot run; "
+            "install opencv-contrib-python."
+        )
     print()
 
 
@@ -112,30 +127,57 @@ def update_env_file(env_file: Path, values: dict) -> bool:
             print(f"      {key}={value}")
         print("\n  or, on the machine that holds the checkout:\n")
         assign = " ".join(f"{k}={v}" for k, v in values.items())
-        print(f"      python3 scripts/calibration/run_botman_calibration.py --write-env {assign}\n")
+        print(
+            f"      python3 scripts/calibration/run_botman_calibration.py --write-env {assign}\n"
+        )
         return False
     print(f"  [OK] Updated {env_file}")
     return True
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--duration", type=float, default=25.0,
-                        help="Manual rotation duration in seconds (default: 25)")
-    parser.add_argument("--square-size", type=float, default=0.1125,
-                        help="Spot panel chequer square side in metres (default: 0.1125, derived "
-                             "from the panel documented 118.5 x 50 cm outer size)")
-    parser.add_argument("--marker-size", type=float, default=None,
-                        help="Marker side in metres (default: 0.75 * square size)")
-    parser.add_argument("--dictionary", default="DICT_4X4_50",
-                        help="ArUco dictionary of the panel (default: DICT_4X4_50, the Spot panel)")
-    parser.add_argument("--captures", type=int, default=5,
-                        help="Number of board poses to capture (minimum 3, default: 5)")
-    parser.add_argument("--write-env", nargs="+", metavar="KEY=VALUE", default=None,
-                        help="Apply KEY=VALUE pairs to deploy/robots/botman.env and exit. Use this "
-                             "from a host shell when the calibration ran inside a container whose "
-                             "repo mount is read-only.")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=25.0,
+        help="Manual rotation duration in seconds (default: 25)",
+    )
+    parser.add_argument(
+        "--square-size",
+        type=float,
+        default=0.1125,
+        help="Spot panel chequer square side in metres (default: 0.1125, derived "
+        "from the panel documented 118.5 x 50 cm outer size)",
+    )
+    parser.add_argument(
+        "--marker-size",
+        type=float,
+        default=None,
+        help="Marker side in metres (default: 0.75 * square size)",
+    )
+    parser.add_argument(
+        "--dictionary",
+        default="DICT_4X4_50",
+        help="ArUco dictionary of the panel (default: DICT_4X4_50, the Spot panel)",
+    )
+    parser.add_argument(
+        "--captures",
+        type=int,
+        default=5,
+        help="Number of board poses to capture (minimum 3, default: 5)",
+    )
+    parser.add_argument(
+        "--write-env",
+        nargs="+",
+        metavar="KEY=VALUE",
+        default=None,
+        help="Apply KEY=VALUE pairs to deploy/robots/botman.env and exit. Use this "
+        "from a host shell when the calibration ran inside a container whose "
+        "repo mount is read-only.",
+    )
     parser.add_argument("--skip-imu", action="store_true", help="Skip phases 1 and 2")
     parser.add_argument("--skip-camera", action="store_true", help="Skip phase 3")
     args = parser.parse_args()
@@ -166,7 +208,9 @@ def main() -> None:
 
     imu_results = None
     if not args.skip_imu:
-        input("--> Press [ENTER] to begin Phase 1 (Static Gravity & Tilt Estimation)... ")
+        input(
+            "--> Press [ENTER] to begin Phase 1 (Static Gravity & Tilt Estimation)... "
+        )
         imu_results = run_interactive_imu_calibration(
             imu_topic="/vectornav/imu",
             odom_topic="/odom",
@@ -203,29 +247,42 @@ def main() -> None:
         if "rpy_imu_laser" in imu_results:
             rpy_l = imu_results["rpy_imu_laser"]
             print("\n[IMU-to-LiDAR Extrinsics] vectornav <- os_lidar:")
-            print(f"  Euler RPY (rad):       [{rpy_l[0]:.4f}, {rpy_l[1]:.4f}, {rpy_l[2]:.4f}]")
+            print(
+                f"  Euler RPY (rad):       [{rpy_l[0]:.4f}, {rpy_l[1]:.4f}, {rpy_l[2]:.4f}]"
+            )
             print("  Yaw is 0 by construction: an in-place spin cannot observe it.")
         lever = imu_results.get("lever_arm_fit")
         if lever is not None:
             r, se = lever["r"], lever["stderr"]
             print("\n[IMU lever arm] offset from the rotation axis:")
-            print(f"  r_x = {r[0]:+.3f} +/- {se[0]:.3f} m, r_y = {r[1]:+.3f} +/- {se[1]:.3f} m")
+            print(
+                f"  r_x = {r[0]:+.3f} +/- {se[0]:.3f} m, r_y = {r[1]:+.3f} +/- {se[1]:.3f} m"
+            )
         print("\n  Note: botman.env carries no IMU keys, so these are reported only.")
 
     if cam_results is not None:
         print("\n" + "=" * 65)
-        ans = input("--> Update deploy/robots/botman.env with the measured camera values? [y/N]: ").strip().lower()
+        ans = (
+            input(
+                "--> Update deploy/robots/botman.env with the measured camera values? [y/N]: "
+            )
+            .strip()
+            .lower()
+        )
         if ans == "y":
             t = cam_results["translation"]
             rpy = cam_results["rpy_rad"]
-            update_env_file(REPO_ROOT / "deploy/robots/botman.env", {
-                "BOTMAN_OAK_X": f"{t[0]:.3f}",
-                "BOTMAN_OAK_Y": f"{t[1]:.3f}",
-                "BOTMAN_OAK_Z": f"{t[2]:.3f}",
-                "BOTMAN_OAK_ROLL": f"{rpy[0]:.4f}",
-                "BOTMAN_OAK_PITCH": f"{rpy[1]:.4f}",
-                "BOTMAN_OAK_YAW": f"{rpy[2]:.4f}",
-            })
+            update_env_file(
+                REPO_ROOT / "deploy/robots/botman.env",
+                {
+                    "BOTMAN_OAK_X": f"{t[0]:.3f}",
+                    "BOTMAN_OAK_Y": f"{t[1]:.3f}",
+                    "BOTMAN_OAK_Z": f"{t[2]:.3f}",
+                    "BOTMAN_OAK_ROLL": f"{rpy[0]:.4f}",
+                    "BOTMAN_OAK_PITCH": f"{rpy[1]:.4f}",
+                    "BOTMAN_OAK_YAW": f"{rpy[2]:.4f}",
+                },
+            )
 
     print("\nCalibration session finished.")
 

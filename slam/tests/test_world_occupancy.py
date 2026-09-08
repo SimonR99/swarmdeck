@@ -14,7 +14,6 @@ from swarmdeck_slam.world_occupancy import (
     score_surfaces,
 )
 
-
 SDF = (
     Path(__file__).resolve().parents[2]
     / "swarmdeck_ros"

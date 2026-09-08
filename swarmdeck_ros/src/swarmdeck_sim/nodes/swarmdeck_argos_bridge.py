@@ -137,38 +137,45 @@ class RobotInterface:
         # move": no `<ns>/scan` at all (pointcloud_to_laserscan never received a
         # cloud) and an explorer that never saw an odometry message. The only
         # hint is a rclpy warning about an incompatible RELIABILITY policy.
-        reliable = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=10,
-                              reliability=QoSReliabilityPolicy.RELIABLE)
+        reliable = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+        )
         # TF has to be latched-ish for late joiners the same way tf2_ros does it.
-        tf_qos = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=100,
-                            reliability=QoSReliabilityPolicy.RELIABLE,
-                            durability=QoSDurabilityPolicy.VOLATILE)
+        tf_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=100,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
 
         ns = robot_id
         self.pub_points = node.create_publisher(
-            PointCloud2, f"/{ns}/scan/points", reliable)
-        self.pub_imu = node.create_publisher(
-            Imu, f"/{ns}/imu", reliable)
-        self.pub_odom = node.create_publisher(
-            Odometry, f"/{ns}/odom", reliable)
+            PointCloud2, f"/{ns}/scan/points", reliable
+        )
+        self.pub_imu = node.create_publisher(Imu, f"/{ns}/imu", reliable)
+        self.pub_odom = node.create_publisher(Odometry, f"/{ns}/odom", reliable)
         self.pub_truth = node.create_publisher(
-            Odometry, f"/{ns}/ground_truth", reliable)
-        self.pub_image = node.create_publisher(
-            Image, f"/{ns}/camera/image", reliable)
+            Odometry, f"/{ns}/ground_truth", reliable
+        )
+        self.pub_image = node.create_publisher(Image, f"/{ns}/camera/image", reliable)
         self.pub_depth = node.create_publisher(
-            Image, f"/{ns}/camera/depth_image", reliable)
+            Image, f"/{ns}/camera/depth_image", reliable
+        )
         self.pub_info = node.create_publisher(
-            CameraInfo, f"/{ns}/camera/camera_info", reliable)
+            CameraInfo, f"/{ns}/camera/camera_info", reliable
+        )
         # Namespaced, and remapped to `tf` by every consumer in this stack, so
         # the four robots' trees stay separate.
         self.pub_tf = node.create_publisher(TFMessage, f"/{ns}/tf", tf_qos)
 
-        node.create_subscription(
-            Twist, f"/{ns}/cmd_vel", self._on_cmd_vel, reliable)
+        node.create_subscription(Twist, f"/{ns}/cmd_vel", self._on_cmd_vel, reliable)
 
         if SetPose is not None:
             self.srv_set_pose = node.create_service(
-                SetPose, f"/{ns}/set_pose", self._on_set_pose)
+                SetPose, f"/{ns}/set_pose", self._on_set_pose
+            )
 
         self.frame_base = f"{ns}/base_link"
         self.frame_odom = f"{ns}/odom"
@@ -220,7 +227,8 @@ class RobotInterface:
         o = request.pose.pose.pose.orientation
         self.pending_teleport = (p.x, p.y, p.z, o.w, o.x, o.y, o.z)
         self.node.get_logger().info(
-            f"[{self.id}] teleport queued to ({p.x:.2f}, {p.y:.2f})")
+            f"[{self.id}] teleport queued to ({p.x:.2f}, {p.y:.2f})"
+        )
         return response
 
 
@@ -233,8 +241,7 @@ class ArgosBridge(Node):
         self.world_reset_pending = False
 
         self.pub_clock = self.create_publisher(Clock, "/clock", 10)
-        self.create_service(Trigger, "/swarmdeck_sim/reset_world",
-                            self._on_reset_world)
+        self.create_service(Trigger, "/swarmdeck_sim/reset_world", self._on_reset_world)
 
         parent = os.path.dirname(socket_path)
         if parent:
@@ -291,12 +298,14 @@ class ArgosBridge(Node):
     def _handle(self, sock: socket.socket) -> None:
         while self.running:
             magic, tick, ticks_per_second, count = struct.unpack(
-                "<4sIII", recv_exact(sock, 16))
+                "<4sIII", recv_exact(sock, 16)
+            )
             if magic != OBSERVATION_MAGIC:
                 raise RuntimeError(
                     f"observation magic {magic!r} is not {OBSERVATION_MAGIC!r}: "
                     f"the ARGoS loop function and this bridge are different "
-                    f"protocol versions")
+                    f"protocol versions"
+                )
 
             seconds = tick / float(ticks_per_second or 1)
             stamp = Clock().clock
@@ -312,8 +321,9 @@ class ArgosBridge(Node):
             self._send_commands(sock, tick, ids, seconds)
 
     def _read_robot(self, sock, stamp, ticks_per_second, seconds=0.0) -> str:
-        robot_id = recv_exact(
-            sock, struct.unpack("<B", recv_exact(sock, 1))[0]).decode("utf-8")
+        robot_id = recv_exact(sock, struct.unpack("<B", recv_exact(sock, 1))[0]).decode(
+            "utf-8"
+        )
         robot = self._robot(robot_id)
 
         # -- ground truth ---------------------------------------------------
@@ -323,8 +333,7 @@ class ArgosBridge(Node):
         truth.header.frame_id = "world"
         truth.child_frame_id = robot.frame_base
         truth.pose.pose.position = Point(x=gt[0], y=gt[1], z=gt[2])
-        truth.pose.pose.orientation = Quaternion(w=gt[3], x=gt[4], y=gt[5],
-                                                 z=gt[6])
+        truth.pose.pose.orientation = Quaternion(w=gt[3], x=gt[4], y=gt[5], z=gt[6])
         truth.twist.twist.linear = Vector3(x=gt[7], y=gt[8], z=gt[9])
         truth.twist.twist.angular = Vector3(x=gt[10], y=gt[11], z=gt[12])
         robot.pub_truth.publish(truth)
@@ -341,18 +350,17 @@ class ArgosBridge(Node):
                 odom.child_frame_id = robot.frame_base
                 odom.pose.pose.position = Point(x=odo[0], y=odo[1], z=odo[2])
                 odom.pose.pose.orientation = Quaternion(
-                    w=odo[3], x=odo[4], y=odo[5], z=odo[6])
+                    w=odo[3], x=odo[4], y=odo[5], z=odo[6]
+                )
                 odom.twist.twist.linear = Vector3(x=odo[7], y=odo[8], z=odo[9])
-                odom.twist.twist.angular = Vector3(
-                    x=odo[10], y=odo[11], z=odo[12])
+                odom.twist.twist.angular = Vector3(x=odo[10], y=odo[11], z=odo[12])
                 robot.pub_odom.publish(odom)
 
                 transform = TransformStamped()
                 transform.header.stamp = stamp
                 transform.header.frame_id = robot.frame_odom
                 transform.child_frame_id = robot.frame_base
-                transform.transform.translation = Vector3(
-                    x=odo[0], y=odo[1], z=odo[2])
+                transform.transform.translation = Vector3(x=odo[0], y=odo[1], z=odo[2])
                 transform.transform.rotation = odom.pose.pose.orientation
                 robot.pub_tf.publish(TFMessage(transforms=[transform]))
             elif not robot._warned_invalid:
@@ -362,7 +370,8 @@ class ArgosBridge(Node):
                 # a placeholder would put the robot at the origin of its own map.
                 self.get_logger().info(
                     f"[{robot_id}] estimator has no pose yet; withholding "
-                    f"/{robot_id}/odom and odom->base_link until it converges")
+                    f"/{robot_id}/odom and odom->base_link until it converges"
+                )
 
         # -- wheel encoders --------------------------------------------------
         # Normally read and discarded: Ultra-Fusion consumes the encoders inside
@@ -387,10 +396,10 @@ class ArgosBridge(Node):
             imu = Imu()
             imu.header.stamp = stamp
             imu.header.frame_id = robot.frame_imu
-            imu.angular_velocity = Vector3(x=imu_data[0], y=imu_data[1],
-                                           z=imu_data[2])
-            imu.linear_acceleration = Vector3(x=imu_data[3], y=imu_data[4],
-                                              z=imu_data[5])
+            imu.angular_velocity = Vector3(x=imu_data[0], y=imu_data[1], z=imu_data[2])
+            imu.linear_acceleration = Vector3(
+                x=imu_data[3], y=imu_data[4], z=imu_data[5]
+            )
             # No orientation estimate: this is a 6-DOF IMU, and -1 in the first
             # covariance element is how sensor_msgs/Imu says so. Filling it from
             # ground truth would hand a localizer the answer.
@@ -400,7 +409,8 @@ class ArgosBridge(Node):
         # -- lidar ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
             _scan_tick, _rings, _azimuths, _max_range, readings = struct.unpack(
-                "<IIIfI", recv_exact(sock, 20))
+                "<IIIfI", recv_exact(sock, 20)
+            )
             raw = recv_exact(sock, readings * LIDAR_READING.size)
             packed = bytearray()
             hits = 0
@@ -418,14 +428,21 @@ class ArgosBridge(Node):
                 # ring is what a 3D SLAM front-end actually wants from the
                 # fourth field, and it costs nothing to carry.
                 cloud.fields = [
-                    PointField(name="x", offset=0,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name="y", offset=4,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name="z", offset=8,
-                               datatype=PointField.FLOAT32, count=1),
-                    PointField(name="intensity", offset=12,
-                               datatype=PointField.FLOAT32, count=1),
+                    PointField(
+                        name="x", offset=0, datatype=PointField.FLOAT32, count=1
+                    ),
+                    PointField(
+                        name="y", offset=4, datatype=PointField.FLOAT32, count=1
+                    ),
+                    PointField(
+                        name="z", offset=8, datatype=PointField.FLOAT32, count=1
+                    ),
+                    PointField(
+                        name="intensity",
+                        offset=12,
+                        datatype=PointField.FLOAT32,
+                        count=1,
+                    ),
                 ]
                 cloud.is_bigendian = False
                 cloud.point_step = 16
@@ -437,7 +454,8 @@ class ArgosBridge(Node):
         # -- camera ------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
             _cam_tick, width, height, fov_deg = struct.unpack(
-                "<IIIf", recv_exact(sock, 16))
+                "<IIIf", recv_exact(sock, 16)
+            )
             rgb = recv_exact(sock, width * height * 3)
 
             image = Image()
@@ -491,8 +509,9 @@ class ArgosBridge(Node):
             if hit:
                 yield x, y, z, ring
 
-    def _send_commands(self, sock: socket.socket, tick: int, ids,
-                       sim_now: float) -> None:
+    def _send_commands(
+        self, sock: socket.socket, tick: int, ids, sim_now: float
+    ) -> None:
         out = bytearray(COMMAND_MAGIC)
         out += struct.pack("<II", tick, len(ids))
         for robot_id in ids:
@@ -528,8 +547,7 @@ class ArgosBridge(Node):
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--socket", default="/run/swarmdeck/argos.sock")
-    args, ros_args = parser.parse_known_args(argv if argv is not None
-                                             else sys.argv[1:])
+    args, ros_args = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
 
     rclpy.init(args=ros_args)
     node = ArgosBridge(socket_path=args.socket)

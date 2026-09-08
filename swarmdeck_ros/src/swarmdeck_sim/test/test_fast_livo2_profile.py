@@ -54,8 +54,8 @@ def test_imu_noise_conversion_from_argos():
     assert imu_noise["acc_n"] == pytest.approx(expected_acc_n, rel=1e-4)
     assert imu_noise["gyr_w"] == pytest.approx(expected_gyr_w, rel=1e-4)
     assert imu_noise["acc_w"] == pytest.approx(expected_acc_w, rel=1e-4)
-    assert imu_noise["cov_gyr"] == pytest.approx(expected_gyr_n ** 2, rel=1e-4)
-    assert imu_noise["cov_acc"] == pytest.approx(expected_acc_n ** 2, rel=1e-4)
+    assert imu_noise["cov_gyr"] == pytest.approx(expected_gyr_n**2, rel=1e-4)
+    assert imu_noise["cov_acc"] == pytest.approx(expected_acc_n**2, rel=1e-4)
 
 
 def test_heterogeneous_fleet_profiles():
@@ -85,13 +85,29 @@ def test_heterogeneous_fleet_profiles():
         # Verify Camera translation
         assert cfg["mapping"]["camera_ext_t"] == [0.15, 0.0, mounts["cam_z"]]
         # Verify Camera rotation (optical to body)
-        assert cfg["mapping"]["camera_ext_R"] == [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+        assert cfg["mapping"]["camera_ext_R"] == [
+            0.0,
+            0.0,
+            1.0,
+            -1.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+        ]
         # Verify scan line count
         assert cfg["preprocess"]["scan_line"] == 17
 
     # Ensure profiles are strictly distinct between platforms
-    assert configs["scout_mini"]["mapping"]["extrinsic_T"] != configs["spot"]["mapping"]["extrinsic_T"]
-    assert configs["bunker"]["mapping"]["extrinsic_T"] != configs["spot"]["mapping"]["extrinsic_T"]
+    assert (
+        configs["scout_mini"]["mapping"]["extrinsic_T"]
+        != configs["spot"]["mapping"]["extrinsic_T"]
+    )
+    assert (
+        configs["bunker"]["mapping"]["extrinsic_T"]
+        != configs["spot"]["mapping"]["extrinsic_T"]
+    )
 
 
 def test_yaml_roundtrip_validity(tmp_path):

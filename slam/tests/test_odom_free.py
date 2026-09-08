@@ -67,8 +67,12 @@ def test_empty_filtered_cloud_has_no_registration() -> None:
 
 def _planar_corridor() -> np.ndarray:
     along = np.linspace(-8.0, 8.0, 500)
-    north = np.column_stack([along, np.full(along.shape, 1.8), np.full(along.shape, 0.52)])
-    south = np.column_stack([along, np.full(along.shape, -1.8), np.full(along.shape, 0.52)])
+    north = np.column_stack(
+        [along, np.full(along.shape, 1.8), np.full(along.shape, 0.52)]
+    )
+    south = np.column_stack(
+        [along, np.full(along.shape, -1.8), np.full(along.shape, 0.52)]
+    )
     end = np.column_stack(
         [np.full(80, 8.0), np.linspace(-1.8, 1.8, 80), np.full(80, 0.52)]
     )

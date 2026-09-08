@@ -77,7 +77,9 @@ def test_observe_mode_is_transparent_and_durable(tmp_path, monkeypatch):
     assert jobs[0]["kind"] == "diagnosis"
     assert jobs[0]["phase"] == "completed"
     assert jobs[0]["conversation_id"] == "opaque-provider-id"
-    assert [event["event_type"] for event in supervisor.store.get_events(jobs[0]["job_id"])] == [
+    assert [
+        event["event_type"] for event in supervisor.store.get_events(jobs[0]["job_id"])
+    ] == [
         "provider.init",
         "provider.token",
         "provider.done",

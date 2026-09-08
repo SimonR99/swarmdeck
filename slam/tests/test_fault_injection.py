@@ -25,9 +25,7 @@ class _Packet:
 
 def test_fault_history_is_deterministic_independent_and_severe() -> None:
     packets = [
-        _Packet(robot, seq)
-        for robot in ("robot_0", "robot_1")
-        for seq in range(40)
+        _Packet(robot, seq) for robot in ("robot_0", "robot_1") for seq in range(40)
     ]
 
     first, report = generate_faulty_odometry(packets, seed=19)
@@ -39,8 +37,7 @@ def test_fault_history_is_deterministic_independent_and_severe() -> None:
     assert all(len(item["events"]) == 4 for item in report["trajectories"])
     assert all(item["max_reported_step_m"] > 2.0 for item in report["trajectories"])
     assert all(
-        item["max_reported_step_yaw_deg"] > 20.0
-        for item in report["trajectories"]
+        item["max_reported_step_yaw_deg"] > 20.0 for item in report["trajectories"]
     )
 
 
@@ -66,6 +63,6 @@ def test_wire_rewrite_preserves_cloud_and_descriptor_body_exactly() -> None:
     header_struct = struct.Struct("<4sHI")
     header_length = header_struct.unpack_from(corrupted)[2]
     header = json.loads(
-        corrupted[header_struct.size:header_struct.size + header_length]
+        corrupted[header_struct.size : header_struct.size + header_length]
     )
     assert header["robot_id"] == "bot"

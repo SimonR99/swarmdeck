@@ -81,9 +81,7 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="stop after local fragment construction",
     )
-    parser.add_argument(
-        "--max-keyframes", type=int, help="debug limit after filtering"
-    )
+    parser.add_argument("--max-keyframes", type=int, help="debug limit after filtering")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--render-resolution", type=float, default=0.08)
     parser.add_argument(
@@ -283,9 +281,7 @@ def _fingerprint(
     return hashlib.sha256(payload).hexdigest()
 
 
-def _packet_registration_config(
-    packet: Any, base: OdomFreeConfig
-) -> OdomFreeConfig:
+def _packet_registration_config(packet: Any, base: OdomFreeConfig) -> OdomFreeConfig:
     """Use producer-measured physical height limits when the packet has them."""
     if (
         packet.ground_z is None
@@ -359,9 +355,7 @@ def _render_component(
                 (
                     float((position[0] - minimum[0]) / effective_resolution),
                     float(
-                        size[1]
-                        - 1
-                        - (position[1] - minimum[1]) / effective_resolution
+                        size[1] - 1 - (position[1] - minimum[1]) / effective_resolution
                     ),
                 )
                 for position in positions
@@ -376,9 +370,7 @@ def _render_component(
             if pixels and first_pixel is None:
                 first_pixel = pixels[0]
         if first_pixel is not None:
-            draw.text(
-                (first_pixel[0] + 4, first_pixel[1] + 4), robot_id, fill=color
-            )
+            draw.text((first_pixel[0] + 4, first_pixel[1] + 4), robot_id, fill=color)
     image.save(path)
     return {
         "title": title,
@@ -461,20 +453,22 @@ def main() -> None:
                 _packet_registration_config(packet, registration_config),
             ),
             packet.session,
-            None
-            if arguments.ignore_odom
-            else se3_from_quat_xyz(packet.t_odom_base),
+            None if arguments.ignore_odom else se3_from_quat_xyz(packet.t_odom_base),
         )
         for index, packet in enumerate(packets)
     ]
     packet_height_bands = [
         (
-            None
-            if packet.ground_z is None or packet.min_height is None
-            else float(packet.ground_z + packet.min_height),
-            None
-            if packet.ground_z is None or packet.max_height is None
-            else float(packet.ground_z + packet.max_height),
+            (
+                None
+                if packet.ground_z is None or packet.min_height is None
+                else float(packet.ground_z + packet.min_height)
+            ),
+            (
+                None
+                if packet.ground_z is None or packet.max_height is None
+                else float(packet.ground_z + packet.max_height)
+            ),
         )
         for packet in packets
     ]
@@ -506,9 +500,7 @@ def main() -> None:
             fragments, connections, match_config
         )
         rejected_connections.extend(rejected_inter_robot)
-        loop_closures = find_intra_fragment_loops(
-            frames, fragments, memo, match_config
-        )
+        loop_closures = find_intra_fragment_loops(frames, fragments, memo, match_config)
         print(
             f"global stage: {len(connections)} accepted fragment links, "
             f"{len(loop_closures)} intra-fragment loop closures, "
@@ -645,9 +637,7 @@ def main() -> None:
                 "score": closure.registration.score,
                 "path_translation_residual_m": closure.path_translation_residual_m,
                 "path_rotation_residual_rad": closure.path_rotation_residual_rad,
-                "t_target_source": _matrix(
-                    closure.registration.t_target_source
-                ),
+                "t_target_source": _matrix(closure.registration.t_target_source),
             }
             for closure in loop_closures
         ],

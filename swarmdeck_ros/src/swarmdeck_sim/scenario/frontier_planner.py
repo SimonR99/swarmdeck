@@ -200,10 +200,7 @@ def merge_grids(
         out_cols = np.floor((world_x - origin_x) / resolution).astype(np.int64)
         out_rows = np.floor((world_y - origin_y) / resolution).astype(np.int64)
         valid = (
-            (out_cols >= 0)
-            & (out_cols < width)
-            & (out_rows >= 0)
-            & (out_rows < height)
+            (out_cols >= 0) & (out_cols < width) & (out_rows >= 0) & (out_rows < height)
         )
         if not np.any(valid):
             continue
@@ -326,8 +323,7 @@ def extract_frontiers(
     kept: list[Frontier] = []
     for candidate in candidates:
         if any(
-            math.hypot(candidate.x - other.x, candidate.y - other.y)
-            < min_separation_m
+            math.hypot(candidate.x - other.x, candidate.y - other.y) < min_separation_m
             for other in kept
         ):
             continue
@@ -468,9 +464,7 @@ def allocate_frontiers(
             if robot.navigation_clearance_m is not None
             else robot.radius_m + 0.12
         )
-        traversable, factor = _coarse_navigation_grid(
-            navigation, clearance_m=clearance
-        )
+        traversable, factor = _coarse_navigation_grid(navigation, clearance_m=clearance)
         start_row, start_col = navigation.cell(robot.x, robot.y)
         start = _nearest_true(traversable, start_row // factor, start_col // factor)
         if start is None:

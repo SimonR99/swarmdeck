@@ -2,9 +2,10 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-
 REPO = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("robot_tool", REPO / "scripts" / "robot_tool.py")
+SPEC = importlib.util.spec_from_file_location(
+    "robot_tool", REPO / "scripts" / "robot_tool.py"
+)
 assert SPEC and SPEC.loader
 robot_tool = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(robot_tool)
@@ -80,9 +81,14 @@ def test_doctor_rejects_rtsp_metadata_without_frame_evidence(monkeypatch):
     monkeypatch.setattr(
         robot_tool,
         "_try_http_get",
-        lambda endpoint, _server: (fleet, None)
-        if endpoint == "/api/fleet"
-        else ({"camera_streaming": False, "frame_seq": None, "frame_age_ms": None}, None),
+        lambda endpoint, _server: (
+            (fleet, None)
+            if endpoint == "/api/fleet"
+            else (
+                {"camera_streaming": False, "frame_seq": None, "frame_age_ms": None},
+                None,
+            )
+        ),
     )
     monkeypatch.setattr(
         robot_tool,

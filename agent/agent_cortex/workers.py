@@ -24,9 +24,7 @@ class RuntimeCodingWorker:
             "active": False,
         }
 
-    async def run(
-        self, request: ChangeRequest
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    async def run(self, request: ChangeRequest) -> AsyncGenerator[Dict[str, Any], None]:
         provider_request = ProviderRequest(
             prompt=request.instruction,
             workspace=request.workspace,

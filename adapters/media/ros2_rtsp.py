@@ -175,15 +175,15 @@ def main() -> None:
                     width=args.width,
                     height=args.height,
                 )
-                publisher.get_logger().info(
-                    f"streaming {source} to {args.rtsp_url}"
-                )
+                publisher.get_logger().info(f"streaming {source} to {args.rtsp_url}")
                 while rclpy.ok() and not publisher._failed.is_set():
                     rclpy.spin_once(publisher, timeout_sec=0.5)
             except KeyboardInterrupt:
                 break
             except Exception as exc:
-                print(f"RTSP publisher error: {exc}; retrying in 2s...", file=sys.stderr)
+                print(
+                    f"RTSP publisher error: {exc}; retrying in 2s...", file=sys.stderr
+                )
             finally:
                 if publisher is not None:
                     publisher.close()

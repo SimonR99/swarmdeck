@@ -121,9 +121,7 @@ def test_vertical_hop_is_not_physical_ground_robot_motion() -> None:
     jump[2, 3] = 3.0
 
     def register(target: ReconstructionFrame, source: ReconstructionFrame):
-        return [
-            RegistrationHypothesis(jump, 0.0, 0.1, 0.8, 0.9, 0.05, 0.05, 500, 0.9)
-        ]
+        return [RegistrationHypothesis(jump, 0.0, 0.1, 0.8, 0.9, 0.05, 0.05, 500, 0.9)]
 
     fragments, boundaries = build_temporal_fragments(frames, register)
     assert [fragment.frame_indices for fragment in fragments] == [(0,), (1,)]
@@ -240,7 +238,9 @@ def test_temporal_fragments_never_chain_across_sessions() -> None:
 
 def test_fragment_connection_requires_multi_frame_consensus() -> None:
     frames = [_frame(index, float(index)) for index in range(6)]
-    poses_a = {index: _hypothesis(0.0, float(index), 1.0).t_target_source for index in range(3)}
+    poses_a = {
+        index: _hypothesis(0.0, float(index), 1.0).t_target_source for index in range(3)
+    }
     poses_b = {
         index: _hypothesis(0.0, float(index - 3), 1.0).t_target_source
         for index in range(3, 6)
@@ -288,18 +288,17 @@ def test_fragment_connection_requires_multi_frame_consensus() -> None:
     assert np.allclose(placement.poses["robot:001"], t_a_b, atol=1e-6)
 
 
-def test_required_pairs_reconsider_a_verified_connection_after_retrieval_crowding() -> None:
+def test_required_pairs_reconsider_a_verified_connection_after_retrieval_crowding() -> (
+    None
+):
     frames = [
-        _frame(index, float(index), robot_id="left", seq=index)
-        for index in range(3)
+        _frame(index, float(index), robot_id="left", seq=index) for index in range(3)
     ] + [
         _frame(index, float(index - 3), robot_id="right", seq=index - 3)
         for index in range(3, 6)
     ]
     poses_left = {index: _yaw_pose(float(index), 0.0) for index in range(3)}
-    poses_right = {
-        index: _yaw_pose(float(index - 3), 0.0) for index in range(3, 6)
-    }
+    poses_right = {index: _yaw_pose(float(index - 3), 0.0) for index in range(3, 6)}
     left = Fragment("left:000", "left", (0, 1, 2), poses_left, ())
     right = Fragment("right:000", "right", (3, 4, 5), poses_right, ())
     t_left_right = _yaw_pose(6.0, 0.0)
@@ -347,8 +346,7 @@ def test_required_pairs_reconsider_a_verified_connection_after_retrieval_crowdin
 def test_spatially_correlated_alias_does_not_hide_a_valid_rendezvous() -> None:
     """Many votes from one place cannot outrank distributed observations."""
     frames = [
-        _frame(index, float(index), robot_id="left", seq=index)
-        for index in range(4)
+        _frame(index, float(index), robot_id="left", seq=index) for index in range(4)
     ] + [
         _frame(index, float(index - 4), robot_id="right", seq=index - 4)
         for index in range(4, 8)
@@ -432,12 +430,8 @@ def test_coarse_pose_hints_resolve_equal_support_pi_alias() -> None:
     with surveyed starts the lower-scoring, prior-consistent mode is safe.
     """
     frames = [
-        _frame(i, float(i), x=float(i), robot_id="left", seq=i)
-        for i in range(3)
-    ] + [
-        _frame(i + 3, float(i), x=float(i), robot_id="right", seq=i)
-        for i in range(3)
-    ]
+        _frame(i, float(i), x=float(i), robot_id="left", seq=i) for i in range(3)
+    ] + [_frame(i + 3, float(i), x=float(i), robot_id="right", seq=i) for i in range(3)]
     poses_left = {i: _yaw_pose(float(i), 0.0) for i in range(3)}
     poses_right = {i + 3: _yaw_pose(float(i), 0.0) for i in range(3)}
     left = Fragment("left:000", "left", (0, 1, 2), poses_left, ())
@@ -507,21 +501,15 @@ def test_coarse_pose_hints_resolve_equal_support_pi_alias() -> None:
 
 def test_coarse_start_is_not_reused_for_a_later_fragment() -> None:
     """A capture gap/restart does not teleport that fragment to spawn."""
-    frames = [_frame(0, 0.0, robot_id="left", seq=0)] + [
-        _frame(i + 1, 10.0 + i, robot_id="left", seq=10 + i)
-        for i in range(3)
-    ] + [
-        _frame(i + 4, float(i), robot_id="right", seq=i)
-        for i in range(3)
-    ]
-    left_primary = Fragment(
-        "left:000", "left", (0,), {0: se3_identity()}, ()
+    frames = (
+        [_frame(0, 0.0, robot_id="left", seq=0)]
+        + [_frame(i + 1, 10.0 + i, robot_id="left", seq=10 + i) for i in range(3)]
+        + [_frame(i + 4, float(i), robot_id="right", seq=i) for i in range(3)]
     )
+    left_primary = Fragment("left:000", "left", (0,), {0: se3_identity()}, ())
     poses_left = {i + 1: _yaw_pose(float(i), 0.0) for i in range(3)}
     poses_right = {i + 4: _yaw_pose(float(i), 0.0) for i in range(3)}
-    left_later = Fragment(
-        "left:001", "left", (1, 2, 3), poses_left, ()
-    )
+    left_later = Fragment("left:001", "left", (1, 2, 3), poses_left, ())
     right = Fragment("right:000", "right", (4, 5, 6), poses_right, ())
     correct = _yaw_pose(10.0, math.pi)
     wrong = _yaw_pose(4.0, 0.0)
@@ -553,7 +541,10 @@ def test_coarse_start_is_not_reused_for_a_later_fragment() -> None:
             return []
         if target.robot_id == "right":
             target, source = source, target
-            return [mode(target, source, wrong, 0.9), mode(target, source, correct, 0.8)]
+            return [
+                mode(target, source, wrong, 0.9),
+                mode(target, source, correct, 0.8),
+            ]
         return [mode(target, source, wrong, 0.9), mode(target, source, correct, 0.8)]
 
     config = FragmentMatchConfig(
@@ -582,8 +573,7 @@ def test_coarse_start_is_not_reused_for_a_later_fragment() -> None:
 def test_fragment_consensus_cannot_outvote_direct_boundary_registration() -> None:
     frames = [_frame(index, float(index)) for index in range(6)]
     poses_a = {
-        index: _hypothesis(0.0, float(index), 1.0).t_target_source
-        for index in range(3)
+        index: _hypothesis(0.0, float(index), 1.0).t_target_source for index in range(3)
     }
     poses_b = {
         index: _hypothesis(0.0, float(index - 3), 1.0).t_target_source
@@ -643,9 +633,7 @@ def test_fragment_consensus_cannot_outvote_direct_boundary_registration() -> Non
 def test_boundary_registration_selects_a_supported_lower_ranked_mode() -> None:
     frames = [_frame(index, float(index)) for index in range(8)]
     poses_a = {index: _yaw_pose(float(index), 0.0) for index in range(4)}
-    poses_b = {
-        index: _yaw_pose(float(index - 4), 0.0) for index in range(4, 8)
-    }
+    poses_b = {index: _yaw_pose(float(index - 4), 0.0) for index in range(4, 8)}
     fragment_a = Fragment("robot:000", "robot", (0, 1, 2, 3), poses_a, ())
     fragment_b = Fragment("robot:001", "robot", (4, 5, 6, 7), poses_b, ())
     correct = _yaw_pose(4.0, 0.0)
@@ -719,8 +707,7 @@ def test_inter_robot_bridges_do_not_count_as_corroboration() -> None:
     assert kept == []
     assert len(rejected) == 2
     assert all(
-        item.reason == "inter-robot merge has no independent cycle"
-        for item in rejected
+        item.reason == "inter-robot merge has no independent cycle" for item in rejected
     )
 
 

@@ -162,12 +162,15 @@ def test_idle_robot_defers_deadhead_to_active_robot_near_frontier() -> None:
 
     # The idle robot's ~17 m cross-map leg is unnecessary because a teammate
     # is already driving to x=16 and can receive this frontier next.
-    assert allocate_frontiers(
-        grid,
-        [idle],
-        [frontier],
-        reserved=[(16.0, 3.0)],
-    ) == []
+    assert (
+        allocate_frontiers(
+            grid,
+            [idle],
+            [frontier],
+            reserved=[(16.0, 3.0)],
+        )
+        == []
+    )
 
     # When nobody is active, completeness wins and the distant leg is sent.
     assignment = allocate_frontiers(grid, [idle], [frontier])

@@ -41,6 +41,7 @@ def test_png_encoding_roundtrip():
 
 def test_build_reply_with_unconverged_estimator():
     """When an estimator has not converged yet, valid byte is 0."""
+
     class DummyPubs:
         estimate = None
 
@@ -72,6 +73,7 @@ def test_build_reply_with_unconverged_estimator():
 
 def test_build_reply_with_converged_pose():
     """When an estimate arrives, pose and twist are packed accurately."""
+
     class DummyPubs:
         # stamp_ns, pos, quat, twist
         estimate = (

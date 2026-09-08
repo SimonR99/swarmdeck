@@ -19,9 +19,7 @@ class PlannerRequest(BaseModel):
 
 
 class PlannerDecision(BaseModel):
-    action: Literal[
-        "respond", "diagnose", "repair", "code_change", "mission", "ask"
-    ]
+    action: Literal["respond", "diagnose", "repair", "code_change", "mission", "ask"]
     target_robots: List[str] = Field(default_factory=list)
     instructions: str
     confidence: float = Field(ge=0.0, le=1.0)

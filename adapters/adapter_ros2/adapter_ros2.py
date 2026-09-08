@@ -367,7 +367,8 @@ class HardwareBridge(
                         from rosidl_runtime_py.utilities import get_message
 
                         msg_cls = (
-                            get_message("spot_msgs/msg/BatteryStateArray") or BatteryState
+                            get_message("spot_msgs/msg/BatteryStateArray")
+                            or BatteryState
                         )
                     except Exception:
                         pass
@@ -607,9 +608,7 @@ class HardwareBridge(
         target = str(self.map_frame or "").lstrip("/")
         stamp = getattr(header, "stamp", None) if header is not None else None
         tf_time = (
-            rclpy.time.Time.from_msg(stamp)
-            if stamp is not None
-            else rclpy.time.Time()
+            rclpy.time.Time.from_msg(stamp) if stamp is not None else rclpy.time.Time()
         )
         if source and target and source != target:
             try:
@@ -1406,12 +1405,8 @@ class HardwareBridge(
         dx = float(relative.pose.position.x)
         dy = float(relative.pose.position.y)
         distance = math.hypot(dx, dy)
-        position_tolerance = max(
-            0.01, float(tcfg.get("position_tolerance_m", 0.15))
-        )
-        heading_tolerance = max(
-            0.01, float(tcfg.get("heading_tolerance_rad", 0.08))
-        )
+        position_tolerance = max(0.01, float(tcfg.get("position_tolerance_m", 0.15)))
+        heading_tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
 
         if distance > position_tolerance:
             bearing = math.atan2(dy, dx)
@@ -1657,9 +1652,7 @@ class HardwareBridge(
             outcome = future.result()
             status = outcome.status
         except Exception as exc:
-            self.node.get_logger().warn(
-                f"[{self.id}] navigation result failed: {exc}"
-            )
+            self.node.get_logger().warn(f"[{self.id}] navigation result failed: {exc}")
             self._finish_goal("failed")
             return
         result = getattr(outcome, "result", None)
@@ -1716,15 +1709,11 @@ class HardwareBridge(
         elif self._trajectory_step == "align":
             after = abs(math.atan2(dy, dx))
             tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
-            minimum = max(
-                0.005, float(tcfg.get("minimum_progress_rad", 0.02))
-            )
+            minimum = max(0.005, float(tcfg.get("minimum_progress_rad", 0.02)))
         elif self._trajectory_step == "final_turn":
             after = abs(yaw_of(relative.pose.orientation))
             tolerance = max(0.01, float(tcfg.get("heading_tolerance_rad", 0.08)))
-            minimum = max(
-                0.005, float(tcfg.get("minimum_progress_rad", 0.02))
-            )
+            minimum = max(0.005, float(tcfg.get("minimum_progress_rad", 0.02)))
         else:
             return False
         self.node.get_logger().info(
