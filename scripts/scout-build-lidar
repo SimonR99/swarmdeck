@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Backport max_range to Scout's Ouster 0.5.2 cloud nodelet. Run on the robot.
+set -Eeuo pipefail
+scout_ws="${SCOUT_MIST_WS:-/ssd/mist_ws}"
+scout_driver="$scout_ws/src/driver/ouster-ros"
+python3 - "$scout_driver" <<'PY'
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
+root = Path(sys.argv[1])
+source = root / 'src/os_cloud_nodelet.cpp'
+text = source.read_text()
+marker = '// SwarmDeck: compact range-filtered cloud for dense-only LVI-SAM.'
+if marker not in text:
+    if ET.parse(root / 'package.xml').getroot().findtext('version') != '0.5.2':
+        raise SystemExit('Expected Ouster 0.5.2; verify native max_range support before upgrading this backport')
+    changes = [
+        ('#include <chrono>', '#include <chrono>\n#include <cmath>'),
+        ('        auto& pnh = getPrivateNodeHandle();', '''        auto& pnh = getPrivateNodeHandle();
+        const double max_range = pnh.param("max_range", 30.0);
+        if (!std::isfinite(max_range) || max_range <= 0.0)
+            throw std::invalid_argument("max_range must be finite and positive");
+        max_range_mm = max_range * 1000.0;'''),
+        ('            sensor_msgs::PointCloud2 pc =\n                ouster_ros::cloud_to_cloud_msg(cloud, msg_ts, sensor_frame);', '''            // SwarmDeck: compact range-filtered cloud for dense-only LVI-SAM.
+            // Keep the organized input buffer intact for the next scan_to_cloud.
+            // Copy complete records so ring, timing and intensity remain aligned.
+            filtered.points.clear();
+            for (const auto& point : cloud.points) {
+                if (point.range > 0 && point.range <= max_range_mm &&
+                    std::isfinite(point.x) && std::isfinite(point.y) &&
+                    std::isfinite(point.z))
+                    filtered.points.push_back(point);
+            }
+            filtered.width = filtered.points.size();
+            filtered.height = 1;
+            filtered.is_dense = true;
+            sensor_msgs::PointCloud2 pc =
+                ouster_ros::cloud_to_cloud_msg(filtered, msg_ts, sensor_frame);'''),
+        ('    ouster_ros::Cloud cloud;', '    ouster_ros::Cloud cloud;\n    ouster_ros::Cloud filtered;\n    double max_range_mm = 30000.0;'),
+    ]
+    for before, after in changes:
+        if text.count(before) != 1:
+            raise SystemExit('Unexpected Ouster source; refusing a partial backport')
+        text = text.replace(before, after, 1)
+    backup = source.with_suffix('.cpp.pre-swarmdeck-range')
+    if not backup.exists():
+        backup.write_bytes(source.read_bytes())
+    source.write_text(text)
+PY
+set +u
+source /opt/ros/noetic/setup.bash
+source "$scout_ws/devel/setup.bash"
+set -u
+# The existing catkin build already has the matching SDK and message artifacts.
+# Relink to a temporary output so the linker cannot truncate a live mapping.
+scout_lib="$scout_ws/devel/.private/ouster_ros/lib/libnodelets_os.so"
+scout_backup="${scout_lib}.pre-swarmdeck-range"
+if [[ ! -e "$scout_backup" ]]; then
+  cp -p "$scout_lib" "$scout_backup"
+fi
+scout_stage="$(mktemp -d "$scout_ws/build/ouster_ros/swarmdeck-range.XXXXXX")"
+trap 'rm -rf "$scout_stage"' EXIT
+# Build the changed object only, then relink to a temporary output atomically.
+make -C "$scout_ws/build/ouster_ros" -f CMakeFiles/nodelets_os.dir/build.make \
+  CMakeFiles/nodelets_os.dir/src/os_cloud_nodelet.cpp.o -j2
+python3 - "$scout_ws/build/ouster_ros" "$scout_stage/libnodelets_os.so" <<'PY'
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+build, output = Path(sys.argv[1]), sys.argv[2]
+command = shlex.split((build / 'CMakeFiles/nodelets_os.dir/link.txt').read_text())
+command[command.index('-o') + 1] = output
+subprocess.run(command, cwd=build, check=True)
+PY
+mv -f "$scout_stage/libnodelets_os.so" "$scout_lib"
+echo 'Ouster 0.5.2 max_range backport built; restart the Scout sensor/SLAM launch to load it.'
