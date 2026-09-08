@@ -428,9 +428,7 @@ export const mapStore = {
     state.slamGraphs = { ...state.slamGraphs, [robotId]: graph };
     if (state.mapSource === 'optimized') {
       if (state.viewMode === 'local' && state.viewRobot === robotId) {
-        void this.loadOptimizedScopes().then(() => {
-          void this.selectRobotView(robotId, true);
-        });
+        void this.refreshLocalView();
       } else if (state.viewMode === 'global') {
         if (pendingSlamRefresh !== null) {
           clearTimeout(pendingSlamRefresh);
@@ -986,7 +984,13 @@ export const mapStore = {
     if (localRefreshInFlight) return;
     localRefreshInFlight = true;
     try {
-      await this.selectRobotView(state.viewRobot, true, true);
+      const robotId = state.viewRobot;
+      const generation = loadGeneration;
+      if (state.mapSource === 'optimized') await this.loadOptimizedScopes();
+      // Selection may change while the index is downloading. Never let a
+      // background refresh navigate back to the previously selected robot.
+      if (generation !== loadGeneration || state.viewRobot !== robotId) return;
+      await this.selectRobotView(robotId, true, true);
     } finally {
       localRefreshInFlight = false;
     }
@@ -1092,7 +1096,6 @@ export const mapStore = {
       let info: MapInfo;
       let mapResponse: Response;
       if (scope) {
-        state.showingOptimizedGrid = true;
         const prevSeq = state.robotSeqs[robotId!] ?? 0;
         const currentSeq = prevSeq + 1;
         state.robotSeqs[robotId!] = currentSeq;
@@ -1107,7 +1110,6 @@ export const mapStore = {
           cache: 'no-store'
         });
       } else {
-        state.showingOptimizedGrid = false;
         const infoResponse = await fetch(`/api/map/local/${encodeURIComponent(robotId!)}/info`, {
           cache: 'no-store'
         });
@@ -1135,15 +1137,14 @@ export const mapStore = {
       bitmap.close();
       state.info = info;
       state.seq = state.robotSeqs[robotId!] ?? info.seq;
+      state.showingOptimizedGrid = Boolean(scope);
       state.ready = true;
       state.revision++;
       await this.loadNetworkSnapshot(robotId!, generation);
     } catch (error) {
       console.warn('[swarmdeck] local map restore failed', error);
-      if (generation === loadGeneration && state.viewMode === 'local' && state.viewRobot === robotId) {
-        clearGrid();
-        state.revision++;
-      }
+      // Keep the last successful raster and its frame on transient failures.
+      // A real selection change/reset already cleared it before this request.
     }
   },
 
