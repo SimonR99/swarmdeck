@@ -59,6 +59,7 @@ topics:
   camera_compressed: /oak/rgb/image_raw/compressed
   camera_depth: /oak/stereo/image_raw
   camera_info: /oak/stereo/camera_info
+  camera_color_info: /oak/rgb/camera_info
   # Nav2 never publishes to the physical driver. The adapter relays this
   # isolated output only while its own NavigateToPose goal is active.
   nav_cmd_vel: /aslan_0/cmd_vel_nav
@@ -91,3 +92,11 @@ exploration:
     body_height_m: 0.4
     bounds_min: [-60.0, -60.0, -3.0]
     bounds_max: [60.0, 60.0, 3.0]
+
+# Match delayed registered scans to raw RGB pixels using lens distortion + TF.
+# This OAK driver leaves RGB CameraInfo.frame_id empty; pin its optical frame.
+map_color:
+  enabled: true
+  camera_frame: oak_rgb_camera_optical_frame
+  max_age_s: 0.05
+  history_s: 2.0

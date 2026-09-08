@@ -166,3 +166,9 @@ rates:
 drive_timeout_s: 0.45   # SwarmDeck protocol default — scout_base_node's own cmd_vel watchdog behavior (if any) was not inspected
 battery_voltage_min: 23.0
 battery_voltage_max: 29.2
+
+# Color registered scans and optimized keyframes using the color CameraInfo.
+map_color:
+  enabled: true
+  max_age_s: 0.05
+  history_s: 2.0

@@ -2000,3 +2000,19 @@ def test_timestamped_keyframe_pose_never_falls_back_to_latest_odometry(mod):
     assert bridge.pose7(object()) is None
     # Telemetry's unstamped fallback remains available.
     assert bridge.pose7() is not None
+
+
+def test_upload_colored_cloud_keeps_xyz_rgb_snapshot_together(mod, monkeypatch):
+    bridge = _bridge(mod)
+    bridge.http_url = "http://backend"
+    points = mod.np.array([[1.25, -2.5, 0.75]], dtype="<f4")
+    rgb = mod.np.array([[250, 30, 10]], dtype=mod.np.uint8)
+    bridge._cloud_snapshot = (points, rgb)
+    bridge._cloud_points = mod.np.zeros((5, 3))
+    bridge._cloud_dirty = True
+    upload = MagicMock()
+    monkeypatch.setattr(mod.urllib.request, "urlopen", upload)
+    bridge.upload_cloud()
+    request = upload.call_args.args[0]
+    assert "format=xyzrgb32" in request.full_url
+    assert mod.zlib.decompress(request.data) == points.tobytes() + rgb.tobytes()

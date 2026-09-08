@@ -1199,3 +1199,30 @@ def test_connect_actually_passes_the_keepalive_settings(mod, monkeypatch):
 
     assert seen.get("ping_interval") == float(bridge.cfg["ping_interval_s"])
     assert seen.get("ping_timeout") == float(bridge.cfg["ping_timeout_s"])
+
+
+def test_display_color_uses_original_coordinates_before_z_offset(mod):
+    bridge = _bridge(mod, {"cloud_z_offset": 10.0})
+    bridge._colorize_map = MagicMock(
+        return_value=mod.np.array([[250, 30, 10]], dtype=mod.np.uint8)
+    )
+    bridge._on_map_cloud(_fake_cloud_with_header([(1.0, 2.0, 0.5)]))
+    assert bridge._colorize_map.call_args.args[0].tolist() == [[1.0, 2.0, 0.5]]
+    assert bridge._cloud_snapshot[0].tolist() == [[1.0, 2.0, 10.5]]
+    assert bridge._cloud_snapshot[1].tolist() == [[250, 30, 10]]
+
+
+def test_upload_colored_cloud_keeps_xyz_rgb_snapshot_together(mod, monkeypatch):
+    bridge = _bridge(mod)
+    bridge.http_url = "http://backend"
+    points = mod.np.array([[1.25, -2.5, 0.75]], dtype="<f4")
+    rgb = mod.np.array([[250, 30, 10]], dtype=mod.np.uint8)
+    bridge._cloud_snapshot = (points, rgb)
+    bridge._cloud_points = mod.np.zeros((5, 3))
+    bridge._cloud_dirty = True
+    upload = MagicMock()
+    monkeypatch.setattr(mod.urllib.request, "urlopen", upload)
+    bridge.upload_cloud()
+    request = upload.call_args.args[0]
+    assert "format=xyzrgb32" in request.full_url
+    assert mod.zlib.decompress(request.data) == points.tobytes() + rgb.tobytes()

@@ -36,6 +36,31 @@ OAK_ENV_KEYS = (
 )
 
 
+def camera_mount_for_deployment(result):
+    """Convert os_lidar <- optical solve to botman_base_link <- OAK body.
+
+    Raw Ouster axes are yawed pi from the physical-forward base. DepthAI's
+    body <- RGB optical edge is RPY(-pi/2, 0, -pi/2), zero translation, verified
+    on the deployed OAK-D driver. A different camera TF requires its own edge.
+    """
+    import math
+    import numpy as np
+
+    base_from_lidar = np.diag([-1.0, -1.0, 1.0])
+    body_from_optical = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    rotation = base_from_lidar @ result["R_lidar_cam"] @ body_from_optical.T
+    return {
+        "translation": base_from_lidar @ result["translation"],
+        "rpy_rad": np.array(
+            [
+                math.atan2(rotation[2, 1], rotation[2, 2]),
+                math.atan2(-rotation[2, 0], math.hypot(rotation[0, 0], rotation[1, 0])),
+                math.atan2(rotation[1, 0], rotation[0, 0]),
+            ]
+        ),
+    }
+
+
 def check_sensor_health() -> None:
     print("=" * 65)
     print(" STEP 1: SENSOR & NETWORK CONNECTIVITY CHECK")
@@ -234,10 +259,13 @@ def main() -> None:
     print(" FINAL CALIBRATION SUMMARY")
     print("=" * 65)
 
-    if cam_results is not None:
-        t = cam_results["translation"]
-        rpy = cam_results["rpy_rad"]
-        print("\n[Camera Extrinsics] os_lidar -> oak-d-base-frame:")
+    camera_mount = (
+        camera_mount_for_deployment(cam_results) if cam_results is not None else None
+    )
+    if camera_mount is not None:
+        t = camera_mount["translation"]
+        rpy = camera_mount["rpy_rad"]
+        print("\n[Camera Mount] botman_base_link -> oak-d-base-frame:")
         print(f"  Translation (x, y, z): [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m")
         print(f"  Euler RPY (rad):       [{rpy[0]:.4f}, {rpy[1]:.4f}, {rpy[2]:.4f}]")
     else:
@@ -270,8 +298,8 @@ def main() -> None:
             .lower()
         )
         if ans == "y":
-            t = cam_results["translation"]
-            rpy = cam_results["rpy_rad"]
+            t = camera_mount["translation"]
+            rpy = camera_mount["rpy_rad"]
             update_env_file(
                 REPO_ROOT / "deploy/robots/botman.env",
                 {

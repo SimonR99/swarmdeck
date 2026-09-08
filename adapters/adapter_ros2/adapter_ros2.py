@@ -86,6 +86,7 @@ from adapters.perception.depth_projection import (
     transform_point,
     transform_points,
 )
+from adapters.map_color import CameraColorizer, MapColorMixin
 from adapters.network_quality import read_link_quality
 from adapters.runtime import (
     AdapterDetectionMixin,
@@ -180,6 +181,7 @@ OPTIONAL_BODY_SERVICES = frozenset({"power_on", "estop_release", "clear_keepaliv
 
 
 class HardwareBridge(
+    MapColorMixin,
     AdapterHelloMixin,
     AdapterDetectionMixin,
     AdapterLinkMixin,
@@ -235,9 +237,10 @@ class HardwareBridge(
         self._scan_origin: dict[str, float] | None = None
         self._scan_dirty = False
         self._cloud_points: np.ndarray | None = None
+        self._map_color = CameraColorizer(cfg.get("map_color", {}))
         self._cloud_rgb: np.ndarray | None = None
-        self._mapping_image = None
         self._cloud_dirty = False
+        self._cloud_snapshot = None
         self._last_cloud_prepare_at = 0.0
         self.planned_path: list[dict[str, float]] = []
         self._global_planned_path: list[dict[str, float]] = []
@@ -653,6 +656,7 @@ class HardwareBridge(
             cloud_keep = unique_row_index(cloud_keys)
             self._cloud_points = points[cloud_keep]
             self._cloud_rgb = self._colorize_map(self._cloud_points, header)
+            self._cloud_snapshot = (self._cloud_points, self._cloud_rgb)
             self._cloud_dirty = True
 
         min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
@@ -688,7 +692,14 @@ class HardwareBridge(
         try:
             if pose is not None:
                 stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
-                self._keyframes.consider(points, pose, stamp)
+                self._keyframes.consider(
+                    points,
+                    pose,
+                    stamp,
+                    colorize=self._keyframe_colorizer(
+                        pose, getattr(msg, "header", None)
+                    ),
+                )
         except Exception:
             # Keyframe production is best-effort. A missing TF, a test double
             # without a header, or a too-small cloud must not starve the scan
@@ -804,7 +815,7 @@ class HardwareBridge(
         jpeg = bytes(msg.data)
         # Queue for detection; do NOT run inference here. See run_detection().
         self._detect_pending = (jpeg, getattr(msg, "header", None))
-        self._mapping_image = self._detect_pending
+        self._remember_mapping_image(jpeg, getattr(msg, "header", None))
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Detection takes JPEG internally. Imported lazily so a robot with no
@@ -828,7 +839,7 @@ class HardwareBridge(
             return
         jpeg = buf.tobytes()
         self._detect_pending = (jpeg, getattr(msg, "header", None))
-        self._mapping_image = self._detect_pending
+        self._remember_mapping_image(jpeg, getattr(msg, "header", None))
 
     def run_detection(self) -> None:
         """Detect on the newest queued frame. Runs OFF the ROS executor thread.
@@ -1915,76 +1926,28 @@ class HardwareBridge(
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] scan upload failed: {exc}")
 
-    def _colorize_map(self, points, cloud_header):
-        """Join camera and registered LiDAR only with fresh stamps and calibrated TF."""
-        config = self.cfg.get("map_color", {})
-        image = getattr(self, "_mapping_image", None)
-        info = getattr(self, "_camera_color_info", None) or getattr(
-            self, "_camera_info", None
+    def _lookup_color_transform(self, header):
+        # Do not block the single ROS executor waiting for TF it must dispatch.
+        return self.tf_buffer.lookup_transform(
+            header.frame_id, self.map_frame, rclpy.time.Time.from_msg(header.stamp)
         )
-        if not config.get("enabled", False) or image is None or info is None:
-            return None
-        jpeg, header = image
-        image_time, cloud_time = self._stamp_seconds(header), self._stamp_seconds(
-            cloud_header
-        )
-        if (
-            image_time is None
-            or cloud_time is None
-            or abs(image_time - cloud_time) > float(config.get("max_age_s", 0.05))
-        ):
-            return None
-        # The projection uses pinhole intrinsics; only accept rectified image topics.
-        if any(abs(float(v)) > 1e-8 for v in info.d):
-            return None
-        frame = str(getattr(header, "frame_id", "") or "")
-        if not frame or frame != str(info.header.frame_id):
-            return None
-        try:
-            import cv2
-            from reconstruction import colorize_points
-
-            bgr = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if bgr is None or bgr.shape[:2] != (info.height, info.width):
-                return None
-            tf = self.tf_buffer.lookup_transform(
-                frame,
-                self.map_frame,
-                rclpy.time.Time.from_msg(header.stamp),
-                timeout=Duration(seconds=0.05),
-            )
-            # Use the shared ROS transform helper to avoid quaternion convention drift.
-            basis = transform_points(
-                np.array(
-                    [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-                ),
-                tf.transform,
-            )
-            transform = np.eye(4)
-            transform[:3, 3] = basis[0]
-            transform[:3, :3] = (basis[1:] - basis[0]).T
-            colors, visible = colorize_points(
-                points, bgr[:, :, ::-1], np.asarray(info.k).reshape(3, 3), transform
-            )
-            return colors if visible.any() else None
-        except Exception as exc:
-            self.node.get_logger().debug(f"[{self.id}] cloud color unavailable: {exc}")
-            return None
 
     def upload_cloud(self) -> None:
         """Upload a voxel-reduced XYZ scan for the optional 3D map view."""
-        if not self._cloud_dirty or self._cloud_points is None:
+        points, rgb = getattr(self, "_cloud_snapshot", None) or (
+            self._cloud_points,
+            getattr(self, "_cloud_rgb", None),
+        )
+        if not self._cloud_dirty or points is None:
             return
         self._cloud_dirty = False
-        if not len(self._cloud_points):
+        if not len(points):
             return
-        rgb = getattr(self, "_cloud_rgb", None)
-        scale = max(MAP_CLOUD_SCALE, float(np.max(np.abs(self._cloud_points))) / 32767)
-        quantised = np.round(self._cloud_points / scale).astype("<i2")
+        scale = max(MAP_CLOUD_SCALE, float(np.max(np.abs(points))) / 32767)
         body = (
-            quantised.tobytes()
+            np.round(points / scale).astype("<i2").tobytes()
             if rgb is None
-            else self._cloud_points.astype("<f4").tobytes() + rgb.tobytes()
+            else points.astype("<f4").tobytes() + rgb.tobytes()
         )
         url = (
             f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"

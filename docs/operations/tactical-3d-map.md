@@ -77,25 +77,74 @@ bounds close-up overdraw. This reduces fidelity relative to UMAMI's CUDA viewer.
 
 ## Colorize LiDAR with camera images
 
-In the ROS 2 hardware adapter configuration, opt into calibrated color projection:
+Both hardware adapters color registered LiDAR scans and accepted optimized
+keyframes. Botman, Aslan, and TARS enable this in their profiles:
 
 ```yaml
+topics:
+  camera_compressed: /oak/rgb/image_raw/compressed
+  camera_color_info: /oak/rgb/camera_info
 map_color:
   enabled: true
   max_age_s: 0.05
+  history_s: 2.0
+  camera_frame: oak_rgb_camera_optical_frame
 ```
 
-Configure the existing `topics.camera` or `topics.camera_compressed` and
-`topics.camera_color_info` (or `topics.camera_info`) to a **rectified** image and
-its matching CameraInfo. The image and cloud timestamps must be within the
-configured tolerance. Capture-time TF must resolve camera-optical <- map.
-Nonzero distortion coefficients, mismatched sizes/frames, missing calibration,
-or stale images suppress color rather than projecting incorrectly. Only the
-nearest cloud surface per pixel is colored; unseen points are neutral gray.
-The server retains the first observed RGB per display voxel; this is not
-photometric texture fusion. Sparse LiDAR
-cannot guarantee occlusion rejection between its returns. The shared projection
-helper also accepts aligned metric depth for stronger visibility checking.
+Use the **RGB** CameraInfo for the actual image pixels, not depth CameraInfo.
+The projector supports rectified pinhole images and raw `plumb_bob` /
+`rational_polynomial` distortion. A mismatched size/frame, unsupported lens
+model, missing capture-time TF, or stale image suppresses color while geometry
+continues. `camera_frame` is optional when both image and CameraInfo carry the
+same frame. It explicitly permits an empty CameraInfo frame (observed on OAK);
+it never overrides a conflicting nonempty frame.
+
+Registered scans on the live fleet arrived 0.37–0.69 seconds behind the newest
+image. A two-second JPEG history selects the image nearest the **scan capture
+time**, retaining the strict 50 ms join tolerance. Storage is capped at 60 frames
+and 16 MiB, plus one decoded image. Decode/projection occurs only at the display
+upload interval (four seconds by default) or after a keyframe passes motion and
+novelty gates. On the three robot CPUs, paired-sample projection including JPEG
+decode took 13–25 ms; cached-image projection took 2–4 ms for 5k–12k display
+points. No camera frames are uploaded for this feature.
+
+Capture-time TF must resolve **camera optical ← map**. Camera body axes and
+optical axes are different: do not apply the optical rotation twice. Botman's
+ChArUco solve yields `os_lidar ← oak_rgb_camera_optical_frame`; deployment needs
+`botman_base_link ← oak-d-base-frame`. The calibration exporter now composes
+the raw LiDAR's pi yaw and removes the driver's body-to-optical edge. The
+2026-09-08 profile correction preserves the measured extrinsic; it is not a
+new calibration. Aslan's mount remains approximate and needs measured board
+calibration for precise texture alignment.
+
+| Robot | RGB image / CameraInfo prefix | Optical frame |
+| --- | --- | --- |
+| Botman / Aslan | `/oak/rgb/image_raw/compressed`, `/oak/rgb/camera_info` | `oak_rgb_camera_optical_frame` |
+| TARS (ROS 1) | `/d400_arm/color/image_raw/compressed`, `/d400_arm/color/camera_info` | `d400_arm_color_optical_frame` |
+
+Run the passive check inside an adapter container with ROS sourced; it prints
+only visibility counts, projection timing, and failure reasons:
+
+```bash
+python3 /app/swarmdeck/scripts/check_map_color.py --ros 2 \
+  --config /app/swarmdeck/adapters/adapter_ros2/config/bunker.yaml
+# TARS: --ros 1 --config /app/swarmdeck/adapters/adapter_ros1/config/scout_mini.yaml
+```
+
+For a short-lived ROS 2 diagnostic, set `FASTRTPS_DEFAULT_PROFILES_FILE` to
+`/app/swarmdeck/deploy/dds/fastdds_udp_only.xml`; retain shared memory for the
+long-running adapter. Numeric visibility confirms the pipeline, but inspect a
+camera/LiDAR overlay or a calibration target to assess physical alignment.
+
+Only the nearest cloud surface per pixel is colored; unseen points remain
+neutral gray. Optimized keyframes carry an explicit visibility alpha mask.
+The server accumulates observed RGB and fills previously uncolored display
+voxels, retaining the first measured color. Historical global clouds are not
+painted using the current camera, and old XYZ-only optimized keyframes cannot
+be colored retroactively. Sparse LiDAR cannot guarantee occlusion rejection
+between its returns; the shared projector also accepts aligned metric depth
+for stronger visibility checking. In the 3D viewer, select **Camera** under
+coloring once RGB observations arrive.
 
 Legacy XYZ uploads remain accepted. `POST /api/adapter/cloud?robot_id=...&format=xyzrgb32`
 accepts zlib-compressed planar data: N little-endian float32 XYZ triples followed

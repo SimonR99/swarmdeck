@@ -5,9 +5,17 @@ import numpy as np
 
 
 def colorize_points(
-    points, rgb, intrinsics, camera_from_points, *, depth=None, tolerance=0.08
+    points,
+    rgb,
+    intrinsics,
+    camera_from_points,
+    *,
+    depth=None,
+    tolerance=0.08,
+    distortion=(),
+    distortion_model="plumb_bob",
 ):
-    """Project into a rectified camera, keeping only the nearest surface per pixel.
+    """Project into a calibrated camera, keeping the nearest surface per pixel.
 
     RGB is uint8 HxWx3; optional aligned depth is in metres. Returns colors and
     an explicit visibility mask so unobserved samples never acquire fake colors.
@@ -39,8 +47,37 @@ def colorize_points(
     camera = points @ transform[:3, :3].T + transform[:3, 3]
     valid = np.isfinite(camera).all(axis=1) & (camera[:, 2] > 0.05)
     idx = np.flatnonzero(valid)
-    projected = camera[idx] @ k.T
-    pixels = np.rint(projected[:, :2] / projected[:, 2, None]).astype(np.int64)
+    normalized = camera[idx, :2] / camera[idx, 2, None]
+    d = np.asarray(distortion, dtype=float)
+    if d.ndim != 1 or not np.isfinite(d).all():
+        raise ValueError("invalid distortion coefficients")
+    if distortion_model not in ("", "plumb_bob", "rational_polynomial") or len(
+        d
+    ) not in (0, 4, 5, 8):
+        raise ValueError("unsupported camera distortion")
+    if np.any(d):
+        if not distortion_model:
+            raise ValueError("unsupported camera distortion")
+        coeff = np.zeros(8)
+        coeff[: len(d)] = d
+        k1, k2, p1, p2, k3, k4, k5, k6 = coeff
+        x, y = normalized.T
+        r2 = x * x + y * y
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            radial = (1 + r2 * (k1 + r2 * (k2 + r2 * k3))) / (
+                1 + r2 * (k4 + r2 * (k5 + r2 * k6))
+            )
+            normalized = np.column_stack(
+                (
+                    x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x),
+                    y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y,
+                )
+            )
+    projected = normalized @ k[:2, :2].T + k[:2, 2]
+    # Reject singular lens projections before converting to integer pixels.
+    finite = np.isfinite(projected).all(axis=1) & (np.abs(projected) < 1e9).all(axis=1)
+    idx = idx[finite]
+    pixels = np.rint(projected[finite]).astype(np.int64)
     inside = (
         (pixels[:, 0] >= 0)
         & (pixels[:, 0] < w)

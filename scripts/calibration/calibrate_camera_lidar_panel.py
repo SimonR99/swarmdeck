@@ -86,7 +86,7 @@ SPOT_BOARD_SQUARES_Y = 4
 SPOT_BOARD_DICT = "DICT_4X4_50"
 SPOT_BOARD_MARKER_RATIO = 0.75  # marker side / square side, measured 0.771 in-frame
 
-# Nominal os_lidar -> oak-d-base-frame. Used only to decide WHICH plane in the
+# Nominal os_lidar <- oak_rgb_camera_optical_frame. Used only to decide WHICH plane in the
 # cloud is the board, never as part of the answer.
 NOMINAL_CAM_IN_LIDAR = np.array([0.03, 0.00, -0.22])
 
@@ -758,7 +758,7 @@ def run_interactive_camera_lidar_calibration(
 
         print("\n" + "=" * 65)
         print(
-            f" SOLVED EXTRINSIC from {len(collected)} captures (os_lidar -> oak-d-base-frame)"
+            f" SOLVED EXTRINSIC from {len(collected)} captures (os_lidar <- oak_rgb_camera_optical_frame)"
         )
         print("=" * 65)
         print(f"  Translation (x, y, z): [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}] m")

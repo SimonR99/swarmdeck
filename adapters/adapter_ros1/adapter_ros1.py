@@ -73,6 +73,7 @@ from adapters.perception.depth_projection import (
     transform_point,
     transform_points,
 )
+from adapters.map_color import CameraColorizer, MapColorMixin
 from adapters.network_quality import read_link_quality
 from adapters.runtime import (
     AdapterDetectionMixin,
@@ -129,6 +130,7 @@ except ImportError:  # pragma: no cover - depends on the robot's install
 
 
 class HardwareBridge(
+    MapColorMixin,
     AdapterHelloMixin,
     AdapterDetectionMixin,
     AdapterLinkMixin,
@@ -182,7 +184,10 @@ class HardwareBridge(
         self._scan_origin: dict[str, float] | None = None
         self._scan_dirty = False
         self._cloud_points: np.ndarray | None = None
+        self._map_color = CameraColorizer(cfg.get("map_color", {}))
+        self._cloud_rgb: np.ndarray | None = None
         self._cloud_dirty = False
+        self._cloud_snapshot = None
         self._last_cloud_prepare_at = 0.0
         self._native_map_frame_warned = False
         self.planned_path: list[dict[str, float]] = []
@@ -452,7 +457,7 @@ class HardwareBridge(
             self._costmaps[kind] = snapshot
             self._costmap_dirty.add(kind)
 
-    def _prepare_display_cloud(self, points: np.ndarray) -> None:
+    def _prepare_display_cloud(self, points: np.ndarray, header=None) -> None:
         """Keep a coarser XYZ copy for the optional 3D map viewer."""
         now = time.monotonic()
         cloud_period = max(
@@ -469,7 +474,13 @@ class HardwareBridge(
             pts = points
         cloud_keys = np.round(pts / MAP_CLOUD_3D_VOXEL).astype(np.int32)
         _, cloud_keep = np.unique(cloud_keys, axis=0, return_index=True)
+        self._cloud_rgb = (
+            self._colorize_map(points[cloud_keep], header)
+            if header is not None
+            else None
+        )
         self._cloud_points = pts[cloud_keep]
+        self._cloud_snapshot = (self._cloud_points, self._cloud_rgb)
         self._cloud_dirty = True
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
@@ -493,7 +504,7 @@ class HardwareBridge(
         # slowly. A full 3D np.unique() on every scan spent roughly a third of a
         # CPU core preparing clouds that could never be uploaded. Reduce only
         # when the next display sample is due; the 2D scan below remains live.
-        self._prepare_display_cloud(points)
+        self._prepare_display_cloud(points, getattr(msg, "header", None))
 
         min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
         xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
@@ -517,7 +528,14 @@ class HardwareBridge(
             pose = self.pose7()
             if pose is not None:
                 stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
-                self._keyframes.consider(points, pose, stamp)
+                self._keyframes.consider(
+                    points,
+                    pose,
+                    stamp,
+                    colorize=self._keyframe_colorizer(
+                        pose, getattr(msg, "header", None)
+                    ),
+                )
         except Exception:
             # Keyframe production is best-effort. A missing TF, a test double
             # without a header, or a too-small cloud must not starve the scan
@@ -658,7 +676,9 @@ class HardwareBridge(
         if msg.format and "jpeg" not in msg.format.lower():
             return
         # Queue for detection; do NOT run inference here. See run_detection().
-        self._detect_pending = (bytes(msg.data), getattr(msg, "header", None))
+        jpeg = bytes(msg.data)
+        self._detect_pending = (jpeg, getattr(msg, "header", None))
+        self._remember_mapping_image(jpeg, getattr(msg, "header", None))
 
     def _on_camera_raw(self, msg: Image) -> None:
         # Detection takes JPEG (the sidecar posts it). Imported lazily so a
@@ -680,7 +700,9 @@ class HardwareBridge(
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         if not ok:
             return
-        self._detect_pending = (buf.tobytes(), getattr(msg, "header", None))
+        jpeg = buf.tobytes()
+        self._detect_pending = (jpeg, getattr(msg, "header", None))
+        self._remember_mapping_image(jpeg, getattr(msg, "header", None))
 
     def run_detection(self) -> None:
         """Detect on the newest queued frame. Runs OFF rospy's callback threads.
@@ -1194,6 +1216,11 @@ class HardwareBridge(
         except Exception as exc:
             rospy.logwarn(f"[{self.id}] scan upload failed: {exc}")
 
+    def _lookup_color_transform(self, header):
+        return self.tf_buffer.lookup_transform(
+            header.frame_id, self.map_frame, header.stamp
+        )
+
     def upload_cloud(self) -> None:
         """Push the latest registered XYZ cloud to the optional 3D viewer.
 
@@ -1201,21 +1228,30 @@ class HardwareBridge(
         filtering. For a global 3D SLAM topic this is the accumulated map; for
         the ordinary map-cloud topic it is the latest registered scan.
         """
-        if not self._cloud_dirty or self._cloud_points is None:
+        points, rgb = getattr(self, "_cloud_snapshot", None) or (
+            self._cloud_points,
+            getattr(self, "_cloud_rgb", None),
+        )
+        if not self._cloud_dirty or points is None:
             return
         self._cloud_dirty = False
-        if not len(self._cloud_points):
+        if not len(points):
             return
-        quantised = np.round(self._cloud_points / MAP_CLOUD_SCALE).astype(np.int16)
+        scale = max(MAP_CLOUD_SCALE, float(np.max(np.abs(points))) / 32767)
+        body = (
+            np.round(points / scale).astype("<i2").tobytes()
+            if rgb is None
+            else points.astype("<f4").tobytes() + rgb.tobytes()
+        )
         url = (
             f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
-            f"&scale={MAP_CLOUD_SCALE}"
+            f"&scale={scale}" + ("&format=xyzrgb32" if rgb is not None else "")
         )
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
                     url,
-                    data=zlib.compress(quantised.tobytes(), 1),
+                    data=zlib.compress(body, 1),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
