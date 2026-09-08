@@ -176,6 +176,14 @@ synthetic browser rendering checks cannot establish those results.
 ## Overlay frames and camera color
 
 The tactical view uses world coordinates in both global and single-robot views.
+The graph backend accepts a position-fitted map frame only when both trajectories
+have at least 5 cm RMS spread in a second direction and that spread is at least
+1% of their dominant spread. Stationary and nearly straight paths cannot
+determine a full 3D rotation from positions alone, even with low fitting error;
+they retain the frame derived from keyframe poses. This prevents unconstrained
+pitch/roll from tilting a robot's entire cloud. The check runs once per trajectory
+fit, not per point or rendered frame.
+
 Cloud responses declare `X-Cloud-Frame`: direct robot maps are `local`, while the
 collaborative SLAM cloud is already `world`. Only local XYZ receives the robot's
 map-to-world transform. Robot markers and paths arrive in world coordinates;

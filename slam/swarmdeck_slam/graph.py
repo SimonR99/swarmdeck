@@ -129,6 +129,12 @@ _PCM_DOF: Final = 6
 # guards the fit is vacuous at n == 2, because a 2-point Kabsch fit always has
 # zero residual while leaving rotation about the line between them free.
 _MIN_FIT_KEYFRAMES: Final = 3
+# A position-only fit cannot observe rotation about a stationary/straight
+# trajectory. Require 5 cm RMS spread in a second direction, and at least 1%
+# of the dominant spread. Planar trajectories are sufficient; full 3D rank
+# would incorrectly reject normal ground-robot motion.
+_MIN_FIT_SPREAD_M: Final = 0.05
+_MIN_FIT_SPREAD_RATIO: Final = 0.01
 
 
 def _frame_residual(
@@ -685,10 +691,10 @@ class GtsamPoseGraph:
         what an operator sees. It needs at least
         :data:`_MIN_FIT_KEYFRAMES` keyframes to be better determined than the
         snapshot it replaces, and it is only accepted if it actually explains
-        that robot's poses at least as well -- so a robot that has driven too
-        little, or straight down a corridor where the fit is free to rotate
-        about the travel axis, falls back to the single-keyframe read rather
-        than to an arbitrary rotation.
+        that robot's positions at least as well. Both position sets must also
+        have measurable spread in two directions: position residual alone
+        cannot reject an arbitrary rotation about a straight travel axis.
+        Underconstrained trajectories retain the pose-derived snapshot.
         """
         by_trajectory: dict[TrajectoryId, list[KeyframeId]] = defaultdict(list)
         for kf_id in self._keyframes:
@@ -750,6 +756,14 @@ class GtsamPoseGraph:
             return snapshot
         source = np.array([self._keyframes[k].t_odom_base[:3, 3] for k in kf_ids])
         target = np.array([poses[k][:3, 3] for k in kf_ids])
+        for positions in (source, target):
+            spread = np.linalg.svd(
+                positions - positions.mean(axis=0), compute_uv=False
+            ) / np.sqrt(len(positions))
+            if spread[1] < max(
+                _MIN_FIT_SPREAD_M, _MIN_FIT_SPREAD_RATIO * spread[0]
+            ):
+                return snapshot
         try:
             fitted = se3_kabsch(source, target)
         except ValueError:  # pragma: no cover - guarded by _MIN_FIT_KEYFRAMES
