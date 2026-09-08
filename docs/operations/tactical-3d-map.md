@@ -4,7 +4,7 @@ The dashboard opens the tactical 3D map without a URL parameter. Deselect
 **Layers → 3D cloud** to return to 2D, and select it to reopen the tactical map.
 The optional `?view=2d` URL starts directly in 2D. The map uses registered
 clouds selected by the map source. **Optimized** uses the accumulated, solved
-keyframe cloud; **Robot SLAM** uses the latest robot uploads. Optimized falls
+keyframe cloud; **Robot SLAM** uses the server-accumulated history of robot uploads. Optimized falls
 back to those uploads while reconstruction is unavailable or empty. X/Y are world
 metres and Z is up. A local robot cloud is transformed into world coordinates
 for agreement with robot overlays and navigation goals.
@@ -45,8 +45,31 @@ to 2D retains the bounded 3D scene, camera, and display settings while stopping
 its animation loop and map requests. Returning to 3D immediately resumes the
 loaded tactical map, including when the server returns 304 or is unavailable.
 
-The viewer polls clouds every two seconds with conditional ETags and cancels
-requests on scope changes, hiding, and unmount. Gaussian models poll every five seconds while
+The server accumulates Robot SLAM clouds in each robot's own map frame on a
+10 cm voxel lattice. A new registered scan adds coverage instead of replacing
+the previous scan. Registration still consumes the latest scan independently.
+Repeated observations keep stable surface positions and preserve camera color;
+an uncolored voxel can acquire color on a later observation. Each robot retains
+at most 500,000 display voxels, coarsening the lattice when necessary to retain
+old rooms. Map reset clears this history for the selected robot or fleet. Like
+the scan-derived 2D grid, this history is in server memory: a server restart
+starts fresh accumulation. Previously discarded scans cannot be recovered from
+a 2D grid; use the Optimized source when solved keyframe history is available.
+Robot-local SLAM resets also require resetting the corresponding server map so
+scans from different coordinate origins are not accumulated together.
+
+The viewer polls cloud manifests every two seconds with conditional ETags and
+cancels requests on scope changes, hiding, and unmount. Snapshot fusion and
+compression are shared across viewers and reused until geometry, color,
+membership, or registration changes. Optimized upstream requests are shared for
+two seconds. Content-addressed 4 m spatial chunks let browsers download only
+changed regions; repeated scans of known uncolored surfaces normally return
+304 without a payload. The server retains up to 128 MiB of compressed chunks
+and 64 MiB / 16 recent snapshots; each viewer retains up to 64 MiB of decoded
+chunks, including across map selections. Chunk downloads use four concurrent
+requests and the terrain is replaced only after the entire snapshot is ready.
+Robot SLAM output is spatially coarsened to at most 300,000 points for the GPU,
+rather than dropping previously explored regions. Gaussian models poll every five seconds while
 selected. Server fusion/compression runs off the async event loop. Gaussian
 sorting runs at most 10 Hz and only when camera orientation changes. DC color
 replaces higher spherical-harmonic bands; a 384-pixel maximum ellipse radius
@@ -69,7 +92,8 @@ configured tolerance. Capture-time TF must resolve camera-optical <- map.
 Nonzero distortion coefficients, mismatched sizes/frames, missing calibration,
 or stale images suppress color rather than projecting incorrectly. Only the
 nearest cloud surface per pixel is colored; unseen points are neutral gray.
-This is per-upload coloring, not persistent texture fusion, and sparse LiDAR
+The server retains the first observed RGB per display voxel; this is not
+photometric texture fusion. Sparse LiDAR
 cannot guarantee occlusion rejection between its returns. The shared projection
 helper also accepts aligned metric depth for stronger visibility checking.
 
@@ -82,7 +106,12 @@ same voxel membership as positions during fusion.
 SLAM fallback's `xyz16`), `X-Cloud-Points`, `X-Cloud-Scale`, `X-Cloud-Robots`, and
 `X-Cloud-RGB`. Layout: XYZ, then one uint8 robot index per point, then optional
 RGB triples. Consumers must honor the format header. Float32 output avoids
-wrapping world coordinates beyond the legacy int16 range.
+wrapping world coordinates beyond the legacy int16 range. Adding `manifest=1`
+returns a version-1 JSON manifest with the same response headers and a `chunks`
+list of `{id, points}` records. Each `GET /api/map/cloud?chunk=<id>` returns an
+immutable zlib payload with the same planar layout for that chunk. A 404 means
+the chunk was evicted; retry the manifest without changing the displayed map.
+Legacy clients can continue fetching the complete compressed cloud.
 
 ## Capture RGB-D and reconstruct with UMAMI-SLAM
 

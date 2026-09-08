@@ -14,6 +14,44 @@ Prerequisites on the robot:
 - ROS domain 49. The base additionally requires a ready `can2` and physical
   e-stop supervision.
 
+## VectorNav odometry
+
+Deployment uses the VectorNav VN-100 on `/vectornav/imu`. The profile and Compose
+select its driver, `aslan_superodom.yaml`, and `aslan_superodom_calibration.yaml`
+together. The Ouster IMU remains an explicit fallback: override all four
+`ASLAN_IMU_TOPIC`, `ASLAN_START_VECTORNAV`, `ASLAN_SUPERODOM_CONFIG`, and
+`ASLAN_SUPERODOM_CALIB` settings together.
+
+The VN-100 occupies the same baseplate position as Botman's. The existing TF
+accounts for Aslan's lower lidar mount, and the estimator uses Aslan's measured
+rotation (approximately -90.65 degrees yaw). Its unit-specific calibration was
+measured on 2026-09-04: `g_norm=9.7666`, `acc_n=1.422605e-3`, and
+`gyr_n=6.969057e-5`. Botman's VN-100 reads a different static acceleration norm
+(9.8719), so matching the mount does not justify copying its bias calibration.
+These validated values had remained in `worktree-aslan-vn100` while deployments
+from the main checkout still selected the Ouster IMU.
+
+On 2026-09-08, the live Ouster-configured IMU preintegration process had aborted
+on an invalid assertion that rotating acceleration must change its X component.
+A zero or rotation-invariant component is legitimate. The SwarmDeck overlay
+patch removes that assertion; the SLAM health check now also requires the IMU
+preintegration process, so surviving lidar nodes cannot hide this crash.
+
+After deploying the fix on 2026-09-08, a passive 120-second stationary capture
+received 11,927 IMU samples and 1,151 odometry samples. Excluding the first
+30 seconds, fitted drift was 0.0034 m/min in position and 0.0149 degrees/min
+in yaw. The median IMU rate was 100.15 Hz, odometry averaged 9.68 Hz, and no
+IMU timestamps repeated or went backwards; the largest observed IMU gap was
+91 ms. Startup included one bias reset; occasional stationary iSAM2
+underconstraint warnings remained, without further bias resets or scan
+synchronization failures in the subsequent log check. This short static
+capture does not establish accuracy while driving.
+
+Changing the IMU selection requires restarting SLAM and begins a new local map.
+The previous calibration's static drift measurements are not a guarantee of
+performance while driving; check live IMU rate, timestamp continuity, and scan
+synchronization after deployment.
+
 ```bash
 make deploy ROBOT=aslan                 # full stack (base driver, sensing, SLAM, Nav2)
 ```

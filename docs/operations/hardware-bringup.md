@@ -60,3 +60,39 @@ authenticating proxy protects hardware controls.
 7. If navigation is advertised, issue a short clear-space goal and cancel it.
 8. Confirm stop-all halts motion, then inspect container/ROS logs for restarts or
    missing sensor data.
+
+## Adapter running but robot offline
+
+Check `docker logs --tail 100 swarmdeck-botman-adapter` and backend reachability
+from the robot. A running container alone does not mean ROS initialization or
+adapter registration completed.
+
+On 2026-09-08, Botman's adapter and two Nav2 processes hung opening
+`/dev/shm/fastrtps_port11707`: an abandoned **zero-byte** shared-memory object.
+Fast DDS 2.6.12's Boost 1.74 code waits indefinitely for such a file to acquire
+its initial size, before Fast DDS can run its port health check. A native stack
+showed `SharedMemTransport::CreateInputChannelResource`; the blocked process
+held that empty file open. Shared memory worked in another ROS domain, and
+quarantining that specific empty object restored node creation in domain 17.
+A subsequent 10-second read-only SHM probe received 100 Ouster clouds and
+89 odometry/registered-scan messages, with clouds up to 3.1 MB.
+This was not a mismatch with MGG's UDP transport. The original creator's
+interruption was not captured, so the event that abandoned the file is unknown.
+
+Nav2's `timeout 5 ros2 lifecycle get ...` probes amplified the fault: ROS signal
+handlers could not finish shutdown inside the blocked native call, and timeout
+had no forced-kill deadline. We found and terminated 252 leaked read-only probes.
+Their DDS participants also contributed to several GiB of SHM allocations.
+
+ROS CLI health checks now request graceful SIGINT shutdown after 4 seconds and
+force termination one second later. On the Bunkers, these disposable probes use
+`deploy/dds/fastdds_udp_only.xml` so a killed probe cannot abandon a host SHM
+port. The long-lived Botman adapter, lidar, SLAM, and Nav2 nodes use
+`fastdds_large_data.xml` for efficient local cloud transport. MGG remains on UDP
+in its private IPC namespace.
+
+Do not blanket-delete `/dev/shm/fastrtps_*` while ROS is running. Diagnose the
+specific object and its users first; preserve a verified old, empty port outside
+the DDS naming scheme when recovering it. Processes already waiting on its old
+file descriptor need restarting. Changing ROS domain is a diagnostic only;
+robot services must remain on their configured domain to communicate.

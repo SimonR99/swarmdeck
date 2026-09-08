@@ -15,7 +15,7 @@
    * - 3D tactical terrain grid, costmap, and network heatmaps
    */
   import { onMount, untrack } from 'svelte';
-  import { inflate } from 'pako';
+  import { CloudSnapshotCache } from './cloudSnapshot';
   import * as THREE from 'three';
   import { Box, Check, Compass, Crosshair, Eye, Layers, Sliders, Sparkles, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
@@ -202,6 +202,7 @@
   let lastScope: string | null = null;
   let lastCloudRevision = '';
   let cloudEtag = '';
+  const cloudCache = new CloudSnapshotCache();
   let gaussianEtag = '';
   let firstCloud = true;
 
@@ -225,10 +226,9 @@
     const currentScope = cloudScope();
     const revision = lastCloudRevision;
     try {
-      const response = await fetch(`/api/map/cloud${currentScope}`, {
-        signal: controller.signal,
-        headers: cloudEtag ? { 'If-None-Match': cloudEtag } : {}
-      });
+      const { response, raw } = await cloudCache.fetch(
+        `/api/map/cloud${currentScope}`, cloudEtag, controller.signal
+      );
       if (response.status === 304) return;
       if (!response.ok) throw new Error(`Cloud unavailable (${response.status})`);
       const total = Number(response.headers.get('X-Cloud-Points') ?? 0);
@@ -244,7 +244,7 @@
       )
         throw new Error('Invalid cloud metadata');
       const names = (response.headers.get('X-Cloud-Robots') ?? '').split(',').filter(Boolean);
-      const raw = inflate(new Uint8Array(await response.arrayBuffer()));
+      if (!raw) return;
       if (id !== generation || !scene) return;
       const xyzBytes = format === 'xyz32' ? 12 : 6;
       if (raw.byteLength !== total * (xyzBytes + 1 + (rgbPresent ? 3 : 0)))
@@ -316,6 +316,7 @@
     } catch (e) {
       if (!controller.signal.aborted && id === generation)
         error = e instanceof Error ? e.message : String(e);
+      controller.abort(); // Stop sibling chunk downloads after a failed snapshot.
     } finally {
       window.clearTimeout(timeout);
       if (pending === controller) pending = null;

@@ -234,3 +234,85 @@ esac
         thread.join(timeout=2)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_robot_health_probes_are_bounded_and_keep_cloud_transport_separate():
+    import shlex
+    import xml.etree.ElementTree as ET
+
+    import yaml
+
+    for robot in ("botman", "aslan", "asimov"):
+        services = yaml.safe_load(
+            (COMPOSE_DIR / f"docker-compose.robot-{robot}.yml").read_text()
+        )["services"]
+        for name, service in services.items():
+            check = service.get("healthcheck", {}).get("test", [""])[-1]
+            if "ros2 " not in check:
+                continue
+            words = shlex.split(check)
+            for i, word in enumerate(words):
+                if word == "ros2":
+                    assert words[i - 4 : i] == [
+                        "timeout",
+                        "--signal=SIGINT",
+                        "--kill-after=1s",
+                        "4s",
+                    ]
+            if robot in ("botman", "aslan"):
+                assert "export FASTRTPS_DEFAULT_PROFILES_FILE=" in check
+                assert "/fastdds_udp_only.xml" in check
+                assert any(":/app/swarmdeck:ro" in v for v in service["volumes"])
+        if robot == "botman":
+            for name in ("adapter", "lidar", "slam", "nav2"):
+                assert services[name]["environment"][
+                    "FASTRTPS_DEFAULT_PROFILES_FILE"
+                ].endswith("/fastdds_large_data.xml")
+
+    root = ET.parse(REPO / "deploy/dds/fastdds_udp_only.xml")
+    ns = {"dds": "http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles"}
+    transports = root.findall(".//dds:transport_descriptor", ns)
+    assert [entry.findtext("dds:type", namespaces=ns) for entry in transports] == [
+        "UDPv4"
+    ]
+    participant = root.find(".//dds:participant", ns)
+    assert participant.attrib["is_default_profile"] == "true"
+    assert (
+        participant.findtext("dds:rtps/dds:useBuiltinTransports", namespaces=ns)
+        == "false"
+    )
+    assert participant.findtext(
+        "dds:rtps/dds:userTransports/dds:transport_id", namespaces=ns
+    ) == transports[0].findtext("dds:transport_id", namespaces=ns)
+
+
+def test_healthcheck_deadline_kills_a_probe_that_ignores_shutdown(tmp_path):
+    import shlex
+    import signal
+    import sys
+
+    import yaml
+
+    check = yaml.safe_load(
+        (COMPOSE_DIR / "docker-compose.robot-botman.yml").read_text()
+    )["services"]["nav2"]["healthcheck"]["test"][-1]
+    words = shlex.split(check)
+    start = words.index("timeout")
+    prefix = words[start : words.index("ros2", start)]
+    ready = tmp_path / "ready"
+    code = (
+        "import signal,time,pathlib; "
+        "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        f"pathlib.Path({str(ready)!r}).touch(); time.sleep(30)"
+    )
+    process = subprocess.Popen(
+        [*prefix, sys.executable, "-c", code], start_new_session=True
+    )
+    try:
+        assert process.wait(timeout=8) in (-signal.SIGKILL, 128 + signal.SIGKILL)
+        assert ready.exists(), "probe must start before its deadline expires"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()

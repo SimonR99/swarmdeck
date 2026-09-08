@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from .cloud_map import CloudMap
+from .cloud_delivery import CloudDelivery
 from .grid_meta import GridMeta
 from .registration import (
     MIN_SUPPORT,
@@ -182,6 +184,10 @@ class MapService:
         # sends one and the 3D view stays empty rather than wrong.
         self.robot_clouds: dict[str, np.ndarray] = {}
         self.robot_cloud_colors: dict[str, np.ndarray] = {}
+        self.cloud_maps: dict[str, CloudMap] = {}
+        self.cloud_epoch = 0
+        self.cloud_reset_epoch = 0
+        self.cloud_delivery = CloudDelivery()
         # Display-only vertical correction per robot, against the reference's
         # cloud. See estimate_z_offset: the SE(2) merge cannot produce this.
         self.cloud_z_offsets: dict[str, float] = {}
@@ -329,6 +335,9 @@ class MapService:
                 self.cslam_disagreement.clear()
                 self.robot_clouds.clear()
                 self.robot_cloud_colors.clear()
+                self.cloud_maps.clear()
+                self.cloud_epoch += 1
+                self.cloud_reset_epoch += 1
                 self._scan_grids.clear()
                 self._network_grids.clear()
                 self._network_prev.clear()
@@ -370,6 +379,9 @@ class MapService:
             self.cslam_disagreement.pop(robot_id, None)
             self.robot_clouds.pop(robot_id, None)
             self.robot_cloud_colors.pop(robot_id, None)
+            self.cloud_maps.pop(robot_id, None)
+            self.cloud_epoch += 1
+            self.cloud_reset_epoch += 1
             self._scan_grids.pop(robot_id, None)
             self._network_grids.pop(robot_id, None)
             self._network_prev.pop(robot_id, None)
@@ -479,6 +491,9 @@ class MapService:
             self.robot_revisions.clear()
             self.robot_clouds.clear()
             self.robot_cloud_colors.clear()
+            self.cloud_maps.clear()
+            self.cloud_epoch += 1
+            self.cloud_reset_epoch += 1
             self.registrations.clear()
             self.registration_rejections.clear()
             self.registered.clear()
@@ -549,6 +564,18 @@ class MapService:
         if rgb is not None and (rgb.shape != points.shape or rgb.dtype != np.uint8):
             raise ValueError("RGB must be uint8 with one triple per point")
         with self._state_lock:
+            previous = self.cloud_maps.get(robot_id)
+            epoch = self.cloud_reset_epoch
+        accumulated = (previous or CloudMap.empty()).add(points, rgb)
+        with self._state_lock:
+            if (
+                epoch != self.cloud_reset_epoch
+                or self.cloud_maps.get(robot_id) is not previous
+            ):
+                return  # A reset or newer upload superseded this work.
+            if accumulated is not previous:
+                self.cloud_epoch += 1
+            self.cloud_maps[robot_id] = accumulated
             self.robot_clouds[robot_id] = points
             if rgb is None:
                 self.robot_cloud_colors.pop(robot_id, None)

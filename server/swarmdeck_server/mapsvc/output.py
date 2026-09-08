@@ -40,7 +40,11 @@ def consolidate_voxel_centroids(
 
 
 def merged_cloud(
-    service: Any, robot_id: str | None = None, *, include_rgb: bool = False
+    service: Any,
+    robot_id: str | None = None,
+    *,
+    include_rgb: bool = False,
+    accumulated: bool = False,
 ) -> (
     tuple[np.ndarray, np.ndarray, list[str]]
     | tuple[np.ndarray, np.ndarray, list[str], np.ndarray | None]
@@ -49,10 +53,18 @@ def merged_cloud(
     with service._state_lock:
         robot_clouds = dict(service.robot_clouds)
         robot_colors = dict(service.robot_cloud_colors) if include_rgb else {}
+        if accumulated:
+            robot_clouds = {
+                rid: cloud.points for rid, cloud in service.cloud_maps.items()
+            }
+            robot_colors = (
+                {rid: cloud.colors for rid, cloud in service.cloud_maps.items()}
+                if include_rgb
+                else {}
+            )
         transforms = dict(service.transforms)
         cloud_z_offsets = dict(service.cloud_z_offsets)
-
-    members = service.global_members()
+        members = service.global_members()
     selected_rids = (
         [robot_id] if robot_id else (members if members else list(robot_clouds))
     )
@@ -70,6 +82,14 @@ def merged_cloud(
             out[:, 0] = tx + points[:, 0] * c - points[:, 1] * sn
             out[:, 1] = ty + points[:, 0] * sn + points[:, 1] * c
             out[:, 2] += cloud_z_offsets.get(rid, 0.0)
+        if accumulated:
+            chunks.append(out)
+            indices.append(np.full(len(out), len(names), dtype=np.uint8))
+            names.append(rid)
+            if include_rgb:
+                colors.append(robot_colors[rid])
+                any_rgb |= bool(np.any(robot_colors[rid] != 148))
+            continue
         keys = np.floor(out / 0.04).astype(np.int64)
         _, inverse, counts = np.unique(
             keys, axis=0, return_inverse=True, return_counts=True
