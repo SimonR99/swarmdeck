@@ -2,11 +2,16 @@
   import { Brain, PanelLeftClose, Trash2, UsersRound } from 'lucide-svelte';
   import RobotCard from './RobotCard.svelte';
   import CortexChatView from '$lib/components/agent/CortexChatView.svelte';
+  import { actions } from '$lib/api/connection';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { settings } from '$lib/stores/settings.svelte';
   import { cortexStore } from '$lib/stores/agent.svelte';
 
   let { oncollapse = () => {} }: { oncollapse?: () => void } = $props();
+  const exploring = $derived(fleet.robots.some((robot) => robot.mode === 'explore'));
+  const canExplore = $derived(
+    fleet.robots.some((robot) => robot.online && fleet.can(robot.robot_id, 'explore'))
+  );
 </script>
 
 <aside
@@ -86,6 +91,17 @@
         </div>
       {/if}
     </div>
+    <footer class="shrink-0 border-t border-border/70 p-2">
+      <button
+        class="flex h-10 w-full items-center justify-center rounded-full bg-accent-container px-3 text-xs font-semibold text-accent-container-fg transition-colors hover:brightness-95 disabled:opacity-40"
+        disabled={!exploring && !canExplore}
+        aria-pressed={exploring}
+        title={exploring ? 'Stop fleet exploration' : canExplore ? 'Start fleet exploration' : 'No connected robot has exploration configured'}
+        onclick={() => actions.explore(!exploring)}
+      >
+        {exploring ? 'Stop exploration' : 'Explore'}
+      </button>
+    </footer>
   {:else}
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <CortexChatView />

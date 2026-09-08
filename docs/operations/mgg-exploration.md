@@ -1,10 +1,13 @@
 # MGG autonomous exploration
 
-Each robot card under **Fleet** has an **Explore** button. It becomes **Stop
-exploration** while that robot's exploration session is active. The state badge
-reads **EXPLORING**, even while its navigation stack executes an exploration
-goal. Stop All also stops exploration. Manual navigation, teleoperation, reset,
-and operator-link loss end the session; it never resumes automatically.
+A single **Explore** button stays at the bottom of the **Fleet** tab, below
+its scrollable robot list. It starts all connected, enabled robots that support
+exploration, regardless of selection. The button reads **Stop exploration**
+while any fleet robot is exploring; clicking it stops exploration across the
+fleet. Each exploring robot's state badge reads **EXPLORING**, including while
+its navigation stack executes a goal. Stop All also stops exploration. Manual
+navigation, teleoperation, reset, and operator-link loss end the affected robot's
+session; it never resumes automatically.
 
 The button is disabled unless the adapter advertises `explore`. Enable this only
 with a configured MGG planner and a working navigation stack. No planner service

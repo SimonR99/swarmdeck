@@ -215,7 +215,9 @@ Repeated starts are idempotent. Stop, manual navigation, teleoperation, reset,
 and operator-link loss disable planner-path intake and cancel navigation.
 Delayed paths and service replies must not restart a stopped session.
 
-The GUI sends `start_explore` or `stop_explore` with `robot_id`. Omitting the ID
+The single Fleet exploration button sends `start_explore` or `stop_explore`
+with `robot_id` for each enabled, capable robot. Starts target connected robots;
+stops are also attempted for disconnected explorers. Omitting the ID
 retains the legacy fleet-wide command for capable robots. Stop All sends `stop`
 to every robot, whether or not it advertises exploration.
 

@@ -138,18 +138,6 @@
           Dismiss
         </button>
       {/if}
-      <button
-        class="inline-flex h-7 items-center rounded-full bg-accent-container px-2.5 text-[10px] font-semibold text-accent-container-fg disabled:opacity-40"
-        disabled={!robot.online || !fleet.can(robot.robot_id, 'explore')}
-        aria-pressed={robot.mode === 'explore'}
-        title={fleet.can(robot.robot_id, 'explore') ? 'Autonomous exploration' : 'Exploration planner is not configured'}
-        onclick={(e) => {
-          e.stopPropagation();
-          actions.explore(robot.robot_id, robot.mode !== 'explore');
-        }}
-      >
-        {robot.mode === 'explore' ? 'Stop exploration' : 'Explore'}
-      </button>
       {#if fleet.can(robot.robot_id, 'body')}
         <button
           class="inline-flex h-5 items-center gap-1 rounded-full bg-surface-3 px-2 text-[9px] font-semibold text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg active:scale-95"
