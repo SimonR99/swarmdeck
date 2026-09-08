@@ -477,3 +477,15 @@ def test_ground_ring_does_not_mask_changing_walls():
     # floor_z is map-relative, so the map's ground reference moves with the gauge.
     uploader._height_band["floor_z"] += 0.2
     assert not uploader.consider(second + shift, corrected, 4.0)
+
+
+def test_slow_simulation_keeps_capture_period_in_sensor_time():
+    uploader = KeyframeUploader("r", "http://unused", min_period_s=2)
+    pose = pose7_from_xy_yaw(0, 0, 0)
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=0):
+        assert uploader.consider(_wall(), pose, 100)
+    changed = _wall() + np.array([2, 0, 0])
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=10):
+        assert not uploader.consider(changed, pose, 100.5)
+    with patch("adapters.keyframe_producer.time.monotonic", return_value=11):
+        assert uploader.consider(changed, pose, 102)

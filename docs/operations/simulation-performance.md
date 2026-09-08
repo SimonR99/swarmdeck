@@ -232,6 +232,32 @@ mesh. These 6–9 cm objects otherwise acted as infinite-mass barriers below the
 navigation proximity scan's 15 cm cutoff. The large ducks remain collidable.
 This does not simulate pushing, rolling, or deforming the small objects.
 
+### Keyframe density and closure counts
+
+The producer enforces its capture period in both sensor time and monotonic wall
+time. A two-second wall-only gate admitted sub-second simulation captures when
+rendering ran below real time. The sensor-time check bounds observation density;
+the wall-time check still bounds work during replay. Both run before cloud
+processing. The ground-filtered novelty threshold remains 0.25 m.
+
+The SLAM status `accepted_closures` counts geometrically accepted scan-pair
+constraints, not independent revisits or factors surviving graph rejection.
+Three candidates per keyframe can produce thousands of constraints from nearby
+observations. After restarting the mapper with this version, `/status` also
+reports cumulative `verification.intra` and `verification.inter` outcome counts:
+accepted, too few points/inliers, convergence, inlier ratio, mean error,
+translation, yaw deviation, and degeneracy. These are counters, not per-scan logs.
+
+In the September 7 Bistro probe, 2,119 accepted constraints were all intra-robot,
+with 906 keyframes queued. A four-robot live scan sample rejected both nearby
+pairs (about four metres apart) on mean registration error, even with approximate
+pose seeds; the other pairs were then about 20–25 m apart. Proximity alone did
+not establish an acceptable correspondence. Own-robot scans can also fill the
+three-entry descriptor shortlist. Reserving peer slots exposed a false merge in
+the disjoint-building regression, so that change was not retained. Inter-robot
+recall remains unresolved; the geometric thresholds and shortlist policy are
+unchanged pending validation that improves recall without false merges.
+
 An additional startup failure can produce an active mapper with a **0×0 map**.
 ARGoS initializes an unrendered LiDAR scan with `MaxRange=0`; passing that scan
 to SLAM Toolbox can initialize an unusable laser model. The bridge now drains

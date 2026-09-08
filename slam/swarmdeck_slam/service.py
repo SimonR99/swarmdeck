@@ -727,6 +727,10 @@ def status() -> dict[str, Any]:
         "pending_controls": len(_controls),
         "last_error": _last_error,
         "has_snapshot": snapshot is not None,
+        # Cumulative geometric outcomes, distinct from factors retained by GNC.
+        "verification": {
+            kind: counts.copy() for kind, counts in backend.verification_stats.items()
+        },
         "components": (
             [
                 {"id": c.component_id, "robots": sorted(c.robots)}

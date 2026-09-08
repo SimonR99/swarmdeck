@@ -364,6 +364,7 @@ class KeyframeUploader:
         self._last_pose: np.ndarray | None = None
         self._last_scan_signature: np.ndarray | None = None
         self._last_at = 0.0
+        self._last_capture_stamp = -math.inf
         self.dropped = 0
         self.sent = 0
         self.spun = 0
@@ -402,7 +403,12 @@ class KeyframeUploader:
             return False
         now = time.monotonic()
         if self._last_pose is not None:
-            if now - self._last_at < self.min_period_s:
+            # Bound both acquisition density and upload work. Wall time alone
+            # admits near-adjacent captures when simulation runs below real time.
+            if (
+                now - self._last_at < self.min_period_s
+                or stamp - self._last_capture_stamp < self.min_period_s
+            ):
                 return False
         pts = np.asarray(points_map)
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] < self.min_points:
@@ -498,6 +504,7 @@ class KeyframeUploader:
             self._last_pose = pose
             self._last_scan_signature = signature
             self._last_at = now
+            self._last_capture_stamp = stamp
             # The rate this capture was actually taken at. Distinct from the
             # peak observed, which is above the limit on any run where the
             # robot turns and says only that the gate had work to do. What

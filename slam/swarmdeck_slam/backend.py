@@ -629,6 +629,7 @@ class CollaborativeBackend:
         self.ambiguous_matches = 0
         self.implausible_hops = 0
         self.primed_verifications = 0
+        self.verification_stats: dict[str, dict[str, int]] = {"intra": {}, "inter": {}}
         self._last_solved: OptimizedGraph | None = None
         self._accepted = 0
         self._inter_robot = 0
@@ -736,6 +737,9 @@ class CollaborativeBackend:
                 yaw_prior=candidate.yaw,
                 config=self.verify,
                 t_target_source_prior=prior,
+                diagnostics=self.verification_stats[
+                    "inter" if target.id.robot_id != keyframe.id.robot_id else "intra"
+                ],
             )
             if edge is None:
                 continue
