@@ -56,6 +56,4 @@ def test_runtime_reports_stderr_when_provider_has_no_terminal_event():
         request = ProviderRequest(prompt="hello", workspace=".")
         return [event async for event in ProviderRuntime(provider).run(request)]
 
-    assert asyncio.run(collect()) == [
-        {"type": "error", "error": "provider failed"}
-    ]
+    assert asyncio.run(collect()) == [{"type": "error", "error": "provider failed"}]

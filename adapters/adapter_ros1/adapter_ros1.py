@@ -431,9 +431,7 @@ class HardwareBridge(
                         target, source, stamp, rospy.Duration(0.1)
                     )
                 except Exception:
-                    tf = self.tf_buffer.lookup_transform(
-                        target, source, rospy.Time(0)
-                    )
+                    tf = self.tf_buffer.lookup_transform(target, source, rospy.Time(0))
                 t = tf.transform
                 transform = (
                     float(t.translation.x),

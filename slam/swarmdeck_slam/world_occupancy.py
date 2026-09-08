@@ -84,7 +84,9 @@ def _pose6(text: str | None) -> tuple[float, float, float]:
     return parts[0], parts[1], parts[5]
 
 
-def _compose(parent: tuple[float, float, float], child: tuple[float, float, float]) -> tuple[float, float, float]:
+def _compose(
+    parent: tuple[float, float, float], child: tuple[float, float, float]
+) -> tuple[float, float, float]:
     yaw = parent[2] + child[2]
     cosine, sine = math.cos(parent[2]), math.sin(parent[2])
     return (
@@ -149,7 +151,9 @@ def rasterize(
 
 
 def occupancy_from_grid(grid: RenderedGrid) -> Occupancy:
-    return Occupancy(grid.cells == OCCUPIED, grid.origin_x, grid.origin_y, grid.resolution)
+    return Occupancy(
+        grid.cells == OCCUPIED, grid.origin_x, grid.origin_y, grid.resolution
+    )
 
 
 def _occupied_xy(occupancy: Occupancy) -> np.ndarray:
@@ -165,7 +169,12 @@ def _occupied_xy(occupancy: Occupancy) -> np.ndarray:
 
 
 def _paint_on(
-    points: np.ndarray, origin_x: float, origin_y: float, resolution: float, height: int, width: int
+    points: np.ndarray,
+    origin_x: float,
+    origin_y: float,
+    resolution: float,
+    height: int,
+    width: int,
 ) -> np.ndarray:
     cells = np.zeros((height, width), dtype=bool)
     if points.size == 0:
@@ -204,7 +213,9 @@ def _shift_zero(cells: np.ndarray, drow: int, dcol: int) -> np.ndarray:
     return out
 
 
-def _iou(estimated: np.ndarray, truth: np.ndarray) -> tuple[float, float, float, int, int]:
+def _iou(
+    estimated: np.ndarray, truth: np.ndarray
+) -> tuple[float, float, float, int, int]:
     intersection = int(np.count_nonzero(estimated & truth))
     union = int(np.count_nonzero(estimated | truth))
     predicted = int(np.count_nonzero(estimated))
@@ -353,13 +364,19 @@ def score_surfaces(
 
     from scipy.ndimage import distance_transform_edt
 
-    estimate_to_truth = distance_transform_edt(~truth_cells)[estimated_cells] * resolution
+    estimate_to_truth = (
+        distance_transform_edt(~truth_cells)[estimated_cells] * resolution
+    )
     truth_to_estimate = (
         distance_transform_edt(~estimated_cells)[truth_cells] * resolution
     )
     precision = float(np.mean(estimate_to_truth <= tolerance_m))
     recall = float(np.mean(truth_to_estimate <= tolerance_m))
-    f1 = 0.0 if precision + recall == 0.0 else 2.0 * precision * recall / (precision + recall)
+    f1 = (
+        0.0
+        if precision + recall == 0.0
+        else 2.0 * precision * recall / (precision + recall)
+    )
     symmetric = np.concatenate([estimate_to_truth, truth_to_estimate])
     return SurfaceScore(
         tolerance_m,
@@ -373,7 +390,9 @@ def score_surfaces(
     )
 
 
-def overlay_png(estimated: Occupancy, truth: Occupancy, score: OccupancyScore) -> np.ndarray:
+def overlay_png(
+    estimated: Occupancy, truth: Occupancy, score: OccupancyScore
+) -> np.ndarray:
     """RGB: truth walls grey, reconstructed hits blue, agreement black."""
     est_xy = _occupied_xy(estimated)
     truth_xy = _occupied_xy(truth)
@@ -384,14 +403,20 @@ def overlay_png(estimated: Occupancy, truth: Occupancy, score: OccupancyScore) -
     rotated = rotated.copy()
     rotated[:, 0] += score.shift_x_m
     rotated[:, 1] += score.shift_y_m
-    mins = np.minimum(
-        rotated.min(axis=0) if rotated.size else truth_xy.min(axis=0),
-        truth_xy.min(axis=0),
-    ) - truth.resolution
-    maxs = np.maximum(
-        rotated.max(axis=0) if rotated.size else truth_xy.max(axis=0),
-        truth_xy.max(axis=0),
-    ) + truth.resolution
+    mins = (
+        np.minimum(
+            rotated.min(axis=0) if rotated.size else truth_xy.min(axis=0),
+            truth_xy.min(axis=0),
+        )
+        - truth.resolution
+    )
+    maxs = (
+        np.maximum(
+            rotated.max(axis=0) if rotated.size else truth_xy.max(axis=0),
+            truth_xy.max(axis=0),
+        )
+        + truth.resolution
+    )
     occupancy = Occupancy(
         np.zeros(
             (
@@ -405,10 +430,20 @@ def overlay_png(estimated: Occupancy, truth: Occupancy, score: OccupancyScore) -
         truth.resolution,
     )
     aligned = _paint_on(
-        rotated, occupancy.origin_x, occupancy.origin_y, occupancy.resolution, occupancy.height, occupancy.width
+        rotated,
+        occupancy.origin_x,
+        occupancy.origin_y,
+        occupancy.resolution,
+        occupancy.height,
+        occupancy.width,
     )
     truth_cells = _paint_on(
-        truth_xy, occupancy.origin_x, occupancy.origin_y, occupancy.resolution, occupancy.height, occupancy.width
+        truth_xy,
+        occupancy.origin_x,
+        occupancy.origin_y,
+        occupancy.resolution,
+        occupancy.height,
+        occupancy.width,
     )
     rgb = np.full((occupancy.height, occupancy.width, 3), 255, dtype=np.uint8)
     rgb[truth_cells] = (180, 184, 190)

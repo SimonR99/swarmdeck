@@ -92,18 +92,19 @@ def test_the_track_gauge_matches_the_entity_plugin(tree, cfg):
     for i, platform in enumerate(types):
         params = blocks[f"{prefix}{i}_ctrl"].find("params")
         assert float(params.get("track_gauge")) == pytest.approx(
-            spawn_fleet.robot_spec(platform).track_gauge, abs=1e-4)
+            spawn_fleet.robot_spec(platform).track_gauge, abs=1e-4
+        )
 
 
 def test_the_lidar_matches_the_configured_profile(tree, cfg):
     spec = spawn_fleet.lidar_spec(cfg["fleet"])
-    lidar = list(controllers(tree).values())[0].find(
-        "./sensors/photorealistic_lidar")
+    lidar = list(controllers(tree).values())[0].find("./sensors/photorealistic_lidar")
     assert int(lidar.get("rings")) == spec.rings
     # ARGoS takes an azimuth STEP in degrees where LidarSpec counts samples per
     # revolution. 1800 samples is 0.2 deg, which is what a real unit does.
     assert float(lidar.get("horizontal_resolution")) == pytest.approx(
-        360.0 / spec.h_samples, abs=1e-4)
+        360.0 / spec.h_samples, abs=1e-4
+    )
     assert float(lidar.get("max_range")) == pytest.approx(spec.range_max)
     lo, hi = (float(v) for v in lidar.get("vertical_fov").split(","))
     assert hi == pytest.approx(math.degrees(spec.vfov), abs=1e-3)
@@ -129,8 +130,7 @@ def test_robots_spawn_on_the_floor_at_their_configured_poses(tree, cfg):
     starts = cfg["map"]["start_poses"]
     arena = tree.find("arena")
     for rid, pose in starts.items():
-        body = next(b for e in arena for b in e.findall("body")
-                    if e.get("id") == rid)
+        body = next(b for e in arena for b in e.findall("body") if e.get("id") == rid)
         x, y, z = (float(v) for v in body.get("position").split(","))
         assert x == pytest.approx(pose["x"], abs=1e-3)
         assert y == pytest.approx(pose["y"], abs=1e-3)
@@ -175,12 +175,13 @@ def test_physics_collides_with_the_floorless_copy_of_the_world(tree):
     mesh = tree.find("./arena/mesh[@id='world_mesh']")
     prop = tree.find("./media/photorealism/scenery/prop")
 
-    assert tree.find("./physics_engines/jolt/floor") is not None, (
-        "the reasoning below assumes the engine supplies the ground plane"
-    )
+    assert (
+        tree.find("./physics_engines/jolt/floor") is not None
+    ), "the reasoning below assumes the engine supplies the ground plane"
     assert mesh.get("file") != prop.get("model")
 
     import make_argos_world as maw  # noqa: E402
+
     assert mesh.get("file") == str(maw.collision_path(Path(prop.get("model"))))
 
 
@@ -188,10 +189,14 @@ def test_every_detection_target_is_both_collidable_and_visible(tree):
     """A prop with no mesh is driven through; a mesh with no prop is invisible
     to the cameras and to the photorealistic lidar, which raytrace the render
     scene rather than the collision geometry."""
-    meshes = {m.get("file"): m for m in tree.findall("./arena/mesh")
-              if m.get("id") != "world_mesh"}
-    props = {p.get("model"): p for p in
-             tree.findall("./media/photorealism/scenery/prop")}
+    meshes = {
+        m.get("file"): m
+        for m in tree.findall("./arena/mesh")
+        if m.get("id") != "world_mesh"
+    }
+    props = {
+        p.get("model"): p for p in tree.findall("./media/photorealism/scenery/prop")
+    }
     world = tree.find("./arena/mesh[@id='world_mesh']").get("file")
     assert meshes, "no detection targets were placed"
 
@@ -200,6 +205,7 @@ def test_every_detection_target_is_both_collidable_and_visible(tree):
     # the prop side by the same mapping the generator used, so this stays a
     # statement about detection targets and nothing else.
     import make_argos_world as maw  # noqa: E402
+
     world_props = {m for m in props if str(maw.collision_path(Path(m))) == world}
     assert len(world_props) == 1, world_props
     assert set(meshes) == set(props) - world_props
@@ -214,6 +220,7 @@ def test_target_classes_come_from_the_detector_catalog():
     from adapters.perception.catalog import CLASS_NAMES  # noqa: E402
 
     import make_argos_world as maw  # noqa: E402
+
     assert tuple(maw.PROPS) == CLASS_NAMES
     for name in maw.PROPS:
         assert (REPO / "argos" / "assets" / "props" / f"{name}.glb").exists()
@@ -290,9 +297,7 @@ def test_the_development_config_starts_every_robot_it_declares():
 def test_drift_odometry_drops_the_estimator_entirely(tree):
     """`--odometry drift` must not leave a dangling medium="uf" reference: the
     sensor would fail to resolve its medium and ARGoS would refuse to start."""
-    diag = ElementTree.fromstring(
-        mas.generate_argos_xml(CONFIG, estimator=False)
-    )
+    diag = ElementTree.fromstring(mas.generate_argos_xml(CONFIG, estimator=False))
     assert diag.find("./media/external_estimator") is None
     for block in controllers(diag).values():
         odometry = block.find("./sensors/odometry")
@@ -342,7 +347,8 @@ def test_the_sensor_rates_divide_the_tick_rate(tree):
     assert 100 / int(lidar.get("framerate_divider")) == pytest.approx(mas.LIDAR_HZ)
     assert 100 / int(camera.get("framerate_divider")) == pytest.approx(mas.CAMERA_HZ)
     assert 100 / int(tree.find("loop_functions").get("exchange_period")) == (
-        pytest.approx(mas.EXCHANGE_HZ))
+        pytest.approx(mas.EXCHANGE_HZ)
+    )
 
 
 def test_the_same_config_renders_the_same_bytes():
@@ -441,4 +447,3 @@ def test_bistro_3robot_dev_config():
     arena = tree.find("arena")
     for platform in types:
         assert arena.findall(f"./{platform}"), platform
-

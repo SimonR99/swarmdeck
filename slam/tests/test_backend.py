@@ -123,7 +123,10 @@ def test_delete_robot_removes_keyframes_edges_and_descriptor_candidates() -> Non
     snapshot = backend.optimize_and_render()
     assert snapshot is not None
     assert set(snapshot.keyframe_counts) == {survivor.robot_id}
-    assert all(removed_robot not in component.robots for component in snapshot.optimized.components)
+    assert all(
+        removed_robot not in component.robots
+        for component in snapshot.optimized.components
+    )
 
 
 def test_delete_last_robot_returns_backend_to_clean_state() -> None:
@@ -455,7 +458,9 @@ def test_gauge_keeps_live_pose_on_reconstructed_occupancy() -> None:
         lx, ly, _ = se2_of(live)
         px, py, _ = se2_of(snapshot.optimized.poses[kf_id])
         err = math.hypot(lx - px, ly - py)
-        assert err < 0.05, f"{robot_id} live pose is {err:.2f} m off reconstructed occupancy"
+        assert (
+            err < 0.05
+        ), f"{robot_id} live pose is {err:.2f} m off reconstructed occupancy"
 
 
 def test_odom_free_world_gauge_ignores_pose_origins_and_restarts() -> None:
@@ -526,7 +531,6 @@ def test_odom_free_world_gauge_ignores_pose_origins_and_restarts() -> None:
     assert np.allclose(gauged.poses[alpha_id], world_alpha)
     assert np.allclose(gauged.poses[beta_id], world_beta)
     assert np.allclose(gauged.poses[restarted_id], reconstructed_restart)
-
 
 
 def test_world_map_hint_overlays_robots_the_solver_did_not_merge() -> None:

@@ -41,6 +41,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
     from sensor_msgs.msg import Imu
+
     HAVE_ROS2 = True
 except ImportError:
     HAVE_ROS2 = False
@@ -72,11 +73,13 @@ class LidarOdomSample:
 
 
 def skew(v: np.ndarray) -> np.ndarray:
-    return np.array([
-        [0.0, -v[2], v[1]],
-        [v[2], 0.0, -v[0]],
-        [-v[1], v[0], 0.0],
-    ])
+    return np.array(
+        [
+            [0.0, -v[2], v[1]],
+            [v[2], 0.0, -v[0]],
+            [-v[1], v[0], 0.0],
+        ]
+    )
 
 
 def rodrigues(axis: np.ndarray, angle: float) -> np.ndarray:
@@ -161,8 +164,9 @@ def dominant_axis(omega: np.ndarray) -> Tuple[np.ndarray, float, float]:
     return axis, ratio, float(np.max(np.linalg.norm(omega, axis=1)))
 
 
-def resolve_sign(t_ref: np.ndarray, proj_ref: np.ndarray,
-                 t_other: np.ndarray, proj_other: np.ndarray) -> float:
+def resolve_sign(
+    t_ref: np.ndarray, proj_ref: np.ndarray, t_other: np.ndarray, proj_other: np.ndarray
+) -> float:
     """+1 or -1: does `proj_other` turn the same way as `proj_ref`?"""
     lo, hi = max(t_ref[0], t_other[0]), min(t_ref[-1], t_other[-1])
     if hi <= lo:
@@ -173,7 +177,9 @@ def resolve_sign(t_ref: np.ndarray, proj_ref: np.ndarray,
     return 1.0 if float(np.dot(a, b)) >= 0 else -1.0
 
 
-def resample_uniform(t: np.ndarray, v: np.ndarray, rate: float) -> Tuple[np.ndarray, np.ndarray]:
+def resample_uniform(
+    t: np.ndarray, v: np.ndarray, rate: float
+) -> Tuple[np.ndarray, np.ndarray]:
     """Put an irregularly stamped signal on a uniform grid.
 
     /vectornav/imu on Botman arrives at 35-50 Hz with gaps up to 0.28 s, so
@@ -194,7 +200,7 @@ def smooth(v: np.ndarray, window: int) -> np.ndarray:
     out = np.empty_like(v)
     for i in range(v.shape[1]):
         padded = np.pad(v[:, i], pad, mode="edge")
-        out[:, i] = np.convolve(padded, w, mode="same")[pad:pad + len(v)]
+        out[:, i] = np.convolve(padded, w, mode="same")[pad : pad + len(v)]
     return out
 
 
@@ -209,12 +215,20 @@ def resample_signals(
     if t_end <= t_start:
         return np.array([]), np.array([]), np.array([])
     t_common = np.linspace(t_start, t_end, int((t_end - t_start) * 100))
-    v_ref_interp = np.array([np.interp(t_common, t_ref, v_ref[:, i]) for i in range(v_ref.shape[1])]).T
-    v_tgt_interp = np.array([np.interp(t_common, t_target, v_target[:, i]) for i in range(v_target.shape[1])]).T
+    v_ref_interp = np.array(
+        [np.interp(t_common, t_ref, v_ref[:, i]) for i in range(v_ref.shape[1])]
+    ).T
+    v_tgt_interp = np.array(
+        [
+            np.interp(t_common, t_target, v_target[:, i])
+            for i in range(v_target.shape[1])
+        ]
+    ).T
     return t_common, v_ref_interp, v_tgt_interp
 
 
 if HAVE_ROS2:
+
     class PassiveIMUMotionRecorder(Node):
         def __init__(
             self,
@@ -237,13 +251,25 @@ if HAVE_ROS2:
             )
 
             self.sub_imu = self.create_subscription(Imu, imu_topic, self._on_imu, qos)
-            self.sub_odom = self.create_subscription(Odometry, odom_topic, self._on_odom, qos)
-            self.sub_lidar = self.create_subscription(Odometry, lidar_odom_topic, self._on_lidar_odom, qos)
+            self.sub_odom = self.create_subscription(
+                Odometry, odom_topic, self._on_odom, qos
+            )
+            self.sub_lidar = self.create_subscription(
+                Odometry, lidar_odom_topic, self._on_lidar_odom, qos
+            )
 
         def _on_imu(self, msg: Imu) -> None:
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            gyro = np.array([msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z])
-            accel = np.array([msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z])
+            gyro = np.array(
+                [msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z]
+            )
+            accel = np.array(
+                [
+                    msg.linear_acceleration.x,
+                    msg.linear_acceleration.y,
+                    msg.linear_acceleration.z,
+                ]
+            )
             self.imu_samples.append(IMUSample(stamp=t, gyro=gyro, accel=accel))
 
         def _on_odom(self, msg: Odometry) -> None:
@@ -258,14 +284,32 @@ if HAVE_ROS2:
 
         def _on_lidar_odom(self, msg: Odometry) -> None:
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            gyro = np.array([msg.twist.twist.angular.x, msg.twist.twist.angular.y, msg.twist.twist.angular.z])
-            vel = np.array([msg.twist.twist.linear.x, msg.twist.twist.linear.y, msg.twist.twist.linear.z])
-            self.lidar_samples.append(LidarOdomSample(stamp=t, gyro=gyro, linear_vel=vel))
+            gyro = np.array(
+                [
+                    msg.twist.twist.angular.x,
+                    msg.twist.twist.angular.y,
+                    msg.twist.twist.angular.z,
+                ]
+            )
+            vel = np.array(
+                [
+                    msg.twist.twist.linear.x,
+                    msg.twist.twist.linear.y,
+                    msg.twist.twist.linear.z,
+                ]
+            )
+            self.lidar_samples.append(
+                LidarOdomSample(stamp=t, gyro=gyro, linear_vel=vel)
+            )
 
 
-def analyze_static_phase(imu_samples: List[IMUSample]) -> Tuple[float, float, np.ndarray, np.ndarray]:
+def analyze_static_phase(
+    imu_samples: List[IMUSample],
+) -> Tuple[float, float, np.ndarray, np.ndarray]:
     if len(imu_samples) < 20:
-        raise ValueError(f"Insufficient static IMU samples ({len(imu_samples)} samples). Ensure /vectornav/imu is publishing.")
+        raise ValueError(
+            f"Insufficient static IMU samples ({len(imu_samples)} samples). Ensure /vectornav/imu is publishing."
+        )
 
     acc_arr = np.array([s.accel for s in imu_samples])
     gyro_arr = np.array([s.gyro for s in imu_samples])
@@ -276,20 +320,38 @@ def analyze_static_phase(imu_samples: List[IMUSample]) -> Tuple[float, float, np
     acc_noise = np.std(acc_arr, axis=0)
 
     up_imu = g_vec / g_norm
-    pitch_static = math.atan2(-up_imu[0], math.sqrt(up_imu[1]**2 + up_imu[2]**2))
+    pitch_static = math.atan2(-up_imu[0], math.sqrt(up_imu[1] ** 2 + up_imu[2] ** 2))
     roll_static = math.atan2(up_imu[1], up_imu[2])
 
-    print("  Gravity Vector (stationary): [%.4f, %.4f, %.4f] m/s^2 (|g| = %.3f m/s^2)" % (g_vec[0], g_vec[1], g_vec[2], g_norm))
+    print(
+        "  Gravity Vector (stationary): [%.4f, %.4f, %.4f] m/s^2 (|g| = %.3f m/s^2)"
+        % (g_vec[0], g_vec[1], g_vec[2], g_norm)
+    )
     print("  Accelerometer noise (1 sd):  [%.4f, %.4f, %.4f] m/s^2" % tuple(acc_noise))
-    print("  Gyroscope Static Bias:       [%.6f, %.6f, %.6f] rad/s" % (gyro_bias[0], gyro_bias[1], gyro_bias[2]))
-    print("  Static Tilt relative to g:   Roll = %.2f deg (%.4f rad), Pitch = %.2f deg (%.4f rad)" % (
-        math.degrees(roll_static), roll_static, math.degrees(pitch_static), pitch_static
-    ))
+    print(
+        "  Gyroscope Static Bias:       [%.6f, %.6f, %.6f] rad/s"
+        % (gyro_bias[0], gyro_bias[1], gyro_bias[2])
+    )
+    print(
+        "  Static Tilt relative to g:   Roll = %.2f deg (%.4f rad), Pitch = %.2f deg (%.4f rad)"
+        % (
+            math.degrees(roll_static),
+            roll_static,
+            math.degrees(pitch_static),
+            pitch_static,
+        )
+    )
     tilt = math.degrees(math.acos(min(1.0, abs(up_imu[2]))))
-    print("  Total tilt from vertical:    %.2f deg  ->  gravity sweeps +/-%.3f m/s^2 through the" % (
-        tilt, g_norm * math.sin(math.radians(tilt))))
-    print("                               IMU x/y axes during an in-place spin. This is removed")
-    print("                               by de-rotating gravity, not by subtracting a constant.")
+    print(
+        "  Total tilt from vertical:    %.2f deg  ->  gravity sweeps +/-%.3f m/s^2 through the"
+        % (tilt, g_norm * math.sin(math.radians(tilt)))
+    )
+    print(
+        "                               IMU x/y axes during an in-place spin. This is removed"
+    )
+    print(
+        "                               by de-rotating gravity, not by subtracting a constant."
+    )
     return roll_static, pitch_static, g_vec, gyro_bias
 
 
@@ -342,9 +404,9 @@ def estimate_lever_arm(
     A = np.zeros((3 * n, 6))
     b = np.zeros(3 * n)
     for i in range(n):
-        A[3 * i:3 * i + 3, :3] = skew(alpha[i]) + skew(gyro_s[i]) @ skew(gyro_s[i])
-        A[3 * i:3 * i + 3, 3:] = np.eye(3)
-        b[3 * i:3 * i + 3] = accel_u[i] - g_seq[i]
+        A[3 * i : 3 * i + 3, :3] = skew(alpha[i]) + skew(gyro_s[i]) @ skew(gyro_s[i])
+        A[3 * i : 3 * i + 3, 3:] = np.eye(3)
+        b[3 * i : 3 * i + 3] = accel_u[i] - g_seq[i]
 
     sol, _, _, sv = np.linalg.lstsq(A, b, rcond=None)
     r_fit = sol[:3]
@@ -390,21 +452,55 @@ def report_axis_alignment(
     print(f"\n  [Solved] {label}")
     print("    Spin axis in source frame: [%.5f, %.5f, %.5f]" % tuple(axis_src))
     print("    Spin axis in target frame: [%.5f, %.5f, %.5f]" % tuple(axis_dst))
-    tilt = math.degrees(math.acos(float(np.clip(np.dot(
-        axis_src / np.linalg.norm(axis_src), axis_dst / np.linalg.norm(axis_dst)), -1, 1))))
-    print("    Angle between the axes:    %.2f deg  (decomposition-free; trust this one)" % tilt)
-    print("    Minimal alignment RPY:     Roll=%.2f deg, Pitch=%.2f deg, Yaw=%.2f deg" % (
-        math.degrees(roll), math.degrees(pitch), math.degrees(yaw)))
+    tilt = math.degrees(
+        math.acos(
+            float(
+                np.clip(
+                    np.dot(
+                        axis_src / np.linalg.norm(axis_src),
+                        axis_dst / np.linalg.norm(axis_dst),
+                    ),
+                    -1,
+                    1,
+                )
+            )
+        )
+    )
+    print(
+        "    Angle between the axes:    %.2f deg  (decomposition-free; trust this one)"
+        % tilt
+    )
+    print(
+        "    Minimal alignment RPY:     Roll=%.2f deg, Pitch=%.2f deg, Yaw=%.2f deg"
+        % (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
+    )
     if tilt > 150.0:
-        print("    NOTE: the axes are nearly opposed, so the ZYX readout above splits one")
-        print("          flip across roll and yaw. The matrix is right; read the angle instead.")
-    print("    Quaternion [x, y, z, w]:   [%.6f, %.6f, %.6f, %.6f]" % tuple(results[f"q_{key}"]))
+        print(
+            "    NOTE: the axes are nearly opposed, so the ZYX readout above splits one"
+        )
+        print(
+            "          flip across roll and yaw. The matrix is right; read the angle instead."
+        )
+    print(
+        "    Quaternion [x, y, z, w]:   [%.6f, %.6f, %.6f, %.6f]"
+        % tuple(results[f"q_{key}"])
+    )
     if ratio < SINGLE_AXIS_RATIO:
-        print("    NOTE: single-axis motion (s2/s1 = %.4f). Roll and pitch above are measured;" % ratio)
-        print("          yaw is 0 by construction and is NOT observable from this run. Add a")
-        print("          non-parallel rotation (pitch or roll the robot) to determine it.")
+        print(
+            "    NOTE: single-axis motion (s2/s1 = %.4f). Roll and pitch above are measured;"
+            % ratio
+        )
+        print(
+            "          yaw is 0 by construction and is NOT observable from this run. Add a"
+        )
+        print(
+            "          non-parallel rotation (pitch or roll the robot) to determine it."
+        )
     else:
-        print("    Motion excited a second axis (s2/s1 = %.3f), so yaw is partially constrained." % ratio)
+        print(
+            "    Motion excited a second axis (s2/s1 = %.3f), so yaw is partially constrained."
+            % ratio
+        )
 
 
 def analyze_motion_phase(
@@ -426,11 +522,18 @@ def analyze_motion_phase(
 
     axis_imu, ratio_imu, peak = dominant_axis(gyro_motion)
     duration = t_imu[-1] - t_imu[0]
-    print("\n  Motion summary: %d IMU samples over %.1f s (%.1f Hz), peak |omega| = %.3f rad/s" % (
-        len(imu_samples), duration, len(imu_samples) / max(duration, 1e-6), peak))
-    print("  Rotation axis in IMU frame: [%.5f, %.5f, %.5f]  (s2/s1 = %.4f)" % (*axis_imu, ratio_imu))
+    print(
+        "\n  Motion summary: %d IMU samples over %.1f s (%.1f Hz), peak |omega| = %.3f rad/s"
+        % (len(imu_samples), duration, len(imu_samples) / max(duration, 1e-6), peak)
+    )
+    print(
+        "  Rotation axis in IMU frame: [%.5f, %.5f, %.5f]  (s2/s1 = %.4f)"
+        % (*axis_imu, ratio_imu)
+    )
     if peak < 0.15:
-        print("  [WARN] Peak rotation rate is low. Spin at 0.3-0.5 rad/s for a usable lever arm.")
+        print(
+            "  [WARN] Peak rotation rate is low. Spin at 0.3-0.5 rad/s for a usable lever arm."
+        )
 
     # IMU <-> Base. /odom carries only angular.z, so the base-frame axis is
     # known a priori to be +z; there is nothing to fit with an SVD, and running
@@ -447,12 +550,21 @@ def analyze_motion_phase(
             proj_imu = flip * proj_imu
             report_axis_alignment(
                 "base_link <- vectornav (from wheel odometry)",
-                axis_imu, np.array([0.0, 0.0, 1.0]), ratio_imu, results, "base_imu")
+                axis_imu,
+                np.array([0.0, 0.0, 1.0]),
+                ratio_imu,
+                results,
+                "base_imu",
+            )
         else:
-            print("\n  [SKIP] Wheel odometry reported no rotation; cannot align to base_link.")
+            print(
+                "\n  [SKIP] Wheel odometry reported no rotation; cannot align to base_link."
+            )
     else:
-        print("\n  [SKIP] Too few wheel odometry samples (%d); IMU axis sign is unresolved,"
-              % len(odom_samples))
+        print(
+            "\n  [SKIP] Too few wheel odometry samples (%d); IMU axis sign is unresolved,"
+            % len(odom_samples)
+        )
         print("         so the alignment below may be flipped by 180 deg.")
 
     # IMU <-> LiDAR.
@@ -461,18 +573,33 @@ def analyze_motion_phase(
         w_lidar = np.array([s.gyro for s in lidar_samples])
         lidar_rate = len(lidar_samples) / max(t_lidar[-1] - t_lidar[0], 1e-6)
         axis_lidar, ratio_lidar, peak_l = dominant_axis(w_lidar)
-        print("\n  LiDAR odometry: %d samples over %.1f s (%.2f Hz), peak |omega| = %.3f rad/s" % (
-            len(lidar_samples), t_lidar[-1] - t_lidar[0], lidar_rate, peak_l))
+        print(
+            "\n  LiDAR odometry: %d samples over %.1f s (%.2f Hz), peak |omega| = %.3f rad/s"
+            % (len(lidar_samples), t_lidar[-1] - t_lidar[0], lidar_rate, peak_l)
+        )
         if lidar_rate < 5.0:
-            print("  [WARN] /laser_odometry is only %.2f Hz. A 0.4 rad/s spin is badly undersampled at" % lidar_rate)
-            print("         this rate, and the interpolation to 100 Hz below invents the samples in")
+            print(
+                "  [WARN] /laser_odometry is only %.2f Hz. A 0.4 rad/s spin is badly undersampled at"
+                % lidar_rate
+            )
+            print(
+                "         this rate, and the interpolation to 100 Hz below invents the samples in"
+            )
             print("         between. Treat the IMU-to-LiDAR result as indicative only.")
         results["lidar_odom_rate"] = lidar_rate
         # Both axes come from independent SVDs whose signs are arbitrary; without
         # this the two can disagree and produce a spurious 180 deg alignment.
-        axis_lidar = resolve_sign(t_imu, proj_imu, t_lidar, w_lidar @ axis_lidar) * axis_lidar
+        axis_lidar = (
+            resolve_sign(t_imu, proj_imu, t_lidar, w_lidar @ axis_lidar) * axis_lidar
+        )
         report_axis_alignment(
-            "vectornav <- os_lidar", axis_lidar, axis_imu, min(ratio_imu, ratio_lidar), results, "imu_laser")
+            "vectornav <- os_lidar",
+            axis_lidar,
+            axis_imu,
+            min(ratio_imu, ratio_lidar),
+            results,
+            "imu_laser",
+        )
     else:
         print("\n  [SKIP] Too few LiDAR odometry samples (%d)." % len(lidar_samples))
 
@@ -493,16 +620,31 @@ def analyze_motion_phase(
         if obs[i]:
             print("    r_%s = %+.3f m  +/- %.3f m (1 sigma)" % (name, r[i], se[i]))
         else:
-            print("    r_%s : UNOBSERVABLE from a yaw-only spin (no excitation in this direction)" % name)
-    print("    Fitted accelerometer bias: [%+.4f, %+.4f, %+.4f] m/s^2" % tuple(lever["accel_bias"]))
+            print(
+                "    r_%s : UNOBSERVABLE from a yaw-only spin (no excitation in this direction)"
+                % name
+            )
+    print(
+        "    Fitted accelerometer bias: [%+.4f, %+.4f, %+.4f] m/s^2"
+        % tuple(lever["accel_bias"])
+    )
     print("    Residual RMS: %.4f m/s^2" % lever["residual_rms"])
     reach = float(np.linalg.norm(r[:2]))
     if reach > 0.8:
-        print("    [WARN] %.2f m exceeds the Bunker footprint. Suspect a tilted spin (gravity leak)," % reach)
-        print("           too slow a spin, or the robot translating instead of turning in place.")
-    print("    Sanity: at peak |omega| = %.2f rad/s this offset produces only %.3f m/s^2 of" % (
-        lever["peak_omega"], lever["peak_omega"] ** 2 * reach))
-    print("            centripetal acceleration. Compare it against the accelerometer noise above.")
+        print(
+            "    [WARN] %.2f m exceeds the Bunker footprint. Suspect a tilted spin (gravity leak),"
+            % reach
+        )
+        print(
+            "           too slow a spin, or the robot translating instead of turning in place."
+        )
+    print(
+        "    Sanity: at peak |omega| = %.2f rad/s this offset produces only %.3f m/s^2 of"
+        % (lever["peak_omega"], lever["peak_omega"] ** 2 * reach)
+    )
+    print(
+        "            centripetal acceleration. Compare it against the accelerometer noise above."
+    )
 
     return results
 
@@ -514,7 +656,9 @@ def run_interactive_imu_calibration(
     motion_duration: float = 25.0,
 ) -> Optional[dict]:
     if not HAVE_ROS2:
-        print("ERROR: ROS 2 (rclpy, sensor_msgs, nav_msgs) is required.", file=sys.stderr)
+        print(
+            "ERROR: ROS 2 (rclpy, sensor_msgs, nav_msgs) is required.", file=sys.stderr
+        )
         return None
 
     owns_context = not rclpy.ok()
@@ -532,22 +676,32 @@ def run_interactive_imu_calibration(
         print("=" * 60)
         print("--> Keep the robot COMPLETELY STATIONARY on level ground.")
         print(f"--> Listening to IMU topic: {imu_topic}")
-        input("--> Press [ENTER] when the robot is stationary to record static baseline (5s)... ")
+        input(
+            "--> Press [ENTER] when the robot is stationary to record static baseline (5s)... "
+        )
 
         node.imu_samples.clear()
         start_t = time.time()
         while rclpy.ok() and (time.time() - start_t) < 5.0:
             rclpy.spin_once(node, timeout_sec=0.05)
             rem = 5.0 - (time.time() - start_t)
-            sys.stdout.write(f"\rRecording static IMU data: {rem:.1f}s remaining | IMU samples: {len(node.imu_samples)}... ")
+            sys.stdout.write(
+                f"\rRecording static IMU data: {rem:.1f}s remaining | IMU samples: {len(node.imu_samples)}... "
+            )
             sys.stdout.flush()
         print()
 
         if len(node.imu_samples) == 0:
             print(f"\n[ERROR] 0 samples received on '{imu_topic}'.", file=sys.stderr)
             print("Possible causes:", file=sys.stderr)
-            print("  1. The VectorNav driver is not running. (Ensure vectornav node is started)", file=sys.stderr)
-            print("  2. ROS_DOMAIN_ID mismatch (Botman uses ROS_DOMAIN_ID=17).", file=sys.stderr)
+            print(
+                "  1. The VectorNav driver is not running. (Ensure vectornav node is started)",
+                file=sys.stderr,
+            )
+            print(
+                "  2. ROS_DOMAIN_ID mismatch (Botman uses ROS_DOMAIN_ID=17).",
+                file=sys.stderr,
+            )
             return None
 
         roll_s, pitch_s, g_vec, gyro_bias = analyze_static_phase(node.imu_samples)
@@ -556,9 +710,15 @@ def run_interactive_imu_calibration(
         print(" PHASE 2: MANUAL IN-PLACE ROTATION")
         print("=" * 60)
         print("--> Get ready with your remote control / joystick.")
-        print(f"--> When you press [ENTER], rotate the robot IN PLACE for ~{int(motion_duration)}s.")
-        print("    (Tip: Rotate CW for ~10s, pause briefly, then CCW for ~10s at moderate speed ~0.3-0.5 rad/s)")
-        print("    Turn in place: any translation adds acceleration the lever arm fit cannot separate.")
+        print(
+            f"--> When you press [ENTER], rotate the robot IN PLACE for ~{int(motion_duration)}s."
+        )
+        print(
+            "    (Tip: Rotate CW for ~10s, pause briefly, then CCW for ~10s at moderate speed ~0.3-0.5 rad/s)"
+        )
+        print(
+            "    Turn in place: any translation adds acceleration the lever arm fit cannot separate."
+        )
         input("--> Press [ENTER] to start recording motion... ")
 
         node.imu_samples.clear()
@@ -575,7 +735,9 @@ def run_interactive_imu_calibration(
             sys.stdout.flush()
         print("\nMotion recording complete. Stop rotating the robot.")
 
-        results = analyze_motion_phase(node.imu_samples, node.odom_samples, node.lidar_samples, g_vec, gyro_bias)
+        results = analyze_motion_phase(
+            node.imu_samples, node.odom_samples, node.lidar_samples, g_vec, gyro_bias
+        )
         results["static_tilt"] = (roll_s, pitch_s)
         results["gravity_vec"] = g_vec
         results["gyro_bias"] = gyro_bias
@@ -587,11 +749,20 @@ def run_interactive_imu_calibration(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--imu-topic", default="/vectornav/imu", help="IMU topic name")
     parser.add_argument("--odom-topic", default="/odom", help="Wheel odometry topic")
-    parser.add_argument("--lidar-odom-topic", default="/laser_odometry", help="LiDAR odometry topic")
-    parser.add_argument("--duration", type=float, default=25.0, help="Rotation recording duration (seconds)")
+    parser.add_argument(
+        "--lidar-odom-topic", default="/laser_odometry", help="LiDAR odometry topic"
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=25.0,
+        help="Rotation recording duration (seconds)",
+    )
     args = parser.parse_args()
 
     run_interactive_imu_calibration(

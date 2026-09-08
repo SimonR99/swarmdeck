@@ -350,9 +350,7 @@ def test_a_failed_send_does_not_unbind_a_replacement_socket():
     async def scenario() -> None:
         reg = Registry()
         replacement = WorkingSocket()
-        stale = FailingSocket(
-            lambda: reg.hello({"robot_id": "r0"}, sink=replacement)
-        )
+        stale = FailingSocket(lambda: reg.hello({"robot_id": "r0"}, sink=replacement))
         reg.hello({"robot_id": "r0"}, sink=stale)
 
         assert await reg.send("r0", {"type": "drive"}) is False
@@ -396,9 +394,10 @@ def test_a_batch_retracts_the_boxes_it_no_longer_contains():
     app_registry.robots.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 ad.send_json(
                     {
                         "type": "hello",
@@ -451,9 +450,10 @@ def test_retraction_is_scoped_to_the_camera_that_reported_it():
     app_registry.robots.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 ad.send_json(
                     {
                         "type": "hello",
@@ -510,9 +510,10 @@ def test_saving_detection_categories_deletes_old_map_entities_and_rejects_late_b
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 ad.send_json(
                     {
                         "type": "hello",
@@ -946,7 +947,12 @@ def test_body_command_requires_the_body_capability():
         assert sink.messages[0]["action"] == "stand"
         asyncio.run(
             handle_gui_message(
-                {"type": "body_command", "robot_id": "r0", "action": "set_height", "height": 0.12}
+                {
+                    "type": "body_command",
+                    "robot_id": "r0",
+                    "action": "set_height",
+                    "height": 0.12,
+                }
             )
         )
         assert len(sink.messages) == 2
@@ -1702,9 +1708,10 @@ def test_raising_a_floor_hides_existing_markers_and_lowering_it_brings_them_back
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 ad.send_json(
                     {
                         "type": "hello",
@@ -1743,9 +1750,10 @@ def test_a_per_robot_floor_leaves_the_rest_of_the_fleet_alone():
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 for robot_id in ("r0", "r1"):
                     ad.send_json(
                         {
@@ -1778,9 +1786,10 @@ def test_visibility_is_judged_on_best_score_not_the_latest_one():
     app_registry._sinks.clear()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 ad.send_json(
                     {
                         "type": "hello",
@@ -1950,9 +1959,10 @@ def test_a_located_detection_reaches_the_operators_review_queue():
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 # Every GUI socket is handed a review snapshot on connect;
                 # swallow it so the assertions below read the ingest broadcast.
                 assert _drain_for(gui, "detection_review")["proposals"] == []
@@ -2007,9 +2017,10 @@ def test_an_accepted_object_stops_asking_and_recentres_on_new_evidence():
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 assert _drain_for(gui, "detection_review")["proposals"] == []
                 ad.send_json(
                     {
@@ -2122,9 +2133,10 @@ def test_confirmed_objects_survive_a_restart(tmp_path, monkeypatch):
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 _drain_for(gui, "detection_review")
                 ad.send_json(
                     {
@@ -2181,9 +2193,10 @@ def test_deleting_a_confirmed_object_is_persisted_immediately(tmp_path, monkeypa
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 _drain_for(gui, "detection_review")
                 ad.send_json(
                     {
@@ -2234,9 +2247,10 @@ def test_clearing_proposals_and_deleting_all_via_websocket(tmp_path, monkeypatch
     review_store.reset()
     try:
         with TestClient(app) as c:
-            with c.websocket_connect("/ws") as gui, c.websocket_connect(
-                "/adapter"
-            ) as ad:
+            with (
+                c.websocket_connect("/ws") as gui,
+                c.websocket_connect("/adapter") as ad,
+            ):
                 _drain_for(gui, "detection_review")
                 ad.send_json(
                     {

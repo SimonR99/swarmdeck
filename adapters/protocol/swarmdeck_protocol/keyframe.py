@@ -261,8 +261,7 @@ def encode_keyframe(
     session = _validate_session(session)
     height_band_spec = None
     if any(
-        value is not None
-        for value in (ground_z, min_height, max_height, lidar_height)
+        value is not None for value in (ground_z, min_height, max_height, lidar_height)
     ):
         height_band_spec = {
             "ground_z": ground_z,
@@ -296,9 +295,7 @@ def encode_keyframe(
         header["session"] = session
     if height_band_spec is not None:
         header["height_band"] = {
-            key: value
-            for key, value in height_band_spec.items()
-            if value is not None
+            key: value for key, value in height_band_spec.items() if value is not None
         }
 
     body = quantized.tobytes(order="C")

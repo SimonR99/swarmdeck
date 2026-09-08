@@ -31,7 +31,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-
 REPO_DIR = Path(__file__).resolve().parents[1]
 ROBOT_ALIASES = {
     "asimov": "asimov_0",
@@ -97,7 +96,9 @@ def _http_get(endpoint: str, server_url: str = DEFAULT_SERVER_URL) -> Any:
         sys.exit(1)
 
 
-def _http_post(endpoint: str, payload: dict[str, Any], server_url: str = DEFAULT_SERVER_URL) -> Any:
+def _http_post(
+    endpoint: str, payload: dict[str, Any], server_url: str = DEFAULT_SERVER_URL
+) -> Any:
     url = f"{server_url}{endpoint}"
     data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -132,13 +133,19 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("No robots currently connected to SwarmDeck.")
         return
 
-    print(f"{'ROBOT ID':<15} {'STATE':<9} {'TYPE':<22} {'BATTERY':<10} {'MODE':<10} {'NAV STATUS':<12} {'POSE (X, Y, YAW)'}")
+    print(
+        f"{'ROBOT ID':<15} {'STATE':<9} {'TYPE':<22} {'BATTERY':<10} {'MODE':<10} {'NAV STATUS':<12} {'POSE (X, Y, YAW)'}"
+    )
     print("=" * 104)
     for r in robots:
         rid = r.get("robot_id", "unknown")
         rtype = r.get("robot_type", "unknown")
         state = "online" if r.get("online") is True else "OFFLINE"
-        batt = f"{int(r.get('battery', 0.0) * 100)}%" if r.get("battery") is not None else "N/A"
+        batt = (
+            f"{int(r.get('battery', 0.0) * 100)}%"
+            if r.get("battery") is not None
+            else "N/A"
+        )
         mode = r.get("mode", "idle")
         nav_st = r.get("nav_status", "idle")
         pose = r.get("pose") or {}
@@ -146,7 +153,9 @@ def cmd_list(args: argparse.Namespace) -> None:
         py = f"{pose.get('y', 0.0):.2f}"
         pyaw = f"{pose.get('yaw', 0.0):.2f}"
         pose_str = f"({px}, {py}, {pyaw} rad)"
-        print(f"{rid:<15} {state:<9} {rtype:<22} {batt:<10} {mode:<10} {nav_st:<12} {pose_str}")
+        print(
+            f"{rid:<15} {state:<9} {rtype:<22} {batt:<10} {mode:<10} {nav_st:<12} {pose_str}"
+        )
 
 
 def cmd_drive(args: argparse.Namespace) -> None:
@@ -157,9 +166,13 @@ def cmd_drive(args: argparse.Namespace) -> None:
     }
     res = _http_post(f"/api/robot/{args.robot_id}/drive", payload, args.server)
     if args.duration and args.duration > 0:
-        print(f"Driving {args.robot_id}: linear={args.linear} m/s, angular={args.angular} rad/s for {args.duration}s... (Auto-stopping afterwards)")
+        print(
+            f"Driving {args.robot_id}: linear={args.linear} m/s, angular={args.angular} rad/s for {args.duration}s... (Auto-stopping afterwards)"
+        )
     else:
-        print(f"Driving {args.robot_id}: linear={args.linear} m/s, angular={args.angular} rad/s")
+        print(
+            f"Driving {args.robot_id}: linear={args.linear} m/s, angular={args.angular} rad/s"
+        )
     if args.json:
         print(json.dumps(res, indent=2))
 
@@ -171,7 +184,9 @@ def cmd_navigate(args: argparse.Namespace) -> None:
         "yaw": float(args.yaw) if args.yaw is not None else 0.0,
     }
     res = _http_post(f"/api/robot/{args.robot_id}/goal", payload, args.server)
-    print(f"Navigation goal sent to {args.robot_id}: target=({args.x}, {args.y}, yaw={payload['yaw']})")
+    print(
+        f"Navigation goal sent to {args.robot_id}: target=({args.x}, {args.y}, yaw={payload['yaw']})"
+    )
     if args.json:
         print(json.dumps(res, indent=2))
 
@@ -220,7 +235,8 @@ def cmd_see(args: argparse.Namespace) -> None:
     # Filter for this robot
     robot_tracks = [d for d in live_tracks if d.get("robot_id") == robot_id]
     robot_proposals = [
-        p for p in proposals
+        p
+        for p in proposals
         if p.get("robot_id") == robot_id
         or robot_id in p.get("robot_ids", [])
         or (isinstance(p.get("sightings"), list) and robot_id in p.get("sightings"))
@@ -246,20 +262,24 @@ def cmd_see(args: argparse.Namespace) -> None:
     }
 
     for track in robot_tracks:
-        summary["visible_objects"].append({
-            "class": track.get("class_name") or track.get("label", "object"),
-            "confidence": track.get("confidence", 0.0),
-            "bbox": track.get("bbox"),
-            "map_pos": track.get("position"),
-        })
+        summary["visible_objects"].append(
+            {
+                "class": track.get("class_name") or track.get("label", "object"),
+                "confidence": track.get("confidence", 0.0),
+                "bbox": track.get("bbox"),
+                "map_pos": track.get("position"),
+            }
+        )
 
     for prop in robot_proposals:
-        summary["pending_proposals"].append({
-            "proposal_id": prop.get("proposal_id") or prop.get("id"),
-            "class": prop.get("class_name") or prop.get("class"),
-            "confidence": prop.get("confidence") or prop.get("best_score"),
-            "position": prop.get("position"),
-        })
+        summary["pending_proposals"].append(
+            {
+                "proposal_id": prop.get("proposal_id") or prop.get("id"),
+                "class": prop.get("class_name") or prop.get("class"),
+                "confidence": prop.get("confidence") or prop.get("best_score"),
+                "position": prop.get("position"),
+            }
+        )
 
     # Find entities within 5 meters
     for ent in entities:
@@ -267,25 +287,35 @@ def cmd_see(args: argparse.Namespace) -> None:
         ex, ey = pos.get("x", 0.0), pos.get("y", 0.0)
         dist = ((ex - px) ** 2 + (ey - py) ** 2) ** 0.5
         if dist <= 5.0:
-            summary["fleet_confirmed_entities_nearby"].append({
-                "entity_id": ent.get("entity_id") or ent.get("id"),
-                "class": ent.get("class_name") or ent.get("class"),
-                "distance_m": round(dist, 2),
-                "position": pos,
-            })
+            summary["fleet_confirmed_entities_nearby"].append(
+                {
+                    "entity_id": ent.get("entity_id") or ent.get("id"),
+                    "class": ent.get("class_name") or ent.get("class"),
+                    "distance_m": round(dist, 2),
+                    "position": pos,
+                }
+            )
 
     if args.json:
         print(json.dumps(summary, indent=2))
         return
 
     print(f"=== Vision Report for Robot '{robot_id}' ===")
-    print(f"Type: {robot.get('robot_type')} | Pose: ({px:.2f}, {py:.2f}, yaw={pyaw:.2f})")
-    cam_status = "Active & Streaming" if summary["camera_streaming"] else "Standby / No recent frame"
+    print(
+        f"Type: {robot.get('robot_type')} | Pose: ({px:.2f}, {py:.2f}, yaw={pyaw:.2f})"
+    )
+    cam_status = (
+        "Active & Streaming"
+        if summary["camera_streaming"]
+        else "Standby / No recent frame"
+    )
     print(f"Camera Feed: {cam_status}")
     print()
 
     if summary["visible_objects"]:
-        print(f"Currently Detected Objects in Camera View ({len(summary['visible_objects'])}):")
+        print(
+            f"Currently Detected Objects in Camera View ({len(summary['visible_objects'])}):"
+        )
         for obj in summary["visible_objects"]:
             conf = f"{int(obj['confidence'] * 100)}%" if obj.get("confidence") else ""
             pos = obj.get("map_pos")
@@ -295,19 +325,35 @@ def cmd_see(args: argparse.Namespace) -> None:
         print("No live object detections currently in camera field of view.")
 
     if summary["pending_proposals"]:
-        print(f"\nPending Operator Review Proposals ({len(summary['pending_proposals'])}):")
+        print(
+            f"\nPending Operator Review Proposals ({len(summary['pending_proposals'])}):"
+        )
         for prop in summary["pending_proposals"]:
-            conf_str = f" (conf {int(prop['confidence']*100)}%)" if prop.get("confidence") is not None else ""
+            conf_str = (
+                f" (conf {int(prop['confidence']*100)}%)"
+                if prop.get("confidence") is not None
+                else ""
+            )
             pos = prop.get("position")
-            pos_str = f" at (x={pos['x']:.2f}, y={pos['y']:.2f})" if pos and "x" in pos else ""
+            pos_str = (
+                f" at (x={pos['x']:.2f}, y={pos['y']:.2f})"
+                if pos and "x" in pos
+                else ""
+            )
             print(f"  - [{prop['proposal_id']}] {prop['class']}{conf_str}{pos_str}")
 
     if summary["fleet_confirmed_entities_nearby"]:
         print(f"\nNearby Confirmed Map Objects (<= 5m):")
         for ent in summary["fleet_confirmed_entities_nearby"]:
             pos = ent.get("position")
-            pos_str = f" at (x={pos['x']:.2f}, y={pos['y']:.2f})" if pos and "x" in pos else ""
-            print(f"  - [{ent['entity_id']}] {ent['class']}{pos_str} ({ent['distance_m']}m away)")
+            pos_str = (
+                f" at (x={pos['x']:.2f}, y={pos['y']:.2f})"
+                if pos and "x" in pos
+                else ""
+            )
+            print(
+                f"  - [{ent['entity_id']}] {ent['class']}{pos_str} ({ent['distance_m']}m away)"
+            )
 
 
 def cmd_detections(args: argparse.Namespace) -> None:
@@ -324,13 +370,17 @@ def cmd_detections(args: argparse.Namespace) -> None:
     print(f"Live Camera Tracks: {len(tracks)}")
     for t in tracks:
         cls_name = t.get("class_name") or t.get("class") or t.get("label", "object")
-        print(f"  - [{t.get('robot_id')}] {cls_name} (conf {int(t.get('confidence',0)*100)}%)")
+        print(
+            f"  - [{t.get('robot_id')}] {cls_name} (conf {int(t.get('confidence',0)*100)}%)"
+        )
 
     print(f"\nProposals Awaiting Operator Review: {len(proposals)}")
     for p in proposals:
         cls_name = p.get("class_name") or p.get("class")
         p_id = p.get("proposal_id") or p.get("id")
-        r_id = p.get("robot_id") or (p.get("robot_ids")[0] if p.get("robot_ids") else "unknown")
+        r_id = p.get("robot_id") or (
+            p.get("robot_ids")[0] if p.get("robot_ids") else "unknown"
+        )
         print(f"  - [{p_id}] {cls_name} from {r_id}")
 
     print(f"\nConfirmed Map Entities: {len(entities)}")
@@ -338,7 +388,9 @@ def cmd_detections(args: argparse.Namespace) -> None:
         pos = e.get("position") or {}
         e_id = e.get("entity_id") or e.get("id")
         cls_name = e.get("class_name") or e.get("class")
-        print(f"  - [{e_id}] {cls_name} at ({pos.get('x',0):.2f}, {pos.get('y',0):.2f})")
+        print(
+            f"  - [{e_id}] {cls_name} at ({pos.get('x',0):.2f}, {pos.get('y',0):.2f})"
+        )
 
 
 def _try_http_get(
@@ -477,7 +529,11 @@ def probe_video_packets(robot_id: str, rtsp_base_url: str) -> dict[str, Any]:
                         control = candidate
                         break
             if not control:
-                return {"ok": False, "url": url, "error": "SDP has no video control track"}
+                return {
+                    "ok": False,
+                    "url": url,
+                    "error": "SDP has no video control track",
+                }
             if control.startswith("rtsp://"):
                 track_url = control
             else:
@@ -490,7 +546,9 @@ def probe_video_packets(robot_id: str, rtsp_base_url: str) -> dict[str, Any]:
                 track_url,
                 {"Transport": "RTP/AVP/TCP;unicast;interleaved=0-1"},
             )
-            status, setup_headers, _, buffered = _read_rtsp_response(connection, buffered)
+            status, setup_headers, _, buffered = _read_rtsp_response(
+                connection, buffered
+            )
             if status != 200:
                 return {"ok": False, "url": url, "error": f"SETUP returned {status}"}
             session = setup_headers.get("session", "").split(";", 1)[0]
@@ -539,7 +597,11 @@ def probe_video_packets(robot_id: str, rtsp_base_url: str) -> dict[str, Any]:
                 "bytes": byte_count,
                 "sequence_count": len(sequences),
                 "codec": "H264" if "H264/90000" in sdp.upper() else "unknown",
-                "error": None if len(sequences) >= 2 else "no progressing RTP packets observed",
+                "error": (
+                    None
+                    if len(sequences) >= 2
+                    else "no progressing RTP packets observed"
+                ),
             }
     except Exception as exc:
         return {"ok": False, "url": url, "error": str(exc)}
@@ -558,7 +620,16 @@ def _profile_details(robot_id: str) -> tuple[Optional[dict[str, Any]], Optional[
     )
     try:
         result = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", shell, "_", str(fleet_env), str(profile_env)],
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                shell,
+                "_",
+                str(fleet_env),
+                str(profile_env),
+            ],
             check=False,
             capture_output=True,
             timeout=5,
@@ -566,7 +637,10 @@ def _profile_details(robot_id: str) -> tuple[Optional[dict[str, Any]], Optional[
     except Exception as exc:
         return None, str(exc)
     if result.returncode != 0:
-        return None, result.stderr.decode(errors="replace").strip() or "profile load failed"
+        return (
+            None,
+            result.stderr.decode(errors="replace").strip() or "profile load failed",
+        )
     fields = result.stdout.decode(errors="replace").split("\0")
     if len(fields) < 3:
         return None, "profile returned incomplete deployment details"
@@ -584,7 +658,12 @@ def _classify_ssh_error(stderr: str) -> str:
         return "SSH authentication failed"
     if any(
         marker in lowered
-        for marker in ("timed out", "no route to host", "could not resolve", "connection refused")
+        for marker in (
+            "timed out",
+            "no route to host",
+            "could not resolve",
+            "connection refused",
+        )
     ):
         return "robot host is unreachable"
     return "SSH/service check failed"
@@ -654,7 +733,9 @@ def check_remote_services(robot_id: str) -> dict[str, Any]:
     }
     if not services_ok:
         detail = result.stderr.strip()
-        response["error"] = f"{_classify_ssh_error(detail)}: {detail or 'required container is not ready'}"
+        response["error"] = (
+            f"{_classify_ssh_error(detail)}: {detail or 'required container is not ready'}"
+        )
     return response
 
 
@@ -667,7 +748,9 @@ def collect_doctor_report(args: argparse.Namespace) -> dict[str, Any]:
             "robots": [],
         }
 
-    fleet_robots = fleet_payload.get("robots", []) if isinstance(fleet_payload, dict) else []
+    fleet_robots = (
+        fleet_payload.get("robots", []) if isinstance(fleet_payload, dict) else []
+    )
     fleet_by_id = {
         item.get("robot_id"): item
         for item in fleet_robots
@@ -690,7 +773,9 @@ def collect_doctor_report(args: argparse.Namespace) -> dict[str, Any]:
     reports = []
     for robot_id in robot_ids:
         robot = fleet_by_id.get(robot_id)
-        second, second_error = _try_http_get(f"/api/robot/{robot_id}/vision", args.server)
+        second, second_error = _try_http_get(
+            f"/api/robot/{robot_id}/vision", args.server
+        )
         vision = second if isinstance(second, dict) else None
         previous = first_vision.get(robot_id)
         first_seq = previous.get("frame_seq") if previous else None
@@ -710,7 +795,9 @@ def collect_doctor_report(args: argparse.Namespace) -> dict[str, Any]:
             "second_seq": second_seq,
         }
         if not vision:
-            camera["error"] = second_error or first_errors.get(robot_id) or "no vision response"
+            camera["error"] = (
+                second_error or first_errors.get(robot_id) or "no vision response"
+            )
 
         telemetry = {
             "ok": bool(robot and robot.get("online") is True),
@@ -728,7 +815,9 @@ def collect_doctor_report(args: argparse.Namespace) -> dict[str, Any]:
                 "ok": False,
                 "error": "skipped because telemetry or RTSP publication is unavailable",
             }
-        services = check_remote_services(robot_id) if args.services else {"checked": False}
+        services = (
+            check_remote_services(robot_id) if args.services else {"checked": False}
+        )
         frame_evidence_ok = media["ok"] is True
         robot_ok = telemetry["ok"] and rtsp["ok"] and frame_evidence_ok
         if args.services:
@@ -766,18 +855,26 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             print(f"\n{robot['robot_id']}: {label}")
             telemetry = robot["telemetry"]
             if telemetry["registered"]:
-                state = "online" if telemetry["online"] else "OFFLINE (stored telemetry only)"
+                state = (
+                    "online"
+                    if telemetry["online"]
+                    else "OFFLINE (stored telemetry only)"
+                )
                 print(f"  telemetry: {state}")
             else:
                 print("  telemetry: not registered")
             camera = robot["camera"]
             if camera["ok"]:
-                print(f"  camera frames: fresh and progressing ({camera['frame_age_ms']} ms old)")
+                print(
+                    f"  camera frames: fresh and progressing ({camera['frame_age_ms']} ms old)"
+                )
             elif camera["fresh"]:
                 print("  camera frames: fresh but no new frame observed during sample")
             else:
                 detail = camera.get("error") or "no recent frame"
-                print(f"  camera preview: unavailable — {detail} (separate from RTSP video)")
+                print(
+                    f"  camera preview: unavailable — {detail} (separate from RTSP video)"
+                )
             rtsp = robot["rtsp"]
             if rtsp["ok"]:
                 print("  MediaMTX RTSP: published (DESCRIBE 200)")
@@ -791,20 +888,28 @@ def cmd_doctor(args: argparse.Namespace) -> None:
                     f"({media.get('packet_count', 0)} packets sampled)"
                 )
             else:
-                print(f"  video packets: FAIL — {media.get('error', 'no packets observed')}")
+                print(
+                    f"  video packets: FAIL — {media.get('error', 'no packets observed')}"
+                )
             services = robot["services"]
             if services.get("checked") is not False:
                 if services.get("ok"):
-                    print(f"  remote services: {len(services['containers'])}/{len(services['containers'])} ready")
+                    print(
+                        f"  remote services: {len(services['containers'])}/{len(services['containers'])} ready"
+                    )
                 else:
-                    print(f"  remote services: FAIL — {services.get('error', 'not ready')}")
+                    print(
+                        f"  remote services: FAIL — {services.get('error', 'not ready')}"
+                    )
                     for item in services.get("containers", []):
                         print(
                             f"    {item['container']}: {item['state']} "
                             f"(health {item['health']})"
                         )
         if report["robots"]:
-            print("\nEvidence note: RTSP publication alone is not healthy; progressing media packets are required.")
+            print(
+                "\nEvidence note: RTSP publication alone is not healthy; progressing media packets are required."
+            )
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -821,7 +926,9 @@ def _ensure_ssh_agent() -> None:
         except Exception:
             needs_update = True
     if needs_update:
-        agent_socks = sorted(glob.glob("/root/.ssh_host/agent/s.*"), key=os.path.getmtime)
+        agent_socks = sorted(
+            glob.glob("/root/.ssh_host/agent/s.*"), key=os.path.getmtime
+        )
         for sock in reversed(agent_socks):
             try:
                 with socket.socket(socket.AF_UNIX) as s:
@@ -839,9 +946,16 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     base_robot = raw_name.split("_")[0] if "_" in raw_name else raw_name
     if base_robot == "tars":
         base_robot = "scout"
-    print(f"Deploying robot profile '{base_robot}' via 'make deploy ROBOT={base_robot}'...")
+    print(
+        f"Deploying robot profile '{base_robot}' via 'make deploy ROBOT={base_robot}'..."
+    )
     try:
-        ret = subprocess.run(["make", "deploy", f"ROBOT={base_robot}"], capture_output=True, text=True, timeout=300)
+        ret = subprocess.run(
+            ["make", "deploy", f"ROBOT={base_robot}"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
         if ret.returncode == 0:
             print(f"✓ Successfully deployed and started '{base_robot}'.")
             if ret.stdout:
@@ -863,18 +977,30 @@ def cmd_deploy(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="SwarmDeck Robot & Fleet Control Tool")
-    parser.add_argument("--server", default=DEFAULT_SERVER_URL, help="SwarmDeck server base URL")
+    parser.add_argument(
+        "--server", default=DEFAULT_SERVER_URL, help="SwarmDeck server base URL"
+    )
     parser.add_argument("--json", action="store_true", help="Output raw JSON format")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     # deploy
-    p_deploy = subparsers.add_parser("deploy", help="Deploy/start/restart robot profiles (e.g. make deploy ROBOT=spot)")
-    p_deploy.add_argument("robot", default="all", nargs="?", help="Robot profile name (spot, aslan, botman, tars, or all)")
+    p_deploy = subparsers.add_parser(
+        "deploy",
+        help="Deploy/start/restart robot profiles (e.g. make deploy ROBOT=spot)",
+    )
+    p_deploy.add_argument(
+        "robot",
+        default="all",
+        nargs="?",
+        help="Robot profile name (spot, aslan, botman, tars, or all)",
+    )
     p_deploy.set_defaults(func=cmd_deploy)
 
     # list
-    p_list = subparsers.add_parser("list", help="List all connected robots and telemetry")
+    p_list = subparsers.add_parser(
+        "list", help="List all connected robots and telemetry"
+    )
     p_list.set_defaults(func=cmd_list)
 
     # doctor
@@ -909,9 +1035,24 @@ def main() -> None:
     # drive
     p_drive = subparsers.add_parser("drive", help="Send velocity commands to a robot")
     p_drive.add_argument("robot_id", help="Target robot ID (e.g. aslan_0, botman_0)")
-    p_drive.add_argument("--linear", type=float, default=0.0, help="Linear velocity in m/s (e.g. 0.3 for forward, -0.3 for backward)")
-    p_drive.add_argument("--angular", type=float, default=0.0, help="Angular velocity in rad/s (e.g. 0.5 for left turn, -0.5 for right)")
-    p_drive.add_argument("--duration", type=float, default=0.0, help="Duration in seconds to drive before auto-stopping (e.g. 2.0)")
+    p_drive.add_argument(
+        "--linear",
+        type=float,
+        default=0.0,
+        help="Linear velocity in m/s (e.g. 0.3 for forward, -0.3 for backward)",
+    )
+    p_drive.add_argument(
+        "--angular",
+        type=float,
+        default=0.0,
+        help="Angular velocity in rad/s (e.g. 0.5 for left turn, -0.5 for right)",
+    )
+    p_drive.add_argument(
+        "--duration",
+        type=float,
+        default=0.0,
+        help="Duration in seconds to drive before auto-stopping (e.g. 2.0)",
+    )
     p_drive.set_defaults(func=cmd_drive)
 
     # navigate
@@ -919,7 +1060,9 @@ def main() -> None:
     p_nav.add_argument("robot_id", help="Target robot ID")
     p_nav.add_argument("--x", type=float, required=True, help="Target X coordinate")
     p_nav.add_argument("--y", type=float, required=True, help="Target Y coordinate")
-    p_nav.add_argument("--yaw", type=float, default=0.0, help="Target yaw orientation in radians")
+    p_nav.add_argument(
+        "--yaw", type=float, default=0.0, help="Target yaw orientation in radians"
+    )
     p_nav.set_defaults(func=cmd_navigate)
 
     # cancel
@@ -929,53 +1072,95 @@ def main() -> None:
 
     # stop
     p_stop = subparsers.add_parser("stop", help="Immediately stop robot movement")
-    p_stop.add_argument("robot_id", default="all", nargs="?", help="Target robot ID or 'all'")
+    p_stop.add_argument(
+        "robot_id", default="all", nargs="?", help="Target robot ID or 'all'"
+    )
     p_stop.set_defaults(func=cmd_stop)
 
     # body
     p_body = subparsers.add_parser("body", help="Send body command for legged robots")
     p_body.add_argument("robot_id", help="Target robot ID")
-    p_body.add_argument("--action", required=True, choices=["claim", "release", "stand", "sit", "damping", "lie_to_stand", "lock_stand", "walk_mode", "run_mode", "wave", "set_height"], help="Body posture action")
-    p_body.add_argument("--height", type=float, default=None, help="Body height in meters")
+    p_body.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "claim",
+            "release",
+            "stand",
+            "sit",
+            "damping",
+            "lie_to_stand",
+            "lock_stand",
+            "walk_mode",
+            "run_mode",
+            "wave",
+            "set_height",
+        ],
+        help="Body posture action",
+    )
+    p_body.add_argument(
+        "--height", type=float, default=None, help="Body height in meters"
+    )
     p_body.set_defaults(func=cmd_body)
 
     # snap / snapshot
-    p_snap = subparsers.add_parser("snap", help="Capture a live camera snapshot from a robot")
+    p_snap = subparsers.add_parser(
+        "snap", help="Capture a live camera snapshot from a robot"
+    )
     p_snap.add_argument("robot_id", help="Target robot ID")
-    p_snap.add_argument("--save", default=None, help="File path to save the JPEG snapshot")
+    p_snap.add_argument(
+        "--save", default=None, help="File path to save the JPEG snapshot"
+    )
+
     def _run_snap(args):
         try:
             from agent.tools.vision import cmd_snapshot
+
             cmd_snapshot(args)
         except Exception:
             raw_jpeg = _http_get(f"/api/camera/{args.robot_id}", args.server)
-            out_path = args.save or f"/app/agent/captures/snapshot_{args.robot_id}_{int(time.time())}.jpg"
+            out_path = (
+                args.save
+                or f"/app/agent/captures/snapshot_{args.robot_id}_{int(time.time())}.jpg"
+            )
             os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
             with open(out_path, "wb") as f:
                 f.write(raw_jpeg)
             print(f"Captured snapshot from {args.robot_id} -> {out_path}")
+
     p_snap.set_defaults(func=_run_snap)
 
     p_snapshot = subparsers.add_parser("snapshot", help="Alias for snap")
     p_snapshot.add_argument("robot_id", help="Target robot ID")
-    p_snapshot.add_argument("--save", default=None, help="File path to save the JPEG snapshot")
+    p_snapshot.add_argument(
+        "--save", default=None, help="File path to save the JPEG snapshot"
+    )
     p_snapshot.set_defaults(func=_run_snap)
 
     # inspect
-    p_inspect = subparsers.add_parser("inspect", help="Inspect and analyze an image file")
+    p_inspect = subparsers.add_parser(
+        "inspect", help="Inspect and analyze an image file"
+    )
     p_inspect.add_argument("image_path", help="Path to image file")
+
     def _run_inspect(args):
         from agent.tools.vision import cmd_inspect
+
         cmd_inspect(args)
+
     p_inspect.set_defaults(func=_run_inspect)
 
     # see
-    p_see = subparsers.add_parser("see", help="Inspect what a robot is currently seeing")
+    p_see = subparsers.add_parser(
+        "see", help="Inspect what a robot is currently seeing"
+    )
     p_see.add_argument("robot_id", help="Target robot ID")
     p_see.set_defaults(func=cmd_see)
 
     # detections
-    p_det = subparsers.add_parser("detections", help="List live detections, proposals, and entities")
+    p_det = subparsers.add_parser(
+        "detections", help="List live detections, proposals, and entities"
+    )
     p_det.set_defaults(func=cmd_detections)
 
     args = parser.parse_args()

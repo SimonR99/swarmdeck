@@ -162,15 +162,11 @@ def generate_launch_description() -> LaunchDescription:
                         # target frame's ground offset makes this physical.
                         target_frame=[ns, "/base_link"],
                         min_height=ParameterValue(
-                            PythonExpression(
-                                [floor_z, " + ", str(FLATTEN_MIN_HEIGHT)]
-                            ),
+                            PythonExpression([floor_z, " + ", str(FLATTEN_MIN_HEIGHT)]),
                             value_type=float,
                         ),
                         max_height=ParameterValue(
-                            PythonExpression(
-                                [floor_z, " + ", str(FLATTEN_MAX_HEIGHT)]
-                            ),
+                            PythonExpression([floor_z, " + ", str(FLATTEN_MAX_HEIGHT)]),
                             value_type=float,
                         ),
                         # A real TF lookup now happens per cloud, so this cannot

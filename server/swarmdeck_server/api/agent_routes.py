@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 def _app():
     from . import app
+
     return app
 
 
@@ -40,7 +41,6 @@ from .teleop_routes import (
     get_robot_vision,
     get_all_detections,
 )
-
 
 # ----------------------------------------------------------------- Cortex Images & Attachments
 
@@ -105,7 +105,10 @@ async def post_agent_snapshot(robot_id: str) -> Any:
     app = _app()
     frame_tuple = app._camera_frames.get(robot_id)
     if not frame_tuple or not frame_tuple[0]:
-        return JSONResponse({"error": f"No active camera frame available for robot '{robot_id}'"}, status_code=404)
+        return JSONResponse(
+            {"error": f"No active camera frame available for robot '{robot_id}'"},
+            status_code=404,
+        )
 
     raw_jpeg = frame_tuple[0]
     filename = f"snapshot_{robot_id}_{int(time.time())}.jpg"
@@ -195,9 +198,10 @@ async def post_agent_chat(request: Request) -> Response:
 
     agy_bin = _find_agy_binary()
     if not agy_bin:
-        return JSONResponse({
-            "error": "Antigravity CLI ('agy') binary was not found in environment."
-        }, status_code=500)
+        return JSONResponse(
+            {"error": "Antigravity CLI ('agy') binary was not found in environment."},
+            status_code=500,
+        )
 
     ws_dir = _get_workspace_dir()
 
@@ -207,7 +211,11 @@ async def post_agent_chat(request: Request) -> Response:
         for idx, item in enumerate(images_payload):
             if isinstance(item, dict):
                 d = item.get("data")
-                name = item.get("filename") or item.get("name") or f"chat_img_{int(time.time())}_{idx}.png"
+                name = (
+                    item.get("filename")
+                    or item.get("name")
+                    or f"chat_img_{int(time.time())}_{idx}.png"
+                )
                 if d:
                     if "," in d:
                         _, d = d.split(",", 1)
@@ -227,19 +235,30 @@ async def post_agent_chat(request: Request) -> Response:
 
     # Check for @robot_id mentions in prompt
     robot_mentions = re.findall(r"@([a-zA-Z0-9_-]+)", user_prompt)
-    effective_target = tagged_robot or (robot_mentions[0] if robot_mentions else selected_robot)
+    effective_target = tagged_robot or (
+        robot_mentions[0] if robot_mentions else selected_robot
+    )
 
     # Build fleet snapshot
     fleet_snap = app.fleet_snapshot()
-    fleet_summary = ", ".join([
-        f"{r.get('robot_id')} ({r.get('robot_type')}, battery {int(r.get('battery', 0)*100)}%, pose: ({round(r.get('pose',{}).get('x',0),2)}, {round(r.get('pose',{}).get('y',0),2)}))"
-        for r in fleet_snap
-    ]) or "None"
+    fleet_summary = (
+        ", ".join(
+            [
+                f"{r.get('robot_id')} ({r.get('robot_type')}, battery {int(r.get('battery', 0)*100)}%, pose: ({round(r.get('pose',{}).get('x',0),2)}, {round(r.get('pose',{}).get('y',0),2)}))"
+                for r in fleet_snap
+            ]
+        )
+        or "None"
+    )
 
     # Assemble system prefix
     images_info = ""
     if attached_image_paths:
-        images_info = f"- Attached User Images:\n" + "\n".join([f"  * {p}" for p in attached_image_paths]) + "\n  (You can directly inspect these images visually with your `view_file` tool or run `python -m agent_cortex.vision inspect <path>`!)\n"
+        images_info = (
+            f"- Attached User Images:\n"
+            + "\n".join([f"  * {p}" for p in attached_image_paths])
+            + "\n  (You can directly inspect these images visually with your `view_file` tool or run `python -m agent_cortex.vision inspect <path>`!)\n"
+        )
 
     system_prefix = (
         f"[SYSTEM CONTEXT: You are Cortex, the AI Fleet Intelligence, Perception Engine & Autonomous Operator embedded directly in SwarmDeck.\n"
@@ -262,10 +281,14 @@ async def post_agent_chat(request: Request) -> Response:
 
     cmd = [
         agy_bin,
-        "--add-dir", ws_dir,
-        "--add-dir", "/app/agent",
-        "-p", full_prompt,
-        "--output-format", "stream-json",
+        "--add-dir",
+        ws_dir,
+        "--add-dir",
+        "/app/agent",
+        "-p",
+        full_prompt,
+        "--output-format",
+        "stream-json",
         "--dangerously-skip-permissions",
     ]
     if conversation_id:

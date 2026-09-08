@@ -128,9 +128,7 @@ def generate_faulty_odometry(
                 (0.72, "odometry_reset"),
                 (0.86, "slam_reconnect"),
             ):
-                event_index = max(
-                    1, min(count - 1, round(fraction * (count - 1)))
-                )
+                event_index = max(1, min(count - 1, round(fraction * (count - 1))))
                 event_specs[event_index] = kind
 
         events: list[dict[str, Any]] = []
@@ -144,8 +142,10 @@ def generate_faulty_odometry(
                 world_delta = original[:2] - previous[:2]
                 c, s = math.cos(previous_yaw), math.sin(previous_yaw)
                 local_delta = np.array(
-                    [c * world_delta[0] + s * world_delta[1],
-                     -s * world_delta[0] + c * world_delta[1]],
+                    [
+                        c * world_delta[0] + s * world_delta[1],
+                        -s * world_delta[0] + c * world_delta[1],
+                    ],
                     dtype=np.float64,
                 )
                 local_delta *= 1.0 + scale_bias
@@ -154,8 +154,10 @@ def generate_faulty_odometry(
                 )
                 c, s = math.cos(latent_yaw), math.sin(latent_yaw)
                 latent_xy += np.array(
-                    [c * local_delta[0] - s * local_delta[1],
-                     s * local_delta[0] + c * local_delta[1]],
+                    [
+                        c * local_delta[0] - s * local_delta[1],
+                        s * local_delta[0] + c * local_delta[1],
+                    ],
                     dtype=np.float64,
                 )
                 true_yaw_delta = _wrap(_yaw(original) - previous_yaw)
@@ -263,7 +265,7 @@ def replace_wire_odometry(blob: bytes, pose: np.ndarray) -> bytes:
     header_end = _WIRE_HEADER.size + header_length
     if magic != b"SDKF" or version != 1 or header_end > len(blob):
         raise ValueError("unsupported or malformed keyframe")
-    header = json.loads(blob[_WIRE_HEADER.size:header_end].decode("utf-8"))
+    header = json.loads(blob[_WIRE_HEADER.size : header_end].decode("utf-8"))
     replacement = np.asarray(pose, dtype=np.float64).reshape(-1)
     if replacement.shape != (7,) or not np.isfinite(replacement).all():
         raise ValueError("replacement pose must contain seven finite values")
@@ -285,4 +287,4 @@ def wire_body(blob: bytes) -> bytes:
     if len(blob) < _WIRE_HEADER.size:
         raise ValueError("keyframe is too short")
     header_length = _WIRE_HEADER.unpack_from(blob)[2]
-    return blob[_WIRE_HEADER.size + header_length:]
+    return blob[_WIRE_HEADER.size + header_length :]

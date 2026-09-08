@@ -280,15 +280,15 @@ def evaluate(
 
         scored += len(estimates)
         component_result = {
-                "id": component["id"],
-                "keyframes": component["keyframes"],
-                "scored_poses": len(estimates),
-                "robots": sorted(set(robots)),
-                "joint_ate": _pose_errors(estimates, actual, alignment),
-                "per_robot_joint_alignment": by_robot,
-                "robot_alignment_disagreement": alignment_disagreement,
-                "rpe": rpe,
-            }
+            "id": component["id"],
+            "keyframes": component["keyframes"],
+            "scored_poses": len(estimates),
+            "robots": sorted(set(robots)),
+            "joint_ate": _pose_errors(estimates, actual, alignment),
+            "per_robot_joint_alignment": by_robot,
+            "robot_alignment_disagreement": alignment_disagreement,
+            "rpe": rpe,
+        }
         if surveyed_gauge is not None:
             component_result.update(
                 {

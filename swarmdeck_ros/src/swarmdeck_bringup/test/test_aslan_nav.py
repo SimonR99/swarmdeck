@@ -9,10 +9,7 @@ CONFIG = REPO / "adapters/adapter_ros2/config/aslan_bunker.yaml"
 COMPOSE = REPO / "deploy/compose/docker-compose.robot-aslan.yml"
 LAUNCH = REPO / "swarmdeck_ros/src/swarmdeck_nav/launch/aslan.launch.py"
 PARAMS = REPO / "swarmdeck_ros/src/swarmdeck_nav/config/botman_nav2_params.yaml"
-PROJECTOR = (
-    REPO
-    / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
-)
+PROJECTOR = REPO / "swarmdeck_ros/src/swarmdeck_nav/src/footprint_cloud_to_scan.cpp"
 ROBOT_LAUNCH = REPO / "adapters/adapter_ros2/launch/aslan_bunker.launch.py"
 
 
@@ -147,12 +144,8 @@ def test_aslan_slam_uses_ouster_imu():
     slam_command = compose["services"]["slam"]["command"][2]
 
     assert 'DeclareLaunchArgument("start_imu", default_value="true")' in source
-    assert (
-        'DeclareLaunchArgument("imu_topic", default_value="/ouster/imu")' in source
-    )
-    assert (
-        'DeclareLaunchArgument("start_vectornav", default_value="false")' in source
-    )
+    assert 'DeclareLaunchArgument("imu_topic", default_value="/ouster/imu")' in source
+    assert 'DeclareLaunchArgument("start_vectornav", default_value="false")' in source
     assert "imu_preintegration_node" in source
     assert "launch/os1_128.launch.py" not in source
     assert "aslan_superodom_ouster_calibration.yaml" in source

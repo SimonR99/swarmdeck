@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 def _app():
     from . import app
+
     return app
 
 
@@ -43,12 +44,23 @@ async def post_robot_drive(robot_id: str, request: Request) -> Any:
         {"type": "drive", "linear": linear, "angular": angular, **app.stamps()},
     )
     if not sent:
-        return JSONResponse({"error": f"Failed to send drive to '{robot_id}'"}, status_code=502)
+        return JSONResponse(
+            {"error": f"Failed to send drive to '{robot_id}'"}, status_code=502
+        )
 
     robot.goal = None
-    app.events.log("agent_drive", {"robot_id": robot_id, "linear": linear, "angular": angular, "duration": duration})
+    app.events.log(
+        "agent_drive",
+        {
+            "robot_id": robot_id,
+            "linear": linear,
+            "angular": angular,
+            "duration": duration,
+        },
+    )
 
     if duration > 0.0 and (linear != 0.0 or angular != 0.0):
+
         async def _auto_stop(rid: str, delay: float):
             await asyncio.sleep(delay)
             await app.registry.send(
@@ -83,7 +95,10 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
 
     if not app.registry.can(robot_id, "navigate"):
-        return JSONResponse({"error": f"Robot '{robot_id}' does not support navigation"}, status_code=400)
+        return JSONResponse(
+            {"error": f"Robot '{robot_id}' does not support navigation"},
+            status_code=400,
+        )
 
     goal = {
         "x": float(body["x"]),
@@ -93,7 +108,10 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
 
     taken_by = app.goal_taken(goal, exclude=robot_id)
     if taken_by:
-        return JSONResponse({"error": f"Goal position is already occupied/assigned to {taken_by}"}, status_code=409)
+        return JSONResponse(
+            {"error": f"Goal position is already occupied/assigned to {taken_by}"},
+            status_code=409,
+        )
 
     local_goal = (
         goal
@@ -132,7 +150,9 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
         },
     )
     if not sent:
-        return JSONResponse({"error": f"Failed to send navigation goal to {robot_id}"}, status_code=502)
+        return JSONResponse(
+            {"error": f"Failed to send navigation goal to {robot_id}"}, status_code=502
+        )
 
     robot.goal = local_goal
     robot.nav_status = "active"
@@ -142,7 +162,12 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
         robot.planned_path = local_planned
 
     app.events.log("agent_goal", {"robot_id": robot_id, "goal": goal})
-    return {"ok": True, "robot_id": robot_id, "goal": goal, "path_length": len(local_planned)}
+    return {
+        "ok": True,
+        "robot_id": robot_id,
+        "goal": goal,
+        "path_length": len(local_planned),
+    }
 
 
 async def post_robot_cancel(robot_id: str) -> Any:
@@ -170,7 +195,9 @@ async def post_robot_stop(robot_id: str) -> Any:
         targets = list(app.registry.robots.keys())
     else:
         if robot_id not in app.registry.robots:
-            return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
+            return JSONResponse(
+                {"error": f"Robot '{robot_id}' not found"}, status_code=404
+            )
         targets = [robot_id]
 
     for rid in targets:
@@ -198,10 +225,21 @@ async def post_robot_body(robot_id: str, request: Request) -> Any:
 
     action = str(body.get("action", ""))
     if action not in (
-        "claim", "release", "sit", "stand", "damping", "lie_to_stand",
-        "lock_stand", "walk_mode", "run_mode", "wave", "set_height"
+        "claim",
+        "release",
+        "sit",
+        "stand",
+        "damping",
+        "lie_to_stand",
+        "lock_stand",
+        "walk_mode",
+        "run_mode",
+        "wave",
+        "set_height",
     ):
-        return JSONResponse({"error": f"Unknown body action '{action}'"}, status_code=400)
+        return JSONResponse(
+            {"error": f"Unknown body action '{action}'"}, status_code=400
+        )
 
     robot = app.registry.robots.get(robot_id)
     if not robot:
@@ -230,20 +268,20 @@ async def get_robot_vision(robot_id: str) -> Any:
 
     frame_tuple = app._camera_frames.get(robot_id)
     has_frame = frame_tuple is not None
-    frame_age_ms = int((time.monotonic() - frame_tuple[1]) * 1000) if frame_tuple else None
+    frame_age_ms = (
+        int((time.monotonic() - frame_tuple[1]) * 1000) if frame_tuple else None
+    )
     seq = frame_tuple[2] if frame_tuple else None
 
     # Retrieve live tracks for this robot
-    tracks = [
-        d for d in app._detections.values()
-        if d.get("robot_id") == robot_id
-    ]
+    tracks = [d for d in app._detections.values() if d.get("robot_id") == robot_id]
 
     return {
         "robot_id": robot_id,
         "robot_type": robot.robot_type,
         "pose": robot.pose,
-        "camera_streaming": has_frame and (frame_age_ms is not None and frame_age_ms < 5000),
+        "camera_streaming": has_frame
+        and (frame_age_ms is not None and frame_age_ms < 5000),
         "frame_age_ms": frame_age_ms,
         "frame_seq": seq,
         "tracks": tracks,

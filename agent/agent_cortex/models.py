@@ -15,7 +15,6 @@ import httpx
 
 from .contracts import PlannerDecision, PlannerRequest
 
-
 _ROBOT_ACTIONS = {"diagnose", "repair", "mission"}
 _EXPLICIT_FLEET = re.compile(
     r"\b(all|fleet-wide|entire fleet|every robot|all robots)\b", re.I
@@ -82,7 +81,9 @@ class OllamaPlanner:
             os.environ.get("CORTEX_PLANNER_CONTEXT_LENGTH", "8192")
         )
         if not 1024 <= self.context_length <= 131072:
-            raise ValueError("CORTEX_PLANNER_CONTEXT_LENGTH must be between 1024 and 131072")
+            raise ValueError(
+                "CORTEX_PLANNER_CONTEXT_LENGTH must be between 1024 and 131072"
+            )
         self.max_tokens = max_tokens or int(
             os.environ.get("CORTEX_PLANNER_MAX_TOKENS", "256")
         )
@@ -105,7 +106,9 @@ class OllamaPlanner:
 
     async def plan(self, request: PlannerRequest) -> PlannerDecision:
         if not self.model:
-            raise RuntimeError("CORTEX_PLANNER_MODEL is required for the Ollama planner")
+            raise RuntimeError(
+                "CORTEX_PLANNER_MODEL is required for the Ollama planner"
+            )
         schema = PlannerDecision.model_json_schema()
         payload = {
             "model": self.model,
@@ -159,7 +162,9 @@ class OllamaPlanner:
         try:
             decision = PlannerDecision.model_validate_json(content)
         except Exception as exc:
-            raise RuntimeError(f"Ollama returned an invalid planner decision: {exc}") from exc
+            raise RuntimeError(
+                f"Ollama returned an invalid planner decision: {exc}"
+            ) from exc
         return _apply_planner_policy(request, decision)
 
 

@@ -71,10 +71,10 @@ BISTRO_ISO = 400.0
 
 # 4 default start poses (x, y, yaw in radians) along the 141m closed road loop
 BISTRO_DEFAULT_START_POSES = {
-    "robot_0": {"x": -10.75, "y": 8.25, "yaw": -1.4259},   # -81.7 deg
+    "robot_0": {"x": -10.75, "y": 8.25, "yaw": -1.4259},  # -81.7 deg
     "robot_1": {"x": 14.25, "y": -15.75, "yaw": -0.3665},  # -21.0 deg
-    "robot_2": {"x": 40.25, "y": -25.75, "yaw": 2.8047},   # 160.7 deg
-    "robot_3": {"x": 11.25, "y": -14.75, "yaw": 3.1416},   # 180.0 deg
+    "robot_2": {"x": 40.25, "y": -25.75, "yaw": 2.8047},  # 160.7 deg
+    "robot_3": {"x": 11.25, "y": -14.75, "yaw": 3.1416},  # 180.0 deg
 }
 
 # Safe street / sidewalk coordinates for detection targets in Bistro
@@ -100,12 +100,18 @@ def find_bistro_assets_dir(custom_path: Path | str | None = None) -> Path:
         val = os.environ.get(env_var)
         if val:
             candidates.append(Path(val))
-    candidates.extend([
-        REPO.parent / "argos3-examples" / "experiments" / "bistro_exploration" / "assets",
-        REPO / "argos" / "assets" / "bistro",
-        Path("/app/argos3-examples/experiments/bistro_exploration/assets"),
-        Path("/argos3-examples/experiments/bistro_exploration/assets"),
-    ])
+    candidates.extend(
+        [
+            REPO.parent
+            / "argos3-examples"
+            / "experiments"
+            / "bistro_exploration"
+            / "assets",
+            REPO / "argos" / "assets" / "bistro",
+            Path("/app/argos3-examples/experiments/bistro_exploration/assets"),
+            Path("/argos3-examples/experiments/bistro_exploration/assets"),
+        ]
+    )
     for c in candidates:
         if c.is_dir() and (c / "bistro_exterior.glb").exists():
             return c.resolve()
@@ -120,10 +126,13 @@ def find_bistro_assets_dir(custom_path: Path | str | None = None) -> Path:
 
 def _sanitize_xml_comments(xml_text: str) -> str:
     """XML 1.0 disallows '--' inside comments."""
+
     def fix_comment(match: re.Match) -> str:
         content = match.group(1).replace("--", "- -")
         return f"<!--{content}-->"
+
     return re.sub(r"<!--(.*?)-->", fix_comment, xml_text, flags=re.DOTALL)
+
 
 # Ultra-Fusion's tooling is built around 100 Hz. `make_profile.py` derives the
 # estimator's IMU noise densities from the sample rate, and those scale by
@@ -134,8 +143,8 @@ def _sanitize_xml_comments(xml_text: str) -> str:
 TICKS_PER_SECOND = 100
 
 # Sensor rates, as divisors of the tick rate.
-LIDAR_HZ = 10.0     # what a VLP-16 actually spins at
-CAMERA_HZ = 5.0     # matches the adapter's JPEG preview budget
+LIDAR_HZ = 10.0  # what a VLP-16 actually spins at
+CAMERA_HZ = 5.0  # matches the adapter's JPEG preview budget
 EXCHANGE_HZ = 10.0  # how often ROS sees an observation, and the /clock rate
 
 # The photorealistic camera's resolution is the single biggest render-cost dial
@@ -187,8 +196,9 @@ def _divider(hz: float) -> int:
     return max(1, int(round(TICKS_PER_SECOND / hz)))
 
 
-def controller_block(rid: str, profile: str, spec, lidar,
-                     estimator: bool = True, indent: str = "    ") -> list[str]:
+def controller_block(
+    rid: str, profile: str, spec, lidar, estimator: bool = True, indent: str = "    "
+) -> list[str]:
     """One robot's controller, with its sensors mounted from `RobotSpec`.
 
     Sensors hang off the `origin` anchor with explicit positions rather than
@@ -200,41 +210,44 @@ def controller_block(rid: str, profile: str, spec, lidar,
     `RobotSpec` mounts are relative to base_link, which floats `base_height`
     above the floor; the ARGoS origin anchor is ON the floor. Hence the sum.
     """
-    odometry_attrs = ('implementation="external" medium="uf"' if estimator
-                      else 'implementation="drift"')
+    odometry_attrs = (
+        'implementation="external" medium="uf"'
+        if estimator
+        else 'implementation="drift"'
+    )
     lidar_z = spec.base_height + spec.lidar_z
     camera_z = spec.base_height + spec.camera_z
     vfov_deg = math.degrees(lidar.vfov)
     h_res = 360.0 / lidar.h_samples
     lines = [
         f'{indent}<swarmdeck_robot_controller id={_attr(rid + "_ctrl")}',
-        f'{indent}    library={_attr(LIBRARY)}>',
-        f'{indent}  <actuators>',
+        f"{indent}    library={_attr(LIBRARY)}>",
+        f"{indent}  <actuators>",
         f'{indent}    <differential_steering implementation="default" />',
-        f'{indent}  </actuators>',
-        f'{indent}  <sensors>',
+        f"{indent}  </actuators>",
+        f"{indent}  <sensors>",
         f'{indent}    <positioning implementation="default" />',
         f'{indent}    <photorealistic_lidar implementation="default" medium="pr"',
         f'{indent}                          anchor="origin"',
-        f'{indent}                          position={_attr(_vec(spec.lidar_x, 0.0, lidar_z))}',
+        f"{indent}                          position={_attr(_vec(spec.lidar_x, 0.0, lidar_z))}",
         f'{indent}                          orientation="0,0,0"',
-        f'{indent}                          rings={_attr(lidar.rings)}',
-        f'{indent}                          vertical_fov={_attr(_vec(-vfov_deg, vfov_deg))}',
+        f"{indent}                          rings={_attr(lidar.rings)}",
+        f"{indent}                          vertical_fov={_attr(_vec(-vfov_deg, vfov_deg))}",
         f'{indent}                          horizontal_resolution={_attr(f"{h_res:.4f}")}',
-        f'{indent}                          max_range={_attr(_fmt(lidar.range_max))}',
+        f"{indent}                          max_range={_attr(_fmt(lidar.range_max))}",
         # A real time-of-flight unit is specified around +/-3 cm. Zero noise
         # hands the scan matcher an accuracy it will never have on hardware.
         f'{indent}                          range_noise_std_dev="0.03"',
-        f'{indent}                          framerate_divider={_attr(_divider(LIDAR_HZ))} />',
+        f"{indent}                          framerate_divider={_attr(_divider(LIDAR_HZ))} />",
         f'{indent}    <photorealistic_camera implementation="default" medium="pr"',
         f'{indent}                           anchor="origin"',
-        f'{indent}                           position={_attr(_vec(spec.camera_x, 0.0, camera_z))}',
+        f"{indent}                           position={_attr(_vec(spec.camera_x, 0.0, camera_z))}",
         f'{indent}                           orientation="0,0,0"',
-        f'{indent}                           resolution={_attr(_vec(*CAMERA_RESOLUTION))}',
-        f'{indent}                           fov={_attr(_fmt(CAMERA_FOV_DEG))}',
+        f"{indent}                           resolution={_attr(_vec(*CAMERA_RESOLUTION))}",
+        f"{indent}                           fov={_attr(_fmt(CAMERA_FOV_DEG))}",
         f'{indent}                           near="0.05" far="40"',
         f'{indent}                           modalities="rgb,depth"',
-        f'{indent}                           framerate_divider={_attr(_divider(CAMERA_HZ))} />',
+        f"{indent}                           framerate_divider={_attr(_divider(CAMERA_HZ))} />",
         f'{indent}    <imu implementation="default"',
         f'{indent}         gyro_noise_std_dev="0.002" accel_noise_std_dev="0.02"',
         f'{indent}         gyro_bias_walk_std_dev="0.0002" accel_bias_walk_std_dev="0.002" />',
@@ -245,12 +258,12 @@ def controller_block(rid: str, profile: str, spec, lidar,
         f'{indent}                           vel_noise_range="-0.2:0.2"',
         f'{indent}                           dist_noise_range="-0.02:0.02" />',
         # The pose the whole ROS stack navigates on. See the module docstring.
-        f'{indent}    <odometry {odometry_attrs} />',
-        f'{indent}  </sensors>',
-        f'{indent}  <params robot_id={_attr(rid)}',
-        f'{indent}          track_gauge={_attr(_fmt(spec.track_gauge))}',
+        f"{indent}    <odometry {odometry_attrs} />",
+        f"{indent}  </sensors>",
+        f"{indent}  <params robot_id={_attr(rid)}",
+        f"{indent}          track_gauge={_attr(_fmt(spec.track_gauge))}",
         f'{indent}          max_speed="150.0" />',
-        f'{indent}</swarmdeck_robot_controller>',
+        f"{indent}</swarmdeck_robot_controller>",
     ]
     return lines
 
@@ -278,7 +291,9 @@ def generate_argos_xml(
 
     world_cfg = cfg.get("world") or cfg.get("environment") or "procedural"
     if isinstance(world_cfg, dict):
-        world_type = str(world_cfg.get("name") or world_cfg.get("type", "procedural")).lower()
+        world_type = str(
+            world_cfg.get("name") or world_cfg.get("type", "procedural")
+        ).lower()
         if not bistro_dir and (world_cfg.get("dir") or world_cfg.get("assets_dir")):
             bistro_dir = world_cfg.get("dir") or world_cfg.get("assets_dir")
     else:
@@ -321,21 +336,23 @@ def generate_argos_xml(
             controller_block(rid, profile, robot_spec(profile), lidar, estimator)
         )
 
-    lines.extend([
-        "  </controllers>",
-        "",
-        "  <!-- The single loop-function slot is the ROS boundary. Ultra-Fusion",
-        "       is a <media> below precisely because this slot is taken. -->",
-        "  <loop_functions",
-        f'      library={_attr(LIBRARY)}',
-        '      label="swarmdeck_bridge"',
-        f'      socket={_attr(socket_path)}',
-        f'      robots={_attr(",".join(robot_ids))}',
-        f'      exchange_period={_attr(_divider(EXCHANGE_HZ))}',
-        '      realtime_factor="1"',
-        '      connect_timeout="180" />',
-        "",
-    ])
+    lines.extend(
+        [
+            "  </controllers>",
+            "",
+            "  <!-- The single loop-function slot is the ROS boundary. Ultra-Fusion",
+            "       is a <media> below precisely because this slot is taken. -->",
+            "  <loop_functions",
+            f"      library={_attr(LIBRARY)}",
+            '      label="swarmdeck_bridge"',
+            f"      socket={_attr(socket_path)}",
+            f'      robots={_attr(",".join(robot_ids))}',
+            f"      exchange_period={_attr(_divider(EXCHANGE_HZ))}",
+            '      realtime_factor="1"',
+            '      connect_timeout="180" />',
+            "",
+        ]
+    )
 
     if is_bistro:
         b_dir = find_bistro_assets_dir(bistro_dir)
@@ -344,33 +361,41 @@ def generate_argos_xml(
             bistro_glb_path = Path(world_gltf)
         lamps_inc_path = b_dir / "bistro_lamps.inc"
         ibl_path = b_dir / "san_giuseppe_ibl.ktx"
-        lamps_xml = _sanitize_xml_comments(lamps_inc_path.read_text().rstrip()) if lamps_inc_path.exists() else ""
+        lamps_xml = (
+            _sanitize_xml_comments(lamps_inc_path.read_text().rstrip())
+            if lamps_inc_path.exists()
+            else ""
+        )
 
-        lines.extend([
-            f'  <arena size="{BISTRO_ARENA_SIZE}" center="{BISTRO_ARENA_CENTER}">',
-            "",
-            "    <!-- Collision geometry: Jolt physics mesh directly from the glTF model. -->",
-            f'    <mesh id="world_mesh" file={_attr(str(bistro_glb_path))}',
-            '          position="0,0,-0.3" orientation="0,0,90" scale="1.0" />',
-        ])
+        lines.extend(
+            [
+                f'  <arena size="{BISTRO_ARENA_SIZE}" center="{BISTRO_ARENA_CENTER}">',
+                "",
+                "    <!-- Collision geometry: Jolt physics mesh directly from the glTF model. -->",
+                f'    <mesh id="world_mesh" file={_attr(str(bistro_glb_path))}',
+                '          position="0,0,-0.3" orientation="0,0,90" scale="1.0" />',
+            ]
+        )
         placements = BISTRO_TARGET_PLACEMENTS[:targets] if targets > 0 else []
     else:
         # 26 m of building plus clearance; nothing in the world reaches 6 m.
-        lines.extend([
-            '  <arena size="30,30,6" center="0,0,3">',
-            "",
-            "    <!-- Collision geometry, at the SAME transform as the photorealism",
-            "         <prop> at the bottom of this file, but NOT the same file.",
-            "         The collision mesh carries no floor slab: the <jolt> engine",
-            "         below already provides the ground as a plane at z=0, and a",
-            "         slab whose top face is also at z=0 puts every robot in",
-            "         contact with two coincident surfaces. Measured cost of that:",
-            "         60-100% of the commanded turn rate, varying with position,",
-            "         while translation is almost unaffected. A robot that drives",
-            "         but will not turn. See make_argos_world.build_indoor_world. -->",
-            f'    <mesh id="world_mesh" file={_attr(world_collision)}',
-            '          position="0,0,0" orientation="0,0,90" scale="1.0" />',
-        ])
+        lines.extend(
+            [
+                '  <arena size="30,30,6" center="0,0,3">',
+                "",
+                "    <!-- Collision geometry, at the SAME transform as the photorealism",
+                "         <prop> at the bottom of this file, but NOT the same file.",
+                "         The collision mesh carries no floor slab: the <jolt> engine",
+                "         below already provides the ground as a plane at z=0, and a",
+                "         slab whose top face is also at z=0 puts every robot in",
+                "         contact with two coincident surfaces. Measured cost of that:",
+                "         60-100% of the commanded turn rate, varying with position,",
+                "         while translation is almost unaffected. A robot that drives",
+                "         but will not turn. See make_argos_world.build_indoor_world. -->",
+                f'    <mesh id="world_mesh" file={_attr(world_collision)}',
+                '          position="0,0,0" orientation="0,0,90" scale="1.0" />',
+            ]
+        )
         placements = place_targets(seed, targets)
 
     classes = target_classes(len(placements))
@@ -386,7 +411,7 @@ def generate_argos_xml(
                 f'    <mesh id={_attr(f"target_{i}_{name}")} file={_attr(model)}'
             )
             lines.append(
-                f'          position={_attr(_vec(x, y, 0.0))} '
+                f"          position={_attr(_vec(x, y, 0.0))} "
                 f'orientation={_attr(orientation)} scale="1.0" />'
             )
 
@@ -407,161 +432,189 @@ def generate_argos_xml(
         # The origin anchor is on the floor and the body stands on it, so z is
         # zero plus a hair of clearance to settle rather than interpenetrate
         # the floor on the first physics step.
-        lines.extend([
-            f'    <{entity} id={_attr(rid)}>',
-            f'      <body position={_attr(_vec(x, y, 0.02))} '
-            f'orientation={_attr(_vec(yaw_deg, 0.0, 0.0))} />',
-            f'      <controller config={_attr(rid + "_ctrl")} />',
-            f'    </{entity}>',
-        ])
+        lines.extend(
+            [
+                f"    <{entity} id={_attr(rid)}>",
+                f"      <body position={_attr(_vec(x, y, 0.02))} "
+                f"orientation={_attr(_vec(yaw_deg, 0.0, 0.0))} />",
+                f'      <controller config={_attr(rid + "_ctrl")} />',
+                f"    </{entity}>",
+            ]
+        )
 
-    lines.extend([
-        "  </arena>",
-        "",
-        "  <physics_engines>",
-        '    <jolt id="jolt" iterations="10" threads="1">',
-        '      <floor height="0" />',
-        '      <gravity g="9.81" />',
-        "    </jolt>",
-        "  </physics_engines>",
-        "",
-        "  <media>",
-    ])
+    lines.extend(
+        [
+            "  </arena>",
+            "",
+            "  <physics_engines>",
+            '    <jolt id="jolt" iterations="10" threads="1">',
+            '      <floor height="0" />',
+            '      <gravity g="9.81" />',
+            "    </jolt>",
+            "  </physics_engines>",
+            "",
+            "  <media>",
+        ]
+    )
 
     if estimator:
-        lines.extend([
-        "    <!-- Fast-LIVO2. `channels` names only what the estimator reads:",
-        "         the camera is declared on every robot but not streamed here,",
-        "         and an unread VLP-16 revolution is ~630 KB per robot per",
-        "         100 ms of traffic that only starves the channels that matter.",
-        "",
-        "         alignment=\"none\" on purpose. Each robot's estimate starts at",
-        "         its own origin, exactly as a real robot's does, which is the",
-        "         premise every merge_mode in configs/ is written against.",
-        "         alignment=\"ground_truth\" would hand every robot the shared",
-        "         frame that swarmdeck-slam exists to recover. -->",
-        f'    <external_estimator id="uf" socket={_attr(uf_socket_path)}',
-        f'                        robots={_attr(",".join(robot_ids))}',
-        '                        lockstep_pose="false"',
-        # Ultra-Fusion ran lwio and never read the camera, so withholding it was
-        # right: an unread frame is pure bandwidth. FAST-LIVO2 is
-        # LiDAR-inertial-VISUAL, and with the camera withheld its sync_packages
-        # never completes, so it emits no pose at all and logs nothing about it.
-        # The camera is declared on every robot either way, which is why it
-        # still reaches the operator UI; this attribute only governs what is
-        # streamed to the estimator socket.
-        # Override: SWARMDECK_ESTIMATOR_CHANNELS=imu,lidar,wheels,camera
-        f'                        channels={_attr(os.environ.get("SWARMDECK_ESTIMATOR_CHANNELS", "imu,lidar,wheels"))}',
-        '                        alignment="none"',
-        '                        connect_timeout="180" timeout="120" />',
-        "",
-        ])
+        lines.extend(
+            [
+                "    <!-- Fast-LIVO2. `channels` names only what the estimator reads:",
+                "         the camera is declared on every robot but not streamed here,",
+                "         and an unread VLP-16 revolution is ~630 KB per robot per",
+                "         100 ms of traffic that only starves the channels that matter.",
+                "",
+                '         alignment="none" on purpose. Each robot\'s estimate starts at',
+                "         its own origin, exactly as a real robot's does, which is the",
+                "         premise every merge_mode in configs/ is written against.",
+                '         alignment="ground_truth" would hand every robot the shared',
+                "         frame that swarmdeck-slam exists to recover. -->",
+                f'    <external_estimator id="uf" socket={_attr(uf_socket_path)}',
+                f'                        robots={_attr(",".join(robot_ids))}',
+                '                        lockstep_pose="false"',
+                # Ultra-Fusion ran lwio and never read the camera, so withholding it was
+                # right: an unread frame is pure bandwidth. FAST-LIVO2 is
+                # LiDAR-inertial-VISUAL, and with the camera withheld its sync_packages
+                # never completes, so it emits no pose at all and logs nothing about it.
+                # The camera is declared on every robot either way, which is why it
+                # still reaches the operator UI; this attribute only governs what is
+                # streamed to the estimator socket.
+                # Override: SWARMDECK_ESTIMATOR_CHANNELS=imu,lidar,wheels,camera
+                f'                        channels={_attr(os.environ.get("SWARMDECK_ESTIMATOR_CHANNELS", "imu,lidar,wheels"))}',
+                '                        alignment="none"',
+                '                        connect_timeout="180" timeout="120" />',
+                "",
+            ]
+        )
 
     if is_bistro:
-        lines.extend([
-            '    <photorealism id="pr" backend="vulkan" draw_floor="false">',
-        ])
+        lines.extend(
+            [
+                '    <photorealism id="pr" backend="vulkan" draw_floor="false">',
+            ]
+        )
         if ibl_path.exists():
-            lines.append(f'      <environment ibl={_attr(str(ibl_path))} intensity="{BISTRO_SKY_LUX:g}" />')
-        lines.extend([
-            f'      <skybox color="{BISTRO_SKY_COLOR}" />',
-            f'      <sun direction="0.85,0.35,-0.22" intensity="{BISTRO_SUN_LUX:g}" cast_shadows="false" />',
-            f'      <exposure aperture="{BISTRO_APERTURE:g}" shutter_speed="{BISTRO_SHUTTER:g}" sensitivity="{BISTRO_ISO:g}" />',
-            '      <lights>',
-        ])
+            lines.append(
+                f'      <environment ibl={_attr(str(ibl_path))} intensity="{BISTRO_SKY_LUX:g}" />'
+            )
+        lines.extend(
+            [
+                f'      <skybox color="{BISTRO_SKY_COLOR}" />',
+                f'      <sun direction="0.85,0.35,-0.22" intensity="{BISTRO_SUN_LUX:g}" cast_shadows="false" />',
+                f'      <exposure aperture="{BISTRO_APERTURE:g}" shutter_speed="{BISTRO_SHUTTER:g}" sensitivity="{BISTRO_ISO:g}" />',
+                "      <lights>",
+            ]
+        )
         if lamps_xml:
             for lamp_line in lamps_xml.splitlines():
-                lines.append(f"        {lamp_line}" if lamp_line.startswith("<") else f"      {lamp_line}")
-        lines.extend([
-            '      </lights>',
-            '      <scenery>',
-            f'        <prop model={_attr(str(bistro_glb_path))} position="0,0,-0.3"',
-            '              orientation="0,0,90" scale="1.0" />',
-        ])
+                lines.append(
+                    f"        {lamp_line}"
+                    if lamp_line.startswith("<")
+                    else f"      {lamp_line}"
+                )
+        lines.extend(
+            [
+                "      </lights>",
+                "      <scenery>",
+                f'        <prop model={_attr(str(bistro_glb_path))} position="0,0,-0.3"',
+                '              orientation="0,0,90" scale="1.0" />',
+            ]
+        )
         for (x, y, yaw), name in zip(placements, classes):
             model = f"{props_dir}/{name}.glb"
             orientation = _vec(math.degrees(yaw), 0.0, 90.0)
             lines.append(
-                f'        <prop model={_attr(model)} '
-                f'position={_attr(_vec(x, y, 0.0))} '
+                f"        <prop model={_attr(model)} "
+                f"position={_attr(_vec(x, y, 0.0))} "
                 f'orientation={_attr(orientation)} scale="1.0" />'
             )
-        lines.extend([
-            '      </scenery>',
-            '    </photorealism>',
-            '  </media>',
-        ])
+        lines.extend(
+            [
+                "      </scenery>",
+                "    </photorealism>",
+                "  </media>",
+            ]
+        )
     else:
-        lines.extend([
-            "    <!-- draw_floor is false because indoor.gltf carries its own floor",
-            "         slab; the built-in one would z-fight with it. -->",
-            '    <photorealism id="pr" backend="vulkan" draw_floor="false">',
-            '      <skybox color="0.53,0.71,0.92" />',
-            "      <!-- Bright overcast, not direct sun. The building has walls but",
-            "           no ceiling, so whatever is in the sky lights the rooms, and",
-            "           the exposure has to be set for it: the renderer is",
-            "           physically based, so illuminance and exposure are one",
-            "           setting made in two places. Filament exposes EV =",
-            "           log2(N^2/t * 100/S), which at f/4, 1/250 s, ISO 100 is",
-            "           EV 12, the right value for roughly 15 klux. The first",
-            "           version of this file paired 70 klux with EV 10.9 and every",
-            "           camera returned a white frame with the geometry burned out",
-            "           of it, while depth and segmentation looked perfect: nothing",
-            "           downstream of a physically based renderer notices that the",
-            "           photograph is unusable. -->",
-            '      <sun direction="0.35,0.25,-0.90" intensity="15000"',
-            '           cast_shadows="true" />',
-            '      <exposure aperture="4" shutter_speed="0.004" sensitivity="100" />',
-            "      <lights>",
-            '        <point position="-9,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="-3,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="3,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="9,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="-9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="-3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
-            '        <point position="9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
-            '        <point position="0,0,2.3" intensity="8000" falloff="14" color="1.0,0.98,0.95" />',
-            "      </lights>",
-            "      <scenery>",
-            f'        <prop model={_attr(world_gltf)} position="0,0,0"',
-            '              orientation="0,0,90" scale="1.0" />',
-        ])
+        lines.extend(
+            [
+                "    <!-- draw_floor is false because indoor.gltf carries its own floor",
+                "         slab; the built-in one would z-fight with it. -->",
+                '    <photorealism id="pr" backend="vulkan" draw_floor="false">',
+                '      <skybox color="0.53,0.71,0.92" />',
+                "      <!-- Bright overcast, not direct sun. The building has walls but",
+                "           no ceiling, so whatever is in the sky lights the rooms, and",
+                "           the exposure has to be set for it: the renderer is",
+                "           physically based, so illuminance and exposure are one",
+                "           setting made in two places. Filament exposes EV =",
+                "           log2(N^2/t * 100/S), which at f/4, 1/250 s, ISO 100 is",
+                "           EV 12, the right value for roughly 15 klux. The first",
+                "           version of this file paired 70 klux with EV 10.9 and every",
+                "           camera returned a white frame with the geometry burned out",
+                "           of it, while depth and segmentation looked perfect: nothing",
+                "           downstream of a physically based renderer notices that the",
+                "           photograph is unusable. -->",
+                '      <sun direction="0.35,0.25,-0.90" intensity="15000"',
+                '           cast_shadows="true" />',
+                '      <exposure aperture="4" shutter_speed="0.004" sensitivity="100" />',
+                "      <lights>",
+                '        <point position="-9,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="-3,7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="3,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="9,7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="-9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="-3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="3,-7,2.2" intensity="6000" falloff="9" color="1.0,0.96,0.90" />',
+                '        <point position="9,-7,2.2" intensity="6000" falloff="9" color="0.95,0.97,1.0" />',
+                '        <point position="0,0,2.3" intensity="8000" falloff="14" color="1.0,0.98,0.95" />',
+                "      </lights>",
+                "      <scenery>",
+                f'        <prop model={_attr(world_gltf)} position="0,0,0"',
+                '              orientation="0,0,90" scale="1.0" />',
+            ]
+        )
 
         for (x, y, yaw), name in zip(placements, classes):
             model = f"{props_dir}/{name}.glb"
             orientation = _vec(math.degrees(yaw), 0.0, 90.0)
             lines.append(
-                f'        <prop model={_attr(model)} '
-                f'position={_attr(_vec(x, y, 0.0))} '
+                f"        <prop model={_attr(model)} "
+                f"position={_attr(_vec(x, y, 0.0))} "
                 f'orientation={_attr(orientation)} scale="1.0" />'
             )
 
-        lines.extend([
-            "      </scenery>",
-            "    </photorealism>",
-            "  </media>",
-        ])
+        lines.extend(
+            [
+                "      </scenery>",
+                "    </photorealism>",
+                "  </media>",
+            ]
+        )
 
     if not headless:
         if is_bistro:
-            lines.extend([
-                "",
-                "  <visualization>",
-                '    <filament medium="pr" resolution="1280,720" speed="1"',
-                '              near="0.3" far="400"',
-                '              position="-7.25,-12.75,3.0" look_at="-9.5,0.5,1.2" />',
-                "  </visualization>",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "  <visualization>",
+                    '    <filament medium="pr" resolution="1280,720" speed="1"',
+                    '              near="0.3" far="400"',
+                    '              position="-7.25,-12.75,3.0" look_at="-9.5,0.5,1.2" />',
+                    "  </visualization>",
+                ]
+            )
         else:
-            lines.extend([
-                "",
-                "  <visualization>",
-                '    <filament medium="pr" resolution="1280,720" speed="1"',
-                '              near="0.3" far="80"',
-                '              position="0,-20,14" look_at="0,0,1" />',
-                "  </visualization>",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "  <visualization>",
+                    '    <filament medium="pr" resolution="1280,720" speed="1"',
+                    '              near="0.3" far="80"',
+                    '              position="0,-20,14" look_at="0,0,1" />',
+                    "  </visualization>",
+                ]
+            )
 
     lines.extend(["", "</argos-configuration>", ""])
     return "\n".join(lines)
@@ -572,38 +625,64 @@ def main() -> int:
     ap.add_argument("--config", required=True, help="SwarmDeck session YAML")
     ap.add_argument("-o", "--output", default="session.argos")
     ap.add_argument("--robots", type=int, default=None, help="Override robot count")
-    ap.add_argument("--world", default="indoor.gltf",
-                    help="Path to the generated world glTF, or world name, as ARGoS will "
-                         "resolve it (relative paths are relative to the "
-                         "working directory argos3 runs in)")
-    ap.add_argument("--bistro-dir", default=None,
-                    help="Directory holding Bistro assets (bistro_exterior.glb, etc.)")
-    ap.add_argument("--props-dir", default="props",
-                    help="Directory holding the detection-target models")
-    ap.add_argument("--targets", type=int, default=10,
-                    help="How many detection targets to place; classes are "
-                         "assigned round robin from the catalog")
+    ap.add_argument(
+        "--world",
+        default="indoor.gltf",
+        help="Path to the generated world glTF, or world name, as ARGoS will "
+        "resolve it (relative paths are relative to the "
+        "working directory argos3 runs in)",
+    )
+    ap.add_argument(
+        "--bistro-dir",
+        default=None,
+        help="Directory holding Bistro assets (bistro_exterior.glb, etc.)",
+    )
+    ap.add_argument(
+        "--props-dir",
+        default="props",
+        help="Directory holding the detection-target models",
+    )
+    ap.add_argument(
+        "--targets",
+        type=int,
+        default=10,
+        help="How many detection targets to place; classes are "
+        "assigned round robin from the catalog",
+    )
     ap.add_argument("--socket", default=f"{RUNTIME_DIR}/argos.sock")
     ap.add_argument("--uf-socket", default=f"{RUNTIME_DIR}/uf.sock")
     ap.add_argument("--headless", action="store_true", default=True)
-    ap.add_argument("--odometry", choices=("external", "drift"), default="external",
-                    help="external (default): Ultra-Fusion, a real "
-                         "lidar-inertial front-end running outside ARGoS, so "
-                         "the drift is drift something actually made. "
-                         "drift: ARGoS's synthetic <odometry "
-                         "implementation=\"drift\">, which perturbs "
-                         "ground-truth motion with Gaussian noise. About 4x "
-                         "faster, because it removes the estimator from the "
-                         "lockstep exchange, and correspondingly less "
-                         "faithful: a Gaussian cannot slip a wheel against an "
-                         "obstacle or lose a scan to degeneracy, which are the "
-                         "failures swarmdeck-slam exists to survive. For "
-                         "development and for frame capture, not for judging "
-                         "mapping quality.")
-    ap.add_argument("--no-estimator", dest="odometry", action="store_const",
-                    const="drift", help="Deprecated alias for --odometry drift.")
-    ap.add_argument("--gui", dest="headless", action="store_false",
-                    help="Add the interactive Filament viewer")
+    ap.add_argument(
+        "--odometry",
+        choices=("external", "drift"),
+        default="external",
+        help="external (default): Ultra-Fusion, a real "
+        "lidar-inertial front-end running outside ARGoS, so "
+        "the drift is drift something actually made. "
+        "drift: ARGoS's synthetic <odometry "
+        'implementation="drift">, which perturbs '
+        "ground-truth motion with Gaussian noise. About 4x "
+        "faster, because it removes the estimator from the "
+        "lockstep exchange, and correspondingly less "
+        "faithful: a Gaussian cannot slip a wheel against an "
+        "obstacle or lose a scan to degeneracy, which are the "
+        "failures swarmdeck-slam exists to survive. For "
+        "development and for frame capture, not for judging "
+        "mapping quality.",
+    )
+    ap.add_argument(
+        "--no-estimator",
+        dest="odometry",
+        action="store_const",
+        const="drift",
+        help="Deprecated alias for --odometry drift.",
+    )
+    ap.add_argument(
+        "--gui",
+        dest="headless",
+        action="store_false",
+        help="Add the interactive Filament viewer",
+    )
     args = ap.parse_args()
 
     cfg_path = Path(args.config)

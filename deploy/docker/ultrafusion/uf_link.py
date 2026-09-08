@@ -52,6 +52,7 @@ so the cloud is forwarded as an opaque blob with no repacking.
 Usage:
   uf_link.py --socket /tmp/argos_uf.sock [--lockstep-timeout 5.0]
 """
+
 import argparse
 import math
 import os
@@ -64,7 +65,14 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import Image, CompressedImage, CameraInfo, Imu, PointCloud2, PointField
+from sensor_msgs.msg import (
+    Image,
+    CompressedImage,
+    CameraInfo,
+    Imu,
+    PointCloud2,
+    PointField,
+)
 from nav_msgs.msg import Odometry, Path
 from rosgraph_msgs.msg import Clock
 
@@ -111,19 +119,23 @@ class RobotIO:
     """
 
     def __init__(self, node, robot):
-        qos = QoSProfile(depth=10,
-                         reliability=ReliabilityPolicy.RELIABLE,
-                         history=HistoryPolicy.KEEP_LAST)
+        qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         self.robot = robot
         self.frame_id = "%s/base_link" % robot
         self.color = node.create_publisher(
-            CompressedImage, "/%s/color/image_raw/compressed" % robot, qos)
+            CompressedImage, "/%s/color/image_raw/compressed" % robot, qos
+        )
         self.info = node.create_publisher(
-            CameraInfo, "/%s/color/camera_info" % robot, qos)
+            CameraInfo, "/%s/color/camera_info" % robot, qos
+        )
         self.depth = node.create_publisher(
-            Image, "/%s/aligned_depth_to_color/image_raw" % robot, qos)
-        self.points = node.create_publisher(
-            PointCloud2, "/%s/points" % robot, qos)
+            Image, "/%s/aligned_depth_to_color/image_raw" % robot, qos
+        )
+        self.points = node.create_publisher(PointCloud2, "/%s/points" % robot, qos)
         self.imu = node.create_publisher(Imu, "/%s/imu" % robot, qos)
         self.wheel = node.create_publisher(Odometry, "/%s/odom" % robot, qos)
         # The fused estimate coming back out of uf_node.
@@ -134,9 +146,11 @@ class RobotIO:
         # this would look exactly like an estimator that never
         # converged. BEST_EFFORT matches either. Losing the odd pose
         # costs nothing here: only the newest one is ever used.
-        estimate_qos = QoSProfile(depth=10,
-                                  reliability=ReliabilityPolicy.BEST_EFFORT,
-                                  history=HistoryPolicy.KEEP_LAST)
+        estimate_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+        )
         # Where the pose comes back depends on the FUSION MODE, and
         # nothing documents it:
         #
@@ -148,11 +162,13 @@ class RobotIO:
         # link mode-agnostic. Subscribing only to /odom_lidar in a
         # visual run looks exactly like an estimator that never
         # converged, even while it is happily writing poses to disk.
-        self.estimate = None          # (stamp_ns, pos, quat, twist)
+        self.estimate = None  # (stamp_ns, pos, quat, twist)
         self.sub_odom = node.create_subscription(
-            Odometry, "/%s/odom_lidar" % robot, self.on_odometry, estimate_qos)
+            Odometry, "/%s/odom_lidar" % robot, self.on_odometry, estimate_qos
+        )
         self.sub_path = node.create_subscription(
-            Path, "/%s/result_path" % robot, self.on_path, estimate_qos)
+            Path, "/%s/result_path" % robot, self.on_path, estimate_qos
+        )
 
     @staticmethod
     def _stamp_ns(header):
@@ -165,10 +181,12 @@ class RobotIO:
 
     def on_odometry(self, msg):
         p, q, t = msg.pose.pose.position, msg.pose.pose.orientation, msg.twist.twist
-        self._offer(self._stamp_ns(msg.header),
-                    (p.x, p.y, p.z), (q.w, q.x, q.y, q.z),
-                    (t.linear.x, t.linear.y, t.linear.z,
-                     t.angular.x, t.angular.y, t.angular.z))
+        self._offer(
+            self._stamp_ns(msg.header),
+            (p.x, p.y, p.z),
+            (q.w, q.x, q.y, q.z),
+            (t.linear.x, t.linear.y, t.linear.z, t.angular.x, t.angular.y, t.angular.z),
+        )
 
     def on_path(self, msg):
         if not msg.poses:
@@ -178,8 +196,9 @@ class RobotIO:
         last = msg.poses[-1]
         p, q = last.pose.position, last.pose.orientation
         stamp = self._stamp_ns(last.header) or self._stamp_ns(msg.header)
-        self._offer(stamp, (p.x, p.y, p.z), (q.w, q.x, q.y, q.z),
-                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self._offer(
+            stamp, (p.x, p.y, p.z), (q.w, q.x, q.y, q.z), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        )
 
 
 class Link(Node):
@@ -222,7 +241,8 @@ class Link(Node):
         self.get_logger().info(
             "ARGoS disconnected after %d ticks: %d camera frames, %d lidar "
             "scans published, %d poses returned"
-            % (self.ticks, self.frames, self.scans, self.poses_returned))
+            % (self.ticks, self.frames, self.scans, self.poses_returned)
+        )
 
     def handle_tick(self, conn):
         head = recv_exactly(conn, 4 + 4 + 4 + 1 + 4)
@@ -266,7 +286,8 @@ class Link(Node):
             rclpy.spin_once(self, timeout_sec=0.005)
         self.get_logger().warning(
             "lockstep: no pose for every robot within %.1f s; releasing the "
-            "simulation with what is available" % self.lockstep_timeout)
+            "simulation with what is available" % self.lockstep_timeout
+        )
 
     def estimate_is_current(self, name, stamp_ns):
         est = self.robots[name].estimate
@@ -293,8 +314,9 @@ class Link(Node):
             # Back to a tick: the reverse of the stamp derivation above
             est_tick = int(round(est_ns * 1e-9 * self.ticks_per_second))
             out += struct.pack("<I", est_tick)
-            out += struct.pack("<7d", pos[0], pos[1], pos[2],
-                               quat[0], quat[1], quat[2], quat[3])
+            out += struct.pack(
+                "<7d", pos[0], pos[1], pos[2], quat[0], quat[1], quat[2], quat[3]
+            )
             out += struct.pack("<6d", *twist)
             out += struct.pack("<B", 1)
             self.poses_returned += 1
@@ -435,8 +457,16 @@ class Link(Node):
         msg.header.stamp.sec = sec
         msg.header.stamp.nanosec = nanosec
         msg.header.frame_id = pubs.frame_id
-        msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = v[0], v[1], v[2]
-        msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = v[3], v[4], v[5]
+        msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = (
+            v[0],
+            v[1],
+            v[2],
+        )
+        (
+            msg.linear_acceleration.x,
+            msg.linear_acceleration.y,
+            msg.linear_acceleration.z,
+        ) = (v[3], v[4], v[5])
         pubs.imu.publish(msg)
 
 
@@ -461,33 +491,42 @@ def png_encode_rgb(w, h, rgb, bgr=False):
     stride = w * 3
     for y in range(h):
         raw.append(0)
-        raw += rgb[y * stride:(y + 1) * stride]
+        raw += rgb[y * stride : (y + 1) * stride]
 
     def chunk(tag, payload):
         out = struct.pack(">I", len(payload)) + tag + payload
         return out + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
 
     header = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", header)
-            + chunk(b"IDAT", zlib.compress(bytes(raw), 1))
-            + chunk(b"IEND", b""))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 1))
+        + chunk(b"IEND", b"")
+    )
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--socket", default="/tmp/argos_uf.sock")
-    ap.add_argument("--depth-encoding", choices=("16UC1", "32FC1"),
-                    default="16UC1",
-                    help="16UC1 millimetres is the ROS convention for "
-                         "aligned_depth_to_color/image_raw and what the "
-                         "released profiles expect; 32FC1 metres is what the "
-                         "Swarm-SLAM bridge uses")
-    ap.add_argument("--lockstep-timeout", type=float, default=5.0,
-                    help="seconds to wait for a current pose when ARGoS asks "
-                         "for lockstep_pose before releasing it anyway")
+    ap.add_argument(
+        "--depth-encoding",
+        choices=("16UC1", "32FC1"),
+        default="16UC1",
+        help="16UC1 millimetres is the ROS convention for "
+        "aligned_depth_to_color/image_raw and what the "
+        "released profiles expect; 32FC1 metres is what the "
+        "Swarm-SLAM bridge uses",
+    )
+    ap.add_argument(
+        "--lockstep-timeout",
+        type=float,
+        default=5.0,
+        help="seconds to wait for a current pose when ARGoS asks "
+        "for lockstep_pose before releasing it anyway",
+    )
     args = ap.parse_args()
 
     rclpy.init()

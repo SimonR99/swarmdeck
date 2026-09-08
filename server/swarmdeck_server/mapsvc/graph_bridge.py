@@ -152,7 +152,9 @@ def delete_robot(robot_id: str) -> tuple[int, dict[str, Any]]:
             payload = json.loads(exc.read().decode())
         except Exception:
             payload = {"error": str(exc)}
-        return int(exc.code), payload if isinstance(payload, dict) else {"error": str(exc)}
+        return int(exc.code), (
+            payload if isinstance(payload, dict) else {"error": str(exc)}
+        )
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         return 503, {"error": str(exc)}
 
@@ -179,7 +181,9 @@ def fetch_json(path: str, timeout: float = 2.0) -> tuple[int, dict[str, Any]]:
         return 503, {"error": str(exc)}
 
 
-def put_json(path: str, payload: dict[str, Any], timeout: float = 2.0) -> tuple[int, dict[str, Any]]:
+def put_json(
+    path: str, payload: dict[str, Any], timeout: float = 2.0
+) -> tuple[int, dict[str, Any]]:
     """PUT JSON to the slam process."""
     if not SLAM_URL:
         return 503, {"error": "slam service is not configured"}

@@ -128,7 +128,9 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
     ):
         from ..mapsvc import graph_bridge
 
-        code, graph_delete = await asyncio.to_thread(graph_bridge.delete_robot, robot_id)
+        code, graph_delete = await asyncio.to_thread(
+            graph_bridge.delete_robot, robot_id
+        )
         if code < 200 or code >= 300:
             return JSONResponse(
                 {
@@ -338,9 +340,7 @@ async def post_costmap(request: Request) -> Any:
     if not rid:
         return JSONResponse({"error": "robot_id required"}, status_code=400)
     if kind not in {"global", "local"}:
-        return JSONResponse(
-            {"error": "kind must be global or local"}, status_code=400
-        )
+        return JSONResponse({"error": "kind must be global or local"}, status_code=400)
     try:
         resolution = float(request.query_params.get("resolution", 0.0))
         width = int(request.query_params.get("width", 0))
@@ -358,7 +358,9 @@ async def post_costmap(request: Request) -> Any:
         or not math.isfinite(origin_x)
         or not math.isfinite(origin_y)
     ):
-        return JSONResponse({"error": "invalid costmap dimensions or geometry"}, status_code=400)
+        return JSONResponse(
+            {"error": "invalid costmap dimensions or geometry"}, status_code=400
+        )
 
     try:
         raw = _inflate(await request.body())
@@ -672,7 +674,9 @@ async def get_slam_backend() -> Any:
     """Operator view of the pose-graph process: status, merge knobs, reachability."""
     from ..mapsvc import graph_bridge
 
-    status_code, status_body = await asyncio.to_thread(graph_bridge.fetch_json, "/status")
+    status_code, status_body = await asyncio.to_thread(
+        graph_bridge.fetch_json, "/status"
+    )
     config_code, config_body = (503, {})
     if status_code == 200:
         config_code, config_body = await asyncio.to_thread(

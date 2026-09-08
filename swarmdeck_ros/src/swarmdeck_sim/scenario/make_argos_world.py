@@ -56,13 +56,19 @@ Vec3 = tuple[float, float, float]
 # glTF writer
 # --------------------------------------------------------------------------
 
+
 class Material:
     """One PBR material. Equality is by value so parts can share slots."""
 
     __slots__ = ("name", "color", "roughness", "metallic")
 
-    def __init__(self, name: str, color: Sequence[float],
-                 roughness: float = 0.8, metallic: float = 0.0):
+    def __init__(
+        self,
+        name: str,
+        color: Sequence[float],
+        roughness: float = 0.8,
+        metallic: float = 0.0,
+    ):
         self.name = name
         self.color = tuple(color)
         self.roughness = roughness
@@ -102,8 +108,9 @@ class GLTFBuilder:
             self._materials[mat.name] = mat
         return self._groups[mat.name]
 
-    def add_tri(self, mat: Material, p0: Vec3, p1: Vec3, p2: Vec3,
-                normal: Vec3 | None = None) -> None:
+    def add_tri(
+        self, mat: Material, p0: Vec3, p1: Vec3, p2: Vec3, normal: Vec3 | None = None
+    ) -> None:
         pos, nrm, idx = self._group(mat)
         if normal is None:
             ux, uy, uz = (p1[i] - p0[i] for i in range(3))
@@ -117,47 +124,70 @@ class GLTFBuilder:
             nrm.extend(normal)
         idx.extend([start, start + 1, start + 2])
 
-    def add_quad(self, mat: Material, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3,
-                 normal: Vec3 | None = None) -> None:
+    def add_quad(
+        self,
+        mat: Material,
+        p0: Vec3,
+        p1: Vec3,
+        p2: Vec3,
+        p3: Vec3,
+        normal: Vec3 | None = None,
+    ) -> None:
         self.add_tri(mat, p0, p1, p2, normal)
         self.add_tri(mat, p0, p2, p3, normal)
 
-    def add_box(self, mat: Material, centre: Vec3, size: Vec3,
-                yaw: float = 0.0) -> None:
+    def add_box(
+        self, mat: Material, centre: Vec3, size: Vec3, yaw: float = 0.0
+    ) -> None:
         """Axis-aligned box, optionally rotated about z by `yaw` radians."""
         hx, hy, hz = (s / 2.0 for s in size)
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
 
         def place(x: float, y: float, z: float) -> Vec3:
-            return (centre[0] + x * cos_y - y * sin_y,
-                    centre[1] + x * sin_y + y * cos_y,
-                    centre[2] + z)
+            return (
+                centre[0] + x * cos_y - y * sin_y,
+                centre[1] + x * sin_y + y * cos_y,
+                centre[2] + z,
+            )
 
         def normal(x: float, y: float, z: float) -> Vec3:
             return (x * cos_y - y * sin_y, x * sin_y + y * cos_y, z)
 
         corners = {
             (sx, sy, sz): place(sx * hx, sy * hy, sz * hz)
-            for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)
+            for sx in (-1, 1)
+            for sy in (-1, 1)
+            for sz in (-1, 1)
         }
         faces = (
-            (( 1,  0,  0), (( 1, -1, -1), ( 1,  1, -1), ( 1,  1,  1), ( 1, -1,  1))),
-            ((-1,  0,  0), ((-1,  1, -1), (-1, -1, -1), (-1, -1,  1), (-1,  1,  1))),
-            (( 0,  1,  0), (( 1,  1, -1), (-1,  1, -1), (-1,  1,  1), ( 1,  1,  1))),
-            (( 0, -1,  0), ((-1, -1, -1), ( 1, -1, -1), ( 1, -1,  1), (-1, -1,  1))),
-            (( 0,  0,  1), ((-1, -1,  1), ( 1, -1,  1), ( 1,  1,  1), (-1,  1,  1))),
-            (( 0,  0, -1), ((-1,  1, -1), ( 1,  1, -1), ( 1, -1, -1), (-1, -1, -1))),
+            ((1, 0, 0), ((1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1))),
+            ((-1, 0, 0), ((-1, 1, -1), (-1, -1, -1), (-1, -1, 1), (-1, 1, 1))),
+            ((0, 1, 0), ((1, 1, -1), (-1, 1, -1), (-1, 1, 1), (1, 1, 1))),
+            ((0, -1, 0), ((-1, -1, -1), (1, -1, -1), (1, -1, 1), (-1, -1, 1))),
+            ((0, 0, 1), ((-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1))),
+            ((0, 0, -1), ((-1, 1, -1), (1, 1, -1), (1, -1, -1), (-1, -1, -1))),
         )
         for n, quad in faces:
             self.add_quad(mat, *(corners[c] for c in quad), normal(*n))
 
-    def add_cylinder(self, mat: Material, centre: Vec3, radius: float,
-                     height: float, sections: int = 24) -> None:
+    def add_cylinder(
+        self,
+        mat: Material,
+        centre: Vec3,
+        radius: float,
+        height: float,
+        sections: int = 24,
+    ) -> None:
         """Z-axis cylinder, `centre` at its mid-height."""
         cx, cy, cz = centre
         z0, z1 = cz - height / 2.0, cz + height / 2.0
-        ring = [(math.cos(2.0 * math.pi * i / sections),
-                 math.sin(2.0 * math.pi * i / sections)) for i in range(sections)]
+        ring = [
+            (
+                math.cos(2.0 * math.pi * i / sections),
+                math.sin(2.0 * math.pi * i / sections),
+            )
+            for i in range(sections)
+        ]
         for i in range(sections):
             ax, ay = ring[i]
             bx, by = ring[(i + 1) % sections]
@@ -168,21 +198,30 @@ class GLTFBuilder:
             # Side, with per-vertex-ish normals approximated per face.
             mid = ((ax + bx) / 2.0, (ay + by) / 2.0)
             length = math.hypot(*mid) or 1.0
-            self.add_quad(mat, pa0, pb0, pb1, pa1,
-                          (mid[0] / length, mid[1] / length, 0.0))
+            self.add_quad(
+                mat, pa0, pb0, pb1, pa1, (mid[0] / length, mid[1] / length, 0.0)
+            )
             self.add_tri(mat, (cx, cy, z1), pa1, pb1, (0.0, 0.0, 1.0))
             self.add_tri(mat, (cx, cy, z0), pb0, pa0, (0.0, 0.0, -1.0))
 
-    def add_sphere(self, mat: Material, centre: Vec3, radius: float,
-                   segments: int = 20, rings: int = 12,
-                   scale: Vec3 = (1.0, 1.0, 1.0)) -> None:
+    def add_sphere(
+        self,
+        mat: Material,
+        centre: Vec3,
+        radius: float,
+        segments: int = 20,
+        rings: int = 12,
+        scale: Vec3 = (1.0, 1.0, 1.0),
+    ) -> None:
         """UV sphere, optionally scaled per axis into an ellipsoid."""
         cx, cy, cz = centre
 
         def point(lat: float, lon: float) -> Vec3:
-            return (cx + radius * scale[0] * math.sin(lat) * math.cos(lon),
-                    cy + radius * scale[1] * math.sin(lat) * math.sin(lon),
-                    cz + radius * scale[2] * math.cos(lat))
+            return (
+                cx + radius * scale[0] * math.sin(lat) * math.cos(lon),
+                cy + radius * scale[1] * math.sin(lat) * math.sin(lon),
+                cz + radius * scale[2] * math.cos(lat),
+            )
 
         for r in range(rings):
             lat0 = math.pi * r / rings
@@ -233,8 +272,14 @@ class GLTFBuilder:
                     blob.append(0)
                 offset = len(blob)
                 blob.extend(payload)
-                views.append({"buffer": 0, "byteOffset": offset,
-                              "byteLength": len(payload), "target": target})
+                views.append(
+                    {
+                        "buffer": 0,
+                        "byteOffset": offset,
+                        "byteLength": len(payload),
+                        "target": target,
+                    }
+                )
                 return len(views) - 1
 
             pos_view = emit(struct.pack(f"<{len(flat_pos)}f", *flat_pos), 34962)
@@ -242,20 +287,41 @@ class GLTFBuilder:
             idx_view = emit(struct.pack(f"<{len(idx)}I", *idx), 34963)
 
             count = len(flat_pos) // 3
-            accessors.append({"bufferView": pos_view, "componentType": 5126,
-                              "count": count, "type": "VEC3",
-                              "min": mins, "max": maxs})
-            accessors.append({"bufferView": nrm_view, "componentType": 5126,
-                              "count": count, "type": "VEC3"})
-            accessors.append({"bufferView": idx_view, "componentType": 5125,
-                              "count": len(idx), "type": "SCALAR"})
+            accessors.append(
+                {
+                    "bufferView": pos_view,
+                    "componentType": 5126,
+                    "count": count,
+                    "type": "VEC3",
+                    "min": mins,
+                    "max": maxs,
+                }
+            )
+            accessors.append(
+                {
+                    "bufferView": nrm_view,
+                    "componentType": 5126,
+                    "count": count,
+                    "type": "VEC3",
+                }
+            )
+            accessors.append(
+                {
+                    "bufferView": idx_view,
+                    "componentType": 5125,
+                    "count": len(idx),
+                    "type": "SCALAR",
+                }
+            )
             base = len(accessors) - 3
-            primitives.append({
-                "attributes": {"POSITION": base, "NORMAL": base + 1},
-                "indices": base + 2,
-                "material": mat_index,
-                "mode": 4,
-            })
+            primitives.append(
+                {
+                    "attributes": {"POSITION": base, "NORMAL": base + 1},
+                    "indices": base + 2,
+                    "material": mat_index,
+                    "mode": 4,
+                }
+            )
 
         gltf = {
             "asset": {"version": "2.0", "generator": "SwarmDeck make_argos_world"},
@@ -281,8 +347,9 @@ class GLTFBuilder:
     def export_glb(self, path: Path) -> None:
         blob, gltf = self._pack()
         gltf["buffers"] = [{"byteLength": len(blob)}]
-        json_chunk = json.dumps(gltf, sort_keys=True,
-                                separators=(",", ":")).encode("utf-8")
+        json_chunk = json.dumps(gltf, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         json_chunk += b" " * (-len(json_chunk) % 4)
         bin_chunk = blob + b"\x00" * (-len(blob) % 4)
         total = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
@@ -341,11 +408,15 @@ def build_chair(mesh: GLTFBuilder, x: float, y: float, yaw: float) -> None:
     mesh.add_box(CHAIR_LEG, (x, y, 0.21), (0.38, 0.38, 0.42), yaw)
 
 
-def build_painting(mesh: GLTFBuilder, x: float, y: float, z: float,
-                   yaw: float, color: str) -> None:
+def build_painting(
+    mesh: GLTFBuilder, x: float, y: float, z: float, yaw: float, color: str
+) -> None:
     mesh.add_box(FRAME, (x, y, z), (1.15, 0.055, 0.78), yaw)
-    canvas = Material(f"canvas_{color.replace(' ', '_').replace('.', '')}",
-                      tuple(float(c) for c in color.split()), roughness=0.75)
+    canvas = Material(
+        f"canvas_{color.replace(' ', '_').replace('.', '')}",
+        tuple(float(c) for c in color.split()),
+        roughness=0.75,
+    )
     cx = x - 0.032 * -math.sin(yaw)
     cy = y - 0.032 * math.cos(yaw)
     mesh.add_box(canvas, (cx, cy, z), (0.98, 0.018, 0.61), yaw)
@@ -386,12 +457,17 @@ def build_indoor_world(floor: bool = True) -> GLTFBuilder:
     """
     mesh = GLTFBuilder()
     if floor:
-        mesh.add_box(FLOOR, (0.0, 0.0, -FLOOR_THICKNESS / 2.0),
-                     (FLOOR_HALF * 2.0, FLOOR_HALF * 2.0, FLOOR_THICKNESS))
+        mesh.add_box(
+            FLOOR,
+            (0.0, 0.0, -FLOOR_THICKNESS / 2.0),
+            (FLOOR_HALF * 2.0, FLOOR_HALF * 2.0, FLOOR_THICKNESS),
+        )
     for x0, y0, x1, y1 in LAYOUT:
-        mesh.add_box(WALL,
-                     ((x0 + x1) / 2.0, (y0 + y1) / 2.0, WALL_H / 2.0),
-                     (abs(x1 - x0), abs(y1 - y0), WALL_H))
+        mesh.add_box(
+            WALL,
+            ((x0 + x1) / 2.0, (y0 + y1) / 2.0, WALL_H / 2.0),
+            (abs(x1 - x0), abs(y1 - y0), WALL_H),
+        )
     for kind, _index, args in FURNITURE:
         _FURNITURE_BUILDERS[kind](mesh, *args)
     return mesh
@@ -429,8 +505,7 @@ def make_rubber_duck() -> GLTFBuilder:
     # about 9 cm, which is the one dimension where the two backends' ducks
     # differ; it is here because recognisability is the entire reason for
     # switching to a rendered scene, and a tailless sphere reads as a ball.
-    mesh.add_sphere(DUCK_BODY, (-0.160, 0.0, 0.245), 0.085,
-                    scale=(1.2, 0.75, 0.85))
+    mesh.add_sphere(DUCK_BODY, (-0.160, 0.0, 0.245), 0.085, scale=(1.2, 0.75, 0.85))
     mesh.add_box(DUCK_BEAK, (0.215, 0.0, 0.325), (0.10, 0.105, 0.045))
     for side in (1.0, -1.0):
         mesh.add_sphere(DUCK_EYE, (0.18, side * 0.078, 0.378), 0.018)
@@ -456,8 +531,9 @@ def make_disc_cone() -> GLTFBuilder:
     # dips below z=0: a prop that sinks through the floor is invisible to a
     # lidar looking at it edge-on and pokes out of the underside of the world.
     mesh.add_cylinder(CONE_ORANGE, (0.0, 0.0, 0.004), 0.095, 0.008, sections=32)
-    mesh.add_sphere(CONE_ORANGE, (0.0, 0.0, 0.0341), 0.062,
-                    scale=(1.0, 1.0, 0.55), rings=8)
+    mesh.add_sphere(
+        CONE_ORANGE, (0.0, 0.0, 0.0341), 0.062, scale=(1.0, 1.0, 0.55), rings=8
+    )
     return mesh
 
 
@@ -466,8 +542,7 @@ def make_filament_spool() -> GLTFBuilder:
     # Lying flat on its lower rim, which is how a spool sits on a bench. The
     # stack is measured from the floor up (lower rim 0.000..0.006) rather than
     # from an arbitrary centre, or the whole prop floats.
-    mesh.add_cylinder(SPOOL_FILAMENT, (0.0, 0.0, 0.033), 0.088, 0.055,
-                      sections=32)
+    mesh.add_cylinder(SPOOL_FILAMENT, (0.0, 0.0, 0.033), 0.088, 0.055, sections=32)
     for z in (0.003, 0.063):
         mesh.add_cylinder(SPOOL_RIM, (0.0, 0.0, z), 0.100, 0.006, sections=32)
     mesh.add_cylinder(SPOOL_RIM, (0.0, 0.0, 0.033), 0.028, 0.062, sections=20)
@@ -484,13 +559,20 @@ def make_pool_noodle() -> GLTFBuilder:
         a1 = 2.0 * math.pi * (i + 1) / sections
         y0, z0 = math.cos(a0) * radius, math.sin(a0) * radius + radius
         y1, z1 = math.cos(a1) * radius, math.sin(a1) * radius + radius
-        mesh.add_quad(NOODLE_FOAM,
-                      (-length / 2.0, y0, z0), (length / 2.0, y0, z0),
-                      (length / 2.0, y1, z1), (-length / 2.0, y1, z1))
-        for end, normal in ((-length / 2.0, (-1.0, 0.0, 0.0)),
-                            (length / 2.0, (1.0, 0.0, 0.0))):
-            mesh.add_tri(NOODLE_FOAM, (end, 0.0, radius), (end, y0, z0),
-                         (end, y1, z1), normal)
+        mesh.add_quad(
+            NOODLE_FOAM,
+            (-length / 2.0, y0, z0),
+            (length / 2.0, y0, z0),
+            (length / 2.0, y1, z1),
+            (-length / 2.0, y1, z1),
+        )
+        for end, normal in (
+            (-length / 2.0, (-1.0, 0.0, 0.0)),
+            (length / 2.0, (1.0, 0.0, 0.0)),
+        ):
+            mesh.add_tri(
+                NOODLE_FOAM, (end, 0.0, radius), (end, y0, z0), (end, y1, z1), normal
+            )
     return mesh
 
 
@@ -524,21 +606,34 @@ def generate_props(outdir: Path) -> list[Path]:
         mesh = factory()
         mesh.export_glb(path)
         written.append(path)
-        print(f"[props] {path.name}: {mesh.triangle_count} triangles, "
-              f"{path.stat().st_size / 1024:.1f} KiB")
+        print(
+            f"[props] {path.name}: {mesh.triangle_count} triangles, "
+            f"{path.stat().st_size / 1024:.1f} KiB"
+        )
     return written
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--seed", type=int, default=20260801,
-                    help="Floor plan seed; the same seed gives the same bytes.")
-    ap.add_argument("-o", "--output",
-                    default=str(HERE.parent / "worlds" / "indoor.gltf"),
-                    help="Output .gltf path; the .bin lands beside it.")
-    ap.add_argument("--props", metavar="DIR", default=None,
-                    help="Regenerate the committed detection-target models "
-                         "into DIR instead of building the world.")
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=20260801,
+        help="Floor plan seed; the same seed gives the same bytes.",
+    )
+    ap.add_argument(
+        "-o",
+        "--output",
+        default=str(HERE.parent / "worlds" / "indoor.gltf"),
+        help="Output .gltf path; the .bin lands beside it.",
+    )
+    ap.add_argument(
+        "--props",
+        metavar="DIR",
+        default=None,
+        help="Regenerate the committed detection-target models "
+        "into DIR instead of building the world.",
+    )
     args = ap.parse_args()
 
     if args.props:
@@ -551,11 +646,14 @@ def main() -> int:
     collision = build_indoor_world(floor=False)
     collision_out = collision_path(out)
     collision.export_gltf(collision_out)
-    print(f"[world] seed={args.seed} walls={len(LAYOUT)} "
-          f"furniture={len(FURNITURE)}")
+    print(
+        f"[world] seed={args.seed} walls={len(LAYOUT)} " f"furniture={len(FURNITURE)}"
+    )
     print(f"[world]   visual    {visual.triangle_count} triangles -> {out}")
-    print(f"[world]   collision {collision.triangle_count} triangles -> "
-          f"{collision_out}  (no floor slab; see build_indoor_world)")
+    print(
+        f"[world]   collision {collision.triangle_count} triangles -> "
+        f"{collision_out}  (no floor slab; see build_indoor_world)"
+    )
     return 0
 
 

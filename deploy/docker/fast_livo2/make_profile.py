@@ -49,7 +49,9 @@ def compute_camera_intrinsics(resolution_str: str, fov_deg: float) -> dict:
     }
 
 
-def compute_imu_noise(argos_noise: list[float] | None, imu_hz: float, scale: float = 3.0) -> dict:
+def compute_imu_noise(
+    argos_noise: list[float] | None, imu_hz: float, scale: float = 3.0
+) -> dict:
     """Converts ARGoS discrete per-sample IMU noise to continuous-time densities and covariances.
 
     ARGoS imu_default_sensor draws:
@@ -79,10 +81,10 @@ def compute_imu_noise(argos_noise: list[float] | None, imu_hz: float, scale: flo
         "acc_n": acc_n,
         "gyr_w": gyr_w,
         "acc_w": acc_w,
-        "cov_gyr": gyr_n ** 2,
-        "cov_acc": acc_n ** 2,
-        "cov_bias_gyr": gyr_w ** 2,
-        "cov_bias_acc": acc_w ** 2,
+        "cov_gyr": gyr_n**2,
+        "cov_acc": acc_n**2,
+        "cov_bias_gyr": gyr_w**2,
+        "cov_bias_acc": acc_w**2,
     }
 
 
@@ -153,13 +155,11 @@ def build_fast_livo_config(
             # LiDAR (x fwd, y left, z up) -> camera optical (x right, y down,
             # z fwd) is the fixed axis permutation; the offset is the LiDAR
             # origin expressed in the camera frame.
-            "Rcl": [0.0, -1.0, 0.0,
-                    0.0, 0.0, -1.0,
-                    1.0, 0.0, 0.0],
+            "Rcl": [0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0],
             "Pcl": [
                 -(float(lidar_in_body[1]) - float(camera_in_body[1])),
                 -(float(lidar_in_body[2]) - float(camera_in_body[2])),
-                 (float(lidar_in_body[0]) - float(camera_in_body[0])),
+                (float(lidar_in_body[0]) - float(camera_in_body[0])),
             ],
         },
         "preprocess": {
@@ -309,32 +309,72 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--out", required=True, help="output directory")
-    ap.add_argument("--lidar-in-body", nargs=3, type=float, default=[0.0, 0.0, 0.720],
-                    metavar=("X", "Y", "Z"), help="LiDAR position relative to body/IMU")
-    ap.add_argument("--camera-in-body", nargs=3, type=float, default=[0.15, 0.0, 0.620],
-                    metavar=("X", "Y", "Z"), help="Camera position relative to body/IMU")
-    ap.add_argument("--camera-resolution", default="320,240",
-                    help="Camera resolution as width,height")
-    ap.add_argument("--camera-fov", type=float, default=60.0,
-                    help="Camera vertical field of view in degrees")
-    ap.add_argument("--lidar-elev", nargs=2, type=float, default=[-15.0, 15.0],
-                    metavar=("MIN", "MAX"), help="LiDAR vertical elevation range")
+    ap.add_argument(
+        "--lidar-in-body",
+        nargs=3,
+        type=float,
+        default=[0.0, 0.0, 0.720],
+        metavar=("X", "Y", "Z"),
+        help="LiDAR position relative to body/IMU",
+    )
+    ap.add_argument(
+        "--camera-in-body",
+        nargs=3,
+        type=float,
+        default=[0.15, 0.0, 0.620],
+        metavar=("X", "Y", "Z"),
+        help="Camera position relative to body/IMU",
+    )
+    ap.add_argument(
+        "--camera-resolution",
+        default="320,240",
+        help="Camera resolution as width,height",
+    )
+    ap.add_argument(
+        "--camera-fov",
+        type=float,
+        default=60.0,
+        help="Camera vertical field of view in degrees",
+    )
+    ap.add_argument(
+        "--lidar-elev",
+        nargs=2,
+        type=float,
+        default=[-15.0, 15.0],
+        metavar=("MIN", "MAX"),
+        help="LiDAR vertical elevation range",
+    )
     ap.add_argument("--imu-hz", type=float, default=100.0, help="IMU publish frequency")
     ap.add_argument("--gravity", type=float, default=9.81, help="Gravity constant")
-    ap.add_argument("--argos-imu-noise", nargs=4, type=float, default=None,
-                    metavar=("GYRO", "ACCEL", "GYRO_WALK", "ACCEL_WALK"),
-                    help="ARGoS IMU noise parameters")
-    ap.add_argument("--imu-noise-scale", type=float, default=3.0,
-                    help="Safety margin multiplier for IMU noise")
+    ap.add_argument(
+        "--argos-imu-noise",
+        nargs=4,
+        type=float,
+        default=None,
+        metavar=("GYRO", "ACCEL", "GYRO_WALK", "ACCEL_WALK"),
+        help="ARGoS IMU noise parameters",
+    )
+    ap.add_argument(
+        "--imu-noise-scale",
+        type=float,
+        default=3.0,
+        help="Safety margin multiplier for IMU noise",
+    )
     ap.add_argument("--voxel", type=float, default=0.5, help="Voxel size in meters")
     ap.add_argument("--scan-line", type=int, default=17, help="Number of LiDAR rings")
-    ap.add_argument("--img-en", type=int, default=0,
-                    help="1 to fuse camera (LIVO); 0 for LiDAR-inertial only")
+    ap.add_argument(
+        "--img-en",
+        type=int,
+        default=0,
+        help="1 to fuse camera (LIVO); 0 for LiDAR-inertial only",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     intrinsics = compute_camera_intrinsics(args.camera_resolution, args.camera_fov)
-    imu_noise = compute_imu_noise(args.argos_imu_noise, args.imu_hz, args.imu_noise_scale)
+    imu_noise = compute_imu_noise(
+        args.argos_imu_noise, args.imu_hz, args.imu_noise_scale
+    )
 
     config = build_fast_livo_config(
         lidar_in_body=args.lidar_in_body,

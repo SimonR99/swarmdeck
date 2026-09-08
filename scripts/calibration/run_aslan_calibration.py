@@ -37,23 +37,31 @@ def check_sensor_health() -> None:
         print(f"  [WARN] ROS_DOMAIN_ID is '{domain_id}' (setting to 49 for Aslan)")
         os.environ["ROS_DOMAIN_ID"] = "49"
 
-    vn_dev = next((d for d in ("/dev/vectornav", "/dev/ttyUSB0") if os.path.exists(d)), None)
+    vn_dev = next(
+        (d for d in ("/dev/vectornav", "/dev/ttyUSB0") if os.path.exists(d)), None
+    )
     if vn_dev:
         print(f"  [OK] VectorNav serial device is present locally ({vn_dev})")
     else:
-        print("  [INFO] VectorNav serial not in local /dev (subscribing via ROS 2 topic /vectornav/imu)")
+        print(
+            "  [INFO] VectorNav serial not in local /dev (subscribing via ROS 2 topic /vectornav/imu)"
+        )
 
     ouster_ip = "192.168.2.118"
     try:
         with socket.create_connection((ouster_ip, 80), timeout=1.0):
             print(f"  [OK] Ouster LiDAR is reachable at {ouster_ip}:80 (HTTP API)")
     except (socket.timeout, ConnectionRefusedError, OSError):
-        print(f"  [INFO] Ouster LiDAR IP not directly routable from this host (checking via ROS 2 topics)")
+        print(
+            f"  [INFO] Ouster LiDAR IP not directly routable from this host (checking via ROS 2 topics)"
+        )
 
     if os.path.exists("/sys/class/net/can2"):
         print("  [OK] Bunker CAN interface can2 is present locally")
     else:
-        print("  [INFO] can2 not in local sysfs (subscribing via ROS 2 topic /bunker_status)")
+        print(
+            "  [INFO] can2 not in local sysfs (subscribing via ROS 2 topic /bunker_status)"
+        )
     print()
 
 
@@ -123,7 +131,10 @@ def main() -> None:
     check_sensor_health()
 
     sys.path.insert(0, str(REPO_ROOT / "scripts/calibration"))
-    from calibrate_imu_to_imu import run as run_dual_imu_calibration, emit_calibration_yaml
+    from calibrate_imu_to_imu import (
+        run as run_dual_imu_calibration,
+        emit_calibration_yaml,
+    )
 
     print("--> PHASE 1: Dual-IMU Gyro Calibration (VectorNav <-> Ouster)")
     imu_to_imu_res = run_dual_imu_calibration(
@@ -141,7 +152,9 @@ def main() -> None:
         R_lidar_vn = imu_to_imu_res["R_lidar_target"]
         t_lidar_vn = imu_to_imu_res["t_lidar_target"]
         calib_yaml = emit_calibration_yaml(R_lidar_vn, t_lidar_vn)
-        calib_file = REPO_ROOT / "adapters/adapter_ros2/config/aslan_superodom_calibration.yaml"
+        calib_file = (
+            REPO_ROOT / "adapters/adapter_ros2/config/aslan_superodom_calibration.yaml"
+        )
         print(f"\n[IMU Calibration] Writing calibration to {calib_file.name}...")
         calib_file.write_text(calib_yaml)
         print(f"  [OK] Saved {calib_file}")

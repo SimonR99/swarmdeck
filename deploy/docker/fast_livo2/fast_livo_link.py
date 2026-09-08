@@ -43,7 +43,14 @@ try:
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-    from sensor_msgs.msg import Image, CompressedImage, CameraInfo, Imu, PointCloud2, PointField
+    from sensor_msgs.msg import (
+        Image,
+        CompressedImage,
+        CameraInfo,
+        Imu,
+        PointCloud2,
+        PointField,
+    )
     from nav_msgs.msg import Odometry, Path
     from rosgraph_msgs.msg import Clock
 except ImportError:
@@ -127,28 +134,28 @@ class RobotIO:
         self.color_compressed = node.create_publisher(
             CompressedImage, f"/{robot}/color/image_raw/compressed", qos
         )
-        self.color_raw = node.create_publisher(
-            Image, f"/{robot}/color/image_raw", qos
-        )
+        self.color_raw = node.create_publisher(Image, f"/{robot}/color/image_raw", qos)
         self.info = node.create_publisher(
             CameraInfo, f"/{robot}/color/camera_info", qos
         )
-        self.points = node.create_publisher(
-            PointCloud2, f"/{robot}/points", qos
-        )
-        self.imu = node.create_publisher(
-            Imu, f"/{robot}/imu", qos
-        )
-        self.wheel = node.create_publisher(
-            Odometry, f"/{robot}/odom", qos
-        )
+        self.points = node.create_publisher(PointCloud2, f"/{robot}/points", qos)
+        self.imu = node.create_publisher(Imu, f"/{robot}/imu", qos)
+        self.wheel = node.create_publisher(Odometry, f"/{robot}/odom", qos)
 
         estimate_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
         )
-        self.estimate: tuple[int, tuple[float, float, float], tuple[float, float, float, float], tuple[float, ...]] | None = None
+        self.estimate: (
+            tuple[
+                int,
+                tuple[float, float, float],
+                tuple[float, float, float, float],
+                tuple[float, ...],
+            ]
+            | None
+        ) = None
 
         # Subscribe to standard Fast-LIVO2 and Fast-LIO odometry output topics
         self.sub_odom1 = node.create_subscription(
@@ -190,7 +197,9 @@ class RobotIO:
         p = last.pose.position
         q = last.pose.orientation
         stamp = self._stamp_ns(last.header) or self._stamp_ns(msg.header)
-        self._offer(stamp, (p.x, p.y, p.z), (q.w, q.x, q.y, q.z), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self._offer(
+            stamp, (p.x, p.y, p.z), (q.w, q.x, q.y, q.z), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        )
 
 
 class FastLivoLink(Node):
@@ -215,9 +224,13 @@ class FastLivoLink(Node):
         server.bind(self.socket_path)
         os.chmod(self.socket_path, 0o777)
         server.listen(1)
-        self.get_logger().info(f"Fast-LIVO2 Link listening for ARGoS on {self.socket_path}")
+        self.get_logger().info(
+            f"Fast-LIVO2 Link listening for ARGoS on {self.socket_path}"
+        )
         conn, _ = server.accept()
-        self.get_logger().info("ARGoS connected to Fast-LIVO2 Link; running in lockstep")
+        self.get_logger().info(
+            "ARGoS connected to Fast-LIVO2 Link; running in lockstep"
+        )
         try:
             while rclpy.ok():
                 if not self.handle_tick(conn):
@@ -288,7 +301,9 @@ class FastLivoLink(Node):
             est_ns, pos, quat, twist = est
             est_tick = int(round(est_ns * 1e-9 * self.ticks_per_second))
             out += struct.pack("<I", est_tick)
-            out += struct.pack("<7d", pos[0], pos[1], pos[2], quat[0], quat[1], quat[2], quat[3])
+            out += struct.pack(
+                "<7d", pos[0], pos[1], pos[2], quat[0], quat[1], quat[2], quat[3]
+            )
             out += struct.pack("<6d", *twist)
             out += struct.pack("<B", 1)
             self.poses_returned += 1
@@ -328,7 +343,16 @@ class FastLivoLink(Node):
         self.publish_imu(pubs, imu, sec, nanosec)
         return robot
 
-    def publish_frame(self, pubs: RobotIO, w: int, h: int, rgb: bytes, fov: float, sec: int, nanosec: int):
+    def publish_frame(
+        self,
+        pubs: RobotIO,
+        w: int,
+        h: int,
+        rgb: bytes,
+        fov: float,
+        sec: int,
+        nanosec: int,
+    ):
         # 1. Publish CompressedImage (bgr8; png compressed)
         img_c = CompressedImage()
         img_c.header.stamp.sec = sec
@@ -365,7 +389,9 @@ class FastLivoLink(Node):
         info.p = [fx, 0.0, w / 2.0, 0.0, 0.0, fy, h / 2.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         pubs.info.publish(info)
 
-    def publish_scan(self, pubs: RobotIO, n_points: int, blob: bytes, sec: int, nanosec: int):
+    def publish_scan(
+        self, pubs: RobotIO, n_points: int, blob: bytes, sec: int, nanosec: int
+    ):
         cloud = PointCloud2()
         cloud.header.stamp.sec = sec
         cloud.header.stamp.nanosec = nanosec
@@ -380,7 +406,9 @@ class FastLivoLink(Node):
         cloud.data = blob
         pubs.points.publish(cloud)
 
-    def publish_wheel(self, pubs: RobotIO, o: tuple[float, ...], sec: int, nanosec: int):
+    def publish_wheel(
+        self, pubs: RobotIO, o: tuple[float, ...], sec: int, nanosec: int
+    ):
         msg = Odometry()
         msg.header.stamp.sec = sec
         msg.header.stamp.nanosec = nanosec
@@ -400,8 +428,16 @@ class FastLivoLink(Node):
         msg.header.stamp.sec = sec
         msg.header.stamp.nanosec = nanosec
         msg.header.frame_id = pubs.frame_id
-        msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = v[0], v[1], v[2]
-        msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z = v[3], v[4], v[5]
+        msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z = (
+            v[0],
+            v[1],
+            v[2],
+        )
+        (
+            msg.linear_acceleration.x,
+            msg.linear_acceleration.y,
+            msg.linear_acceleration.z,
+        ) = (v[3], v[4], v[5])
         pubs.imu.publish(msg)
 
 

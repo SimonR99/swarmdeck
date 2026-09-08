@@ -15,7 +15,6 @@ from typing import Any
 
 import numpy as np
 
-
 # A malformed or accidentally unbounded costmap must not make an adapter spend
 # hundreds of megabytes rasterising it or make the server retain one forever.
 MAX_COSTMAP_CELLS = 16_000_000
@@ -88,7 +87,10 @@ def normalize_costmap(
     source_y = float(getattr(position, "y", 0.0))
     source_yaw = _yaw_from_quaternion(getattr(origin, "orientation", None))
     tx, ty, target_yaw = (float(value) for value in transform)
-    if not all(math.isfinite(value) for value in (source_x, source_y, source_yaw, tx, ty, target_yaw)):
+    if not all(
+        math.isfinite(value)
+        for value in (source_x, source_y, source_yaw, tx, ty, target_yaw)
+    ):
         raise ValueError("costmap geometry is not finite")
 
     frame = str(target_frame or "").lstrip("/")
@@ -98,7 +100,12 @@ def normalize_costmap(
 
     # The common case is already an axis-aligned map-frame costmap. Avoid a
     # potentially expensive raster pass and retain its exact geometry.
-    if abs(source_yaw) < 1e-9 and abs(tx) < 1e-9 and abs(ty) < 1e-9 and abs(target_yaw) < 1e-9:
+    if (
+        abs(source_yaw) < 1e-9
+        and abs(tx) < 1e-9
+        and abs(ty) < 1e-9
+        and abs(target_yaw) < 1e-9
+    ):
         return CostmapSnapshot(
             resolution=resolution,
             width=width,
@@ -114,8 +121,12 @@ def normalize_costmap(
     corner_y = source_y + np.array([0.0, 0.0, height * resolution, height * resolution])
     source_c = math.cos(source_yaw)
     source_s = math.sin(source_yaw)
-    rotated_x = source_x + source_c * (corner_x - source_x) - source_s * (corner_y - source_y)
-    rotated_y = source_y + source_s * (corner_x - source_x) + source_c * (corner_y - source_y)
+    rotated_x = (
+        source_x + source_c * (corner_x - source_x) - source_s * (corner_y - source_y)
+    )
+    rotated_y = (
+        source_y + source_s * (corner_x - source_x) + source_c * (corner_y - source_y)
+    )
     target_x, target_y = _transform_points(rotated_x, rotated_y, transform)
     min_x = float(np.min(target_x))
     min_y = float(np.min(target_y))
@@ -124,7 +135,9 @@ def normalize_costmap(
     output_origin_x = math.floor(min_x / resolution) * resolution
     output_origin_y = math.floor(min_y / resolution) * resolution
     output_width = max(1, int(math.ceil((max_x - output_origin_x) / resolution - 1e-9)))
-    output_height = max(1, int(math.ceil((max_y - output_origin_y) / resolution - 1e-9)))
+    output_height = max(
+        1, int(math.ceil((max_y - output_origin_y) / resolution - 1e-9))
+    )
     if output_width * output_height > MAX_COSTMAP_CELLS:
         raise ValueError("normalized costmap dimensions are too large")
 
@@ -136,17 +149,10 @@ def normalize_costmap(
         local_y = (ys.astype(np.float64) + 0.5) * resolution
         source_center_x = source_x + source_c * local_x - source_s * local_y
         source_center_y = source_y + source_s * local_x + source_c * local_y
-        dest_x, dest_y = _transform_points(
-            source_center_x, source_center_y, transform
-        )
+        dest_x, dest_y = _transform_points(source_center_x, source_center_y, transform)
         ix = np.floor((dest_x - output_origin_x) / resolution).astype(np.int64)
         iy = np.floor((dest_y - output_origin_y) / resolution).astype(np.int64)
-        valid = (
-            (ix >= 0)
-            & (ix < output_width)
-            & (iy >= 0)
-            & (iy < output_height)
-        )
+        valid = (ix >= 0) & (ix < output_width) & (iy >= 0) & (iy < output_height)
         flat = iy[valid] * output_width + ix[valid]
         # Rotating a grid can put more than one source cell into an output
         # cell; the most restrictive cost is the safe visual choice.

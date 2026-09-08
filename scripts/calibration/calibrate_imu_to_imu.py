@@ -45,6 +45,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
     from sensor_msgs.msg import Imu
+
     HAVE_ROS2 = True
 except ImportError:
     HAVE_ROS2 = False
@@ -75,18 +76,26 @@ def solve_rotation_svd(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
 def euler_from_matrix(R: np.ndarray) -> Tuple[float, float, float]:
     sy = math.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
     if sy >= 1e-6:
-        return math.atan2(R[2, 1], R[2, 2]), math.atan2(-R[2, 0], sy), math.atan2(R[1, 0], R[0, 0])
+        return (
+            math.atan2(R[2, 1], R[2, 2]),
+            math.atan2(-R[2, 0], sy),
+            math.atan2(R[1, 0], R[0, 0]),
+        )
     return math.atan2(-R[1, 2], R[1, 1]), math.atan2(-R[2, 0], sy), 0.0
 
 
 if HAVE_ROS2:
+
     class DualImuRecorder(Node):
         def __init__(self, topic_a: str, topic_b: str) -> None:
             super().__init__("dual_imu_recorder")
             self.a: List[Tuple[float, np.ndarray]] = []
             self.b: List[Tuple[float, np.ndarray]] = []
-            qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=500,
-                             reliability=ReliabilityPolicy.BEST_EFFORT)
+            qos = QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=500,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+            )
             self.create_subscription(Imu, topic_a, lambda m: self._on(m, self.a), qos)
             self.create_subscription(Imu, topic_b, lambda m: self._on(m, self.b), qos)
 
@@ -95,21 +104,38 @@ if HAVE_ROS2:
             # Accelerometers are kept as well as gyros: the rotation comes from
             # the gyros, but only the accelerometers can see the translation.
             t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            sink.append((t, np.array([msg.angular_velocity.x,
-                                      msg.angular_velocity.y,
-                                      msg.angular_velocity.z]),
-                         np.array([msg.linear_acceleration.x,
-                                   msg.linear_acceleration.y,
-                                   msg.linear_acceleration.z])))
+            sink.append(
+                (
+                    t,
+                    np.array(
+                        [
+                            msg.angular_velocity.x,
+                            msg.angular_velocity.y,
+                            msg.angular_velocity.z,
+                        ]
+                    ),
+                    np.array(
+                        [
+                            msg.linear_acceleration.x,
+                            msg.linear_acceleration.y,
+                            msg.linear_acceleration.z,
+                        ]
+                    ),
+                )
+            )
 
 
 def _resample(t_ref: np.ndarray, t_src: np.ndarray, v_src: np.ndarray) -> np.ndarray:
     return np.column_stack([np.interp(t_ref, t_src, v_src[:, i]) for i in range(3)])
 
 
-def estimate_time_offset(ta: np.ndarray, va: np.ndarray,
-                         tb: np.ndarray, vb: np.ndarray,
-                         max_offset: float = 0.25) -> float:
+def estimate_time_offset(
+    ta: np.ndarray,
+    va: np.ndarray,
+    tb: np.ndarray,
+    vb: np.ndarray,
+    max_offset: float = 0.25,
+) -> float:
     """Align the two streams by cross-correlating |omega|.
 
     The two drivers stamp independently; tens of milliseconds of skew rotates
@@ -129,9 +155,13 @@ def estimate_time_offset(ta: np.ndarray, va: np.ndarray,
     return best
 
 
-def solve_imu_rotation(ta: np.ndarray, va: np.ndarray,
-                       tb: np.ndarray, vb: np.ndarray,
-                       min_rate: float = 0.10) -> Optional[dict]:
+def solve_imu_rotation(
+    ta: np.ndarray,
+    va: np.ndarray,
+    tb: np.ndarray,
+    vb: np.ndarray,
+    min_rate: float = 0.10,
+) -> Optional[dict]:
     offset = estimate_time_offset(ta, va, tb, vb)
     lo, hi = max(ta[0], tb[0] - offset) + 0.05, min(ta[-1], tb[-1] - offset) - 0.05
     if hi <= lo:
@@ -158,17 +188,27 @@ def solve_imu_rotation(ta: np.ndarray, va: np.ndarray,
 
     R = solve_rotation_svd(wb, wa)
     resid = wa - (R @ wb.T).T
-    rms = float(np.sqrt((resid ** 2).sum(axis=1).mean()))
+    rms = float(np.sqrt((resid**2).sum(axis=1).mean()))
     return {
-        "R": R, "time_offset": offset, "singular_values": sv, "axis_ratio": ratio,
-        "residual_rms": rms, "n_samples": int(len(wa)),
+        "R": R,
+        "time_offset": offset,
+        "singular_values": sv,
+        "axis_ratio": ratio,
+        "residual_rms": rms,
+        "n_samples": int(len(wa)),
         "observable": ratio >= min_rate,
     }
 
 
-def solve_translation(ta: np.ndarray, wa: np.ndarray, aa: np.ndarray,
-                      tb: np.ndarray, wb: np.ndarray, ab: np.ndarray,
-                      R_ba: np.ndarray) -> Optional[dict]:
+def solve_translation(
+    ta: np.ndarray,
+    wa: np.ndarray,
+    aa: np.ndarray,
+    tb: np.ndarray,
+    wb: np.ndarray,
+    ab: np.ndarray,
+    R_ba: np.ndarray,
+) -> Optional[dict]:
     """Solve the offset between two IMUs from their accelerometers.
 
     Gyros cannot see it, but accelerometers can: two points on a rigid body
@@ -203,14 +243,16 @@ def solve_translation(ta: np.ndarray, wa: np.ndarray, aa: np.ndarray,
 
     alpha = np.stack([np.gradient(w[:, k], t) for k in range(3)], axis=1)
     ker = np.ones(9) / 9.0
-    alpha = np.stack([np.convolve(alpha[:, c], ker, mode="same") for c in range(3)], axis=1)
+    alpha = np.stack(
+        [np.convolve(alpha[:, c], ker, mode="same") for c in range(3)], axis=1
+    )
 
     y = f_b - (R_ba @ f_a.T).T
     rows = np.empty((len(t) * 3, 6))
     for i in range(len(t)):
         M = _skew(alpha[i]) + _skew(w[i]) @ _skew(w[i])
-        rows[3 * i:3 * i + 3, :3] = M
-        rows[3 * i:3 * i + 3, 3:] = np.eye(3)
+        rows[3 * i : 3 * i + 3, :3] = M
+        rows[3 * i : 3 * i + 3, 3:] = np.eye(3)
     sol, _, rank, _ = np.linalg.lstsq(rows, y.reshape(-1), rcond=None)
     resid = rows @ sol - y.reshape(-1)
 
@@ -229,7 +271,7 @@ def solve_translation(ta: np.ndarray, wa: np.ndarray, aa: np.ndarray,
     return {
         "r": sol[:3],
         "bias": sol[3:],
-        "rms": float(np.sqrt((resid ** 2).mean())),
+        "rms": float(np.sqrt((resid**2).mean())),
         "rank": int(rank),
         "singular_values": sv,
         "observability": observability,
@@ -239,7 +281,8 @@ def solve_translation(ta: np.ndarray, wa: np.ndarray, aa: np.ndarray,
 
 def emit_calibration_yaml(R_lidar_imu: np.ndarray, t_lidar_imu: np.ndarray) -> str:
     rows = ",\n        ".join(
-        ", ".join(f"{v: .8f}" for v in row) for row in R_lidar_imu)
+        ", ".join(f"{v: .8f}" for v in row) for row in R_lidar_imu
+    )
     return f"""%YAML:1.0
 
 # Rotation from laser frame to imu frame, imu^R_laser
@@ -266,7 +309,9 @@ yaw_ratio: 0.0
 """
 
 
-def run(target_topic: str, reference_topic: str, duration: float, no_prompt: bool = False) -> Optional[dict]:
+def run(
+    target_topic: str, reference_topic: str, duration: float, no_prompt: bool = False
+) -> Optional[dict]:
     if not HAVE_ROS2:
         print("ERROR: ROS 2 (rclpy, sensor_msgs) is required.", file=sys.stderr)
         return None
@@ -279,8 +324,12 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         print("=" * 66)
         print(" IMU-TO-IMU ROTATION  (%s  <-  %s)" % (target_topic, reference_topic))
         print("=" * 66)
-        print("--> This needs rotation about a NON-VERTICAL axis. A yaw spin will not do:")
-        print("    it leaves the rotation about the spin axis unobservable, which is the")
+        print(
+            "--> This needs rotation about a NON-VERTICAL axis. A yaw spin will not do:"
+        )
+        print(
+            "    it leaves the rotation about the spin axis unobservable, which is the"
+        )
         print("    whole quantity we are missing.")
         print("--> With the robot stationary and powered, ROCK THE CHASSIS BY HAND:")
         print("      1. press down on a front corner and release, ~5 times")
@@ -301,19 +350,26 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         while rclpy.ok() and time.time() - start < duration:
             rclpy.spin_once(node, timeout_sec=0.02)
             rem = duration - (time.time() - start)
-            sys.stdout.write(f"\rRecording: {rem:4.1f}s left | {target_topic}: {len(node.a):5d}"
-                             f" | {reference_topic}: {len(node.b):5d} ")
+            sys.stdout.write(
+                f"\rRecording: {rem:4.1f}s left | {target_topic}: {len(node.a):5d}"
+                f" | {reference_topic}: {len(node.b):5d} "
+            )
             sys.stdout.flush()
         print()
 
         if len(node.a) < 100 or len(node.b) < 100:
-            print(f"[ERROR] too few samples ({len(node.a)} / {len(node.b)}). Are both topics live?",
-                  file=sys.stderr)
+            print(
+                f"[ERROR] too few samples ({len(node.a)} / {len(node.b)}). Are both topics live?",
+                file=sys.stderr,
+            )
             return None
 
-        ta = np.array([s[0] for s in node.a]); va = np.array([s[1] for s in node.a])
-        tb = np.array([s[0] for s in node.b]); vb = np.array([s[1] for s in node.b])
-        aa = np.array([s[2] for s in node.a]); ab = np.array([s[2] for s in node.b])
+        ta = np.array([s[0] for s in node.a])
+        va = np.array([s[1] for s in node.a])
+        tb = np.array([s[0] for s in node.b])
+        vb = np.array([s[1] for s in node.b])
+        aa = np.array([s[2] for s in node.a])
+        ab = np.array([s[2] for s in node.b])
         res = solve_imu_rotation(ta, va, tb, vb)
         if res is None:
             print("[ERROR] not enough overlapping motion to solve.", file=sys.stderr)
@@ -322,12 +378,25 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         R = res["R"]
         r, p, y = [math.degrees(v) for v in euler_from_matrix(R)]
         print("\n  Samples used      : %d" % res["n_samples"])
-        print("  Stamp offset      : %+.3f s (estimated by cross-correlation)" % res["time_offset"])
-        print("  Excitation        : singular values %s" % np.round(res["singular_values"], 3))
-        print("  Second-axis ratio : %.3f  %s" % (
-            res["axis_ratio"],
-            "OK, a second axis was excited" if res["observable"]
-            else "TOO LOW: this is still essentially single-axis motion"))
+        print(
+            "  Stamp offset      : %+.3f s (estimated by cross-correlation)"
+            % res["time_offset"]
+        )
+        print(
+            "  Excitation        : singular values %s"
+            % np.round(res["singular_values"], 3)
+        )
+        print(
+            "  Second-axis ratio : %.3f  %s"
+            % (
+                res["axis_ratio"],
+                (
+                    "OK, a second axis was excited"
+                    if res["observable"]
+                    else "TOO LOW: this is still essentially single-axis motion"
+                ),
+            )
+        )
         print("  Residual RMS      : %.4f rad/s" % res["residual_rms"])
         print("\n  R (%s <- %s):" % (target_topic, reference_topic))
         for row in R:
@@ -335,10 +404,19 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         print("  RPY: roll=%.2f deg  pitch=%.2f deg  yaw=%.2f deg" % (r, p, y))
 
         if not res["observable"]:
-            print("\n[REFUSING] Second-axis excitation %.3f is below 0.10, so the motion was"
-                  % res["axis_ratio"], file=sys.stderr)
-            print("           effectively about one axis and the yaw this script exists to", file=sys.stderr)
-            print("           measure is not determined by it. Rock about a second axis.", file=sys.stderr)
+            print(
+                "\n[REFUSING] Second-axis excitation %.3f is below 0.10, so the motion was"
+                % res["axis_ratio"],
+                file=sys.stderr,
+            )
+            print(
+                "           effectively about one axis and the yaw this script exists to",
+                file=sys.stderr,
+            )
+            print(
+                "           measure is not determined by it. Rock about a second axis.",
+                file=sys.stderr,
+            )
             return res
 
         R_lidar_target = R @ R_LIDAR_TO_OUSTER_IMU
@@ -367,9 +445,13 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         else:
             t_lidar_target = np.zeros(3)
         rr, pp, yy = [math.degrees(v) for v in euler_from_matrix(R_lidar_target)]
-        print("\n  Composed with the Ouster's factory os_lidar -> os_imu (180 deg yaw):")
-        print("  R (os_lidar -> %s): RPY roll=%.2f  pitch=%.2f  yaw=%.2f deg" % (
-            target_topic, rr, pp, yy))
+        print(
+            "\n  Composed with the Ouster's factory os_lidar -> os_imu (180 deg yaw):"
+        )
+        print(
+            "  R (os_lidar -> %s): RPY roll=%.2f  pitch=%.2f  yaw=%.2f deg"
+            % (target_topic, rr, pp, yy)
+        )
         print("\n" + "=" * 66)
         print(" SuperOdometry calibration file for imu_topic: %s" % target_topic)
         print("=" * 66)
@@ -377,29 +459,62 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
         if not np.any(t_lidar_target):
             tf = res.get("translation_fit")
             if tf is None:
-                print("  NOTE: the translation is zero: the accelerometer solve did not converge.")
-                print("        Spin the robot in place at 0.3-0.5 rad/s, reversing a few times.")
+                print(
+                    "  NOTE: the translation is zero: the accelerometer solve did not converge."
+                )
+                print(
+                    "        Spin the robot in place at 0.3-0.5 rad/s, reversing a few times."
+                )
             else:
                 print("\n  [Solved] translation from the accelerometer pair:")
-                print("    target relative to reference: [%+.4f, %+.4f, %+.4f] m" % tuple(tf["r"]))
+                print(
+                    "    target relative to reference: [%+.4f, %+.4f, %+.4f] m"
+                    % tuple(tf["r"])
+                )
                 obs = tf["observability"]
                 print("    observability (1.0 = fully determined by this motion):")
-                print("                                  [ %.3f,  %.3f,  %.3f]" % tuple(obs))
+                print(
+                    "                                  [ %.3f,  %.3f,  %.3f]"
+                    % tuple(obs)
+                )
                 if obs[-1] < 0.1:
-                    print("    [WARN] the weakest direction is not measured by this motion.")
-                    print("           A spin about a vertical axis cannot see the vertical")
-                    print("           offset: both rigid-body terms vanish along the axis.")
-                    print("           Rotate about a HORIZONTAL axis (pitch or roll the")
-                    print("           sensor head) for that component, or take it from CAD.")
-                print("    fitted bias (absorbs any gravity leak): [%+.3f, %+.3f, %+.3f] m/s^2"
-                      % tuple(tf["bias"]))
-                print("    peak |omega| %.3f rad/s, rms residual %.4f m/s^2, rank %d"
-                      % (tf["peak_omega"], tf["rms"], tf["rank"]))
+                    print(
+                        "    [WARN] the weakest direction is not measured by this motion."
+                    )
+                    print(
+                        "           A spin about a vertical axis cannot see the vertical"
+                    )
+                    print(
+                        "           offset: both rigid-body terms vanish along the axis."
+                    )
+                    print(
+                        "           Rotate about a HORIZONTAL axis (pitch or roll the"
+                    )
+                    print(
+                        "           sensor head) for that component, or take it from CAD."
+                    )
+                print(
+                    "    fitted bias (absorbs any gravity leak): [%+.3f, %+.3f, %+.3f] m/s^2"
+                    % tuple(tf["bias"])
+                )
+                print(
+                    "    peak |omega| %.3f rad/s, rms residual %.4f m/s^2, rank %d"
+                    % (tf["peak_omega"], tf["rms"], tf["rank"])
+                )
                 if tf["peak_omega"] < 0.3:
-                    print("    [WARN] peak rotation below 0.3 rad/s: the signal scales with")
-                    print("           omega^2, so spin faster and re-run to tighten this.")
-            print("        Measure os_lidar -> %s with a ruler and fill it in if the two" % target_topic)
-            print("        are more than ~10 cm apart; the rotation above is the load-bearing part.")
+                    print(
+                        "    [WARN] peak rotation below 0.3 rad/s: the signal scales with"
+                    )
+                    print(
+                        "           omega^2, so spin faster and re-run to tighten this."
+                    )
+            print(
+                "        Measure os_lidar -> %s with a ruler and fill it in if the two"
+                % target_topic
+            )
+            print(
+                "        are more than ~10 cm apart; the rotation above is the load-bearing part."
+            )
         res["R_lidar_target"] = R_lidar_target
         res["t_lidar_target"] = t_lidar_target
         return res
@@ -410,14 +525,25 @@ def run(target_topic: str, reference_topic: str, duration: float, no_prompt: boo
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", default="/vectornav/imu",
-                    help="IMU whose mounting you want (default: /vectornav/imu)")
-    ap.add_argument("--reference", default="/ouster/imu",
-                    help="IMU whose lidar extrinsic is already known (default: /ouster/imu)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--target",
+        default="/vectornav/imu",
+        help="IMU whose mounting you want (default: /vectornav/imu)",
+    )
+    ap.add_argument(
+        "--reference",
+        default="/ouster/imu",
+        help="IMU whose lidar extrinsic is already known (default: /ouster/imu)",
+    )
     ap.add_argument("--duration", type=float, default=30.0)
-    ap.add_argument("--no-prompt", action="store_true", help="Start recording immediately without waiting for enter")
+    ap.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Start recording immediately without waiting for enter",
+    )
     a = ap.parse_args()
     run(a.target, a.reference, a.duration, a.no_prompt)
 

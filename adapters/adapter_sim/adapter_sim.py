@@ -598,9 +598,7 @@ class RobotBridge(
                 float(self._map_to_odom["yaw"]),
             )
         try:
-            snapshot = normalize_costmap(
-                msg, target_frame=target, transform=transform
-            )
+            snapshot = normalize_costmap(msg, target_frame=target, transform=transform)
         except (TypeError, ValueError) as exc:
             self._warn_costmap(kind, str(exc))
             return

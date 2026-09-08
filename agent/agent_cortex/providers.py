@@ -227,7 +227,10 @@ class NdjsonBridgeProvider:
             payload = json.loads(line)
         except (TypeError, json.JSONDecodeError):
             return None
-        if not isinstance(payload, dict) or payload.get("type") not in NORMALIZED_EVENT_TYPES:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("type") not in NORMALIZED_EVENT_TYPES
+        ):
             return None
         return payload
 
@@ -384,6 +387,5 @@ def get_provider() -> AgentProvider:
     if name in {"opencode", "open-code"}:
         return OpenCodeProvider()
     raise ValueError(
-        f"Unknown CORTEX_PROVIDER '{name}' "
-        "(expected 'agy', 'opencode', or 'ndjson')"
+        f"Unknown CORTEX_PROVIDER '{name}' " "(expected 'agy', 'opencode', or 'ndjson')"
     )

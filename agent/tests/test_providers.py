@@ -9,7 +9,6 @@ from agent_cortex.providers import (
     ProviderRequest,
 )
 
-
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -28,7 +27,9 @@ def test_agy_events_are_normalized(monkeypatch):
                     "step_type": "tool",
                     "state": "ACTIVE",
                     "tool_name": "run_command",
-                    "tool_info": {"parameters": {"CommandLine": "robot_tool.py doctor"}},
+                    "tool_info": {
+                        "parameters": {"CommandLine": "robot_tool.py doctor"}
+                    },
                 },
             }
         )
@@ -72,7 +73,7 @@ def test_ndjson_bridge_receives_one_normalized_request(tmp_path, monkeypatch):
         "#!/usr/bin/env python3\n"
         "import pathlib, sys\n"
         f"pathlib.Path({str(output)!r}).write_text(sys.stdin.readline())\n"
-        "print('{\"type\":\"done\",\"response\":\"ok\"}', flush=True)\n"
+        'print(\'{"type":"done","response":"ok"}\', flush=True)\n'
     )
     bridge.chmod(0o755)
     monkeypatch.setenv("CORTEX_PROVIDER_COMMAND", json.dumps([str(bridge)]))
@@ -80,7 +81,9 @@ def test_ndjson_bridge_receives_one_normalized_request(tmp_path, monkeypatch):
 
     async def run_bridge():
         process = await provider.start(
-            ProviderRequest(prompt="hello", workspace=str(tmp_path), conversation_id="c-1")
+            ProviderRequest(
+                prompt="hello", workspace=str(tmp_path), conversation_id="c-1"
+            )
         )
         assert process.stdout is not None
         event = provider.parse_event((await process.stdout.readline()).decode())

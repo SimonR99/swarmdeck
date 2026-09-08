@@ -313,8 +313,12 @@ def test_config_endpoint_clamps_and_does_not_switch_mode(slam_client) -> None:
     before = slam_client.get("/config").json()
     assert before["ok"] is True
     assert "min_support" in before["settings"]
-    applied = slam_client.put("/config", json={"min_support": 1, "registration_mode": "graph"})
+    applied = slam_client.put(
+        "/config", json={"min_support": 1, "registration_mode": "graph"}
+    )
     assert applied.status_code == 200
     body = applied.json()
     assert body["settings"]["min_support"] == 2
-    assert body["settings"]["registration_mode"] == before["settings"]["registration_mode"]
+    assert (
+        body["settings"]["registration_mode"] == before["settings"]["registration_mode"]
+    )

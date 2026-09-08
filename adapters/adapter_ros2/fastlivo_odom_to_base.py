@@ -46,21 +46,25 @@ def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Hamilton product, both (x, y, z, w)."""
     ax, ay, az, aw = a
     bx, by, bz, bw = b
-    return np.array([
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-        aw * bw - ax * bx - ay * by - az * bz,
-    ])
+    return np.array(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ]
+    )
 
 
 def quat_to_R(q: np.ndarray) -> np.ndarray:
     x, y, z, w = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-    ])
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
 
 
 class FastLivoOdomToBase(Node):
@@ -71,7 +75,9 @@ class FastLivoOdomToBase(Node):
         self.declare_parameter("child_frame", "botman_base_link")
         # R(base_link -> vectornav) as (x, y, z, w). Default measured on Botman
         # 2026-08-28: RPY 0.88, 0.45, 87.48 deg.
-        self.declare_parameter("imu_base_quat", [0.00284045, 0.00820173, 0.69135670, 0.72246147])
+        self.declare_parameter(
+            "imu_base_quat", [0.00284045, 0.00820173, 0.69135670, 0.72246147]
+        )
         # Vectornav origin in base_link. UNMEASURED, see the caveat above.
         self.declare_parameter("imu_base_translation", [0.0, 0.0, 0.0])
         # Re-origin so the first pose is identity, which makes the output
@@ -87,7 +93,9 @@ class FastLivoOdomToBase(Node):
 
         self.q_ib = np.array(self.get_parameter("imu_base_quat").value, dtype=float)
         self.q_ib /= np.linalg.norm(self.q_ib)
-        self.t_ib = np.array(self.get_parameter("imu_base_translation").value, dtype=float)
+        self.t_ib = np.array(
+            self.get_parameter("imu_base_translation").value, dtype=float
+        )
         self.child = self.get_parameter("child_frame").value
         self.zero_at_start = self.get_parameter("zero_at_start").value
         self.origin: tuple[np.ndarray, np.ndarray] | None = None
@@ -100,25 +108,44 @@ class FastLivoOdomToBase(Node):
         rpy = self._rpy(quat_to_R(self.q_ib))
         self.get_logger().info(
             "base_link -> imu rotation RPY %.2f %.2f %.2f deg, lever arm %s%s"
-            % (*[math.degrees(v) for v in rpy], self.t_ib.tolist(),
-               "  (lever arm is zero: spins will show spurious translation)"
-               if not self.t_ib.any() else "")
+            % (
+                *[math.degrees(v) for v in rpy],
+                self.t_ib.tolist(),
+                (
+                    "  (lever arm is zero: spins will show spurious translation)"
+                    if not self.t_ib.any()
+                    else ""
+                ),
+            )
         )
 
-        qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=20,
-                         reliability=ReliabilityPolicy.RELIABLE)
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=20,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
         self.pub = self.create_publisher(
-            Odometry, self.get_parameter("out_topic").value, qos)
+            Odometry, self.get_parameter("out_topic").value, qos
+        )
         self.create_subscription(
-            Odometry, self.get_parameter("in_topic").value, self.on_odom,
-            QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=20,
-                       reliability=ReliabilityPolicy.BEST_EFFORT))
+            Odometry,
+            self.get_parameter("in_topic").value,
+            self.on_odom,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=20,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+            ),
+        )
 
     @staticmethod
     def _rpy(R: np.ndarray) -> tuple[float, float, float]:
         sy = math.hypot(R[0, 0], R[1, 0])
-        return (math.atan2(R[2, 1], R[2, 2]), math.atan2(-R[2, 0], sy),
-                math.atan2(R[1, 0], R[0, 0]))
+        return (
+            math.atan2(R[2, 1], R[2, 2]),
+            math.atan2(-R[2, 0], sy),
+            math.atan2(R[1, 0], R[0, 0]),
+        )
 
     def on_odom(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
@@ -129,8 +156,10 @@ class FastLivoOdomToBase(Node):
         if not np.isfinite(p_wi).all() or not np.isfinite(n) or n < 1e-9:
             # The estimator emits NaN once scan matching collapses. Do not
             # forward that to nav2: a diverged pose is worse than none.
-            self.get_logger().warn("dropping a non-finite pose from the estimator",
-                                   throttle_duration_sec=5.0)
+            self.get_logger().warn(
+                "dropping a non-finite pose from the estimator",
+                throttle_duration_sec=5.0,
+            )
             return
         q_wi = q_wi / n
 
@@ -158,8 +187,9 @@ class FastLivoOdomToBase(Node):
                         self.muted = True
                         self.get_logger().error(
                             "estimator diverged (%.0f m/s implied over %d samples); "
-                            "muting output. Restart the estimator to clear." %
-                            (speed, self.bad))
+                            "muting output. Restart the estimator to clear."
+                            % (speed, self.bad)
+                        )
                     return
                 self.bad = 0
         if self.muted:
@@ -170,9 +200,15 @@ class FastLivoOdomToBase(Node):
         out.header.stamp = msg.header.stamp
         out.header.frame_id = msg.header.frame_id
         out.child_frame_id = self.child
-        out.pose.pose.position.x, out.pose.pose.position.y, out.pose.pose.position.z = p_wb
-        (out.pose.pose.orientation.x, out.pose.pose.orientation.y,
-         out.pose.pose.orientation.z, out.pose.pose.orientation.w) = q_wb
+        out.pose.pose.position.x, out.pose.pose.position.y, out.pose.pose.position.z = (
+            p_wb
+        )
+        (
+            out.pose.pose.orientation.x,
+            out.pose.pose.orientation.y,
+            out.pose.pose.orientation.z,
+            out.pose.pose.orientation.w,
+        ) = q_wb
         out.pose.covariance = msg.pose.covariance
         out.twist = msg.twist
         self.pub.publish(out)

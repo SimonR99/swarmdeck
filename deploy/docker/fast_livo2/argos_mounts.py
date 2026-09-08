@@ -48,14 +48,22 @@ def mount(block, tag: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("experiment")
-    ap.add_argument("--robots", action="store_true",
-                    help="Print the robot ids, in order, space separated")
-    ap.add_argument("--lidar", metavar="ROBOT",
-                    help="Print that robot's lidar mount as 'x y z'")
-    ap.add_argument("--camera", metavar="ROBOT",
-                    help="Print that robot's camera mount as 'x y z'")
-    ap.add_argument("--lidar-elev", metavar="ROBOT",
-                    help="Print that robot's lidar vertical FOV as 'min max'")
+    ap.add_argument(
+        "--robots",
+        action="store_true",
+        help="Print the robot ids, in order, space separated",
+    )
+    ap.add_argument(
+        "--lidar", metavar="ROBOT", help="Print that robot's lidar mount as 'x y z'"
+    )
+    ap.add_argument(
+        "--camera", metavar="ROBOT", help="Print that robot's camera mount as 'x y z'"
+    )
+    ap.add_argument(
+        "--lidar-elev",
+        metavar="ROBOT",
+        help="Print that robot's lidar vertical FOV as 'min max'",
+    )
     ap.add_argument("--camera-resolution", metavar="ROBOT")
     ap.add_argument("--camera-fov", metavar="ROBOT")
     args = ap.parse_args()

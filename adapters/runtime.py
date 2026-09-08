@@ -107,9 +107,7 @@ def hello_message(
         "robot_type": robot_type,
         "adapter": adapter,
         "ros": ros,
-        "coordinate_frame": (
-            "merged" if coordinate_frame == "merged" else "local"
-        ),
+        "coordinate_frame": ("merged" if coordinate_frame == "merged" else "local"),
         "capabilities": list(capabilities),
         "footprint_radius": float(footprint_radius),
         "footprint": footprint or None,
@@ -434,7 +432,7 @@ class AdapterSensorMixin:
         # is the safe whole-robot value when packs are not perfectly balanced.
         if hasattr(msg, "battery_states"):
             levels = []
-            for state in (getattr(msg, "battery_states", None) or []):
+            for state in getattr(msg, "battery_states", None) or []:
                 raw = getattr(
                     state,
                     "charge_percentage",
@@ -455,7 +453,9 @@ class AdapterSensorMixin:
         if hasattr(msg, "battery_voltage") or hasattr(msg, "voltage"):
             try:
                 voltage = float(
-                    getattr(msg, "battery_voltage", getattr(msg, "voltage", float("nan")))
+                    getattr(
+                        msg, "battery_voltage", getattr(msg, "voltage", float("nan"))
+                    )
                 )
             except (TypeError, ValueError):
                 voltage = float("nan")

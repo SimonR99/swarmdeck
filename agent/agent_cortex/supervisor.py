@@ -22,7 +22,6 @@ from .runtime import ProviderRuntime
 from .store import CortexStore, SCHEMA_VERSION
 from .workers import get_coding_worker
 
-
 _SENSITIVE_KEY = re.compile(
     r"(^|_)(authorization|cookie|password|passwd|secret|token|private_key)($|_)",
     re.IGNORECASE,
@@ -54,11 +53,13 @@ def classify_job(prompt: str) -> str:
     ):
         return "diagnosis"
     if command in {"/deploy", "/restart"} or any(
-        word in text for word in ("repair", "fix", "restart", "deploy", "start the robot")
+        word in text
+        for word in ("repair", "fix", "restart", "deploy", "start the robot")
     ):
         return "repair"
     if command == "/code" or any(
-        word in text for word in ("edit the code", "modify the code", "refactor", "implement")
+        word in text
+        for word in ("edit the code", "modify the code", "refactor", "implement")
     ):
         return "code_change"
     if command in {"/drive", "/nav", "/stop"}:
@@ -268,7 +269,9 @@ class CortexSupervisor:
 def build_supervisor(history_dir: Path) -> CortexSupervisor:
     mode = os.environ.get("CORTEX_SUPERVISOR_MODE", "observe")
     state_path = Path(
-        os.environ.get("CORTEX_STATE_DB", str(history_dir.parent / "cortex" / "state.db"))
+        os.environ.get(
+            "CORTEX_STATE_DB", str(history_dir.parent / "cortex" / "state.db")
+        )
     )
     try:
         return CortexSupervisor(mode=mode, store_path=state_path)

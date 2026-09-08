@@ -183,9 +183,7 @@ class CoordinatedExplorer(Node):
             self.nav_clients[robot_id] = ActionClient(
                 self, NavigateToPose, f"/{robot_id}/navigate_to_pose"
             )
-            self.spin_clients[robot_id] = ActionClient(
-                self, Spin, f"/{robot_id}/spin"
-            )
+            self.spin_clients[robot_id] = ActionClient(self, Spin, f"/{robot_id}/spin")
             self.stop_publishers[robot_id] = self.create_publisher(
                 Twist, f"/{robot_id}/cmd_vel", 10
             )
@@ -391,10 +389,7 @@ class CoordinatedExplorer(Node):
         if record is None or record.token != token:
             return
         del self.active[robot_id]
-        if (
-            record.purpose == "rendezvous"
-            and status == GoalStatus.STATUS_SUCCEEDED
-        ):
+        if record.purpose == "rendezvous" and status == GoalStatus.STATUS_SUCCEEDED:
             self.rendezvous_finished.add(robot_id)
         elif record.purpose == "rendezvous":
             # Action discovery becomes ready before a lifecycle action server
@@ -496,16 +491,15 @@ class CoordinatedExplorer(Node):
         if attempt == 0:
             label = "90deg scan rotation"
             sent = sum(
-                self._send_spin(robot_id, math.pi / 2.0)
-                for robot_id in self.robot_ids
+                self._send_spin(robot_id, math.pi / 2.0) for robot_id in self.robot_ids
             )
         else:
-            centre_x = sum(point[0] for point in self.rendezvous_targets.values()) / len(
-                self.rendezvous_targets
-            )
-            centre_y = sum(point[1] for point in self.rendezvous_targets.values()) / len(
-                self.rendezvous_targets
-            )
+            centre_x = sum(
+                point[0] for point in self.rendezvous_targets.values()
+            ) / len(self.rendezvous_targets)
+            centre_y = sum(
+                point[1] for point in self.rendezvous_targets.values()
+            ) / len(self.rendezvous_targets)
             if attempt == 1:
                 targets = {}
                 for robot_id, point in self.rendezvous_targets.items():

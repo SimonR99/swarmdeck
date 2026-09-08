@@ -336,7 +336,9 @@ def _restore_capture() -> int:
     if failures:
         preview = "; ".join(failures[:3])
         suffix = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
-        _last_error = f"capture restore skipped {len(failures)} file(s): {preview}{suffix}"
+        _last_error = (
+            f"capture restore skipped {len(failures)} file(s): {preview}{suffix}"
+        )
     return restored
 
 
@@ -715,8 +717,7 @@ def delete_robot_keyframes(robot_id: str) -> Any:
                 blob = _queue.popleft()
                 try:
                     belongs = (
-                        str(peek_keyframe_header(blob).get("robot_id", ""))
-                        == robot_id
+                        str(peek_keyframe_header(blob).get("robot_id", "")) == robot_id
                     )
                 except ProtocolError:
                     belongs = False
