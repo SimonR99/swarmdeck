@@ -184,7 +184,7 @@ def test_physics_collides_with_the_floorless_copy_of_the_world(tree):
     assert mesh.get("file") == str(maw.collision_path(Path(prop.get("model"))))
 
 
-def test_every_detection_target_is_both_collidable_and_visible(tree):
+def test_only_large_detection_targets_are_collidable(tree):
     """A prop with no mesh is driven through; a mesh with no prop is invisible
     to the cameras and to the photorealistic lidar, which raytrace the render
     scene rather than the collision geometry."""
@@ -202,7 +202,9 @@ def test_every_detection_target_is_both_collidable_and_visible(tree):
     import make_argos_world as maw  # noqa: E402
     world_props = {m for m in props if str(maw.collision_path(Path(m))) == world}
     assert len(world_props) == 1, world_props
-    assert set(meshes) == set(props) - world_props
+    small = {m for m in props if Path(m).stem in mas.NONBLOCKING_TARGET_CLASSES}
+    assert small
+    assert set(meshes) == set(props) - world_props - small
     for model, mesh in meshes.items():
         for attr in ("position", "orientation", "scale"):
             assert mesh.get(attr) == props[model].get(attr), (model, attr)
@@ -572,3 +574,57 @@ def test_robot_visuals_are_packaged_and_selected(tree, bistro_tree, tmp_path):
                 assert np.all(
                     np.sum(cross * np.array(normals).reshape(-1, 3)[::3], axis=1) > 0
                 )
+
+
+def test_targets_stay_upright_when_rotated(tree, bistro_tree):
+    import numpy as np
+
+    for scene in (tree, bistro_tree):
+        for mesh in scene.findall("./arena/mesh"):
+            if not mesh.get("id").startswith("target_"):
+                continue
+            z, y, x = map(math.radians, map(float, mesh.get("orientation").split(",")))
+            rx = np.array(
+                [
+                    [1, 0, 0],
+                    [0, math.cos(x), -math.sin(x)],
+                    [0, math.sin(x), math.cos(x)],
+                ]
+            )
+            ry = np.array(
+                [
+                    [math.cos(y), 0, math.sin(y)],
+                    [0, 1, 0],
+                    [-math.sin(y), 0, math.cos(y)],
+                ]
+            )
+            rz = np.array(
+                [
+                    [math.cos(z), -math.sin(z), 0],
+                    [math.sin(z), math.cos(z), 0],
+                    [0, 0, 1],
+                ]
+            )
+            # glTF up must stay world up under ARGoS's actual Rx*Ry*Rz order.
+            np.testing.assert_allclose(rx @ ry @ rz @ [0, 1, 0], [0, 0, 1], atol=1e-6)
+
+
+def test_bistro_duck_is_raised_above_brick_road(bistro_tree):
+    mesh = bistro_tree.find('./arena/mesh[@id="target_0_rubber_duck"]')
+    z = float(mesh.get("position").split(",")[2])
+    assert 0.075 < z < 0.09
+    prop = next(
+        p
+        for p in bistro_tree.findall("./media/photorealism/scenery/prop")
+        if p.get("position") == mesh.get("position")
+    )
+    assert prop.get("orientation") == mesh.get("orientation")
+
+
+def test_bistro_small_props_remain_visible_without_static_colliders(bistro_tree):
+    meshes = bistro_tree.findall("./arena/mesh")
+    props = bistro_tree.findall("./media/photorealism/scenery/prop")
+    for name in mas.NONBLOCKING_TARGET_CLASSES:
+        assert any(Path(p.get("model")).stem == name for p in props)
+        assert not any(Path(m.get("file")).stem == name for m in meshes)
+    assert sum("rubber_duck" in m.get("file") for m in meshes) == 2

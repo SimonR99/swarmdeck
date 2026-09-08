@@ -211,3 +211,23 @@ they do not guarantee geometrically valid loop closures.
 The novelty fix requires a new adapter process. The current simulation
 entrypoint exits if its adapter child exits, so plan a coordinated simulation
 restart instead of killing that child in an active run.
+
+## Detection targets on the Bistro road
+
+Target placement now samples the Bistro GLB's pavement triangles over each
+rotated model footprint at 5 cm spacing. It subtracts the model's actual bottom
+height and leaves 5 mm clearance above the highest sampled surface. This replaces
+the old fixed z=0 placement: the brick road under the first duck is about 7 cm
+above zero. Physics and rendering receive the same computed position. Missing
+pavement raises a generation error instead of silently burying a collider.
+
+ARGoS composes Euler rotations as `Rx * Ry * Rz`. For a Y-up glTF model that
+needs a +90° X rotation, world yaw therefore goes in the **second** XML angle:
+`orientation="0,yaw_degrees,90"`. Putting it in the first angle tipped the props
+sideways. This correction applies to indoor targets as well as Bistro.
+
+Blocks, spools, disc cones, and foam noodles are now nonblocking perception
+targets: they remain visible to RGB-D and LiDAR but have no static collision
+mesh. These 6–9 cm objects otherwise acted as infinite-mass barriers below the
+navigation proximity scan's 15 cm cutoff. The large ducks remain collidable.
+This does not simulate pushing, rolling, or deforming the small objects.

@@ -96,6 +96,12 @@ BISTRO_TARGET_PLACEMENTS = [
 ]
 
 
+# Small detection props are visible sensor targets, not infinite-mass barriers.
+NONBLOCKING_TARGET_CLASSES = frozenset(
+    {"wooden_block", "filament_spool", "disc_cone", "pool_noodle"}
+)
+
+
 def find_bistro_assets_dir(custom_path: Path | str | None = None) -> Path:
     candidates: list[Path] = []
     if custom_path:
@@ -407,19 +413,37 @@ def generate_argos_xml(
         placements = place_targets(seed, targets)
 
     classes = target_classes(len(placements))
+    target_z = [0.0] * len(placements)
+    if is_bistro and placements:
+        from mesh_surface import BistroSurface
+
+        surface = BistroSurface(bistro_glb_path)
+        # Default relative prop paths refer to generated runtime copies. Use
+        # their checked-in originals when generating outside that directory.
+        models = Path(props_dir)
+        if props_dir == "props" and not models.is_dir():
+            models = REPO / "argos/assets/props"
+        target_z = [
+            surface.place(models / f"{name}.glb", x, y, yaw)
+            for (x, y, yaw), name in zip(placements, classes)
+        ]
     if placements:
         lines.append("")
-        lines.append("    <!-- Detection targets: one collision mesh each, drawn by")
+        lines.append("    <!-- Large detection targets: collision meshes drawn by")
         lines.append("         the matching <prop>. Classes come from")
         lines.append("         adapters/perception/catalog.py. -->")
-        for i, ((x, y, yaw), name) in enumerate(zip(placements, classes)):
+        for i, ((x, y, yaw), name, z) in enumerate(zip(placements, classes, target_z)):
+            if name in NONBLOCKING_TARGET_CLASSES:
+                continue
             model = f"{props_dir}/{name}.glb"
-            orientation = _vec(math.degrees(yaw), 0.0, 90.0)
+            # ARGoS composes Rx * Ry * Rz. After the glTF-to-Z-up roll,
+            # its Y angle becomes world yaw; using the Z angle tips the prop.
+            orientation = _vec(0.0, math.degrees(yaw), 90.0)
             lines.append(
                 f'    <mesh id={_attr(f"target_{i}_{name}")} y_up="false" file={_attr(model)}'
             )
             lines.append(
-                f'          position={_attr(_vec(x, y, 0.0))} '
+                f"          position={_attr(_vec(x, y, z))} "
                 f'orientation={_attr(orientation)} scale="1.0" />'
             )
 
@@ -517,12 +541,14 @@ def generate_argos_xml(
             f'        <prop model={_attr(str(bistro_glb_path))} position="0,0,-0.3"',
             '              orientation="0,0,90" scale="1.0" />',
         ])
-        for (x, y, yaw), name in zip(placements, classes):
+        for (x, y, yaw), name, z in zip(placements, classes, target_z):
             model = f"{props_dir}/{name}.glb"
-            orientation = _vec(math.degrees(yaw), 0.0, 90.0)
+            # ARGoS composes Rx * Ry * Rz. After the glTF-to-Z-up roll,
+            # its Y angle becomes world yaw; using the Z angle tips the prop.
+            orientation = _vec(0.0, math.degrees(yaw), 90.0)
             lines.append(
-                f'        <prop model={_attr(model)} '
-                f'position={_attr(_vec(x, y, 0.0))} '
+                f"        <prop model={_attr(model)} "
+                f"position={_attr(_vec(x, y, z))} "
                 f'orientation={_attr(orientation)} scale="1.0" />'
             )
         lines.extend([
@@ -569,12 +595,14 @@ def generate_argos_xml(
             ]
         )
 
-        for (x, y, yaw), name in zip(placements, classes):
+        for (x, y, yaw), name, z in zip(placements, classes, target_z):
             model = f"{props_dir}/{name}.glb"
-            orientation = _vec(math.degrees(yaw), 0.0, 90.0)
+            # ARGoS composes Rx * Ry * Rz. After the glTF-to-Z-up roll,
+            # its Y angle becomes world yaw; using the Z angle tips the prop.
+            orientation = _vec(0.0, math.degrees(yaw), 90.0)
             lines.append(
-                f'        <prop model={_attr(model)} '
-                f'position={_attr(_vec(x, y, 0.0))} '
+                f"        <prop model={_attr(model)} "
+                f"position={_attr(_vec(x, y, z))} "
                 f'orientation={_attr(orientation)} scale="1.0" />'
             )
 
