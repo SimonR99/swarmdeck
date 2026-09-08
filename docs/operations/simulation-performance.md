@@ -169,3 +169,45 @@ server/.venv/bin/python tests/integration/run_visual_test.py \
 
 The [robot visual assets](../../argos/assets/robots/README.md) describe the new
 Bunker, Scout Mini, and Spot meshes and how to regenerate them.
+
+## Missing local maps and sparse loop closures
+
+In a live Bistro run, Spot had valid odometry and scans but no local map or
+keyframes. `/robot_3/slam_toolbox` was **inactive**, despite successful
+configuration: its configure service response timed out and the lifecycle
+manager never proceeded to activation. The process being alive did not imply
+that it was mapping. Check its state inside the sim container:
+
+```sh
+docker exec swarmdeck-sim-1 bash -c \
+  'source /opt/ros/jazzy/setup.bash; ros2 lifecycle get /robot_3/slam_toolbox'
+```
+
+If it is configured/inactive and should be mapping, activate it with
+`ros2 lifecycle set /robot_3/slam_toolbox activate` in the same environment.
+This preserves the running simulation. Once the map appears, check the Nav2
+lifecycle states too: a missing map can leave its planner and subsequent nodes
+inactive. Activate only nodes confirmed inactive; do not reset working nodes
+or issue motion commands as part of this diagnosis. Startup staggering and
+longer client timeouts reduce contention but do not recover every lost service
+response automatically.
+
+The same investigation found the nearest-return scan-novelty signature was
+mostly measuring the street: 60/60 sectors on robots 0 and 2, 56/60 on robot 1,
+and 57/60 on Spot. Ground intersections form a near ring that changes little
+with translation, hiding changing walls behind it. Profiles with a physical
+height band now compute novelty using that band above the ground. Full 3D
+geometry, including the ground, is still uploaded; timestamp, yaw-rate, and
+registration verification gates remain in effect.
+
+Use `/api/slam/backend` to distinguish a stopped ingest pipeline from sparse
+accepted matches. `queued=0` with increasing keyframes means the worker is
+keeping up. `accepted_closures` includes same-robot closures;
+`inter_robot_closures` counts connections between robots. The diagnosed run had
+one same-robot closure and zero inter-robot closures, rather than a disabled
+loop-closure worker. More useful captures improve matching opportunities;
+they do not guarantee geometrically valid loop closures.
+
+The novelty fix requires a new adapter process. The current simulation
+entrypoint exits if its adapter child exits, so plan a coordinated simulation
+restart instead of killing that child in an active run.

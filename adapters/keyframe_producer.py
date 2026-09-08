@@ -413,7 +413,18 @@ class KeyframeUploader:
             return False
         if base_points.shape[0] < self.min_points:
             return False
-        signature = _scan_signature(base_points)
+        signature_points = base_points
+        if self._height_band is not None:
+            # Ground returns form a nearly constant near ring as a robot moves.
+            # They must not hide changing walls in the nearest-range signature.
+            # This only filters novelty detection; the full 3D cloud is uploaded.
+            ground_z = self._height_band["floor_z"] - float(pose[2])
+            min_z = ground_z + self._height_band["min_height"]
+            max_z = ground_z + self._height_band["max_height"]
+            signature_points = base_points[
+                (base_points[:, 2] >= min_z) & (base_points[:, 2] <= max_z)
+            ]
+        signature = _scan_signature(signature_points)
         if self._last_pose is not None:
             moved = _moved(
                 self._last_pose, pose, self.min_translation_m, self.min_yaw_rad

@@ -445,3 +445,35 @@ def test_period_gate_updates_turn_reference_without_processing_the_cloud():
             )
         downsample.assert_not_called()
     assert uploader.pending() == 1
+
+
+def test_ground_ring_does_not_mask_changing_walls():
+    """A flat street moves through the sensor but its near-ground ring is constant."""
+    angles = np.linspace(-math.pi, math.pi, 720, endpoint=False)
+    ground = np.column_stack(
+        (np.cos(angles), np.sin(angles), np.full(720, -0.3))
+    ).astype(np.float32)
+    walls = np.column_stack(
+        (5 * np.cos(angles), 5 * np.sin(angles), np.full(720, 0.5))
+    ).astype(np.float32)
+    first = np.vstack((ground, walls))
+    second = np.vstack((ground, walls + np.array([1.0, 0.0, 0.0], dtype=np.float32)))
+    uploader = KeyframeUploader(
+        "r0",
+        "http://backend",
+        min_period_s=0.0,
+        height_band={"floor_z": -0.3, "min_z": 0.15, "max_z": 1.8},
+    )
+    pose = pose7_from_xy_yaw(0.0, 0.0, 0.0)
+    assert uploader.consider(first, pose, 1.0)
+    packet = decode_keyframe(uploader._queue[-1])
+    assert np.any(packet.points[:, 2] < 0.0)  # Ground stays in the uploaded map.
+    assert not uploader.consider(first, pose, 2.0)
+    assert uploader.consider(second, pose, 3.0)
+    # Translating the map and pose together still represents the same observation.
+    shift = np.array([2.0, 3.0, 0.2], dtype=np.float32)
+    corrected = pose.copy()
+    corrected[:3] += shift
+    # floor_z is map-relative, so the map's ground reference moves with the gauge.
+    uploader._height_band["floor_z"] += 0.2
+    assert not uploader.consider(second + shift, corrected, 4.0)
