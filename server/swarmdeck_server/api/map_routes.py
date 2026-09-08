@@ -633,7 +633,6 @@ async def get_cloud(request: Request | None = None) -> Response:
     """Bounded cloud transport. Expensive fusion/compression and upstream I/O run off-loop."""
     from ..mapsvc.output import merged_cloud
     from ..mapsvc.graph_bridge import SLAM_URL
-    import hashlib
     import urllib.parse
     import urllib.request
 
@@ -641,6 +640,34 @@ async def get_cloud(request: Request | None = None) -> Response:
     source = request.query_params.get("source", "slam") if request else "slam"
     if source not in {"slam", "optimized"}:
         return JSONResponse({"error": "invalid cloud source"}, status_code=400)
+
+    delivery = map_service.cloud_delivery
+    chunk_id = request.query_params.get("chunk") if request else None
+    if chunk_id:
+        payload = await asyncio.to_thread(delivery.chunk, chunk_id)
+        if payload is None:
+            return Response(status_code=404)
+        return Response(
+            payload,
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "ETag": f'"{chunk_id}"',
+            },
+        )
+    with map_service._state_lock:
+        members = map_service.global_members()
+        selected = [robot_id] if robot_id else (members or map_service.cloud_maps)
+        has_cloud = any(
+            rid in map_service.cloud_maps and len(map_service.cloud_maps[rid].points)
+            for rid in selected
+        )
+        revision = (
+            map_service.cloud_epoch,
+            tuple(sorted(map_service.transforms.items())),
+            tuple(sorted(map_service.cloud_z_offsets.items())),
+            tuple(sorted(members)),
+        )
 
     def upstream_cloud():
         url = f"{SLAM_URL}/cloud"
@@ -675,16 +702,21 @@ async def get_cloud(request: Request | None = None) -> Response:
             except (OSError, ValueError):
                 pass  # Before reconstruction is ready, retain live scan coverage.
         points, indices, names, rgb = merged_cloud(
-            map_service, robot_id=robot_id or None, include_rgb=True
+            map_service, robot_id=robot_id or None, include_rgb=True, accumulated=True
         )
         if not len(points) and SLAM_URL and not attempted_upstream:
             return upstream_cloud()
-        # Uniformly retain coverage across robots. Float32 avoids int16 wrap beyond 327 m.
-        if len(points) > 300_000:
-            keep = np.linspace(0, len(points) - 1, 300_000, dtype=np.int64)
+        # Bound browser/GPU work by coarsening spatially, not sampling array
+        # offsets (which would change every tile when any robot adds points).
+        size = 0.10
+        while len(points) > 300_000:
+            keys = np.column_stack((indices, np.floor(points / size).astype(np.int64)))
+            _, keep = np.unique(keys, axis=0, return_index=True)
             points, indices = points[keep], indices[keep]
             if rgb is not None:
                 rgb = rgb[keep]
+            size *= 2
+        # Float32 avoids int16 wrap beyond 327 m.
         raw = points.astype("<f4").tobytes() + indices.tobytes()
         if rgb is not None:
             raw += rgb.tobytes()
@@ -698,22 +730,26 @@ async def get_cloud(request: Request | None = None) -> Response:
         }
 
     try:
-        body, headers = await asyncio.to_thread(prepare)
+        product = await asyncio.to_thread(
+            delivery.prepare,
+            (robot_id, source, SLAM_URL),
+            revision,
+            prepare,
+            upstream=bool(SLAM_URL) and (source == "optimized" or not has_cloud),
+        )
+        headers = product.headers
+        if request and request.headers.get("if-none-match") == headers["ETag"]:
+            return Response(status_code=304, headers=headers)
+        if request and request.query_params.get("manifest") == "1":
+            manifest = await asyncio.to_thread(delivery.manifest, product)
+            return JSONResponse(manifest, headers=headers)
+        return Response(
+            product.body, media_type="application/octet-stream", headers=headers
+        )
     except Exception as exc:
         return JSONResponse(
             {"error": f"cloud unavailable: {type(exc).__name__}"}, status_code=503
         )
-    etag = (
-        '"'
-        + hashlib.sha256(body + repr(sorted(headers.items())).encode()).hexdigest()
-        + '"'
-    )
-    headers.update({"ETag": etag, "Cache-Control": "no-cache"})
-    if request and request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers=headers)
-    return Response(
-        content=body, media_type="application/octet-stream", headers=headers
-    )
 
 
 async def post_optimized_map(request: Request) -> Any:
