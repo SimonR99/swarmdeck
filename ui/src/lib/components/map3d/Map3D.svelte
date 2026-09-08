@@ -211,13 +211,18 @@
       : '';
   }
 
+  function cloudScope() {
+    const selection = scope();
+    return `${selection}${selection ? '&' : '?'}source=${mapStore.mapSource}`;
+  }
+
   async function fetchCloud() {
     if (!scene || !worker || !active || document.hidden || pending) return;
     const controller = new AbortController();
     pending = controller;
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     const id = ++generation;
-    const currentScope = scope();
+    const currentScope = cloudScope();
     const revision = lastCloudRevision;
     try {
       const response = await fetch(`/api/map/cloud${currentScope}`, {
@@ -287,7 +292,7 @@
           ...(keptRgb ? [keptRgb.buffer] : [])
         ]);
       });
-      if (id !== generation || !scene || currentScope !== scope()) return;
+      if (id !== generation || !scene || currentScope !== cloudScope()) return;
       cloudEtag = revision === lastCloudRevision ? response.headers.get('ETag') ?? '' : '';
       hasRgb = rgbPresent;
       if (!hasRgb && colorMode === 'camera') setColorMode('elevation');
@@ -388,7 +393,7 @@
     const localTransform = mapStore.viewRobot
       ? mapStore.status?.transforms[mapStore.viewRobot]
       : null;
-    const key = `${currentScope}|${enabled}|${currentScope ? JSON.stringify(localTransform) : ''}`;
+    const key = `${cloudScope()}|${enabled}|${currentScope ? JSON.stringify(localTransform) : ''}`;
     if (key === lastCloudRevision) return;
     lastCloudRevision = key;
     if (currentScope !== lastScope) {

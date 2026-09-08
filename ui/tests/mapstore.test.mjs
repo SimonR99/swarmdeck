@@ -32,7 +32,7 @@ try {
   await rm(directory, { recursive: true });
 }
 const context = {
-  clearRect() {}, drawImage() {},
+  clearRect() {}, drawImage() {}, fillRect() {},
   getImageData: () => ({ data: new Uint8ClampedArray(16) })
 };
 globalThis.document = { createElement: () => ({ width: 2, height: 2, getContext: () => context }) };
@@ -117,3 +117,32 @@ test('a delayed graph index cannot reselect the previous robot', async () => {
   assert.equal(mapStore.ready, false);
   assert.equal(mapStore.canvas, null);
 });
+
+for (const local of [true, false]) {
+  test(`${local ? 'local' : 'global'} optimized image uses its own geometry when the index is stale`, async () => {
+    await setup();
+    const latest = { width: 5, height: 7, resolution: 0.05, origin: { x: -3, y: 9 } };
+    globalThis.fetch = async url => {
+      if (url === '/api/map/optimized') return Response.json({ maps: [
+        { ...scope, scope: 'component:1', robots: ['r1', 'r2'] }, scope
+      ] });
+      if (url.startsWith('/api/map/optimized/')) return new Response('png', { headers: {
+        'X-Map-Resolution': String(latest.resolution),
+        'X-Map-Width': String(latest.width), 'X-Map-Height': String(latest.height),
+        'X-Map-Origin-X': String(latest.origin.x), 'X-Map-Origin-Y': String(latest.origin.y)
+      } });
+      return response(url);
+    };
+    if (local) await mapStore.refreshLocalView();
+    else {
+      mapStore.setGlobalInfo(info);
+      await mapStore.setViewPreference('global', null);
+    }
+    assert.equal(mapStore.info.width, latest.width);
+    assert.equal(mapStore.info.height, latest.height);
+    assert.equal(mapStore.info.resolution, latest.resolution);
+    assert.deepEqual(mapStore.info.origin, latest.origin);
+    assert.equal(mapStore.canvas.width, latest.width);
+    assert.equal(mapStore.canvas.height, latest.height);
+  });
+}

@@ -65,12 +65,28 @@ _costmaps: dict[tuple[str, str], CostmapEntry] = {}
 _costmap_lock = threading.Lock()
 
 
+def _map_headers(info: dict[str, Any]) -> dict[str, str]:
+    """Bind raster geometry to the image response, never a separate index poll."""
+    return {
+        "Cache-Control": "no-cache",
+        "X-Map-Resolution": str(info["resolution"]),
+        "X-Map-Width": str(info["width"]),
+        "X-Map-Height": str(info["height"]),
+        "X-Map-Origin-X": str(info["origin"]["x"]),
+        "X-Map-Origin-Y": str(info["origin"]["y"]),
+        **({"X-Map-Seq": str(info["seq"])} if "seq" in info else {}),
+    }
+
+
 async def get_map() -> Response:
-    content, seq = map_service.map_png()
+    from ..mapsvc.output import grid_png
+
+    snapshot = map_service.map_snapshot()
+    content = await asyncio.to_thread(grid_png, snapshot.meta, snapshot.merged)
     return Response(
         content=content,
         media_type="image/png",
-        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(seq)},
+        headers=_map_headers(snapshot.meta.as_dict(snapshot.seq)),
     )
 
 
@@ -201,15 +217,13 @@ async def reset_all_maps() -> Response:
 
 async def get_local_map(robot_id: str) -> Response:
     """The robot's unregistered SLAM grid, expressed in its own map frame."""
-    content = map_service.local_png(robot_id)
-    info = map_service.local_info(robot_id)
-    if content is None or info is None:
+    from ..mapsvc.output import local_png_snapshot
+
+    snapshot = await asyncio.to_thread(local_png_snapshot, map_service, robot_id)
+    if snapshot is None:
         return JSONResponse({"error": "local map not available"}, status_code=404)
-    return Response(
-        content=content,
-        media_type="image/png",
-        headers={"Cache-Control": "no-cache", "X-Map-Seq": str(info["seq"])},
-    )
+    content, info = snapshot
+    return Response(content=content, media_type="image/png", headers=_map_headers(info))
 
 
 async def get_local_map_info(robot_id: str) -> Response:
@@ -624,32 +638,50 @@ async def get_cloud(request: Request | None = None) -> Response:
     import urllib.request
 
     robot_id = str(request.query_params.get("robot_id", "") or "") if request else ""
+    source = request.query_params.get("source", "slam") if request else "slam"
+    if source not in {"slam", "optimized"}:
+        return JSONResponse({"error": "invalid cloud source"}, status_code=400)
+
+    def upstream_cloud():
+        url = f"{SLAM_URL}/cloud"
+        if robot_id:
+            url += "?robot_id=" + urllib.parse.quote(robot_id, safe="")
+        with urllib.request.urlopen(url, timeout=3.0) as upstream:
+            data = upstream.read(MAX_UPLOAD_BYTES + 1)
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise ValueError("upstream cloud too large")
+            headers = {
+                k: upstream.headers.get(k, default)
+                for k, default in {
+                    "X-Cloud-Points": "0",
+                    "X-Cloud-Scale": str(CLOUD_SCALE),
+                    "X-Cloud-Robots": "",
+                    "X-Cloud-Format": "xyz16",
+                    "X-Cloud-RGB": "0",
+                    "X-Cloud-Frame": "world",
+                }.items()
+            }
+            return data, headers
 
     def prepare():
-        points, indices, names, rgb = merged_cloud(map_service, robot_id=robot_id or None, include_rgb=True)
-        if not len(points) and SLAM_URL:
-            url = f"{SLAM_URL}/cloud"
-            if robot_id:
-                url += "?robot_id=" + urllib.parse.quote(robot_id, safe="")
-            with urllib.request.urlopen(url, timeout=3.) as upstream:
-                data = upstream.read(MAX_UPLOAD_BYTES + 1)
-                if len(data) > MAX_UPLOAD_BYTES:
-                    raise ValueError("upstream cloud too large")
-                headers = {
-                    k: upstream.headers.get(k, default)
-                    for k, default in {
-                        "X-Cloud-Points": "0",
-                        "X-Cloud-Scale": str(CLOUD_SCALE),
-                        "X-Cloud-Robots": "",
-                        "X-Cloud-Format": "xyz16",
-                        "X-Cloud-RGB": "0",
-                        "X-Cloud-Frame": "world",
-                    }.items()
-                }
-                return data, headers
+        # The optimized raster and tactical terrain must use the same solved
+        # keyframes. Live adapter clouds may contain only the latest scan.
+        attempted_upstream = source == "optimized" and bool(SLAM_URL)
+        if attempted_upstream:
+            try:
+                product = upstream_cloud()
+                if int(product[1]["X-Cloud-Points"]) > 0:
+                    return product
+            except (OSError, ValueError):
+                pass  # Before reconstruction is ready, retain live scan coverage.
+        points, indices, names, rgb = merged_cloud(
+            map_service, robot_id=robot_id or None, include_rgb=True
+        )
+        if not len(points) and SLAM_URL and not attempted_upstream:
+            return upstream_cloud()
         # Uniformly retain coverage across robots. Float32 avoids int16 wrap beyond 327 m.
         if len(points) > 300_000:
-            keep = np.linspace(0, len(points)-1, 300_000, dtype=np.int64)
+            keep = np.linspace(0, len(points) - 1, 300_000, dtype=np.int64)
             points, indices = points[keep], indices[keep]
             if rgb is not None:
                 rgb = rgb[keep]
@@ -664,15 +696,24 @@ async def get_cloud(request: Request | None = None) -> Response:
             "X-Cloud-RGB": "1" if rgb is not None else "0",
             "X-Cloud-Frame": "local" if robot_id else "world",
         }
+
     try:
         body, headers = await asyncio.to_thread(prepare)
     except Exception as exc:
-        return JSONResponse({"error": f"cloud unavailable: {type(exc).__name__}"}, status_code=503)
-    etag = '"' + hashlib.sha256(body + repr(sorted(headers.items())).encode()).hexdigest() + '"'
+        return JSONResponse(
+            {"error": f"cloud unavailable: {type(exc).__name__}"}, status_code=503
+        )
+    etag = (
+        '"'
+        + hashlib.sha256(body + repr(sorted(headers.items())).encode()).hexdigest()
+        + '"'
+    )
     headers.update({"ETag": etag, "Cache-Control": "no-cache"})
     if request and request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
-    return Response(content=body, media_type="application/octet-stream", headers=headers)
+    return Response(
+        content=body, media_type="application/octet-stream", headers=headers
+    )
 
 
 async def post_optimized_map(request: Request) -> Any:
@@ -742,7 +783,7 @@ async def get_optimized_map(scope: str) -> Response:
     return Response(
         content=grid_png(meta, cells),
         media_type="image/png",
-        headers={"Cache-Control": "no-cache"},
+        headers=_map_headers(meta.as_dict()),
     )
 
 

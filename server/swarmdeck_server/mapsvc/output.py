@@ -198,6 +198,14 @@ def local_info(service: Any, robot_id: str) -> dict[str, Any] | None:
 
 
 def local_png(service: Any, robot_id: str) -> bytes | None:
+    snapshot = local_png_snapshot(service, robot_id)
+    return snapshot[0] if snapshot else None
+
+
+def local_png_snapshot(
+    service: Any, robot_id: str
+) -> tuple[bytes, dict[str, Any]] | None:
+    """Encode pixels and geometry from the same captured robot grid."""
     with service._state_lock:
         grid = service.robot_grids.get(robot_id)
         if grid is None:
@@ -207,4 +215,5 @@ def local_png(service: Any, robot_id: str) -> bytes | None:
             meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
         )
         cells = np.array(cells, dtype=np.int8, copy=True)
-    return grid_png(meta, cells)
+        seq = service.robot_revisions.get(robot_id, 0)
+    return grid_png(meta, cells), meta.as_dict(seq)

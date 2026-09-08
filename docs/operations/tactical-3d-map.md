@@ -3,7 +3,9 @@
 The dashboard opens the tactical 3D map without a URL parameter. Deselect
 **Layers → 3D cloud** to return to 2D, and select it to reopen the tactical map.
 The optional `?view=2d` URL starts directly in 2D. The map uses registered
-robot clouds, with the collaborative SLAM cloud as a fallback. X/Y are world
+clouds selected by the map source. **Optimized** uses the accumulated, solved
+keyframe cloud; **Robot SLAM** uses the latest robot uploads. Optimized falls
+back to those uploads while reconstruction is unavailable or empty. X/Y are world
 metres and Z is up. A local robot cloud is transformed into world coordinates
 for agreement with robot overlays and navigation goals.
 
@@ -206,3 +208,11 @@ voxel. The Camera control enables when the map supplies RGB; unobserved areas
 remain neutral gray. Existing XYZ-only keyframes cannot gain camera colors
 retroactively. Simulator and SLAM processes must load this version and collect
 new keyframes before Camera becomes available on such a run.
+
+### Stable raster updates
+
+Map PNG responses carry their resolution, dimensions, and origin in `X-Map-*`
+headers from the same snapshot as the pixels. The UI uses those headers instead
+of an earlier metadata poll, preventing stretching or displacement while the map
+expands. Raster updates preserve world positions on screen, including when the
+view is rotated or the grid resolution changes.
