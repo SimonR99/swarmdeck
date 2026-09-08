@@ -62,7 +62,16 @@ class CodingWorker(Protocol):
 
 
 class FleetAction(BaseModel):
-    action: Literal["doctor", "deploy", "drive", "navigate", "cancel", "stop", "body"]
+    action: Literal[
+        "doctor",
+        "battery",
+        "deploy",
+        "drive",
+        "navigate",
+        "cancel",
+        "stop",
+        "body",
+    ]
     robot_ids: List[str]
     parameters: Dict[str, Any] = Field(default_factory=dict)
 

@@ -99,3 +99,86 @@ def test_invoke_can_run_multiple_robots_concurrently_through_injected_runner():
         ["doctor", "spot_0"],
         ["doctor", "aslan_0"],
     ]
+
+
+def test_battery_uses_one_read_only_fleet_snapshot_without_approval():
+    tools = RobotToolFleetTools(
+        script="/app/scripts/robot_tool.py", server_url="http://server:8080"
+    )
+
+    commands = tools.build_commands(
+        FleetAction(action="battery", robot_ids=["tars_0", "spot_0"])
+    )
+
+    assert len(commands) == 1
+    _, argv, timeout = commands[0]
+    assert argv[-1] == "list"
+    assert "--services" not in argv
+    assert timeout == 30.0
+
+
+def test_battery_normalizes_multiple_robots_from_one_list_call():
+    seen = []
+
+    async def runner(argv, timeout):
+        seen.append((argv, timeout))
+        return {
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "payload": [
+                {"robot_id": "tars_0", "battery": 0.4193549, "online": True},
+                {"robot_id": "spot_0", "battery": 0.8, "online": False},
+            ],
+        }
+
+    result = asyncio.run(
+        RobotToolFleetTools(runner=runner).invoke(
+            FleetAction(action="battery", robot_ids=["tars", "spot_0"])
+        )
+    )
+
+    assert result == {
+        "ok": True,
+        "action": "battery",
+        "results": [
+            {
+                "robot_id": "tars_0",
+                "returncode": 0,
+                "battery_fraction": 0.4193549,
+                "battery_percent": 41.9,
+                "online": True,
+            },
+            {
+                "robot_id": "spot_0",
+                "returncode": 0,
+                "battery_fraction": 0.8,
+                "battery_percent": 80.0,
+                "online": False,
+            },
+        ],
+    }
+    assert len(seen) == 1
+    assert seen[0][0][-1] == "list"
+
+
+def test_battery_reports_a_missing_robot_without_hiding_valid_results():
+    async def runner(argv, timeout):
+        return {
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "payload": [{"robot_id": "tars_0", "battery": None, "online": True}],
+        }
+
+    result = asyncio.run(
+        RobotToolFleetTools(runner=runner).invoke(
+            FleetAction(action="battery", robot_ids=["tars_0", "missing_0"])
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["results"][0]["returncode"] == 0
+    assert result["results"][0]["battery_percent"] is None
+    assert result["results"][1]["returncode"] == 1
+    assert "not found" in result["results"][1]["error"]

@@ -23,6 +23,15 @@ CommandResult = Dict[str, Any]
 CommandRunner = Callable[[list[str], float], Awaitable[CommandResult]]
 
 _SAFE_TARGET = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_READ_ONLY_ACTIONS = {"doctor", "battery"}
+_ROBOT_ID_ALIASES = {
+    "asimov": "asimov_0",
+    "aslan": "aslan_0",
+    "botman": "botman_0",
+    "scout": "tars_0",
+    "spot": "spot_0",
+    "tars": "tars_0",
+}
 _DEPLOY_PROFILE = {
     "all": "all",
     "aslan": "aslan",
@@ -57,6 +66,11 @@ def _target(value: str) -> str:
     if not _SAFE_TARGET.fullmatch(value):
         raise ValueError(f"invalid robot target: {value!r}")
     return value
+
+
+def _canonical_robot_id(value: str) -> str:
+    target = _target(value)
+    return _ROBOT_ID_ALIASES.get(target.lower(), target)
 
 
 def _number(
@@ -102,7 +116,7 @@ class RobotToolFleetTools:
             "name": "robot_tool",
             "available": Path(self.script).is_file(),
             "transport": "validated argv; no shell",
-            "read_only_without_approval": ["doctor"],
+            "read_only_without_approval": sorted(_READ_ONLY_ACTIONS),
             "mutations_require_approval": True,
             "active": False,
         }
@@ -114,19 +128,24 @@ class RobotToolFleetTools:
             raise ValueError("at least one robot target is required")
         # Approval is deliberately out-of-band from FleetAction.  A model may
         # propose that object, so no value inside it is accepted as authority.
-        if action.action != "doctor" and not operator_approved:
+        if action.action not in _READ_ONLY_ACTIONS and not operator_approved:
             raise PermissionError(f"{action.action} requires operator approval")
 
+        targets = [_target(robot_id) for robot_id in action.robot_ids]
+        base = [
+            sys.executable,
+            self.script,
+            "--json",
+            "--server",
+            self.server_url,
+        ]
+        if action.action == "battery":
+            # The list command is the stable, read-only telemetry endpoint. One
+            # fleet snapshot is enough even when several batteries are requested.
+            return [("all", [*base, "list"], 30.0)]
+
         commands: list[tuple[str, list[str], float]] = []
-        for robot_id in action.robot_ids:
-            robot = _target(robot_id)
-            base = [
-                sys.executable,
-                self.script,
-                "--json",
-                "--server",
-                self.server_url,
-            ]
+        for robot in targets:
             params = action.parameters
 
             if action.action == "doctor":
@@ -213,6 +232,16 @@ class RobotToolFleetTools:
     ) -> Dict[str, Any]:
         commands = self.build_commands(action, operator_approved=operator_approved)
 
+        if action.action == "battery":
+            _, argv, timeout = commands[0]
+            snapshot = await self.runner(argv, timeout)
+            results = self._battery_results(action.robot_ids, snapshot)
+            return {
+                "ok": all(result.get("returncode") == 0 for result in results),
+                "action": action.action,
+                "results": results,
+            }
+
         async def run_one(
             robot_id: str, argv: list[str], timeout: float
         ) -> Dict[str, Any]:
@@ -227,6 +256,72 @@ class RobotToolFleetTools:
             "action": action.action,
             "results": results,
         }
+
+    @staticmethod
+    def _battery_results(
+        requested_robot_ids: list[str], snapshot: CommandResult
+    ) -> list[CommandResult]:
+        requested = [_canonical_robot_id(robot_id) for robot_id in requested_robot_ids]
+        returncode = snapshot.get("returncode")
+        payload = snapshot.get("payload")
+        if returncode != 0 or not isinstance(payload, list):
+            error = snapshot.get("stderr") or "robot list returned invalid JSON"
+            return [
+                {
+                    "robot_id": robot_id,
+                    "returncode": returncode if isinstance(returncode, int) else 1,
+                    "battery_fraction": None,
+                    "battery_percent": None,
+                    "online": None,
+                    "error": error,
+                }
+                for robot_id in requested
+            ]
+
+        fleet = {
+            item.get("robot_id"): item
+            for item in payload
+            if isinstance(item, dict) and isinstance(item.get("robot_id"), str)
+        }
+        targets = list(fleet) if requested == ["all"] else requested
+        results: list[CommandResult] = []
+        for robot_id in targets:
+            telemetry = fleet.get(robot_id)
+            if telemetry is None:
+                results.append(
+                    {
+                        "robot_id": robot_id,
+                        "returncode": 1,
+                        "battery_fraction": None,
+                        "battery_percent": None,
+                        "online": None,
+                        "error": f"robot {robot_id!r} was not found in the fleet snapshot",
+                    }
+                )
+                continue
+
+            battery = telemetry.get("battery")
+            try:
+                battery_fraction = float(battery) if battery is not None else None
+            except (TypeError, ValueError):
+                battery_fraction = None
+            if battery_fraction is not None and not math.isfinite(battery_fraction):
+                battery_fraction = None
+            battery_percent = (
+                round(battery_fraction * 100.0, 1)
+                if battery_fraction is not None
+                else None
+            )
+            results.append(
+                {
+                    "robot_id": robot_id,
+                    "returncode": 0,
+                    "battery_fraction": battery_fraction,
+                    "battery_percent": battery_percent,
+                    "online": telemetry.get("online"),
+                }
+            )
+        return results
 
     @staticmethod
     async def _run_command(argv: list[str], timeout: float) -> CommandResult:
