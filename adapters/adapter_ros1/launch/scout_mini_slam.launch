@@ -26,7 +26,7 @@
 
     <!-- Fleet return limit in metres, applied by the Ouster cloud processor.
          Override after the vendor include so its defaults cannot replace it. -->
-    <param name="/os_cloud_node/max_range" type="double" value="30.0" />
+    <param name="/os_cloud_node/os_cloud_node/max_range" type="double" value="30.0" />
 
     <!--- LVI-SAM: lidar-visual-inertial SLAM -->
     <include file="$(find lvi_sam)/launch/include/module_sam_agx.launch" />

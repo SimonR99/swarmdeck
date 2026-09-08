@@ -101,13 +101,17 @@ robot services must remain on their configured domain to communicate.
 
 Botman, Aslan, and TARS are configured for a **30 m maximum return range**.
 Botman and Aslan set `max_range` in their repo-owned Ouster driver YAML files;
-TARS overrides `/os_cloud_node/max_range` after its vendor Ouster launch include.
-The ROS 1 parameter is the cloud processor's private `max_range`, measured in
-metres ([Ouster implementation](https://github.com/ouster-lidar/ouster-ros/blob/master/src/os_cloud_nodelet.cpp)).
+TARS overrides `/os_cloud_node/os_cloud_node/max_range` after its vendor Ouster
+launch include. Its installed Ouster 0.5.2 predates this parameter, so
+`scripts/scout-build-lidar` backports filtering into the cloud nodelet before
+normal Scout deployment. It preserves complete point records and publishes a
+dense cloud: LVI-SAM rejects the NaN-filled organized clouds used by newer
+drivers. The SDK's per-point range is in millimetres; the ROS setting is metres.
+The original source and library are backed up beside the patched files.
 This is distance from the sensor at capture time, not distance from the map
 origin. Navigation can retain its shorter obstacle/raytrace horizon.
 
 Apply these startup parameters by restarting the corresponding LiDAR driver.
-Check the published cloud's range afterward, particularly on TARS where the
-installed vendor driver version must support this parameter. Existing spurious
+On TARS, restart its coupled sensor/SLAM launch after building the backport.
+Check the published cloud's range afterward. Existing spurious
 returns already accumulated in a SLAM/server map are not removed retroactively.
