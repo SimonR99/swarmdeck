@@ -114,7 +114,8 @@ Launch from the SwarmDeck repository, using the real topic and frame names:
 
 ```bash
 ros2 launch deploy/mgg/robot.launch.py \
-  robot:=spot_0 map_frame:=map odom:=/spot/odom cloud:=/ouster/points \
+  robot:=spot_0 map_frame:=map base_frame:=body \
+  odom:=/lio_sam/mapping/odometry cloud:=/ouster/points \
   params:=/absolute/path/to/spot-site-mgg.yaml use_sim_time:=false
 ```
 
@@ -123,7 +124,8 @@ collision size, sensor extrinsics, ground clearance, and site's allowed planning
 bounds. The upstream foot-bot demo parameters are not hardware calibration.
 The map frame must match the adapter's `map_frame`; the controller rejects paths
 in another frame. `odom.child_frame_id` must resolve into that frame through TF.
-Use `tf:=... tf_static:=...` if the robot has nonstandard TF topics. Use an actual
+Use `base_frame:=...` to select the chassis when the odometry child names a
+sensor frame. Use `tf:=... tf_static:=...` if the robot has nonstandard TF topics. Use an actual
 sensor cloud with correct extrinsics, not an accumulated global cloud whose
 origin no longer describes individual LiDAR rays.
 
@@ -139,3 +141,40 @@ exploration:
 ROS 1 adapters do not advertise exploration. Hardware deployment must validate
 its navigation action, TF, planner parameters, and actual stopping behavior;
 unit tests and a container build do not establish physical-robot performance.
+
+### Robot-local deployment
+
+The ROS 2 deployment profiles for **Botman, Aslan, Spot, and Asimov** include
+an `mgg` service. Each robot builds and runs its own pinned MGG image; the
+operator computer does not run their planners. `make deploy ROBOT=botman`
+(and `aslan`, `spot`, or `asimov`) includes this service in the normal deployment.
+It maps while idle and starts navigation only when Fleet → Explore is pressed.
+Scout/TARS's ROS 1 deployment is unchanged.
+
+The sidecar joins the robot's existing ROS domain over host networking, using
+standard ROS messages/services between its Jazzy runtime and the Humble adapter.
+It consumes the raw Ouster cloud on the Bunkers/Spot and the Mid-360 cloud on
+Asimov. Registered or accumulated SLAM clouds must not replace these inputs:
+the sensor-frame origin is required for correct free-space raycasting.
+
+`hardware.launch.py` reads the same adapter YAML as the robot adapter. It uses
+`base_frame` explicitly when resolving timestamped poses: SuperOdometry and
+LIO-SAM odometry child-frame names do not necessarily describe the robot body.
+Aligned depth and CameraInfo use the hardware's existing optical-frame TF;
+16-bit millimetre and 32-bit metre depth are supported. Both sensor streams
+are limited to 2 Hz; depth is sampled every fourth pixel. No synthetic camera
+transform or floor is added on hardware.
+
+The shared planner defaults are in `deploy/mgg/config/hardware.yaml` (500
+vertices, a 20-degree slope limit, no shared graphs). Each adapter YAML supplies
+its nominal body height, existing footprint and local planning bounds under
+`exploration.planner`. These bounds default to ±60 m in the robot's map frame;
+set them to the actual site and check the body envelope and sensor calibration
+before field use. Spot still requires its usual claim, power and standing
+state; Explore does not perform those body actions.
+
+Validation covers launch configuration, ROS sensor projection, frame selection,
+and adapter start/stop behavior. A Humble adapter also passed start, path delivery and stop checks against
+native Jazzy PCI in isolated Docker containers. Physical driving and the
+robot’s actual sensor/TF connectivity still need an on-robot check; these
+tests do not establish that a particular hardware deployment is ready to move.

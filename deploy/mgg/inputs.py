@@ -19,6 +19,8 @@ class Inputs(Node):
     def __init__(self):
         super().__init__("mgg_inputs")
         self.frame = self.declare_parameter("map_frame", "map").value
+        self.base_frame = self.declare_parameter("base_frame", "").value
+        self.sim_depth = self.declare_parameter("sim_depth", False).value
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.odom = self.create_publisher(Odometry, "map_odometry", 10)
@@ -29,14 +31,12 @@ class Inputs(Node):
         self.latest = None
         self.depth = None
         self.intrinsics = None
-        if self.declare_parameter("sim_depth", False).value:
+        if self.sim_depth:
             # Share the relay's node for the missing ARGoS camera extrinsic,
             # instead of starting another ROS process per robot.
             self.camera_tf = StaticTransformBroadcaster(self)
             transform = TransformStamped()
-            transform.header.frame_id = self.declare_parameter(
-                "base_frame", "base_link"
-            ).value
+            transform.header.frame_id = self.base_frame
             transform.child_frame_id = transform.header.frame_id + "/camera"
             transform.transform.translation.x = self.declare_parameter(
                 "camera_x", 0.0
@@ -46,6 +46,7 @@ class Inputs(Node):
             ).value
             transform.transform.rotation.w = 1.0
             self.camera_tf.sendTransform(transform)
+        if self.declare_parameter("depth_enabled", self.sim_depth).value:
             self.create_subscription(
                 Image, "depth", self.on_depth, qos_profile_sensor_data
             )
@@ -71,7 +72,7 @@ class Inputs(Node):
             msg = self.pending_odom[0]
             stamp = Time.from_msg(msg.header.stamp)
             try:
-                tf = self.buffer.lookup_transform(self.frame, msg.child_frame_id, stamp)
+                tf = self.buffer.lookup_transform(self.frame, self.base_frame or msg.child_frame_id, stamp)
             except TransformException:
                 if self.get_clock().now().nanoseconds - stamp.nanoseconds > 1_000_000_000:
                     self.pending_odom.popleft()
@@ -80,6 +81,7 @@ class Inputs(Node):
             self.pending_odom.popleft()
             output = copy.deepcopy(msg)
             output.header.frame_id = self.frame
+            output.child_frame_id = self.base_frame or msg.child_frame_id
             t = tf.transform.translation
             (
                 output.pose.pose.position.x,
@@ -104,21 +106,27 @@ class Inputs(Node):
             self.latest = None
         depth, info = self.depth, self.intrinsics
         self.depth = None
-        if depth is None or info is None or depth.encoding != "32FC1":
+        if depth is None or info is None or depth.encoding not in ("32FC1", "16UC1"):
+            return
+        if depth.header.frame_id != info.header.frame_id:
             return
         if (depth.width, depth.height) != (info.width, info.height):
             return
         fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
         if fx <= 0 or fy <= 0:
             return
-        # ARGoS depth is axial metres; its camera TF uses forward/left/up.
-        # Retain that frame and capture time so MGG raycasts from the camera.
+        # Real cameras use optical axes (right/down/forward); ARGoS alone
+        # labels its camera frame forward/left/up. Preserve sensor origin/time.
+        is_mm = depth.encoding == "16UC1"
+        item_size = 2 if is_mm else 4
         z = np.ndarray(
             (depth.height, depth.width),
-            dtype=">f4" if depth.is_bigendian else "<f4",
+            dtype=(">" if depth.is_bigendian else "<") + ("u2" if is_mm else "f4"),
             buffer=depth.data,
-            strides=(depth.step, 4),
+            strides=(depth.step, item_size),
         )[::4, ::4]
+        if is_mm:
+            z = z.astype(np.float32) * 0.001
         v, u = np.mgrid[0:depth.height:4, 0:depth.width:4]
         valid = np.isfinite(z) & (z > 0.05) & (z < 20.0)
         points = np.column_stack((
@@ -126,6 +134,9 @@ class Inputs(Node):
             -(u[valid] - cx) * z[valid] / fx,
             -(v[valid] - cy) * z[valid] / fy,
         )).astype("<f4")
+        if not self.sim_depth:
+            points = points[:, [1, 2, 0]] * [-1, -1, 1]
+            points = points.astype("<f4")
         cloud = PointCloud2()
         cloud.header = depth.header
         cloud.height, cloud.width = 1, len(points)

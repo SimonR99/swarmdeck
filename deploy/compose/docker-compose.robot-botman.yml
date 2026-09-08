@@ -13,6 +13,31 @@
 x-ros-domain: &ros_domain "${BOTMAN_ROS_DOMAIN_ID:-17}"
 
 services:
+  # Planner and PCI stay onboard; only operator commands cross the fleet link.
+  mgg:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mgg
+    image: swarmdeck-mgg:local
+    container_name: swarmdeck-botman-mgg
+    network_mode: host
+    environment:
+      ROS_DOMAIN_ID: *ros_domain
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      SWARMDECK_ROBOT_ID: botman_0
+      SWARMDECK_ROBOT_CONFIG: /app/swarmdeck/adapters/adapter_ros2/config/bunker.yaml
+    volumes:
+      - ${ROBOT_REPO:-/ssd/swarmdeck}:/app/swarmdeck:ro
+    command:
+      - bash
+      - -lc
+      - >-
+        source /opt/ros/jazzy/setup.bash &&
+        source /opt/mgg/ros2/install/setup.bash &&
+        ros2 launch /app/swarmdeck/deploy/mgg/hardware.launch.py
+    restart: unless-stopped
+
   # Base only. Lidar and SuperOdometry are separate services, same split as
   # Aslan. Default `docker compose up -d` starts the Bunker CAN driver
   # (robot_stack) alongside lidar, slam, oak_camera, media, duck_detector,

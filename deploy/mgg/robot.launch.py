@@ -21,8 +21,13 @@ def robot_nodes(
     planner_overrides=None,
     sim_depth=False,
     camera_offset=(0.0, 0.0),
+    base_frame="",
+    depth_topic="",
+    info_topic="",
 ):
     ns = f"{robot}/mgg"
+    base_frame = base_frame or (f"{robot}/base_link" if sim_depth else "")
+    base_frame_arg = base_frame or "''"
     common = {"use_sim_time": sim_time}
     tf_remaps = [("/tf", tf), ("/tf_static", tf_static)]
     overrides = {
@@ -47,15 +52,17 @@ def robot_nodes(
                 "-p",
                 f"sim_depth:={str(sim_depth).lower()}",
                 "-p",
+                f"depth_enabled:={str(sim_depth or bool(depth_topic and info_topic)).lower()}",
+                "-p",
                 f"camera_x:={camera_offset[0]}",
                 "-p",
                 f"camera_z:={camera_offset[1]}",
                 "-p",
-                f"base_frame:={robot}/base_link",
+                f"base_frame:={base_frame_arg}",
                 "-r",
-                f"depth:=/{robot}/camera/depth_image",
+                f"depth:={depth_topic or f'/{robot}/camera/depth_image'}",
                 "-r",
-                f"camera_info:=/{robot}/camera/camera_info",
+                f"camera_info:={info_topic or f'/{robot}/camera/camera_info'}",
                 "-r",
                 f"input_odometry:={odom}",
                 "-r",
@@ -96,6 +103,9 @@ def setup(context):
         get("tf_static"),
         get("params"),
         get("use_sim_time") == "true",
+        base_frame=get("base_frame"),
+        depth_topic=get("depth"),
+        info_topic=get("camera_info"),
     )
 
 
@@ -103,6 +113,9 @@ def generate_launch_description():
     defaults = {
         "robot": "robot_0",
         "map_frame": "map",
+        "base_frame": "",
+        "depth": "",
+        "camera_info": "",
         "odom": "/odom",
         "cloud": "/points",
         "tf": "/tf",

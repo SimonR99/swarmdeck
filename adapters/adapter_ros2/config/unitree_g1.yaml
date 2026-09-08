@@ -87,3 +87,13 @@ rates:
 
 upload_timeout_s: 0.5
 drive_timeout_s: 1.5
+
+# Onboard MGG selects goals; the existing navigation backend executes them.
+# Nominal body envelope and local site bounds: adjust before a new deployment.
+exploration:
+  enabled: true
+  planner:
+    cloud_topic: /utlidar/cloud_livox_mid360
+    body_height_m: 1.32
+    bounds_min: [-60.0, -60.0, -3.0]
+    bounds_max: [60.0, 60.0, 3.0]

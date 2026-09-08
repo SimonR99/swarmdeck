@@ -9,8 +9,11 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 node = module.Inputs.__new__(module.Inputs)
 node.latest = None
+node.sim_depth = True
+node.base_frame = ""
 node.cloud = Mock()
 info = CameraInfo(width=8, height=8)
+info.header.frame_id = 'robot_0/base_link/camera'
 info.k = [4., 0., 4., 0., 4., 4., 0., 0., 1.]
 node.intrinsics = info
 for endian in (False, True):
@@ -69,3 +72,24 @@ node.buffer.lookup_transform.side_effect = TransformException('history expired')
 node.publish_odom()
 assert not node.pending_odom and node.odom.publish.call_count == 1
 print('MGG delayed TF smoke passed')
+
+# Hardware uses millimetre depth and optical axes, with no invented camera TF.
+node.sim_depth = False
+info.header.frame_id = 'camera_optical_frame'
+depth = Image(width=8, height=8, step=16, encoding='16UC1')
+depth.header.frame_id = info.header.frame_id
+depth.data = np.full((8, 8), 2000, dtype='<u2').tobytes()
+node.depth = depth
+node.publish_cloud()
+cloud = node.cloud.publish.call_args.args[0]
+points = np.frombuffer(cloud.data, dtype='<f4').reshape(-1, 3)
+np.testing.assert_allclose(points, [[-2., -2., 2.], [0., -2., 2.], [-2., 0., 2.], [0., 0., 2.]])
+assert cloud.header.frame_id == 'camera_optical_frame'
+node.base_frame = 'chassis'
+node.buffer.lookup_transform.side_effect = None
+node.buffer.lookup_transform.return_value = tf
+node.on_odom(odom)
+node.publish_odom()
+assert node.buffer.lookup_transform.call_args.args[1] == 'chassis'
+assert node.odom.publish.call_args.args[0].child_frame_id == 'chassis'
+print('MGG hardware depth and chassis-frame smoke passed')

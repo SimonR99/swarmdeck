@@ -126,3 +126,13 @@ rates:
 drive_timeout_s: 0.45
 battery_voltage_min: 23.0
 battery_voltage_max: 29.2
+
+# Onboard MGG selects goals; the existing navigation backend executes them.
+# Nominal body envelope and local site bounds: adjust before a new deployment.
+exploration:
+  enabled: true
+  planner:
+    cloud_topic: /ouster/points
+    body_height_m: 0.4
+    bounds_min: [-60.0, -60.0, -3.0]
+    bounds_max: [60.0, 60.0, 3.0]
