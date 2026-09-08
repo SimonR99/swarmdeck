@@ -152,8 +152,8 @@ services:
         - >-
           . /opt/ros/humble/setup.sh &&
           . /nav_ws/install/setup.sh &&
-          timeout 5 ros2 action list | grep -qx '/asimov_0/navigate_to_pose' &&
-          timeout 5 ros2 lifecycle get /asimov_0/bt_navigator | grep -q '^active'
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/asimov_0/navigate_to_pose' &&
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /asimov_0/bt_navigator | grep -q '^active'
       interval: 20s
       timeout: 12s
       retries: 12

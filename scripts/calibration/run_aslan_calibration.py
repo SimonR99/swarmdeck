@@ -153,7 +153,9 @@ def main() -> None:
             {
                 "ASLAN_START_VECTORNAV": "true",
                 "ASLAN_IMU_TOPIC": "/vectornav/imu",
-                "ASLAN_SUPERODOM_CONFIG": "aslan_vectornav.yaml",
+                # This is the estimator config; aslan_vectornav.yaml configures
+                # the serial driver and has no SuperOdometry parameter section.
+                "ASLAN_SUPERODOM_CONFIG": "aslan_superodom.yaml",
                 "ASLAN_SUPERODOM_CALIB": "aslan_superodom_calibration.yaml",
             },
         )

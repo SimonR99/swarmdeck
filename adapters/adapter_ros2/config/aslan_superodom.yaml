@@ -40,15 +40,12 @@
 
     imu_preintegration_node:
         lidar_correction_noise: 0.01
-        acc_n: 3.9939570888238808e-03
-        gyr_n: 1.5636343949698187e-03
+        # Aslan VN-100, measured 2026-09-04 over 600 s / 59,908 samples.
+        # Restored from the validated worktree-aslan-vn100 configuration.
+        acc_n: 1.422605e-03
+        gyr_n: 6.969057e-05
         acc_w: 6.4356659353532566e-05
         gyr_w: 3.5640318696367613e-05
-# g_norm MUST equal what this IMU reads when static, not true local gravity
-        # -- see aslan_superodom_ouster.yaml for the experiment that established
-        # this. UNMEASURED: aslan's VectorNav exists at /dev/vectornav but
-        # ASLAN_START_VECTORNAV=false, so nothing was ever recorded from it.
-        # Before using this config, log /vectornav/imu static and set g_norm to
-        # the mean |accel|. The value below is the upstream default and is
-        # almost certainly wrong for this device.
-        g_norm: 9.80511
+        # Mean static |accel| measured on THIS unit, not a transferred value.
+        # The previous placeholder 9.80511 was never calibrated for this IMU.
+        g_norm: 9.7666

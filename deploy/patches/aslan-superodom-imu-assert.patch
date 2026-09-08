@@ -1,0 +1,9 @@
+diff --git a/src/ImuPreintegration/imuPreintegration.cpp b/src/ImuPreintegration/imuPreintegration.cpp
+--- a/src/ImuPreintegration/imuPreintegration.cpp
++++ b/src/ImuPreintegration/imuPreintegration.cpp
+@@ -550,3 +550,4 @@
+     // 1. Pre-process IMU data
+     sensor_msgs::msg::Imu thisImu = imuConverter(*imu_raw);
+-    assert(imu_raw->linear_acceleration.x != thisImu.linear_acceleration.x);
++    // A valid rotation can preserve an acceleration component (including zero).
++    // Equality of one component does not mean the IMU conversion failed.

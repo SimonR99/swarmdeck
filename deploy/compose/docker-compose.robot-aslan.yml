@@ -100,9 +100,10 @@ services:
       test:
         - CMD-SHELL
         - >-
+          export FASTRTPS_DEFAULT_PROFILES_FILE=/app/swarmdeck/deploy/dds/fastdds_udp_only.xml &&
           . /opt/ros/humble/setup.sh &&
           . /aslan_overlay/setup.sh 2>/dev/null || true &&
-          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/ouster/points'
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 topic list 2>/dev/null | grep -qx '/ouster/points'
       interval: 20s
       timeout: 12s
       retries: 12
@@ -129,18 +130,20 @@ services:
         start_lidar:=false
         start_slam:=true
         start_imu:=true
-        start_vectornav:=${ASLAN_START_VECTORNAV:-false}
-        imu_topic:=${ASLAN_IMU_TOPIC:-/ouster/imu}
-        config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CONFIG:-aslan_superodom_ouster.yaml}
-        calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CALIB:-aslan_superodom_ouster_calibration.yaml}
+        start_vectornav:=${ASLAN_START_VECTORNAV:-true}
+        imu_topic:=${ASLAN_IMU_TOPIC:-/vectornav/imu}
+        config_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CONFIG:-aslan_superodom.yaml}
+        calibration_file:=/app/swarmdeck/adapters/adapter_ros2/config/${ASLAN_SUPERODOM_CALIB:-aslan_superodom_calibration.yaml}
     healthcheck:
       test:
         - CMD-SHELL
         - >-
+          export FASTRTPS_DEFAULT_PROFILES_FILE=/app/swarmdeck/deploy/dds/fastdds_udp_only.xml &&
           . /opt/ros/humble/setup.sh &&
           . /workspace/install/setup.sh 2>/dev/null || true &&
           . /aslan_overlay/setup.sh 2>/dev/null || true &&
-          timeout 5 ros2 topic list 2>/dev/null | grep -qx '/laser_odometry'
+          pgrep -f '^/aslan_overlay/lib/super_odometry/imu_preintegration_node( |$)' >/dev/null &&
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 topic list 2>/dev/null | grep -qx '/laser_odometry'
       interval: 20s
       timeout: 12s
       retries: 12
@@ -217,30 +220,17 @@ services:
       - swarmdeck_nav
       - aslan.launch.py
       - publish_odom_tf:=false
-    # Every ros2 CLI call is wrapped in `timeout`, and the interval is well
-    # clear of it. Without that this healthcheck LEAKS: `ros2 action list` and
-    # `ros2 lifecycle get` hang indefinitely against a busy ROS graph instead
-    # of exiting -- one was observed alive for 14m16s -- and each hung call
-    # holds an open DDS participant. Measured on aslan_0 on 2026-08-26: ~5
-    # leaked ros2/grep pairs per minute, load climbing 7.9 -> 24.3 in 17
-    # minutes, and /ouster/points collapsing from its configured 10 Hz to
-    # 2.96 Hz with gaps up to 2.9 s. SuperOdometry dead-reckons between scans
-    # and snaps when a late one lands, so the visible symptom was odometry
-    # jitter that worsened with uptime; the robot eventually stopped answering
-    # SSH entirely and needed a physical power cycle.
-    #
-    # The hang is not specific to these two subcommands -- a plain `ros2 param
-    # get` was seen hanging the same way -- so bounding the call is the fix,
-    # not choosing a different query. `interval: 5s` against `timeout: 4s` also
-    # left almost no margin, so a slow probe overlapped the next one.
+    # Disposable health probes use UDP and have a forced-kill deadline.
+    # See Botman's healthcheck for the zero-byte SHM port / leaked CLI incident.
     healthcheck:
       test:
         - CMD-SHELL
         - >-
+          export FASTRTPS_DEFAULT_PROFILES_FILE=/app/swarmdeck/deploy/dds/fastdds_udp_only.xml &&
           . /opt/ros/humble/setup.sh &&
           . /nav_ws/install/setup.sh &&
-          timeout 5 ros2 action list | grep -qx '/aslan_0/navigate_to_pose' &&
-          timeout 5 ros2 lifecycle get /aslan_0/bt_navigator | grep -q '^active'
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 action list | grep -qx '/aslan_0/navigate_to_pose' &&
+          timeout --signal=SIGINT --kill-after=1s 4s ros2 lifecycle get /aslan_0/bt_navigator | grep -q '^active'
       interval: 20s
       timeout: 12s
       retries: 12

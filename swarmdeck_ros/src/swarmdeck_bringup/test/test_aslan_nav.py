@@ -141,7 +141,7 @@ def test_aslan_uses_the_same_forward_or_reverse_nav_limits():
     assert "PreferForward" in follow_path["critics"]
 
 
-def test_aslan_slam_uses_ouster_imu():
+def test_aslan_deployment_uses_vectornav_with_explicit_ouster_launch_fallback():
     source = ROBOT_LAUNCH.read_text()
     compose = yaml.safe_load(COMPOSE.read_text())
     slam_command = compose["services"]["slam"]["command"][2]
@@ -158,5 +158,54 @@ def test_aslan_slam_uses_ouster_imu():
     assert "aslan_superodom_ouster_calibration.yaml" in source
     assert ". /workspace/install/setup.bash" in slam_command
     assert "start_imu:=true" in slam_command
-    assert "imu_topic:=${ASLAN_IMU_TOPIC:-/ouster/imu}" in slam_command
-    assert "aslan_superodom_ouster_calibration.yaml" in slam_command
+    assert "imu_topic:=${ASLAN_IMU_TOPIC:-/vectornav/imu}" in slam_command
+    assert "start_vectornav:=${ASLAN_START_VECTORNAV:-true}" in slam_command
+    assert "ASLAN_SUPERODOM_CONFIG:-aslan_superodom.yaml" in slam_command
+    assert "ASLAN_SUPERODOM_CALIB:-aslan_superodom_calibration.yaml" in slam_command
+    profile = (REPO / "deploy/robots/aslan.env").read_text()
+    for setting in (
+        "ASLAN_IMU_TOPIC:=/vectornav/imu",
+        "ASLAN_START_VECTORNAV:=true",
+        "ASLAN_SUPERODOM_CONFIG:=aslan_superodom.yaml",
+        "ASLAN_SUPERODOM_CALIB:=aslan_superodom_calibration.yaml",
+    ):
+        assert setting in profile
+    health = compose["services"]["slam"]["healthcheck"]["test"][-1]
+    assert "^/aslan_overlay/lib/super_odometry/imu_preintegration_node( |$)" in health
+
+
+def test_aslan_uses_its_measured_vectornav_bias_and_noise():
+    params = yaml.safe_load(
+        (REPO / "adapters/adapter_ros2/config/aslan_superodom.yaml").read_text()
+    )["/**"]["ros__parameters"]
+    assert params["imu_topic"] == "/vectornav/imu"
+    imu = params["imu_preintegration_node"]
+    assert imu["g_norm"] == 9.7666
+    assert imu["acc_n"] == 1.422605e-3
+    assert imu["gyr_n"] == 6.969057e-5
+    calibration = (REPO / "scripts/calibration/run_aslan_calibration.py").read_text()
+    assert '"ASLAN_SUPERODOM_CONFIG": "aslan_superodom.yaml"' in calibration
+
+
+def test_aslan_overlay_removes_the_invalid_acceleration_assertion(tmp_path):
+    import subprocess
+
+    patch = REPO / "deploy/patches/aslan-superodom-imu-assert.patch"
+    build = (REPO / "scripts/aslan-build-overlay").read_text()
+    assert patch.name in build
+    # Apply the actual patch to its upstream context; zero X acceleration is
+    # valid even when the IMU-to-lidar rotation is a non-identity half-turn.
+    source = tmp_path / "src/ImuPreintegration/imuPreintegration.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "    \n"
+        "    // 1. Pre-process IMU data\n"
+        "    sensor_msgs::msg::Imu thisImu = imuConverter(*imu_raw);\n"
+        "    assert(imu_raw->linear_acceleration.x != thisImu.linear_acceleration.x);\n"
+        "\n"
+        "    // 2. Handle IMU initialization for LIVOX sensor\n"
+        "    if (!handleIMUInitialization(imu_raw, thisImu)) {\n"
+    )
+    subprocess.run(["patch", "--batch", "-p1", "-i", str(patch)], cwd=tmp_path, check=True, capture_output=True)
+    assert "assert(" not in source.read_text()
+    assert "thisImu = imuConverter(*imu_raw)" in source.read_text()
