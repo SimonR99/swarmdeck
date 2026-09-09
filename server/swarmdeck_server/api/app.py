@@ -1158,7 +1158,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     if (
         rid
-        and kind in {"set_goal", "drive", "body_command"}
+        and kind in {"set_goal", "return_home", "drive", "body_command"}
         and not is_robot_enabled(settings_store.value, rid)
     ):
         return
@@ -1208,8 +1208,24 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             await broadcast_review()
         return
 
-    if kind == "set_goal":
+    if kind in ("set_goal", "return_home"):
         goal = msg.get("payload") or {}
+        if kind == "return_home":
+            robot = registry.robots.get(rid)
+            if robot is None or robot.home_pose is None:
+                await raise_alert(
+                    "home_unavailable",
+                    "warn",
+                    "fault",
+                    "Starting position has not been recorded",
+                    rid,
+                )
+                return
+            goal = (
+                dict(robot.home_pose)
+                if robot.coordinate_frame == "merged"
+                else map_service.robot_to_world(rid, robot.home_pose)
+            )
         if not registry.can(rid, "navigate"):
             return
         taken_by = goal_taken(goal, exclude=rid)

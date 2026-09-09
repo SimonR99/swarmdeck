@@ -7,6 +7,7 @@ operator exploration session.
 
 from __future__ import annotations
 
+import json
 import math
 import time
 
@@ -15,9 +16,12 @@ class MggExploration:
     def __init__(self, bridge, config):
         from std_srvs.srv import Trigger
         from nav_msgs.msg import Path
+        from std_msgs.msg import String
         from rclpy.qos import QoSProfile, DurabilityPolicy
 
         self.bridge = bridge
+        self.awaiting_terminal = False
+        self.status = "idle"
         self.active = False
         self.generation = 0
         self.started_ns = 0
@@ -47,6 +51,9 @@ class MggExploration:
         self.subscription = bridge.node.create_subscription(
             Path, f"{namespace}/command_path", self.on_path, qos
         )
+        self.status_subscription = bridge.node.create_subscription(
+            String, f"{namespace}/status", self.on_status, qos
+        )
         self.timer = bridge.node.create_timer(0.2, self.tick)
 
     def warn(self, text):
@@ -71,6 +78,8 @@ class MggExploration:
         self.generation += 1
         generation = self.generation
         self.started_ns = self.bridge.node.get_clock().now().nanoseconds
+        self.awaiting_terminal = False
+        self.status = "starting"
         self.active = True
         self.deadline = time.monotonic() + 30.0
         try:
@@ -95,7 +104,9 @@ class MggExploration:
             self.warn(f"start failed: {exc}")
             self.stop()
 
-    def stop(self):
+    def stop(self, *, notify_planner=True, status="stopped"):
+        self.status = status
+        self.awaiting_terminal = False
         # Disable intake before touching ROS: a late service response or path
         # cannot re-arm exploration after Stop All or manual control.
         was_active = self.active
@@ -103,7 +114,9 @@ class MggExploration:
         self.generation += 1
         if was_active:
             try:
-                if self.stop_client.service_is_ready():
+                if not notify_planner:
+                    pass
+                elif self.stop_client.service_is_ready():
                     self.pending_stop = self.stop_client.call_async(self.request_type())
                     self.stop_deadline = time.monotonic() + 30.0
                 else:
@@ -136,6 +149,24 @@ class MggExploration:
             self.warn("operator link lost")
             self.stop()
 
+    def on_status(self, message):
+        try:
+            report = json.loads(message.data)
+            stamp = int(report["stamp_ns"])
+            state = report["state"]
+        except (ValueError, TypeError, KeyError):
+            return
+        if stamp < self.started_ns or not self.started_ns:
+            return
+        if state in ("complete", "blocked"):
+            # Empty path and status are separate DDS topics and may arrive in
+            # either order. A manual stop increments generation and must win.
+            if self.active or getattr(self, "awaiting_terminal", False):
+                self.stop(notify_planner=False, status=state)
+                self.awaiting_terminal = False
+        elif state in ("starting", "exploring") and self.active:
+            self.status = state
+
     def on_path(self, path):
         if not self.active:
             return
@@ -143,7 +174,10 @@ class MggExploration:
         if stamp < self.started_ns:
             return  # Discard the latched path from a previous session.
         if not path.poses:
-            self.stop()  # MGG publishes an empty path on stop/completion.
+            # Stop immediately without sending pci_stop back: the accompanying
+            # status topic distinguishes exhaustion from blocked planning.
+            self.stop(notify_planner=False, status="stopped")
+            self.awaiting_terminal = True
             return
         if path.header.frame_id.lstrip("/") != self.frame:
             self.warn(
@@ -168,6 +202,7 @@ class MggExploration:
         if not self.active:
             return
         try:
+            self.status = "exploring"
             self.bridge.navigate_to(goal)
         except Exception as exc:
             self.warn(f"navigation failed: {exc}")

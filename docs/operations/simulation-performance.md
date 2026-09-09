@@ -123,43 +123,37 @@ a live ROS/ARGoS trajectory comparison. The Fast-LIVO2 link's single-callback
 non-lockstep polling and lockstep timeout behavior also warrant profiling under
 large fleets before changing executor scheduling.
 
-## Bistro deployment and collision geometry
+## Bistro terrain and deployment
 
-The `bistro`, `4robot_bistro`, and `3robot_bistro` configurations now deploy the
-fleet together on the street near `(-13, 5)`: a two-metre grid with every robot
-facing south. The four-robot formation spans 2 × 2 m between robot centres.
-The 0.15 m initial anchor height lets the bodies settle onto the uneven street.
-Custom start poses may specify `z`; indoor defaults retain 0.02 m clearance.
+Bistro configurations deploy the fleet on a two-metre grid near `(-13, 5)`,
+facing south. The 0.15 m initial anchor height lets bodies settle onto uneven
+pavement. Custom start poses can specify `z`; indoor defaults use 0.02 m.
 
-The scene uses a visual roll of +90° to convert glTF Y-up to ARGoS Z-up.
-**Jolt's mesh loader also performs this conversion by default.** Previously,
-copying the visual roll to the collision mesh applied the rotation twice,
-putting collision triangles in a different plane from the rendered surfaces.
-All generated world and target meshes now explicitly set `y_up="false"` and
-keep the same position, orientation, and scale as their visual prop. Do not
-remove that attribute merely because the XML transforms already match.
+Keep these geometry contracts when changing scenario generation:
 
-Bistro now uses its triangle mesh as the ground. It no longer has a second,
-invisible infinite plane at z=0. The indoor world keeps that plane because its
-collision asset intentionally excludes its floor slab. In a local query of the
-actual Bistro GLB, 1.3 × 1.3 m patches around the new spawn points had no obstacle
-triangle bounds in the 0.15–1.3 m height band. Nine ground probes per footprint
-ranged from −0.048 to +0.117 m after the scene's −0.3 m translation, which is why
-fixed z=0 spawning and a second flat floor were inappropriate.
+- World and target collision meshes use `y_up="false"` and the same transform
+  as their visual props. The visual +90° roll already converts glTF Y-up into
+  ARGoS Z-up; enabling Jolt's automatic conversion applies it twice.
+- Bistro uses its mesh as ground. An additional infinite plane would create
+  invisible surfaces. Indoor scenarios need that plane because their collision
+  asset excludes the floor slab.
+- Target placement samples pavement across the rotated footprint at 5 cm
+  spacing, compensates for the model's bottom, and adds 5 mm clearance. Missing
+  pavement is a generation error.
+- ARGoS composes Euler rotations as `Rx * Ry * Rz`. For Y-up target models,
+  use `orientation="0,yaw_degrees,90"` to apply world yaw without tipping them.
+- Blocks, spools, disc cones, and foam noodles are nonblocking perception
+  targets. RGB-D and LiDAR still see them; large ducks remain collidable.
 
-Rebuild the ARGoS and simulation images when activating these changes, using
-your chosen rendering/odometry settings. Start a fresh mapping session: an old
-map recorded against the incorrectly rotated geometry is not a validation of
-the corrected scene. XML transform, spawn-spacing, and asset tests run in the
-simulation test suite. An isolated local ARGoS/Jolt run also completed 60 exchanges (six simulation
-seconds) while commanding 0.30 m/s and 0.15 rad/s. All four robots produced RGB,
-depth, and about 30,600 LiDAR hits; final ground-anchor heights were 0.01–0.02 m
-after driving approximately 1.7 m. All three custom visuals loaded successfully.
-This short spawn-area check does not cover every curb or the full street circuit.
-It used local ARGoS build plugins and software Vulkan, not rebuilt deployment
-containers; its 95.4-second wall time includes startup/rendering overhead.
+Robot bodies support steps up to 10 cm (Spot: 30 cm) with full-body clearance
+and static-support checks. Navigation may still avoid low obstacles seen by its
+conservative proximity scan. Internal-edge correction prevents false Jolt
+contacts at road/manhole seams. See the [physics patch guide](../../deploy/patches/argos/README.md)
+for implementation and native regression commands.
 
-To reproduce with locally built ARGoS plugins:
+Rebuild the ARGoS and simulation images after geometry changes and start a fresh
+mapping session. XML transforms, spawn spacing, and assets have regression tests
+in the simulation suite. To check rendering with locally built ARGoS plugins:
 
 ```sh
 server/.venv/bin/python tests/integration/run_visual_test.py \
@@ -167,104 +161,55 @@ server/.venv/bin/python tests/integration/run_visual_test.py \
   --outdir /tmp/swarmdeck-bistro-check
 ```
 
-The [robot visual assets](../../argos/assets/robots/README.md) describe the new
-Bunker, Scout Mini, and Spot meshes and how to regenerate them.
+This short spawn-area check does not validate every curb or the full street.
+See [robot visual assets](../../argos/assets/robots/README.md) for regeneration.
 
-## Missing local maps and sparse loop closures
+## Missing local maps
 
-In a live Bistro run, Spot had valid odometry and scans but no local map or
-keyframes. `/robot_3/slam_toolbox` was **inactive**, despite successful
-configuration: its configure service response timed out and the lifecycle
-manager never proceeded to activation. The process being alive did not imply
-that it was mapping. Check its state inside the sim container:
+A running SLAM Toolbox process may still be inactive after a lifecycle service
+timeout. Check its state inside the simulation container:
 
 ```sh
 docker exec swarmdeck-sim-1 bash -c \
   'source /opt/ros/jazzy/setup.bash; ros2 lifecycle get /robot_3/slam_toolbox'
 ```
 
-If it is configured/inactive and should be mapping, activate it with
+If configured but inactive, activate it with
 `ros2 lifecycle set /robot_3/slam_toolbox activate` in the same environment.
-This preserves the running simulation. Once the map appears, check the Nav2
-lifecycle states too: a missing map can leave its planner and subsequent nodes
-inactive. Activate only nodes confirmed inactive; do not reset working nodes
-or issue motion commands as part of this diagnosis. Startup staggering and
-longer client timeouts reduce contention but do not recover every lost service
-response automatically.
+Check Nav2 lifecycle states too: a missing map can leave downstream nodes
+inactive. Activate only nodes confirmed inactive. Startup staggering and longer
+client timeouts reduce contention but cannot recover every lost response.
 
-The same investigation found the nearest-return scan-novelty signature was
-mostly measuring the street: 60/60 sectors on robots 0 and 2, 56/60 on robot 1,
-and 57/60 on Spot. Ground intersections form a near ring that changes little
-with translation, hiding changing walls behind it. Profiles with a physical
-height band now compute novelty using that band above the ground. Full 3D
-geometry, including the ground, is still uploaded; timestamp, yaw-rate, and
-registration verification gates remain in effect.
+An active mapper with a **0×0 map** may have initialized its laser model from an
+unrendered ARGoS scan (`MaxRange=0`). The bridge drains these packets and withholds
+scans until the range is finite and above the minimum. Empty scans with valid
+metadata still publish. For an already affected empty mapper, deactivate,
+clean up, configure, and activate that node after valid scans arrive. Cleanup
+discards its map; do not use this recovery on a working trajectory.
 
-Use `/api/slam/backend` to distinguish a stopped ingest pipeline from sparse
-accepted matches. `queued=0` with increasing keyframes means the worker is
-keeping up. `accepted_closures` includes same-robot closures;
-`inter_robot_closures` counts connections between robots. The diagnosed run had
-one same-robot closure and zero inter-robot closures, rather than a disabled
-loop-closure worker. More useful captures improve matching opportunities;
-they do not guarantee geometrically valid loop closures.
+## Keyframe density and loop closures
 
-The novelty fix requires a new adapter process. The current simulation
-entrypoint exits if its adapter child exits, so plan a coordinated simulation
-restart instead of killing that child in an active run.
+Capture periods apply in both sensor time and monotonic wall time before cloud
+processing. This bounds observation density in slow simulation and processing
+cost during replay. Profiles with a physical height band compute scan novelty
+above the ground, keeping street returns from hiding changes in nearby walls.
+The novelty threshold is 0.25 m; full 3D geometry still uploads. Timestamp,
+yaw-rate, and registration gates remain independent checks.
 
-## Detection targets on the Bistro road
+Use `/api/slam/backend` to distinguish ingest backlog from sparse matches:
 
-Target placement now samples the Bistro GLB's pavement triangles over each
-rotated model footprint at 5 cm spacing. It subtracts the model's actual bottom
-height and leaves 5 mm clearance above the highest sampled surface. This replaces
-the old fixed z=0 placement: the brick road under the first duck is about 7 cm
-above zero. Physics and rendering receive the same computed position. Missing
-pavement raises a generation error instead of silently burying a collider.
+| Signal | Interpretation |
+|---|---|
+| `queued=0` with increasing keyframes | The ingest worker is keeping up. |
+| `accepted_closures` | Accepted scan-pair constraints, including same-robot pairs; not independent revisits or surviving graph factors. |
+| `inter_robot_closures` | Connections between robots. Proximity alone does not guarantee valid correspondences. |
+| SLAM `/status` → `verification.intra` / `verification.inter` | Cumulative geometric verification outcomes, including convergence, inliers, error, translation, yaw, and degeneracy. |
 
-ARGoS composes Euler rotations as `Rx * Ry * Rz`. For a Y-up glTF model that
-needs a +90° X rotation, world yaw therefore goes in the **second** XML angle:
-`orientation="0,yaw_degrees,90"`. Putting it in the first angle tipped the props
-sideways. This correction applies to indoor targets as well as Bistro.
+Inter-robot recall remains a limitation. Same-robot scans can fill the descriptor
+shortlist, but reserving peer slots previously caused a false merge in the
+disjoint-building regression. Validate recall improvements against false merges
+before relaxing thresholds or changing candidate selection.
 
-Blocks, spools, disc cones, and foam noodles are now nonblocking perception
-targets: they remain visible to RGB-D and LiDAR but have no static collision
-mesh. These 6–9 cm objects otherwise acted as infinite-mass barriers below the
-navigation proximity scan's 15 cm cutoff. The large ducks remain collidable.
-This does not simulate pushing, rolling, or deforming the small objects.
-
-### Keyframe density and closure counts
-
-The producer enforces its capture period in both sensor time and monotonic wall
-time. A two-second wall-only gate admitted sub-second simulation captures when
-rendering ran below real time. The sensor-time check bounds observation density;
-the wall-time check still bounds work during replay. Both run before cloud
-processing. The ground-filtered novelty threshold remains 0.25 m.
-
-The SLAM status `accepted_closures` counts geometrically accepted scan-pair
-constraints, not independent revisits or factors surviving graph rejection.
-Three candidates per keyframe can produce thousands of constraints from nearby
-observations. After restarting the mapper with this version, `/status` also
-reports cumulative `verification.intra` and `verification.inter` outcome counts:
-accepted, too few points/inliers, convergence, inlier ratio, mean error,
-translation, yaw deviation, and degeneracy. These are counters, not per-scan logs.
-
-In the September 7 Bistro probe, 2,119 accepted constraints were all intra-robot,
-with 906 keyframes queued. A four-robot live scan sample rejected both nearby
-pairs (about four metres apart) on mean registration error, even with approximate
-pose seeds; the other pairs were then about 20–25 m apart. Proximity alone did
-not establish an acceptable correspondence. Own-robot scans can also fill the
-three-entry descriptor shortlist. Reserving peer slots exposed a false merge in
-the disjoint-building regression, so that change was not retained. Inter-robot
-recall remains unresolved; the geometric thresholds and shortlist policy are
-unchanged pending validation that improves recall without false merges.
-
-An additional startup failure can produce an active mapper with a **0×0 map**.
-ARGoS initializes an unrendered LiDAR scan with `MaxRange=0`; passing that scan
-to SLAM Toolbox can initialize an unusable laser model. The bridge now drains
-such packets but withholds scans until the range is finite and greater than the
-minimum range. A real empty scan with valid range metadata still publishes, and
-the first valid render is accepted even if it shares the placeholder's tick.
-For an already affected empty mapper, deactivate, clean up, configure, and
-activate only that node once valid sensor data is arriving. Cleanup discards
-that node's map, so this recovery is appropriate for an empty map, not a routine
-operation on a working trajectory.
+Adapter changes require a process restart. The simulation entrypoint exits when
+its adapter child exits, so use a coordinated simulation restart instead of
+killing that child during an active session.

@@ -25,6 +25,7 @@ Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 | --- | --- | --- |
 | `pci_trigger` | `std_srvs/srv/Trigger` | Start PCI's autonomous planning cycle |
 | `pci_stop` | `std_srvs/srv/Trigger` | Stop planning; PCI also publishes an empty path |
+| `status` | `std_msgs/msg/String` | Timestamped JSON lifecycle state: starting, exploring, complete, blocked, stopped |
 | `command_path` | `nav_msgs/msg/Path` | PCI's current exploration path; transient-local QoS |
 | `mggplanner` | `mgg_msgs/srv/PlannerSrv` | Internal PCI-to-planner request |
 | `map_odometry` | `nav_msgs/msg/Odometry` | Robot pose in the planner's map frame |
@@ -34,7 +35,11 @@ The adapter passes each path's **final goal** to its existing navigation backend
 (Nav2 or the configured hardware trajectory action). The navigation backend
 plans and collision-checks the route; this is not exact MGG waypoint following.
 PCI observes map-frame odometry and requests the next plan on arrival or lack of
-progress. Empty paths end exploration. A failed start or 30-second start timeout
+progress. Empty paths stop navigation immediately. The accompanying lifecycle status
+distinguishes exhausted reachable planning from an unusable map or blocked
+route. The fleet card reports **EXPLORED** or **EXPLORE BLOCKED**. Completion
+is relative to the planner’s mapped, reachable space and configured bounds; it
+does not certify that every part of the physical scene has been observed. A failed start or 30-second start timeout
 stops local navigation and requests PCI stop.
 
 Stops disable path intake first, cancel navigation, and issue zero velocity,
@@ -81,8 +86,8 @@ as the simulated sensor. No synthetic floor is inserted. Missing historical TF
 suppresses the observation. Odometry waits in a bounded ten-message queue
 for up to one simulated second for its matching TF, avoiding callback-order
 races without substituting a newer pose.
-Planner and PCI use simulation time. The collision-box clearance includes the
-0.15 m OctoMap voxel thickness;
+Planner and PCI use simulation time. The simulation uses 0.15 m OctoMap voxels
+and a platform-specific collision-box clearance;
 the simulation slope limit is 30 degrees. Robot dimensions and sensor offsets come
 from SwarmDeck's platform table. The supplied simulation planning bounds are
 ±60 m horizontally; adjust `fleet.launch.py` for another site. Hardware requires
@@ -178,3 +183,55 @@ and adapter start/stop behavior. A Humble adapter also passed start, path delive
 native Jazzy PCI in isolated Docker containers. Physical driving and the
 robot’s actual sensor/TF connectivity still need an on-robot check; these
 tests do not establish that a particular hardware deployment is ready to move.
+
+## Simulation steps and return home
+
+The ARGoS Jolt stand-ins are upright rigid bodies. SwarmDeck adds collision-checked
+step assistance for 0.10 m steps on Bunker/Scout and 0.30 m steps on Spot. It
+sweeps the complete body upward, forward, and down to supported static ground;
+ceilings, taller walls, other dynamic robots, and unsupported climbs are refused.
+This approximates step traversal, not wheel suspension or articulated leg dynamics.
+The low proximity obstacle band remains conservative so Spot can see Scout;
+automatic navigation may avoid some physically traversable low obstacles.
+
+MGG uses the same platform step limits when testing projected edges. Ground
+probes can cross unobserved air to find known occupied floor, without inserting
+synthetic ground. Missing support retains the existing graph height instead of
+turning the `-1` sentinel into an artificial upward jump. The root uses the same
+collision-box offset as projected vertices even inside the sensor blind spot;
+Spot’s edge cap reaches 2.5 m so its graph can reach camera-observed floor. The pinned upstream patch is
+`deploy/patches/mgg-traversal-lifecycle.patch`; rebuild the MGG image when it changes.
+PCI stops after three consecutive empty/failed plans or three stalled legs.
+A leg also has a time limit of six times `stuck_timeout_sec` so circling cannot
+keep it active forever. A stopped session cannot publish a late planner result.
+
+**Return home** is per robot. The simulation adapter records its first complete,
+finite `map_frame -> odom -> base_link` pose, rather than the startup `(0,0)`
+fallback. The server keeps this robot-local position and converts through the
+current fleet alignment when issuing the normal navigation command. Home is
+not a teleport or automatic emergency behavior. The button waits for valid home
+telemetry and navigation capability; physical adapters that do not report
+`home_pose` leave it disabled. Restarting the simulation adapter records a new
+home; keep the server and simulation in the same run when resetting map frames.
+
+Regression checks include adapter/backend tests, `deploy/patches/argos/test_steps.cpp`
+against Jolt, and `adapters/test/ros/mgg_contract_smoke.py` against native PCI
+in an isolated ROS domain with an inert navigation sink.
+
+Run the native PCI test without robot access:
+
+```bash
+docker run --rm --network none -e ROS_DOMAIN_ID=173 \
+  -e FASTDDS_BUILTIN_TRANSPORTS=UDPv4 -v "$PWD:/workspace:ro" -w /workspace \
+  --entrypoint bash swarmdeck-mgg:local -lc '
+    source /opt/ros/jazzy/setup.bash
+    source /opt/mgg/ros2/install/setup.bash
+    export PYTHONPATH=/workspace:"$PYTHONPATH"
+    python3 adapters/test/ros/mgg_contract_smoke.py'
+```
+
+The Bistro regression run with drift odometry confirmed goals and motion on all
+four robots, including Spot, and a successful Spot return to within the existing
+navigation position tolerance. Completion and repeated-stall outcomes are tested
+with native PCI and controlled planner responses; a full Bistro coverage run is
+not part of that short regression.

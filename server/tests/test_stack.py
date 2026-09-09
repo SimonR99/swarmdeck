@@ -881,6 +881,8 @@ def test_disabled_robots_cannot_be_driven_or_given_goals(monkeypatch):
                 }
             )
         )
+        app_registry.robots["r0"].home_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        asyncio.run(handle_gui_message({"type": "return_home", "robot_id": "r0"}))
         assert sink.messages == []
     finally:
         app_registry.robots.clear()
@@ -2481,6 +2483,43 @@ def test_exploration_button_targets_one_capable_hardware_robot():
         asyncio.run(app_module.handle_gui_message({"type": "stop_all"}))
         assert hardware.messages[-1]["type"] == "stop"
         assert sim.messages[-1]["type"] == "stop"
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_return_home_uses_recorded_local_pose_after_alignment_changes(monkeypatch):
+    from swarmdeck_server.api import app as app_module
+
+    sim, _ = _explore_fleet(app_module)
+    try:
+        home = {"x": 1.0, "y": -2.0, "yaw": 0.4}
+        app_registry.update_state({"robot_id": "sim_0", "home_pose": home})
+        app_registry.update_state(
+            {"robot_id": "sim_0", "home_pose": {"x": 99, "y": 99, "yaw": 0}}
+        )
+        map_service.set_transform("sim_0", 12.0, -8.0, 1.1)
+        monkeypatch.setattr(map_service, "plan_path", lambda *args: [])
+        asyncio.run(handle_gui_message({"type": "return_home", "robot_id": "sim_0"}))
+        command = next(m for m in sim.messages if m["type"] == "navigate_to")
+        assert command["goal"] == pytest.approx(home)
+        assert app_registry.robots["sim_0"].home_pose == home
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()
+
+
+def test_return_home_requires_valid_home():
+    from swarmdeck_server.api import app as app_module
+
+    sim, _ = _explore_fleet(app_module)
+    try:
+        app_registry.update_state(
+            {"robot_id": "sim_0", "home_pose": {"x": float("nan"), "y": 0, "yaw": 0}}
+        )
+        asyncio.run(handle_gui_message({"type": "return_home", "robot_id": "sim_0"}))
+        assert not sim.messages
+        assert app_registry.robots["sim_0"].home_pose is None
     finally:
         app_registry.robots.clear()
         app_registry._sinks.clear()

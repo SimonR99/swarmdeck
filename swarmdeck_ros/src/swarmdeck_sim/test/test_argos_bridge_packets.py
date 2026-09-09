@@ -52,7 +52,6 @@ def rig(monkeypatch):
         last_scan_tick=-1,
         last_camera_tick=-1,
         last_odom_tick=-1,
-        duplicate_scans=0,
         _warned_invalid=False,
         lidar_x=0.0,
         lidar_z=0.4,

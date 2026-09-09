@@ -20,9 +20,7 @@ def generate_launch_description():
     sys.path.insert(0, "/app/adapters/protocol")
     from swarmdeck_sim.scenario.spawn_fleet import robot_types, robot_spec
 
-    with open(
-        os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot.yaml")
-    ) as stream:
+    with open(os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot.yaml")) as stream:
         fleet = yaml.safe_load(stream)["fleet"]
     count = int(os.environ.get("SWARMDECK_ROBOT_COUNT") or fleet.get("robot_count", 4))
     platforms = robot_types(fleet, count, "robot_")
@@ -31,6 +29,7 @@ def generate_launch_description():
     for i, platform in enumerate(platforms):
         robot = f"robot_{i}"
         spec = robot_spec(platform)
+        step_height = 0.30 if platform == "spot" else 0.10
         nodes += module.robot_nodes(
             robot,
             f"{robot}/map_frame",
@@ -44,8 +43,16 @@ def generate_launch_description():
             [spec.length, spec.width, 2 * spec.base_height],
             {
                 "SensorParams.VLP16.center_offset": [spec.lidar_x, 0.0, spec.lidar_z],
-                # Keep the extended body box above the occupied floor voxel.
-                "PlanningParams.max_ground_height": spec.base_height + 0.15 + 0.025,
+                # Keep the extended body box above climbable terrain and the
+                # occupied floor voxel; max_ground_height is a box offset.
+                "PlanningParams.max_ground_height": spec.base_height
+                + step_height
+                + 0.15
+                + 0.025,
+                "PlanningParams.max_step_height": step_height,
+                # Spot’s elevated camera first sees floor beyond the default
+                # 1.2 m edge cap; allow the initial graph to reach it.
+                "PlanningParams.edge_length_max": 2.5 if platform == "spot" else 1.2,
                 "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
                 "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
                 "PlanningParams.max_inclination": math.radians(30),

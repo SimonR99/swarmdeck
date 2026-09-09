@@ -61,6 +61,8 @@ export interface RobotState extends Stamps {
   mode: RobotMode;
   nav_status: NavStatus;
   goal: Point | null;
+  exploration_status?: "idle" | "starting" | "exploring" | "complete" | "blocked" | "stopped";
+  home_pose?: (Point & { yaw: number }) | null;
   planned_path: Point[];
   /** Global planner route, usually the full route to the goal. */
   global_planned_path?: Point[];
@@ -449,6 +451,7 @@ export type ServerMessage =
 export type ClientMessage =
   | { type: 'set_goal'; robot_id: string; payload: Point }
   | { type: 'cancel_goal'; robot_id: string }
+  | { type: 'return_home'; robot_id: string }
   | { type: 'drive'; robot_id: string; payload: { linear: number; angular: number } }
   | { type: 'select_robots'; robot_ids: string[] }
   | { type: 'switch_camera'; robot_id: string }

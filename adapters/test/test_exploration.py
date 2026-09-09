@@ -171,3 +171,36 @@ def test_orphaned_requests_expire_after_planner_restart():
     explorer.start_client.call_async.return_value = Future()
     explorer.start()
     assert explorer.active
+
+
+def test_terminal_status_survives_either_dds_delivery_order():
+    import json
+
+    for status_first in (True, False):
+        bridge, explorer = rig()
+        explorer.start()
+        message = NS(data=json.dumps({"state": "blocked", "stamp_ns": 2000000000}))
+        calls = [
+            lambda: explorer.on_status(message),
+            lambda: explorer.on_path(path(empty=True)),
+        ]
+        for call in calls if status_first else reversed(calls):
+            call()
+        assert not explorer.active
+        assert explorer.status == "blocked"
+        explorer.stop_client.call_async.assert_not_called()
+        bridge.cancel_goal.assert_called()
+
+
+def test_manual_stop_and_old_status_cannot_relabel_a_session():
+    import json
+
+    _, explorer = rig()
+    explorer.start()
+    explorer.on_status(NS(data=json.dumps({"state": "complete", "stamp_ns": 1})))
+    assert explorer.active
+    explorer.stop()
+    explorer.on_status(
+        NS(data=json.dumps({"state": "complete", "stamp_ns": 2000000000}))
+    )
+    assert explorer.status == "stopped"

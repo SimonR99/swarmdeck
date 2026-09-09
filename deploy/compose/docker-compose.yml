@@ -321,11 +321,6 @@ services:
       ADAPTER_DELAY: "${ADAPTER_DELAY:-60}"
       SLAM_BACKEND: "${SLAM_BACKEND:-toolbox}"
       GRID_3D: "${GRID_3D:-false}"
-      # Diagnostic. Reports how far each lidar frame lags the exchange that
-      # carried it, which is the pose/scan mismatch that shows up as a rotated
-      # copy of the map when a robot is turning. Off by default; it logs once
-      # per robot per simulated second.
-      SWARMDECK_DEBUG_SCAN_AGE: "${SWARMDECK_DEBUG_SCAN_AGE:-}"
       # Detection targets scattered through the world, classes assigned round
       # robin from adapters/perception/catalog.py.
       SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
@@ -333,10 +328,6 @@ services:
       # faster because it leaves the lockstep exchange, and correspondingly
       # less faithful. `make up-argos-dev` sets drift; nothing else should.
       SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-fast_livo2}"
-      # Diagnostic: log each robot's wheel encoder readings, which are the
-      # only view of what the controller actually commanded. Separates a
-      # controller fault from a physics one when a robot will not turn.
-      SWARMDECK_DEBUG_ENCODERS: "${SWARMDECK_DEBUG_ENCODERS:-}"
       # Bootstrap the maps by exploring, then stop and hand the fleet to the
       # operator. Without this nothing drives, and goals issued against an empty
       # map jam robots into walls where wheel slip destroys their odometry.

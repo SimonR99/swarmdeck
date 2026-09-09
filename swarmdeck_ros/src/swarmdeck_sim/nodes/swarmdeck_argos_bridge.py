@@ -96,14 +96,6 @@ except ImportError:  # pragma: no cover - only when robot_localization is absent
 # ~0.05 s, and this leaves it ten missed control cycles before intervening.
 CMD_VEL_TIMEOUT_SIM_S = 0.5
 
-# Diagnostic only. See the encoder block in _read_robot().
-DEBUG_ENCODERS = os.environ.get("SWARMDECK_DEBUG_ENCODERS", "") == "1"
-# SWARMDECK_DEBUG_SCAN_AGE=1 reports how far the lidar frame lags the exchange
-# that carried it. Zero means the two schedules happen to coincide; anything
-# else is the pose/scan mismatch that stamping at the exchange tick used to
-# hide, and it converts directly to a yaw error at the current turn rate.
-DEBUG_SCAN_AGE = os.environ.get("SWARMDECK_DEBUG_SCAN_AGE", "") == "1"
-
 OBSERVATION_MAGIC = b"SDB2"
 COMMAND_MAGIC = b"SDCMD"
 
@@ -278,15 +270,11 @@ class RobotInterface:
         self._seen_seq = 0
         self._cmd_at_sim: float | None = None
         self._expired = False
-        self._encoder_log_at = -1e9
-        self._scan_age_log_at = -1e9
-        self._duplicate_log_at = -1e9
         # The tick of the last lidar frame actually published, so a frame the
         # exchange carries twice is published once. See the lidar block.
         self.last_scan_tick = -1
         self.last_camera_tick = -1
         self.last_odom_tick = -1
-        self.duplicate_scans = 0
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -357,33 +345,6 @@ class RobotInterface:
     def _on_cmd_vel(self, msg: Twist) -> None:
         self.cmd_vel = (float(msg.linear.x), float(msg.angular.z))
         self.cmd_seq += 1
-
-    def _encoder_log_due(self, sim_now: float) -> bool:
-        """Rate-limit the diagnostic to once a second of simulation time."""
-        if sim_now - self._encoder_log_at < 1.0:
-            return False
-        self._encoder_log_at = sim_now
-        return True
-
-    def _log_duplicate_scan(self, sim_now: float) -> None:
-        """How often the exchange outruns the lidar, at most once a sim second."""
-        if sim_now - self._duplicate_log_at < 1.0:
-            return
-        self._duplicate_log_at = sim_now
-        self.node.get_logger().info(
-            f"[{self.id}] lidar frame repeated by the exchange "
-            f"({self.duplicate_scans} so far); not republished"
-        )
-
-    def _log_scan_age(self, sim_now: float, age_s: float) -> None:
-        """How stale the lidar frame in this exchange is, once a sim second."""
-        if sim_now - self._scan_age_log_at < 1.0:
-            return
-        self._scan_age_log_at = sim_now
-        self.node.get_logger().info(
-            f"[{self.id}] lidar frame is {age_s * 1000.0:.0f} ms older "
-            f"than the exchange carrying it"
-        )
 
     def velocity_at(self, sim_now: float) -> tuple[float, float]:
         """The velocity to command, zeroed once the last one has gone stale."""
@@ -608,21 +569,10 @@ class ArgosBridge(Node):
                     f"/{robot_id}/odom and odom->base_link until it converges")
 
         # -- wheel encoders --------------------------------------------------
-        # Normally read and discarded: Ultra-Fusion consumes the encoders inside
-        # ARGoS, through the external_estimator medium, and nothing in ROS wants
-        # a second dead-reckoned pose to disagree with the fused one.
-        #
-        # SWARMDECK_DEBUG_ENCODERS=1 logs them instead. They are the only view
-        # of what the controller actually commanded, which is what separates a
-        # controller fault from a physics one when a robot will not turn.
+        # The estimator consumes encoders through its own ARGoS channel.
+        # Drain this unused payload to preserve observation packet framing.
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
-            encoders = struct.unpack("<4d", recv_exact(sock, 4 * 8))
-            if DEBUG_ENCODERS and robot._encoder_log_due(seconds):
-                left, right = encoders[0], encoders[1]
-                self.get_logger().info(
-                    f"[{robot_id}] wheels L={left:+.4f} R={right:+.4f} m/s "
-                    f"diff={right - left:+.4f}"
-                )
+            recv_exact(sock, 4 * 8)
 
         # -- IMU -------------------------------------------------------------
         if struct.unpack("<B", recv_exact(sock, 1))[0]:
@@ -654,11 +604,6 @@ class ArgosBridge(Node):
             else:
                 scan_stamp = stamp
                 self._warn_scan_tick(scan_tick, tick)
-            # Repeated sensor frames must be drained but published only once.
-            if DEBUG_SCAN_AGE:
-                robot._log_scan_age(
-                    seconds, scan_age_ticks / float(ticks_per_second or 1)
-                )
             # The payload is always drained, duplicate or not: it is framed on
             # the socket and the next field starts after it either way.
             raw = recv_exact(sock, readings * LIDAR_READING.size)
@@ -668,10 +613,6 @@ class ArgosBridge(Node):
             duplicate = robot.last_scan_tick == scan_tick
             if usable_scan:
                 robot.last_scan_tick = scan_tick
-            if duplicate:
-                robot.duplicate_scans += 1
-                if DEBUG_SCAN_AGE:
-                    robot._log_duplicate_scan(seconds)
             # A duplicate frame is not a new observation. Publishing it would
             # hand every consumer two readings where the sensor produced one,
             # with identical stamps, which is the zero interval that defeats
@@ -682,7 +623,7 @@ class ArgosBridge(Node):
                 hits = int(np.count_nonzero(hit_mask))
                 hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
 
-                # 1. PointCloud2 (Fast-LIVO2 & 3D consumers - UNTOUCHED)
+                # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
                 if hits:
                     out = np.empty((hits, 4), dtype="<f4")
                     out[:, 0] = hit_pts["x"]

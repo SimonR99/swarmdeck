@@ -660,11 +660,15 @@ class AdapterTelemetryMixin:
             "robot_id": self.id,
             "t_mono": round(time.monotonic() - self.t0, 4),
             "pose": self.map_pose(),
+            "home_pose": getattr(self, "_home_pose", None),
             "battery": self.battery,
             "mode": (
                 "explore"
                 if getattr(getattr(self, "exploration", None), "active", False)
                 else self.mode
+            ),
+            "exploration_status": getattr(
+                getattr(self, "exploration", None), "status", "idle"
             ),
             "nav_status": self.nav_status,
             "goal": self.goal,

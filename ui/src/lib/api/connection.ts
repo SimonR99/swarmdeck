@@ -182,6 +182,10 @@ export const actions = {
   cancelGoal(robotId: string) {
     sendAction({ type: 'cancel_goal', robot_id: robotId });
   },
+  returnHome(robotId: string) {
+    if (!fleet.isEnabled(robotId)) return;
+    sendAction({ type: 'return_home', robot_id: robotId });
+  },
   drive(robotId: string, linear: number, angular: number) {
     if (!fleet.isEnabled(robotId)) return;
     sendAction({ type: 'drive', robot_id: robotId, payload: { linear, angular } });
