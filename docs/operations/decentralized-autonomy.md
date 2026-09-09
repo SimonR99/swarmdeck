@@ -251,7 +251,16 @@ selection are still a deployment policy to configure before long missions.
 `SWARMDECK_BASE_FRAME`, `SWARMDECK_ODOM_FRAME`,
 `SWARMDECK_NAVIGATION_FRAME`, and `SWARMDECK_SENSOR_NAMESPACE` for its calibrated
 ROS graph. Hardware with global TF topics should set `SWARMDECK_TF_TOPIC=/tf`
-and `SWARMDECK_TF_STATIC_TOPIC=/tf_static`. The standalone
+and `SWARMDECK_TF_STATIC_TOPIC=/tf_static`. Keep each robot's existing
+`ROS_DOMAIN_ID` as its local sensor, adapter, MGG, and indexed-query domain. Set
+one common, unused ROS domain across the participating robots as
+`SWARMDECK_PEER_DOMAIN_ID`; if it is omitted, the bridge retains the existing
+single-domain behavior. The dual-domain bridge consumes raw cloud and TF only
+from the local domain, sends normalized cloud/odometry to Swarm-SLAM on the
+peer domain, and returns map authority and keyframe metadata locally. It relays
+only bounded `/swarmdeck/intentions` and `/swarmdeck/exploration_reports` JSON
+between the domains. Robot-ID direction filters prevent relay loops, and the
+JSON bytes are preserved exactly.
 `deploy/compose/docker-compose.robot-peer.yml` profile packages this participant
 with host networking and a persistent onboard map volume; the server URL is
 optional. It does not change existing robot deployment defaults. Sensor normalization requires capture-time TF; it never substitutes
@@ -270,7 +279,26 @@ docker compose -f deploy/compose/docker-compose.robot-peer.yml \
   peer_mapping peer_mola_mapping peer_mapping_query
 ```
 
-The query service uses host networking, host IPC, the configured ROS domain,
+Hardware adapters read autonomy selection from their YAML. Qualifying a robot
+for MGG planning and peer coordination therefore requires these explicit
+additions alongside its existing `exploration.planner` calibration:
+
+```yaml
+actions:
+  follow_path: /robot_namespace/follow_path  # real Nav2 FollowPath server
+planning:
+  backend: mgg
+exploration:
+  enabled: true
+  peer_coordination: true
+```
+
+Set `SWARMDECK_MAPPING_AUTHORITY=onboard` in that adapter's environment. The
+configured `follow_path` action must execute the complete MGG path; a robot with
+only waypoint, trajectory, or direct velocity control needs a qualified path
+adapter before enabling this configuration.
+
+The query service uses host networking, host IPC, the local ROS domain,
 and the exact mission UUID. The MOLA worker remains ROS-independent. Starting
 these services does not enable MGG's client; set `SWARMDECK_INDEXED_MAP_QUERY=1`
 only in a separately qualified MGG deployment after sufficient measured
@@ -327,6 +355,12 @@ serialization, FREE/OCCUPIED/UNKNOWN arrays, and stale key/timestamp rejection.
 It caught and fixed a collision with rclpy's internal `_services` member that
 unit tests of the index alone could not detect. The local MOLA native build
 passed both C++ tests and serialized the Python fixture to a metric map.
+The native dual-domain bridge smoke publishes conflicting `odom -> base_link`
+transforms on the local sensor and shared peer domains. Normalized odometry uses
+the local transform, raw TF/cloud never appears on the peer domain, normalized
+capture reaches the peer domain, and authority/keyframe metadata returns only
+to the local domain. Exact intention and exploration-report JSON crosses in
+each permitted direction once; oversized payloads are rejected.
 
 On the authorized amd64 workstation, ROS Jazzy Swarm-SLAM compiled with the
 versioned message patch and its native Open3D/TEASER/message imports passed.
@@ -345,3 +379,22 @@ capture and solution processing; it does not establish inter-robot closure accur
 or continued motion during an operator-link outage. Arm64 builds, physical robot trials,
 transparent peer restart, and comparative four-robot coverage are separate
 acceptance gates and must not be inferred from these unit/build results.
+
+## Remaining acceptance work
+
+The integration boundaries are implemented; the full rollout plan remains in
+progress. In particular:
+
+- Run the four-robot Bistro scenario with onboard authority and peer coordination
+  enabled, measuring duplicate coverage and inter-robot alignment against the
+  independent simulation reference. The earlier Bistro run used shadow mapping.
+- Exercise peers on separate hosts through partitions, rejoin, and optimizer
+  loss. A frontend restart currently requires a fresh fleet mission and domain;
+  transparent restart with preserved native graph state is not implemented.
+- Validate each physical robot's calibrated capture, ARM image, and local
+  controller. Moving-obstacle and blind-corner behavior needs controlled trials.
+- Establish a sensor coverage/bootstrap policy before enabling the strict indexed
+  terrain gate. MGG still uses its local OctoMap for frontier construction and
+  information gain; Inspect and Rendezvous remain unsupported objectives.
+- Run the native CUDA reconstruction and measure alignment, memory, training
+  time, and rendering cost. Online incremental training remains a later step.

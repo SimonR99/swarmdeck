@@ -1,7 +1,8 @@
 """One onboard peer. No dashboard service participates in discovery or solving.
 
-Required environment: SWARMDECK_MISSION_ID (fresh UUID), ROS_DOMAIN_ID (fresh
-isolated domain), SWARMDECK_PEER_NAMES (JSON array), SWARMDECK_PEER_INDEX.
+Required environment: SWARMDECK_MISSION_ID (fresh UUID), ROS_DOMAIN_ID (shared
+peer domain), SWARMDECK_PEER_NAMES (JSON array), SWARMDECK_PEER_INDEX.
+SWARMDECK_SENSOR_DOMAIN_ID may select a separate robot-local sensor domain.
 Robot-specific sensor topics and frames are explicit overrides for hardware.
 """
 
@@ -22,8 +23,12 @@ def generate_launch_description():
     names = json.loads(os.environ["SWARMDECK_PEER_NAMES"])
     index = int(os.environ["SWARMDECK_PEER_INDEX"])
     robot = names[index]
-    if not 1 <= int(os.environ["ROS_DOMAIN_ID"]) <= 232:
+    peer_domain = int(os.environ["ROS_DOMAIN_ID"])
+    sensor_domain = int(os.environ.get("SWARMDECK_SENSOR_DOMAIN_ID", peer_domain))
+    if not 1 <= peer_domain <= 232:
         raise ValueError("Use a dedicated nonzero ROS_DOMAIN_ID for each mission")
+    if not 0 <= sensor_domain <= 232:
+        raise ValueError("SWARMDECK_SENSOR_DOMAIN_ID must be between 0 and 232")
     ns = os.environ.get("SWARMDECK_SENSOR_NAMESPACE", robot).strip("/")
     sim_time = os.environ.get("SWARMDECK_USE_SIM_TIME", "false").lower() == "true"
     config = "/cslam_ws/install/swarmdeck_cslam/share/swarmdeck_cslam/config/cslam_lidar.yaml"
@@ -56,6 +61,7 @@ def generate_launch_description():
                 "robot_names": json.dumps(names),
                 "mission_id": mission,
                 "sensor_namespace": ns,
+                "sensor_domain_id": sensor_domain,
                 "use_sim_time": sim_time,
                 "navigation_frame": os.environ.get(
                     "SWARMDECK_NAVIGATION_FRAME", f"{ns}/map_frame"
@@ -64,6 +70,10 @@ def generate_launch_description():
                 "odom_frame": os.environ.get("SWARMDECK_ODOM_FRAME", f"{ns}/odom"),
                 "cloud_topic": os.environ.get(
                     "SWARMDECK_CLOUD_TOPIC", f"/{ns}/scan/points"
+                ),
+                "tf_topic": os.environ.get("SWARMDECK_TF_TOPIC", f"/{ns}/tf"),
+                "tf_static_topic": os.environ.get(
+                    "SWARMDECK_TF_STATIC_TOPIC", f"/{ns}/tf_static"
                 ),
                 "server_url": os.environ.get("SWARMDECK_SERVER_URL", ""),
                 "store_root": os.environ.get("SWARMDECK_MAP_STORE", "/maps"),

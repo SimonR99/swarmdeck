@@ -1,6 +1,8 @@
 # Optional ROS 2 onboard mapping participant. Start only after the robot's
 # capture-time TF/odometry inputs and this image are validated on its platform.
-# All peers need the same ordered names, mission UUID, and ROS domain.
+# All peers need the same ordered names, mission UUID, and peer ROS domain.
+# ROS_DOMAIN_ID remains the robot-local sensor/planning domain; optionally set
+# SWARMDECK_PEER_DOMAIN_ID to the common cross-robot mapping domain.
 services:
   peer_mapping:
     profiles: [peer_mapping]
@@ -12,7 +14,8 @@ services:
     ipc: host
     environment:
       PYTHONPATH: /app
-      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the domain used by all participating robot sensor stacks}"
+      ROS_DOMAIN_ID: "${SWARMDECK_PEER_DOMAIN_ID:-${ROS_DOMAIN_ID:?Set the robot-local ROS domain}}"
+      SWARMDECK_SENSOR_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the robot-local ROS domain}"
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_PEER_NAMES: "${SWARMDECK_PEER_NAMES:?Set the ordered JSON fleet robot names}"
       SWARMDECK_PEER_INDEX: "${SWARMDECK_PEER_INDEX:?Set this robot's zero-based index}"
@@ -58,7 +61,7 @@ services:
     network_mode: host
     ipc: host
     environment:
-      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the domain used by all participating robot sensor stacks}"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the robot-local ROS domain}"
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
     volumes:
       - onboard_peer_maps:/maps

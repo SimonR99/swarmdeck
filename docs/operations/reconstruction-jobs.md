@@ -104,9 +104,14 @@ python3 -m autonomy.reconstruction submit \
   --umami /opt/UMAMI-SLAM \
   --config /opt/UMAMI-SLAM/cfg/colmap/gaussian_splatting.yaml \
   --artifact /data/swarmdeck-reconstructions/global.swgs \
-  --pose-snapshot /data/run-rgbd/graph-solution.json \
+  --pose-snapshot /maps/550e8400-e29b-41d4-a716-446655440000/botman_0/graph_solution.json \
   --max-frames 2000
 ```
+
+Use the same mission UUID and robot ID as the onboard peer when capturing;
+its map directory publishes `graph_solution.json` automatically. Mount that
+directory read-only into the reconstruction worker, or synchronize it while
+preserving atomic file replacement.
 
 The pose snapshot is an immutable JSON wrapper around one validated
 `GraphSolution` (`schema: swarmdeck.pose-snapshot.v1`). At submission the
@@ -118,6 +123,11 @@ detection. Its
 or changed keyframes fail the job rather than silently using the old capture
 pose. A job fingerprints the snapshot bytes at submission and marks itself
 stale if those bytes change before publication.
+
+This first batch runner conservatively treats every source snapshot change,
+including newly added keyframes, as stale. Run training after capture and graph
+optimization have settled. Incremental training and invalidation limited to
+affected submaps remain later milestones.
 
 The command prints a `job_id`. Query it while a worker is running:
 
