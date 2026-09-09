@@ -126,6 +126,45 @@ def test_ply_conversion_activates_scale_opacity_and_reorders_quaternion(tmp_path
     assert np.isclose(values[13], 1 / (1 + np.exp(-2)))
 
 
+@pytest.mark.parametrize("integer_type", ["int", "int32"])
+def test_native_umami_creation_keyframe_metadata_preserves_vertex_alignment(
+    tmp_path, integer_type
+):
+    source = tmp_path / "native.ply"
+    ply_file(source)
+    header, payload = source.read_bytes().split(b"end_header\n", 1)
+    floats = np.frombuffer(payload, dtype="<f4").reshape(2, 14).copy()
+    floats[1, :3] = [4, 5, 6]
+    records = np.zeros(2, dtype=[("attributes", "<f4", (14,)), ("keyframe", "<i4")])
+    records["attributes"] = floats
+    records["keyframe"] = [-1, 123]
+    source.write_bytes(
+        header
+        + f"property {integer_type} creation_kfid\nend_header\n".encode()
+        + records.tobytes()
+    )
+
+    vertices = umami.read_gaussian_ply(source)
+    assert vertices["creation_kfid"].tolist() == [-1, 123]
+    assert vertices["x"].tolist() == [1, 4]
+    output = tmp_path / "native.swgs"
+    assert umami.convert_ply(source, output) == 2
+    compact = np.frombuffer(output.read_bytes(), dtype="<f4", offset=16).reshape(2, 14)
+    assert compact[:, :3].tolist() == [[1, 2, 3], [4, 5, 6]]
+
+    source.write_bytes(source.read_bytes()[:-1])
+    with pytest.raises(ValueError, match="truncated"):
+        umami.read_gaussian_ply(source)
+
+
+def test_gaussian_geometry_attributes_must_remain_float(tmp_path):
+    source = tmp_path / "invalid.ply"
+    ply_file(source)
+    source.write_bytes(source.read_bytes().replace(b"property float x\n", b"property int x\n"))
+    with pytest.raises(ValueError, match="unsupported Gaussian PLY property"):
+        umami.read_gaussian_ply(source)
+
+
 def test_reconstruction_endpoint_scope_etag_and_corruption(tmp_path, monkeypatch):
     from swarmdeck_server.api.reconstruction_routes import get_gaussians
 

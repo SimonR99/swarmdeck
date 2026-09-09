@@ -257,7 +257,7 @@ def export_colmap(
 
 
 def read_gaussian_ply(path):
-    """Read UMAMI GaussianModel::savePly's binary little-endian float vertex table."""
+    """Read UMAMI's little-endian attributes and optional creation-keyframe IDs."""
     with Path(path).open("rb") as f:
         properties = []
         count = None
@@ -283,9 +283,17 @@ def read_gaussian_ply(path):
                 elif count is None:
                     raise ValueError("vertex must be the first PLY element")
             if parts[0] == "property" and in_vertex:
-                if parts[1] not in ("float", "float32"):
-                    raise ValueError("expected float Gaussian attributes")
-                properties.append(parts[2])
+                if len(parts) != 3:
+                    raise ValueError("expected scalar Gaussian attributes")
+                if parts[1] in ("float", "float32"):
+                    scalar = "<f4"
+                elif parts[1] in ("int", "int32") and parts[2] == "creation_kfid":
+                    # UMAMI appends this metadata to each vertex. Preserve its
+                    # width so subsequent rows remain aligned; rendering ignores it.
+                    scalar = "<i4"
+                else:
+                    raise ValueError("unsupported Gaussian PLY property")
+                properties.append((parts[2], scalar))
             if parts[0] == "end_header":
                 break
         required = [
@@ -304,16 +312,17 @@ def read_gaussian_ply(path):
             "f_dc_2",
             "opacity",
         ]
+        names = [name for name, _scalar in properties]
         if (
             fmt != "binary_little_endian"
             or count is None
             or not 0 < count <= 10000000
-            or not set(required) <= set(properties)
-            or len(set(properties)) != len(properties)
+            or not set(required) <= set(names)
+            or len(set(names)) != len(names)
         ):
             raise ValueError("unsupported or incomplete Gaussian PLY")
         offset = f.tell()
-    dtype = np.dtype([(name, "<f4") for name in properties])
+    dtype = np.dtype(properties)
     if Path(path).stat().st_size < offset + count * dtype.itemsize:
         raise ValueError("truncated PLY")
     return np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=(count,))
