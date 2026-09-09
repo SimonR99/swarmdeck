@@ -54,6 +54,7 @@ class Robot:
         default_factory=lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
     )
     exploration_status: str = "idle"
+    fleet_exploration_status: str = "unknown"
     home_pose: dict[str, float] | None = None
     battery: float | None = None
     mode: str = "idle"
@@ -91,6 +92,7 @@ class Robot:
             "pose": self.pose,
             "home_pose": self.home_pose,
             "exploration_status": self.exploration_status,
+            "fleet_exploration_status": self.fleet_exploration_status if self.online else "unknown",
             "battery": self.battery,
             "mode": self.mode,
             "nav_status": self.nav_status,
@@ -161,11 +163,15 @@ class Registry:
             "idle",
             "starting",
             "exploring",
+            "waiting",
+            "locally_exhausted",
             "complete",
             "blocked",
             "stopped",
         }:
             r.exploration_status = msg["exploration_status"]
+        if msg.get("fleet_exploration_status") in {"unknown", "incomplete", "complete"}:
+            r.fleet_exploration_status = msg["fleet_exploration_status"]
         if "nav_status" in msg:
             r.nav_status = msg["nav_status"]
         if "goal" in msg:

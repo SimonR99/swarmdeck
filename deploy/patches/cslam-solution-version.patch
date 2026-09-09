@@ -1,0 +1,135 @@
+--- a/cslam_interfaces/cslam_common_interfaces/msg/OptimizationResult.msg
++++ b/cslam_interfaces/cslam_common_interfaces/msg/OptimizationResult.msg
+@@ -3,4 +3,11 @@
+ uint32 origin_robot_id
+ 
+ cslam_common_interfaces/PoseGraphEdge[] factors
+-cslam_common_interfaces/PoseGraphValue[] estimates
+\ No newline at end of file
++cslam_common_interfaces/PoseGraphValue[] estimates
++
++# SwarmDeck causal solution identity; all peers must use the same mission.
++string mission_id
++uint64 solution_clock
++uint32 optimizer_robot_id
++# Zero or one anchor pose; absent means this solution cannot establish a shared frame.
++cslam_common_interfaces/PoseGraphValue[] anchor_estimates
+--- a/cslam_interfaces/cslam_common_interfaces/msg/PoseGraph.msg
++++ b/cslam_interfaces/cslam_common_interfaces/msg/PoseGraph.msg
+@@ -18,3 +18,7 @@
+ uint64 front_end_cumulative_communication_bytes
+ float64 sparsification_cumulative_computation_time
+ cslam_common_interfaces/InterRobotMatches spectral_matches
++
++
++string mission_id
++uint64 solution_clock
+--- a/cslam/src/back_end/pose_graph_manager_node.cpp
++++ b/cslam/src/back_end/pose_graph_manager_node.cpp
+@@ -17,6 +17,7 @@
+ 
+   node->declare_parameter<int>("max_nb_robots", 1);
+   node->declare_parameter<int>("robot_id", 0);
++  node->declare_parameter<std::string>("swarmdeck.mission_id", "");
+   node->declare_parameter<int>("backend.pose_graph_optimization_start_period_ms", 1000);
+   node->declare_parameter<int>("backend.pose_graph_optimization_loop_period_ms", 100);
+   node->declare_parameter<int>("backend.max_waiting_time_sec", 100);
+--- a/cslam/include/cslam/back_end/decentralized_pgo.h
++++ b/cslam/include/cslam/back_end/decentralized_pgo.h
+@@ -394,6 +394,10 @@
+         rclcpp::Duration max_waiting_time_sec_;
+ 
+         unsigned int origin_robot_id_;
++        std::string mission_id_;
++        uint64_t solution_clock_ = 0;
++        uint64_t applied_solution_clock_ = 0;
++        uint32_t applied_optimizer_id_ = 0;
+         double heartbeat_period_sec_;
+         rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr heartbeat_publisher_;
+ 
+--- a/cslam/src/back_end/decentralized_pgo.cpp
++++ b/cslam/src/back_end/decentralized_pgo.cpp
+@@ -11,6 +11,7 @@
+ {
+   node_->get_parameter("max_nb_robots", max_nb_robots_);
+   node_->get_parameter("robot_id", robot_id_);
++  node_->get_parameter("swarmdeck.mission_id", mission_id_);
+   node_->get_parameter("backend.pose_graph_optimization_start_period_ms",
+                        pose_graph_optimization_start_period_ms_);
+   node_->get_parameter("backend.pose_graph_optimization_loop_period_ms",
+@@ -375,6 +376,8 @@
+ 
+ cslam_common_interfaces::msg::PoseGraph DecentralizedPGO::fill_pose_graph_msg(const cslam_common_interfaces::msg::RobotIds& msg){
+   cslam_common_interfaces::msg::PoseGraph out_msg;
++  out_msg.mission_id = mission_id_;
++  out_msg.solution_clock = solution_clock_;
+   out_msg.robot_id = robot_id_;
+   out_msg.values = gtsam_values_to_msg(odometry_pose_estimates_);
+   auto graph = boost::make_shared<gtsam::NonlinearFactorGraph>();
+@@ -438,6 +441,8 @@
+ void DecentralizedPGO::pose_graph_callback(
+     const cslam_common_interfaces::msg::PoseGraph::ConstSharedPtr msg)
+ {
++  if (!mission_id_.empty() && msg->mission_id != mission_id_) return;
++  solution_clock_ = std::max(solution_clock_, msg->solution_clock);
+   if (optimizer_state_ == OptimizerState::WAITING_FOR_NEIGHBORS_POSEGRAPHS)
+   {
+     other_robots_graph_and_estimates_.insert(
+@@ -637,6 +642,14 @@
+     const cslam_common_interfaces::msg::OptimizationResult::ConstSharedPtr
+         msg)
+ {
++  if (!msg->success || msg->estimates.empty() || odometry_pose_estimates_->size() == 0 ||
++      (!mission_id_.empty() && msg->mission_id != mission_id_)) return;
++  if (msg->solution_clock < applied_solution_clock_ ||
++      (msg->solution_clock == applied_solution_clock_ &&
++       msg->optimizer_robot_id <= applied_optimizer_id_)) return;
++  solution_clock_ = std::max(solution_clock_, msg->solution_clock);
++  applied_solution_clock_ = msg->solution_clock;
++  applied_optimizer_id_ = msg->optimizer_robot_id;
+   if (odometry_pose_estimates_->size() > 0 && msg->estimates.size() > 0)
+   {
+     current_pose_estimates_ = values_msg_to_gtsam(msg->estimates);
+@@ -665,13 +678,23 @@
+ void DecentralizedPGO::share_optimized_estimates(
+     const gtsam::Values &estimates)
+ {
++  ++solution_clock_;
+   auto included_robots_ids = current_neighbors_ids_;
+   included_robots_ids.robots.ids.push_back(robot_id_);
+   for (unsigned int i = 0; i < included_robots_ids.robots.ids.size(); i++)
+   {
+     cslam_common_interfaces::msg::OptimizationResult msg;
+     msg.success = true;
++    msg.mission_id = mission_id_;
++    msg.solution_clock = solution_clock_;
++    msg.optimizer_robot_id = robot_id_;
+     msg.origin_robot_id = origin_robot_id_;
++    gtsam::LabeledSymbol anchor(GRAPH_LABEL, ROBOT_LABEL(origin_robot_id_), 0);
++    if (estimates.exists(anchor)) {
++      gtsam::Values anchor_values;
++      anchor_values.insert(anchor, estimates.at<gtsam::Pose3>(anchor));
++      msg.anchor_estimates = gtsam_values_to_msg(anchor_values);
++    }
+     msg.estimates =
+         gtsam_values_to_msg(estimates.filter(gtsam::LabeledSymbol::LabelTest(
+             ROBOT_LABEL(included_robots_ids.robots.ids[i]))));
+@@ -698,6 +721,8 @@
+   if (visualization_pose_graph_publisher_->get_subscription_count() > 0)
+   {
+     cslam_common_interfaces::msg::PoseGraph out_msg;
++  out_msg.mission_id = mission_id_;
++  out_msg.solution_clock = solution_clock_;
+     out_msg.robot_id = robot_id_;
+     out_msg.origin_robot_id = origin_robot_id_;
+     out_msg.values = gtsam_values_to_msg(current_pose_estimates_);
+@@ -874,6 +899,9 @@
+     {
+       cslam_common_interfaces::msg::OptimizationResult msg;
+       msg.success = true;
++    msg.mission_id = mission_id_;
++    msg.solution_clock = solution_clock_;
++    msg.optimizer_robot_id = robot_id_;
+       msg.factors = gtsam_factors_to_msg(aggregate_pose_graph_.first);
+       msg.estimates = gtsam_values_to_msg(result);
+       debug_optimization_result_publisher_->publish(msg);

@@ -18,6 +18,9 @@
 
 FROM ros:jazzy-ros-base
 
+ARG BUILD_JOBS=4
+ARG TEASER_REF=52a9c52ee7d4c838c5e8a75458c33178be5bfb70
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -28,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-colcon-common-extensions \
       libeigen3-dev libboost-all-dev libtbb-dev pybind11-dev \
       libpcl-dev \
-      ros-jazzy-gtsam \
+      ros-jazzy-gtsam ros-jazzy-nav2-msgs \
       ros-jazzy-rmw-zenoh-cpp \
       ros-jazzy-pcl-conversions \
       ros-jazzy-perception-pcl \
@@ -61,13 +64,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the first time two robots have something to verify. Both the import and the
 # solver symbol are asserted here so that cannot ship.
 WORKDIR /opt
-RUN git clone --depth 1 https://github.com/MIT-SPARK/TEASER-plusplus.git \
+RUN git clone https://github.com/MIT-SPARK/TEASER-plusplus.git \
+    && git -C TEASER-plusplus checkout "${TEASER_REF}" \
     && cmake -S TEASER-plusplus -B TEASER-plusplus/build \
          -DCMAKE_BUILD_TYPE=Release \
          -DBUILD_TEASER_FPFH=ON \
-         -DBUILD_TESTS=OFF \
+         -DBUILD_TESTING=OFF \
          -DBUILD_PYTHON_BINDINGS=ON \
-    && cmake --build TEASER-plusplus/build -j"$(nproc)" \
+    && cmake --build TEASER-plusplus/build -j"${BUILD_JOBS}" \
     && cmake --install TEASER-plusplus/build \
     && ldconfig \
     && SP="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
@@ -77,8 +81,11 @@ RUN git clone --depth 1 https://github.com/MIT-SPARK/TEASER-plusplus.git \
     && python3 -c "import teaserpp_python; assert hasattr(teaserpp_python, 'RobustRegistrationSolver'); print('teaserpp_python OK')"
 
 WORKDIR /cslam_ws
-RUN git clone --depth 1 https://github.com/MISTLab/Swarm-SLAM.git src/Swarm-SLAM \
-    && vcs import src < src/Swarm-SLAM/cslam.repos
+# Pin every repository; the upstream umbrella file follows moving branches.
+COPY deploy/cslam/upstream.repos /tmp/cslam.repos
+RUN mkdir -p src && vcs import src < /tmp/cslam.repos
+RUN git clone https://github.com/MISTLab/Swarm-SLAM.git /opt/Swarm-SLAM \
+    && git -C /opt/Swarm-SLAM checkout af17c4b71432f750571ea699a0beccfbe9004872
 
 # Install the repo's OWN requirements.txt rather than a guessed subset. Getting
 # this wrong does not fail the build: colcon compiles cslam regardless, and the
@@ -97,12 +104,20 @@ RUN git clone --depth 1 https://github.com/MISTLab/Swarm-SLAM.git src/Swarm-SLAM
 # aborts. Installing a pip-managed copy alongside satisfies the resolver without
 # pip having to remove a distro package.
 RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed psutil \
-    && sed -e '/^torch/d' -e '/^torchvision/d' src/Swarm-SLAM/requirements.txt > /tmp/req.txt \
+    && sed -e '/^torch/d' -e '/^torchvision/d' /opt/Swarm-SLAM/requirements.txt > /tmp/req.txt \
     && pip3 install --break-system-packages --no-cache-dir -r /tmp/req.txt
 
-# Not `|| true`: the whole point of the spike is a definite answer.
+COPY deploy/patches/cslam-solution-version.patch /tmp/cslam-solution-version.patch
+COPY deploy/patches/cslam-keyframe-readiness.patch /tmp/cslam-keyframe-readiness.patch
+COPY deploy/patches/cslam-registration-budget.patch /tmp/cslam-registration-budget.patch
+RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
+    && git apply /tmp/cslam-solution-version.patch \
+    && git apply /tmp/cslam-keyframe-readiness.patch \
+    && git apply /tmp/cslam-registration-budget.patch
+
+# Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \
-    && colcon build --symlink-install \
+    && MAKEFLAGS="-j${BUILD_JOBS}" colcon build --symlink-install --parallel-workers 2 \
          --cmake-args -DCMAKE_BUILD_TYPE=Release \
          --packages-skip cslam_experiments
 

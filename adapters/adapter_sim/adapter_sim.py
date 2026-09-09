@@ -33,7 +33,7 @@ import websockets
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import FollowPath, NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap, ManageLifecycleNodes
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -77,6 +77,7 @@ from adapters.keyframe_producer import (
 )
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
+from adapters.onboard_mapping import mapping_authority_mode, publish_onboard_map
 
 from sim_cslam import (
     CSLAM_GRID,
@@ -307,9 +308,14 @@ class RobotBridge(
         *,
         instantaneous_planar_scan: bool = False,
         exploration_config: dict | None = None,
+        planning_config: dict | None = None,
     ) -> None:
         self.node = node
         self.id = robot_id
+        self.map_frame = f"{robot_id}/map_frame"
+        self.mapping_authority_mode = mapping_authority_mode()
+        self.onboard_mapping = self.mapping_authority_mode == "onboard"
+        self._onboard_map_warned_at = 0.0
         self.http_url = http_url
         self.t0 = time.monotonic()
         # What this robot IS. `footprint_radius` is not decoration: the GUI draws
@@ -327,6 +333,7 @@ class RobotBridge(
                 "footprint": json.loads(spec.footprint),
                 "network_iface": "",
                 "exploration": exploration_config or {},
+                "planning": planning_config or {},
             },
         )
         self.robot_type = self.cfg["robot_type"]
@@ -512,10 +519,13 @@ class RobotBridge(
         self.nav_client = ActionClient(
             node, NavigateToPose, f"/{robot_id}/navigate_to_pose"
         )
+        self.path_client = ActionClient(node, FollowPath, f"/{robot_id}/follow_path")
         self.pub_cmd = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)
         from adapters.exploration import configure_exploration
+        from adapters.objective_planning import configure_objective_planning
 
         configure_exploration(self)
+        configure_objective_planning(self)
 
     def _on_odom(self, msg: Odometry) -> None:
         """Wheel odometry — a FALLBACK only. See map_pose() for why."""
@@ -716,6 +726,8 @@ class RobotBridge(
     def _on_map(self, msg: OccupancyGrid) -> None:
         self.grid = msg
         self._grid_dirty = True
+        # Runs in the ROS callback, independently of the websocket session.
+        publish_onboard_map(self, msg)
 
     def _warn_costmap(self, kind: str, reason: str) -> None:
         now = time.monotonic()
@@ -1066,6 +1078,8 @@ class RobotBridge(
         caps = ["navigate", "map", "camera", "estop", "reset"]
         if getattr(self, "exploration", None) is not None:
             caps.append("explore")
+        if getattr(self, "objective_planner", None) is not None:
+            caps.append("plan_objective")
         return caps
 
     def _cfg_timeout(self, key: str) -> float:
@@ -1074,6 +1088,10 @@ class RobotBridge(
 
     def navigate_to(self, goal: dict) -> None:
         """Map a planner-agnostic command onto Nav2's NavigateToPose action."""
+        planner = getattr(self, "objective_planner", None)
+        if planner is not None:
+            planner.navigate(goal)
+            return
         self._cancel_nav()
         generation = self._goal_generation
 
@@ -1097,6 +1115,46 @@ class RobotBridge(
         future.add_done_callback(lambda done: self._goal_response(done, generation))
         self.goal = {"x": float(goal["x"]), "y": float(goal["y"]), "yaw": yaw}
         self.nav_status, self.mode = "active", "nav"
+
+    def plan_objective(self, objective: str, goal: dict | None = None) -> bool:
+        planner = getattr(self, "objective_planner", None)
+        if planner is None:
+            return False
+        return planner.plan(objective, goal or {})
+
+    def return_home(self, goal: dict | None = None) -> bool:
+        planner = getattr(self, "objective_planner", None)
+        return bool(planner and planner.return_home(goal))
+
+    def follow_path(self, plan) -> bool:
+        """Execute every MGG waypoint through Nav2's controller server."""
+        if not plan.poses:
+            return False
+        self._cancel_nav()
+        generation = self._goal_generation
+        if not self.path_client.server_is_ready():
+            self.node.get_logger().error(
+                f"[{self.id}] Nav2 FollowPath action server is not ready"
+            )
+            self.goal = None
+            self.nav_status, self.mode = "failed", "idle"
+            return False
+
+        from adapters.exploration import follow_path_goal
+
+        request = follow_path_goal(plan)
+
+        future = self.path_client.send_goal_async(request)
+        future.add_done_callback(lambda done: self._goal_response(done, generation))
+        final = plan.poses[-1]
+        yaw = math.atan2(
+            2.0 * (final.qw * final.qz + final.qx * final.qy),
+            1.0 - 2.0 * (final.qy * final.qy + final.qz * final.qz),
+        )
+        self.goal = {"x": final.x, "y": final.y, "yaw": yaw}
+        self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
+        self.nav_status, self.mode = "active", "nav"
+        return True
 
     def _goal_response(self, future, generation: int) -> None:
         if generation != self._goal_generation:
@@ -1827,7 +1885,18 @@ def main() -> None:
             instantaneous_planar_scan=instantaneous_planar_scan,
             exploration_config={
                 "enabled": os.environ.get("SWARMDECK_MGG_ENABLED", "0").lower()
-                in ("1", "true", "yes")
+                in ("1", "true", "yes"),
+                "peer_coordination": os.environ.get(
+                    "SWARMDECK_PEER_COORDINATION", "0"
+                ).lower()
+                in ("1", "true", "yes"),
+                "planar_tolerance_m": 0.30 if platforms[i] == "spot" else 0.10,
+                "max_inclination_rad": math.radians(30.0),
+            },
+            planning_config={
+                "backend": os.environ.get("SWARMDECK_PLANNING_BACKEND", ""),
+                "planar_tolerance_m": 0.30 if platforms[i] == "spot" else 0.10,
+                "max_inclination_rad": math.radians(30.0),
             },
         )
         for i in range(robot_count)

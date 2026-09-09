@@ -41,3 +41,12 @@ def test_hello_matches_the_hardware_protocol_envelope(sim_module):
     assert msg["adapter"] == "adapter_sim/0.1.0"
     assert "reset" in msg["capabilities"]
     assert "battery" not in msg["capabilities"]
+
+
+def test_objective_capability_requires_a_configured_planner(sim_module):
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.exploration = None
+    bridge.objective_planner = None
+    assert "plan_objective" not in bridge.capabilities()
+    bridge.objective_planner = object()
+    assert "plan_objective" in bridge.capabilities()

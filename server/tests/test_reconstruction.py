@@ -1,7 +1,9 @@
 """Geometry, wire-format and export regressions without CUDA or a running ROS graph."""
 
 import asyncio
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import struct
 import zlib
@@ -148,6 +150,47 @@ def test_reconstruction_endpoint_scope_etag_and_corruption(tmp_path, monkeypatch
     assert asyncio.run(get_gaussians(req(b"robot_id=other"))).status_code == 404
     (tmp_path / "global.swgs").write_bytes(b"corrupt")
     assert asyncio.run(get_gaussians(req())).status_code == 422
+
+
+def test_reconstruction_manifest_pointer_is_validated_and_served(tmp_path, monkeypatch):
+    from swarmdeck_server.api.reconstruction_routes import get_gaussians
+
+    monkeypatch.setenv("SWARMDECK_RECONSTRUCTION_DIR", str(tmp_path))
+    source = tmp_path / "in.ply"
+    ply_file(source)
+    legacy = tmp_path / "global.swgs"
+    umami.convert_ply(source, legacy)
+    artifact = tmp_path / "global.swgs.job-uuid"
+    artifact.write_bytes(legacy.read_bytes())
+    legacy.write_bytes(b"legacy bytes that must not be served")
+    pointer = tmp_path / "global.swgs.manifest.json"
+    pointer.write_text(
+        json.dumps(
+            {
+                "version": "job-uuid",
+                "state": "ready",
+                "job_id": "job-uuid",
+                "artifact": str(artifact),
+                "artifact_size_bytes": artifact.stat().st_size,
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            }
+        )
+    )
+    request = lambda: Request({"type": "http", "query_string": b"", "headers": []})
+    response = asyncio.run(get_gaussians(request()))
+    assert response.status_code == 200
+    assert Path(response.path).resolve() == artifact.resolve()
+    assert response.headers["X-Reconstruction-Version"] == "job-uuid"
+    assert response.headers["X-Reconstruction-State"] == "ready"
+
+    pointer.write_text(json.dumps({"state": "ready", "artifact": str(artifact), "artifact_size_bytes": 1}))
+    assert asyncio.run(get_gaussians(request())).status_code == 409
+    pointer.write_text(json.dumps({"state": "ready", "artifact": str(artifact), "artifact_sha256": "0" * 64}))
+    assert asyncio.run(get_gaussians(request())).status_code == 409
+    pointer.write_text(json.dumps({"state": "ready", "artifact": str(tmp_path.parent / "outside.swgs")}))
+    assert asyncio.run(get_gaussians(request())).status_code == 409
+    pointer.write_text(json.dumps({"state": "stale", "artifact": str(artifact)}))
+    assert asyncio.run(get_gaussians(request())).status_code == 409
 
 
 def test_cloud_float_transport_preserves_far_coordinates_and_rgb(monkeypatch):

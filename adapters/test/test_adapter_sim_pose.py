@@ -45,6 +45,26 @@ def make_bridge(bridge_cls):
     return bridge
 
 
+def test_onboard_map_callback_requires_the_navigation_frame(bridge_cls):
+    bridge = make_bridge(bridge_cls)
+    bridge.onboard_mapping = True
+    bridge._onboard_map_warned_at = 0.0
+    bridge.map_frame = "robot_0/map_frame"
+    bridge.pub_global_map = MagicMock()
+    wrong = types.SimpleNamespace(
+        header=types.SimpleNamespace(frame_id="map")
+    )
+    aligned = types.SimpleNamespace(
+        header=types.SimpleNamespace(frame_id="robot_0/map_frame")
+    )
+
+    bridge._on_map(wrong)
+    bridge.pub_global_map.publish.assert_not_called()
+    bridge._on_map(aligned)
+
+    bridge.pub_global_map.publish.assert_called_once_with(aligned)
+
+
 def tf_message(pairs):
     """A TFMessage-shaped stub: [(parent, child, x, y, yaw), ...]."""
     transforms = []

@@ -1,0 +1,78 @@
+diff --git a/cslam/cslam/lidar_pr/icp_utils.py b/cslam/cslam/lidar_pr/icp_utils.py
+index 8ee7008..1ab4070 100644
+--- a/cslam/cslam/lidar_pr/icp_utils.py
++++ b/cslam/cslam/lidar_pr/icp_utils.py
+@@ -39,7 +39,9 @@ def extract_fpfh(pcd, voxel_size):
+ 
+ def find_knn_cpu(feat0, feat1, knn=1, return_distance=False):
+     feat1tree = cKDTree(feat1)
+-    dists, nn_inds = feat1tree.query(feat0, k=knn, workers=-1)
++    # Verification runs in the same container as ROS and the optimizer. Keep
++    # the descriptor query from consuming every CPU while several peers spin.
++    dists, nn_inds = feat1tree.query(feat0, k=knn, workers=1)
+     if return_distance:
+         return nn_inds, dists
+     else:
+@@ -65,7 +67,7 @@ def find_correspondences(feats0, feats1, mutual_filter=True):
+     return corres_idx0, corres_idx1
+ 
+ 
+-def get_teaser_solver(noise_bound):
++def get_teaser_solver(noise_bound, max_clique_time_limit=2.0):
+     solver_params = teaserpp_python.RobustRegistrationSolver.Params()
+     solver_params.cbar2 = 1.0
+     solver_params.noise_bound = noise_bound
+@@ -77,8 +79,9 @@ def get_teaser_solver(noise_bound):
+     solver_params.rotation_estimation_algorithm = \
+         teaserpp_python.RobustRegistrationSolver.ROTATION_ESTIMATION_ALGORITHM.GNC_TLS
+     solver_params.rotation_gnc_factor = 1.4
+-    solver_params.rotation_max_iterations = 10000
++    solver_params.rotation_max_iterations = 1000
+     solver_params.rotation_cost_threshold = 1e-16
++    solver_params.max_clique_time_limit = max_clique_time_limit
+     solver = teaserpp_python.RobustRegistrationSolver(solver_params)
+     return solver
+ 
+@@ -100,13 +103,20 @@ def downsample(points, voxel_size):
+     return open3d_cloud.voxel_down_sample(voxel_size=voxel_size)
+ 
+ 
+-def solve_teaser(src, dst, voxel_size, min_inliers):
++def solve_teaser(src, dst, voxel_size, min_inliers, max_matched_pairs=1000):
+     src_feats = extract_fpfh(src, voxel_size)
+     dst_feats = extract_fpfh(dst, voxel_size)
+ 
+     corrs_src, corrs_dst = find_correspondences(src_feats,
+                                                 dst_feats,
+                                                 mutual_filter=True)
++    if len(corrs_src) > max_matched_pairs:
++        # Keep a deterministic, evenly spread subset. The cap bounds PMC's
++        # exact maximum-clique search without changing the inlier threshold.
++        selected = np.linspace(
++            0, len(corrs_src) - 1, max_matched_pairs, dtype=np.int64
++        )
++        corrs_src, corrs_dst = corrs_src[selected], corrs_dst[selected]
+ 
+     src_xyz = pcd2xyz(src)  # np array of size 3 by N
+     dst_xyz = pcd2xyz(dst)  # np array of size 3 by M
+@@ -178,7 +188,8 @@
+ def compute_transform(src, dst, voxel_size, min_inliers):
+     """Computes a 3D transform between 2 point clouds using TEASER++.
+ 
+-    Be careful: TEASER++ computes the transform from dst to src.
++    Return the pose of dst in src, as required by a BetweenFactor(src, dst).
++    Registration estimates src into dst; invert it before publishing.
+ 
+     Args:
+         src (Open3D point cloud): pointcloud from
+@@ -192,5 +203,10 @@ def compute_transform(src, dst, voxel_size, min_inliers):
+     valid, translation, rotation = solve_teaser(src, dst, voxel_size,
+                                                 min_inliers)
+     success = valid
++    # TEASER/Open3D return the transform mapping ``src`` into ``dst``.
++    # Loop-closure fields and the backend BetweenFactor use the inverse
++    # relation (robot0 frame from robot1 frame), so publish that relation.
++    rotation = np.asarray(rotation).T
++    translation = -rotation @ np.asarray(translation)
+     transform = to_transform_msg(translation, rotation)
+     return transform, success

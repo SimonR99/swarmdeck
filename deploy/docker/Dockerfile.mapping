@@ -1,0 +1,61 @@
+# Native MOLA map bridge build and contract smoke test.
+#
+# Build from the repository root:
+#   docker build -f deploy/docker/Dockerfile.mapping -t swarmdeck-mapping:local .
+FROM ros:jazzy-ros-base AS mapping-contracts
+
+SHELL ["/bin/bash", "-c"]
+
+ARG MOLA_VERSION=2.9.0
+ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CMAKE_BUILD_PARALLEL_LEVEL=2
+
+# MOLA packages come from the ROS Jazzy repository already configured by the
+# base image. The version prefix prevents an unnoticed major/minor API update;
+# the Debian release suffix may change for a rebuild of the same upstream tag.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git python3-colcon-common-extensions python3-numpy \
+      libssl-dev nlohmann-json3-dev \
+      ros-jazzy-rosidl-default-generators \
+      "ros-jazzy-mola=${MOLA_VERSION}-*" \
+      "ros-jazzy-mola-kernel=${MOLA_VERSION}-*" \
+      "ros-jazzy-mola-metric-maps=${MOLA_VERSION}-*" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build only MGG's small generated wire-contract package. The mapping runtime
+# does not build or link the planner itself.
+COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
+COPY deploy/patches/mgg-objective-msgs.patch /tmp/mgg-objective-msgs.patch
+COPY deploy/patches/mgg-indexed-map-msgs.patch /tmp/mgg-indexed-map-msgs.patch
+RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
+    && rm -rf /tmp/mgg-msgs-source
+
+FROM mapping-contracts AS mapping-runtime
+
+ENV LD_LIBRARY_PATH=/mapping_ws/install/swarmdeck_mapping/lib
+
+WORKDIR /mapping_ws
+COPY swarmdeck_ros/src/swarmdeck_mapping src/swarmdeck_mapping
+COPY autonomy /opt/swarmdeck/autonomy
+COPY deploy/autonomy/mola_worker.py /usr/local/bin/swarmdeck-mola-worker
+COPY deploy/autonomy/indexed_map_server.py /opt/swarmdeck/deploy/autonomy/indexed_map_server.py
+COPY deploy/autonomy/run_indexed_map_server.sh /usr/local/bin/swarmdeck-indexed-map-server
+
+RUN chmod 0755 /usr/local/bin/swarmdeck-mola-worker /usr/local/bin/swarmdeck-indexed-map-server
+
+RUN source /opt/ros/jazzy/setup.bash \
+    && colcon build --packages-select swarmdeck_mapping \
+         --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON \
+    && ctest --test-dir build/swarmdeck_mapping --output-on-failure
+
+# Cross the Python/native boundary with the actual canonical snapshot and chunk
+# format, then ensure MRPT serialization emits a nonempty MOLA metric map.
+RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py /tmp/map-fixture \
+    && source /opt/ros/jazzy/setup.bash \
+    && /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import \
+         /tmp/map-fixture/snapshot.json \
+         /tmp/map-fixture/chunks /tmp/smoke.metricmap \
+    && test -s /tmp/smoke.metricmap
+
+CMD ["bash"]

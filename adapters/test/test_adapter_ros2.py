@@ -15,7 +15,8 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -83,6 +84,10 @@ def _bridge(mod, cfg_override=None):
     bridge.nav_client = (
         MagicMock() if cfg.get("actions", {}).get("navigate_to_pose") else None
     )
+    path_action = cfg.get("actions", {}).get("follow_path")
+    if path_action is None and (cfg.get("exploration") or {}).get("enabled"):
+        path_action = cfg.get("actions", {}).get("navigate_to_pose")
+    bridge.path_client = MagicMock() if path_action else None
     bridge.traj_client = (
         MagicMock() if cfg.get("actions", {}).get("trajectory") else None
     )
@@ -120,6 +125,63 @@ def _bridge(mod, cfg_override=None):
     bridge._camera_depth_cloud = None
     bridge._last_depth_warning_at = 0.0
     return bridge
+
+
+def _occupancy_grid(frame="map"):
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            frame_id=frame, stamp=SimpleNamespace(sec=12, nanosec=34)
+        ),
+        info=SimpleNamespace(
+            resolution=0.05,
+            width=20,
+            height=10,
+            origin=SimpleNamespace(position=SimpleNamespace(x=-1.0, y=-2.0)),
+        ),
+        data=[-1, 0, 100],
+    )
+
+
+def test_onboard_map_callback_republishes_exact_aligned_snapshot(mod):
+    bridge = _bridge(mod)
+    bridge.map_frame = "map"
+    bridge.onboard_mapping = True
+    bridge._onboard_map_warned_at = 0.0
+    bridge.pub_global_map = MagicMock()
+    msg = _occupancy_grid()
+
+    bridge._on_map(msg)
+
+    assert bridge.grid is msg
+    assert bridge._grid_dirty
+    bridge.pub_global_map.publish.assert_called_once_with(msg)
+    assert msg.header.frame_id == "map"
+    assert msg.header.stamp.nanosec == 34
+    assert msg.info.origin.position.x == -1.0
+
+
+def test_onboard_map_callback_rejects_a_grid_from_another_frame(mod):
+    bridge = _bridge(mod)
+    bridge.map_frame = "map"
+    bridge.onboard_mapping = True
+    bridge._onboard_map_warned_at = 0.0
+    bridge.pub_global_map = MagicMock()
+
+    bridge._on_map(_occupancy_grid("odom"))
+
+    bridge.pub_global_map.publish.assert_not_called()
+    bridge.node.get_logger().warn.assert_called_once()
+
+
+def test_central_map_mode_does_not_republish_from_ros_callback(mod):
+    bridge = _bridge(mod)
+    bridge.map_frame = "map"
+    bridge.onboard_mapping = False
+    bridge.pub_global_map = MagicMock()
+
+    bridge._on_map(_occupancy_grid())
+
+    bridge.pub_global_map.publish.assert_not_called()
 
 
 def test_config_merge_is_deep_not_shallow(mod):
@@ -175,6 +237,14 @@ def test_capabilities_reflect_configuration_only(mod):
         },
     )
     assert bare.capabilities() == []
+
+
+def test_objective_capability_requires_a_configured_planner(mod):
+    bridge = _bridge(mod)
+    bridge.objective_planner = None
+    assert "plan_objective" not in bridge.capabilities()
+    bridge.objective_planner = MagicMock()
+    assert "plan_objective" in bridge.capabilities()
 
 
 def test_body_capability_needs_configured_services(mod):
@@ -1233,6 +1303,93 @@ def test_nav_goal_waits_briefly_for_a_starting_nav2_server(mod):
     bridge.nav_client.wait_for_server.assert_called_once_with(timeout_sec=3.0)
     bridge.nav_client.send_goal_async.assert_called_once()
     assert bridge.nav_status == "active"
+
+
+def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod):
+    from adapters.exploration import PlannerPath, PlannerPose
+
+    bridge = _bridge(
+        mod,
+        {
+            "actions": {
+                "navigate_to_pose": "navigate_to_pose",
+                "follow_path": "follow_path",
+            }
+        },
+    )
+    bridge.path_client.server_is_ready.return_value = True
+    plan = PlannerPath(
+        "map",
+        12_345_678_901,
+        (
+            PlannerPose(0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0),
+            PlannerPose(1.0, 0.5, 0.4, 0.0, 0.0, 0.2, 0.98),
+            PlannerPose(2.0, 1.0, 0.4, 0.0, 0.0, 0.4, 0.92),
+        ),
+    )
+
+    def pose_stamped():
+        return SimpleNamespace(
+            header=None,
+            pose=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=0.0),
+            ),
+        )
+
+    with patch.object(
+        sys.modules["geometry_msgs.msg"], "PoseStamped", side_effect=pose_stamped
+    ):
+        assert bridge.follow_path(plan)
+
+    goal = bridge.path_client.send_goal_async.call_args.args[0]
+    assert goal.path.header.frame_id == "map"
+    assert goal.path.header.stamp.sec == 12
+    assert goal.path.header.stamp.nanosec == 345_678_901
+    assert [pose.pose.position.x for pose in goal.path.poses] == [0.0, 1.0, 2.0]
+    assert [pose.pose.position.z for pose in goal.path.poses] == [0.4, 0.4, 0.4]
+    bridge.nav_client.send_goal_async.assert_not_called()
+    assert bridge.planned_path == [
+        {"x": 0.0, "y": 0.0},
+        {"x": 1.0, "y": 0.5},
+        {"x": 2.0, "y": 1.0},
+    ]
+    assert bridge.nav_status == "active"
+
+
+def test_follow_path_wait_is_bounded_and_rejection_is_failure(mod):
+    from adapters.exploration import PlannerPath, PlannerPose
+
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge.path_client.server_is_ready.return_value = False
+    bridge.path_client.wait_for_server.return_value = False
+    plan = PlannerPath(
+        "map", 1, (PlannerPose(1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0),)
+    )
+
+    assert bridge.follow_path(plan) is False
+    bridge.path_client.wait_for_server.assert_called_once_with(timeout_sec=3.0)
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "failed"
+
+
+def test_empty_follow_path_fails_without_canceling_active_motion(mod):
+    from adapters.exploration import PlannerPath
+
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    handle = MagicMock()
+    bridge._goal_handle = handle
+
+    assert bridge.follow_path(PlannerPath("map", 1, ())) is False
+    handle.cancel_goal_async.assert_not_called()
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "idle"
 
 
 def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):

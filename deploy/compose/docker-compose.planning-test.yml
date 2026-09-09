@@ -1,0 +1,38 @@
+# Isolated ARGoS test overlay. Add base, gpu, mgg, then this file; use -p planning.
+services:
+  server:
+    ports: !override ["18080:8080"]
+    environment:
+      SWARMDECK_REPLICA_DIR: /app/sessions/replicas
+    volumes:
+      - ../../server/swarmdeck_server:/app/server/swarmdeck_server:ro
+      - ../../autonomy:/app/autonomy:ro
+  slam:
+    ports: !override ["18090:8090"]
+  ui:
+    volumes:
+      - ../../ui/dist:/usr/share/nginx/html:ro
+    ports: !override ["15173:80"]
+  mediamtx:
+    ports: !reset []
+  sim:
+    image: swarmdeck-sim:planning
+    entrypoint: ["bash", "/app/deploy/docker/sim-entrypoint.sh"]
+    volumes:
+      - ../../autonomy:/app/autonomy:ro
+      - ../../argos:/app/argos:ro
+      - ../docker/sim-entrypoint.sh:/app/deploy/docker/sim-entrypoint.sh:ro
+    environment:
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      EXPLORE_SECONDS: "0"
+      SWARMDECK_ODOMETRY: drift
+      SWARMDECK_CONFIG: /app/configs/4robot_bistro.yaml
+  argos:
+    image: swarmdeck-argos:planning
+    devices: !reset []
+  mgg:
+    image: swarmdeck-mgg:planning
+    environment:
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      SWARMDECK_CONFIG: /app/configs/4robot_bistro.yaml

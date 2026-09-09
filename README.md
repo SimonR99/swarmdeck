@@ -40,6 +40,14 @@ the return journey. Home is retained through dashboard reconnects.
 See [MGG exploration setup](docs/operations/mgg-exploration.md)
 for simulation and ROS 2 hardware wiring.
 
+## Decentralized autonomy development
+
+The opt-in onboard pipeline combines peer Swarm-SLAM, persistent submaps, a
+native MOLA map consumer, full-path MGG execution through Nav2, and resumable
+server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
+[integration and simulation guide](docs/operations/decentralized-autonomy.md)
+for build commands, component inspection, validation status, and rollout limits.
+
 ## Quick start
 
 ### Try the dashboard without robots

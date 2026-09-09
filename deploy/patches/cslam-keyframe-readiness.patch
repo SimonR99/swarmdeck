@@ -1,0 +1,98 @@
+diff --git a/cslam/lidar_handler_node.py b/cslam/lidar_handler_node.py
+index ae42d44..57217d0 100755
+--- a/cslam/cslam/lidar_handler_node.py
++++ b/cslam/cslam/lidar_handler_node.py
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env python3
+ import numpy as np
++from collections import deque
+ from message_filters import ApproximateTimeSynchronizer, Subscriber
+ from sensor_msgs.msg import PointCloud2, PointField, NavSatFix
+ from nav_msgs.msg import Odometry
+@@ -53,7 +54,7 @@ class LidarHandler:
+         period_ms = self.params["frontend.map_manager_process_period_ms"]
+         self.processing_timer = self.node.create_timer(float(period_ms)/1000, self.process_new_sensor_data, clock=Clock())
+ 
+-        self.received_data = []
++        self.received_data = deque(maxlen=10)
+         self.local_descriptors_map = {}
+         self.nb_local_keyframes = 0
+         self.previous_keyframe = None
+@@ -66,7 +67,6 @@ class LidarHandler:
+ 
+         if self.params["evaluation.enable_gps_recording"]:
+             self.gps_subscriber = self.node.create_subscription(NavSatFix, self.params["evaluation.gps_topic"], self.gps_callback, 100)
+-            self.gps_data = []
+             self.latest_gps = NavSatFix()
+ 
+     def lidar_callback(self, pc_msg, odom_msg):
+@@ -79,9 +79,10 @@ class LidarHandler:
+         if (odom_msg.pose.covariance[0] > 1000):
+             self.node.get_logger().warn("Odom tracking failed, skipping frame")
+             return
+-        self.received_data.append((pc_msg, odom_msg))
+         if self.params["evaluation.enable_gps_recording"]:
+-            self.gps_data.append(self.latest_gps)
++            self.received_data.append((pc_msg, odom_msg, self.latest_gps))
++        else:
++            self.received_data.append((pc_msg, odom_msg))
+ 
+     def gps_callback(self, gps_msg):
+         """GPS data callback
+@@ -168,13 +169,17 @@ class LidarHandler:
+     def process_new_sensor_data(self):
+         """ Process new sensor data
+         """
++        # A volatile first keyframe cannot be replayed to a late-starting
++        # descriptor or graph consumer. Wait for the configured onboard
++        # consumers before allocating identity zero; the input queue is bounded.
++        if self.nb_local_keyframes == 0:
++            required = self.params.get("frontend.keyframe_min_subscribers", 1)
++            if (self.keyframe_pointcloud_publisher.get_subscription_count() < required or
++                    self.keyframe_odom_publisher.get_subscription_count() < required):
++                return
+         if len(self.received_data) > 0:
+-            data = self.received_data[0]
+-            self.received_data.pop(0)
+-            gps_data = None
+-            if self.params["evaluation.enable_gps_recording"]:
+-                gps = self.gps_data[0]
+-                self.gps_data.pop(0)
++            data = self.received_data.popleft()
++            gps_data = data[2] if self.params["evaluation.enable_gps_recording"] else None
+             if self.generate_new_keyframe(data):
+                 try:
+                     self.local_descriptors_map[self.nb_local_keyframes] = icp_utils.downsample_ros_pointcloud(data[0], self.params["frontend.voxel_size"])
+@@ -192,7 +197,7 @@ class LidarHandler:
+                 msg_odom.id = self.nb_local_keyframes
+                 msg_odom.odom = data[1]
+                 if self.params["evaluation.enable_gps_recording"]:
+-                    msg_odom.gps = gps
++                    msg_odom.gps = gps_data
+                 self.keyframe_odom_publisher.publish(msg_odom)
+                 if self.params["visualization.enable"]:
+                     viz_msg = VizPointCloud()
+@@ -210,6 +215,7 @@ if __name__ == '__main__':
+             namespace='',
+             parameters=[('frontend.pointcloud_topic', 'pointcloud'),
+                         ('frontend.odom_topic', 'odom'),
++                        ('frontend.keyframe_min_subscribers', 1),
+                         ('frontend.map_manager_process_period_ms', 100),
+                         ('frontend.voxel_size', 0.5),
+                         ('frontend.registration_min_inliers', 60),
+@@ -223,6 +229,8 @@ if __name__ == '__main__':
+                         ('visualization.enable', False),
+                         ])
+     params = {}
++    params['frontend.keyframe_min_subscribers'] = node.get_parameter(
++        'frontend.keyframe_min_subscribers').value
+     params['frontend.pointcloud_topic'] = node.get_parameter(
+         'frontend.pointcloud_topic').value 
+     params['frontend.odom_topic'] = node.get_parameter(
+@@ -250,4 +258,4 @@ if __name__ == '__main__':
+     lidar_handler = LidarHandler(node, params)
+     node.get_logger().info('Initialization done.')
+     rclpy.spin(node)
+-    rclpy.shutdown()
+\ No newline at end of file
++    rclpy.shutdown()

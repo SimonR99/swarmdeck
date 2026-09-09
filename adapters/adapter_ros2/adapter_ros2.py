@@ -105,6 +105,7 @@ from adapters.session import run_adapter_session
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
+from adapters.onboard_mapping import mapping_authority_mode, publish_onboard_map
 from ros2_defaults import DEFAULTS
 
 # Transport quantisation for registered-cloud uploads. One centimetre keeps a
@@ -127,8 +128,9 @@ else:
 
 # Nav2 is the common case but not the only one; see `navigate_to` below.
 try:
-    from nav2_msgs.action import NavigateToPose
+    from nav2_msgs.action import FollowPath, NavigateToPose
 except ImportError:  # pragma: no cover - depends on the robot's install
+    FollowPath = None
     NavigateToPose = None
 
 try:
@@ -208,6 +210,9 @@ class HardwareBridge(
         self.cfg = cfg
         self.http_url = http_url
         self.t0 = time.monotonic()
+        self.mapping_authority_mode = mapping_authority_mode()
+        self.onboard_mapping = self.mapping_authority_mode == "onboard"
+        self._onboard_map_warned_at = 0.0
         rates = cfg.get("rates") or {}
         self._keyframes = KeyframeUploader(
             robot_id,
@@ -441,6 +446,22 @@ class HardwareBridge(
         if action_name and NavigateToPose is not None:
             self.nav_client = ActionClient(node, NavigateToPose, action_name)
 
+        path_action_name = cfg.get("actions", {}).get("follow_path")
+        planning_cfg = cfg.get("planning") or {}
+        uses_mgg_planning = str(
+            planning_cfg.get("backend") or cfg.get("planning_backend") or ""
+        ).lower() == "mgg"
+        if (
+            path_action_name is None
+            and action_name
+            and ((cfg.get("exploration") or {}).get("enabled") or uses_mgg_planning)
+        ):
+            prefix = action_name.rsplit("/", 1)[0]
+            path_action_name = f"{prefix}/follow_path" if prefix else "follow_path"
+        self.path_client = None
+        if path_action_name and FollowPath is not None:
+            self.path_client = ActionClient(node, FollowPath, path_action_name)
+
         traj_name = cfg.get("actions", {}).get("trajectory")
         self.traj_client = None
         if traj_name and Trajectory is not None:
@@ -496,8 +517,10 @@ class HardwareBridge(
         # (the GUI only repeats every 120 ms), and finer than `drive_timeout_s`.
         self._watchdog_timer = node.create_timer(0.05, self._watchdogs)
         from adapters.exploration import configure_exploration
+        from adapters.objective_planning import configure_objective_planning
 
         configure_exploration(self)
+        configure_objective_planning(self)
 
     # ------------------------------------------------------------- capabilities
 
@@ -522,6 +545,8 @@ class HardwareBridge(
         caps: list[str] = []
         if getattr(self, "exploration", None) is not None:
             caps.append("explore")
+        if getattr(self, "objective_planner", None) is not None:
+            caps.append("plan_objective")
         if self.nav_client is not None or self.traj_client is not None:
             caps.append("navigate")
         if self.cfg["topics"].get("map") or self.cfg["topics"].get("map_cloud"):
@@ -547,6 +572,12 @@ class HardwareBridge(
         return caps
 
     # ------------------------------------------------------------- ROS inputs
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        self.grid = msg
+        self._grid_dirty = True
+        # Runs in the ROS callback, independently of the websocket session.
+        publish_onboard_map(self, msg)
 
     def _warn_costmap(self, kind: str, reason: str) -> None:
         now = time.monotonic()
@@ -1277,6 +1308,10 @@ class HardwareBridge(
         return True
 
     def navigate_to(self, goal: dict[str, float]) -> None:
+        planner = getattr(self, "objective_planner", None)
+        if planner is not None:
+            planner.navigate(goal)
+            return
         if self.traj_client is not None:
             self._navigate_trajectory(goal)
             return
@@ -1319,6 +1354,52 @@ class HardwareBridge(
         self._arm_goal(goal)
         future = self.nav_client.send_goal_async(msg)
         future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
+
+    def plan_objective(self, objective: str, goal: dict | None = None) -> bool:
+        planner = getattr(self, "objective_planner", None)
+        if planner is None:
+            return False
+        return planner.plan(objective, goal or {})
+
+    def return_home(self, goal: dict | None = None) -> bool:
+        planner = getattr(self, "objective_planner", None)
+        return bool(planner and planner.return_home(goal))
+
+    def follow_path(self, plan) -> bool:
+        """Submit the complete validated MGG route to Nav2's controller."""
+        if not plan.poses:
+            return False
+        if self.path_client is None:
+            self.nav_status = "failed"
+            return False
+        if (
+            not self.path_client.server_is_ready()
+            and not self.path_client.wait_for_server(timeout_sec=3.0)
+        ):
+            self.node.get_logger().warn(
+                f"[{self.id}] FollowPath action server not available; path dropped"
+            )
+            self.nav_status = "failed"
+            return False
+
+        self.cancel_goal()
+        generation = self._goal_generation
+        self._trajectory_target = None
+        from adapters.exploration import follow_path_goal
+
+        msg = follow_path_goal(plan)
+
+        final = plan.poses[-1]
+        self._arm_goal({"x": final.x, "y": final.y})
+        self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
+        try:
+            future = self.path_client.send_goal_async(msg)
+        except Exception as exc:
+            self.node.get_logger().warn(f"[{self.id}] path submission failed: {exc}")
+            self._finish_goal("failed")
+            return False
+        future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
+        return True
 
     def _navigate_trajectory(self, goal: dict[str, float]) -> None:
         """Spot click-to-pose: map-frame goal -> body-frame Trajectory.

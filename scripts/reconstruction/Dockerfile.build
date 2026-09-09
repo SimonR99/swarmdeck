@@ -1,0 +1,118 @@
+# syntax=docker/dockerfile:1.7
+#
+# Reproducible private UMAMI build. Only the UMAMI checkout is a named
+# context; it is mounted for one build step and is never copied from the
+# public SwarmDeck context or retained in the resulting image:
+#
+#   docker build -f scripts/reconstruction/Dockerfile.build \
+#     --build-context umami=/tmp/swarmdeck-umami-inspect \
+#     --build-arg UMAMI_REF=$(git -C /tmp/swarmdeck-umami-inspect rev-parse HEAD) \
+#     -t swarmdeck-umami:$(git -C /tmp/swarmdeck-umami-inspect rev-parse --short HEAD) .
+
+ARG CUDA_IMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+FROM ${CUDA_IMAGE} AS dependencies
+
+ARG LIBTORCH_URL=https://download.pytorch.org/libtorch/cu118/libtorch-cxx11-abi-shared-with-deps-2.0.1%2Bcu118.zip
+ARG OPENCV_VERSION=4.8.0
+ARG BOOST_VERSION=1.80.0
+ARG JSONCPP_VERSION=1.9.5
+ARG CUDA_ARCH=8.6
+ARG BUILD_JOBS=4
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake curl ca-certificates unzip pkg-config \
+      libeigen3-dev libglfw3-dev libglm-dev libopengl-dev \
+      libglew-dev libx11-dev libxi-dev libxrandr-dev \
+      libxinerama-dev libxcursor-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# LibTorch is the exact cxx11-ABI/cu118 archive documented by UMAMI's source.
+RUN mkdir -p /opt/deps \
+    && curl --fail --location --retry 3 "${LIBTORCH_URL}" -o /tmp/libtorch.zip \
+    && unzip -q /tmp/libtorch.zip -d /opt/deps \
+    && rm /tmp/libtorch.zip
+
+# UMAMI requires OpenCV with CUDA and opencv_contrib. Build matching 4.8.0
+# trees for the RTX 3080's 8.6 architecture instead of relying on host libs.
+RUN mkdir -p /tmp/opencv \
+    && curl --fail --location --retry 3 "https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz" -o /tmp/opencv.tar.gz \
+    && curl --fail --location --retry 3 "https://github.com/opencv/opencv_contrib/archive/refs/tags/${OPENCV_VERSION}.tar.gz" -o /tmp/opencv-contrib.tar.gz \
+    && tar -xzf /tmp/opencv.tar.gz -C /tmp/opencv --strip-components=1 \
+    && mkdir /tmp/opencv-contrib \
+    && tar -xzf /tmp/opencv-contrib.tar.gz -C /tmp/opencv-contrib --strip-components=1 \
+    && cmake -S /tmp/opencv -B /tmp/opencv-build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_INSTALL_PREFIX=/opt/deps/opencv \
+         -DWITH_CUDA=ON -DWITH_CUDNN=ON -DOPENCV_DNN_CUDA=ON \
+         -DWITH_NVCUVID=ON -DCUDA_ARCH_BIN=${CUDA_ARCH} \
+         -DOPENCV_EXTRA_MODULES_PATH=/tmp/opencv-contrib/modules \
+         -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+         -DBUILD_opencv_python3=OFF -DWITH_QT=OFF -DWITH_GTK=OFF \
+    && cmake --build /tmp/opencv-build -j${BUILD_JOBS} \
+    && cmake --install /tmp/opencv-build \
+    && rm -rf /tmp/opencv /tmp/opencv-contrib /tmp/opencv-build /tmp/*.tar.gz
+
+# Pin the two small C++ packages that UMAMI's CMake project finds by config.
+RUN curl --fail --location --retry 3 "https://github.com/open-source-parsers/jsoncpp/archive/refs/tags/${JSONCPP_VERSION}.tar.gz" -o /tmp/jsoncpp.tar.gz \
+    && tar -xzf /tmp/jsoncpp.tar.gz -C /tmp \
+    && cmake -S /tmp/jsoncpp-${JSONCPP_VERSION} -B /tmp/jsoncpp-build \
+         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/deps/jsoncpp \
+         -DJSONCPP_WITH_POST_BUILD_UNITTEST=OFF -DBUILD_SHARED_LIBS=ON \
+    && cmake --build /tmp/jsoncpp-build -j${BUILD_JOBS} \
+    && cmake --install /tmp/jsoncpp-build \
+    && rm -rf /tmp/jsoncpp-${JSONCPP_VERSION} /tmp/jsoncpp-build /tmp/jsoncpp.tar.gz
+
+RUN curl --fail --location --retry 3 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION//./_}.tar.gz" -o /tmp/boost.tar.gz \
+    && tar -xzf /tmp/boost.tar.gz -C /tmp \
+    && cd /tmp/boost_${BOOST_VERSION//./_} \
+    && ./bootstrap.sh --with-libraries=serialization --prefix=/opt/deps/boost \
+    && ./b2 -j${BUILD_JOBS} install \
+    && rm -rf /tmp/boost_${BOOST_VERSION//./_} /tmp/boost.tar.gz
+
+FROM dependencies AS builder
+
+ARG BUILD_JOBS=4
+ARG GIOJO_CUDA_ARCHS=86
+ARG GIOJO_GLIBCXX_ABI=1
+ARG UMAMI_REF=unknown
+
+LABEL org.opencontainers.image.title="SwarmDeck private UMAMI runner" \
+      org.opencontainers.image.revision="${UMAMI_REF}"
+
+RUN --mount=type=bind,from=umami,source=.,target=/src/UMAMI-SLAM,readonly \
+    cp -a /src/UMAMI-SLAM /tmp/UMAMI-SLAM \
+    && GIOJO_CUDA_ARCHS=${GIOJO_CUDA_ARCHS} GIOJO_GLIBCXX_ABI=${GIOJO_GLIBCXX_ABI} \
+       cmake -S /tmp/UMAMI-SLAM -B /tmp/umami-build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DTorch_DIR=/opt/deps/libtorch/share/cmake/Torch \
+         -DOpenCV_DIR=/opt/deps/opencv/lib/cmake/opencv4 \
+         -Djsoncpp_DIR=/opt/deps/jsoncpp/lib/cmake/jsoncpp \
+         -DBOOST_ROOT=/opt/deps/boost \
+    && cmake --build /tmp/umami-build --target train_colmap -j${BUILD_JOBS} \
+    && mkdir -p /opt/umami-runtime/bin /opt/umami-runtime/lib \
+    && cp /tmp/UMAMI-SLAM/bin/train_colmap /opt/umami-runtime/bin/ \
+    && find /tmp/UMAMI-SLAM/lib -maxdepth 1 -type f -name '*.so*' -exec cp -a {} /opt/umami-runtime/lib/ \; \
+    && cp -a /tmp/UMAMI-SLAM/ORB-SLAM3/lib/libORB_SLAM3.so /opt/umami-runtime/lib/ \
+    && rm -rf /tmp/UMAMI-SLAM /tmp/umami-build
+
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    LD_LIBRARY_PATH=/opt/umami-runtime/lib:/opt/deps/libtorch/lib:/opt/deps/opencv/lib:/opt/deps/boost/lib:/opt/deps/jsoncpp/lib
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libglfw3 libglm-dev libopengl0 libglew2.2 libx11-6 libxi6 \
+      libxrandr2 libxinerama1 libxcursor1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=dependencies /opt/deps /opt/deps
+COPY --from=builder /opt/umami-runtime /opt/umami-runtime
+
+WORKDIR /inputs
+ENTRYPOINT ["/opt/umami-runtime/bin/train_colmap"]

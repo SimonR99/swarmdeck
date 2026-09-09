@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>swarmdeck_mapping</name>
+  <version>0.1.0</version>
+  <description>
+    Correction-aware bridge from SwarmDeck map snapshots to MOLA keyframe maps.
+  </description>
+  <maintainer email="swarmdeck@mistlab.ca">SwarmDeck</maintainer>
+  <!-- mola_kernel and mola_metric_maps are GPL-3.0. -->
+  <license>GPL-3.0-only</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>mola_kernel</depend>
+  <depend>mola_metric_maps</depend>
+  <depend>mrpt_libmaps</depend>
+  <depend>mrpt_libobs</depend>
+  <depend>mrpt_libio</depend>
+  <depend>mrpt_libserialization</depend>
+  <depend>nlohmann-json3-dev</depend>
+  <depend>openssl</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

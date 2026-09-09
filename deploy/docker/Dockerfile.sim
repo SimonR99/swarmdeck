@@ -9,6 +9,8 @@
 # double this image for nothing.
 FROM ros:jazzy-ros-base
 
+ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -21,12 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-yaml \
       python3-opencv \
       python3-colcon-common-extensions \
+      git \
       ros-jazzy-slam-toolbox \
       ros-jazzy-navigation2 \
       ros-jazzy-nav2-bringup \
       ros-jazzy-nav2-msgs \
       ros-jazzy-pointcloud-to-laserscan \
       ros-jazzy-robot-localization \
+      ros-jazzy-rosidl-default-generators \
       ros-jazzy-rtabmap-odom \
       ros-jazzy-rtabmap-slam \
       ros-jazzy-rtabmap-util \
@@ -48,6 +52,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-gi \
     && rm -rf /var/lib/apt/lists/*
 
+COPY deploy/patches/mgg-objective-msgs.patch /tmp/mgg-objective-msgs.patch
+COPY deploy/patches/mgg-indexed-map-msgs.patch /tmp/mgg-indexed-map-msgs.patch
+COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
+RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV"
+ENV AMENT_PREFIX_PATH="/opt/swarmdeck-mgg-msgs:${AMENT_PREFIX_PATH}" \
+    LD_LIBRARY_PATH="/opt/swarmdeck-mgg-msgs/lib:${LD_LIBRARY_PATH}" \
+    PYTHONPATH="/opt/swarmdeck-mgg-msgs/lib/python3.12/site-packages:${PYTHONPATH}"
+
 # Adapter protocol deps (system Python; the ROS image is not PEP 668 gated the
 # same way).
 RUN pip3 install --break-system-packages --no-cache-dir websockets
@@ -55,6 +67,7 @@ RUN pip3 install --break-system-packages --no-cache-dir websockets
 WORKDIR /app
 COPY swarmdeck_ros /app/swarmdeck_ros
 COPY adapters /app/adapters
+COPY autonomy /app/autonomy
 COPY configs /app/configs
 # The prop models are referenced by the generated experiment; this container
 # writes that experiment, so it needs the paths to exist here as well as in the

@@ -20,6 +20,7 @@
   const selected = $derived(fleet.isSelected(robot.robot_id));
   const isCamera = $derived(fleet.activeCamera === robot.robot_id);
   const stale = $derived(robot.unattended_s > unattendedThreshold);
+  const canReturnHome = $derived(Boolean(robot.home_pose) || fleet.can(robot.robot_id, 'plan_objective'));
   const detectionCount = $derived(
     session.detections.filter((detection) => detection.robot_id === robot.robot_id).length
   );
@@ -49,11 +50,15 @@
             ? 'NAVIGATING'
             : robot.nav_status === 'failed'
               ? 'NAV FAILED'
-              : robot.exploration_status === 'complete'
-                ? 'EXPLORED'
-                : robot.exploration_status === 'blocked'
-                  ? 'EXPLORE BLOCKED'
-                  : robot.mode.toUpperCase()
+              : robot.fleet_exploration_status === 'complete'
+                ? 'EXPLORATION DONE'
+                : robot.exploration_status === 'locally_exhausted'
+                  ? 'LOCAL AREA DONE'
+                  : robot.exploration_status === 'complete'
+                    ? 'EXPLORED'
+                    : robot.exploration_status === 'blocked'
+                      ? 'EXPLORE BLOCKED'
+                      : robot.mode.toUpperCase()
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));
@@ -131,8 +136,8 @@
       {#if fleet.can(robot.robot_id, 'navigate')}
         <button
           class="inline-flex h-7 items-center gap-1 rounded-full bg-surface-3 px-2 text-[10px] font-semibold text-fg-muted hover:bg-surface-4 disabled:opacity-40"
-          disabled={!robot.online || !robot.home_pose}
-          title={robot.home_pose ? 'Navigate to the recorded starting position' : 'Waiting for a recorded starting position'}
+          disabled={!robot.online || !canReturnHome}
+          title={canReturnHome ? 'Navigate to the recorded starting position' : 'Waiting for a recorded starting position'}
           onclick={(e) => { e.stopPropagation(); actions.returnHome(robot.robot_id); }}
         ><House class="h-3 w-3" />Return home</button>
       {/if}

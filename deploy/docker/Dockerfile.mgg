@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
     libeigen3-dev libboost-dev libyaml-cpp-dev ros-jazzy-octomap \
     ros-jazzy-octomap-msgs ros-jazzy-octomap-ros ros-jazzy-tf2-ros \
+    ros-jazzy-nav2-msgs \
+    ros-jazzy-rclpy \
     ros-jazzy-tf2-geometry-msgs ros-jazzy-rosidl-default-generators \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --branch ros2 --single-branch https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
@@ -14,7 +16,18 @@ RUN source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 COPY deploy/patches/mgg-traversal-lifecycle.patch /tmp/mgg-traversal-lifecycle.patch
-RUN cd /opt/mgg && git apply /tmp/mgg-traversal-lifecycle.patch && \
+COPY deploy/patches/mgg-planning-stages.patch /tmp/mgg-planning-stages.patch
+COPY deploy/patches/mgg-objective-service.patch /tmp/mgg-objective-service.patch
+COPY deploy/patches/mgg-coordination-exclusions.patch /tmp/mgg-coordination-exclusions.patch
+COPY deploy/patches/mgg-objective-native-tests.patch /tmp/mgg-objective-native-tests.patch
+COPY deploy/patches/mgg-indexed-map-query.patch /tmp/mgg-indexed-map-query.patch
+RUN cd /opt/mgg && \
+    git apply /tmp/mgg-traversal-lifecycle.patch && \
+    git apply /tmp/mgg-planning-stages.patch && \
+    git apply /tmp/mgg-objective-service.patch && \
+    git apply /tmp/mgg-coordination-exclusions.patch && \
+    git apply /tmp/mgg-objective-native-tests.patch && \
+    git apply /tmp/mgg-indexed-map-query.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

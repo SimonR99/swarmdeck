@@ -19,6 +19,13 @@
   let responsiveLayoutInitialised = false;
   let settingsOpen = $state(false);
   let swarmSlamOpen = $state(false);
+  let replicasOpen = $state(false);
+  let replicaModule = $state<Promise<typeof import('$lib/components/replicas/ReplicaInspector.svelte')> | null>(null);
+
+  function openReplicas() {
+    replicaModule ??= import('$lib/components/replicas/ReplicaInspector.svelte');
+    replicasOpen = true;
+  }
 
   function openFleet() {
     cortexStore.openFleet();
@@ -87,6 +94,7 @@
   <TopBar
     onsettings={() => (settingsOpen = true)}
     onswarmslam={() => (swarmSlamOpen = true)}
+    onreplicas={openReplicas}
   />
 
   <main class="workspace">
@@ -149,3 +157,15 @@
 
 <SettingsModal open={settingsOpen} onclose={() => (settingsOpen = false)} />
 <SwarmGraphPanel open={swarmSlamOpen} onclose={() => (swarmSlamOpen = false)} />
+{#if replicaModule}
+  {#await replicaModule then { default: ReplicaInspector }}
+    <ReplicaInspector open={replicasOpen} onclose={() => (replicasOpen = false)} />
+  {:catch}
+    {#if replicasOpen}
+      <div class="absolute right-3 top-16 z-40 rounded bg-surface p-3 text-sm text-fg" role="alert">
+        Could not load map replicas.
+        <button onclick={() => { replicaModule = null; openReplicas(); }}>Retry</button>
+      </div>
+    {/if}
+  {/await}
+{/if}

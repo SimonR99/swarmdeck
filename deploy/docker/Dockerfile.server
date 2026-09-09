@@ -19,6 +19,7 @@ COPY server/tests /app/server/tests
 COPY configs /app/configs
 RUN ln -s /app/configs /app/study
 COPY adapters /app/adapters
+COPY autonomy /app/autonomy
 COPY scripts /app/scripts
 RUN mkdir -p /app/sessions
 

@@ -670,6 +670,11 @@ class AdapterTelemetryMixin:
             "exploration_status": getattr(
                 getattr(self, "exploration", None), "status", "idle"
             ),
+            "fleet_exploration_status": getattr(
+                getattr(getattr(self, "exploration", None), "coordinator", None),
+                "completion_state",
+                "unknown",
+            ),
             "nav_status": self.nav_status,
             "goal": self.goal,
             # Backward-compatible effective route: local when available,

@@ -1,6 +1,7 @@
 """One MGG planner/PCI connected to an existing SwarmDeck robot's ROS topics."""
 
 from pathlib import Path
+import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
@@ -35,6 +36,14 @@ def robot_nodes(
         "PlanningParams.robot_id": robot_index,
     }
     overrides.update(planner_overrides or {})
+    if os.environ.get("SWARMDECK_INDEXED_MAP_QUERY", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        overrides["indexed_map_query_service"] = (
+            f"/{robot}/mapping/query_batch"
+        )
     if size:
         overrides["RobotParams.size"] = size
     return [

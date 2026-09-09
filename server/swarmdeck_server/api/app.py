@@ -10,6 +10,7 @@ import json
 import math
 import os
 import time
+from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="SwarmDeck", lifespan=lifespan)
+
+from .autonomy_routes import router as autonomy_router
+from .replica_views import router as replica_views_router
+
+app.include_router(autonomy_router)
+app.include_router(replica_views_router)
 
 REPO = Path(__file__).resolve().parents[3]
 settings_store = SettingsStore(REPO / "sessions" / "settings.json")
@@ -1211,6 +1218,14 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
 
     if kind in ("set_goal", "return_home"):
         goal = msg.get("payload") or {}
+        onboard_planner = registry.can(rid, "plan_objective") and registry.can(
+            rid, "navigate"
+        )
+        if kind == "return_home" and onboard_planner:
+            from .objective_commands import send_objective
+
+            await send_objective(registry, rid, "return_home")
+            return
         if kind == "return_home":
             robot = registry.robots.get(rid)
             if robot is None or robot.home_pose is None:
@@ -1245,6 +1260,11 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             if robot.coordinate_frame == "merged"
             else map_service.world_to_robot(rid, goal)
         )
+        if onboard_planner:
+            from .objective_commands import send_objective
+
+            await send_objective(registry, rid, "navigate", local_goal)
+            return
         # Pre-compute collision-free global A* path for robots (like Scout)
         # that lack an onboard global grid planner.
         start_pose = (
@@ -1364,6 +1384,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         # A robot card addresses one configured explorer. Legacy fleet-wide
         # commands remain supported; capability gating also applies to hardware.
         enabled = kind == "start_explore"
+        run_id = str(uuid4())
         targets = [
             robot_id
             for robot_id in list(registry.robots)
@@ -1381,7 +1402,14 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 robot_id
                 for robot_id in targets
                 if not await registry.send(
-                    robot_id, {"type": "explore", "enabled": enabled, **stamps()}
+                    robot_id,
+                    {
+                        "type": "explore",
+                        "enabled": enabled,
+                        "run_id": run_id,
+                        "participants": sorted(targets),
+                        **stamps(),
+                    },
                 )
             ]
             events.log(

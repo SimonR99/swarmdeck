@@ -1,0 +1,13 @@
+# Opt in after adding peers.yml and mapping.yml. Removing this overlay restores
+# the legacy central navigation map and optimizer uplink on adapter restart.
+services:
+  sim:
+    environment:
+      SWARMDECK_MAPPING_AUTHORITY: onboard
+      SWARMDECK_PEER_COORDINATION: "1"
+      SWARMDECK_PLANNING_BACKEND: mgg
+  mgg:
+    environment:
+      # Full body-volume evidence needs prior coverage; a sparse cold-start
+      # LiDAR scan cannot certify it. Enable after validating sensor coverage.
+      SWARMDECK_INDEXED_MAP_QUERY: "${SWARMDECK_INDEXED_MAP_QUERY:-0}"

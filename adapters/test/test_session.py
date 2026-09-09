@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+import pytest
 
-from adapters.session import dispatch_command
+from adapters.session import dispatch_command, _tx_maps
 
 
 class _Ros2Nav:
@@ -53,3 +54,92 @@ def test_unknown_command_types_are_ignored():
         )
 
     asyncio.run(run())
+
+
+def test_explore_command_binds_common_run_before_start():
+    calls = []
+    coordinator = SimpleNamespace(begin_run=lambda *args: calls.append(("run", *args)))
+    explorer = SimpleNamespace(
+        coordinator=coordinator, active=False, start=lambda: calls.append(("start",))
+    )
+    bridge = SimpleNamespace(exploration=explorer)
+
+    async def run():
+        await dispatch_command(
+            bridge,
+            {
+                "type": "explore",
+                "enabled": True,
+                "run_id": "shared",
+                "participants": ["r0", "r1"],
+            },
+            asyncio.get_running_loop(),
+        )
+
+    asyncio.run(run())
+    assert calls == [("run", "shared", ["r0", "r1"]), ("start",)]
+    calls.clear()
+    explorer.active = True
+    coordinator.run_id = "previous"
+    asyncio.run(run())
+    assert calls == [("run", "shared", ["r0", "r1"]), ("start",)]
+
+
+@pytest.mark.parametrize("onboard", [False, True])
+def test_onboard_session_does_not_use_central_optimizer_or_nav_map(
+    monkeypatch, onboard
+):
+    from adapters import session
+
+    calls = []
+
+    async def offload(loop, bridge, name):
+        calls.append(name)
+
+    async def stop_after_tick(period):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(session, "_offload", offload)
+    monkeypatch.setattr(session.asyncio, "sleep", stop_after_tick)
+    bridge = SimpleNamespace(onboard_mapping=onboard)
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await _tx_maps(
+                bridge,
+                None,
+                {
+                    "rates": {
+                        "state_hz": 5,
+                        "map_period_s": 0,
+                        "cloud_period_s": 0,
+                    }
+                },
+            )
+
+    asyncio.run(run())
+    assert ("upload_keyframe" in calls) is not onboard
+    assert ("pull_nav_map" in calls) is not onboard
+    assert "upload_map" in calls  # Optional operator display remains available.
+
+
+def test_home_objective_uses_onboard_home_after_stopping_exploration():
+    calls = []
+    bridge = SimpleNamespace(
+        exploration=SimpleNamespace(stop=lambda: calls.append("stop_exploration")),
+        return_home=lambda: calls.append("onboard_home"),
+    )
+
+    async def run():
+        await dispatch_command(
+            bridge,
+            {
+                "type": "plan_objective",
+                "objective": "return_home",
+                "goal": {"x": 999, "y": 999},
+            },
+            asyncio.get_running_loop(),
+        )
+
+    asyncio.run(run())
+    assert calls == ["stop_exploration", "onboard_home"]

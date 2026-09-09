@@ -1,0 +1,39 @@
+# Continuous MOLA product overlay. The worker has no ROS or server dependency;
+# it watches the atomically published peer snapshots on the shared map volume.
+#
+# docker compose -f deploy/compose/docker-compose.yml \
+#   -f deploy/compose/docker-compose.peers.yml \
+#   -f deploy/compose/docker-compose.mapping.yml --profile argos up -d \
+#   mapping mapping-query
+services:
+  mapping:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mapping
+    image: swarmdeck-mapping:phase0
+    environment:
+      SWARMDECK_MAPS_ROOT: /maps
+    volumes:
+      - peer_maps:/maps
+    command: ["swarmdeck-mola-worker", "--maps-root", "/maps"]
+    restart: unless-stopped
+  mapping-query:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mapping
+    image: swarmdeck-mapping:phase0
+    network_mode: service:sim
+    environment:
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+    volumes:
+      - peer_maps:/maps
+    command: ["swarmdeck-indexed-map-server", "--maps-root", "/maps"]
+    depends_on:
+      sim:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  peer_maps:

@@ -67,12 +67,28 @@ async def dispatch_command(
     if exploration is not None:
         if kind == "explore":
             if msg.get("enabled") is True:
+                coordinator = getattr(exploration, "coordinator", None)
+                if coordinator is not None and (
+                    not exploration.active
+                    or (
+                        msg.get("run_id") is not None
+                        and msg["run_id"] != getattr(coordinator, "run_id", None)
+                    )
+                ):
+                    try:
+                        coordinator.begin_run(
+                            msg.get("run_id"), msg.get("participants")
+                        )
+                    except (ValueError, TypeError) as exc:
+                        _emit(bridge, "warning", f"Invalid exploration mission: {exc}")
+                        return
                 exploration.start()
             else:
                 exploration.stop()
             return
         if kind in (
             "navigate_to",
+            "plan_objective",
             "cancel_goal",
             "drive",
             "stop",
@@ -80,7 +96,17 @@ async def dispatch_command(
             "body_command",
         ):
             exploration.stop()
-    if kind == "navigate_to":
+    if kind == "plan_objective":
+        objective = msg.get("objective")
+        if objective == "return_home":
+            fn = getattr(bridge, "return_home", None)
+            if callable(fn):
+                await loop.run_in_executor(None, fn)
+        elif objective == "navigate":
+            fn = getattr(bridge, "plan_objective", None)
+            if callable(fn):
+                await loop.run_in_executor(None, fn, objective, msg.get("goal", {}))
+    elif kind == "navigate_to":
         fn = bridge.navigate_to
         goal = msg.get("goal", {})
         try:
@@ -163,8 +189,9 @@ async def _tx_maps(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
         if now - last_cloud > float(rates["cloud_period_s"]):
             await _offload(loop, bridge, "upload_cloud")
             last_cloud = time.monotonic()
-        await _offload(loop, bridge, "upload_keyframe")
-        if now - last_nav_map > float(
+        if not getattr(bridge, "onboard_mapping", False):
+            await _offload(loop, bridge, "upload_keyframe")
+        if not getattr(bridge, "onboard_mapping", False) and now - last_nav_map > float(
             rates.get("nav_map_period_s", rates.get("map_period_s", 2.0))
         ):
             await _offload(loop, bridge, "pull_nav_map")

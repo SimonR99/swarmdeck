@@ -1,0 +1,91 @@
+diff --git a/ros2/src/mgg_msgs/CMakeLists.txt b/ros2/src/mgg_msgs/CMakeLists.txt
+index b59787f..99382d9 100644
+--- a/ros2/src/mgg_msgs/CMakeLists.txt
++++ b/ros2/src/mgg_msgs/CMakeLists.txt
+@@ -29,6 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
+   "msg/Edge.msg"
+   "msg/ExecutionPathMode.msg"
+   "msg/Graph.msg"
++  "msg/MappingSnapshot.msg"
+   "msg/PlannerStatus.msg"
+   "msg/PlanningBound.msg"
+   "msg/PlanningMode.msg"
+@@ -63,6 +64,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
+   "srv/PlannerSetSearchMode.srv"
+   "srv/PlannerSetVel.srv"
+   "srv/PlanObjective.srv"
++  "srv/QueryMapBatch.srv"
+   "srv/PlannerSrv.srv"
+   "srv/PlannerStringTrigger.srv"
+ 
+diff --git a/ros2/src/mgg_msgs/msg/MappingSnapshot.msg b/ros2/src/mgg_msgs/msg/MappingSnapshot.msg
+new file mode 100644
+index 0000000..6d601c4
+--- /dev/null
++++ b/ros2/src/mgg_msgs/msg/MappingSnapshot.msg
+@@ -0,0 +1,7 @@
++string component_id
++uint64 epoch
++uint64 graph_revision
++string geometry_revision
++builtin_interfaces/Time source_stamp
++# Validated authority transform; QueryMapBatch samples are in component frame.
++geometry_msgs/Transform component_from_navigation
+diff --git a/ros2/src/mgg_msgs/srv/PlanObjective.srv b/ros2/src/mgg_msgs/srv/PlanObjective.srv
+index c3b6a44..358e25c 100644
+--- a/ros2/src/mgg_msgs/srv/PlanObjective.srv
++++ b/ros2/src/mgg_msgs/srv/PlanObjective.srv
+@@ -8,6 +8,10 @@ string goal_landmark_id
+ string component_id
+ uint64 graph_revision
+ uint64 map_revision
++uint64 map_epoch
++uint64 mapping_graph_revision
++string geometry_revision
++builtin_interfaces/Time map_source_stamp
+ ---
+ uint8 SUCCEEDED=0
+ uint8 UNREACHABLE=1
+@@ -18,5 +22,9 @@ uint8 status
+ string component_id
+ uint64 graph_revision
+ uint64 map_revision
++uint64 map_epoch
++uint64 mapping_graph_revision
++string geometry_revision
++builtin_interfaces/Time map_source_stamp
+ geometry_msgs/Pose[] path
+ string reason
+diff --git a/ros2/src/mgg_msgs/srv/QueryMapBatch.srv b/ros2/src/mgg_msgs/srv/QueryMapBatch.srv
+new file mode 100644
+index 0000000..93efe8c
+--- /dev/null
++++ b/ros2/src/mgg_msgs/srv/QueryMapBatch.srv
+@@ -0,0 +1,27 @@
++string component_id
++uint64 epoch
++uint64 graph_revision
++string geometry_revision
++builtin_interfaces/Time source_stamp
++geometry_msgs/Point[] samples
++geometry_msgs/Vector3 body_size
++bool stop_at_unknown
++---
++uint8 OK=0
++uint8 STALE=1
++uint8 UNAVAILABLE=2
++uint8 status
++string component_id
++uint64 epoch
++uint64 graph_revision
++string geometry_revision
++uint8 UNKNOWN=0
++uint8 FREE=1
++uint8 OCCUPIED=2
++uint8[] occupancy
++float64[] ground_z
++float64[] roughness
++float64[] clearance
++bool[] step
++bool[] drop
++string detail

@@ -1,0 +1,69 @@
+# Optional ROS 2 onboard mapping participant. Start only after the robot's
+# capture-time TF/odometry inputs and this image are validated on its platform.
+# All peers need the same ordered names, mission UUID, and ROS domain.
+services:
+  peer_mapping:
+    profiles: [peer_mapping]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.cslam
+    image: swarmdeck-cslam:planning
+    network_mode: host
+    ipc: host
+    environment:
+      PYTHONPATH: /app
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the domain used by all participating robot sensor stacks}"
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_PEER_NAMES: "${SWARMDECK_PEER_NAMES:?Set the ordered JSON fleet robot names}"
+      SWARMDECK_PEER_INDEX: "${SWARMDECK_PEER_INDEX:?Set this robot's zero-based index}"
+      SWARMDECK_SENSOR_NAMESPACE: "${SWARMDECK_SENSOR_NAMESPACE:-}"
+      SWARMDECK_CLOUD_TOPIC: "${SWARMDECK_CLOUD_TOPIC:?Set the sensor-frame cloud topic}"
+      SWARMDECK_BASE_FRAME: "${SWARMDECK_BASE_FRAME:?Set the physical base frame}"
+      SWARMDECK_ODOM_FRAME: "${SWARMDECK_ODOM_FRAME:?Set the continuous odometry frame}"
+      SWARMDECK_NAVIGATION_FRAME: "${SWARMDECK_NAVIGATION_FRAME:?Set the local planner frame}"
+      SWARMDECK_TF_TOPIC: "${SWARMDECK_TF_TOPIC:-/tf}"
+      SWARMDECK_TF_STATIC_TOPIC: "${SWARMDECK_TF_STATIC_TOPIC:-/tf_static}"
+      SWARMDECK_USE_SIM_TIME: "false"
+      SWARMDECK_SERVER_URL: "${SWARMDECK_SERVER_URL:-}"
+    volumes:
+      - ../../autonomy:/app/autonomy:ro
+      - ../autonomy:/app/deploy/autonomy:ro
+      - onboard_peer_maps:/maps
+    command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch /app/deploy/autonomy/peer.launch.py"]
+    restart: "no"
+
+  # Server-independent MOLA serialization of the peer's coherent snapshots.
+  # This process does not join ROS or publish TF.
+  peer_mola_mapping:
+    profiles: [peer_mapping]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mapping
+    image: swarmdeck-mapping:phase0
+    environment:
+      SWARMDECK_MAPS_ROOT: /maps
+    volumes:
+      - onboard_peer_maps:/maps
+    command: ["swarmdeck-mola-worker", "--maps-root", "/maps"]
+    restart: "no"
+
+  # Bounded batch validation for MGG's final corridor. The adapter publishes
+  # MappingSnapshot separately; this service only consumes the coherent store.
+  peer_mapping_query:
+    profiles: [peer_mapping]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mapping
+    image: swarmdeck-mapping:phase0
+    network_mode: host
+    ipc: host
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:?Set the domain used by all participating robot sensor stacks}"
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+    volumes:
+      - onboard_peer_maps:/maps
+    command: ["swarmdeck-indexed-map-server", "--maps-root", "/maps"]
+    restart: "no"
+
+volumes:
+  onboard_peer_maps:

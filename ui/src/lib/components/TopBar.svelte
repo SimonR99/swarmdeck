@@ -3,6 +3,7 @@
     Brain,
     Bug,
     Circle,
+    Database,
     Globe,
     Maximize2,
     Minimize2,
@@ -23,10 +24,12 @@
 
   let {
     onsettings = () => {},
-    onswarmslam = () => {}
+    onswarmslam = () => {},
+    onreplicas = () => {}
   }: {
     onsettings?: () => void;
     onswarmslam?: () => void;
+    onreplicas?: () => void;
   } = $props();
 
   type FullscreenDocument = Document & {
@@ -236,6 +239,16 @@
       {:else}
         <Maximize2 class="h-4 w-4" />
       {/if}
+    </Button>
+    <Button
+      variant="ghost"
+      size="sm"
+      class="px-2"
+      title="Inspect onboard map replicas"
+      onclick={onreplicas}
+    >
+      <Database class="h-4 w-4" />
+      <span class="sr-only">Onboard map replicas</span>
     </Button>
     <Button variant="ghost" size="sm" title="Settings" onclick={onsettings} class="px-2">
       <Settings2 class="h-4 w-4" />

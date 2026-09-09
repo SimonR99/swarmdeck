@@ -11,9 +11,27 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import numpy as np
 from PIL import Image
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from autonomy.reconstruction import InputUnavailable, PoseSnapshot, _compose_se3
+from autonomy.contracts import KeyframeId
+
+
+def _keyframe_id(value: str) -> KeyframeId:
+    parts = str(value).split("/")
+    if len(parts) != 3 or not parts[0] or not parts[1]:
+        raise ValueError(f"frame keyframe_id must be robot/session/seq, got {value!r}")
+    try:
+        sequence = int(parts[2])
+    except ValueError as exc:
+        raise ValueError(f"frame keyframe_id has an invalid sequence: {value!r}") from exc
+    return KeyframeId(parts[0], parts[1], sequence)
 
 
 def rotation_quaternion(r):
@@ -50,7 +68,13 @@ def rotation_quaternion(r):
     return q if q[0] >= 0 else -q
 
 
-def export_colmap(capture: Path, output: Path, stride=8, max_points=200000):
+def export_colmap(
+    capture: Path,
+    output: Path,
+    stride=8,
+    max_points=200000,
+    pose_snapshot: Path | None = None,
+):
     """NPZ per keyframe: rgb, depth_m, K, T_world_camera, stamp. Optical camera axes.
 
     Depth seeds geometry; fixed camera poses preserve the fleet map frame during
@@ -59,6 +83,23 @@ def export_colmap(capture: Path, output: Path, stride=8, max_points=200000):
     frames = sorted(capture.glob("*.npz"))
     if not frames or stride < 1 or max_points < 1:
         raise ValueError("capture frames and positive export budgets required")
+    capture_metadata = {}
+    metadata_path = capture / "capture_manifest.json"
+    if metadata_path.exists():
+        capture_metadata = json.loads(metadata_path.read_text())
+        if not isinstance(capture_metadata, dict):
+            raise ValueError("capture_manifest.json must contain an object")
+    solution = None
+    if pose_snapshot is not None:
+        try:
+            solution = PoseSnapshot.from_file(pose_snapshot)
+        except InputUnavailable as exc:
+            raise ValueError(str(exc)) from exc
+        capture_session = str(capture_metadata.get("session_id", ""))
+        capture_robot = str(capture_metadata.get("robot_id", ""))
+        capture_component = str(capture_metadata.get("component_id", ""))
+        if capture_component and capture_component != solution.component_id:
+            raise ValueError("pose snapshot component does not match capture metadata")
     output.mkdir(parents=True, exist_ok=False)
     sparse = output / "sparse" / "0"
     sparse.mkdir(parents=True)
@@ -73,11 +114,63 @@ def export_colmap(capture: Path, output: Path, stride=8, max_points=200000):
     ):
         cameras.write(struct.pack("<Q", len(frames)))
         poses.write(struct.pack("<Q", len(frames)))
+        exported_frames = []
         for i, path in enumerate(frames, 1):
             with np.load(path, allow_pickle=False) as frame:
                 rgb, depth, k, twc = (
                     frame[key] for key in ("rgb", "depth_m", "K", "T_world_camera")
                 )
+                optional = {
+                    key: str(frame[key].item())
+                    for key in (
+                        "capture_id",
+                        "robot_id",
+                        "session_id",
+                        "submap_id",
+                        "calibration_version",
+                        "keyframe_id",
+                        "component_id",
+                        "optical_frame",
+                    )
+                    if key in frame.files
+                }
+                frame_stamp = float(frame["stamp"]) if "stamp" in frame.files else None
+                pose_source = "capture"
+                if solution is not None:
+                    if "keyframe_id" not in frame.files or "T_keyframe_camera" not in frame.files:
+                        raise ValueError(
+                            f"{path}: pose snapshot export requires dynamic keyframe_id and T_keyframe_camera"
+                        )
+                    keyframe = _keyframe_id(str(frame["keyframe_id"].item()))
+                    if capture_session and keyframe.session_id != capture_session:
+                        raise ValueError(f"{path}: keyframe session does not match capture metadata")
+                    if capture_robot and keyframe.robot_id != capture_robot:
+                        raise ValueError(f"{path}: keyframe robot does not match capture metadata")
+                    if "component_id" in frame.files and str(frame["component_id"].item()) != solution.component_id:
+                        raise ValueError(f"{path}: frame component does not match pose snapshot")
+                    twc = np.asarray(
+                        _compose_se3(solution.pose_for(keyframe), frame["T_keyframe_camera"]),
+                        dtype=np.float64,
+                    )
+                    pose_source = f"graph-solution:{solution.component_id}:{solution.solution.revision.revision}"
+                calibration = {
+                    "intrinsics": np.asarray(k).tolist(),
+                    "distortion": (
+                        np.asarray(frame["D"]).tolist() if "D" in frame.files else []
+                    ),
+                    "distortion_model": (
+                        str(frame["distortion_model"].item())
+                        if "distortion_model" in frame.files
+                        else "rectified_pinhole"
+                    ),
+                    "depth_units": (
+                        str(frame["depth_units"].item())
+                        if "depth_units" in frame.files
+                        else "metres"
+                    ),
+                    "has_validity_mask": "depth_valid_mask" in frame.files,
+                    "has_keyframe_to_camera": "T_keyframe_camera" in frame.files,
+                }
             h, w = depth.shape
             if (
                 rgb.shape != (h, w, 3)
@@ -126,6 +219,18 @@ def export_colmap(capture: Path, output: Path, stride=8, max_points=200000):
                 voxel_keys.add(key)
                 points.append(xyz[j])
                 colors.append(rgb[y[j], x[j]])
+            exported_frame = {
+                "source": path.name,
+                "image": name,
+                "stamp": frame_stamp,
+                "pose_source": pose_source,
+                "pose_snapshot_digest": solution.digest if solution is not None else "",
+                "calibration": calibration,
+                **optional,
+            }
+            if solution is not None:
+                exported_frame["T_component_camera"] = np.asarray(twc).tolist()
+            exported_frames.append(exported_frame)
     if not points:
         raise ValueError("capture contains no valid metric depth")
     with (sparse / "points3D.bin").open("wb") as f:
@@ -135,11 +240,15 @@ def export_colmap(capture: Path, output: Path, stride=8, max_points=200000):
     (output / "swarmdeck.json").write_text(
         json.dumps(
             {
-                "frame": "world",
+                "schema_version": 2,
+                "frame": "world" if solution is None else f"component:{solution.component_id}",
+                "pose_frame": "world" if solution is None else solution.component_id,
                 "units": "metres",
                 "up": "z",
                 "frames": len(frames),
                 "seed_points": len(points),
+                "capture": capture_metadata,
+                "frame_records": exported_frames,
             },
             indent=2,
         )
@@ -268,6 +377,8 @@ def main():
     e.add_argument("capture", type=Path)
     e.add_argument("output", type=Path)
     e.add_argument("--stride", type=int, default=8)
+    e.add_argument("--max-points", type=int, default=200000)
+    e.add_argument("--pose-snapshot", type=Path)
     c = sub.add_parser("convert")
     c.add_argument("ply", type=Path)
     c.add_argument("output", type=Path)
@@ -278,15 +389,19 @@ def main():
     t.add_argument("--dataset", type=Path, required=True)
     t.add_argument("--output", type=Path, required=True)
     t.add_argument("--publish", type=Path, required=True)
+    t.add_argument("--budget", type=int, default=150000)
     a = p.parse_args()
     if a.command == "export":
-        print(f"Exported {export_colmap(a.capture,a.output,a.stride)} seed points")
+        print(
+            f"Exported {export_colmap(a.capture, a.output, a.stride, a.max_points, a.pose_snapshot)} seed points"
+        )
     elif a.command == "convert":
         print(f"Published {convert_ply(a.ply,a.output,a.budget)} Gaussians")
     else:
         metadata = json.loads((a.dataset / "swarmdeck.json").read_text())
-        if metadata.get("frame") != "world":
-            raise ValueError("world-aligned SwarmDeck dataset required")
+        frame = str(metadata.get("frame", ""))
+        if frame != "world" and not frame.startswith("component:"):
+            raise ValueError("world- or component-aligned SwarmDeck dataset required")
         a.output.mkdir(parents=True, exist_ok=False)
         subprocess.run(
             [
@@ -303,7 +418,7 @@ def main():
         if not candidates:
             raise RuntimeError("UMAMI produced no Gaussian PLY")
         final = max(candidates, key=lambda p: p.stat().st_mtime_ns)
-        print(f"Published {convert_ply(final,a.publish)} Gaussians from {final}")
+        print(f"Published {convert_ply(final,a.publish,a.budget)} Gaussians from {final}")
 
 
 if __name__ == "__main__":

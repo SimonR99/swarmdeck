@@ -1,0 +1,13 @@
+repositories:
+  cslam:
+    type: git
+    url: https://github.com/lajoiepy/cslam.git
+    version: fccf88765167431d293a1245c19411fd874f937d
+  cslam_interfaces:
+    type: git
+    url: https://github.com/lajoiepy/cslam_interfaces.git
+    version: 0e6bb91411796db593c8ce680f382a1f242ab7d9
+  cslam_experiments:
+    type: git
+    url: https://github.com/lajoiepy/cslam_experiments.git
+    version: 0b5fc6c9354f75ed99971aa6c6e04b6a91141689
