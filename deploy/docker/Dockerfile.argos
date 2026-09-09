@@ -90,6 +90,12 @@ RUN cmake -S /src/argos3/src -B /src/argos3/build \
     && cmake --build /src/argos3/build -j"$(nproc)" \
     && cmake --install /src/argos3/build
 
+# Incremental rebuild preserves the expensive upstream/Filament build cache.
+COPY deploy/patches/argos /tmp/swarmdeck-steps
+RUN python3 /tmp/swarmdeck-steps/apply_steps.py /src/argos3 \
+    && cmake --build /src/argos3/build -j4 \
+    && cmake --install /src/argos3/build
+
 # SwarmDeck's own controller and bridge loop function, built against the
 # just-installed ARGoS. One module, not two: the loop function resolves each
 # robot's controller with a dynamic_cast and a separately dlopen'd sibling does

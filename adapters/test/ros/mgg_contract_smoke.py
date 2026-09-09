@@ -26,6 +26,12 @@ def main():
             "__ns:=/probe/mgg",
             "-p",
             "world_frame:=map",
+            "-p",
+            "bootstrap_distance:=0.0",
+            "-p",
+            "stuck_timeout_sec:=0.5",
+            "-p",
+            "auto_period_sec:=0.1",
         ],
         stdout=subprocess.DEVNULL,
     )
@@ -44,7 +50,14 @@ def main():
     )
     explorer = MggExploration(bridge, {})
 
+    outcome = {"status": 0, "delay": 0, "entered": False}
+
     def plan(request, response):
+        outcome["entered"] = True
+        time.sleep(outcome["delay"])
+        response.status = outcome["status"]
+        if outcome["status"] < 0:
+            return response
         pose = Pose()
         pose.position.x, pose.position.y = 2.0, 1.0
         pose.orientation.w = 1.0
@@ -84,10 +97,29 @@ def main():
         while time.monotonic() < end:
             executor.spin_once(timeout_sec=0.1)
         assert len(goals) == count
-        print(
-            "PASS: actual PCI start, goal delivery, stop acknowledgment, and no post-stop goals"
-        )
+        for result, label in ((-2, "blocked"), (-3, "complete")):
+            outcome["status"] = result
+            explorer.start()
+            wait_until(lambda: explorer.status == label and explorer.pending is None)
+            assert not explorer.active
+        outcome["status"] = 0
+        explorer.start()
+        wait_until(lambda: explorer.status == "blocked", timeout=15)
+        assert not explorer.active
+        outcome.update(status=0, delay=1.0, entered=False)
+        count = len(goals)
+        explorer.start()
+        wait_until(lambda: outcome["entered"])
+        explorer.stop()
+        wait_until(lambda: explorer.pending is None and explorer.pending_stop.done())
+        end = time.monotonic() + 1
+        while time.monotonic() < end:
+            executor.spin_once(timeout_sec=0.1)
+        assert len(goals) == count, "a late planner response escaped the stop gate"
+        print("PASS: native PCI start/stop, blocked map, completion, bounded stalls")
     finally:
+        explorer.timer.cancel()
+        executor.remove_node(node)
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

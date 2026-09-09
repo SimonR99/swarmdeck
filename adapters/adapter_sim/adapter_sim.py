@@ -367,6 +367,8 @@ class RobotBridge(
         # guaranteed to be consistent with each other. See map_pose().
         self._map_to_odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._odom_to_base: dict[str, float] | None = None
+        self._map_tf_seen = False
+        self._home_pose: dict[str, float] | None = None
         # Short history of each link, keyed by the TF stamp, so a cloud can be
         # paired with the pose it was captured AT rather than the newest one.
         # See map_pose_at(). Two seconds at the bridge's ~50 Hz is ample, and
@@ -542,6 +544,7 @@ class RobotBridge(
                 and stamped.child_frame_id == odom_frame
             ):
                 self._map_to_odom = value
+                self._map_tf_seen = True
                 if at is not None:
                     self._map_to_odom_log.append((at, value))
             elif (
@@ -551,6 +554,17 @@ class RobotBridge(
                 self._odom_to_base = value
                 if at is not None:
                     self._odom_to_base_log.append((at, value))
+
+        # Record the first complete map-frame pose, not the startup fallback
+        # at (0,0). Keep it across websocket reconnects and subsequent motion.
+        if (
+            getattr(self, "_home_pose", None) is None
+            and getattr(self, "_map_tf_seen", False)
+            and self._odom_to_base is not None
+        ):
+            pose = self._compose(self._map_to_odom, self._odom_to_base)
+            if all(math.isfinite(v) for v in pose.values()):
+                self._home_pose = pose
 
     @staticmethod
     def _compose(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:

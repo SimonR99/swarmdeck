@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ScanSearch, SlidersHorizontal, Video, TriangleAlert, X } from 'lucide-svelte';
+  import { House, ScanSearch, SlidersHorizontal, Video, TriangleAlert, X } from 'lucide-svelte';
   import Card from '../ui/Card.svelte';
   import Badge from '../ui/Badge.svelte';
   import BatteryIndicator from '../ui/BatteryIndicator.svelte';
@@ -49,7 +49,11 @@
             ? 'NAVIGATING'
             : robot.nav_status === 'failed'
               ? 'NAV FAILED'
-              : robot.mode.toUpperCase()
+              : robot.exploration_status === 'complete'
+                ? 'EXPLORED'
+                : robot.exploration_status === 'blocked'
+                  ? 'EXPLORE BLOCKED'
+                  : robot.mode.toUpperCase()
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));
@@ -124,6 +128,14 @@
       >
         {modeLabel}
       </Badge>
+      {#if fleet.can(robot.robot_id, 'navigate')}
+        <button
+          class="inline-flex h-7 items-center gap-1 rounded-full bg-surface-3 px-2 text-[10px] font-semibold text-fg-muted hover:bg-surface-4 disabled:opacity-40"
+          disabled={!robot.online || !robot.home_pose}
+          title={robot.home_pose ? 'Navigate to the recorded starting position' : 'Waiting for a recorded starting position'}
+          onclick={(e) => { e.stopPropagation(); actions.returnHome(robot.robot_id); }}
+        ><House class="h-3 w-3" />Return home</button>
+      {/if}
       {#if !robot.online}
         <Badge tone="danger">OFFLINE</Badge>
         <button

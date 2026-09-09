@@ -53,6 +53,8 @@ class Robot:
     pose: dict[str, float] = field(
         default_factory=lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
     )
+    exploration_status: str = "idle"
+    home_pose: dict[str, float] | None = None
     battery: float | None = None
     mode: str = "idle"
     nav_status: str = "idle"
@@ -87,6 +89,8 @@ class Robot:
             "ros": self.ros,
             "peer": self.peer,
             "pose": self.pose,
+            "home_pose": self.home_pose,
+            "exploration_status": self.exploration_status,
             "battery": self.battery,
             "mode": self.mode,
             "nav_status": self.nav_status,
@@ -142,10 +146,26 @@ class Registry:
         r.last_seen = time.monotonic()
         if "pose" in msg:
             r.pose = msg["pose"]
+        if r.home_pose is None and isinstance(msg.get("home_pose"), dict):
+            try:
+                home = {key: float(msg["home_pose"][key]) for key in ("x", "y", "yaw")}
+                if all(math.isfinite(v) for v in home.values()):
+                    r.home_pose = home
+            except (KeyError, TypeError, ValueError):
+                pass
         if "battery" in msg:
             r.battery = msg["battery"]
         if "mode" in msg:
             r.mode = msg["mode"]
+        if msg.get("exploration_status") in {
+            "idle",
+            "starting",
+            "exploring",
+            "complete",
+            "blocked",
+            "stopped",
+        }:
+            r.exploration_status = msg["exploration_status"]
         if "nav_status" in msg:
             r.nav_status = msg["nav_status"]
         if "goal" in msg:

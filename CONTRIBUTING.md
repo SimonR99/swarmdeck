@@ -53,6 +53,20 @@ global maps, ceiling clipping, and each affected representation. Check behavior
 with missing RGB or Gaussian data. Workload limits and synthetic test timings
 are not evidence of sustained performance on a particular GPU.
 
+## Diagnostics and upstream patches
+
+Keep operational warnings actionable and rate-limited. Avoid per-frame logging
+in sensor, map, and rendering loops; use focused regression tests or the
+[simulation benchmark](scripts/benchmark-sim.py) for investigations. Keep local
+captures and temporary reproductions outside tracked source. Document current
+contracts and reproducible commands; Git history holds resolved incident detail.
+
+Keep command-line scripts import-safe, with argument parsing in `main()` and
+reusable processing functions. Upstream source changes belong in
+`deploy/patches/` and must match the revisions pinned in the Dockerfiles. See the
+[ARGoS patch guide](deploy/patches/argos/README.md) for physics checks and
+[MGG exploration](docs/operations/mgg-exploration.md) for planner lifecycle checks.
+
 ## Pull requests
 
 Describe the problem, the resulting behavior, and the tests you ran. Include

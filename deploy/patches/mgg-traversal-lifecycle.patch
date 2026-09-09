@@ -1,0 +1,381 @@
+--- a/ros2/src/mgg_core/include/mgg_core/params.h
++++ b/ros2/src/mgg_core/include/mgg_core/params.h
+@@ -160,6 +160,7 @@
+   double max_ground_height = 1.2;
+   double robot_height = 1.0;
+   double max_inclination = 0.52;
++  double max_step_height = 0.0;
+ 
+   // Free-space augmentation (deprecated upstream).
+   double augment_free_voxels_time = 5.0;
+--- a/ros2/src/mgg_ros/src/param_loader.cpp
++++ b/ros2/src/mgg_ros/src/param_loader.cpp
+@@ -255,6 +255,7 @@
+   p.get(ns + "/max_ground_height", out.max_ground_height);
+   p.get(ns + "/robot_height", out.robot_height);
+   p.get(ns + "/max_inclination", out.max_inclination);
++  p.get(ns + "/max_step_height", out.max_step_height);
+   p.get(ns + "/exp_sensor_list", out.exp_sensor_list);
+   p.get(ns + "/no_gain_zones_list", out.no_gain_zones_list);
+   p.get(ns + "/exp_gain_voxel_size", out.exp_gain_voxel_size);
+--- a/ros2/src/mgg_core/src/ground_projection.cpp
++++ b/ros2/src/mgg_core/src/ground_projection.cpp
+@@ -34,7 +34,10 @@
+         start - Eigen::Vector3d(0.0, 0.0, max_projection_length);
+ 
+     Eigen::Vector3d end_voxel;
+-    const VoxelStatus vs = map_.getRayStatus(start, end, true, end_voxel);
++    // Ground rays may cross unobserved air above the lidar. Ordinary body and edge
++    // collision checks still run; only known occupied ground can support a
++    // projected point.
++    const VoxelStatus vs = map_.getRayStatus(start, end, false, end_voxel);
+ 
+     if (vs == VoxelStatus::kOccupied) {
+       const double ray_len = std::abs(sample_z - end_voxel(2));
+@@ -68,7 +71,7 @@
+   const Eigen::Vector3d ray = end - start;
+   const double edge_incl =
+       std::atan2(std::abs(ray(2)), std::abs(ray.head(2).norm()));
+-  if (edge_incl > max_inclination) return ProjectedEdgeStatus::kSteep;
++  if (std::abs(ray(2)) > params_.max_step_height + 1e-6 && edge_incl > max_inclination) return ProjectedEdgeStatus::kSteep;
+ 
+   const double ray_len = ray.norm();
+   if (ray_len < 1e-12) return ProjectedEdgeStatus::kAdmissible;
+@@ -88,6 +91,10 @@
+           !is_hanging) {
+         return ProjectedEdgeStatus::kHanging;
+       }
++      if (vs != VoxelStatus::kOccupied || ground_height < 0.0) {
++        projected_edge.push_back(edge_point);
++        continue;
++      }
+       Eigen::Vector3d projected = edge_point;
+       projected(2) -= (ground_height - params_.max_ground_height);
+       projected_edge.push_back(projected);
+@@ -105,7 +112,8 @@
+     if ((vs == VoxelStatus::kUnknown || start_ground < 0.0) && !is_hanging) {
+       return ProjectedEdgeStatus::kHanging;
+     }
+-    start_m(2) -= (start_ground - params_.max_ground_height);
++    if (vs == VoxelStatus::kOccupied && start_ground >= 0.0)
++      start_m(2) -= (start_ground - params_.max_ground_height);
+     projected_edge.push_back(start_m);
+   }
+ 
+@@ -116,7 +124,8 @@
+   if ((vs == VoxelStatus::kUnknown || ground_height < 0.0) && !is_hanging) {
+     return ProjectedEdgeStatus::kHanging;
+   }
+-  end_m(2) -= (ground_height - params_.max_ground_height);
++  if (vs == VoxelStatus::kOccupied && ground_height >= 0.0)
++    end_m(2) -= (ground_height - params_.max_ground_height);
+   projected_edge.push_back(end_m);
+ 
+ 
+@@ -125,7 +134,8 @@
+     const Eigen::Vector3d segment = projected_edge[i] - projected_edge[i - 1];
+     const double theta =
+         std::atan2(std::abs(segment(2)), std::abs(segment.head(2).norm()));
+-    if (std::abs(theta) > max_inclination) return ProjectedEdgeStatus::kSteep;
++    if (std::abs(segment(2)) > params_.max_step_height + 1e-6 &&
++        std::abs(theta) > max_inclination) return ProjectedEdgeStatus::kSteep;
+   }
+ 
+   for (size_t i = 1; i < projected_edge.size(); ++i) {
+--- a/ros2/src/mgg_core/src/path_selection.cpp
++++ b/ros2/src/mgg_core/src/path_selection.cpp
+@@ -44,7 +44,7 @@
+             path[ind]->state.head(3) - path[ind - 1]->state.head(3);
+         // Only descents are checked: driving down a steep slope is what the
+         // robot cannot recover from.
+-        if ((path[ind]->state(2) - path[ind - 1]->state(2)) < -map_resolution) {
++        if ((path[ind]->state(2) - path[ind - 1]->state(2)) < -std::max(map_resolution, planning.max_step_height)) {
+           const double stored =
+               inclinations.get(path[ind]->id, path[ind - 1]->id);
+           const double geometric =
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -391,6 +391,9 @@
+       root_state[2] = pos[2] - (ground_height - planning_params_.max_ground_height);
+     } else {
+       root_hanging = true;
++      // Odometry locates the base, whereas graph states locate the raised
++      // collision box. Preserve this offset even inside the sensor blind spot.
++      root_state[2] += planning_params_.max_ground_height - robot_params_.size[2] / 2.0;
+     }
+   }
+   auto* root = new mgg::Vertex(0, root_state);
+@@ -684,13 +687,14 @@
+   robot_params_.bound_mode =
+       static_cast<mgg::BoundModeType>(request->bound_mode);
+ 
++  best_path_.clear();
+   const std::string summary = buildLocalGraph();
+   robot_params_.bound_mode = previous;
+ 
+   response->planning_bound_mode = request->bound_mode;
+-  response->status = best_path_.empty()
+-                         ? mgg_msgs::srv::PlannerSrv::Response::HOMING
+-                         : mgg_msgs::srv::PlannerSrv::Response::FORWARD;
++  response->status = !have_odometry_ || !map_->getStatus() ? -1
++      : best_path_.empty() ? (local_graph_->getNumVertices() <= 1 ? -2 : -3)
++      : mgg_msgs::srv::PlannerSrv::Response::FORWARD;
+   for (const mgg::StateVec& s : best_path_) {
+     response->path.push_back(toPoseMsg(s));
+   }
+--- a/ros2/src/mgg_pci/include/mgg_pci/pci_node.h
++++ b/ros2/src/mgg_pci/include/mgg_pci/pci_node.h
+@@ -24,6 +24,7 @@
+ #include <nav_msgs/msg/odometry.hpp>
+ #include <nav_msgs/msg/path.hpp>
+ #include <rclcpp/rclcpp.hpp>
++#include <std_msgs/msg/string.hpp>
+ #include <std_srvs/srv/trigger.hpp>
+ 
+ #include <mgg_msgs/srv/planner_srv.hpp>
+@@ -47,6 +48,7 @@
+   bool requestPlan(std::vector<geometry_msgs::msg::Pose>& path,
+                    std::string& error);
+ 
++  void publishStatus(const std::string& state);
+   void publishPath(const std::vector<geometry_msgs::msg::Pose>& path);
+   void planAndPublish();
+   bool executeBootstrap();
+@@ -60,6 +62,10 @@
+   rclcpp::CallbackGroup::SharedPtr callback_group_;
+ 
+   std::mutex mutex_;
++  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
++  int plan_status_ = -1;
++  int stalled_plans_ = 0;
++  uint64_t generation_ = 0;
+   bool running_ = false;
+   bool have_odometry_ = false;
+   bool planning_in_progress_ = false;
+--- a/ros2/src/mgg_pci/src/pci_node.cpp
++++ b/ros2/src/mgg_pci/src/pci_node.cpp
+@@ -49,6 +49,8 @@
+       sub_opts);
+ 
+   // Latched: the path is a latest-value topic and a follower may start later.
++  status_pub_ = create_publisher<std_msgs::msg::String>(
++      "status", rclcpp::QoS(1).transient_local());
+   path_pub_ = create_publisher<nav_msgs::msg::Path>(
+       "command_path", rclcpp::QoS(1).transient_local());
+ 
+@@ -90,6 +92,7 @@
+ 
+   has_bootstrapped_ = true;
+   publishPath(path);
++  publishStatus("exploring");
+   goal_pose_ = path.back();
+   path_in_progress_ = true;
+   last_progress_pos_ = current_pose_.position;
+@@ -128,6 +131,7 @@
+                 "goal reached (dist=%.2f m <= %.2f m); requesting next plan",
+                 dist_to_goal, reach_distance_);
+     path_in_progress_ = false;
++    stalled_plans_ = 0;
+     lock.unlock();
+     planAndPublish();
+   }
+@@ -149,6 +153,7 @@
+   const auto status = future.wait_for(
+       std::chrono::duration<double>(service_timeout_sec_));
+   if (status != std::future_status::ready) {
++    planner_client_->remove_pending_request(future);
+     error = "planner did not answer within " +
+             std::to_string(service_timeout_sec_) +
+             " s (is the executor multi-threaded?)";
+@@ -156,8 +161,16 @@
+   }
+ 
+   const auto response = future.get();
++  plan_status_ = response->status;
+   path = response->path;
+   return true;
++}
++
++void PciNode::publishStatus(const std::string& state) {
++  std_msgs::msg::String msg;
++  msg.data = "{\"state\":\"" + state + "\",\"stamp_ns\":" +
++             std::to_string(now().nanoseconds()) + "}";
++  status_pub_->publish(msg);
+ }
+ 
+ void PciNode::publishPath(const std::vector<geometry_msgs::msg::Pose>& path) {
+@@ -177,9 +190,11 @@
+   if (exploration_completed_) {
+     return;
+   }
++  uint64_t generation;
+   {
+     std::lock_guard<std::mutex> lock(mutex_);
+-    if (planning_in_progress_) return;
++    if (planning_in_progress_ || !running_) return;
++    generation = generation_;
+     planning_in_progress_ = true;
+   }
+ 
+@@ -189,18 +204,25 @@
+ 
+   std::lock_guard<std::mutex> lock(mutex_);
+   planning_in_progress_ = false;
++  if (!running_ || generation != generation_) return;
+ 
+   if (!ok) {
+-    if (!has_bootstrapped_) {
++    if (!has_bootstrapped_ && bootstrap_distance_ > 0.0) {
+       executeBootstrap();
+       return;
+     }
++    if (++consecutive_empty_plans_ >= max_empty_plans_before_stop_) {
++      running_ = false;
++      path_in_progress_ = false;
++      publishPath({});
++      publishStatus("blocked");
++    }
+     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "%s", error.c_str());
+     return;
+   }
+ 
+   if (path.empty()) {
+-    if (!has_bootstrapped_) {
++    if (!has_bootstrapped_ && bootstrap_distance_ > 0.0) {
+       // First attempt on standing start without mapped ground: bootstrap forward
+       executeBootstrap();
+       return;
+@@ -212,8 +234,9 @@
+       running_ = false;
+       path_in_progress_ = false;
+       publishPath({});
++      publishStatus(plan_status_ == -3 ? "complete" : "blocked");
+       RCLCPP_INFO(get_logger(),
+-                  "*** EXPLORATION COMPLETED: Environment fully explored (no remaining frontiers) ***");
++                  "Exploration stopped: no reachable plan remains");
+       return;
+     }
+ 
+@@ -227,6 +250,7 @@
+   consecutive_empty_plans_ = 0;
+   has_bootstrapped_ = true;
+   publishPath(path);
++  publishStatus("exploring");
+   goal_pose_ = path.back();
+   path_in_progress_ = true;
+   last_progress_pos_ = current_pose_.position;
+@@ -248,11 +272,18 @@
+   // Path is active: check if stuck or timed out
+   if (last_progress_time_.nanoseconds() > 0) {
+     const double stuck_duration = (now() - last_progress_time_).seconds();
+-    if (stuck_duration > stuck_timeout_sec_) {
++    if (stuck_duration > stuck_timeout_sec_ ||
++        (now() - path_start_time_).seconds() > 6.0 * stuck_timeout_sec_) {
+       RCLCPP_WARN(get_logger(),
+                   "robot made no progress for %.1f s (> %.1f s); replanning",
+                   stuck_duration, stuck_timeout_sec_);
+       path_in_progress_ = false;
++      if (++stalled_plans_ >= 3) {
++        running_ = false;
++        publishPath({});
++        publishStatus("blocked");
++        return;
++      }
+       lock.unlock();
+       planAndPublish();
+     }
+@@ -265,6 +296,9 @@
+   {
+     std::lock_guard<std::mutex> lock(mutex_);
+     running_ = true;
++    ++generation_;
++    stalled_plans_ = 0;
++    publishStatus("starting");
+     exploration_completed_ = false;
+     consecutive_empty_plans_ = 0;
+     path_in_progress_ = false;
+@@ -272,7 +306,7 @@
+   planAndPublish();
+ 
+   std::lock_guard<std::mutex> lock(mutex_);
+-  response->success = path_in_progress_;
++  response->success = running_ || exploration_completed_;
+   response->message = path_in_progress_
+                           ? "started autonomous exploration"
+                           : "failed to start path";
+@@ -284,9 +318,11 @@
+   {
+     std::lock_guard<std::mutex> lock(mutex_);
+     running_ = false;
++    ++generation_;
+     path_in_progress_ = false;
+   }
+   publishPath({});
++  publishStatus("stopped");
+   response->success = true;
+   response->message = "stopped";
+   RCLCPP_INFO(get_logger(), "stopped");
+--- a/ros2/src/mgg_pci/CMakeLists.txt
++++ b/ros2/src/mgg_pci/CMakeLists.txt
+@@ -19,13 +19,14 @@
+ find_package(nav_msgs REQUIRED)
+ find_package(geometry_msgs REQUIRED)
+ find_package(std_srvs REQUIRED)
++find_package(std_msgs REQUIRED)
+ 
+ add_library(${PROJECT_NAME} src/pci_node.cpp)
+ target_include_directories(${PROJECT_NAME} PUBLIC
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+   $<INSTALL_INTERFACE:include>)
+ ament_target_dependencies(${PROJECT_NAME}
+-  rclcpp nav_msgs geometry_msgs std_srvs mgg_msgs)
++  rclcpp nav_msgs geometry_msgs std_srvs std_msgs mgg_msgs)
+ 
+ add_executable(mgg_pci_node src/pci_main.cpp)
+ target_link_libraries(mgg_pci_node ${PROJECT_NAME})
+@@ -37,7 +38,7 @@
+   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+ 
+ ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+-ament_export_dependencies(mgg_msgs rclcpp nav_msgs geometry_msgs std_srvs)
++ament_export_dependencies(mgg_msgs rclcpp nav_msgs geometry_msgs std_srvs std_msgs)
+ ament_export_include_directories(include)
+ 
+ if(BUILD_TESTING)
+--- a/ros2/src/mgg_pci/package.xml
++++ b/ros2/src/mgg_pci/package.xml
+@@ -21,6 +21,7 @@
+   <depend>nav_msgs</depend>
+   <depend>geometry_msgs</depend>
+   <depend>std_srvs</depend>
++  <depend>std_msgs</depend>
+ 
+   <test_depend>ament_cmake_gtest</test_depend>
+ 
+--- a/ros2/src/mgg_core/src/graph_expansion.cpp
++++ b/ros2/src/mgg_core/src/graph_expansion.cpp
+@@ -162,7 +162,8 @@
+   // be a behaviour change on a path this port cannot yet exercise end to end.
+   for (size_t i = 1; i < projected_edge.size(); ++i) {
+     const Eigen::Vector3d segment = projected_edge[i] - projected_edge[i - 1];
+-    if (std::atan2(std::abs(segment(2)), segment.head(2).norm()) >
++    if (std::abs(segment(2)) > ctx.planning->max_step_height + 1e-6 &&
++        std::atan2(std::abs(segment(2)), segment.head(2).norm()) >
+         ctx.planning->max_inclination) {
+       admissible_edge = false;
+     }
+--- a/ros2/src/mgg_core/test/test_ground_projection.cpp
++++ b/ros2/src/mgg_core/test/test_ground_projection.cpp
+@@ -177,7 +177,11 @@
+   const auto s = gp.getProjectedEdgeStatus({3.0, 0.0, 0.5}, {7.0, 0.0, 0.5},
+                                            {0.4, 0.4, 0.4}, true, path,
+                                            /*is_hanging=*/true);
+-  EXPECT_NE(s, ProjectedEdgeStatus::kHanging);
++  EXPECT_EQ(s, ProjectedEdgeStatus::kAdmissible);
++  ASSERT_FALSE(path.empty());
++  for (const auto& point : path) {
++    EXPECT_LT(point.z(), 0.8) << "Missing ground must not become a metre-high step";
++  }
+ }
+ 
+ // REGRESSION for the erase(end()) fix: a short edge whose last sample nearly

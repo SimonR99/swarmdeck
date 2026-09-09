@@ -381,3 +381,15 @@ def test_duplicate_tf_stamp_uses_most_recent_arrival(bridge_cls):
     bridge = _turning_bridge(bridge_cls)
     bridge._odom_to_base_log.append((100.5, {"x": 0, "y": 0, "yaw": 0.7}))
     assert bridge.map_pose_at(100.5, require_history=True)["yaw"] == pytest.approx(0.7)
+
+
+def test_home_waits_for_both_tf_links_and_remains_at_start(bridge_cls):
+    bridge = make_bridge(bridge_cls)
+    bridge._on_tf(tf_message([("robot_0/odom", "robot_0/base_link", 3, 0, 0)]))
+    assert getattr(bridge, "_home_pose", None) is None
+    bridge._on_tf(
+        tf_message([("robot_0/map_frame", "robot_0/odom", 1, 2, math.pi / 2)])
+    )
+    assert bridge._home_pose == pytest.approx({"x": 1, "y": 5, "yaw": math.pi / 2})
+    bridge._on_tf(tf_message([("robot_0/odom", "robot_0/base_link", 15, 8, 0)]))
+    assert bridge._home_pose == pytest.approx({"x": 1, "y": 5, "yaw": math.pi / 2})

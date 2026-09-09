@@ -33,6 +33,10 @@ all connected, enabled robots with MGG configured. It changes to **Stop explorat
 while any robot is exploring, and **Stop All** also
 stops exploration. The ARGoS startup script includes MGG automatically. The ROS 2 hardware
 deployment profiles run a separate MGG planner onboard each robot.
+Each robot card also has **Return home**, which navigates to its first valid
+simulation map pose. It cancels that robot’s exploration; **Stop All** cancels
+the return journey. Home is retained through dashboard reconnects.
+
 See [MGG exploration setup](docs/operations/mgg-exploration.md)
 for simulation and ROS 2 hardware wiring.
 
