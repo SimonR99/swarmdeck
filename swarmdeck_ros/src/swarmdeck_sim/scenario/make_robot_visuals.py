@@ -206,8 +206,9 @@ def spot():
     for x in (-0.33, 0.33):
         for side in (-1, 1):
             hip = (x, side * 0.205, 0.50)
-            knee = (x + 0.115, side * 0.245, 0.285)
-            foot = (x - 0.015, side * 0.26, 0.025)
+            # Bend the legs rearward, away from the +X-facing camera.
+            knee = (x - 0.115, side * 0.245, 0.285)
+            foot = (x + 0.015, side * 0.26, 0.025)
             m.cylinder_between(DARK, (x, side * 0.14, 0.50), hip, 0.065, 16)
             m.cylinder_between(YELLOW, hip, knee, 0.043, 12)
             m.cylinder_between(

@@ -100,11 +100,19 @@ DEFAULTS: dict[str, Any] = deep_merge(
             # safety mechanism, only a plausible one.
             "nav_joy": "",
         },
-        # Magnitude of the fake nav_joy vector, 0..1 — NOT a speed by itself, see
+        # Magnitude of the fake nav_joy vector, 0..1. NOT a speed by itself, see
         # _pump_nav_joy: axes[1]/axes[2] together encode the bearing to the goal,
-        # and this is that vector's length. The stack rescales its own output to
-        # maxSpeed regardless (confirmed live), so this mostly just needs to stay
-        # comfortably nonzero after being split into cos/sin components.
+        # and this is that vector's length.
+        #
+        # It is also NOT free to choose. localPlanner sets
+        # `pathScale = pathScale_param * joySpeed` and divides obstacle points by
+        # pathScale before testing them against a path library baked with
+        # `searchRadius = 0.45`, so this value directly sets the planner's enforced
+        # clearance radius, R = 0.45 * nav_joy_throttle, and with it the narrowest
+        # doorway the robot can plan through, 2R. Too low and the planner checks a
+        # corridor narrower than the robot and clips corners; too high and it
+        # refuses to path through real doors. Per-robot: see
+        # config/scout_mini.yaml, which works the numbers through for a Scout Mini.
         "nav_joy_throttle": 0.5,
         # Height band for `map_cloud` points, metres, in the map_frame (NOT
         # relative to the robot — this stack has no live z estimate to be relative

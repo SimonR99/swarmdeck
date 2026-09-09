@@ -45,10 +45,70 @@
              IS computed correctly toward our goal this way, it just needs a
              speed source that isn't a joystick - see fleet-status.md. -->
         <arg name="autonomyMode" value="false"/>
-        <!-- MIST default is 0.9 x 0.9. 10% larger so door/jamb clearance
-             matches the physical Scout better than the URDF box. -->
-        <arg name="vehicleLength" value="0.99"/>
-        <arg name="vehicleWidth" value="0.99"/>
+        <!-- The REAL footprint (0.62 x 0.585 m, per
+             adapters/adapter_ros1/config/scout_mini.yaml), NOT an inflated one.
+             These are read only by the checkRotObstacle branch
+             (localPlanner.cpp:1008), and that branch first REJECTS every point
+             falling INSIDE the rectangle as a self-return. Inflating the box
+             therefore adds no clearance, it deletes real obstacles: the
+             previous 0.99 x 0.99 ignored everything inside 0.495 m while
+             flagging points out to 0.70 m, which once checkRotObstacle is on
+             would stop the robot rotating almost anywhere. It also did nothing
+             at all before now, because the only branch that reads it was
+             disabled. -->
+        <arg name="vehicleLength" value="0.62"/>
+        <arg name="vehicleWidth" value="0.585"/>
+
+        <!-- Guard the in-place rotation sweep. Scout Mini is skid-steer: it
+             turns about its centre and sweeps its full 0.43 m circumscribed
+             radius, but with this false (the mist_ws default) lines 1065 and
+             1114 short-circuit on `|| !checkRotObstacle` and NOTHING checks
+             that sweep, so a corner can sit clear of the chosen forward path
+             and still be struck on the way round. Enabling it also makes
+             vehicleLength/vehicleWidth above load-bearing for the first time.
+             PARTIAL FIX: localPlanner.cpp:193 hard-codes a `dis > 0.4`
+             near-field crop, so this guard can only ever see the 0.400..0.426 m
+             annulus, i.e. it fires just before contact rather than early.
+             Widening it means lowering that crop, which needs a mist_ws
+             rebuild and so is deliberately not done here. -->
+        <arg name="checkRotObstacle" value="true"/>
+
+        <!-- Pin pathScale so the fallback loop cannot shrink the collision
+             envelope back below the body. When no candidate path is clear,
+             localPlanner.cpp:1149 shrinks pathScale by pathScaleStep (0.2) and
+             retries; at the mist_ws floor of 0.5 that meant retrying with a
+             0.225 m clearance radius on a robot of radius 0.43 m. At 0.75 the
+             loop's own guard (`pathScale >= minPathScale + pathScaleStep`) is
+             never satisfied, so pathScale stays pinned at the 0.75 that
+             nav_joy_throttle sets and the footprint never shrinks; the loop
+             gives up range instead, which is the safe thing to trade. -->
+        <arg name="minPathScale" value="0.75"/>
+
+        <!-- mist_ws ships 15; localPlanner's own default is 2. A candidate path
+             counts as CLEAR unless at least this many obstacle points land in
+             its envelope (localPlanner.cpp:1058), and the cloud reaching that
+             test has already been 5 cm voxel-downsampled AND stripped of ~86%
+             of its points by the minRelZ/maxRelZ height band (measured live:
+             4572 of 32531 survive). A corner or a thin post presents a small
+             angular cross-section and routinely produced fewer than 15
+             surviving points, i.e. it read as clear. 10 rather than the stock 2
+             keeps some immunity to stray floor returns, which matter here
+             because the lidar mount is pitched about 2.5 deg. -->
+        <arg name="pointPerPathThre" value="10"/>
+
+        <!-- pathFollower steers with `vehicleYawRate = UY / trackingSlackLength`
+             (pathFollower.cpp:559) and its entire forward/reverse hysteresis
+             (navFwd / switchTime) is commented out, so there is NOTHING damping
+             this loop: the sign and magnitude of the yaw command follow the
+             selected path instantly, every cycle. At the compiled-in 0.2 m
+             (pathFollower.cpp:78, never set by any launch until now) a lateral
+             velocity above 0.157 m/s already saturates maxYawRate, so on any
+             real turn the steering runs bang-bang and left/right chatter in the
+             planner's path choice is reproduced directly as physical
+             back-and-forth. 0.4 m keeps it in the proportional region for the
+             whole 0..0.4 m/s speed range. Costs slightly wider arcs, which is
+             the safe direction to err given the clearance work above. -->
+        <arg name="trackingSlackLength" value="0.4"/>
     </include>
 
     <include file="$(find loam_interface)/launch/loam_interface.launch">

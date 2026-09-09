@@ -136,9 +136,41 @@ topics:
   # we send) as the goal source, which is what nav_goal above depends on.
   nav_joy: /joy
 
-# Rescaled to maxSpeed (0.4 m/s) by pathFollower regardless of magnitude
-# (confirmed live) — this mostly just needs to be reliably nonzero.
-nav_joy_throttle: 0.5
+# Sets BOTH pathFollower's speed gate AND localPlanner's collision envelope.
+# The second one is the part that is easy to miss. localPlanner computes
+# `pathScale = pathScale_param * joySpeed` (localPlanner.cpp:945, floored at
+# minPathScale), then divides every obstacle point by pathScale before looking
+# it up in the precomputed path library. That library was baked with
+# `searchRadius = 0.45` (paths/path_generator.m:114), so the real-world
+# clearance radius the planner actually enforces is:
+#
+#     R = 0.45 * pathScale = 0.45 * nav_joy_throttle
+#
+# At the previous 0.5 that gave R = 0.225 m, against a Scout Mini whose
+# circumscribed radius is 0.43 m. The planner was checking a corridor barely
+# half the width of the robot, and because the checked envelope is a DISC while
+# the robot is a RECTANGLE, the shortfall was worst exactly at the corners
+# (0.43 m needed vs 0.293 m at the flat sides): ~0.20 m of corner stuck outside
+# anything the planner looked at. That is why it clipped corners on turns.
+#
+# The ceiling on this value is doorways, NOT the robot. The model is a disc of
+# radius R swept along the path, so the narrowest opening it can ever plan
+# through is 2R:
+#
+#     0.50 -> R 0.225 m -> needs a 0.45 m opening   (old value; clips corners)
+#     0.75 -> R 0.338 m -> needs a 0.675 m opening  (current)
+#     1.00 -> R 0.450 m -> needs a 0.900 m opening  (a 0.81 m / 32in door
+#                                                    becomes unplannable)
+#
+# 0.75 is the smallest value that puts R meaningfully outside the robot's own
+# half-width (0.338 vs 0.293 m) while still clearing a standard door with about
+# 7 cm per side to spare. Do NOT raise this toward 1.0 without measuring the
+# tightest doorway Scout actually has to pass; door clearance here is small.
+#
+# Top speed is unaffected: pathFollower rescales its output vector to maxSpeed
+# (0.4 m/s) regardless, so this only widens the range of bearings over which it
+# reaches that cap.
+nav_joy_throttle: 0.75
 
 # No gbplanner (global exploration planner) is running — only local_planner's
 # reactive local avoidance, whose adjacentRange is 5 m. A goal beyond what the
