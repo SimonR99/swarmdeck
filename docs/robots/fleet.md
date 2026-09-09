@@ -1,11 +1,15 @@
 # Physical fleet
 
+These entries describe repository profiles, not verified live robot state.
+Use [deployment verification](../../deploy/robots/README.md) after bring-up.
+
 | Robot ID | Platform | Compute / ROS | Localization / Odom | Sensors | Deploy target |
 |---|---|---|---|---|---|
 | `tars_0` | AgileX Scout Mini | Jetson AGX Xavier, ROS 1 Noetic | LVI-SAM / filtered odometry | Ouster OS1, VectorNav, RealSense D435 | `scout` (`192.168.1.230`) |
 | `botman_0` | AgileX Bunker | Jetson AGX Orin, ROS 2 Humble | SuperOdometry | Ouster OS1-128, OAK-D Pro RGB-D | `botman@botman.local` |
 | `aslan_0` | AgileX Bunker | Jetson AGX Orin, ROS 2 Humble | SuperOdometry | Ouster OS0-64, VectorNav, OAK-D | `aslan@aslan.local` |
 | `spot_0` | Boston Dynamics Spot | Jetson AGX Orin, ROS 2 Humble | LIO-SAM | Ouster, VectorNav, RealSense D435 | `spot` (`192.168.1.192`) |
+| `asimov_0` | Unitree G1 | Native Foxy/Unitree bridge + Humble containers | Native onboard localization | Mid-360 and camera; verify mount conventions | `asimov` |
 
 ## Robot Contract & Data Flow
 
@@ -16,7 +20,9 @@ Each robot can run its own local SLAM (LVI-SAM, SuperOdometry, LIO-SAM) or filte
 3. **Video Stream**: H.264 camera video stream ingested via RTSP (`:8554/<robot_id>`).
 4. **Operational Metadata**: Battery percentage, Wi-Fi link quality, object detections, nav status, and planned paths.
 
-The server's collaborative SLAM backend (`swarmdeck-slam`) optimizes trajectories across the fleet, renders the global occupancy map, and feeds it back to each robot's Nav2 planner via the navigation map downlink (`GET /api/map/nav/<robot_id>` $\rightarrow$ `/global_map`). Robots do **not** need to rasterize or upload 2D occupancy grids on board.
+The server's collaborative SLAM backend (`swarmdeck-slam`) optimizes trajectories across the fleet, renders the global occupancy map, and feeds it back to each robot's Nav2 planner via the navigation map downlink (`GET /api/map/nav/<robot_id>` $\rightarrow$ `/global_map`). The graph path can render shared occupancy from keyframes; onboard navigation
+may still require a local map. Profiles such as `hardware_asimov.yaml` select
+`static`, so inspect the selected configuration before assuming graph downlink.
 
 The operator/server address is `BACKEND_HOST` in `deploy/fleet.env`. Hardware
 profiles keep their documented ROS domains separate. Video uses RTSP ingest on

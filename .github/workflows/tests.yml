@@ -1,0 +1,52 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [server, agent, slam]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv for the SLAM environment
+        if: matrix.component == 'slam'
+        run: python -m pip install uv
+      - name: Install component
+        run: make install-${{ matrix.component }}
+      - name: Test component
+        env:
+          CORTEX_HISTORY_DIR: ${{ runner.temp }}/cortex/history
+          CORTEX_STATE_DB: ${{ runner.temp }}/cortex/state.db
+          CORTEX_UPLOAD_DIR: ${{ runner.temp }}/cortex/uploads
+        run: make test-${{ matrix.component }}
+
+  ui:
+    name: UI types, tests, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: make install-ui
+      - run: make test-ui ui-build

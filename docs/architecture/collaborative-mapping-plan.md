@@ -1,8 +1,11 @@
-# Collaborative mapping rebuild — implementation plan
+# Collaborative mapping — original design proposal
 
-Status as of 2026-08-24. Supersedes the map-registration approach described in
-[collaborative-slam.md](collaborative-slam.md), which stays as the record of why
-that approach was abandoned.
+Historical proposal and implementation notes from 2026-08-24. Some aspirations
+below (one front-end everywhere, transform-only downlink, and always rendering
+optimized poses) do not describe current deployments. Use the
+[architecture overview](overview.md) for current behavior and the
+[roadmap](roadmap.md) for remaining work. This proposal explains the shift from
+the older [grid-registration approach](collaborative-slam.md).
 
 ## The decision
 

@@ -14,7 +14,7 @@
 # identical robots hides every problem that causes, and dropping robot_3 from
 # `4robot.yaml` would drop the Spot and leave two Bunkers and a Scout Mini.
 #
-# Pair it with `odometry:=drift` for development (see `make up-argos-dev`): the
+# Pair it with `odometry:=drift` for development (see `make up-sim SCENARIO=3robot ODOMETRY=drift`): the
 # synthetic drift model removes Ultra-Fusion from the lockstep exchange, which
 # is worth about 4x on top of the robot count. Read the trade in
 # docs/architecture/simulation.md before drawing conclusions about mapping from

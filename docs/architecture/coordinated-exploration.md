@@ -1,9 +1,12 @@
 # Coordinated multi-robot exploration
 
-The default Gazebo exploration path is a joint frontier planner, implemented as
+This guide describes the legacy Gazebo joint frontier planner, implemented as
 a thin ROS node in `coordinated_explore.py` over deterministic, ROS-free
 primitives in `frontier_planner.py`. The original reactive wanderer remains an
 explicit A/B baseline (`explore_strategy:=reactive`).
+
+The default ARGoS workflow uses [MGG exploration](../operations/mgg-exploration.md).
+The measurements below are historical Gazebo results, not current ARGoS benchmarks.
 
 ## Information boundary
 
@@ -74,10 +77,13 @@ the complete pose, map, and odometry-removal evidence.
 
 ## Run and evaluate
 
-The Compose/launch default is coordinated exploration:
+For the legacy Gazebo comparison only:
 
 ```bash
-EXPLORE_STRATEGY=coordinated EXPLORE_SECONDS=600 make up-sim
+SWARMDECK_CONFIG=/app/configs/baseline_legacy.yaml \
+EXPLORE_STRATEGY=coordinated EXPLORE_SECONDS=600 \
+docker compose -f deploy/compose/docker-compose.yml --profile gazebo \
+  up --build -d server ui slam mediamtx duck_detector gazebo
 ```
 
 Metrics are written atomically to `sessions/exploration-latest.json`. For a

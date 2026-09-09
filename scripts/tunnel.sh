@@ -30,8 +30,8 @@ done
 if ! curl -fs -o /dev/null --max-time 5 "http://localhost:${PORT}/" 2>/dev/null; then
   echo "Nothing is serving http://localhost:${PORT}/ — start the stack first:" >&2
   echo "    make up-server   (server + UI: the always-on core)" >&2
-  echo "    make up-sim      (Gazebo fleet)" >&2
-  echo "    make up-mock     (synthetic fleet, no Gazebo)" >&2
+  echo "    make up-sim      (ARGoS fleet)" >&2
+  echo "    make up-mock     (synthetic fleet, no simulator)" >&2
   exit 1
 fi
 

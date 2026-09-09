@@ -10,8 +10,9 @@ navigation, teleoperation, reset, and operator-link loss end the affected robot'
 session; it never resumes automatically.
 
 The button is disabled unless the adapter advertises `explore`. Enable this only
-with a configured MGG planner and a working navigation stack. No planner service
-is called merely by launching the dashboard or containers.
+with a configured MGG planner and a working navigation stack. `make up-sim`
+leaves MGG idle by default (`EXPLORE=0`). Direct Compose invocations should set
+`EXPLORE_SECONDS=0` explicitly to disable startup exploration.
 
 ## Interface checked
 
@@ -51,7 +52,7 @@ No independent path follower should also consume
 
 ## ARGoS simulation
 
-`scripts/sim-up` (and the `make up-argos*` targets) starts MGG automatically.
+`scripts/sim-up` (and the `make up-sim` targets) starts MGG automatically.
 For example, `./scripts/sim-up --dri --drift` starts the default scene with
 exploration available; MGG remains idle until you press Explore.
 
@@ -61,7 +62,7 @@ repository root:
 
 ```bash
 SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
-SWARMDECK_ODOMETRY=drift \
+SWARMDECK_ODOMETRY=drift EXPLORE_SECONDS=0 \
 docker compose -f deploy/compose/docker-compose.yml \
   -f deploy/compose/docker-compose.gpu.yml \
   -f deploy/compose/docker-compose.mgg.yml \

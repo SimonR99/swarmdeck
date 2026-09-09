@@ -5,7 +5,7 @@
 #                  -f deploy/compose/docker-compose.gpu.yml \
 #                  -f deploy/compose/docker-compose.cslam.yml \
 #                  --profile gazebo up --build -d
-#   make docker-up-cslam
+#   See docs/architecture/simulation.md#legacy-gazebo-backend
 #
 # Requires the RTAB-Map backend: cslam's motion prior is `odom_icp`, the lidar
 # odometry, and a single-ring lidar produces no cloud to build descriptors from.

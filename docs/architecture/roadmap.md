@@ -1,69 +1,87 @@
-# Roadmap
+# Development objectives
 
-This file records current implementation status and the remaining work. Product
-requirements are defined in [requirements.md](requirements.md).
+Priorities based on the repository review in September 2026. These are proposed
+engineering outcomes, not claims about deployed hardware. Current behavior is
+in the [architecture overview](overview.md); [requirements](requirements.md)
+define the product contract.
 
-## Implemented
+The main objective remains a reliable dashboard for a heterogeneous fleet:
+operators can understand robot state, trust map alignment, issue commands, and
+recover from interruptions. ARGoS is the default validation environment; Gazebo
+and alternative estimators remain explicit comparison paths.
 
-| Area | Current state |
-|---|---|
-| Adapter contract | Versioned WebSocket/HTTP protocol; backend remains ROS-free. |
-| Adapters | Mock, Gazebo, configurable ROS 1, and configurable ROS 2 adapters (with keyframe streaming). |
-| Fleet UI | Registration, status, selection, alerts, manual drive, navigation, and stop-all. |
-| Mapping | Per-robot views, dynamic grids, `static`, guarded `auto`, and trajectory-based `graph` modes. |
-| 3D mapping | Optional compressed point-cloud upload and WebGL2 viewer. |
-| Collaborative SLAM | Joint GTSAM pose-graph back-end (`slam/`), Scan Context loop retrieval, GICP geometric verification, PCM outlier rejection, and trajectory-rendered occupancy grids (`merge_mode: graph`). Legacy Swarm-SLAM `cslam` mode retained for comparison. |
-| Video | RTSP ingest through MediaMTX, WHEP/WebRTC display, JPEG fallback. |
-| Perception | YOLOE sidecar, depth projection, operator review, deduplication, persistence. |
-| Simulation | Seeded Gazebo fleet, SLAM, Nav2, reactive exploration, keyframe extraction, headless integration test. |
-| Hardware | Scout, Botman, Aslan, and Spot profiles with centralized deployment and verification. |
-| Session events | Session manifest and timestamped JSONL operator/system event log. |
+## 1. Make the current workflow dependable
 
-## Priority work
+- Keep ARGoS build/start/stop commands consistent across renderers and scenarios.
+- Exercise reconnects, slow map consumers, adapter loss, camera loss, cancelled
+  goals, resets, and component restarts. Preserve capability checks and stop gates.
+- Extract server state/lifecycle responsibilities incrementally; keep one API
+  worker until state ownership supports multiple processes.
+- Consolidate duplicate Cortex chat implementations after auditing direct API
+  consumers. Keep the assistant optional.
 
-### 1. Multi-robot dataset recording & ground truth validation
+Done when: CI covers the relevant contracts, and two recorded four-robot ARGoS
+soak runs of at least 15 minutes complete with no unexplained command replay,
+silent state loss, or orphaned simulation processes. Record machine, config,
+source versions, dropped-frame counters, and unresolved failures with each run.
 
-- Record multi-robot time-aligned bags/MCAP on physical hardware (Ouster lidar + IMU).
-- Survey ground-truth control points to calibrate sensor noise models and information matrices.
-- Validate trajectory optimization against surveyed control points (ATE / RPE).
+## 2. Measure mapping quality and sensor timing
 
-Exit: reproducible multi-robot replay harness driven by physical bags with surveyed ground truth.
+- Fix the external-estimator capture-time contract: the ARGoS observation bridge
+  carries sensor stamps, but the estimator input protocol still only carries an
+  exchange tick. See [simulation performance](../operations/simulation-performance.md).
+- Compare Fast-LIVO2 against the synthetic-drift development baseline with the
+  same scene, seed, and motion. Measure trajectory/map error and false merges.
+- Use existing keyframe capture, replay, fault injection, and scoring tools in
+  `slam/tools/` before introducing another evaluation framework.
+- Collect time-aligned hardware datasets with surveyed or motion-capture ground
+  truth; retain configuration, calibration, and source revisions.
 
-### 2. Robot-side front-end unification
+Done when: a versioned dataset and reproducible command report ATE/RPE, map error,
+merge failures, and data loss against ground truth. State acceptance thresholds
+and compare every estimator change against that baseline.
 
-- Unify front-end lidar-inertial odometry across the fleet using time-synced Ouster lidar + IMU (FAST-LIO2 or DLIO).
-- Gravity-align all front-ends to eliminate extrinsic pitch/tilt errors.
-- Preserve ROS 1 control on Scout Mini while running modernized lidar-inertial front-end in isolated container.
+## 3. Make complete sessions recordable and replayable
 
-Exit: consistent pointcloud and odometry estimates across all hardware platforms.
+- Extend current manifests, JSONL events, keyframe captures, and Cortex history
+  into a coherent session format for telemetry, maps, detections, and commands.
+- Snapshot configurations, calibration references, and software versions.
+- Implement completeness validation and GUI replay without connected robots.
+  MCAP remains the target interchange format in the requirements.
 
-### 3. Complete session recording and replay
+Done when: a stopped session validates and reproduces the operator view offline;
+truncated recordings and dropped streams are reported instead of silently accepted.
+Offline keyframe replay alone does not meet this objective.
 
-- Record fleet state, maps, detections, commands, and stream health in a durable
-  format such as MCAP.
-- Add session validation, configuration/version snapshots, and replay without
-  connected adapters.
-- Keep JSONL operator events as the human-readable action index.
+## 4. Validate heterogeneous hardware contracts
 
-Exit: a stopped session validates and reproduces the operator view offline.
+- Verify capture timestamps, gravity/frame conventions, extrinsics, sensor
+  coverage, and disconnect/stop behavior for each deployment profile.
+- Evaluate estimator replacements against measured failures. A shared wire/frame
+  contract is required; one identical odometry implementation on every robot is
+  not. Preserve working native/ROS 1 integration where appropriate.
+- Treat fleet documentation as profile configuration, and record deployment
+  verification separately. Do not infer current robot state from an old incident.
 
-### 4. Hardening and security
+Done when: every supported profile has a reproducible bring-up and validation
+record, with any unverified sensor transform or navigation capability identified.
 
-- Add authentication and authorization before exposing hardware controls.
-- Exercise adapter loss, stream loss, disk exhaustion, browser reload, and robot
-  restart during active navigation.
-- Run repeated four-robot soak tests and verify deterministic simulation seeds.
-- Freeze tested deployment configurations for data collection.
+## 5. Enforce access and assistant boundaries before broader deployment
 
-Exit: two consecutive soak runs complete without silent data loss, unsafe command
-replay, or orphaned processes.
+- Add authentication and authorization around fleet-control and assistant APIs.
+- Separate coding-worker access from robot credentials and motion authority;
+  do not treat the tool-free shadow planner as isolation for the active provider.
+- Evaluate optional provider/planner changes against the existing Cortex contracts
+  and saved cases before granting additional authority.
 
-## Design constraints
+Done when: unauthorized control attempts are rejected, deployment privileges are
+explicit, and tests demonstrate that a coding worker cannot acquire fleet authority.
+Keep existing deployments on a trusted network or behind an authenticating proxy
+until this boundary exists.
 
-- Planner and middleware details stay inside adapters.
-- The backend and browser remain ROS-free.
-- Hardware adapters never advertise the simulation-only `reset` capability.
-- `static` map transforms remain the reliable fallback when automatic alignment
-  lacks evidence.
-- New robot support may require adapter/configuration and deployment packaging,
-  but must not require backend or UI code changes.
+## Deferred choices
+
+New estimators, agent frameworks, a native numerical rewrite, larger fleet sizes,
+and cloud/high-availability deployment need a measured problem and acceptance
+criteria first. Historical proposals and benchmark results are useful evidence;
+they are not automatic implementation commitments.

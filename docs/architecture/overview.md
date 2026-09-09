@@ -1,108 +1,119 @@
-# SwarmDeck Architecture
+# Architecture
 
-SwarmDeck connects heterogeneous robots to a web dashboard without ROS on the
-server or browser.
+SwarmDeck is a service-oriented monorepo for supervising mixed robot fleets.
+ROS stays at the robot/simulator boundary. The dashboard and fleet server use
+HTTP and WebSockets, while collaborative SLAM has its own numerical environment.
+
+## Components and ownership
+
+| Component | Entry points | Responsibility |
+| --- | --- | --- |
+| Fleet server, port 8080 | [`api/app.py`](../../server/swarmdeck_server/api/app.py), [`mapsvc/`](../../server/swarmdeck_server/mapsvc/) | Adapter registration, capability-aware commands, telemetry, map delivery, detection review, and sessions. FastAPI; no ROS. |
+| Browser, port 5173 | [`App.svelte`](../../ui/src/App.svelte), [`stores/`](../../ui/src/lib/stores/), [`Map3DScene.ts`](../../ui/src/lib/components/map3d/Map3DScene.ts) | Svelte 5/Vite, Canvas 2D and Three.js views, rendering workers, operator controls. |
+| Robot adapters | [`runtime.py`](../../adapters/runtime.py), [`adapter_ros1/`](../../adapters/adapter_ros1/), [`adapter_ros2/`](../../adapters/adapter_ros2/), [`adapter_sim/`](../../adapters/adapter_sim/), [`adapter_mock/`](../../adapters/adapter_mock/) | Translate capabilities, commands, telemetry, and sensor data into the shared protocol. ROS-free helpers are shared across bridges. |
+| Shared wire package | [`swarmdeck_protocol/`](../../adapters/protocol/swarmdeck_protocol/) | Keyframe and odometry codecs used by adapters, server, and SLAM; separate from the TypeScript UI types. |
+| Collaborative SLAM, port 8090 | [`service.py`](../../slam/swarmdeck_slam/service.py), [`backend.py`](../../slam/swarmdeck_slam/backend.py) | Keyframe admission/capture, loop-closure verification, pose-graph optimization, and map publication. Python 3.12, NumPy < 2, GTSAM. |
+| Cortex, port 8085 (optional) | [`server.py`](../../agent/agent_cortex/server.py), [`supervisor.py`](../../agent/agent_cortex/supervisor.py) | Provider-backed assistant, fleet tools, and SQLite job/event history. See [Cortex](../../agent/README.md). |
+| Simulation and navigation | [`argos/`](../../argos/), [`swarmdeck_ros/src/`](../../swarmdeck_ros/src/) | ARGoS C++ plugins and ROS bridge, odometry, onboard SLAM, Nav2, and launch packages. Gazebo remains a legacy option. |
+| Configuration and operations | [`configs/`](../../configs/), [`deploy/`](../../deploy/), [`scripts/`](../../scripts/) | Session YAML, Compose services, robot profiles, upstream patches, and deployment tools. |
+
+## Runtime flow
 
 ```mermaid
 flowchart TB
-    UI["Browser UI (:5173)<br/>Svelte 5 · Canvas 2D · WebGL2 3D"]
-    Server["FastAPI server (:8080)<br/>Fleet · Maps · Events · API"]
-    SLAM["Collaborative SLAM (:8090)<br/>Python 3.12 · GTSAM · GICP · PCM"]
-    ROS2["ROS 2 adapter<br/>Botman · Aslan · Spot"]
-    ROS1["ROS 1 adapter<br/>Scout Mini"]
-    Sim["Simulation adapter"]
-    Mock["Synthetic adapter"]
-    Detector["YOLOE perception sidecar"]
-    Media["MediaMTX (:8554 / :8889)"]
+    UI["Browser: Svelte + Canvas / Three.js"]
+    Proxy["Vite dev proxy / nginx"]
+    Server["Fleet API + map service :8080"]
+    Cortex["Optional Cortex :8085"]
+    Adapters["ROS 1 / ROS 2 / simulation / mock adapters"]
+    Bridge["Bounded keyframe forwarding queue"]
+    SLAM["SLAM worker :8090"]
+    Media["MediaMTX"]
+    Detector["Optional perception sidecar"]
+    Sessions[("sessions/: settings, reviews, events, captures")]
 
-    UI <-->|REST / WebSocket| Server
-    Server <-->|Forward keyframes / optimized maps| SLAM
-    ROS2 <-->|Adapter protocol + keyframes| Server
-    ROS1 <-->|Adapter protocol + keyframes| Server
-    Sim <-->|Adapter protocol + keyframes| Server
-    Mock <-->|Adapter protocol| Server
-    ROS2 <-->|Inference| Detector
-    ROS1 <-->|Inference| Detector
-    Sim <-->|Inference| Detector
-    ROS2 -->|RTSP| Media
-    ROS1 -->|RTSP| Media
-    Sim -->|RTSP| Media
-    Media -->|WHEP / WebRTC| UI
+    UI <-->|"HTTP / WebSocket / SSE"| Proxy
+    Proxy <-->|"/api + /ws"| Server
+    Proxy <-->|"/api/agent/*"| Cortex
+    Cortex -->|"Fleet API"| Server
+    Adapters <-->|"Telemetry + commands"| Server
+    Adapters -->|"Map / cloud / keyframe uploads"| Server
+    Server --> Bridge --> SLAM
+    SLAM -->|"Alignments + scoped grids / clouds"| Server
+    Adapters -->|RTSP| Media
+    Media -->|"WHEP / WebRTC"| UI
+    Adapters <-->|"Images / detections"| Detector
+    Server --> Sessions
+    SLAM --> Sessions
+    Cortex --> Sessions
 ```
 
-## 1. System Components
+1. An adapter registers identity and capabilities over `/adapter`, then sends
+   state. The server delivers operator commands over that connection. Bulk maps,
+   scans, camera fallback images, and keyframes use HTTP uploads.
+2. In graph mode, [`graph_bridge.py`](../../server/swarmdeck_server/mapsvc/graph_bridge.py)
+   forwards keyframes asynchronously. Both forwarding and SLAM ingestion queues
+   are bounded and can drop older frames under load. A successful server upload
+   does not prove durable capture or optimization.
+3. SLAM retrieves Scan Context candidates, verifies geometry with GICP, rejects
+   inconsistent closures, and optimizes a GTSAM graph. Its worker publishes
+   alignments and map scopes back to the server. The browser consumes server
+   snapshots/updates rather than calling the optimizer directly.
+4. Camera streaming uses MediaMTX; JPEG fallback uses the server. Perception and
+   Cortex are optional. Gaussian reconstruction is trained offline and published
+   separately; it is not part of the live pose-graph loop.
 
-### A. SwarmDeck Server (`server/`)
+The browser's `/api/agent/*` requests go to Cortex through both proxies. The
+fleet server still exposes older agent routes on its own port; these are a
+separate implementation, not the normal browser path.
 
-- FastAPI, WebSockets, and NumPy; no `rclpy` or `rospy`.
-- Fleet registry for identity, capabilities, telemetry, liveness, and commands.
-- Map service for scan accumulation, dynamic bounds, registration, merging, and
-  network-quality grids.
-- Detection review, persistent settings, and timestamped event logging.
-- Runs in its own virtual environment (Python 3.10+, NumPy 2.x).
+## Frames and mapping contracts
 
-### B. User Interface (`ui/`)
+| Frame | Meaning |
+| --- | --- |
+| World/shared | Fleet display and aligned map frame; the tactical 3D view uses Z-up world coordinates. |
+| Robot `map` | That robot's local navigation/SLAM frame. |
+| Robot `odom` | Continuous odometry frame. |
+| `base_link` / sensors | Chassis and calibrated camera, LiDAR, and IMU frames. |
 
-Svelte 5 renders the 2D occupancy map and a raw-WebGL2 point cloud. It consumes
-REST/WebSocket state and WHEP/WebRTC video, with JPEG fallback and stream/link
-diagnostics.
+`T_a_b` maps points from frame b into frame a. GTSAM `Pose3` tangent vectors and
+information matrices use rotation first, then translation. Keyframe clouds are
+in the base frame with capture-time poses; registered map clouds and optimized
+world clouds are different inputs. Respect cloud frame metadata to avoid
+applying an alignment twice.
 
-### C. Protocol Adapters (`adapters/`)
+`graph` is selected by the main fleet configurations. `static` uses configured
+transforms, `auto` is the legacy grid-registration path, and `cslam` consumes an
+external collaborative graph. Check the selected YAML rather than assuming
+all deployments share one mode. With `odometry_as_pose=true`, SLAM rendering
+preserves onboard trajectories under their shared alignment; a graph update
+need not repair an erroneous individual capture.
 
-- `adapter_ros1`: ROS 1 Noetic hardware, including Scout/LVI-SAM.
-- `adapter_ros2`: ROS 2 Humble/Jazzy hardware, including Bunker and Spot.
-- `adapter_sim`: simulated fleet with planar/3D keyframe extraction. Backed by
-  ARGoS by default; see [simulation](simulation.md).
-- `adapter_mock`: synthetic fleet without ROS or a GPU.
+Local collision avoidance belongs to onboard sensor/costmap processing. Shared
+maps can feed global planning through the map downlink. Hardware adapters never
+advertise the simulation-only `reset` capability.
 
-All use the same [wire protocol](../../adapters/protocol/README.md).
+See [protocol details](../../adapters/protocol/README.md),
+[capture timing](../operations/keyframe-yaw.md), and
+[3D map behavior](../operations/tactical-3d-map.md). The
+[original mapping proposal](collaborative-mapping-plan.md) explains design intent;
+it is not a complete description of the current implementation.
 
-### D. Collaborative SLAM Back-end (`slam/`)
+## Architecture review and maintenance priorities
 
-- Dedicated service (`swarmdeck-slam`, port 8090) implementing trajectory-based
-  collaborative SLAM.
-- Ingests keyframe packets (voxel-downsampled base-frame point cloud + odometry pose).
-- Generates Scan Context descriptors, retrieves candidate loop closures via KD-tree,
-  and verifies them geometrically using GICP.
-- Rejects false loop closures via Pairwise Consistency Maximization (PCM, minimum clique size 2)
-  and Graduated Non-Convexity (GNC).
-- Optimizes a joint pose graph in GTSAM and renders consistent 2D occupancy grids per
-  multi-robot connected component directly from optimized trajectories.
-- **Python Environment Isolation**: Strictly pinned to Python 3.12 and NumPy < 2.
-  `gtsam==4.2.2` segfaults under NumPy 2.x, which is why it runs in its own isolated
-  distribution (`slam/.venv`) separate from `server/.venv`.
+Source review, September 2026. Keep the current process boundaries: they isolate
+ROS dependencies, incompatible numerical libraries, and optional services.
+Prefer incremental extraction and contract tests over a framework rewrite.
 
-## 2. Coordinate Frames & Transforms
+| Priority | Evidence and consequence | Recommended next change |
+| --- | --- | --- |
+| High: single-process server state | `api/app.py` owns module-global clients, settings, reset state, and review stores; `mapsvc/service.py` owns mutable maps and locks. Multiple API workers would hold different fleet state. | Keep one server worker. Extract an explicit application-state object and lifespan-owned services with injected route dependencies before considering replication. |
+| High: duplicate assistant implementation | `server/swarmdeck_server/api/agent_routes.py` launches AGY directly, while browser proxies use the provider/supervisor implementation in `agent/`. Fixes to one path need not affect the other. | Audit direct-port consumers, then retire or forward legacy chat routes with compatibility tests; retain server-owned robot control endpoints. |
+| High: privileged optional service | Cortex Compose mounts the source workspace and can receive provider/SSH credentials. The normal provider path is not isolated by the typed shadow-planner boundary; the API lacks authentication. | Keep Cortex opt-in. Separate coding-worker privileges from fleet execution and add enforced identity/authorization before broader deployment. |
+| Medium: large orchestration modules | Adapter entry points, `api/app.py`, and `slam/backend.py` each mix substantial lifecycle and domain logic. Shared `adapters/runtime.py` and extracted map/route modules already provide useful seams. | Extract one responsibility at a time when changing it; verify reconnection, resets, command cancellation, and frame contracts at the boundary. |
+| Medium: reproducibility and verification | Python manifests mostly use lower bounds; ROS/native checks need images or hardware. A unit suite cannot establish live sensor or navigation behavior. | Add per-environment Python constraints/locks after validating supported robot runtimes, and maintain simulation/hardware acceptance checks separately from ROS-free CI. |
 
-SwarmDeck standardizes coordinate frames across heterogeneous robots:
-
-| Frame | Scope | Description |
-|---|---|---|
-| shared/world | Fleet | Backend/UI merged frame, normally anchored to the reference robot. |
-| `map` | Robot | Local SLAM frame. |
-| `odom` | Robot | Continuous odometry frame. |
-| `base_link` | Robot | Chassis frame. |
-| sensor frames | Robot | Camera, lidar, and IMU frames. |
-
-### Transform and tangent conventions
-
-- **Direction**: Every transform `T_a_b` maps coordinates in frame `b` into frame `a` ($p_a = T_{a\_b} \cdot p_b$).
-- **Tangent vector ordering**: GTSAM `Pose3` tangent vectors and information matrices are **rotation first** ($\omega_x, \omega_y, \omega_z, v_x, v_y, v_z$).
-
-### 2D map merging modes
-
-- `graph`: (default in `4robot.yaml`, `2robot.yaml`, `hardware_fleet.yaml`) Trajectory-based
-  pose graph optimization in `slam/`. Occupancy grids are rendered from optimized poses,
-  guaranteeing that maps cannot disagree with trajectories.
-- `static`: Applies configured start transforms.
-- `auto`: (legacy 2D grid stitcher) Correlates signed occupied/free grids over SE(2) with
-  strict ambiguity and yaw guards. Retained as an independent diagnostic cross-check.
-- `cslam`: (legacy Swarm-SLAM / RTAB-Map overlay) Consumes external collaborative graph
-  summaries.
-
-See [collaborative mapping plan](collaborative-mapping-plan.md) and [collaborative-slam.md](collaborative-slam.md) for full design details.
-
-### Safety boundary
-
-The `reset` capability is strictly simulation-only (`adapter_sim`, `mock_adapter`). Hardware
-adapters must never advertise or implement `reset`.
+Repository maintenance now includes separate server, Cortex, SLAM, and UI test
+commands and CI jobs, a short root `AGENTS.md`, and one current architecture
+reference. Keep task history in Git/PRs and remaining product work in the
+[roadmap](roadmap.md), rather than duplicating status in progress documents.

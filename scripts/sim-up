@@ -3,7 +3,7 @@
 # SwarmDeck Simulation Bring-Up Script (scripts/sim-up)
 # ==============================================================================
 #
-# Manages the lifecycle of the SwarmDeck simulation stack (ARGoS / Gazebo,
+# Manages the lifecycle of the SwarmDeck ARGoS simulation stack (
 # Fast-LIVO2 estimator, per-robot SLAM/Nav2, adapter_sim, and web UI/server).
 #
 # Examples:
@@ -45,6 +45,7 @@ Lifecycle Actions:
   --status            Display status of running simulation containers
   --logs              Follow logs of simulation containers
   --dry-run           Print Compose command and environment without executing
+  --build-only        Build the selected stack without starting containers
   -h, --help          Show this help message
 
 Configuration Options:
@@ -101,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       ACTION="dry-run"
+      shift
+      ;;
+    --build-only)
+      ACTION="build"
       shift
       ;;
     -s|--scenario)
@@ -257,7 +262,7 @@ Environment:
 EOF
     exit 0
     ;;
-  up)
+  up|build)
     ;;
 esac
 
@@ -292,6 +297,11 @@ export SWARMDECK_ODOMETRY="${ODOMETRY}"
 export SWARMDECK_TARGETS="${TARGETS}"
 export EXPLORE_SECONDS="${EXPLORE_SECONDS}"
 
+if [[ "${ACTION}" == "build" ]]; then
+  "${COMPOSE_CMD[@]}" --profile argos build "${SERVICES[@]}"
+  exit 0
+fi
+
 "${COMPOSE_CMD[@]}" --profile argos up "${UP_FLAGS[@]}" "${SERVICES[@]}"
 
 cat <<EOF
@@ -303,6 +313,6 @@ SwarmDeck Simulation is running!
   Camera Streams: http://localhost:8889
 
 To view logs:   ./scripts/sim-up --logs   (or: make docker-logs)
-To stop stack:  ./scripts/sim-up --down   (or: make down-argos)
+To stop stack:  ./scripts/sim-up --down   (or: make down-sim)
 ============================================================
 EOF

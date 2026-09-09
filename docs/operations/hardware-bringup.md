@@ -43,7 +43,7 @@ The pose-graph process is required for merged maps. Per-robot local maps still
 upload if it is down; they just will not merge. Confirm it with
 `curl -fsS http://localhost:8090/health`.
 
-Open <http://localhost:5173>. `make tunnel` is simulator-only unless an
+Open <http://localhost:5173>. `./scripts/tunnel.sh` is simulator-only unless an
 authenticating proxy protects hardware controls.
 
 ## Pre-flight checklist

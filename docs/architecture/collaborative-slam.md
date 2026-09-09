@@ -1,11 +1,11 @@
 # Mapping and collaborative SLAM
 
 > [!NOTE]
-> **Architecture Status**: This document records the initial map-registration and Swarm-SLAM integration analysis, detailing why those approaches were superseded. For the current, active trajectory-merging GTSAM pose-graph architecture (`merge_mode: graph`), see [Collaborative Mapping Plan](collaborative-mapping-plan.md).
+> **Architecture Status**: This document records the initial map-registration and Swarm-SLAM integration analysis, detailing why those approaches were superseded. For the current, active trajectory-merging GTSAM pose-graph architecture (`merge_mode: graph`), see [architecture overview](overview.md).
 
 SwarmDeck supports trajectory-based collaborative SLAM (`merge_mode: graph`), static start transforms (`static`), backend 2D map registration (`auto`, legacy/diagnostic), and the experimental Swarm-SLAM integration (`cslam`, legacy).
 
-## Current mapping paths
+## Historical mapping paths
 
 ```mermaid
 flowchart LR
@@ -37,7 +37,7 @@ height-filtered 2D scan to lose distant returns.
 
 ### Backend map registration
 
-The default backend is a map stitcher, not collaborative SLAM. Each robot first
+The original backend used a map stitcher; current fleet configs use `graph` mode. Each robot first
 corrects its own trajectory. The map service then aligns completed local grids
 in SE(2):
 
@@ -60,7 +60,8 @@ correct another robot's drift.
 
 ## Swarm-SLAM integration
 
-`make docker-up-cslam` adds MISTLab Swarm-SLAM to the Gazebo/RTAB-Map stack.
+The legacy Compose overlay adds MISTLab Swarm-SLAM to Gazebo/RTAB-Map.
+Use the explicit command in [Legacy Gazebo](simulation.md#legacy-gazebo-backend).
 Swarm-SLAM exchanges descriptors, geometrically verifies inter-robot loop
 closures, and optimizes a joint GTSAM graph. `swarmdeck_cslam/graph_reporter`
 publishes a compact JSON summary that `adapter_sim` forwards as the optional

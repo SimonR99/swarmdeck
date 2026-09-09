@@ -23,6 +23,7 @@ argos/build
 sessions/*
 !sessions/.gitkeep
 docs
+research/
 *.md
 !README.md
 .vscode

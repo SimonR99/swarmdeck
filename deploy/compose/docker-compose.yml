@@ -266,13 +266,13 @@ services:
       # when that experiment declares an <external_estimator>.
       #
       # Naming fast_livo2 here as well would drag it into every `up`, and the
-      # development path (`make up-argos-dev`, odometry:=drift) has no
+      # development path (`make up-sim SCENARIO=3robot ODOMETRY=drift`, odometry:=drift) has no
       # estimator to wait for and no reason to pay for one.
       sim:
         condition: service_started
     environment:
       RUNTIME_DIR: /run/swarmdeck
-      # The portable default. `make up-argos-gpu` turns it off and hands the
+      # The portable default. `make up-sim RENDER=gpu` turns it off and hands the
       # container a real device; measured at 0.93x real time on lavapipe with
       # four robots, a 17-ring lidar and 320x240 RGB-D cameras.
       SWARMDECK_SOFTWARE_RENDER: "${SWARMDECK_SOFTWARE_RENDER:-true}"
@@ -326,7 +326,7 @@ services:
       SWARMDECK_TARGETS: "${SWARMDECK_TARGETS:-10}"
       # fast_livo2 = Fast-LIVO2. drift = ARGoS's synthetic model, roughly 4x
       # faster because it leaves the lockstep exchange, and correspondingly
-      # less faithful. `make up-argos-dev` sets drift; nothing else should.
+      # less faithful. `make up-sim ODOMETRY=drift` selects it explicitly.
       SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-fast_livo2}"
       # Bootstrap the maps by exploring, then stop and hand the fleet to the
       # operator. Without this nothing drives, and goals issued against an empty
@@ -404,7 +404,7 @@ services:
     # NOT swarmdeck-sim:local. That tag belongs to the `sim` service, which
     # builds Dockerfile.sim and entrypoints into the ARGoS session; sharing it
     # meant one `make build-sim` replaced the ARGoS container's image with this
-    # one, and `make up-argos` then started Gazebo without saying so.
+    # one, and `make up-sim` then started Gazebo without saying so.
     image: swarmdeck-gazebo:local
     depends_on:
       server:
@@ -431,7 +431,7 @@ services:
       # (0.54 -> 0.25 measured) and the 2D map is unaffected either way — but it
       # belongs here rather than only in the entrypoint, because "why is the 3D
       # view flat" is otherwise a question with no discoverable answer.
-      #   GRID_3D=true SLAM_BACKEND=rtabmap make docker-up-gpu
+      #   See docs/architecture/simulation.md#legacy-gazebo-backend for RTAB-Map.
       GRID_3D: "${GRID_3D:-false}"
       FUSE_IMU: "${FUSE_IMU:-true}"
       # Bootstrap the maps by exploring, then stop and hand the fleet to the

@@ -4,24 +4,26 @@ Start with the root [README](../README.md) for setup and package structure.
 
 | Topic | Document |
 |---|---|
-| Components, data flow, and frames | [Architecture](architecture/overview.md) |
+| Components, data flow, frames, and architecture review | [Architecture](architecture/overview.md) |
 | ARGoS rendering, sensors, and Fast-LIVO2 odometry | [Simulation](architecture/simulation.md) |
 | Autonomous exploration for simulation and ROS 2 hardware | [MGG exploration](operations/mgg-exploration.md) |
 | Simulation timestamps, adapter costs, and tuning | [Simulation performance](operations/simulation-performance.md) |
-| Pose-graph collaborative SLAM design | [Collaborative mapping plan](architecture/collaborative-mapping-plan.md) |
+| Historical pose-graph design proposal | [Collaborative mapping proposal](architecture/collaborative-mapping-plan.md) |
 | Low-odometry reconstruction and measured accuracy | [Odometry-free reconstruction](architecture/odometry-free-keyframe-reconstruction.md) |
-| Joint frontier allocation and measured exploration | [Coordinated exploration](architecture/coordinated-exploration.md) |
+| Legacy Gazebo frontier allocation and historical measurements | [Coordinated exploration](architecture/coordinated-exploration.md) |
 | Legacy grid-registration & Swarm-SLAM analysis | [Collaborative SLAM](architecture/collaborative-slam.md) |
 | Detection and operator review | [Perception](architecture/perception.md) |
 | Product scope and acceptance criteria | [Requirements](architecture/requirements.md) |
-| Implemented and remaining work | [Roadmap](architecture/roadmap.md) |
+| Current development objectives and completion criteria | [Roadmap](architecture/roadmap.md) |
 | Adapter messages and binary payloads | [Adapter protocol](../adapters/protocol/README.md) |
 | Physical fleet hardware | [Fleet matrix](robots/fleet.md) |
 | Tactical 3D maps and RGB-D reconstruction | [3D map workflow](operations/tactical-3d-map.md) |
 | Capture-time poses, guards, and rotated duplicates | [Keyframe timing](operations/keyframe-yaw.md) |
 | Development workflow and focused tests | [Contributing](../CONTRIBUTING.md) |
+| Coding-agent commands, constraints, and documentation ownership | [AGENTS.md](../AGENTS.md) |
 | Deployment and safety checks | [Hardware bring-up](operations/hardware-bringup.md) |
 | Active limitations and traps | [Known issues](operations/known-issues.md) |
 
 Robot-specific prerequisites and shutdown commands: [Scout](robots/scout.md),
-[Botman](robots/botman.md), [Aslan](robots/aslan.md), and [Spot](robots/spot.md).
+[Botman](robots/botman.md), [Aslan](robots/aslan.md), [Spot](robots/spot.md), and
+[Asimov](../deploy/robots/README.md#asimov-unitree-g1).

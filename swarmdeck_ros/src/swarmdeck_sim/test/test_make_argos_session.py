@@ -412,8 +412,19 @@ BISTRO_CONFIG = REPO / "configs" / "4robot_bistro.yaml"
 
 
 @pytest.fixture(scope="module")
-def bistro_tree():
-    return ElementTree.fromstring(mas.generate_argos_xml(BISTRO_CONFIG))
+def bistro_assets():
+    """Real terrain/lighting checks require the separately distributed scene."""
+    try:
+        return mas.find_bistro_assets_dir()
+    except FileNotFoundError:
+        pytest.skip("Bistro assets unavailable; set SWARMDECK_BISTRO_DIR")
+
+
+@pytest.fixture(scope="module")
+def bistro_tree(bistro_assets):
+    return ElementTree.fromstring(
+        mas.generate_argos_xml(BISTRO_CONFIG, bistro_dir=bistro_assets)
+    )
 
 
 @pytest.fixture(scope="module")
@@ -482,7 +493,7 @@ def test_bistro_robot_spawn_poses(bistro_tree, bistro_cfg):
         assert yaw == pytest.approx(math.degrees(pose["yaw"]), abs=1e-2)
 
 
-def test_bistro_3robot_dev_config():
+def test_bistro_3robot_dev_config(bistro_assets):
     """3-robot bistro config starts one of each platform."""
     dev = REPO / "configs" / "3robot_bistro.yaml"
     cfg = yaml.safe_load(dev.read_text())
@@ -491,7 +502,7 @@ def test_bistro_3robot_dev_config():
         fleet, int(fleet["robot_count"]), fleet.get("robot_prefix", "robot_")
     )
     assert sorted(types) == ["bunker", "scout_mini", "spot"]
-    tree = ElementTree.fromstring(mas.generate_argos_xml(dev))
+    tree = ElementTree.fromstring(mas.generate_argos_xml(dev, bistro_dir=bistro_assets))
     arena = tree.find("arena")
     for platform in types:
         assert arena.findall(f"./{platform}"), platform

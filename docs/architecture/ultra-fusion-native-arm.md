@@ -6,6 +6,10 @@ implements selected paper equations and a plane residual/Jacobian traced through
 the binary. This does not establish full estimator equivalence, ARM compatibility,
 or real-time performance. The inspection below establishes the remaining binary scope.
 
+This is a bounded investigation, not the default odometry path or a committed
+rewrite objective. Current simulation uses Fast-LIVO2; see the
+[development objectives](roadmap.md) before extending this work.
+
 ## Release examined
 
 - Public repository revision: `9235a9601c532fc570f9ee7337a03d23611e148c`.
