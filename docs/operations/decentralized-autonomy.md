@@ -232,6 +232,11 @@ transforms; geometry replacements and retractions remove the old active
 contribution. Free-space queries require measured rays with known origins.
 Absence of a point is never sufficient to declare traversability or clearance.
 
+Optimizer diagnostics distinguish received results, accepted results, unchanged
+accepted results, and applied corrections. `last_solution_order` records the
+latest accepted causal identity. The legacy `solutions` counter counts only
+pose-changing corrections; zero does not mean the optimizer is inactive.
+
 The server exposes `/api/autonomy/replicas` and content-addressed
 `/api/autonomy/chunks/<sha256>`. A manifest becomes visible only after every
 referenced chunk exists. Reconnects negotiate missing hashes in one manifest request and transfer only
@@ -380,14 +385,49 @@ or continued motion during an operator-link outage. Arm64 builds, physical robot
 transparent peer restart, and comparative four-robot coverage are separate
 acceptance gates and must not be inferred from these unit/build results.
 
+After reconnecting the workstation, a fresh mission
+`88492d31-5c28-4de9-bbbd-8bfb1a74014d` ran Bistro with onboard authority, MGG
+objectives, and peer coordination enabled. All four robots executed paths during
+a 90-second Explore trial. Independently recorded ground-truth displacements
+were approximately 12.7, 3.8, 15.1, and 25.2 m; the peers captured 26, 16, 32,
+and 54 keyframes with no dropped keyframe pairs. Robot 1 encountered repeated
+controller progress failures. All four reported stopped, inactive navigation,
+and empty paths after Stop All; a subsequent short run also verified the
+observer's command-write and shutdown handling. These measurements establish
+execution, not exploration coverage or successful fleet coordination: the maps
+remained in four disconnected components, and no inter-robot alignment was
+validated. Singleton optimizer results were accepted without pose corrections.
+
+The operator reports that Bistro needs `max_mean_error` near 0.6 in the existing
+registration pipeline. That parameter belongs to `swarmdeck_slam.verify`; native
+Swarm-SLAM uses different admission controls. Investigating the relationship
+and validating closure accuracy is deferred; this refactor does not relax either
+pipeline's acceptance thresholds.
+
+The trial also exposed repeated rebuilding of an unchanged map that exceeded
+the indexed-map time budget. Failed sources now retry with exponential delays
+from one to 60 seconds, retaining decoded chunks and returning unavailable.
+A changed snapshot bypasses the delay, and healthy peers continue refreshing.
+With the fleet stopped, a subsequent worker sample used about 1.5% of one CPU
+instead of the earlier sustained full core. This is an idle observation, not a
+worst-case build benchmark; budget-limited maps still return unavailable.
+
+To repeat the bounded observation against the isolated API, use
+`adapters/test/ros/onboard_exploration_observer.py --mission-id <UUID>` on the
+workstation. It samples fleet and replica state and issues Stop All on exit.
+Run `adapters/test/ros/simulation_evidence_recorder.py` in the simulation's ROS
+domain before starting peers to retain first-keyframe timestamps and independent
+ground truth. Its trajectory-cell overlap is a diagnostic heuristic, not a
+sensor-coverage measurement.
+
 ## Remaining acceptance work
 
 The integration boundaries are implemented; the full rollout plan remains in
 progress. In particular:
 
-- Run the four-robot Bistro scenario with onboard authority and peer coordination
-  enabled, measuring duplicate coverage and inter-robot alignment against the
-  independent simulation reference. The earlier Bistro run used shadow mapping.
+- Measure duplicate coverage and inter-robot alignment in the four-robot Bistro
+  scenario after the deferred admission investigation. The onboard run above
+  establishes four-robot execution but does not pass these accuracy gates.
 - Exercise peers on separate hosts through partitions, rejoin, and optimizer
   loss. A frontend restart currently requires a fresh fleet mission and domain;
   transparent restart with preserved native graph state is not implemented.

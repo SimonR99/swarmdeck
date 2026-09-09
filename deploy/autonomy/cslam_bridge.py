@@ -158,6 +158,9 @@ class Bridge(Node):
         self.normalized_count = self.capture_count = self.solution_count = (
             self.dropped
         ) = 0
+        self.solution_results_received = self.solution_results_accepted = (
+            self.solution_results_unchanged
+        ) = 0
         self.sensor_node.create_subscription(
             PointCloud2, p["cloud_topic"], self.raw_cloud, qos_profile_sensor_data
         )
@@ -360,8 +363,16 @@ class Bridge(Node):
                 self.dropped += 1
 
     def optimized(self, msg):
-        if self.core.solution(msg):
+        self.solution_results_received += 1
+        previous_order = self.core.solution_order
+        corrected = self.core.solution(msg)
+        accepted = self.core.solution_order != previous_order
+        if accepted:
+            self.solution_results_accepted += 1
+        if corrected:
             self.solution_count += 1
+        elif accepted:
+            self.solution_results_unchanged += 1
 
     def snapshot(self):
         with self._shared_lock:
@@ -469,7 +480,14 @@ class Bridge(Node):
             "mission_id": self.core.mission_id,
             "normalized_scans": normalized_count,
             "keyframes": self.capture_count,
+            # `solutions` is retained for compatibility and has always counted
+            # pose-changing corrections rather than native optimizer messages.
             "solutions": self.solution_count,
+            "solution_results_received": self.solution_results_received,
+            "solution_results_accepted": self.solution_results_accepted,
+            "solution_results_unchanged": self.solution_results_unchanged,
+            "corrections_applied": self.solution_count,
+            "last_solution_order": list(self.core.solution_order),
             "revision": self.core.revision,
             "replicated_revision": self.acked_revision,
             "replication_error": self.replica_error,

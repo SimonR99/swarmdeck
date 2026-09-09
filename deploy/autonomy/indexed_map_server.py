@@ -85,6 +85,7 @@ class IndexRegistry:
         *,
         snapshot_age_s: float,
         poll_s: float,
+        clock=time.monotonic,
     ):
         try:
             mission = str(uuid.UUID(mission_id))
@@ -96,9 +97,16 @@ class IndexRegistry:
         self.mission_id = mission
         self.max_snapshot_age_ns = int(snapshot_age_s * 1e9)
         self.poll_s = poll_s
+        self._clock = clock
         self._lock = threading.RLock()
         self._views: dict[tuple[str, str], IndexedMapView] = {}
         self._roots: dict[tuple[str, str], Path] = {}
+        # A failed source is retried exponentially, while a changed snapshot
+        # identity gets an immediate attempt. Keep this keyed by root rather
+        # than component so one bad publication cannot spin all its views.
+        self._failed_sources: dict[
+            Path, tuple[tuple[int, int, int, int], int, float]
+        ] = {}
         self._robots: set[str] = set()
         self._ambiguous: set[str] = set()
         self._stop = threading.Event()
@@ -128,36 +136,87 @@ class IndexRegistry:
             return _unavailable("component index is unavailable")
         return view.query(request)
 
+    @staticmethod
+    def _snapshot_signature(path: Path) -> tuple[int, int, int, int]:
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    def _invalidate_root(self, root: Path, detail: str) -> None:
+        with self._lock:
+            affected = [
+                view
+                for identity, view in self._views.items()
+                if self._roots.get(identity) == root
+            ]
+        for view in affected:
+            view.invalidate(detail)
+
+    def _record_failure(
+        self, root: Path, signature: tuple[int, int, int, int], now: float
+    ) -> None:
+        previous = self._failed_sources.get(root)
+        attempts = previous[1] + 1 if previous and previous[0] == signature else 1
+        # Seven attempts reach the 60 second ceiling. Keep the counter capped
+        # as well as the delay so an always-broken source cannot overflow the
+        # exponent after a long-lived process has retried it many times.
+        attempts = min(attempts, 7)
+        delay = min(60.0, 2.0 ** (attempts - 1))
+        self._failed_sources[root] = (signature, attempts, now + delay)
+
+    def _retry_allowed(
+        self, root: Path, signature: tuple[int, int, int, int], now: float
+    ) -> bool:
+        previous = self._failed_sources.get(root)
+        if previous is None:
+            return True
+        if previous[0] != signature:
+            # Atomic replacement, mtime/size change, or a new inode means a
+            # new source revision. Do not carry failure backoff across it.
+            self._failed_sources.pop(root, None)
+            return True
+        return now >= previous[2]
+
     def refresh_once(self) -> None:
         paths = tuple(
             sorted((self.maps_root / self.mission_id).glob("*/snapshot.json"))
         )
         robots_to_roots: dict[str, set[Path]] = {}
-        discovered: list[tuple[str, str, Path]] = []
+        discovered: list[tuple[str, str, Path, tuple[int, int, int, int]]] = []
+        preserve_roots: set[Path] = set()
+        validated_roots: set[Path] = set()
+        now = self._clock()
         for path in paths:
             robot = path.parent.name
-            robots_to_roots.setdefault(robot, set()).add(path.parent)
+            root = path.parent
+            robots_to_roots.setdefault(robot, set()).add(root)
+            try:
+                signature = self._snapshot_signature(path)
+            except OSError as exc:
+                self._invalidate_root(root, f"snapshot validation failed: {exc}")
+                continue
+            if not self._retry_allowed(root, signature, now):
+                preserve_roots.add(root)
+                continue
             try:
                 components = _component_ids(path)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
-                with self._lock:
-                    affected = [
-                        view
-                        for identity, view in self._views.items()
-                        if self._roots.get(identity) == path.parent
-                    ]
-                for view in affected:
-                    view.invalidate(f"snapshot validation failed: {exc}")
+                self._invalidate_root(root, f"snapshot validation failed: {exc}")
+                self._record_failure(root, signature, now)
+                preserve_roots.add(root)
                 continue
+            validated_roots.add(root)
             discovered.extend(
-                (robot, component, path.parent) for component in components
+                (robot, component, root, signature) for component in components
             )
         with self._lock:
-            self._robots.update(robots_to_roots)
+            self._robots = set(robots_to_roots)
             self._ambiguous = {
                 robot for robot, roots in robots_to_roots.items() if len(roots) != 1
             }
-        for robot, component, root in discovered:
+        failed_roots: set[Path] = set()
+        for robot, component, root, signature in discovered:
+            if root in failed_roots:
+                continue
             if robot in self._ambiguous:
                 continue
             identity = (robot, component)
@@ -167,17 +226,59 @@ class IndexRegistry:
             source = SnapshotDirectorySource(root)
             try:
                 source.refresh(view, component)
-            except (OSError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
                 # IndexedMapView invalidates its old publication on every
                 # extraction, integrity, or build failure.
+                # Snapshot parsing and chunk I/O can fail before the view is
+                # entered, however, so fail closed here as well. This keeps a
+                # previously published index from being served while the
+                # source is in the retry backoff window.
+                self._invalidate_root(root, f"index refresh failed: {exc}")
+                try:
+                    latest_signature = self._snapshot_signature(source.snapshot_path)
+                except OSError:
+                    latest_signature = signature
+                if latest_signature == signature:
+                    self._record_failure(root, signature, self._clock())
+                else:
+                    self._failed_sources.pop(root, None)
+                failed_roots.add(root)
                 continue
-        current = {(robot, component) for robot, component, _ in discovered}
+        # A source failure is recorded once for the whole source refresh. Only
+        # a complete pass over all of its components clears an older failure.
+        nonambiguous_roots = {
+            root
+            for robot, roots in robots_to_roots.items()
+            if robot not in self._ambiguous
+            for root in roots
+        }
+        successful_roots = validated_roots & nonambiguous_roots - failed_roots
+        for root in successful_roots:
+            self._failed_sources.pop(root, None)
+        current = {(robot, component) for robot, component, _, _ in discovered}
         with self._lock:
+            current.update(
+                identity
+                for identity, root in self._roots.items()
+                if root in preserve_roots
+            )
             removed = [
                 view
                 for identity, view in self._views.items()
-                if identity not in current and identity[0] not in self._ambiguous
+                if identity not in current
             ]
+            removed_identities = [
+                identity
+                for identity in self._views
+                if identity not in current
+            ]
+            for identity in removed_identities:
+                self._views.pop(identity, None)
+                self._roots.pop(identity, None)
+            active_roots = {path.parent for path in paths}
+            for root in tuple(self._failed_sources):
+                if root not in active_roots:
+                    self._failed_sources.pop(root, None)
         for view in removed:
             view.invalidate("component is absent from the current coherent snapshot")
 
@@ -219,9 +320,9 @@ def main() -> None:
             # separate so create_service() can append to that list normally.
             self._robot_services: dict[str, object] = {}
             self._callbacks = ReentrantCallbackGroup()
-            self.create_timer(
-                0.25, self._discover_services, callback_group=self._callbacks
-            )
+            # Discovery mutates the service table. Keep its timer in the
+            # default mutually exclusive group; queries may run concurrently.
+            self.create_timer(0.25, self._discover_services)
 
         def _discover_services(self) -> None:
             for robot in registry.robots():

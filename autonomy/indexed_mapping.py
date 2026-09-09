@@ -258,7 +258,14 @@ class IndexedMapView:
         """Fail closed after the coherent source can no longer be validated."""
 
         with self._lock:
-            self._unavailable_key = self._index.key if self._index is not None else None
+            # A failed newer build records its key before the registry applies
+            # a source-wide invalidation. Preserve that key so callers asking
+            # for the failed revision receive UNAVAILABLE rather than seeing
+            # it misreported as a merely stale older publication.
+            if self._unavailable_key is None:
+                self._unavailable_key = (
+                    self._index.key if self._index is not None else None
+                )
             self._unavailable_detail = detail
 
     def refresh(
