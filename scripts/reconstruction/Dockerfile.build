@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake curl ca-certificates unzip pkg-config \
       libeigen3-dev libglfw3-dev libglm-dev libopengl-dev \
       libglew-dev libx11-dev libxi-dev libxrandr-dev \
-      libxinerama-dev libxcursor-dev zlib1g-dev \
+      libxinerama-dev libxcursor-dev zlib1g-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # LibTorch is the exact cxx11-ABI/cu118 archive documented by UMAMI's source.
@@ -65,16 +65,17 @@ RUN curl --fail --location --retry 3 "https://github.com/open-source-parsers/jso
     && cmake --install /tmp/jsoncpp-build \
     && rm -rf /tmp/jsoncpp-${JSONCPP_VERSION} /tmp/jsoncpp-build /tmp/jsoncpp.tar.gz
 
-RUN curl --fail --location --retry 3 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION//./_}.tar.gz" -o /tmp/boost.tar.gz \
+RUN BOOST_SOURCE_VERSION=$(printf '%s' "${BOOST_VERSION}" | tr '.' '_') \
+    && curl --fail --location --retry 3 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_SOURCE_VERSION}.tar.gz" -o /tmp/boost.tar.gz \
     && tar -xzf /tmp/boost.tar.gz -C /tmp \
-    && cd /tmp/boost_${BOOST_VERSION//./_} \
+    && cd "/tmp/boost_${BOOST_SOURCE_VERSION}" \
     && ./bootstrap.sh --with-libraries=serialization --prefix=/opt/deps/boost \
     && ./b2 -j${BUILD_JOBS} install \
-    && rm -rf /tmp/boost_${BOOST_VERSION//./_} /tmp/boost.tar.gz
+    && rm -rf "/tmp/boost_${BOOST_SOURCE_VERSION}" /tmp/boost.tar.gz
 
 FROM dependencies AS builder
 
-ARG BUILD_JOBS=4
+ARG NATIVE_BUILD_JOBS=2
 ARG GIOJO_CUDA_ARCHS=86
 ARG GIOJO_GLIBCXX_ABI=1
 ARG UMAMI_REF=unknown
@@ -82,8 +83,44 @@ ARG UMAMI_REF=unknown
 LABEL org.opencontainers.image.title="SwarmDeck private UMAMI runner" \
       org.opencontainers.image.revision="${UMAMI_REF}"
 
+# UMAMI's root CMake links against ORB-SLAM3/lib/libORB_SLAM3.so and its DBoW2
+# companion, but the pinned checkout does not contain built binaries and its
+# upstream build.sh is absent. Build DBoW2, g2o, and ORB-SLAM3 before the
+# Gaussian mapper.
 RUN --mount=type=bind,from=umami,source=.,target=/src/UMAMI-SLAM,readonly \
     cp -a /src/UMAMI-SLAM /tmp/UMAMI-SLAM \
+    && export GIOJO_GLIBCXX_ABI=${GIOJO_GLIBCXX_ABI} \
+    && build_logged() { \
+         BUILD_LABEL="$1"; BUILD_DIRECTORY="$2"; BUILD_TARGET="$3"; BUILD_LOG="$4"; \
+         BUILD_START=$(date +%s); \
+         if cmake --build "${BUILD_DIRECTORY}" --target "${BUILD_TARGET}" \
+              -j${NATIVE_BUILD_JOBS} > "${BUILD_LOG}" 2>&1; then \
+           echo "${BUILD_LABEL} build completed in $(($(date +%s) - BUILD_START))s"; \
+         else \
+           BUILD_STATUS=$?; \
+           grep -n -C 3 -E 'fatal error:|error:|Killed|No rule|Stop\.|undefined reference|collect2:|\*\*\*' \
+             "${BUILD_LOG}" || true; \
+           tail -n 80 "${BUILD_LOG}"; \
+           return "${BUILD_STATUS}"; \
+         fi; \
+       } \
+    && cmake -S /tmp/UMAMI-SLAM/ORB-SLAM3/Thirdparty/DBoW2 \
+         -B /tmp/dbow2-build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=${GIOJO_GLIBCXX_ABI} -I/opt/deps/boost/include" \
+         -DOpenCV_DIR=/opt/deps/opencv/lib/cmake/opencv4 \
+    && build_logged DBoW2 /tmp/dbow2-build DBoW2 /tmp/dbow2-build.log \
+    && cmake -S /tmp/UMAMI-SLAM/ORB-SLAM3 \
+         -B /tmp/orb-slam3-build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_CXX_FLAGS_DEBUG=-g0 \
+         -DOpenCV_DIR=/opt/deps/opencv/lib/cmake/opencv4 \
+         -DBOOST_ROOT=/opt/deps/boost \
+         -DBoost_NO_SYSTEM_PATHS=ON \
+    && build_logged g2o /tmp/orb-slam3-build g2o /tmp/g2o-build.log \
+    && build_logged ORB-SLAM3 /tmp/orb-slam3-build ORB_SLAM3 /tmp/orb-build.log \
+    && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/Thirdparty/DBoW2/lib/libDBoW2.so \
+    && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/lib/libORB_SLAM3.so \
     && GIOJO_CUDA_ARCHS=${GIOJO_CUDA_ARCHS} GIOJO_GLIBCXX_ABI=${GIOJO_GLIBCXX_ABI} \
        cmake -S /tmp/UMAMI-SLAM -B /tmp/umami-build \
          -DCMAKE_BUILD_TYPE=Release \
@@ -91,14 +128,21 @@ RUN --mount=type=bind,from=umami,source=.,target=/src/UMAMI-SLAM,readonly \
          -DOpenCV_DIR=/opt/deps/opencv/lib/cmake/opencv4 \
          -Djsoncpp_DIR=/opt/deps/jsoncpp/lib/cmake/jsoncpp \
          -DBOOST_ROOT=/opt/deps/boost \
-    && cmake --build /tmp/umami-build --target train_colmap -j${BUILD_JOBS} \
+    && build_logged 'UMAMI train_colmap' /tmp/umami-build train_colmap /tmp/umami-build.log \
     && mkdir -p /opt/umami-runtime/bin /opt/umami-runtime/lib \
     && cp /tmp/UMAMI-SLAM/bin/train_colmap /opt/umami-runtime/bin/ \
-    && find /tmp/UMAMI-SLAM/lib -maxdepth 1 -type f -name '*.so*' -exec cp -a {} /opt/umami-runtime/lib/ \; \
+    && find /tmp/UMAMI-SLAM/lib -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} /opt/umami-runtime/lib/ \; \
+    && cp -a /tmp/UMAMI-SLAM/ORB-SLAM3/Thirdparty/DBoW2/lib/libDBoW2.so /opt/umami-runtime/lib/ \
+    && cp -a /tmp/UMAMI-SLAM/ORB-SLAM3/Thirdparty/g2o/lib/libg2o.so /opt/umami-runtime/lib/ \
     && cp -a /tmp/UMAMI-SLAM/ORB-SLAM3/lib/libORB_SLAM3.so /opt/umami-runtime/lib/ \
-    && rm -rf /tmp/UMAMI-SLAM /tmp/umami-build
+    && rm -rf /tmp/UMAMI-SLAM /tmp/dbow2-build /tmp/orb-slam3-build /tmp/umami-build
 
 FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+ARG UMAMI_REF=unknown
+
+LABEL org.opencontainers.image.title="SwarmDeck private UMAMI runner" \
+      org.opencontainers.image.revision="${UMAMI_REF}"
 
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
@@ -108,7 +152,7 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libglfw3 libglm-dev libopengl0 libglew2.2 libx11-6 libxi6 \
-      libxrandr2 libxinerama1 libxcursor1 \
+      libxrandr2 libxinerama1 libxcursor1 libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=dependencies /opt/deps /opt/deps

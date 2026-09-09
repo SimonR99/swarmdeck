@@ -187,6 +187,14 @@ no checkpoint resume, incremental updates, internal pose refinement, external
 pose-constraint API, or depth-loss capability. Requests for undeclared
 capabilities fail validation rather than silently changing the pose authority.
 
+LiDAR odometry supplies continuous motion estimates, and Swarm-SLAM supplies
+corrected keyframe poses. Calibrated camera extrinsics place the RGB views in
+that same frame. UMAMI receives these poses through `train_colmap`; this path
+does not start ORB-SLAM3 tracking or add a second visual pose optimizer. The
+pinned Gaussian mapper and viewer libraries still link to ORB-SLAM3, so the
+current image builds it as a dependency. Extracting a standalone reconstruction
+library can remove that build/runtime dependency without changing pose ownership.
+
 The runner enforces frame count, readable input resolution, input byte limit,
 training subprocess wall time, job work-directory disk usage, and compact
 Gaussian count. `max_upload_bytes` is currently a validation limit on the
@@ -245,11 +253,41 @@ docker run --rm --gpus all \
   /inputs/config/gaussian_splatting.yaml /inputs/dataset /outputs no_viewer
 ```
 
+The dependency stage is the expensive part: the LibTorch archive is about
+2--3 GB compressed, and the CUDA OpenCV build, compiler temporaries, CUDA base
+layers, and Docker cache can consume substantially more than the downloaded
+archives. Allow at least 30 GB of free disk for a clean build and its cache.
+The validation workstation has 61 GiB of system RAM and a 10 GiB RTX 3080;
+lower-memory build configurations have not been validated. The
+DBoW2, g2o, and ORB-SLAM3 libraries are built explicitly because this pinned
+checkout has no prebuilt `.so` files. ORB links g2o by filename, so selecting
+the ORB target alone does not build its g2o prerequisite.
+`BUILD_JOBS` controls dependency builds; `NATIVE_BUILD_JOBS` independently limits
+UMAMI/ORB compilation and defaults to two jobs. This lets native concurrency
+change without rebuilding CUDA/OpenCV dependencies. ORB's upstream configuration
+forces Debug while adding `-O3`; the image disables its debug symbols with `-g0`.
+The three-view fixture bounds the input size; native training time and GPU
+memory use still need to be measured.
+
 The source manifest for this validation target is UMAMI-SLAM
 `b1251d435b09f4298a414dbc1151c9bae42c3c37`; the native command above is the
 actual `train_colmap` interface found in `examples/train_colmap.cpp`. No
-native config was executed here; the CPU tests use an inert trainer and a
-minimal `fixed_pose: true` test config. Run the image only on the authorized
+native config has completed validation yet; the CPU tests use an inert trainer and a
+minimal `fixed_pose: true` test config. The repository includes a deterministic
+three-view, 64x48 calibrated loader fixture for the next authorized GPU run:
+
+```bash
+python3 scripts/reconstruction/umami_native_fixture.py /data/umami-native-smoke
+docker run --rm --gpus all \
+  -v /data/umami-native-smoke/dataset:/inputs/dataset:ro \
+  -v /data/umami-native-smoke/umami_smoke.yaml:/inputs/config/umami_smoke.yaml:ro \
+  -v /data/umami-native-smoke/output:/outputs \
+  "swarmdeck-umami:${UMAMI_REF}" \
+  /inputs/config/umami_smoke.yaml /inputs/dataset /outputs no_viewer
+```
+
+The fixture checks binary COLMAP export and native loading/training only; it is
+not a quality or convergence benchmark. Run the image only on the authorized
 GPU workstation, mounting capture/config/output data as shown. This validates
 the native executable in its isolated environment; it does not grant the
 trainer pose refinement, checkpoint, incremental, or depth-loss capabilities.

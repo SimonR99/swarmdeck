@@ -230,6 +230,12 @@ internally, record those as reconstruction-local parameters; never silently
 publish them into TF, Swarm-SLAM, or navigation. Adding UMAMI as an alternative
 odometry frontend would be a separate integration with separate validation.
 
+The pinned `train_colmap` path constructs its Gaussian mapper without an
+ORB-SLAM3 tracking system and reads the supplied camera poses. LiDAR odometry
+and Swarm-SLAM remain the pose providers. ORB-SLAM3 is still linked by the
+upstream libraries; extracting a standalone Gaussian backend would remove
+that dependency without adding another tracker.
+
 **Reuse the existing implementation.** `scripts/reconstruction/capture_rgbd.py`
 records aligned RGB-D and capture-time camera poses; `scripts/reconstruction/umami.py`
 exports COLMAP data, invokes the headless trainer, and converts Gaussian PLY to

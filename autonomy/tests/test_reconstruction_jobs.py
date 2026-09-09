@@ -27,6 +27,7 @@ from autonomy.reconstruction import (
 from autonomy.contracts import ComponentRevision, GraphSolution, KeyframeId
 from scripts.reconstruction.umami import export_colmap
 from scripts.reconstruction.capture_rgbd import associate_preceding_keyframe
+from scripts.reconstruction.umami_native_fixture import make_fixture
 
 
 def _capture(root: Path) -> None:
@@ -189,6 +190,20 @@ def test_dynamic_capture_association_ignores_future_and_rejects_stale_keyframes(
     assert associate_preceding_keyframe(records, 250, 1e-6)["keyframe_id"] == "r/s/0"
     with pytest.raises(ValueError, match="older"):
         associate_preceding_keyframe(records, 2_000, 1e-6)
+
+
+def test_native_umami_fixture_writes_small_calibrated_colmap_dataset(tmp_path):
+    dataset, config = make_fixture(tmp_path / "native-fixture")
+    assert config.read_text().find("Optimization.max_num_iterations: 3") >= 0
+    assert (dataset / "images" / "00000001.png").is_file()
+    cameras = (dataset / "sparse" / "0" / "cameras.bin").read_bytes()
+    images = (dataset / "sparse" / "0" / "images.bin").read_bytes()
+    points = (dataset / "sparse" / "0" / "points3D.bin").read_bytes()
+    assert struct.unpack_from("<Q", cameras)[0] == 3
+    assert struct.unpack_from("<Q", images)[0] == 3
+    assert struct.unpack_from("<Q", points)[0] > 0
+    session = json.loads((dataset / "swarmdeck.json").read_text())["capture"]["session_id"]
+    assert str(uuid.UUID(session)) == session
 
 
 def test_bridge_source_contract_has_dynamic_keyframe_and_atomic_solution_outputs():
