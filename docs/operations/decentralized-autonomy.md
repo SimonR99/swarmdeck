@@ -406,6 +406,28 @@ must match the fresh component, graph, geometry, and source timestamp; the stati
 frame fallback applies only when no authority or snapshot metadata exists.
 The original failed trial produced no route and no arrival: independent ground
 truth stayed approximately 26.3 m from home. Stop All cleared navigation.
+Five native objective-service tests cover this fix. A fresh mission
+`b7f9edbb-4e97-4dcb-93bd-841baf074dd0` then executed a 25-second Explore trial
+with all four robots and passed authority validation on Return Home. It exposed
+a separate persistent-graph problem: Spot's first global vertex was inserted
+after it had moved about 1.4 m, leaving home outside the graph; subsequent
+parent connections also failed. Return Home produced no route, and independent
+ground truth remained 6.32 m from home. This trial does not establish successful
+return navigation.
+
+The follow-up patch captures the initial home anchor from the first finite
+odometry before motion. It keeps that landmark disconnected until mapped
+support and free body clearance admit a terrain-following edge. Graph lookup
+bounds both the current-pose and goal connections. Planner paths retain their
+internal driving-height convention and are converted to robot base poses only
+at response/publication boundaries. Explore retains the local graph's existing
+startup policy for a root whose ground has not yet been observed; explicit
+destinations still require mapped support. The updated patch has not yet been
+retested in Bistro because the remote workstation became unreachable. Native
+tests passed 23 cases covering graph lookup/update, authority validation,
+supported Home corridors, base-height conversion, and the Explore refinement
+boundary with unobserved ground beneath the root. Those fixtures do not establish
+end-to-end cold-start exploration or return execution.
 
 The operator reports that Bistro needs `max_mean_error` near 0.6 in the existing
 registration pipeline. That parameter belongs to `swarmdeck_slam.verify`; native

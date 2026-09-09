@@ -21,6 +21,7 @@ COPY deploy/patches/mgg-objective-service.patch /tmp/mgg-objective-service.patch
 COPY deploy/patches/mgg-coordination-exclusions.patch /tmp/mgg-coordination-exclusions.patch
 COPY deploy/patches/mgg-objective-native-tests.patch /tmp/mgg-objective-native-tests.patch
 COPY deploy/patches/mgg-indexed-map-query.patch /tmp/mgg-indexed-map-query.patch
+COPY deploy/patches/mgg-home-backbone.patch /tmp/mgg-home-backbone.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -28,6 +29,7 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-coordination-exclusions.patch && \
     git apply /tmp/mgg-objective-native-tests.patch && \
     git apply /tmp/mgg-indexed-map-query.patch && \
+    git apply /tmp/mgg-home-backbone.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
