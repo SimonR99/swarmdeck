@@ -398,6 +398,15 @@ execution, not exploration coverage or successful fleet coordination: the maps
 remained in four disconnected components, and no inter-robot alignment was
 validated. Singleton optimizer results were accepted without pose corrections.
 
+A subsequent Return Home trial exposed an integration error: with the optional
+indexed query disabled, MGG compared the request's onboard component ID with
+its static local frame and rejected the request before path search. Authority
+validation is now independent of that query option. An authority-bound request
+must match the fresh component, graph, geometry, and source timestamp; the static
+frame fallback applies only when no authority or snapshot metadata exists.
+The original failed trial produced no route and no arrival: independent ground
+truth stayed approximately 26.3 m from home. Stop All cleared navigation.
+
 The operator reports that Bistro needs `max_mean_error` near 0.6 in the existing
 registration pipeline. That parameter belongs to `swarmdeck_slam.verify`; native
 Swarm-SLAM uses different admission controls. Investigating the relationship
@@ -419,6 +428,19 @@ Run `adapters/test/ros/simulation_evidence_recorder.py` in the simulation's ROS
 domain before starting peers to retain first-keyframe timestamps and independent
 ground truth. Its trajectory-cell overlap is a diagnostic heuristic, not a
 sensor-coverage measurement.
+
+For a bounded Return Home check, use
+`python3 -m adapters.test.ros.onboard_return_home_observer` with an explicit
+`--robot-id`, `--mission-id`, and `--authority-file`. Capture the authority as
+plain JSON with `ros2 topic echo --once --field data --full-length`, removing
+the trailing `---` separator. The fixture must be less than 30 seconds old.
+Run the observer with the simulation image's Python and `websockets` dependency,
+host networking, and a writable evidence directory; overriding the image's
+entrypoint prevents it from starting another simulator. Reports are checkpointed
+atomically and Stop All runs on exit. The observer checks full-path execution
+against the corrected home projected into the server's display frame. Its
+success evidence still requires review against independent ground truth and
+stable map-authority transforms.
 
 ## Remaining acceptance work
 

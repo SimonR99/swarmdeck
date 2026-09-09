@@ -199,7 +199,7 @@ index e63da23..40e057d 100644
    /// One-shot guard against use_sim_time with no /clock.
    rclcpp::TimerBase::SharedPtr sim_time_check_;
 diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
-index df47fe5..6c436d9 100644
+index df47fe5..569aa96 100644
 --- a/ros2/src/mgg_ros/src/planner_node.cpp
 +++ b/ros2/src/mgg_ros/src/planner_node.cpp
 @@ -3,6 +3,8 @@
@@ -286,7 +286,7 @@ index df47fe5..6c436d9 100644
    // A caller may pin the bound mode for this cycle, e.g. to squeeze through a
    // gap it would normally refuse.
    const mgg::BoundModeType previous = robot_params_.bound_mode;
-@@ -757,8 +813,43 @@ void PlannerNode::onPlanRequest(
+@@ -757,8 +813,48 @@ void PlannerNode::onPlanRequest(
    const std::string summary = buildLocalGraph();
    robot_params_.bound_mode = previous;
  
@@ -295,7 +295,12 @@ index df47fe5..6c436d9 100644
 +  core.component_id = component_id_;
 +  core.graph_revision = local_graph_revision_;
 +  core.map_revision = map_revision_;
-+  if (indexed_map_client_ && have_mapping_snapshot_) {
++  const bool mapping_authority_fresh =
++      have_mapping_snapshot_ &&
++      std::chrono::duration<double>(std::chrono::steady_clock::now() -
++                                    mapping_snapshot_received_).count() <=
++          indexed_map_snapshot_ttl_s_;
++  if (mapping_authority_fresh) {
 +    core.component_id = mapping_snapshot_.component_id;
 +    core.map_epoch = mapping_snapshot_.epoch;
 +    core.mapping_graph_revision = mapping_snapshot_.graph_revision;
@@ -330,7 +335,7 @@ index df47fe5..6c436d9 100644
        : best_path_.empty() ? (local_graph_->getNumVertices() <= 1 ? -2 : -3)
        : mgg_msgs::srv::PlannerSrv::Response::FORWARD;
    for (const mgg::StateVec& s : best_path_) {
-@@ -768,14 +859,171 @@ void PlannerNode::onPlanRequest(
+@@ -768,14 +864,171 @@ void PlannerNode::onPlanRequest(
    RCLCPP_INFO(get_logger(), "plan request: %s", summary.c_str());
  }
  
@@ -503,7 +508,7 @@ index df47fe5..6c436d9 100644
    result.reason = corridor.reason;
    if (corridor.status != mgg::PlanningStatus::kSucceeded) return result;
  
-@@ -824,6 +1072,7 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+@@ -824,6 +1077,7 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
      }
      result.poses.push_back(corridor.request.goal.pose);
    }
@@ -511,7 +516,7 @@ index df47fe5..6c436d9 100644
    return result;
  }
  
-@@ -838,6 +1087,11 @@ void PlannerNode::onObjectiveRequest(
+@@ -838,6 +1092,11 @@ void PlannerNode::onObjectiveRequest(
    core.goal.landmark_id = request->goal_landmark_id;
    core.component_id = request->component_id.empty() ? component_id_
                                                      : request->component_id;
@@ -523,7 +528,7 @@ index df47fe5..6c436d9 100644
    mgg::RouteCorridor corridor;
    corridor.request = core;
    const bool local_objective =
-@@ -854,11 +1108,37 @@ void PlannerNode::onObjectiveRequest(
+@@ -854,11 +1113,41 @@ void PlannerNode::onObjectiveRequest(
    const bool explicit_goal =
        core.objective == mgg::ObjectiveKind::kNavigate ||
        core.objective == mgg::ObjectiveKind::kReturnHome;
@@ -545,24 +550,28 @@ index df47fe5..6c436d9 100644
 +      core.geometry_revision == mapping_snapshot_.geometry_revision &&
 +      core.map_source_stamp_sec == mapping_snapshot_.source_stamp.sec &&
 +      core.map_source_stamp_nanosec == mapping_snapshot_.source_stamp.nanosec;
++  const bool request_has_mapping_key =
++      core.map_epoch != 0 || core.mapping_graph_revision != 0 ||
++      !core.geometry_revision.empty() || core.map_source_stamp_sec != 0 ||
++      core.map_source_stamp_nanosec != 0;
++  const bool require_mapping_key =
++      indexed_map_client_ || have_mapping_snapshot_ || request_has_mapping_key;
    if (!supported || !current_state_.allFinite() ||
        (explicit_goal && !core.goal.pose.allFinite())) {
      corridor.status = mgg::PlanningStatus::kUnsupportedObjective;
      corridor.reason = "objective and goal must be supported and finite";
 -  } else if (core.component_id != component_id_ ||
-+  } else if (indexed_map_client_ &&
++  } else if (require_mapping_key &&
 +             (!mapping_stamp_valid ||
 +              !std::regex_match(core.geometry_revision, kDigest) ||
 +              !mapping_key_matches)) {
 +    corridor.status = mgg::PlanningStatus::kStaleRevision;
-+    corridor.reason = "indexed mapping snapshot is missing, invalid, or stale";
-+  } else if ((!indexed_map_client_ && core.component_id != component_id_) ||
-+             (indexed_map_client_ && have_mapping_snapshot_ &&
-+              core.component_id != mapping_snapshot_.component_id) ||
++    corridor.reason = "mapping authority snapshot is missing, invalid, or stale";
++  } else if ((!require_mapping_key && core.component_id != component_id_) ||
               (request->graph_revision != 0 &&
                request->graph_revision != active_graph_revision) ||
               (request->map_revision != 0 &&
-@@ -891,7 +1171,7 @@ void PlannerNode::onObjectiveRequest(
+@@ -891,7 +1180,7 @@ void PlannerNode::onObjectiveRequest(
            core.objective == mgg::ObjectiveKind::kReturnHome ? *global_graph_
                                                              : *local_graph_;
        mgg::TopologicalGoalPlanner planner(
@@ -571,7 +580,7 @@ index df47fe5..6c436d9 100644
        corridor = planner.plan(graph, current_state_, core);
      }
    }
-@@ -901,6 +1181,11 @@ void PlannerNode::onObjectiveRequest(
+@@ -901,6 +1190,11 @@ void PlannerNode::onObjectiveRequest(
    response->component_id = path.component_id;
    response->graph_revision = path.graph_revision;
    response->map_revision = path.map_revision;
@@ -584,7 +593,7 @@ index df47fe5..6c436d9 100644
    for (const auto& pose : path.poses) response->path.push_back(toPoseMsg(pose));
  }
 diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
-index 2c0d31e..488b75b 100644
+index 2c0d31e..94b3348 100644
 --- a/ros2/src/mgg_ros/test/test_objective_service.cpp
 +++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
 @@ -1,4 +1,5 @@
@@ -593,7 +602,7 @@ index 2c0d31e..488b75b 100644
  #include <memory>
  #include <thread>
  
-@@ -6,9 +7,32 @@
+@@ -6,9 +7,42 @@
  #include <rclcpp/rclcpp.hpp>
  
  #include <mgg_msgs/srv/plan_objective.hpp>
@@ -619,6 +628,16 @@ index 2c0d31e..488b75b 100644
 +  static bool queryReady(const PlannerNode& node) {
 +    return node.indexed_map_client_ && node.indexed_map_client_->service_is_ready();
 +  }
++
++  static bool hasQueryClient(const PlannerNode& node) {
++    return static_cast<bool>(node.indexed_map_client_);
++  }
++
++  static void expireSnapshot(PlannerNode& node) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.mapping_snapshot_received_ =
++        std::chrono::steady_clock::now() - std::chrono::seconds(10);
++  }
 +};
 +
 +}  // namespace mgg_ros
@@ -626,10 +645,61 @@ index 2c0d31e..488b75b 100644
  namespace {
  
  using namespace std::chrono_literals;
-@@ -69,6 +93,124 @@ TEST_F(ObjectiveService, ValidatesBeforeTouchingUnavailableMap) {
+@@ -69,6 +103,175 @@ TEST_F(ObjectiveService, ValidatesBeforeTouchingUnavailableMap) {
    EXPECT_EQ(response->status, Service::Response::BLOCKED);
  }
  
++TEST_F(ObjectiveService, AuthorityBindingDoesNotRequireIndexedQuery) {
++  EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::hasQueryClient(*planner));
++  mgg_msgs::msg::MappingSnapshot snapshot;
++  snapshot.component_id = "component-a";
++  snapshot.epoch = 7;
++  snapshot.graph_revision = 8;
++  snapshot.geometry_revision = std::string(64, 'a');
++  snapshot.source_stamp.sec = 3;
++  snapshot.component_from_navigation.rotation.w = 1.0;
++  mgg_ros::PlannerNodeTestPeer::acceptSnapshot(*planner, snapshot);
++
++  const auto request = [&snapshot]() {
++    auto value = std::make_shared<Service::Request>();
++    value->objective = Service::Request::RETURN_HOME;
++    value->component_id = snapshot.component_id;
++    value->goal.orientation.w = 1.0;
++    value->map_epoch = snapshot.epoch;
++    value->mapping_graph_revision = snapshot.graph_revision;
++    value->geometry_revision = snapshot.geometry_revision;
++    value->map_source_stamp = snapshot.source_stamp;
++    return value;
++  };
++
++  auto response = call(request());
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED);
++
++  auto wrong_component = request();
++  wrong_component->component_id = "component-b";
++  response = call(wrong_component);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::STALE_REVISION);
++
++  auto wrong_graph = request();
++  ++wrong_graph->mapping_graph_revision;
++  response = call(wrong_graph);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::STALE_REVISION);
++
++  auto wrong_geometry = request();
++  wrong_geometry->geometry_revision = std::string(64, 'b');
++  response = call(wrong_geometry);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::STALE_REVISION);
++
++  mgg_ros::PlannerNodeTestPeer::expireSnapshot(*planner);
++  response = call(request());
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::STALE_REVISION);
++}
++
 +TEST(IndexedObjectiveService, MissingSnapshotFailsClosedWithoutNestedSpin) {
 +  rclcpp::NodeOptions options;
 +  options.append_parameter_override("indexed_map_query_service",
