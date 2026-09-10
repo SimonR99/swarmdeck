@@ -683,3 +683,14 @@ def test_reconstruction_frame_label_must_agree_with_output_identity(
                 }
             }
         )
+
+
+@pytest.mark.parametrize("source", [{}, {"frame": "world"}])
+def test_new_reconstruction_pointers_require_explicit_output_frame(source):
+    from swarmdeck_server.api.reconstruction_routes import (
+        _PointerError,
+        _source_metadata,
+    )
+
+    with pytest.raises(_PointerError, match="frame metadata is missing"):
+        _source_metadata({"schema_version": 2, "source": source})

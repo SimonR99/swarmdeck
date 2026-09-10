@@ -90,6 +90,10 @@ def _source_metadata(pointer: dict) -> dict:
         return {}
     if not isinstance(source, dict):
         raise _PointerError("reconstruction source metadata is invalid")
+    if pointer.get("schema_version", 1) >= 2 and (
+        not source.get("frame") or not source.get("frame_id")
+    ):
+        raise _PointerError("reconstruction output frame metadata is missing")
     text_fields = (
         "capture_id",
         "robot_id",
