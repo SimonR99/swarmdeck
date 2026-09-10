@@ -14,7 +14,11 @@ from autonomy.coordination import (
     Intention,
     LeaseArbiter,
 )
-from adapters.mapping_authority import get_mapping_authority
+from adapters.mapping_authority import (
+    accepts_authority_update,
+    get_mapping_authority,
+    transform_change_squared,
+)
 
 
 class PeerCoordinator:
@@ -76,21 +80,36 @@ class PeerCoordinator:
             value = json.loads(msg.data)
             if value["robot_id"] != self.bridge.id:
                 return
-            transform = validate_se3(value["T_component_navigation"])
             frame = str(value["navigation_frame"]).lstrip("/")
             if frame != self.bridge.map_frame.lstrip("/"):
+                return
+            if not accepts_authority_update(
+                value, self.authority, self.mapping_authority.expected_mission
+            ):
+                return
+            transform = validate_se3(value["T_component_navigation"])
+            changed = (
+                transform_change_squared(
+                    transform, self.authority["T_component_navigation"]
+                )
+                if self.authority
+                else 0.0
+            )
+            correction = value.get("correction_revision")
+            if "solution_order" not in value:
                 return
             signature = (
                 value["mission_id"],
                 value["component_id"],
-                value.get("correction_revision", tuple(value["solution_order"])),
+                (
+                    correction
+                    if correction is not None
+                    else tuple(value["solution_order"])
+                ),
             )
             if self.authority:
                 old = self.authority
-                delta = np.asarray(transform) - np.asarray(
-                    old["T_component_navigation"]
-                )
-                if signature != old["signature"] or np.linalg.norm(delta) > 0.1:
+                if signature != old["signature"] or changed > 0.01:
                     self.invalid_token = self.token
                     self.release(self.generation)
             if self.arbiter is None or self.arbiter.session_id != value["mission_id"]:

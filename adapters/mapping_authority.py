@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 
@@ -11,10 +12,22 @@ import numpy as np
 
 from autonomy.contracts import KeyframeId, validate_se3
 
+_INDEXED_FIELDS = frozenset(
+    {
+        "map_epoch",
+        "mapping_graph_revision",
+        "geometry_revision",
+        "map_source_stamp",
+    }
+)
 
-def snapshot_values(authority):
-    """Validate and convert the transport-independent authority to ROS fields."""
-    matrix = np.asarray(validate_se3(authority["T_component_navigation"]))
+
+def _snapshot_order(authority):
+    present = _INDEXED_FIELDS.intersection(authority)
+    if present and present != _INDEXED_FIELDS:
+        raise ValueError("Partial indexed map authority")
+    if not present:
+        return None
     epoch, revision = authority["map_epoch"], authority["mapping_graph_revision"]
     if any(type(v) is not int or v < 0 or v >= 2**64 for v in (epoch, revision)):
         raise ValueError("Invalid map revision")
@@ -30,6 +43,74 @@ def snapshot_values(authority):
         or not 0 <= nanosec < 10**9
     ):
         raise ValueError("Invalid source stamp")
+    return epoch, revision
+
+
+def authority_order(authority):
+    """Return comparable causal fields without ordering mission UUIDs."""
+    mission = KeyframeId(authority["robot_id"], authority["mission_id"], 0).session_id
+    raw = authority.get("solution_order")
+    if raw is None:
+        solution = None
+    else:
+        if (
+            not isinstance(raw, (list, tuple))
+            or len(raw) != 2
+            or any(type(value) is not int for value in raw)
+        ):
+            raise ValueError("Invalid solution order")
+        solution = tuple(raw)
+    return mission, solution, _snapshot_order(authority)
+
+
+def expected_mission_id(robot_id):
+    mission = os.environ.get("SWARMDECK_MISSION_ID") or None
+    if mission is not None:
+        mission = KeyframeId(robot_id, mission, 0).session_id
+    return mission
+
+
+def accepts_authority_update(candidate, current, expected_mission=None):
+    """Reject causal rollback while allowing identical heartbeats."""
+    mission, solution, snapshot = authority_order(candidate)
+    if expected_mission is not None and mission != expected_mission:
+        return False
+    if current is None:
+        return True
+    old_mission, old_solution, old_snapshot = authority_order(current)
+    # A process has no causal evidence for ordering two UUID missions. The
+    # documented mission transition restarts the adapter/reader.
+    if mission != old_mission:
+        return False
+    if old_solution is not None and (solution is None or solution < old_solution):
+        return False
+    if old_snapshot is not None and (snapshot is None or snapshot < old_snapshot):
+        return False
+    if snapshot is not None and snapshot == old_snapshot:
+        for field in ("component_id", "geometry_revision", "map_source_stamp"):
+            if candidate.get(field) != current.get(field):
+                return False
+    return True
+
+
+def transform_change_squared(candidate, current):
+    return sum(
+        (value - previous) ** 2
+        for candidate_row, previous_row in zip(candidate, current)
+        for value, previous in zip(candidate_row, previous_row)
+    )
+
+
+def snapshot_values(authority):
+    """Validate and convert the transport-independent authority to ROS fields."""
+    matrix = np.asarray(validate_se3(authority["T_component_navigation"]))
+    order = _snapshot_order(authority)
+    if order is None:
+        raise ValueError("Indexed map authority is required")
+    epoch, revision = order
+    digest = authority["geometry_revision"]
+    stamp = authority["map_source_stamp"]
+    sec, nanosec = stamp["sec"], stamp["nanosec"]
     r = matrix[:3, :3]
     # Choose the largest quaternion component to remain stable at 180 degrees.
     squared = (
@@ -66,6 +147,7 @@ class MappingAuthority:
         self.bridge = bridge
         self.value, self.received_at = None, 0.0
         self.clock = time.monotonic
+        self.expected_mission = expected_mission_id(bridge.id)
         self.publisher = None
         try:
             from mgg_msgs.msg import MappingSnapshot
@@ -103,28 +185,16 @@ class MappingAuthority:
                 "/"
             ) != self.bridge.map_frame.lstrip("/"):
                 return
-            KeyframeId(value["robot_id"], value["mission_id"], 0)
-            validate_se3(value["T_component_navigation"])
+            if not accepts_authority_update(value, self.value, self.expected_mission):
+                return
+            transform = validate_se3(value["T_component_navigation"])
             if not isinstance(value["component_id"], str) or not value["component_id"]:
                 return
             # Old authorities remain readable for non-indexed planning. A
             # partial new snapshot is invalid rather than a fallback to old data.
-            fields = {
-                "map_epoch",
-                "mapping_graph_revision",
-                "geometry_revision",
-                "map_source_stamp",
-            }
-            converted = snapshot_values(value) if fields.intersection(value) else None
-            if (
-                converted is not None
-                and self.value is not None
-                and self.value["mission_id"] == value["mission_id"]
-                and fields.issubset(self.value)
-                and converted[:2]
-                < (self.value["map_epoch"], self.value["mapping_graph_revision"])
-            ):
-                return
+            converted = (
+                snapshot_values(value) if _INDEXED_FIELDS.issubset(value) else None
+            )
             if converted is not None and self.publisher is not None:
                 out = self.message_type()
                 out.component_id = value["component_id"]
@@ -149,7 +219,8 @@ class MappingAuthority:
                     out.component_from_navigation.rotation.w,
                 ) = map(float, q)
                 self.publisher.publish(out)
-            self.value, self.received_at = value, self.clock()
+            self.value = value
+            self.received_at = self.clock()
         except (ValueError, TypeError, KeyError, AttributeError):
             return
 

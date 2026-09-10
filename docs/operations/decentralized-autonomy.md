@@ -207,6 +207,17 @@ operator connection. A grid must already have the exact configured navigation
 frame; the adapter never relabels an incompatible frame. Local maps and scan
 telemetry can still be uploaded for the dashboard.
 
+Authority readers reject older optimizer solution orders, older indexed map
+revisions, partial snapshots, and downgrades to legacy metadata. Equal coherent
+heartbeats renew the three-second monotonic freshness window; rejected messages
+cannot renew it or invalidate a newer target reservation. A live navigation-frame
+TF correction can legitimately change `T_component_navigation` without changing
+the immutable map revision, so it remains accepted; material corrections still
+invalidate the active reservation. `SWARMDECK_MISSION_ID`, when configured,
+selects the exact mission. Otherwise a reader pins its first accepted mission;
+changing missions requires restarting the adapter/reader, consistent with the
+fresh fleet mission and DDS domain required after native frontend restarts.
+
 The indexed final corridor gate remains separately opt-in with
 `SWARMDECK_INDEXED_MAP_QUERY=1`: sparse cold-start LiDAR coverage can leave the
 body volume unknown and prevent any exploratory movement. Until sensor coverage
