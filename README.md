@@ -47,7 +47,7 @@ native MOLA map consumer, full-path MGG execution through Nav2, and resumable
 server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
 [integration and simulation guide](docs/operations/decentralized-autonomy.md)
 for build commands, component inspection, validation status, and rollout limits.
-This remains an opt-in development path; multi-host fault recovery, fresh Bistro
+This remains an opt-in development path; multi-host fault recovery, successful Bistro
 return-home execution, and native GPU reconstruction still have acceptance work.
 
 ## Quick start

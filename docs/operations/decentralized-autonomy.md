@@ -604,6 +604,21 @@ against the corrected home projected into the server's display frame. Its
 success evidence still requires review against independent ground truth and
 stable map-authority transforms.
 
+Review a completed Return Home report against the passive recorder with:
+
+```bash
+python3 -m adapters.test.ros.return_home_evidence \
+  --observer-report robot_3-return-home.json \
+  --truth-report truth.json --robot-id robot_3
+```
+
+The offline checker requires matching mission/home evidence, a real objective
+route, initial truth before the home keyframe, departure before the command,
+and advancing world-frame truth through arrival and the post-stop settling
+window. Missing evidence is inconclusive; a server success flag alone cannot
+pass. Exit codes are 0 for passed, 1 for failed, and 2 for inconclusive. Keep the
+recorder running for at least one second beyond the observer's post-stop sample.
+
 Additional local validation covers replica retention under concurrent publication,
 indexed terrain support on stacked floors, authority reordering/freshness, and
 frame-bound reconstruction delivery. The affected Python suite passed 291 tests
