@@ -20,6 +20,7 @@
   import { Box, Check, Compass, Crosshair, Eye, Layers, Sliders, Sparkles, X } from 'lucide-svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
+  import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { review } from '$lib/stores/review.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
@@ -27,6 +28,13 @@
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { QUALITY, type Quality, type TerrainData } from './terrainData';
   import { cloudToWorld } from './mapFrames';
+  import {
+    ReplicaTacticalLoader,
+    ReplicaRevisionTracker,
+    acceptsReplicaResult,
+    replicaSelectionKey,
+    type ReplicaTacticalCloud
+  } from './replicaTactical';
   import { Map3DScene } from './Map3DScene';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
@@ -63,11 +71,13 @@
 
   let canvas = $state<HTMLCanvasElement | null>(null);
   let scene: Map3DScene | null = null;
+  const tacticalReplica = $derived(replicaTactical.selection);
 
   // Cloud & Terrain State
   let points = $state(0);
   let voxels = $state(0);
   let robotsOnCloud = $state<string[]>([]);
+  let replicaCloud = $state<Pick<ReplicaTacticalCloud, 'view' | 'partial'> | null>(null);
   let error = $state<string | null>(null);
 
   // Render & Color Modes
@@ -95,6 +105,7 @@
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
 
   function robotsOnMap(): MapRobot[] {
+    if (tacticalReplica) return [];
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
       if (!fleet.isEnabled(mapStore.viewRobot)) return [];
       const robot = fleet.get(mapStore.viewRobot);
@@ -170,6 +181,7 @@
   }
 
   export function setRenderMode(mode: Map3DRenderMode) {
+    if (tacticalReplica && mode === 'gaussians') return;
     renderMode = mode;
     if (scene) {
       scene.terrain.setRenderMode(mode);
@@ -203,6 +215,9 @@
   let lastCloudRevision = '';
   let cloudEtag = '';
   const cloudCache = new CloudSnapshotCache();
+  const replicaLoader = new ReplicaTacticalLoader();
+  const replicaRevision = new ReplicaRevisionTracker();
+  let replicaNeedsRebuild = false;
   let gaussianEtag = '';
   let firstCloud = true;
 
@@ -217,15 +232,94 @@
     return `${selection}${selection ? '&' : '?'}source=${mapStore.mapSource}`;
   }
 
+  function sourceScope() {
+    return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : `live:${cloudScope()}`;
+  }
+
+  function prepareCloud(
+    id: number,
+    controller: AbortController,
+    positions: Float32Array,
+    owners: Uint8Array,
+    rgb?: Uint8Array
+  ) {
+    return new Promise<TerrainData>((resolve, reject) => {
+      worker!.onmessage = (
+        e: MessageEvent<{ id: number; data: TerrainData; error?: string }>
+      ) => {
+        if (e.data.id === id)
+          e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.data);
+      };
+      worker!.onerror = () => reject(new Error('Map preparation failed'));
+      controller.signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('Aborted', 'AbortError')),
+        { once: true }
+      );
+      worker!.postMessage({ id, positions, owners, rgb, quality }, [
+        positions.buffer,
+        owners.buffer,
+        ...(rgb ? [rgb.buffer] : [])
+      ]);
+    });
+  }
+
+  function displayTerrain(data: TerrainData, names: string[], rgbPresent: boolean, resetView: boolean) {
+    if (!scene) return;
+    hasRgb = rgbPresent;
+    if (!hasRgb && colorMode === 'camera') setColorMode('elevation');
+    const bounds = scene.terrain.build(data, names.map((id) => fleet.colorOf(id)));
+    scene.layers.invalidate();
+    points = scene.terrain.pointCount;
+    voxels = scene.terrain.voxelCount;
+    robotsOnCloud = names;
+    ceilingMin = bounds.minZ;
+    ceilingMax = Math.max(bounds.maxZ, bounds.minZ + 0.1);
+    if (resetView && points) {
+      ceilingCutoff = Math.min(ceilingMax + 0.2, ceilingMin + 2.3);
+      scene.setCeiling(ceilingCutoff);
+      scene.fitMap();
+      firstCloud = false;
+    }
+  }
+
   async function fetchCloud() {
     if (!scene || !worker || !active || document.hidden || pending) return;
     const controller = new AbortController();
     pending = controller;
     const timeout = window.setTimeout(() => controller.abort(), 20000);
     const id = ++generation;
-    const currentScope = cloudScope();
+    const selection = tacticalReplica ? { ...tacticalReplica } : null;
+    const currentScope = selection ? replicaSelectionKey(selection) : cloudScope();
     const revision = lastCloudRevision;
     try {
+      if (selection) {
+        const forceRebuild = replicaNeedsRebuild;
+        const loaded = await replicaLoader.load(
+          selection,
+          controller.signal,
+          forceRebuild ? null : replicaRevision.current
+        );
+        if (!loaded) {
+          if (acceptsReplicaResult(currentScope, tacticalReplica, id, generation)) error = null;
+          return;
+        }
+        if (!scene || !acceptsReplicaResult(
+          loaded.sourceKey, tacticalReplica, id, generation
+        )) return;
+        const transition = replicaRevision.transition(loaded);
+        const data = await prepareCloud(id, controller, loaded.positions, loaded.owners);
+        if (!scene || !acceptsReplicaResult(
+          loaded.sourceKey, tacticalReplica, id, generation
+        )) return;
+        const resetView = transition === 'selection' || transition === 'frame';
+        displayTerrain(data, loaded.ownerIds, false, resetView);
+        replicaRevision.commit(loaded);
+        replicaCloud = { view: loaded.view, partial: loaded.partial };
+        replicaNeedsRebuild = false;
+        error = null;
+        return;
+      }
       const { response, raw } = await cloudCache.fetch(
         `/api/map/cloud${currentScope}`, cloudEtag, controller.signal
       );
@@ -273,45 +367,11 @@
         cloudToWorld(positions, response.headers.get('X-Cloud-Frame'),
           mapStore.status?.transforms[mapStore.viewRobot]);
       }
-      const data = await new Promise<TerrainData>((resolve, reject) => {
-        worker!.onmessage = (
-          e: MessageEvent<{ id: number; data: TerrainData; error?: string }>
-        ) => {
-          if (e.data.id === id)
-            e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.data);
-        };
-        worker!.onerror = () => reject(new Error('Map preparation failed'));
-        controller.signal.addEventListener(
-          'abort',
-          () => reject(new DOMException('Aborted', 'AbortError')),
-          { once: true }
-        );
-        worker!.postMessage({ id, positions, owners: keptOwners, rgb: keptRgb, quality }, [
-          positions.buffer,
-          keptOwners.buffer,
-          ...(keptRgb ? [keptRgb.buffer] : [])
-        ]);
-      });
+      const data = await prepareCloud(id, controller, positions, keptOwners, keptRgb);
       if (id !== generation || !scene || currentScope !== cloudScope()) return;
       cloudEtag = revision === lastCloudRevision ? response.headers.get('ETag') ?? '' : '';
-      hasRgb = rgbPresent;
-      if (!hasRgb && colorMode === 'camera') setColorMode('elevation');
-      const bounds = scene.terrain.build(
-        data,
-        names.map((id) => fleet.colorOf(id))
-      );
-      scene.layers.invalidate();
-      points = scene.terrain.pointCount;
-      voxels = scene.terrain.voxelCount;
+      displayTerrain(data, names, rgbPresent, firstCloud);
       robotsOnCloud = names.filter((_, i) => keep[i]);
-      ceilingMin = bounds.minZ;
-      ceilingMax = Math.max(bounds.maxZ, bounds.minZ + 0.1);
-      if (firstCloud && points) {
-        ceilingCutoff = Math.min(ceilingMax + 0.2, ceilingMin + 2.3);
-        scene.setCeiling(ceilingCutoff);
-        scene.fitMap();
-        firstCloud = false;
-      }
       error = null;
     } catch (e) {
       if (!controller.signal.aborted && id === generation)
@@ -326,6 +386,14 @@
   let gaussianPending: AbortController | null = null;
   async function fetchGaussians() {
     if (!scene || !active || document.hidden || gaussianPending) return;
+    if (tacticalReplica) {
+      scene.gaussians.clear();
+      gaussianBuffer = null;
+      gaussianCount = 0;
+      gaussianEtag = '';
+      gaussianStatus = 'No component-scoped reconstruction endpoint available';
+      return;
+    }
     const currentScope = scope(),
       controller = new AbortController();
     gaussianPending = controller;
@@ -382,11 +450,12 @@
     pending?.abort();
     pending = null;
     cloudEtag = '';
+    if (tacticalReplica) replicaNeedsRebuild = true;
     void fetchCloud();
   }
 
   $effect(() => {
-    const currentScope = scope();
+    const currentScope = sourceScope();
     const enabled = fleet.robots
       .map((r) => `${r.robot_id}:${fleet.isEnabled(r.robot_id)}`)
       .join(',');
@@ -394,7 +463,9 @@
     const localTransform = mapStore.viewRobot
       ? mapStore.status?.transforms[mapStore.viewRobot]
       : null;
-    const key = `${cloudScope()}|${enabled}|${currentScope ? JSON.stringify(localTransform) : ''}`;
+    const key = tacticalReplica
+      ? currentScope
+      : `${currentScope}|${enabled}|${scope() ? JSON.stringify(localTransform) : ''}`;
     if (key === lastCloudRevision) return;
     lastCloudRevision = key;
     if (currentScope !== lastScope) {
@@ -404,10 +475,14 @@
       pending = null;
       cloudEtag = '';
       firstCloud = true;
+      replicaRevision.clear();
+      replicaCloud = null;
+      replicaNeedsRebuild = false;
       gaussianPending?.abort();
       gaussianPending = null;
       gaussianEtag = '';
       gaussianBuffer = null;
+      if (tacticalReplica && renderMode === 'gaussians') setRenderMode('voxels');
       scene?.terrain.clear();
       scene?.gaussians.clear();
       points = 0;
@@ -471,10 +546,10 @@
       const groundHit = scene.raycastGround(ndc);
       if (groundHit) {
         cursor3D = { x: groundHit.x, y: groundHit.y, z: groundHit.z };
-        onCursorChange?.({ x: groundHit.x, y: groundHit.y });
+        onCursorChange?.(tacticalReplica ? null : { x: groundHit.x, y: groundHit.y });
 
         // Update 3D goal cursor reticle position
-        if (navigation.goalMode) {
+        if (navigation.goalMode && !tacticalReplica) {
           scene.layers.cursorReticle.visible = true;
           scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
         } else {
@@ -505,6 +580,7 @@
   async function handleClick(e: PointerEvent) {
     if (!scene || !canvas) return;
     const ndc = getNDC(e);
+    if (tacticalReplica) return;
 
     // 1. Goal Navigation Targeting (left click on ground)
     if (navigation.goalMode && e.button === 0) {
@@ -573,7 +649,7 @@
     const time = timestamp * 0.001;
 
     // Center on fleet if follow mode is active
-    if (follow) {
+    if (follow && !tacticalReplica) {
       scene.centreRobots(robotsOnMap());
     }
 
@@ -599,18 +675,18 @@
         robots,
         trails,
         showGrid,
-        showTrails,
-        showPlans,
-        showSensors,
-        showCostmap,
-        showNetwork,
+        showTrails: showTrails && !tacticalReplica,
+        showPlans: showPlans && !tacticalReplica,
+        showSensors: showSensors && !tacticalReplica,
+        showCostmap: showCostmap && !tacticalReplica,
+        showNetwork: showNetwork && !tacticalReplica,
         costmapKind,
         time,
         getGroundZ
       });
     }
     // Update active detection screen projection for popover
-    const activeDetId = review.selected ?? review.focused;
+    const activeDetId = tacticalReplica ? null : review.selected ?? review.focused;
     if (activeDetId) {
       const activeObj = review.proposalOf(activeDetId) ?? review.entityOf(activeDetId);
       if (activeObj) {
@@ -719,7 +795,7 @@
 <div class="relative h-full w-full select-none overflow-hidden bg-[#1e242d]">
   <canvas
     bind:this={canvas}
-    class="h-full w-full touch-none {navigation.goalMode
+    class="h-full w-full touch-none {navigation.goalMode && !tacticalReplica
       ? 'cursor-crosshair'
       : dragging
         ? 'cursor-grabbing'
@@ -747,13 +823,16 @@
     </div>
     {#if error}
       <span class="text-warn">{error}</span>
+      {#if replicaCloud}
+        <span>Keeping replica r{replicaCloud.view.revision} in {replicaCloud.view.selected?.frame_id}</span>
+      {/if}
     {:else}
       <div class="flex items-center gap-2 font-mono text-fg-muted">
         <span>{points.toLocaleString()} points</span>
         <span class="text-border">·</span>
         <span>{voxels.toLocaleString()} voxels</span>
         <span class="text-border">·</span>
-        <span>{robotsOnCloud.length} robot{robotsOnCloud.length === 1 ? '' : 's'}</span>
+        <span>{robotsOnCloud.length} {tacticalReplica ? 'source' : 'robot'}{robotsOnCloud.length === 1 ? '' : 's'}</span>
         {#if cursor3D}
           <span class="text-border">·</span>
           <span class="text-accent font-medium"
@@ -762,6 +841,10 @@
         {/if}
       </div>
       <div class="text-[9px] text-fg-dim/80">
+        {#if replicaCloud}
+          {replicaCloud.view.selected?.frame_id} · replica r{replicaCloud.view.revision}
+          {replicaCloud.partial ? ' · bounded chunk sample' : ''}<br />
+        {/if}
         Left-drag to orbit · Right-drag to pan · Scroll to zoom
       </div>
     {/if}
@@ -769,6 +852,18 @@
 
   <!-- 3D Controls Bar (Top Right) -->
   <div class="absolute left-3 right-3 top-3 z-20 flex flex-wrap items-center justify-end gap-2">
+    {#if tacticalReplica}
+      <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl backdrop-blur-xl">
+        <div class="min-w-0">
+          <div class="font-semibold text-accent">Onboard component · read-only</div>
+          <div class="max-w-72 truncate font-mono text-fg-dim" title={tacticalReplica.componentId}>{tacticalReplica.componentId}</div>
+        </div>
+        <button
+          class="rounded bg-surface-2 px-2 py-1 font-semibold text-fg hover:bg-surface-3"
+          onclick={() => replicaTactical.clear()}
+        >Live map</button>
+      </div>
+    {/if}
     <!-- Rendering budgets default to integrated graphics. -->
     <div
       class="panel-glow flex items-center gap-1 rounded-[--radius-control] border border-border/90
@@ -779,7 +874,9 @@
         <button
           class="rounded px-2 py-0.5 {renderMode === mode.id
             ? 'bg-accent text-accent-fg'
-            : 'text-fg-muted'}"
+            : 'text-fg-muted'} disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={mode.id === 'gaussians' && !!tacticalReplica}
+          title={mode.id === 'gaussians' && tacticalReplica ? 'Component-scoped reconstruction is not available yet' : undefined}
           aria-pressed={renderMode === mode.id}
           onclick={() => setRenderMode(mode.id as Map3DRenderMode)}>{mode.label}</button
         >
@@ -892,7 +989,7 @@
   </div>
 
   <!-- Goal Navigation Mode Banner -->
-  {#if navigation.goalMode}
+  {#if navigation.goalMode && !tacticalReplica}
     {@const canGoal = fleet.selected.filter((id) => fleet.can(id, 'navigate')).length}
     <div
       class="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-[--radius-control] border
@@ -905,7 +1002,7 @@
   {/if}
 
   <!-- Active Reviewed Object Detection Preview Card in 3D -->
-  {#if (review.selected || review.focused) && detectionScreenPos}
+  {#if !tacticalReplica && (review.selected || review.focused) && detectionScreenPos}
     {@const activeDetectionId = review.selected ?? review.focused}
     {@const activeObj = activeDetectionId
       ? (review.proposalOf(activeDetectionId) ?? review.entityOf(activeDetectionId))

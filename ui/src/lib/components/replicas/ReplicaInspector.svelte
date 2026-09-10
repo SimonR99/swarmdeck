@@ -2,7 +2,9 @@
   import { onMount } from 'svelte';
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-  import { Database, RefreshCw, X } from 'lucide-svelte';
+  import { Database, ExternalLink, RefreshCw, X } from 'lucide-svelte';
+  import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
+  import type { ReplicaView } from '../map3d/replicaTactical';
   import {
     MAX_CACHE_BYTES,
     MAX_PREVIEW_POINTS,
@@ -16,33 +18,6 @@
   } from './replicaPreview';
 
   type ReplicaIndex = { robot_id: string; session_id: string; revision: number };
-  type Submap = {
-    submap_id: string;
-    geometry_revision: number;
-    T_component_submap: number[][];
-    chunks: ChunkRef[];
-    observed_at_ns?: number;
-  };
-  type Component = {
-    component_id: string;
-    frame_id: string;
-    geometry_revision: string;
-    submaps: Submap[];
-  };
-  type ReplicaView = {
-    robot_id: string;
-    session_id: string;
-    revision: number;
-    solution_order?: number[];
-    snapshot_id?: string;
-    component_id: string | null;
-    components: Component[];
-    selected: Component | null;
-    chunks: ChunkRef[];
-    source_age_s: number | null;
-    age_clock?: string;
-    reconstruction?: { state?: string; artifact?: string } | null;
-  };
 
   let {
     open = false,
@@ -83,6 +58,16 @@
 
   function selectedReplica() {
     return replicas.find((entry) => keyOf(entry) === selectedKey) ?? null;
+  }
+
+  function showInTacticalMap() {
+    if (!view?.selected || !view.component_id) return;
+    replicaTactical.show({
+      robotId: view.robot_id,
+      sessionId: view.session_id,
+      componentId: view.component_id
+    });
+    onclose();
   }
 
   function isAbort(reason: unknown) {
@@ -409,6 +394,15 @@
       {:else if !replicas.length && !loading}
         <div class="rounded-[--radius-control] bg-surface-2 px-3 py-3 text-[11px] text-fg-dim">No onboard replicas have been published.</div>
       {:else if view}
+        {#if view.selected}
+          <button
+            class="flex w-full items-center justify-center gap-2 rounded-[--radius-control] bg-accent px-3 py-2 text-[11px] font-semibold text-accent-fg hover:brightness-105"
+            onclick={showInTacticalMap}
+          >
+            <ExternalLink class="h-3.5 w-3.5" />
+            Open component in tactical map
+          </button>
+        {/if}
         <div class="grid grid-cols-2 gap-2 text-[10px]">
           <div class="rounded-[--radius-control] bg-surface-2 px-2 py-2"><span class="text-fg-dim">Revision</span><br /><b>r{view.revision}</b></div>
           <div class="rounded-[--radius-control] bg-surface-2 px-2 py-2"><span class="text-fg-dim">Source age</span><br /><b>{view.source_age_s === null ? 'unknown clock' : `${Math.round(view.source_age_s)}s`}</b></div>

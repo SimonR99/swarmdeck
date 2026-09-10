@@ -27,6 +27,7 @@
   });
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
+  import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
   import { session } from '$lib/stores/session.svelte';
   import { navigation } from '$lib/stores/navigation.svelte';
   import { settings } from '$lib/stores/settings.svelte';
@@ -62,11 +63,14 @@
   let follow = $state(true);
   let cursorWorld = $state<{ x: number; y: number } | null>(null);
   let layersOpen = $state(false);
-  // Open the tactical map directly; Layers > 3D cloud switches back to 2D.
+  // Open the tactical map directly; switching back to 2D leaves replica mode.
   // Preserve the explicit 2D URL override for lightweight saved views.
   let show3D = $state(
     typeof location === 'undefined' || new URLSearchParams(location.search).get('view') !== '2d'
   );
+  $effect(() => {
+    if (replicaTactical.selection) show3D = true;
+  });
   let showGrid = $state(true);
   let showTrails = $state(true);
   let showLabels = $state(true);
@@ -750,7 +754,10 @@
         <button
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           aria-pressed={show3D}
-          onclick={() => (show3D = !show3D)}
+          onclick={() => {
+            if (show3D && replicaTactical.selection) replicaTactical.clear();
+            show3D = !show3D;
+          }}
         >
           <span class="flex items-center gap-2"><Box class="h-3.5 w-3.5" /> 3D cloud</span>
           <span class="font-semibold {show3D ? 'text-accent' : 'text-fg-dim'}">{show3D ? 'ON' : 'OFF'}</span>

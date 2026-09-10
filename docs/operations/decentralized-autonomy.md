@@ -254,6 +254,20 @@ missing geometry. Pose-only updates reuse those hashes. The **Onboard map replic
 control opens an inspector with explicit robot, session, and component selection.
 It does not overlay disconnected components or issue navigation commands.
 
+Choose **Open component in tactical map** to inspect that component with the
+normal voxel, mesh, or point renderer. Immutable chunks are cached up to 64 MiB;
+assembly is capped at 300,000 points before the existing graphics-quality
+budgets are applied. Unchanged revisions skip geometry assembly. Pose-only
+updates reuse chunk bytes and preserve the camera and ceiling; a different
+component, frame, or epoch starts a new view. Transient fetch errors retain
+the last coherent revision. A local browser fixture rendered 7,800 points and
+preserved a 1.15 m ceiling across a pose revision and a quality change.
+
+This component view is read-only. Robot poses, routes, costmaps, detections and
+goals are hidden until their frame relationship can be verified. Component
+Gaussian rendering is not enabled by this view yet. **Live map** or switching
+to 2D leaves component inspection and restores the ordinary map source.
+
 The server replica defaults to a 1 GiB geometry budget
 (`SWARMDECK_REPLICA_MAX_BYTES`). When an upload reaches that limit, it first
 reclaims up to 256 unreferenced chunks whose grace interval has elapsed. The
