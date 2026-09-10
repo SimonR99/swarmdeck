@@ -146,6 +146,13 @@ def _source_metadata(pointer: dict) -> dict:
     component_id = pose.get("component_id", "")
     if (frame == "component") != bool(component_id):
         raise _PointerError("reconstruction source frame and component disagree")
+    frame_id = source.get("frame_id", "")
+    if frame == "component" and frame_id and frame_id != component_id:
+        raise _PointerError("reconstruction frame ID and component disagree")
+    if frame == "world" and frame_id not in {"", "world"}:
+        raise _PointerError("reconstruction world frame ID is inconsistent")
+    if frame == "local" and frame_id in {"", "world"}:
+        raise _PointerError("reconstruction local frame ID is missing or inconsistent")
     outer_pose = pointer.get("pose_revision")
     if outer_pose is not None and outer_pose != pose:
         raise _PointerError("reconstruction pose revision metadata is inconsistent")

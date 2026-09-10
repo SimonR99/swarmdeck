@@ -655,3 +655,31 @@ def test_reconstruction_disk_queue_stays_bounded_after_request_cancellation(
     finally:
         gate.set()
         executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize(
+    "frame,frame_id,component",
+    [
+        ("component", "another-component", "component-a"),
+        ("world", "odom", ""),
+        ("local", "world", ""),
+    ],
+)
+def test_reconstruction_frame_label_must_agree_with_output_identity(
+    frame, frame_id, component
+):
+    from swarmdeck_server.api.reconstruction_routes import (
+        _PointerError,
+        _source_metadata,
+    )
+
+    with pytest.raises(_PointerError, match="frame"):
+        _source_metadata(
+            {
+                "source": {
+                    "frame": frame,
+                    "frame_id": frame_id,
+                    "pose_revision": {"component_id": component},
+                }
+            }
+        )
