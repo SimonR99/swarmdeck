@@ -9,6 +9,8 @@ be proven.
 
 from __future__ import annotations
 
+from bisect import bisect_right
+
 import hashlib
 import json
 import math
@@ -397,7 +399,19 @@ class IndexedMapView:
         drop: list[bool] = []
         prior_ground: float | None = None
         work = 0
-        half = np.asarray(request.body_size_xyz, dtype=np.float64) / 2.0
+        half_xyz = tuple(v / 2.0 for v in request.body_size_xyz)
+        half = np.asarray(half_xyz, dtype=np.float64)
+        terrain_radius = max(self.terrain_radius_m, half_xyz[0], half_xyz[1])
+        scaled_radius = terrain_radius / index.resolution_m
+        if not math.isfinite(scaled_radius):
+            return QueryResult(
+                QueryStatus.UNAVAILABLE, index.key, detail="query voxel budget exceeded"
+            )
+        column_count = (2 * math.ceil(scaled_radius) + 1) ** 2
+        if column_count > self.max_query_voxels:
+            return QueryResult(
+                QueryStatus.UNAVAILABLE, index.key, detail="query voxel budget exceeded"
+            )
         for sample_index, sample_value in enumerate(request.samples):
             if time.monotonic() - started > self.max_query_s:
                 return QueryResult(
@@ -406,23 +420,43 @@ class IndexedMapView:
                     detail="query time budget exceeded",
                 )
             sample = np.asarray(sample_value, dtype=np.float64)
-            lo = np.floor((sample - half + 1e-9) / index.resolution_m).astype(np.int64)
-            hi = np.floor((sample + half - 1e-9) / index.resolution_m).astype(np.int64)
-            cells = [
-                (x, y, z)
-                for x in range(int(lo[0]), int(hi[0]) + 1)
-                for y in range(int(lo[1]), int(hi[1]) + 1)
-                for z in range(int(lo[2]), int(hi[2]) + 1)
-            ]
-            work += len(cells)
+            try:
+                lo = tuple(
+                    math.floor((v - h + 1e-9) / index.resolution_m)
+                    for v, h in zip(sample_value, half_xyz)
+                )
+                hi = tuple(
+                    math.floor((v + h - 1e-9) / index.resolution_m)
+                    for v, h in zip(sample_value, half_xyz)
+                )
+            except (OverflowError, ValueError):
+                return QueryResult(
+                    QueryStatus.UNAVAILABLE,
+                    index.key,
+                    detail="query coordinates exceed index range",
+                )
+            if any(abs(v) >= 2**63 for v in (*lo, *hi)):
+                return QueryResult(
+                    QueryStatus.UNAVAILABLE,
+                    index.key,
+                    detail="query coordinates exceed index range",
+                )
+            cell_count = math.prod(max(0, b - a + 1) for a, b in zip(lo, hi))
+            work += cell_count + column_count
             if work > self.max_query_voxels:
                 return QueryResult(
                     QueryStatus.UNAVAILABLE,
                     index.key,
                     detail="query voxel budget exceeded",
                 )
+            cells = [
+                (x, y, z)
+                for x in range(int(lo[0]), int(hi[0]) + 1)
+                for y in range(int(lo[1]), int(hi[1]) + 1)
+                for z in range(int(lo[2]), int(hi[2]) + 1)
+            ]
             terrain = self._terrain(index, sample, half)
-            # The lowest fitted surface is support, not a body collision. At
+            # The fitted surface beneath this body is support, not a collision. At
             # map resolution, omit its voxel layer from the body volume; low
             # obstacles that share that voxel are intentionally unresolved.
             collision_cells = cells
@@ -496,7 +530,15 @@ class IndexedMapView:
         center = np.floor(sample[:2] / index.resolution_m).astype(np.int64)
         cell_radius = int(math.ceil(radius / index.resolution_m))
         support: list[tuple[float, float, float]] = []
-        all_z: list[float] = []
+        overhead_z: list[float] = []
+        # A column may contain multiple floors. Select the highest observed
+        # surface under the body's bottom (with half-voxel quantization margin),
+        # never a wall return at or above its center. Always choosing zs[0]
+        # projects an upstairs robot onto the downstairs floor.
+        support_ceiling = min(
+            float(sample[2]) - 1e-9,
+            float(sample[2] - half_body[2]) + 0.5 * index.resolution_m,
+        )
         for x in range(int(center[0]) - cell_radius, int(center[0]) + cell_radius + 1):
             for y in range(
                 int(center[1]) - cell_radius, int(center[1]) + cell_radius + 1
@@ -508,8 +550,13 @@ class IndexedMapView:
                 cy = (y + 0.5) * index.resolution_m
                 if math.hypot(cx - sample[0], cy - sample[1]) > radius:
                     continue
-                support.append((cx, cy, zs[0]))
-                all_z.extend(zs)
+                ordinal = bisect_right(zs, support_ceiling)
+                if ordinal:
+                    height = zs[ordinal - 1]
+                    support.append((cx, cy, height))
+                    above = bisect_right(zs, height + index.resolution_m)
+                    if above < len(zs):
+                        overhead_z.append(zs[above])
         if len(support) < 3:
             return None
         values = np.asarray(support, dtype=np.float64)
@@ -520,7 +567,7 @@ class IndexedMapView:
         )
         residual = values[:, 2] - design @ coefficients
         roughness = float(np.sqrt(np.mean(residual * residual)))
-        higher = [z for z in all_z if z > predicted + index.resolution_m]
+        higher = [z for z in overhead_z if z > predicted + index.resolution_m]
         overhead = min(higher) - predicted if higher else math.nan
         return predicted, roughness, float(overhead)
 

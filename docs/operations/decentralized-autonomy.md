@@ -138,6 +138,16 @@ every body voxel, so enabling the indexed gate from a cold start can block
 exploration until another trusted controller has accumulated enough ray
 coverage. The gate remains opt-in for that reason.
 
+Terrain queries select the observed surface beneath the queried robot body,
+rather than the lowest return in the whole column. Local regression fixtures
+cover stacked floors, downward steps, missing ground, walls, and gentle ramps.
+Both body cells and terrain-column probes count toward the query work budget;
+oversized bodies and unrepresentable coordinates are rejected before allocation.
+In a local 15-sample flat-surface microbenchmark, 280 measured queries after
+20 warmups had median/p95 times of 0.481/0.512 ms versus 0.497/0.531 ms before
+the change. This small CPU fixture is not a Jetson latency or terrain-accuracy
+qualification.
+
 Swarm-SLAM repository commits are pinned in `deploy/cslam/upstream.repos`.
 The local patch adds mission and causal solution identities, checks successful
 results, rejects older results, and carries the actual component anchor pose.
@@ -244,9 +254,29 @@ missing geometry. Pose-only updates reuse those hashes. The **Onboard map replic
 control opens an inspector with explicit robot, session, and component selection.
 It does not overlay disconnected components or issue navigation commands.
 
-The server replica defaults to a 1 GiB geometry budget. The onboard store defaults
-to 512 MiB. Budget exhaustion is explicit; automatic archival and retention
-selection are still a deployment policy to configure before long missions.
+The server replica defaults to a 1 GiB geometry budget
+(`SWARMDECK_REPLICA_MAX_BYTES`). When an upload reaches that limit, it first
+reclaims up to 256 unreferenced chunks whose grace interval has elapsed. The
+interval defaults to one hour (`SWARMDECK_REPLICA_RETENTION_S`) and starts again
+when geometry loses a manifest reference or is uploaded again. Every published
+robot/session manifest protects its referenced chunks, including shared geometry
+and historical missions. A robot uploading over a very slow connection may need
+to renegotiate missing hashes after the grace interval. Pose-only corrections
+reuse geometry and do not make its chunks eligible for collection.
+
+Inspect a bounded collection batch without deleting geometry:
+
+```bash
+python3 -m autonomy.replica_maintenance /data/replicas
+# Add --collect to reclaim that eligible batch; no manifests are retired.
+```
+
+Publication, storage accounting, and collection use SQLite writer transactions
+across server workers. Startup recovers interrupted file/metadata operations.
+Collection never makes room by dropping a published map; storage exhaustion
+remains explicit if protected geometry fills the budget. The onboard store
+defaults to 512 MiB. Onboard archival and explicit retirement of old server
+missions remain deployment policies to implement before long missions.
 
 ## ROS 2 hardware seam
 

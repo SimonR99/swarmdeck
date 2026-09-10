@@ -277,6 +277,78 @@ def test_gentle_ramp_passes_and_step_is_flagged(tmp_path) -> None:
     assert any(step_result.step)
 
 
+def test_stacked_surfaces_select_support_beneath_each_robot(tmp_path):
+    levels = [
+        [x, y, z]
+        for z in (0.0, 2.0, 4.0)
+        for x in (-0.3, -0.1, 0.1, 0.3, 0.5)
+        for y in (-0.3, -0.1, 0.1, 0.3, 0.5)
+    ]
+    store, anchor = make_store(tmp_path, levels, origin=())
+    view = IndexedMapView()
+    key = view.refresh(
+        store.snapshot(), component_id_for_anchor(anchor), store.get_chunk
+    )
+    result = view.query(
+        QueryRequest(
+            key,
+            ((0.1, 0.1, 0.5), (0.1, 0.1, 2.5)),
+            (0.2, 0.2, 0.6),
+            stop_at_unknown=False,
+        )
+    )
+    assert result.status == QueryStatus.OK
+    assert result.ground_z == pytest.approx((0.0, 2.0))
+    assert result.clearance == pytest.approx((2.0, 2.0))
+    # Occupied returns alone cannot prove a clear swept body volume.
+    assert result.occupancy == (VoxelOccupancy.UNKNOWN,) * 2
+
+
+def test_down_step_and_missing_support_are_distinct(tmp_path):
+    floor = [
+        [x, y, z]
+        for center, z in ((0.1, 0.4), (1.7, -0.4))
+        for x in (center - 0.2, center, center + 0.2)
+        for y in (-0.1, 0.1, 0.3)
+    ]
+    store, anchor = make_store(tmp_path, floor, origin=())
+    view = IndexedMapView(max_drop_m=0.2)
+    key = view.refresh(
+        store.snapshot(), component_id_for_anchor(anchor), store.get_chunk
+    )
+    result = view.query(
+        QueryRequest(
+            key,
+            ((0.1, 0.1, 0.9), (1.7, 0.1, 0.1), (5.0, 0.1, 0.1)),
+            (0.2, 0.2, 0.4),
+            stop_at_unknown=False,
+        )
+    )
+    assert result.drop == (False, True, False)
+    assert math.isnan(result.ground_z[2])
+    assert result.occupancy[2] == VoxelOccupancy.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "body, sample",
+    [
+        ((1000, 1000, 1000), (0, 0, 0)),
+        ((1e8, 1e-10, 1e-10), (0, 0, 0)),
+        ((1e308, 1e308, 1e308), (0, 0, 0)),
+        ((1, 1, 1), (1e308, 0, 0)),
+    ],
+)
+def test_query_work_is_bounded_before_allocating_body_cells(tmp_path, body, sample):
+    store, anchor = make_store(tmp_path, [[0.1, 0.1, 0.0]], origin=())
+    view = IndexedMapView(max_query_voxels=1000)
+    key = view.refresh(
+        store.snapshot(), component_id_for_anchor(anchor), store.get_chunk
+    )
+    result = view.query(QueryRequest(key, (sample,), body))
+    assert result.status == QueryStatus.UNAVAILABLE
+    assert not result.occupancy
+
+
 def test_vlp16_history_accepts_body_corridor_and_rejects_wall_and_unknown(
     tmp_path,
 ) -> None:

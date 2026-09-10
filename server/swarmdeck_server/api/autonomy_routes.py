@@ -26,7 +26,11 @@ def store():
     root = os.environ.get("SWARMDECK_REPLICA_DIR")
     if not root:
         root = Path(__file__).resolve().parents[3] / "sessions" / "replicas"
-    return ReplicaStore(root)
+    return ReplicaStore(
+        root,
+        max_bytes=int(os.environ.get("SWARMDECK_REPLICA_MAX_BYTES", 1024**3)),
+        retention_s=float(os.environ.get("SWARMDECK_REPLICA_RETENTION_S", 3600)),
+    )
 
 
 async def bounded_body(request, limit):

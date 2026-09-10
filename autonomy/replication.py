@@ -7,13 +7,16 @@ The transport envelope is deliberately independent of a mapper's internal types.
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
 import tempfile
 import threading
+import time
 from urllib import error, request
 from uuid import UUID
 
@@ -56,32 +59,130 @@ def chunk_hash(value: str) -> None:
 
 
 class ReplicaStore:
-    def __init__(self, root: str | Path, *, max_bytes: int = 1024**3):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        max_bytes: int = 1024**3,
+        retention_s: float = 3600,
+        clock=time.time,
+    ):
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ValueError("Invalid replica storage budget")
+        if not math.isfinite(retention_s) or retention_s < 0:
+            raise ValueError("Invalid unreferenced chunk retention")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.chunks = self.root / "chunks"
         self.chunks.mkdir(exist_ok=True)
         self.max_bytes = max_bytes
+        self.retention_s, self.clock = retention_s, clock
         self.lock = threading.RLock()
         self.db = sqlite3.connect(
             self.root / "replicas.sqlite", check_same_thread=False
         )
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS chunks (hash TEXT PRIMARY KEY, size INTEGER NOT NULL)"
-        )
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS manifests (robot TEXT, session TEXT, revision INTEGER, body BLOB, PRIMARY KEY(robot, session))"
-        )
-        # Recover files committed before their metadata during a crash. Files
-        # with temporary names are incomplete uploads and are never visible.
-        for path in self.chunks.iterdir():
-            if path.is_file() and _HASH.fullmatch(path.name):
+        with self._write():
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS chunks (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, touched REAL NOT NULL)"
+            )
+            if "touched" not in {
+                row[1] for row in self.db.execute("PRAGMA table_info(chunks)")
+            }:
                 self.db.execute(
-                    "INSERT OR IGNORE INTO chunks VALUES (?, ?)",
-                    (path.name, path.stat().st_size),
+                    "ALTER TABLE chunks ADD COLUMN touched REAL NOT NULL DEFAULT 0"
                 )
-        self.db.commit()
+                self.db.execute("UPDATE chunks SET touched=?", (self.clock(),))
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS manifests (robot TEXT, session TEXT, revision INTEGER, body BLOB, PRIMARY KEY(robot, session))"
+            )
+            indexed = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_refs'"
+            ).fetchone()
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS chunk_refs (robot TEXT, session TEXT, hash TEXT, PRIMARY KEY(robot, session, hash))"
+            )
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS chunk_refs_hash ON chunk_refs(hash)"
+            )
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS chunks_touched ON chunks(touched)"
+            )
+            if not indexed:
+                for robot, session, body in self.db.execute(
+                    "SELECT robot, session, body FROM manifests"
+                ).fetchall():
+                    self._set_references(robot, session, json.loads(body)["chunks"])
+            # Recover files committed before their metadata, and deletions
+            # interrupted before metadata commit. Give recovered uploads a full
+            # grace interval; temporary upload files are never visible.
+            known = dict(self.db.execute("SELECT hash, size FROM chunks"))
+            found = set()
+            for path in self.chunks.iterdir():
+                if path.is_file() and _HASH.fullmatch(path.name):
+                    found.add(path.name)
+                    if path.name not in known:
+                        self.db.execute(
+                            "INSERT INTO chunks VALUES (?, ?, ?)",
+                            (path.name, path.stat().st_size, self.clock()),
+                        )
+            self.db.executemany(
+                "DELETE FROM chunks WHERE hash=?", ((h,) for h in known.keys() - found)
+            )
+
+    @contextmanager
+    def _write(self):
+        # Reserve the SQLite writer before filesystem checks. An RLock alone
+        # does not protect publication/collection across server worker processes.
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
+
+    def _set_references(self, robot, session, chunks, previous=()):
+        current = {item["sha256"] for item in chunks}
+        old = {item["sha256"] for item in previous}
+        self.db.executemany(
+            "DELETE FROM chunk_refs WHERE robot=? AND session=? AND hash=?",
+            ((robot, session, digest) for digest in old - current),
+        )
+        self.db.executemany(
+            "INSERT OR IGNORE INTO chunk_refs VALUES (?, ?, ?)",
+            ((robot, session, digest) for digest in current - old),
+        )
+
+    def collect_unreferenced(self, *, limit: int = 256, dry_run: bool = False) -> dict:
+        """Reclaim one bounded batch, preserving all published robot sessions.
+
+        The grace interval starts again when a chunk loses a manifest reference
+        or is uploaded again. Slow uploaders can renegotiate missing hashes.
+        No current or historical session manifest is retired implicitly.
+        """
+        if type(limit) is not int or not 1 <= limit <= 4096:
+            raise ValueError("Collection limit must be between 1 and 4096")
+        with self._write():
+            return self._collect_unreferenced(limit, dry_run)
+
+    def _collect_unreferenced(self, limit, dry_run=False):
+        rows = self.db.execute(
+            "SELECT hash, size FROM chunks WHERE touched <= ? "
+            "AND NOT EXISTS (SELECT 1 FROM chunk_refs WHERE chunk_refs.hash=chunks.hash) "
+            "ORDER BY touched, hash LIMIT ?",
+            (self.clock() - self.retention_s, limit),
+        ).fetchall()
+        if not dry_run:
+            for digest, _ in rows:
+                (self.chunks / digest).unlink(missing_ok=True)
+                self.db.execute("DELETE FROM chunks WHERE hash=?", (digest,))
+        return {
+            "chunks": len(rows),
+            "bytes": sum(size for _, size in rows),
+            "dry_run": dry_run,
+        }
 
     def close(self):
         with self.lock:
@@ -95,19 +196,29 @@ class ReplicaStore:
         chunk_hash(digest)
         if len(data) > MAX_CHUNK_BYTES or hashlib.sha256(data).hexdigest() != digest:
             raise ValueError("Invalid chunk size or checksum")
-        with self.lock:
+        result = self._put_chunk(digest, data)
+        if result is None:
+            raise OverflowError("Replica storage budget exhausted")
+        return result
+
+    def _put_chunk(self, digest, data):
+        with self._write():
             if self.has_chunk(digest):
                 # Recover an atomic file written before a crash interrupted metadata.
                 self.db.execute(
-                    "INSERT OR IGNORE INTO chunks VALUES (?, ?)", (digest, len(data))
+                    "INSERT OR REPLACE INTO chunks VALUES (?, ?, ?)",
+                    (digest, len(data), self.clock()),
                 )
-                self.db.commit()
                 return False
             used = self.db.execute(
                 "SELECT COALESCE(SUM(size), 0) FROM chunks"
             ).fetchone()[0]
             if used + len(data) > self.max_bytes:
-                raise OverflowError("Replica storage budget exhausted")
+                reclaimed = self._collect_unreferenced(256)
+                if used - reclaimed["bytes"] + len(data) > self.max_bytes:
+                    # Commit collection metadata even when this batch cannot
+                    # free enough room. Publication is never changed.
+                    return None
             with tempfile.NamedTemporaryFile(dir=self.chunks, delete=False) as out:
                 temp = Path(out.name)
                 try:
@@ -118,9 +229,9 @@ class ReplicaStore:
                 finally:
                     temp.unlink(missing_ok=True)
             self.db.execute(
-                "INSERT OR REPLACE INTO chunks VALUES (?, ?)", (digest, len(data))
+                "INSERT OR REPLACE INTO chunks VALUES (?, ?, ?)",
+                (digest, len(data), self.clock()),
             )
-            self.db.commit()
             return True
 
     def read_chunk(self, digest: str) -> bytes:
@@ -157,7 +268,7 @@ class ReplicaStore:
         body = canonical(envelope)
         if len(body) > MAX_MANIFEST_BYTES:
             raise ValueError("Manifest too large")
-        with self.lock:
+        with self._write():
             previous = self.get(robot, session)
             if previous:
                 if revision < previous["revision"]:
@@ -173,11 +284,20 @@ class ReplicaStore:
             ]
             if missing:
                 raise MissingChunks(missing)
+            # Readers holding the previous manifest have a grace interval to
+            # finish fetching it after replacement, even for old geometry.
+            old_chunks = previous["chunks"] if previous else []
+            retired = {item["sha256"] for item in old_chunks} - declared.keys()
+            if retired:
+                self.db.executemany(
+                    "UPDATE chunks SET touched=? WHERE hash=?",
+                    ((self.clock(), digest) for digest in retired),
+                )
+            self._set_references(robot, session, chunks, old_chunks)
             self.db.execute(
                 "INSERT OR REPLACE INTO manifests VALUES (?, ?, ?, ?)",
                 (robot, session, revision, body),
             )
-            self.db.commit()
             return True
 
     def get(self, robot: str, session: str):
