@@ -105,6 +105,125 @@ index d01d00a..3b68ce1 100644
  TEST(PlanningStages, NonfiniteGoalIsRejectedBeforeGraphLookup) {
    Chain chain;
    TopologicalGoalPlanner planner("component-a", 12, 34, 0.25);
+diff --git a/ros2/src/mgg_map_octomap/src/octomap_map.cpp b/ros2/src/mgg_map_octomap/src/octomap_map.cpp
+index 64f0dd7..55daf23 100644
+--- a/ros2/src/mgg_map_octomap/src/octomap_map.cpp
++++ b/ros2/src/mgg_map_octomap/src/octomap_map.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdint>
+ 
+ namespace mgg {
+ namespace {
+@@ -146,12 +147,17 @@ VoxelStatus OctomapMap::getPathStatus(const Eigen::Vector3d& start,
+   const double r = tree_->getResolution();
+   const double len = (end - start).norm();
+   if (len < 1e-9) return getBoxStatus(start, box_size, stop_at_unknown_voxel);
+-  const Eigen::Vector3d dir = (end - start) / len;
++  const int steps = std::max(1, static_cast<int>(std::ceil(len / r)));
+ 
+   bool saw_unknown = false;
+-  for (double d = 0.0; d <= len; d += r) {
++  // Sample the same endpoint-inclusive boxes in either direction.  Advancing
++  // by `r` omitted the final endpoint whenever len was not an exact multiple
++  // and made an undirected graph edge pass outward but fail on the Home route.
++  for (int i = 0; i <= steps; ++i) {
++    const double t = static_cast<double>(i) / static_cast<double>(steps);
+     const VoxelStatus s =
+-        getBoxStatus(start + d * dir, box_size, stop_at_unknown_voxel);
++        getBoxStatus(start + t * (end - start), box_size,
++                     stop_at_unknown_voxel);
+     if (s == VoxelStatus::kOccupied) return VoxelStatus::kOccupied;
+     if (s == VoxelStatus::kUnknown) saw_unknown = true;
+   }
+@@ -216,15 +222,28 @@ void OctomapMap::getScanStatusIterative(
+ 
+ bool OctomapMap::augmentFreeBox(const Eigen::Vector3d& position,
+                                 const Eigen::Vector3d& box_size) {
+-  const double r = tree_->getResolution();
+-  for (double dx = -box_size.x() / 2; dx <= box_size.x() / 2; dx += r)
+-    for (double dy = -box_size.y() / 2; dy <= box_size.y() / 2; dy += r)
+-      for (double dz = -box_size.z() / 2; dz <= box_size.z() / 2; dz += r) {
+-        const Eigen::Vector3d p = position + Eigen::Vector3d(dx, dy, dz);
++  octomap::OcTreeKey min_key;
++  octomap::OcTreeKey max_key;
++  const Eigen::Vector3d half = box_size / 2.0;
++  if (!tree_->coordToKeyChecked(toOct(position - half), min_key) ||
++      !tree_->coordToKeyChecked(toOct(position + half), max_key)) {
++    return false;
++  }
++  // Iterate discrete keys rather than adding resolution-sized doubles. At
++  // coordinate boundaries, accumulated floating-point error could skip one
++  // key and leave a thin unknown slice through an otherwise cleared robot
++  // footprint.
++  for (std::uint32_t x = min_key[0]; x <= max_key[0]; ++x)
++    for (std::uint32_t y = min_key[1]; y <= max_key[1]; ++y)
++      for (std::uint32_t z = min_key[2]; z <= max_key[2]; ++z) {
++        const octomap::OcTreeKey key(
++            static_cast<octomap::key_type>(x),
++            static_cast<octomap::key_type>(y),
++            static_cast<octomap::key_type>(z));
+         // setNodeValue, not updateNode: this must assert free rather than
+         // accumulate evidence, or clearing the robot's own footprint would
+         // take several calls to take effect.
+-        tree_->setNodeValue(toOct(p), tree_->getClampingThresMinLog());
++        tree_->setNodeValue(key, tree_->getClampingThresMinLog());
+       }
+   has_data_ = true;
+   return true;
+diff --git a/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp b/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
+index cedb6ae..8ab4617 100644
+--- a/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
++++ b/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
+@@ -159,6 +159,26 @@ TEST(OctomapMap, RayAndPathQueriesMatchBaselineVerdicts) {
+   EXPECT_NEAR(end_voxel.x(), 2.0, 0.5);  // obstacle near face
+ }
+ 
++TEST(OctomapMap, PathStatusIsSymmetricAndIncludesBothEndpoints) {
++  OctomapMap map = buildScene();
++  const Eigen::Vector3d box(0.4, 0.4, 0.4);
++  const Eigen::Vector3d a(0.13, -3.07, 1.0);
++  const Eigen::Vector3d b(0.91, -3.07, 1.0);
++  EXPECT_EQ(map.getPathStatus(a, b, box, true),
++            map.getPathStatus(b, a, box, true));
++
++  // The obstacle surface is at x=2.0.  A segment ending there must be blocked
++  // even when its length is not an exact multiple of the map resolution.
++  const Eigen::Vector3d free(1.31, 0.0, 1.0);
++  const Eigen::Vector3d occupied_endpoint(2.0, 0.0, 1.0);
++  EXPECT_EQ(map.getPathStatus(free, occupied_endpoint,
++                              Eigen::Vector3d::Zero(), false),
++            VoxelStatus::kOccupied);
++  EXPECT_EQ(map.getPathStatus(occupied_endpoint, free,
++                              Eigen::Vector3d::Zero(), false),
++            VoxelStatus::kOccupied);
++}
++
+ // Endpoints matching the baseline's VLP-16 model: 72 azimuth x 6 elevation
+ // rays at 20 m, which is what SensorParamsBase produced for the ROS 1 run.
+ std::vector<Eigen::Vector3d> frustumEndpoints(const Eigen::Vector3d& pos) {
+@@ -289,6 +309,19 @@ TEST(OctomapMap, AugmentFreeBoxClearsUnknownFootprint) {
+   EXPECT_EQ(map.getVoxelStatus(p), VoxelStatus::kFree);
+ }
+ 
++TEST(OctomapMap, AugmentFreeBoxFillsEveryKeyAcrossCoordinateBoundaries) {
++  OctomapConfig cfg;
++  cfg.resolution = 0.05;
++  OctomapMap map(cfg);
++  map.augmentFreeBox({0.60, 0.0, 0.40}, {2.40, 1.20, 0.60});
++
++  for (double x = 0.0; x <= 1.20; x += 0.10) {
++    EXPECT_EQ(map.getBoxStatus({x, 0.0, 0.325}, {0.20, 0.20, 0.15}, true),
++              VoxelStatus::kFree)
++        << "unknown key remained at x=" << x;
++  }
++}
++
+ TEST(OctomapMap, LocalPointcloudReturnsNearbyOccupiedVoxels) {
+   OctomapMap map = buildScene();
+   std::vector<Eigen::Vector3d> pts;
 diff --git a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
 index 40e057d..ffc1f4d 100644
 --- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
@@ -152,7 +271,7 @@ index 40e057d..ffc1f4d 100644
    bool have_global_anchor_ = false;
    /// Heading the robot has been travelling, for the direction penalty.
 diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
-index 569aa96..ecec678 100644
+index 569aa96..2ebd752 100644
 --- a/ros2/src/mgg_ros/src/planner_node.cpp
 +++ b/ros2/src/mgg_ros/src/planner_node.cpp
 @@ -270,8 +270,20 @@ mgg::ExpandContext PlannerNode::makeContext() {
@@ -409,7 +528,17 @@ index 569aa96..ecec678 100644
      if (from.isApprox(to)) return true;
      const Eigen::Vector3d body = robot_params_.getPlanningSize();
      if (robot_params_.type == mgg::RobotType::kAerialRobot) {
-@@ -1065,22 +1163,41 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+@@ -1058,29 +1156,50 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+     if (!admissible(result.poses[i - 1], result.poses[i])) {
+       result.status = mgg::PlanningStatus::kBlocked;
+       result.poses.clear();
+-      result.reason = "route corridor is blocked in the current map";
++      result.reason = "route corridor segment " + std::to_string(i - 1) +
++                      "->" + std::to_string(i) +
++                      " is blocked in the current map";
+       return result;
+     }
+   }
  
    // Explicit objectives retain the requested target separately from the
    // graph vertex. Connect it only after the same terrain/footprint check.
@@ -457,7 +586,7 @@ index 569aa96..ecec678 100644
  void PlannerNode::onObjectiveRequest(
      const std::shared_ptr<mgg_msgs::srv::PlanObjective::Request> request,
      std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> response) {
-@@ -1181,7 +1298,19 @@ void PlannerNode::onObjectiveRequest(
+@@ -1181,7 +1300,19 @@ void PlannerNode::onObjectiveRequest(
                                                              : *local_graph_;
        mgg::TopologicalGoalPlanner planner(
            core.component_id, core.graph_revision, core.map_revision, 1.0);
@@ -478,7 +607,7 @@ index 569aa96..ecec678 100644
      }
    }
  
-@@ -1203,7 +1332,10 @@ void PlannerNode::publishPath() {
+@@ -1203,7 +1334,10 @@ void PlannerNode::publishPath() {
    nav_msgs::msg::Path msg;
    msg.header.stamp = now();
    msg.header.frame_id = world_frame_;
@@ -491,10 +620,25 @@ index 569aa96..ecec678 100644
      pose.header = msg.header;
      pose.pose = toPoseMsg(s);
 diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
-index 94b3348..82ba74d 100644
+index 94b3348..1b89626 100644
 --- a/ros2/src/mgg_ros/test/test_objective_service.cpp
 +++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
-@@ -16,6 +16,105 @@ namespace mgg_ros {
+@@ -1,12 +1,14 @@
+ #include <chrono>
+ #include <atomic>
+ #include <memory>
++#include <sstream>
+ #include <thread>
+ 
+ #include <gtest/gtest.h>
+ #include <rclcpp/rclcpp.hpp>
+ 
+ #include <mgg_msgs/srv/plan_objective.hpp>
++#include <mgg_msgs/srv/planner_srv.hpp>
+ #include <mgg_msgs/msg/mapping_snapshot.hpp>
+ #include <mgg_msgs/srv/query_map_batch.hpp>
+ 
+@@ -16,6 +18,196 @@ namespace mgg_ros {
  
  class PlannerNodeTestPeer {
   public:
@@ -563,6 +707,84 @@ index 94b3348..82ba74d 100644
 +    ++node.map_revision_;
 +  }
 +
++  static void configureExploreServiceScene(PlannerNode& node,
++                                           bool support_root) {
++    configureBackboneTest(node);
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.planning_params_.edge_length_min = 0.05;
++    node.planning_params_.edge_length_max = 0.25;
++    node.planning_params_.edge_overshoot = 0.0;
++    node.planning_params_.num_vertices_max = 20;
++    node.planning_params_.num_edges_max = 40;
++    node.planning_params_.num_loops_max = 40;
++    node.planning_params_.max_step_height = 0.30;
++    node.planning_params_.path_interpolation_distance = 0.10;
++    node.grid_params_.min_val = Eigen::Vector3d::Zero();
++    node.grid_params_.max_val = Eigen::Vector3d(1.0, 0.0, 0.0);
++    node.grid_params_.resolution = Eigen::Vector3d(0.50, 0.50, 0.20);
++    node.global_space_.setBound(Eigen::Vector3d(-3.0, -3.0, -1.0),
++                                Eigen::Vector3d(3.0, 3.0, 2.0));
++    node.global_space_.min_extension.setZero();
++    node.global_space_.max_extension.setZero();
++
++    mgg::SensorParams sensor;
++    sensor.type = mgg::SensorType::kLidar;
++    sensor.max_range = 2.0;
++    sensor.fov = Eigen::Vector2d(M_PI / 2.0, 0.20);
++    sensor.resolution = Eigen::Vector2d(M_PI / 8.0, 0.20);
++    sensor.frontier_percentage_threshold = 0.01;
++    sensor.update();
++    node.sensors_["test_lidar"] = sensor;
++    node.planning_params_.exp_sensor_list = {"test_lidar"};
++
++    // Cover every footprint box and offset ground probe used by the strict
++    // global-edge check. Keep the lower face above the occupied floor.
++    node.map_->augmentFreeBox(Eigen::Vector3d(0.60, 0.0, 0.40),
++                              Eigen::Vector3d(2.4, 1.2, 0.60));
++    for (int repeat = 0; repeat < 10; ++repeat) {
++      for (double x = support_root ? -0.3 : 0.30; x <= 1.3; x += 0.10) {
++        for (const double y : {-0.2, 0.0, 0.2}) {
++          node.map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
++                                      Eigen::Vector3d(x, y, 1.5));
++        }
++      }
++    }
++    node.map_->augmentFreeBox(Eigen::Vector3d(0.60, 0.0, 0.40),
++                              Eigen::Vector3d(2.4, 1.2, 0.60));
++    ++node.map_revision_;
++  }
++
++  static void addCorridorObstacle(PlannerNode& node, double x) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    for (int repeat = 0; repeat < 20; ++repeat) {
++      node.map_->insertPointCloud({Eigen::Vector3d(x, 0.0, 0.30)},
++                                  Eigen::Vector3d(x, 0.0, 1.5));
++    }
++    ++node.map_revision_;
++  }
++
++  static std::uint64_t localGraphRevision(const PlannerNode& node) {
++    return node.local_graph_revision_;
++  }
++
++  static std::uint64_t localGraphMapRevision(const PlannerNode& node) {
++    return node.local_graph_map_revision_;
++  }
++
++  static std::uint64_t globalGraphRevision(const PlannerNode& node) {
++    return node.graph_revision_;
++  }
++
++  static std::string globalGraphDescription(const PlannerNode& node) {
++    std::ostringstream out;
++    for (const auto& entry : node.global_graph_->vertices_map_) {
++      if (entry.second == nullptr) continue;
++      out << "v" << entry.first << "=(" << entry.second->state.x() << ","
++          << entry.second->state.y() << "," << entry.second->state.z() << ") ";
++    }
++    return out.str();
++  }
++
 +  static int globalVertices(const PlannerNode& node) {
 +    return node.global_graph_->getNumVertices();
 +  }
@@ -597,13 +819,28 @@ index 94b3348..82ba74d 100644
 +    return node.refineCorridor(corridor);
 +  }
 +
++  static mgg::ProjectedEdgeStatus globalEdgeStatus(
++      PlannerNode& node, mgg::StateVec from, mgg::StateVec to) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    if (!node.projectStateToDrivingHeight(from) ||
++        !node.projectStateToDrivingHeight(to)) {
++      return mgg::ProjectedEdgeStatus::kHanging;
++    }
++    std::vector<Eigen::Vector3d> projected;
++    return node.ground_->getProjectedEdgeStatus(
++        from.head(3), to.head(3), node.robot_params_.getPlanningSize(), true,
++        projected, false);
++  }
++
    static void acceptSnapshot(PlannerNode& node,
                               const mgg_msgs::msg::MappingSnapshot& snapshot) {
      node.onMappingSnapshot(
-@@ -48,6 +147,117 @@ namespace {
+@@ -47,16 +239,139 @@ namespace {
+ 
  using namespace std::chrono_literals;
  using Service = mgg_msgs::srv::PlanObjective;
- 
++using LegacyService = mgg_msgs::srv::PlannerSrv;
++
 +TEST(PlannerBackbone, CapturesHomeBeforeMotionAndConnectsOnlyMappedTerrain) {
 +  rclcpp::NodeOptions options;
 +  options.parameter_overrides(
@@ -640,6 +877,12 @@ index 94b3348..82ba74d 100644
 +  // Once the body corridor is observed free, the reached pose connects to the
 +  // refined original anchor.
 +  mgg_ros::PlannerNodeTestPeer::observeBodyCorridor(*planner);
++  mgg::StateVec observed_here = mgg::StateVec::Zero();
++  observed_here.x() = 1.20;
++  observed_here.z() = 0.075;
++  EXPECT_EQ(mgg_ros::PlannerNodeTestPeer::globalEdgeStatus(
++                *planner, authority_home, observed_here),
++            mgg::ProjectedEdgeStatus::kAdmissible);
 +  ASSERT_EQ(mgg_ros::PlannerNodeTestPeer::globalVertices(*planner), 2);
 +  ASSERT_EQ(mgg_ros::PlannerNodeTestPeer::globalEdges(*planner), 1);
 +  const mgg::StateVec home =
@@ -714,7 +957,121 @@ index 94b3348..82ba74d 100644
 +  EXPECT_EQ(mgg_ros::PlannerNodeTestPeer::refine(*planner, home).status,
 +            mgg::PlanningStatus::kBlocked);
 +}
-+
+ 
  class ObjectiveService : public ::testing::Test {
   protected:
    void SetUp() override {
+-    planner = std::make_shared<mgg_ros::PlannerNode>(rclcpp::NodeOptions{});
++    rclcpp::NodeOptions options;
++    options.parameter_overrides(
++        {rclcpp::Parameter("map.resolution", 0.05)});
++    planner = std::make_shared<mgg_ros::PlannerNode>(options);
+     caller = std::make_shared<rclcpp::Node>("objective_service_test_client");
+     client = caller->create_client<Service>("plan_objective");
++    legacy_client = caller->create_client<LegacyService>("mggplanner");
+     executor.add_node(planner);
+     spinner = std::thread([this]() { executor.spin(); });
+     ASSERT_TRUE(client->wait_for_service(3s));
++    ASSERT_TRUE(legacy_client->wait_for_service(3s));
+   }
+ 
+   void TearDown() override {
+@@ -73,10 +388,21 @@ class ObjectiveService : public ::testing::Test {
+     return future.get();
+   }
+ 
++  LegacyService::Response::SharedPtr callLegacy(
++      LegacyService::Request::SharedPtr request) {
++    auto future = legacy_client->async_send_request(request);
++    if (rclcpp::spin_until_future_complete(caller, future, 3s) !=
++        rclcpp::FutureReturnCode::SUCCESS) {
++      return nullptr;
++    }
++    return future.get();
++  }
++
+   rclcpp::executors::MultiThreadedExecutor executor;
+   std::shared_ptr<mgg_ros::PlannerNode> planner;
+   std::shared_ptr<rclcpp::Node> caller;
+   rclcpp::Client<Service>::SharedPtr client;
++  rclcpp::Client<LegacyService>::SharedPtr legacy_client;
+   std::thread spinner;
+ };
+ 
+@@ -103,6 +429,76 @@ TEST_F(ObjectiveService, ValidatesBeforeTouchingUnavailableMap) {
+   EXPECT_EQ(response->status, Service::Response::BLOCKED);
+ }
+ 
++TEST_F(ObjectiveService,
++       ColdStartLegacyExploreThenPinnedObjectiveKeepsBaseHeight) {
++  mgg_ros::PlannerNodeTestPeer::configureExploreServiceScene(
++      *planner, /*support_root=*/false);
++  mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 0.0, 0.0, 0.20);
++  ASSERT_FALSE(mgg_ros::PlannerNodeTestPeer::initialAnchorSupported(*planner));
++
++  auto legacy_request = std::make_shared<LegacyService::Request>();
++  legacy_request->bound_mode = LegacyService::Request::EXACT_BOUND;
++  const auto legacy = callLegacy(legacy_request);
++  ASSERT_NE(legacy, nullptr);
++  ASSERT_EQ(legacy->status, LegacyService::Response::FORWARD);
++  ASSERT_GE(legacy->path.size(), 2u);
++
++  auto pinned_request = std::make_shared<Service::Request>();
++  pinned_request->objective = Service::Request::EXPLORE;
++  pinned_request->graph_revision =
++      mgg_ros::PlannerNodeTestPeer::localGraphRevision(*planner);
++  pinned_request->map_revision =
++      mgg_ros::PlannerNodeTestPeer::localGraphMapRevision(*planner);
++  const auto pinned = call(pinned_request);
++  ASSERT_NE(pinned, nullptr);
++  ASSERT_EQ(pinned->status, Service::Response::SUCCEEDED) << pinned->reason;
++  ASSERT_EQ(pinned->path.size(), legacy->path.size());
++  for (std::size_t i = 0; i < legacy->path.size(); ++i) {
++    EXPECT_NEAR(pinned->path[i].position.x, legacy->path[i].position.x, 1e-9);
++    EXPECT_NEAR(pinned->path[i].position.y, legacy->path[i].position.y, 1e-9);
++    EXPECT_NEAR(pinned->path[i].position.z, legacy->path[i].position.z, 1e-9);
++  }
++  // A second subtraction would put the supported destination below ground.
++  EXPECT_GT(pinned->path.back().position.z, -0.05);
++}
++
++TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
++  mgg_ros::PlannerNodeTestPeer::configureExploreServiceScene(
++      *planner, /*support_root=*/true);
++  mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 0.0, 0.0, 0.075);
++  mgg::StateVec home_state = mgg::StateVec::Zero();
++  home_state.z() = 0.075;
++  mgg::StateVec first_state = home_state;
++  first_state.x() = 0.60;
++  EXPECT_EQ(mgg_ros::PlannerNodeTestPeer::globalEdgeStatus(
++                *planner, home_state, first_state),
++            mgg::ProjectedEdgeStatus::kAdmissible);
++  mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 0.60, 0.0, 0.075);
++  mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 1.20, 0.0, 0.075);
++  ASSERT_GE(mgg_ros::PlannerNodeTestPeer::globalVertices(*planner), 3);
++  ASSERT_GE(mgg_ros::PlannerNodeTestPeer::globalEdges(*planner), 2);
++
++  auto home = std::make_shared<Service::Request>();
++  home->objective = Service::Request::RETURN_HOME;
++  home->goal.position.z = 0.075;
++  home->goal.orientation.w = 1.0;
++  home->graph_revision =
++      mgg_ros::PlannerNodeTestPeer::globalGraphRevision(*planner);
++  SCOPED_TRACE(mgg_ros::PlannerNodeTestPeer::globalGraphDescription(*planner));
++  auto response = call(home);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_GE(response->path.size(), 2u);
++
++  mgg_ros::PlannerNodeTestPeer::addCorridorObstacle(*planner, 0.60);
++  response = call(home);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED);
++  EXPECT_TRUE(response->path.empty());
++  EXPECT_NE(response->reason.find("blocked"), std::string::npos);
++}
++
+ TEST_F(ObjectiveService, AuthorityBindingDoesNotRequireIndexedQuery) {
+   EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::hasQueryClient(*planner));
+   mgg_msgs::msg::MappingSnapshot snapshot;

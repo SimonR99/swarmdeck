@@ -467,11 +467,16 @@ internal driving-height convention and are converted to robot base poses only
 at response/publication boundaries. Explore retains the local graph's existing
 startup policy for a root whose ground has not yet been observed; explicit
 destinations still require mapped support. The updated patch has not yet been
-retested in Bistro because the remote workstation became unreachable. Native
-tests passed 23 cases covering graph lookup/update, authority validation,
-supported Home corridors, base-height conversion, and the Explore refinement
-boundary with unobserved ground beneath the root. Those fixtures do not establish
-end-to-end cold-start exploration or return execution.
+retested in Bistro. Local native Jazzy tests now pass 40 cases, including actual
+legacy Explore → revision-pinned Explore service calls with identical base-height
+paths and an actual Home service that changes from a valid route to `BLOCKED`
+with an empty path after an obstacle is inserted. The fixtures exposed two
+OctoMap query defects: path sampling could omit the final endpoint, and floating
+point stepping in `augmentFreeBox` could leave an unknown voxel slice. Sampling
+now includes both endpoints and free-box insertion iterates discrete keys. All
+seven deployment patches replay from pinned MGG `902e868`; the resulting ten
+source files match the compiled fixture. These tests establish service behavior,
+not end-to-end Bistro motion or successful arrival.
 
 The operator reports that Bistro needs `max_mean_error` near 0.6 in the existing
 registration pipeline. That parameter belongs to `swarmdeck_slam.verify`; native
@@ -521,6 +526,11 @@ progress. In particular:
   transparent restart with preserved native graph state is not implemented.
 - Validate each physical robot's calibrated capture, ARM image, and local
   controller. Moving-obstacle and blind-corner behavior needs controlled trials.
+- Implement the reusable grid-search stage: `mgg_core::GridPlanner` is currently
+  an abstract interface. `PlannerNode::refineCorridor` terrain-projects and checks
+  a graph corridor against the live map, but cannot search around a newly blocked
+  segment or generate speed limits. Explore still uses its existing selector;
+  the reusable topological stage handles Navigate and Home.
 - Establish a sensor coverage/bootstrap policy before enabling the strict indexed
   terrain gate. MGG still uses its local OctoMap for frontier construction and
   information gain; Inspect and Rendezvous remain unsupported objectives.
