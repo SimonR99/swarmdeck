@@ -153,6 +153,28 @@ to an immutable, job-suffixed artifact and atomically replaces the adjacent
 pose revision, and authoritative artifact path. The requested
 `global.swgs` path is retained as a compatibility copy; readers that need a
 coherent artifact/metadata pair must follow the manifest's `artifact` path.
+The server reads that same pointer when `SWARMDECK_RECONSTRUCTION_DIR` points
+at the publication directory. `GET /api/map/gaussians` serves the immutable
+artifact bytes with frame, session, component, version, and integrity headers. Use
+`GET /api/map/gaussians?format=status` for bounded source metadata (including capture, calibration, frame inventory,
+and pose revisions) without downloading the artifact. A stale, canceled, failed, malformed, or checksum-
+mismatched pointer returns `409`; the previous ready pointer remains the
+authoritative served result when a newer job is rejected before publication.
+When the pointer declares `source.frame: component`, both `session_id` and
+`component_id` query parameters are required and must match the pose snapshot's
+component authority; an unscoped global request is rejected. Clients may add
+`pose_revision` and `input_fingerprint` query parameters as expected-revision
+guards. This endpoint serves one operator-published model at a time; it does
+not replicate or transform Gaussian artifacts between disconnected components.
+Raw captures in `odom`, `map`, or another robot-local frame are labeled `local`
+and cannot be served here until corrected component poses or a verified world
+transform are supplied. `frame_id` identifies the output frame and
+`capture_frame` preserves the original camera-pose frame. Explicit `world` and
+legacy captures without frame metadata retain world compatibility. Older schema-2
+pointers lacking source metadata must be republished; their output frame cannot
+be inferred safely. Validation uses one disk worker with eight waiting slots and
+a bounded stat-keyed checksum cache, so repeated status polls do not rehash the
+model or block the server event loop.
 The validated private integration target is UMAMI-SLAM commit
 `b1251d435b09f4298a414dbc1151c9bae42c3c37`; source inspection confirmed its
 native `bin/train_colmap` invocation is

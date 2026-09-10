@@ -475,6 +475,50 @@ class InputManifest:
         return sum(record.size_bytes for record in self.frame_records)
 
     @property
+    def world_frame(self) -> str:
+        """The recorded camera-pose frame; metadata already binds the fingerprint."""
+        return str(self.metadata.get("world_frame", ""))
+
+    @property
+    def frame_manifest_digest(self) -> str:
+        """Digest of the immutable frame inventory used by the job."""
+
+        return _digest([record.to_dict() for record in self.frame_records])
+
+    def publication_source(self) -> dict[str, Any]:
+        """Bounded source identity copied into a published artifact pointer."""
+
+        component_id = self.pose_revision.component_id
+        # Capture's ``world_frame`` is the frame in which raw camera poses
+        # were recorded. A nonempty frame other than the explicit global
+        # ``world`` frame is local until a corrected component pose is applied.
+        # Empty values preserve compatibility with pre-metadata captures.
+        frame = (
+            "component"
+            if component_id
+            else (
+                "world"
+                if not self.world_frame or self.world_frame == "world"
+                else "local"
+            )
+        )
+        return {
+            "frame": frame,
+            "frame_id": component_id or self.world_frame or "world",
+            "capture_frame": self.world_frame,
+            "capture_id": self.capture_id,
+            "robot_id": self.robot_id,
+            "session_id": self.session_id,
+            "submap_id": self.submap_id,
+            "calibration_version": self.calibration_version,
+            "optical_frame": self.optical_frame,
+            "frame_count": len(self.frame_records),
+            "frame_bytes": self.total_bytes,
+            "frame_manifest_sha256": self.frame_manifest_digest,
+            "pose_revision": self.pose_revision.to_dict(),
+        }
+
+    @property
     def available(self) -> bool:
         root = Path(self.capture_root)
         return root.is_dir() and bool(self.frame_records)
@@ -1279,6 +1323,7 @@ class DurableJobRunner:
                     "backend_version": job.backend_version,
                     "input_fingerprint": job.input_manifest.fingerprint,
                     "pose_revision": job.input_manifest.pose_revision.to_dict(),
+                    "source": job.input_manifest.publication_source(),
                     "artifact": str(versioned),
                     "artifact_size_bytes": artifact_size,
                     "artifact_sha256": artifact_sha256,

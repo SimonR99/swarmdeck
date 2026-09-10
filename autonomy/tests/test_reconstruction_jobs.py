@@ -116,9 +116,40 @@ def test_fixed_pose_umami_batch_publishes_and_records_manifest(tmp_path):
     assert target.read_bytes()[:4] == b"SWGS"
     manifest = json.loads(target.with_name("model.swgs.manifest.json").read_text())
     assert manifest["input_fingerprint"] == job.input_manifest.fingerprint
+    assert manifest["source"]["capture_id"] == "capture-a"
+    assert manifest["source"]["frame_count"] == 1
+    assert (
+        manifest["source"]["frame_manifest_sha256"]
+        == job.input_manifest.frame_manifest_digest
+    )
     assert backend.capabilities.fixed_camera_poses
     assert not backend.capabilities.checkpoint_resume
     assert not backend.capabilities.incremental_updates
+
+
+def test_raw_odom_capture_is_published_as_local_frame(tmp_path):
+    capture = tmp_path / "odom-capture"
+    capture.mkdir()
+    (capture / "capture_manifest.json").write_text(
+        json.dumps(
+            {
+                "capture_id": "capture-odom",
+                "robot_id": "robot-odom",
+                "session_id": "session-odom",
+                "world_frame": "odom",
+            }
+        )
+    )
+    (capture / "00000000.npz").write_bytes(b"raw-frame")
+
+    manifest = InputManifest.from_capture(capture)
+    source = manifest.publication_source()
+
+    assert manifest.world_frame == "odom"
+    assert source["frame"] == "local"
+    assert source["frame_id"] == "odom"
+    assert source["robot_id"] == "robot-odom"
+    assert source["session_id"] == "session-odom"
 
 
 def test_pose_snapshot_composes_corrected_component_camera_pose(tmp_path):
@@ -163,6 +194,7 @@ def test_pose_snapshot_composes_corrected_component_camera_pose(tmp_path):
     )
     manifest = InputManifest.from_capture(capture, pose_snapshot=snapshot_path)
     assert manifest.pose_revision.snapshot_digest == snapshot.digest
+    assert manifest.publication_source()["frame"] == "component"
     snapshot_path.write_text(snapshot_path.read_text() + "\n")
     changed = InputManifest.from_capture(capture, pose_snapshot=snapshot_path)
     assert changed.fingerprint != manifest.fingerprint
@@ -202,7 +234,9 @@ def test_native_umami_fixture_writes_small_calibrated_colmap_dataset(tmp_path):
     assert struct.unpack_from("<Q", cameras)[0] == 3
     assert struct.unpack_from("<Q", images)[0] == 3
     assert struct.unpack_from("<Q", points)[0] > 0
-    session = json.loads((dataset / "swarmdeck.json").read_text())["capture"]["session_id"]
+    session = json.loads((dataset / "swarmdeck.json").read_text())["capture"][
+        "session_id"
+    ]
     assert str(uuid.UUID(session)) == session
 
 
