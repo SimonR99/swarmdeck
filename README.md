@@ -23,7 +23,7 @@ camera colors appear where calibrated image observations are available.*
 | Fleet supervision | Live state, capability-aware controls, manual drive, navigation goals, cancel, and stop-all. |
 | Collaborative mapping | Local robot maps, shared occupancy grids, pose-graph alignment, and loop-closure verification. |
 | Tactical 3D | Voxels, surface mesh, points, and published Gaussian reconstructions, with a ceiling cut and readable robot/path overlays. |
-| Video and perception | WebRTC camera feeds, JPEG fallback, RGB-D detection projection, and operator review. |
+| Video and perception | H.264 camera feeds over WebRTC with an HLS fallback, RGB-D detection projection, and operator review. |
 | Simulation and hardware | ARGoS with RGB-D and LiDAR, a lightweight mock fleet, and deployment profiles for physical robots. |
 | Session records | Session manifests, timestamped operator events, and optional keyframe capture for offline analysis. |
 | Optional Cortex assistant | An integrated agent service with configurable providers and fleet tools. See [Cortex](agent/README.md). |
@@ -39,6 +39,8 @@ the return journey. Home is retained through dashboard reconnects.
 
 See [MGG exploration setup](docs/operations/mgg-exploration.md)
 for simulation and ROS 2 hardware wiring.
+See [camera stream transport](docs/operations/camera-streams.md) for viewing
+video through LAN connections, HTTPS proxies, and SSH tunnels.
 
 ## Decentralized autonomy development
 

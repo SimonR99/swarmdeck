@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import type Hls from 'hls.js';
   import { Maximize2, Minimize2, Radio, VideoOff } from 'lucide-svelte';
   import Badge from '../ui/Badge.svelte';
   import { fleet } from '$lib/stores/fleet.svelte';
@@ -7,6 +8,13 @@
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
+  import {
+    CameraStreamGate,
+    cameraRetryDelayMs,
+    decodedFrameIsStalled,
+    hlsCameraUrl,
+    type CameraStreamAttempt
+  } from '$lib/video/cameraStream';
 
   let {
     expanded = false,
@@ -18,8 +26,8 @@
 
   /**
    * H.264 camera view.
-   * Streams arrive from MediaMTX via WHEP at /whep/<robot_id>. There is no JPEG
-   * fallback: when H.264 is unavailable the panel reports NO SIGNAL.
+   * Streams prefer MediaMTX WHEP at /whep/<robot_id>. If ICE is unreachable,
+   * the same H.264 stream falls back to same-origin HLS at /hls/<robot_id>/.
   */
 
   let video = $state<HTMLVideoElement | null>(null);
@@ -27,10 +35,14 @@
   let overlayEl = $state<HTMLDivElement | null>(null);
 
   let pc: RTCPeerConnection | null = null;
-  let whepRetryTimer: number | null = null;
-  let whepProbeTimer: number | null = null;
-  let whepFailures = 0;
-  let streamSource = $state<'webrtc' | null>(null);
+  let whepAbort: AbortController | null = null;
+  let hls: Hls | null = null;
+  let nativeHlsCleanup: (() => void) | null = null;
+  let streamRetryTimer: number | null = null;
+  let transportProbeTimer: number | null = null;
+  let streamFailures = 0;
+  const streamGate = new CameraStreamGate();
+  let streamSource = $state<'webrtc' | 'hls' | null>(null);
   let streamState = $state<'idle' | 'connecting' | 'live' | 'unavailable'>('idle');
   let fps = $state(0);
   let pingLatencyMs = $state(0);
@@ -76,6 +88,7 @@
   let rawFps = 0;
   let rawLatency = 0;
   let rfcHandle: number | null = null;
+  let frameEventCleanup: (() => void) | null = null;
   let statsTimer: number | null = null;
 
   function recordFrame(now: number) {
@@ -98,20 +111,42 @@
     }
   }
 
-  function startVideoFrameLoop() {
+  function startVideoFrameLoop(attempt: CameraStreamAttempt) {
     stopVideoFrameLoop();
     updateOverlayPosition();
-    if (!video) return;
+    const target = video;
+    if (!target) return;
+    const onDecodedFrame = (now: number) => {
+      if (!streamGate.isCurrent(attempt, activeId) || video !== target) return;
+      recordFrame(now);
+      updateOverlayPosition();
+      if (streamState !== 'live') {
+        if (transportProbeTimer) clearTimeout(transportProbeTimer);
+        transportProbeTimer = null;
+        streamFailures = 0;
+        streamState = 'live';
+        startStatsPolling(attempt);
+      }
+    };
     if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
       const onFrame = (now: DOMHighResTimeStamp) => {
-        recordFrame(now);
-        updateOverlayPosition();
-        if (streamSource === 'webrtc' && video) {
-          rfcHandle = (video as any).requestVideoFrameCallback(onFrame);
-        }
+        onDecodedFrame(now);
+        if (!streamGate.isCurrent(attempt, activeId) || video !== target) return;
+        rfcHandle = (target as any).requestVideoFrameCallback(onFrame);
       };
-      rfcHandle = (video as any).requestVideoFrameCallback(onFrame);
+      rfcHandle = (target as any).requestVideoFrameCallback(onFrame);
+      return;
     }
+    const onFrame = () => {
+      if (target.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || target.videoWidth <= 0) return;
+      onDecodedFrame(performance.now());
+    };
+    target.addEventListener('loadeddata', onFrame);
+    target.addEventListener('timeupdate', onFrame);
+    frameEventCleanup = () => {
+      target.removeEventListener('loadeddata', onFrame);
+      target.removeEventListener('timeupdate', onFrame);
+    };
   }
 
   function stopVideoFrameLoop() {
@@ -119,18 +154,39 @@
       (video as any).cancelVideoFrameCallback(rfcHandle);
     }
     rfcHandle = null;
+    frameEventCleanup?.();
+    frameEventCleanup = null;
     lastFrameTime = 0;
+    rawFps = 0;
   }
 
-  function startStatsPolling() {
+  function startStatsPolling(attempt: CameraStreamAttempt) {
     stopStatsPolling();
     statsTimer = window.setInterval(async () => {
-      if (!pc || streamSource !== 'webrtc') return;
-      if (lastFrameTime > 0 && performance.now() - lastFrameTime > 1200) {
+      if (!streamGate.isCurrent(attempt, activeId)) return;
+      const now = performance.now();
+      const frameAge = lastFrameTime > 0 ? now - lastFrameTime : 0;
+      if (frameAge > 1200) {
         fps = 0;
+      } else {
+        fps = rawFps;
       }
+      if (decodedFrameIsStalled(lastFrameTime, now, FRAME_RECONNECT_TIMEOUT_MS)) {
+        handleStreamFailure(attempt.robotId, attempt);
+        return;
+      }
+      if (
+        streamState === 'live' &&
+        decodedFrameIsStalled(lastFrameTime, now, FRAME_STALL_TIMEOUT_MS)
+      ) {
+        // Hide a stale image immediately while leaving the current decoder a
+        // longer window to recover its buffer before rebuilding the transport.
+        streamState = 'connecting';
+      }
+      if (!pc || streamSource !== 'webrtc') return;
       try {
         const stats = await pc.getStats();
+        if (!streamGate.isCurrent(attempt, activeId) || streamSource !== 'webrtc') return;
         let foundRtt = false;
         stats.forEach((report) => {
           if (
@@ -161,7 +217,6 @@
             }
           });
         }
-        fps = rawFps;
         pingLatencyMs = rawLatency;
       } catch {
         // Ignored
@@ -176,14 +231,13 @@
     }
   }
 
-  // Back off between WHEP attempts. A robot may be booting its H.264 publisher
-  // or temporarily disconnected, so retry without generating any JPEG traffic.
-  const WHEP_RETRY_MIN_MS = 10_000;
-  const WHEP_RETRY_MAX_MS = 160_000;
   // A negotiation that neither connects nor fails is the ordinary outcome when
   // ICE cannot reach the media server -- the state machine simply sits in
   // `connecting`. Nothing but a deadline ends it.
   const WHEP_PROBE_TIMEOUT_MS = 12_000;
+  const HLS_PROBE_TIMEOUT_MS = 15_000;
+  const FRAME_STALL_TIMEOUT_MS = 3_000;
+  const FRAME_RECONNECT_TIMEOUT_MS = 10_000;
   const activeId = $derived(fleet.activeCamera);
   const color = $derived(activeId ? fleet.colorOf(activeId) : 'var(--color-fg-dim)');
   const boxes = $derived(activeId ? session.bboxesFor(activeId) : []);
@@ -191,24 +245,51 @@
   async function waitForIceGathering(connection: RTCPeerConnection) {
     if (connection.iceGatheringState === 'complete') return;
     await new Promise<void>((resolve) => {
-      const timeout = window.setTimeout(resolve, 2000);
-      const changed = () => {
-        if (connection.iceGatheringState !== 'complete') return;
+      let timeout: number;
+      const finish = () => {
         clearTimeout(timeout);
         connection.removeEventListener('icegatheringstatechange', changed);
         resolve();
       };
+      const changed = () => {
+        if (connection.iceGatheringState !== 'complete') return;
+        finish();
+      };
+      timeout = window.setTimeout(finish, 2000);
       connection.addEventListener('icegatheringstatechange', changed);
     });
   }
 
-  /** Negotiate the robot's H.264 WHEP stream. */
-  async function connectWhep(robotId: string, background = false) {
-    closePeer();
-    if (!background) {
-      streamSource = null;
-      streamState = 'connecting';
-    }
+  function beginAttempt(robotId: string, transport: 'webrtc' | 'hls') {
+    streamGate.invalidate();
+    closeTransport();
+    const attempt = streamGate.begin(robotId, transport);
+    streamSource = transport;
+    streamState = 'connecting';
+    fps = 0;
+    pingLatencyMs = 0;
+    return attempt;
+  }
+
+  function armTransportDeadline(
+    attempt: CameraStreamAttempt,
+    timeoutMs: number,
+    onTimeout: () => void
+  ) {
+    if (transportProbeTimer) clearTimeout(transportProbeTimer);
+    transportProbeTimer = window.setTimeout(() => {
+      transportProbeTimer = null;
+      if (!streamGate.isCurrent(attempt, activeId) || streamState === 'live') return;
+      onTimeout();
+    }, timeoutMs);
+  }
+
+  /** Negotiate the robot's preferred H.264 WHEP stream. */
+  async function connectWhep(robotId: string) {
+    const attempt = beginAttempt(robotId, 'webrtc');
+    armTransportDeadline(attempt, WHEP_PROBE_TIMEOUT_MS, () => {
+      void connectHls(robotId, attempt);
+    });
     let connection: RTCPeerConnection | null = null;
     try {
       const candidate = new RTCPeerConnection({ iceServers: [] });
@@ -223,111 +304,179 @@
       };
       if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
       candidate.ontrack = (e) => {
-        // Attach the track but do not promote the panel yet: the video element
-        // stays hidden until the connection reports itself connected, so a
-        // probe that negotiates and then dies never blanks a working preview.
-        if (pc === candidate && video) video.srcObject = e.streams[0];
+        if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate || !video) return;
+        video.srcObject = e.streams[0];
+        startVideoFrameLoop(attempt);
+        void video.play().catch(() => {});
       };
       candidate.onconnectionstatechange = () => {
-        if (pc !== candidate) return;
-        if (candidate.connectionState === 'connected') {
-          // Media is flowing; only now is it safe to show the video element.
-          if (whepProbeTimer) clearTimeout(whepProbeTimer);
-          whepProbeTimer = null;
-          whepFailures = 0;
-          streamSource = 'webrtc';
-          streamState = 'live';
-          startVideoFrameLoop();
-          startStatsPolling();
-        } else if (
+        if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
+        if (
           candidate.connectionState === 'failed' ||
           candidate.connectionState === 'disconnected'
         ) {
-          closePeer();
-          handleWhepFailure(robotId);
+          void connectHls(robotId, attempt);
         }
       };
       const offer = await candidate.createOffer();
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
       await candidate.setLocalDescription(offer);
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
       // This client deliberately does not implement trickle-ICE PATCHes. Wait
       // until host candidates are in the SDP before sending the one-shot WHEP
       // offer; otherwise a fast POST can contain no usable media candidate.
       await waitForIceGathering(candidate);
-      if (pc !== candidate) return;
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
 
+      const abort = new AbortController();
+      whepAbort = abort;
       const res = await fetch(`/whep/${robotId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
-        body: candidate.localDescription?.sdp
+        body: candidate.localDescription?.sdp,
+        signal: abort.signal
       });
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
       if (!res.ok) throw new Error(`whep ${res.status}`);
       const answer = await res.text();
-      if (pc !== candidate) return;
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
       await candidate.setRemoteDescription({ type: 'answer', sdp: answer });
-
-      // Answered is not connected. Without a deadline, a negotiation that
-      // stalls in `connecting` -- the usual shape of a blocked UDP path, which
-      // is what an operator behind an HTTP tunnel always has -- would neither
-      // promote to WebRTC nor ever schedule another attempt.
-      //
-      // Both this arming and the callback re-check `connectionState`, because a
-      // fast local connection reaches `connected` before this line runs: the
-      // handler above would then clear a timer that does not exist yet, and an
-      // unguarded deadline would later tear down a working stream.
-      if (pc !== candidate || candidate.connectionState === 'connected') return;
-      whepProbeTimer = window.setTimeout(() => {
-        whepProbeTimer = null;
-        if (pc !== candidate || candidate.connectionState === 'connected') return;
-        closePeer();
-        handleWhepFailure(robotId);
-      }, WHEP_PROBE_TIMEOUT_MS);
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== candidate) return;
     } catch {
-      if (pc !== connection) return;
-      closePeer();
-      handleWhepFailure(robotId);
+      if (!streamGate.isCurrent(attempt, activeId) || pc !== connection) return;
+      void connectHls(robotId, attempt);
     }
   }
 
-  /** Report the H.264 outage and keep probing with a widening gap. */
-  function handleWhepFailure(robotId: string) {
-    whepFailures += 1;
-    streamSource = null;
-    streamState = 'unavailable';
-    if (whepRetryTimer) clearTimeout(whepRetryTimer);
-    whepRetryTimer = window.setTimeout(
-      () => {
-        whepRetryTimer = null;
-        void connectWhep(robotId, true);
-      },
-      Math.min(WHEP_RETRY_MAX_MS, WHEP_RETRY_MIN_MS * 2 ** Math.min(whepFailures - 1, 4))
-    );
+  async function connectHls(robotId: string, failedWhep: CameraStreamAttempt) {
+    if (!streamGate.isCurrent(failedWhep, activeId)) return;
+    const attempt = beginAttempt(robotId, 'hls');
+    const target = video;
+    if (!target) {
+      handleStreamFailure(robotId, attempt);
+      return;
+    }
+    const url = hlsCameraUrl(robotId);
+    startVideoFrameLoop(attempt);
+    armTransportDeadline(attempt, HLS_PROBE_TIMEOUT_MS, () => {
+      handleStreamFailure(robotId, attempt);
+    });
+
+    const connectNativeHls = () => {
+      const failed = () => handleStreamFailure(robotId, attempt);
+      target.addEventListener('error', failed);
+      nativeHlsCleanup = () => {
+        target.removeEventListener('error', failed);
+      };
+      target.src = url;
+      target.load();
+      void target.play().catch(() => {});
+    };
+
+    try {
+      const { default: HlsPlayer } = await import('hls.js');
+      if (!streamGate.isCurrent(attempt, activeId)) return;
+      if (!HlsPlayer.isSupported()) {
+        if (target.canPlayType('application/vnd.apple.mpegurl')) {
+          connectNativeHls();
+        } else {
+          handleStreamFailure(robotId, attempt);
+        }
+        return;
+      }
+      const player = new HlsPlayer({
+        lowLatencyMode: true,
+        backBufferLength: 0,
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 5
+      });
+      hls = player;
+      player.on(HlsPlayer.Events.MEDIA_ATTACHED, () => {
+        if (streamGate.isCurrent(attempt, activeId) && hls === player) {
+          player.loadSource(url);
+        }
+      });
+      player.on(HlsPlayer.Events.MANIFEST_PARSED, () => {
+        if (streamGate.isCurrent(attempt, activeId) && hls === player) {
+          void target.play().catch(() => {});
+        }
+      });
+      player.on(HlsPlayer.Events.ERROR, (_event, data) => {
+        if (data.fatal && streamGate.isCurrent(attempt, activeId) && hls === player) {
+          handleStreamFailure(robotId, attempt);
+        }
+      });
+      player.attachMedia(target);
+    } catch {
+      if (!streamGate.isCurrent(attempt, activeId)) return;
+      hls?.destroy();
+      hls = null;
+      if (target.canPlayType('application/vnd.apple.mpegurl')) {
+        connectNativeHls();
+      } else {
+        handleStreamFailure(robotId, attempt);
+      }
+    }
   }
 
-  /** Close the H.264 peer connection. */
+  /** Report a full WHEP/HLS outage and retry the preferred path with backoff. */
+  function handleStreamFailure(robotId: string, attempt: CameraStreamAttempt) {
+    if (!streamGate.isCurrent(attempt, activeId)) return;
+    streamGate.invalidate();
+    closeTransport();
+    streamFailures += 1;
+    streamState = 'unavailable';
+    if (streamRetryTimer) clearTimeout(streamRetryTimer);
+    streamRetryTimer = window.setTimeout(() => {
+      streamRetryTimer = null;
+      if (activeId !== robotId) return;
+      void connectWhep(robotId);
+    }, cameraRetryDelayMs(streamFailures));
+  }
+
   function closePeer() {
-    stopVideoFrameLoop();
-    stopStatsPolling();
-    fps = 0;
-    pingLatencyMs = 0;
-    if (whepProbeTimer) clearTimeout(whepProbeTimer);
-    whepProbeTimer = null;
+    whepAbort?.abort();
+    whepAbort = null;
     const closing = pc;
     pc = null;
+    if (closing) closing.onconnectionstatechange = null;
     closing?.close();
     if (video) video.srcObject = null;
+  }
+
+  function closeHls() {
+    nativeHlsCleanup?.();
+    nativeHlsCleanup = null;
+    const closing = hls;
+    hls = null;
+    closing?.destroy();
+    if (video) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+  }
+
+  function closeTransport() {
+    if (transportProbeTimer) clearTimeout(transportProbeTimer);
+    transportProbeTimer = null;
+    stopVideoFrameLoop();
+    stopStatsPolling();
+    closePeer();
+    closeHls();
+    fps = 0;
+    pingLatencyMs = 0;
+    rawLatency = 0;
+    streamSource = null;
     updateOverlayPosition();
   }
 
   function teardown() {
-    closePeer();
-    stopVideoFrameLoop();
-    stopStatsPolling();
-    fps = 0;
-    pingLatencyMs = 0;
-    if (whepRetryTimer) clearTimeout(whepRetryTimer);
-    whepRetryTimer = null;
-    whepFailures = 0;
-    streamSource = null;
+    streamGate.invalidate();
+    if (streamRetryTimer) clearTimeout(streamRetryTimer);
+    streamRetryTimer = null;
+    closeTransport();
+    streamFailures = 0;
   }
 
   $effect(() => {
@@ -370,13 +519,12 @@
   >
     <video
       bind:this={video}
-      class="h-full w-full object-contain {streamSource === 'webrtc' ? '' : 'hidden'}"
+      class="h-full w-full object-contain {streamSource ? '' : 'hidden'}"
       autoplay
       muted
       playsinline
       onplay={() => {
         updateOverlayPosition();
-        startVideoFrameLoop();
       }}
       onloadedmetadata={updateOverlayPosition}
       onresize={updateOverlayPosition}

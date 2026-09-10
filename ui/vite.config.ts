@@ -31,6 +31,18 @@ export default defineConfig({
       '/whep': {
         target: process.env.MEDIAMTX_WHEP_URL ?? 'http://localhost:8891',
         rewrite: (path) => path.replace(/^\/whep\/([^/]+)$/, '/$1/whep')
+      },
+      '/hls': {
+        target: process.env.MEDIAMTX_HLS_URL ?? 'http://localhost:8888',
+        rewrite: (path) => path.replace(/^\/hls\/([^/]+)\//, '/$1/'),
+        configure: (proxy) => {
+          proxy.on('proxyRes', (response) => {
+            const location = response.headers.location;
+            if (typeof location === 'string' && /^\/(?!\/|hls\/)/.test(location)) {
+              response.headers.location = `/hls${location}`;
+            }
+          });
+        }
       }
     }
   }

@@ -138,6 +138,39 @@ def test_hardware_camera_policy_is_h264_640x480_without_jpeg_fallback():
         assert "/api/camera/" not in source
 
 
+def test_planning_overlay_uses_an_isolated_reachable_webrtc_candidate():
+    base = (COMPOSE_DIR / "docker-compose.yml").read_text()
+    planning = (COMPOSE_DIR / "docker-compose.planning-test.yml").read_text()
+
+    assert 'MTX_WEBRTCLOCALUDPADDRESS: ":8190"' in planning
+    assert 'MTX_WEBRTCLOCALTCPADDRESS: ":8190"' in planning
+    assert '"8190:8190/udp"' in planning
+    assert '"8190:8190/tcp"' in planning
+    assert "MEDIAMTX_TEST_WEBRTC_HOST" in planning
+    assert "MEDIAMTX_WEBRTC_HOST:-192.168.1.161" in planning
+    assert "benchbot.yannbouteiller.com" not in planning
+    assert "swarmdeck-ui:planning" in planning
+    assert '"8189:8189/udp"' not in planning
+    assert '"8189:8189/tcp"' not in planning
+    assert '"8189:8189/udp"' in base
+    assert '"8189:8189/tcp"' in base
+
+
+def test_ui_proxies_same_origin_h264_hls_without_exposing_media_port():
+    nginx = (REPO / "deploy/docker/nginx.conf").read_text()
+    planning = (COMPOSE_DIR / "docker-compose.planning-test.yml").read_text()
+    package = (REPO / "ui/package.json").read_text()
+
+    assert "^/hls/([^/]+)/(.*)$" in nginx
+    assert "http://mediamtx:8888" in nginx
+    assert "proxy_redirect ~^/(.*)$ /hls/$1;" in nginx
+    assert "absolute_redirect off;" in nginx
+    assert "proxy_buffering off" in nginx
+    assert "proxy_cache off" in nginx
+    assert '"8888:8888"' not in planning
+    assert '"hls.js": "1.7.2"' in package
+
+
 def test_spot_deployment_declares_camera_service_and_topics():
     compose = (COMPOSE_DIR / "docker-compose.robot-spot.yml").read_text()
     assert "-r" in compose
