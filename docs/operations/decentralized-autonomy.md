@@ -619,6 +619,18 @@ guard correctly rejected the routes. Routine map revision changes alone did
 not cancel them. Recovery must replan against fresh authority while preserving
 Stop and replacement-command precedence.
 
+The tenth MGG patch makes blocked-route reports actionable without changing
+admission policy or repeating map queries. Reports identify the current pose,
+goal, or corridor waypoint index and distinguish missing ground, occupied body
+space, unknown body space, and geofence rejection. Coordinates use the navigation
+frame: successfully projected states report driving height; a missing-ground
+report retains the input height. Body checks additionally apply the configured
+center offset. Graph-binding reports identify which endpoint exceeds the
+existing tolerance. Native validation passed 176 GoogleTest cases across 20
+binaries (including four PCI cases); colcon reports 196 results with no errors,
+failures, or skips. All ten patches replay from the pinned MGG revision and
+reproduce the tested source. These diagnostics still need a fresh Bistro trial.
+
 Staged launch also exposed the ARGoS experiment freshness rule: starting ARGoS
 after the bridge has already generated `session.argos` makes its timestamp check
 wait for another generation. For this trial, the generated file was verified to

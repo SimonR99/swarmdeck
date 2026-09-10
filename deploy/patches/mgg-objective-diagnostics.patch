@@ -1,0 +1,483 @@
+diff --git a/ros2/src/mgg_core/include/mgg_core/grid_refinement.h b/ros2/src/mgg_core/include/mgg_core/grid_refinement.h
+index 163073f..cdc5e15 100644
+--- a/ros2/src/mgg_core/include/mgg_core/grid_refinement.h
++++ b/ros2/src/mgg_core/include/mgg_core/grid_refinement.h
+@@ -19,10 +19,21 @@ struct GridRefinementLimits {
+   std::chrono::milliseconds timeout{50};
+ };
+ 
++/// Result of projecting an explicit-route state and checking the full body.
++/// Keeping the rejection class in the callback result lets callers report the
++/// failed check without repeating any map query.
++enum class GridProjectionStatus {
++  kSupported,
++  kNoGround,
++  kBodyOccupied,
++  kBodyUnknown,
++  kGeofenceViolation,
++};
++
+ /// Projects a pose onto supported terrain and verifies that the robot's full
+ /// footprint fits there. The input z is the nearest parent's driving height;
+ /// implementations must fail rather than select an unrelated stacked surface.
+-using GridProjectState = std::function<bool(StateVec&)>;
++using GridProjectState = std::function<GridProjectionStatus(StateVec&)>;
+ 
+ /// Verifies a swept segment, including occupancy, footprint, terrain step,
+ /// incline, and geofence policy. Unknown space must return false. On success,
+diff --git a/ros2/src/mgg_core/src/grid_refinement.cpp b/ros2/src/mgg_core/src/grid_refinement.cpp
+index ad5dd8f..d602e56 100644
+--- a/ros2/src/mgg_core/src/grid_refinement.cpp
++++ b/ros2/src/mgg_core/src/grid_refinement.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ #include <climits>
+ #include <cmath>
++#include <cstdio>
+ #include <limits>
+ #include <queue>
+ #include <string>
+@@ -57,6 +58,33 @@ bool samePosition(const StateVec& a, const StateVec& b) {
+   return (a.head<3>() - b.head<3>()).cwiseAbs().maxCoeff() <= 1e-6;
+ }
+ 
++const char* projectionFailureClass(GridProjectionStatus status) {
++  switch (status) {
++    case GridProjectionStatus::kNoGround:
++      return "no mapped ground support";
++    case GridProjectionStatus::kBodyOccupied:
++      return "body intersects occupied space";
++    case GridProjectionStatus::kBodyUnknown:
++      return "body includes unknown space";
++    case GridProjectionStatus::kGeofenceViolation:
++      return "geofence violation";
++    case GridProjectionStatus::kSupported:
++      return "projector returned an invalid supported state";
++  }
++  return "unknown projection failure";
++}
++
++std::string projectionFailure(const std::string& endpoint,
++                              GridProjectionStatus status,
++                              const StateVec& state) {
++  char reason[256];
++  std::snprintf(reason, sizeof(reason),
++                "%s rejected: %s at (%.2f, %.2f, %.2f)", endpoint.c_str(),
++                projectionFailureClass(status), state.x(), state.y(),
++                state.z());
++  return reason;
++}
++
+ double pathLength(const std::vector<StateVec>& path,
+                   const StateVec& from, const StateVec& to) {
+   if (path.size() < 2) return (to.head<3>() - from.head<3>()).norm();
+@@ -128,24 +156,32 @@ FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
+   std::string interruption_reason;
+   if (interrupted(interruption_reason)) return fail(interruption_reason);
+   StateVec start = current_;
+-  const bool start_supported = project_(start);
++  const GridProjectionStatus start_status = project_(start);
+   if (interrupted(interruption_reason)) return fail(interruption_reason);
+-  if (!start_supported || !start.allFinite()) {
+-    return fail("current pose has no supported collision-free grid state");
++  if (start_status != GridProjectionStatus::kSupported ||
++      !start.allFinite()) {
++    return fail(projectionFailure("current pose", start_status, start));
+   }
+ 
+   std::vector<StateVec> waypoints;
+   waypoints.reserve(corridor.poses.size() + 2);
+   waypoints.push_back(start);
+-  for (StateVec waypoint : corridor.poses) {
++  for (std::size_t waypoint_index = 0;
++       waypoint_index < corridor.poses.size(); ++waypoint_index) {
++    StateVec waypoint = corridor.poses[waypoint_index];
+     if (interrupted(interruption_reason)) return fail(interruption_reason);
+     if (!waypoint.allFinite()) {
+-      return fail("route corridor has an unsupported endpoint");
++      return fail("route corridor waypoint[" +
++                  std::to_string(waypoint_index) +
++                  "] rejected: state is non-finite");
+     }
+-    const bool waypoint_supported = project_(waypoint);
++    const GridProjectionStatus waypoint_status = project_(waypoint);
+     if (interrupted(interruption_reason)) return fail(interruption_reason);
+-    if (!waypoint_supported || !waypoint.allFinite()) {
+-      return fail("route corridor has an unsupported endpoint");
++    if (waypoint_status != GridProjectionStatus::kSupported ||
++        !waypoint.allFinite()) {
++      return fail(projectionFailure(
++          "route corridor waypoint[" + std::to_string(waypoint_index) + "]",
++          waypoint_status, waypoint));
+     }
+     if (!samePosition(waypoints.back(), waypoint)) {
+       waypoints.push_back(waypoint);
+@@ -157,11 +193,11 @@ FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
+   if (!goal.allFinite()) {
+     return fail("the exact goal has no supported collision-free grid state");
+   }
+-  const bool goal_supported = project_(goal);
++  const GridProjectionStatus goal_status = project_(goal);
+   if (interrupted(interruption_reason)) return fail(interruption_reason);
+   goal[3] = requested_goal_yaw;
+-  if (!goal_supported || !goal.allFinite()) {
+-    return fail("the exact goal has no supported collision-free grid state");
++  if (goal_status != GridProjectionStatus::kSupported || !goal.allFinite()) {
++    return fail(projectionFailure("exact goal", goal_status, goal));
+   }
+   if (!samePosition(waypoints.back(), goal)) {
+     waypoints.push_back(goal);
+@@ -284,9 +320,12 @@ FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
+       const double lattice_y = origin_y + static_cast<double>(y) * resolution;
+       value.state = StateVec(lattice_x, lattice_y, parent_z, 0.0);
+       if (interrupted(reason)) return false;
+-      const bool supported = project_(value.state);
++      const GridProjectionStatus projection_status = project_(value.state);
+       if (interrupted(reason)) return false;
+-      if (!supported || !value.state.allFinite()) return false;
++      if (projection_status != GridProjectionStatus::kSupported ||
++          !value.state.allFinite()) {
++        return false;
++      }
+       // Keep the discrete XY identity separate from a small support-probe
+       // correction, but reject a projection that jumps into another cell.
+       if (std::abs(value.state.x() - lattice_x) > 0.5 * resolution + 1e-9 ||
+diff --git a/ros2/src/mgg_core/src/planning_stages.cpp b/ros2/src/mgg_core/src/planning_stages.cpp
+index 651e443..f4d3079 100644
+--- a/ros2/src/mgg_core/src/planning_stages.cpp
++++ b/ros2/src/mgg_core/src/planning_stages.cpp
+@@ -1,6 +1,7 @@
+ #include "mgg_core/planning_stages.h"
+ 
+ #include <algorithm>
++#include <cstdio>
+ #include <utility>
+ 
+ namespace mgg {
+@@ -43,9 +44,24 @@ RouteCorridor TopologicalGoalPlanner::plan(
+   // Both ends must bind to the active graph.  An unbounded source lookup can
+   // turn a lone home landmark into an apparently valid one-pose route after
+   // the robot has travelled far beyond the last admitted breadcrumb.
+-  if (!graph.getNearestVertexInRange(&current, goal_vertex_tolerance_, &source) ||
+-      !graph.getNearestVertexInRange(&goal, goal_vertex_tolerance_, &target)) {
+-    result.reason = "current pose or goal is outside the graph";
++  if (!graph.getNearestVertexInRange(&current, goal_vertex_tolerance_,
++                                     &source)) {
++    char reason[192];
++    std::snprintf(reason, sizeof(reason),
++                  "current pose is outside the graph tolerance %.2f m at "
++                  "(%.2f, %.2f, %.2f)",
++                  goal_vertex_tolerance_, current.x(), current.y(),
++                  current.z());
++    result.reason = reason;
++    return result;
++  }
++  if (!graph.getNearestVertexInRange(&goal, goal_vertex_tolerance_, &target)) {
++    char reason[192];
++    std::snprintf(reason, sizeof(reason),
++                  "goal is outside the graph tolerance %.2f m at "
++                  "(%.2f, %.2f, %.2f)",
++                  goal_vertex_tolerance_, goal.x(), goal.y(), goal.z());
++    result.reason = reason;
+     return result;
+   }
+ 
+diff --git a/ros2/src/mgg_core/test/test_grid_refinement.cpp b/ros2/src/mgg_core/test/test_grid_refinement.cpp
+index 9c23527..f062dfd 100644
+--- a/ros2/src/mgg_core/test/test_grid_refinement.cpp
++++ b/ros2/src/mgg_core/test/test_grid_refinement.cpp
+@@ -14,6 +14,7 @@ namespace {
+ 
+ using mgg::BoundedGridPlanner;
+ using mgg::FeasiblePath;
++using mgg::GridProjectionStatus;
+ using mgg::GridRefinementLimits;
+ using mgg::PlanningStatus;
+ using mgg::RouteCorridor;
+@@ -41,7 +42,8 @@ GridRefinementLimits limits() {
+ auto flatProjection() {
+   return [](StateVec& state) {
+     state.z() = 0.0;
+-    return state.allFinite();
++    return state.allFinite() ? GridProjectionStatus::kSupported
++                             : GridProjectionStatus::kNoGround;
+   };
+ }
+ 
+@@ -109,7 +111,7 @@ TEST(GridRefinement, ProjectorCannotReplaceRequestOwnedGoalYaw) {
+   auto yaw_mutating_projector = [](StateVec& state) {
+     state.z() = 0.0;
+     state[3] = -2.4;
+-    return true;
++    return GridProjectionStatus::kSupported;
+   };
+   BoundedGridPlanner planner(StateVec::Zero(), limits(),
+                              yaw_mutating_projector, sampledTraversal({}));
+@@ -125,7 +127,7 @@ TEST(GridRefinement, RejectsExploreBeforeCallingMapPredicates) {
+   int projections = 0;
+   auto project = [&projections](StateVec&) {
+     ++projections;
+-    return true;
++    return GridProjectionStatus::kSupported;
+   };
+   BoundedGridPlanner planner(StateVec::Zero(), limits(), project,
+                              sampledTraversal({}));
+@@ -134,6 +136,58 @@ TEST(GridRefinement, RejectsExploreBeforeCallingMapPredicates) {
+   EXPECT_EQ(projections, 0);
+ }
+ 
++TEST(GridRefinement, ReportsWaypointIndexCoordinatesAndProjectionClass) {
++  const std::vector<std::pair<GridProjectionStatus, std::string>> failures = {
++      {GridProjectionStatus::kNoGround, "no mapped ground support"},
++      {GridProjectionStatus::kBodyOccupied,
++       "body intersects occupied space"},
++      {GridProjectionStatus::kBodyUnknown, "body includes unknown space"},
++      {GridProjectionStatus::kGeofenceViolation, "geofence violation"},
++  };
++  for (const auto& [status, expected_class] : failures) {
++    SCOPED_TRACE(expected_class);
++    RouteCorridor route = routeTo(2.0, 0.0);
++    route.poses.insert(route.poses.begin(), StateVec(1.0, -0.5, 0.25, 0.0));
++    auto project = [status](StateVec& state) {
++      return state.x() == 1.0 ? status : GridProjectionStatus::kSupported;
++    };
++    BoundedGridPlanner planner(StateVec::Zero(), limits(), project,
++                               sampledTraversal({}));
++    const FeasiblePath path = planner.refine(route);
++    EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++    EXPECT_NE(path.reason.find("route corridor waypoint[0] rejected"),
++              std::string::npos);
++    EXPECT_NE(path.reason.find(expected_class), std::string::npos);
++    EXPECT_NE(path.reason.find("(1.00, -0.50, 0.25)"), std::string::npos);
++  }
++}
++
++TEST(GridRefinement, IdentifiesCurrentAndExactGoalProjectionFailures) {
++  auto current_failure = [](StateVec& state) {
++    return state.x() == 0.0 ? GridProjectionStatus::kBodyUnknown
++                            : GridProjectionStatus::kSupported;
++  };
++  BoundedGridPlanner current_planner(StateVec::Zero(), limits(),
++                                     current_failure, sampledTraversal({}));
++  const FeasiblePath current = current_planner.refine(routeTo(2.0, 0.0));
++  EXPECT_NE(current.reason.find("current pose rejected: body includes unknown "
++                                "space at (0.00, 0.00, 0.00)"),
++            std::string::npos);
++
++  RouteCorridor route = routeTo(2.25, -0.25);
++  route.poses = {StateVec(1.0, 0.0, 0.0, 0.0)};
++  auto goal_failure = [](StateVec& state) {
++    return state.x() == 2.25 ? GridProjectionStatus::kGeofenceViolation
++                             : GridProjectionStatus::kSupported;
++  };
++  BoundedGridPlanner goal_planner(StateVec::Zero(), limits(), goal_failure,
++                                  sampledTraversal({}));
++  const FeasiblePath goal = goal_planner.refine(route);
++  EXPECT_NE(goal.reason.find("exact goal rejected: geofence violation at "
++                             "(2.25, -0.25, 0.00)"),
++            std::string::npos);
++}
++
+ TEST(GridRefinement, FindsObservedDetourAroundBlockedChord) {
+   BoundedGridPlanner planner(
+       StateVec::Zero(), limits(), flatProjection(),
+@@ -152,7 +206,9 @@ TEST(GridRefinement, UnknownCellsCannotFormADetour) {
+   const std::set<std::pair<int, int>> known{{0, 0}, {1, 0}, {2, 0}};
+   auto project = [known](StateVec& state) {
+     return known.count({static_cast<int>(std::lround(state.x())),
+-                        static_cast<int>(std::lround(state.y()))}) != 0;
++                        static_cast<int>(std::lround(state.y()))}) != 0
++               ? GridProjectionStatus::kSupported
++               : GridProjectionStatus::kBodyUnknown;
+   };
+   BoundedGridPlanner planner(
+       StateVec::Zero(), limits(), project,
+@@ -167,7 +223,9 @@ TEST(GridRefinement, DoesNotCutDiagonallyBetweenBlockedCardinalCells) {
+   const std::set<std::pair<int, int>> known{{0, 0}, {1, 1}, {2, 2}};
+   auto project = [known](StateVec& state) {
+     return known.count({static_cast<int>(std::lround(state.x())),
+-                        static_cast<int>(std::lround(state.y()))}) != 0;
++                        static_cast<int>(std::lround(state.y()))}) != 0
++               ? GridProjectionStatus::kSupported
++               : GridProjectionStatus::kBodyUnknown;
+   };
+   auto traverse = [](const StateVec& from, const StateVec& to,
+                      std::vector<StateVec>& checked) {
+@@ -258,7 +316,7 @@ TEST(GridRefinement, CancellationRaisedByEndpointProjectionIsObserved) {
+   auto project = [&cancelled, &projections](StateVec& state) {
+     state.z() = 0.0;
+     if (++projections == 2) cancelled = true;
+-    return true;
++    return GridProjectionStatus::kSupported;
+   };
+   BoundedGridPlanner planner(StateVec::Zero(), limits(), project,
+                              sampledTraversal({}),
+diff --git a/ros2/src/mgg_core/test/test_planning_stages.cpp b/ros2/src/mgg_core/test/test_planning_stages.cpp
+index 3b68ce1..a2cf555 100644
+--- a/ros2/src/mgg_core/test/test_planning_stages.cpp
++++ b/ros2/src/mgg_core/test/test_planning_stages.cpp
+@@ -68,8 +68,11 @@ TEST(PlanningStages, GoalMustResolveToTheActiveGraph) {
+   TopologicalGoalPlanner planner("component-a", 12, 34, 0.25);
+   auto far = request(ObjectiveKind::kReturnHome);
+   far.goal.pose.x() = 30.0;
+-  EXPECT_EQ(planner.plan(chain.graph, StateVec::Zero(), far).status,
+-            PlanningStatus::kUnreachable);
++  const auto route = planner.plan(chain.graph, StateVec::Zero(), far);
++  EXPECT_EQ(route.status, PlanningStatus::kUnreachable);
++  EXPECT_EQ(route.reason,
++            "goal is outside the graph tolerance 0.25 m at "
++            "(30.00, 0.00, 0.00)");
+ }
+ 
+ TEST(PlanningStages, CurrentPoseMustResolveToTheActiveGraph) {
+@@ -77,8 +80,12 @@ TEST(PlanningStages, CurrentPoseMustResolveToTheActiveGraph) {
+   TopologicalGoalPlanner planner("component-a", 12, 34, 0.25);
+   auto home = request(ObjectiveKind::kReturnHome);
+   home.goal.pose = StateVec::Zero();
+-  EXPECT_EQ(planner.plan(chain.graph, StateVec(30.0, 0.0, 0.0, 0.0), home).status,
+-            PlanningStatus::kUnreachable);
++  const auto route =
++      planner.plan(chain.graph, StateVec(30.0, 0.0, 0.0, 0.0), home);
++  EXPECT_EQ(route.status, PlanningStatus::kUnreachable);
++  EXPECT_EQ(route.reason,
++            "current pose is outside the graph tolerance 0.25 m at "
++            "(30.00, 0.00, 0.00)");
+ }
+ 
+ TEST(PlanningStages, NonfiniteGoalIsRejectedBeforeGraphLookup) {
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index f0cd98d..0959be3 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -1321,11 +1321,22 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+   const auto project = [this, body, center_offset,
+                         &geofenceContains](mgg::StateVec& state) {
+     if (robot_params_.type == mgg::RobotType::kGroundRobot) {
+-      if (!ground_ || !projectStateToDrivingHeight(state)) return false;
++      if (!ground_ || !projectStateToDrivingHeight(state)) {
++        return mgg::GridProjectionStatus::kNoGround;
++      }
+     }
+     const Eigen::Vector3d center = state.head<3>() + center_offset;
+-    return map_->getStrictBoxStatus(center, body) == mgg::VoxelStatus::kFree &&
+-           geofenceContains(center);
++    const mgg::VoxelStatus body_status = map_->getStrictBoxStatus(center, body);
++    if (body_status == mgg::VoxelStatus::kOccupied) {
++      return mgg::GridProjectionStatus::kBodyOccupied;
++    }
++    if (body_status != mgg::VoxelStatus::kFree) {
++      return mgg::GridProjectionStatus::kBodyUnknown;
++    }
++    if (!geofenceContains(center)) {
++      return mgg::GridProjectionStatus::kGeofenceViolation;
++    }
++    return mgg::GridProjectionStatus::kSupported;
+   };
+   const auto traverse =
+       [this, body, center_offset,
+@@ -1504,11 +1515,25 @@ void PlannerNode::onObjectiveRequest(
+           core.component_id, core.graph_revision, core.map_revision, 1.0);
+       mgg::StateVec graph_current = current_state_;
+       mgg::PlanningRequest graph_request = core;
+-      if (!projectStateToDrivingHeight(graph_current) ||
+-          !projectStateToDrivingHeight(graph_request.goal.pose)) {
++      if (!projectStateToDrivingHeight(graph_current)) {
++        corridor.request = core;
++        corridor.status = mgg::PlanningStatus::kUnreachable;
++        char reason[192];
++        std::snprintf(reason, sizeof(reason),
++                      "current pose rejected: no mapped ground support at "
++                      "(%.2f, %.2f, %.2f)",
++                      graph_current.x(), graph_current.y(), graph_current.z());
++        corridor.reason = reason;
++      } else if (!projectStateToDrivingHeight(graph_request.goal.pose)) {
+         corridor.request = core;
+         corridor.status = mgg::PlanningStatus::kUnreachable;
+-        corridor.reason = "current pose or goal has no mapped terrain support";
++        char reason[192];
++        std::snprintf(reason, sizeof(reason),
++                      "goal rejected: no mapped ground support at "
++                      "(%.2f, %.2f, %.2f)",
++                      graph_request.goal.pose.x(), graph_request.goal.pose.y(),
++                      graph_request.goal.pose.z());
++        corridor.reason = reason;
+       } else {
+         corridor = planner.plan(graph, graph_current, graph_request);
+         // Graph lookup uses driving height, while refinement and the response
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index f4a89b3..d52a7f5 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -506,6 +506,41 @@ TEST(PlannerBackbone, CapturesHomeBeforeMotionAndConnectsOnlyMappedTerrain) {
+ 
+ }
+ 
++TEST(PlannerBackbone, ExplicitGroundFailureIdentifiesCurrentOrGoal) {
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05)});
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++
++  auto unsupported_current = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureBackboneTest(*unsupported_current);
++  Peer::acceptOdometry(*unsupported_current, 0.0, 0.0, 0.075);
++  Peer::observeDestinationSupport(*unsupported_current, 2.0);
++  const mgg::StateVec home(0.0, 0.0, 0.075, 0.0);
++  auto response = Peer::requestObjective(
++      *unsupported_current, mgg::ObjectiveKind::kReturnHome, home);
++  ASSERT_NE(response, nullptr);
++  EXPECT_NE(response->reason.find(
++                "current pose rejected: no mapped ground support at "
++                "(0.00, 0.00,"),
++            std::string::npos)
++      << response->reason;
++
++  auto unsupported_goal = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureBackboneTest(*unsupported_goal);
++  Peer::acceptOdometry(*unsupported_goal, 0.0, 0.0, 0.075);
++  Peer::observeGroundSupport(*unsupported_goal);
++  const mgg::StateVec distant_goal(10.0, 0.0, 0.075, 0.0);
++  response = Peer::requestObjective(
++      *unsupported_goal, mgg::ObjectiveKind::kReturnHome, distant_goal);
++  ASSERT_NE(response, nullptr);
++  EXPECT_NE(response->reason.find(
++                "goal rejected: no mapped ground support at "
++                "(10.00, 0.00,"),
++            std::string::npos)
++      << response->reason;
++}
++
+ TEST(PlannerBackbone, DelayedSupportBackfillsBentTrajectoryBeyondParentRadius) {
+   rclcpp::NodeOptions options;
+   options.parameter_overrides(
+@@ -857,6 +892,10 @@ TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
+   ASSERT_NE(response, nullptr);
+   EXPECT_EQ(response->status, Service::Response::BLOCKED);
+   EXPECT_TRUE(response->path.empty());
++  EXPECT_NE(response->reason.find("route corridor waypoint["),
++            std::string::npos);
++  EXPECT_NE(response->reason.find("body intersects occupied space at"),
++            std::string::npos);
+ }
+ 
+ TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
+@@ -954,6 +993,10 @@ TEST_F(ObjectiveService, GridRejectsSingleUnknownBodyVoxelWithZeroOffset) {
+   ASSERT_NE(response, nullptr);
+   EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
+   EXPECT_TRUE(response->path.empty());
++  EXPECT_NE(response->reason.find("route corridor waypoint[0] rejected"),
++            std::string::npos);
++  EXPECT_NE(response->reason.find("body includes unknown space at"),
++            std::string::npos);
+ }
+ 
+ TEST_F(ObjectiveService, GridGeofenceRejectsStationaryAndCrossingRoutes) {
+@@ -977,6 +1020,8 @@ TEST_F(ObjectiveService, GridGeofenceRejectsStationaryAndCrossingRoutes) {
+   ASSERT_NE(response, nullptr);
+   EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
+   EXPECT_TRUE(response->path.empty());
++  EXPECT_NE(response->reason.find("current pose rejected: geofence violation at"),
++            std::string::npos);
+ 
+   Peer::setGridGeofence(*planner, 0.85, 0.95, -1.3, 1.3);
+   goal->goal.position.x = 0.0;
