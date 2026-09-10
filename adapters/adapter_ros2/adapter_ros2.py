@@ -257,6 +257,9 @@ class HardwareBridge(
         self.goal: dict[str, float] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        self._goal_lock = threading.RLock()
+        self._nav_execution_enabled = False
+        self._nav_enable_on_accept = False
         # When Spot's lateral velocity is zero, an arbitrary (x, y) body goal
         # is not executable as one holonomic trajectory. Keep the map target
         # across a short rotate/drive/rotate sequence instead.
@@ -448,9 +451,12 @@ class HardwareBridge(
 
         path_action_name = cfg.get("actions", {}).get("follow_path")
         planning_cfg = cfg.get("planning") or {}
-        uses_mgg_planning = str(
-            planning_cfg.get("backend") or cfg.get("planning_backend") or ""
-        ).lower() == "mgg"
+        uses_mgg_planning = (
+            str(
+                planning_cfg.get("backend") or cfg.get("planning_backend") or ""
+            ).lower()
+            == "mgg"
+        )
         if (
             path_action_name is None
             and action_name
@@ -1110,18 +1116,48 @@ class HardwareBridge(
     def drive(self, linear: float, angular: float) -> None:
         if self.pub_cmd is None:
             return
-        moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
-        # Operator motion always preempts autonomy. Changing nav_status stops
-        # the isolated velocity relay immediately; cancel_goal() also asks the
-        # action server to terminate its work.
-        if moving and self.nav_status == "active":
+        with self._goal_lock:
+            moving = abs(linear) > 1e-3 or abs(angular) > 1e-3
+            # Operator motion always preempts autonomy. Changing nav_status
+            # stops the isolated relay; cancel also terminates the ROS action.
+            if moving:
+                if (
+                    self._nav_execution_enabled
+                    or self._goal_handle is not None
+                    or self._trajectory_target is not None
+                    or bool(self._trajectory_step)
+                ):
+                    self.cancel_goal()
+                else:
+                    # A planner may own a generation while no action exists.
+                    # Invalidate it without calling Spot's stop service for
+                    # every subsequent joystick sample.
+                    self._goal_generation += 1
+                    self.goal = None
+                    self.planned_path = []
+                    self._local_planned_path = []
+                    self._global_planned_path = []
+                    self.nav_status = "cancelled"
+            twist = Twist()
+            twist.linear.x = float(linear)
+            twist.angular.z = float(angular)
+            self.pub_cmd.publish(twist)
+            self.mode = "teleop" if moving else self.mode
+            self._last_drive_at = time.monotonic() if moving else 0.0
+
+    def stop(self) -> None:
+        exploration = getattr(self, "exploration", None)
+        if exploration is not None:
+            exploration.stop()
+        with self._goal_lock:
             self.cancel_goal()
-        twist = Twist()
-        twist.linear.x = float(linear)
-        twist.angular.z = float(angular)
-        self.pub_cmd.publish(twist)
-        self.mode = "teleop" if moving else self.mode
-        self._last_drive_at = time.monotonic() if moving else 0.0
+            self.mode = "estop"
+
+    def _on_nav_cmd_vel(self, msg) -> None:
+        with self._goal_lock:
+            if not self._nav_execution_enabled:
+                return
+            super()._on_nav_cmd_vel(msg)
 
     def set_stand_height(self, height: float) -> bool:
         """Command Spot's stand height in range [-0.15, 0.15] meters relative to default."""
@@ -1331,13 +1367,6 @@ class HardwareBridge(
             )
             self.nav_status = "failed"
             return
-        self._goal_generation += 1
-        generation = self._goal_generation
-        self._trajectory_target = None
-        self._trajectory_step = ""
-        self._trajectory_step_count = 0
-        self._trajectory_step_error = None
-
         msg = NavigateToPose.Goal()
         msg.pose.header.frame_id = self.map_frame
         msg.pose.header.stamp = self.node.get_clock().now().to_msg()
@@ -1351,9 +1380,18 @@ class HardwareBridge(
         msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
-        self._arm_goal(goal)
-        future = self.nav_client.send_goal_async(msg)
-        future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
+        with self._goal_lock:
+            self._goal_generation += 1
+            generation = self._goal_generation
+            self._trajectory_target = None
+            self._trajectory_step = ""
+            self._trajectory_step_count = 0
+            self._trajectory_step_error = None
+            self._arm_goal(goal, relay_nav=True)
+            future = self.nav_client.send_goal_async(msg)
+            future.add_done_callback(
+                lambda f, g=generation: self._on_goal_response(f, g)
+            )
 
     def plan_objective(self, objective: str, goal: dict | None = None) -> bool:
         planner = getattr(self, "objective_planner", None)
@@ -1365,41 +1403,81 @@ class HardwareBridge(
         planner = getattr(self, "objective_planner", None)
         return bool(planner and planner.return_home(goal))
 
-    def follow_path(self, plan) -> bool:
+    def follow_path(
+        self,
+        plan,
+        expected_generation: int | None = None,
+        not_after: float | None = None,
+        pre_submit=None,
+    ) -> int | bool | None:
         """Submit the complete validated MGG route to Nav2's controller."""
         if not plan.poses:
             return False
+        if expected_generation is not None:
+            with self._goal_lock:
+                if expected_generation != self._goal_generation:
+                    return None
+                if not_after is not None and time.monotonic() >= not_after:
+                    return None
         if self.path_client is None:
-            self.nav_status = "failed"
+            if expected_generation is None:
+                self.nav_status = "failed"
             return False
+        remaining = (
+            math.inf if not_after is None else max(0.0, not_after - time.monotonic())
+        )
+        if remaining <= 0.0:
+            return None
         if (
             not self.path_client.server_is_ready()
-            and not self.path_client.wait_for_server(timeout_sec=3.0)
+            and not self.path_client.wait_for_server(timeout_sec=min(3.0, remaining))
         ):
             self.node.get_logger().warn(
                 f"[{self.id}] FollowPath action server not available; path dropped"
             )
-            self.nav_status = "failed"
+            if expected_generation is None:
+                self.nav_status = "failed"
             return False
 
-        self.cancel_goal()
-        generation = self._goal_generation
-        self._trajectory_target = None
         from adapters.exploration import follow_path_goal
 
         msg = follow_path_goal(plan)
 
         final = plan.poses[-1]
-        self._arm_goal({"x": final.x, "y": final.y})
-        self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
-        try:
-            future = self.path_client.send_goal_async(msg)
-        except Exception as exc:
-            self.node.get_logger().warn(f"[{self.id}] path submission failed: {exc}")
-            self._finish_goal("failed")
-            return False
-        future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
-        return True
+        with self._goal_lock:
+            if not_after is not None and time.monotonic() >= not_after:
+                return None
+            if (
+                expected_generation is not None
+                and expected_generation != self._goal_generation
+            ):
+                return None
+            if pre_submit is not None and not pre_submit():
+                return None
+            if expected_generation is None:
+                self.cancel_goal()
+            generation = self._goal_generation
+            self._trajectory_target = None
+            self._arm_goal({"x": final.x, "y": final.y}, relay_nav=True)
+            self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
+            try:
+                future = self.path_client.send_goal_async(msg)
+            except Exception as exc:
+                self.node.get_logger().warn(
+                    f"[{self.id}] path submission failed: {exc}"
+                )
+                if expected_generation is None:
+                    self._finish_goal("failed")
+                else:
+                    self._nav_execution_enabled = False
+                    self.goal = None
+                    self.planned_path = []
+                    self.nav_status, self.mode = "active", "idle"
+                return False
+            future.add_done_callback(
+                lambda f, g=generation: self._on_goal_response(f, g)
+            )
+            return generation
 
     def _navigate_trajectory(self, goal: dict[str, float]) -> None:
         """Spot click-to-pose: map-frame goal -> body-frame Trajectory.
@@ -1427,21 +1505,22 @@ class HardwareBridge(
             self.nav_status = "failed"
             self.mode = "idle"
             return
-        self._goal_generation += 1
-        generation = self._goal_generation
-        self._arm_goal(goal)
-        if self._trajectory_is_diff_drive():
-            self._trajectory_target = {
-                "x": float(goal["x"]),
-                "y": float(goal["y"]),
-            }
-            if "yaw" in goal and goal["yaw"] is not None:
-                self._trajectory_target["yaw"] = float(goal["yaw"])
-            self._trajectory_step_count = 0
-            self._continue_diff_trajectory(generation)
-            return
-        self._trajectory_target = None
-        self._send_trajectory_pose(pose, generation, "holonomic")
+        with self._goal_lock:
+            self._goal_generation += 1
+            generation = self._goal_generation
+            self._arm_goal(goal)
+            if self._trajectory_is_diff_drive():
+                self._trajectory_target = {
+                    "x": float(goal["x"]),
+                    "y": float(goal["y"]),
+                }
+                if "yaw" in goal and goal["yaw"] is not None:
+                    self._trajectory_target["yaw"] = float(goal["yaw"])
+                self._trajectory_step_count = 0
+                self._continue_diff_trajectory(generation)
+                return
+            self._trajectory_target = None
+            self._send_trajectory_pose(pose, generation, "holonomic")
 
     def _trajectory_is_diff_drive(self) -> bool:
         tcfg = self.cfg.get("trajectory") or {}
@@ -1575,22 +1654,27 @@ class HardwareBridge(
         msg.disable_obstacle_avoidance = bool(
             tcfg.get("disable_obstacle_avoidance", False)
         )
-        self._trajectory_step = step
         yaw = yaw_of(pose.pose.orientation)
         self.node.get_logger().info(
             f"[{self.id}] Spot trajectory step={step} "
             f"x={float(pose.pose.position.x):.3f} "
             f"y={float(pose.pose.position.y):.3f} yaw={yaw:.3f}"
         )
-        try:
-            future = self.traj_client.send_goal_async(msg)
-        except Exception as exc:
-            self.node.get_logger().warn(
-                f"[{self.id}] Spot trajectory submission failed: {exc}"
+        with self._goal_lock:
+            if generation != self._goal_generation:
+                return
+            self._trajectory_step = step
+            try:
+                future = self.traj_client.send_goal_async(msg)
+            except Exception as exc:
+                self.node.get_logger().warn(
+                    f"[{self.id}] Spot trajectory submission failed: {exc}"
+                )
+                self._finish_goal("failed")
+                return
+            future.add_done_callback(
+                lambda f, g=generation: self._on_goal_response(f, g)
             )
-            self._finish_goal("failed")
-            return
-        future.add_done_callback(lambda f, g=generation: self._on_goal_response(f, g))
 
     def _apply_trajectory_velocity_limit(self) -> bool:
         """Apply Spot's configured mobility limit before accepting a goal.
@@ -1664,10 +1748,14 @@ class HardwareBridge(
             return False
         return True
 
-    def _arm_goal(self, goal: dict[str, float]) -> None:
+    def _arm_goal(self, goal: dict[str, float], *, relay_nav=False) -> None:
         self.goal = {"x": float(goal["x"]), "y": float(goal["y"])}
         self.nav_status = "active"
         self.mode = "nav"
+        # Keep Nav2 output closed until this generation is accepted. The old
+        # action can still publish while replacement acceptance is in flight.
+        self._nav_execution_enabled = False
+        self._nav_enable_on_accept = relay_nav
 
     def _goal_in_body(
         self, goal: dict[str, float], *, frame: str | None = None
@@ -1723,35 +1811,65 @@ class HardwareBridge(
         try:
             handle = future.result()
         except Exception as exc:
-            if generation != self._goal_generation:
-                return
-            self.node.get_logger().warn(
-                f"[{self.id}] navigation goal response failed: {exc}"
-            )
-            self._finish_goal("failed")
+            with self._goal_lock:
+                if generation != self._goal_generation:
+                    return
+                self.node.get_logger().warn(
+                    f"[{self.id}] navigation goal response failed: {exc}"
+                )
+                self._finish_goal("failed")
             return
         # A cancellation or newer goal can win while send_goal_async is still
         # in flight. Cancel an accepted stale handle instead of abandoning an
         # action that would continue computing and publishing velocity forever.
-        if generation != self._goal_generation:
-            if handle.accepted:
-                handle.cancel_goal_async()
-            return
-        if not handle.accepted:
-            self.node.get_logger().warn(
-                f"[{self.id}] navigation goal rejected"
-                + (f" during {self._trajectory_step}" if self._trajectory_step else "")
-            )
-            self._finish_goal("failed")
-            return
-        self._goal_handle = handle
-        handle.get_result_async().add_done_callback(
-            lambda f, g=generation: self._on_goal_result(f, g)
-        )
+        with self._goal_lock:
+            if generation != self._goal_generation:
+                if handle.accepted:
+                    handle.cancel_goal_async()
+                return
+            if not handle.accepted:
+                self.node.get_logger().warn(
+                    f"[{self.id}] navigation goal rejected"
+                    + (
+                        f" during {self._trajectory_step}"
+                        if self._trajectory_step
+                        else ""
+                    )
+                )
+                self._finish_goal("failed")
+                return
+            self._goal_handle = handle
+            try:
+                result = handle.get_result_async()
+                result.add_done_callback(
+                    lambda f, g=generation: self._on_goal_result(f, g)
+                )
+            except Exception as exc:
+                try:
+                    handle.cancel_goal_async()
+                except Exception:
+                    pass
+                self._nav_execution_enabled = False
+                if self.pub_cmd is not None:
+                    zero = Twist()
+                    zero.linear.x = 0.0
+                    zero.linear.y = 0.0
+                    zero.angular.z = 0.0
+                    self.pub_cmd.publish(zero)
+                self.node.get_logger().warn(
+                    f"[{self.id}] navigation result monitor failed: {exc}"
+                )
+                self._finish_goal("failed")
+                return
+            self._nav_execution_enabled = self._nav_enable_on_accept
 
     def _on_goal_result(self, future, generation: int) -> None:
-        if generation != self._goal_generation:
-            return
+        with self._goal_lock:
+            if generation != self._goal_generation:
+                return
+            self._finish_goal_result(future, generation)
+
+    def _finish_goal_result(self, future, generation: int) -> None:
         from action_msgs.msg import GoalStatus
 
         try:
@@ -1829,6 +1947,8 @@ class HardwareBridge(
         return after <= tolerance or after <= before - minimum
 
     def _finish_goal(self, status: str) -> None:
+        self._nav_execution_enabled = False
+        self._nav_enable_on_accept = False
         self.nav_status = status
         self.mode = "idle"
         self.goal = None
@@ -1841,37 +1961,75 @@ class HardwareBridge(
         self._trajectory_step_count = 0
         self._trajectory_step_error = None
 
-    def cancel_goal(self) -> None:
-        self._goal_generation += 1
-        if self._goal_handle is not None:
-            try:
-                self._goal_handle.cancel_goal_async()
-            except Exception:
-                pass
-            self._goal_handle = None
-        self.goal = None
-        self.planned_path = []
-        self._local_planned_path = []
-        self._global_planned_path = []
-        self.nav_status = "cancelled"
-        self.mode = "idle"
-        self._trajectory_target = None
-        self._trajectory_step = ""
-        self._trajectory_step_count = 0
-        self._trajectory_step_error = None
-        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
-        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
-        # A zero cmd_vel preempts the SDK trajectory immediately. Also enqueue
-        # `/stop` as a backstop, but never wait for that service round trip here:
-        # drive() calls this inline before publishing the operator's command.
-        if self.traj_client is not None:
+    def cancel_goal(self) -> int:
+        with self._goal_lock:
+            self._goal_generation += 1
+            generation = self._goal_generation
+            self._nav_execution_enabled = False
+            self._nav_enable_on_accept = False
             if self.pub_cmd is not None:
                 zero = Twist()
                 zero.linear.x = 0.0
                 zero.linear.y = 0.0
                 zero.angular.z = 0.0
                 self.pub_cmd.publish(zero)
+            if self._goal_handle is not None:
+                try:
+                    self._goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                self._goal_handle = None
+            self.goal = None
+            self.planned_path = []
+            self._local_planned_path = []
+            self._global_planned_path = []
+            self.nav_status = "cancelled"
+            self.mode = "idle"
+            self._trajectory_target = None
+            self._trajectory_step = ""
+            self._trajectory_step_count = 0
+            self._trajectory_step_error = None
+        # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
+        # (the ROS 1 path that called spot_wrapper.stop() is commented out).
+        # A zero cmd_vel preempts the SDK trajectory immediately. Also enqueue
+        # `/stop` as a backstop, but never wait for that service round trip here:
+        # drive() calls this inline before publishing the operator's command.
+        if self.traj_client is not None:
             self._call_trigger_async("stop")
+        return generation
+
+    def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
+        """Cancel only the command owning ``expected_generation``."""
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return None
+            self.cancel_goal()
+            if pending:
+                self.nav_status = "active"
+            return self._goal_generation
+
+    def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return False
+            if status != "active":
+                self._nav_execution_enabled = False
+            self.nav_status = status
+            return True
+
+    def set_goal_pending_if_current(self, expected_generation: int) -> bool:
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return False
+            self._nav_execution_enabled = False
+            self.nav_status = "active"
+            return True
+
+    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
+        # Conditional cancellation disables the hardware velocity relay before
+        # returning, so this does not wait for the remote action server.
+        with self._goal_lock:
+            return expected_generation == self._goal_generation
 
     def stop_for_exit(self) -> None:
         """Flush a synchronous SDK stop before the ROS executor is torn down."""

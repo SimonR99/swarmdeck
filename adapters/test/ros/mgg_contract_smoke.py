@@ -4,6 +4,7 @@ Run in the MGG image on an isolated ROS domain. No robot commands are published.
 """
 
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 import rclpy
@@ -29,38 +30,95 @@ class FollowPathSink:
         self.paths = paths
         self.cancellations = cancellations
         self._goal_generation = 0
+        self._goal_lock = threading.RLock()
         self.nav_status = "idle"
         self.client = ActionClient(node, FollowPath, "/probe/follow_path")
         self.handle = None
         self.cancel_futures = []
         self.goal_errors = []
 
-    def follow_path(self, plan):
-        future = self.client.send_goal_async(follow_path_goal(plan))
+    def follow_path(
+        self, plan, *, expected_generation=None, not_after=None, pre_submit=None
+    ):
+        request = follow_path_goal(plan)
+        with self._goal_lock:
+            if (
+                expected_generation is not None
+                and expected_generation != self._goal_generation
+            ) or (not_after is not None and time.monotonic() >= not_after):
+                return None
+            if pre_submit is not None and not pre_submit():
+                return None
+            generation = (
+                self.cancel_goal()
+                if expected_generation is None
+                else expected_generation
+            )
+            self.nav_status = "active"
+            future = self.client.send_goal_async(request)
 
-        def accepted(done):
-            try:
-                self.handle = done.result()
-                if not self.handle.accepted:
-                    self.goal_errors.append(
-                        AssertionError("native FollowPath sink rejected the path")
-                    )
-            except Exception as exc:
-                # rclpy schedules done callbacks as Tasks. Consume a teardown
-                # race here so it cannot become an unobserved Task exception;
-                # assertions below still fail any error during the contract.
-                self.goal_errors.append(exc)
+            def accepted(done):
+                try:
+                    handle = done.result()
+                    with self._goal_lock:
+                        if not handle.accepted:
+                            self.goal_errors.append(
+                                AssertionError(
+                                    "native FollowPath sink rejected the path"
+                                )
+                            )
+                        elif generation != self._goal_generation:
+                            self._cancel_handle(handle)
+                        else:
+                            self.handle = handle
+                except Exception as exc:
+                    # Consume teardown races in rclpy's callback Tasks; the
+                    # contract still fails errors observed before teardown.
+                    self.goal_errors.append(exc)
 
-        future.add_done_callback(accepted)
-        return True
+            future.add_done_callback(accepted)
+            return generation
+
+    def _cancel_handle(self, handle):
+        self.cancellations.append(True)
+        self.cancel_futures.append(handle.cancel_goal_async())
 
     def cancel_goal(self):
-        self._goal_generation += 1
-        if self.handle is not None:
-            self.cancellations.append(True)
-            cancel = self.handle.cancel_goal_async()
-            self.cancel_futures.append(cancel)
-            self.handle = None
+        with self._goal_lock:
+            self._goal_generation += 1
+            if self.handle is not None:
+                self._cancel_handle(self.handle)
+                self.handle = None
+            self.nav_status = "cancelled"
+            return self._goal_generation
+
+    def cancel_goal_if_current(self, expected_generation, *, pending=False):
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return None
+            generation = self.cancel_goal()
+            if pending:
+                self.nav_status = "active"
+            return generation
+
+    def set_nav_status_if_current(self, expected_generation, status):
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return False
+            self.nav_status = status
+            return True
+
+    def set_goal_pending_if_current(self, expected_generation):
+        return self.set_nav_status_if_current(expected_generation, "active")
+
+    def wait_goal_quiet(self, expected_generation, not_after):
+        # This sink never publishes velocity; controller stopping semantics
+        # belong to the production bridge tests and the physical trial.
+        with self._goal_lock:
+            return (
+                expected_generation == self._goal_generation
+                and time.monotonic() < not_after
+            )
 
     def drive(self, *_):
         pass
@@ -177,11 +235,7 @@ def main():
         assert [
             (pose.pose.position.x, pose.pose.position.y, pose.pose.position.z)
             for pose in paths[-1].poses
-        ] == [
-            (0.5, 0.25, 0.0),
-            (1.0, 0.5, 0.0),
-            (2.0, 1.0, 0.0)
-        ]
+        ] == [(0.5, 0.25, 0.0), (1.0, 0.5, 0.0), (2.0, 1.0, 0.0)]
         explorer.stop()
         wait_until(lambda: explorer.pending_stop.done())
         assert not explorer.active and cancellations
@@ -246,6 +300,9 @@ def main():
             "and late-response fencing"
         )
     finally:
+        explorer.timer.cancel()
+        if "objective" in locals():
+            objective._authority_timer.cancel()
         # Stop the external client before destroying the local services/actions
         # it is using; otherwise rclpy can complete an in-flight response with
         # a Destroyable exception during interpreter teardown.
@@ -254,12 +311,11 @@ def main():
         end = time.monotonic() + 0.2
         while time.monotonic() < end:
             executor.spin_once(timeout_sec=0.05)
-        explorer.timer.cancel()
-        if "objective" in locals():
-            objective._authority_timer.cancel()
+        # Drain executor threads before destroying handles that an already
+        # scheduled callback can still be using.
+        executor.shutdown()
         action_server.destroy()
         executor.remove_node(node)
-        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

@@ -231,6 +231,35 @@ onboard correction; the server does not substitute its cached home coordinates.
 Nav2 FollowPath receives the complete MGG path. Removing the onboard overlay
 and restarting the adapter restores the legacy central map path.
 
+An executing Home route is cancelled when its navigation transform moves more
+than 2 cm or 0.02 radians, or its correction revision changes. The adapter
+retains the Home intent and requests a fresh route only while mission, component,
+map epoch, navigation frame, and home keyframe identity remain the same.
+One worker coalesces corrections and validates the latest indexed snapshot
+again immediately before dispatch. Stop, manual driving, and replacement goals
+invalidate that worker's command ownership.
+
+The recovery budget applies to each correction episode. A successful dispatch
+ends the episode; a later correction can start another. Configure the following
+keys under the adapter's `planning` section:
+
+| Setting | Default | Bound |
+| --- | --- | --- |
+| `authority_replan_max_attempts` | 3 | 1–20 attempts |
+| `authority_replan_deadline_s` | 15 s | 0.1–300 s, including cancellation and readiness |
+| `authority_replan_backoff_s` | 0.25 s | 0–10 s between attempts |
+
+In simulation, recovery waits for the old Nav2 action's terminal result;
+acceptance of a cancellation request does not establish that it has stopped.
+Unknown action outcomes prevent further objective dispatch and cannot trigger
+the reverse-escape behavior. Tracking is capped at eight unconfirmed actions;
+overflow also blocks dispatch. Hardware publishes zero and disables the
+adapter's Nav2 velocity relay while replanning, reopening it only after the
+current action is accepted and its result monitor is installed. Pending
+recovery does not emit a terminal failure between attempts; exhausted recovery
+reports failure. This does not relax terrain admission or make an initially
+blocked Home route traversable.
+
 MGG retains a bounded sequence of travelled poses while initial terrain support
 or a connecting edge is unavailable. It admits samples in travel order after
 map updates, preserving observed corners between regularly spaced samples.
@@ -618,6 +647,14 @@ The live TF and inverse home transform moved, so the existing 20 mm validity
 guard correctly rejected the routes. Routine map revision changes alone did
 not cancel them. Recovery must replan against fresh authority while preserving
 Stop and replacement-command precedence.
+
+Bounded recovery is now implemented. Clean-export validation covered 223 Python
+tests across objective planning, both navigation bridges, simulation reset,
+exploration, and Home evidence. One upload-pump test was excluded because its
+hang reproduces on the unchanged baseline. The native DDS contract also passed
+with the new generation handoff, full-path execution, Stop, terminal planner
+states, and late-response fencing. Its action sink never publishes velocity;
+physical arrival still requires the next independent-ground-truth Bistro trial.
 
 The tenth MGG patch makes blocked-route reports actionable without changing
 admission policy or repeating map queries. Reports identify the current pose,

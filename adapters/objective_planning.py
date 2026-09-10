@@ -26,7 +26,8 @@ class MggObjectivePlanning:
         )
         self.authority_reader = get_mapping_authority(bridge)
         self.frame = str(
-            config.get("frame") or getattr(bridge, "map_frame", f"{bridge.id}/map_frame")
+            config.get("frame")
+            or getattr(bridge, "map_frame", f"{bridge.id}/map_frame")
         ).lstrip("/")
         self.component_id = str(config.get("component_id") or self.frame)
         self.timeout_s = max(0.1, float(config.get("objective_timeout_s", 30.0)))
@@ -42,9 +43,22 @@ class MggObjectivePlanning:
         self.authority_rotation_tolerance_rad = max(
             0.0, float(config.get("authority_rotation_tolerance_rad", 0.02))
         )
+        self.replan_max_attempts = self._bounded_int(
+            config.get("authority_replan_max_attempts", 3), 1, 20, 3
+        )
+        self.replan_deadline_s = self._bounded_float(
+            config.get("authority_replan_deadline_s", 15.0), 0.1, 300.0, 15.0
+        )
+        self.replan_backoff_s = self._bounded_float(
+            config.get("authority_replan_backoff_s", 0.25), 0.0, 10.0, 0.25
+        )
         self.home = config.get("home")
         self._active_lock = threading.Lock()
         self._active_route = None
+        self._home_intent = None
+        self._recovery_generation = None
+        self._recovery_deadline = None
+        self._recovery_thread = None
         self._authority_timer = bridge.node.create_timer(
             max(0.05, float(config.get("authority_check_period_s", 0.1))),
             self._check_active_authority,
@@ -57,11 +71,52 @@ class MggObjectivePlanning:
         # The authority anchor follows optimizer corrections. A caller-supplied
         # pose may have been resolved before the latest correction, so use it
         # only when no fresh authority anchor is available.
-        target = self._authority_home() or goal or self.home
+        authority = self._authority()
+        authority_home = self._authority_home_from(authority)
+        target = authority_home or goal or self.home
         if not isinstance(target, dict):
-            self._fail("return-home requires planning.home or an explicit goal")
+            generation = self.bridge.cancel_goal()
+            self._fail_if_current(
+                "return-home requires planning.home or an explicit goal", generation
+            )
             return False
-        return self.plan("return_home", target)
+        # Recovery is allowed only for an identity obtained from the current
+        # authority envelope. Caller/config fallbacks are intentionally local.
+        intent = self._authority_home_identity(authority) if authority_home else None
+        if authority_home is not None and (intent is None or intent[4] != self.frame):
+            generation = self.bridge.cancel_goal()
+            self._fail_if_current(
+                "return-home authority has an invalid mission, epoch, or frame",
+                generation,
+            )
+            return False
+        outcome, message, generation = self._plan_once(
+            "return_home", target, authority=authority, home_intent=intent
+        )
+        if outcome == "submitted":
+            return True
+        if outcome == "authority_changed" and intent is not None:
+            if self._start_recovery(generation, intent, cancel_route=False):
+                return True
+        if outcome != "superseded":
+            self._fail_if_current(message, generation)
+        return False
+
+    @staticmethod
+    def _bounded_float(value, lower, upper, default):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return min(upper, max(lower, parsed)) if math.isfinite(parsed) else default
+
+    @staticmethod
+    def _bounded_int(value, lower, upper, default):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return min(upper, max(lower, parsed))
 
     def _authority(self):
         authority = self.authority_reader.current()
@@ -108,7 +163,9 @@ class MggObjectivePlanning:
         return epoch, revision, geometry.lower(), sec, nanosec
 
     def _authority_home(self) -> dict | None:
-        authority = self._authority()
+        return self._authority_home_from(self._authority())
+
+    def _authority_home_from(self, authority) -> dict | None:
         if not isinstance(authority, dict):
             return None
         home = authority.get("home")
@@ -135,6 +192,53 @@ class MggObjectivePlanning:
             }
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _home_identity(goal: dict):
+        if not isinstance(goal, dict):
+            return None
+        identity = tuple(
+            str(goal.get(key, ""))
+            for key in ("mission_id", "component_id", "landmark_id")
+        )
+        return identity if all(identity) else None
+
+    @staticmethod
+    def _authority_home_identity(authority):
+        if not isinstance(authority, dict):
+            return None
+        home = authority.get("home")
+        if not isinstance(home, dict):
+            return None
+        try:
+            mission_id = authority["mission_id"]
+            component_id = authority["component_id"]
+            landmark_id = home["keyframe_id"]
+            map_epoch = authority["map_epoch"]
+            navigation_frame = authority["navigation_frame"]
+        except KeyError:
+            return None
+        if (
+            any(
+                not isinstance(value, str) or not value
+                for value in (
+                    mission_id,
+                    component_id,
+                    landmark_id,
+                    navigation_frame,
+                )
+            )
+            or type(map_epoch) is not int
+            or map_epoch < 0
+        ):
+            return None
+        return (
+            mission_id,
+            component_id,
+            landmark_id,
+            map_epoch,
+            navigation_frame.lstrip("/"),
+        )
 
     @staticmethod
     def _authority_binding(authority: dict | None):
@@ -200,13 +304,21 @@ class MggObjectivePlanning:
             active = self._active_route
         if active is None:
             return
-        generation, binding = active
-        if generation != self.bridge._goal_generation or self.bridge.nav_status != "active":
+        generation, binding, home_intent = active
+        if (
+            generation != self.bridge._goal_generation
+            or self.bridge.nav_status != "active"
+        ):
             with self._active_lock:
                 if self._active_route == active:
                     self._active_route = None
+                    self._home_intent = None
             return
-        if not self._route_authority_changed(binding, self._authority()):
+        authority = self._authority()
+        home_changed = home_intent is not None and (
+            self._authority_home_identity(authority) != home_intent
+        )
+        if not self._route_authority_changed(binding, authority) and not home_changed:
             return
         with self._active_lock:
             if (
@@ -215,19 +327,54 @@ class MggObjectivePlanning:
             ):
                 return
             self._active_route = None
-            # Serialize cancellation with replacement-plan setup. Otherwise a
-            # correction timer that inspected the old route could cancel the
-            # new goal between its own cancel and request dispatch.
-            self.bridge.cancel_goal()
-            self._fail("MGG objective route canceled after map authority changed")
+        if home_intent is not None and self._authority_matches_home(
+            authority, home_intent
+        ):
+            if self._start_recovery(generation, home_intent, cancel_route=True):
+                return
+        canceled_generation = self.bridge.cancel_goal_if_current(generation)
+        if canceled_generation is not None:
+            self._fail_if_current(
+                "MGG objective route canceled after map authority changed",
+                canceled_generation,
+            )
 
     def plan(self, objective: str, goal: dict) -> bool:
+        outcome, message, generation = self._plan_once(objective, goal)
+        if outcome != "submitted" and outcome != "superseded":
+            self._fail_if_current(message, generation)
+        return outcome == "submitted"
+
+    def _plan_once(
+        self,
+        objective: str,
+        goal: dict,
+        *,
+        authority=None,
+        expected_generation: int | None = None,
+        home_intent=None,
+        overall_deadline: float | None = None,
+    ) -> tuple[str, str, int]:
         kind = {
             "navigate": self.service_type.Request.NAVIGATE,
             "return_home": self.service_type.Request.RETURN_HOME,
         }.get(objective)
         if kind is None:
             raise ValueError(f"unsupported MGG objective {objective!r}")
+
+        if expected_generation is None:
+            with self._active_lock:
+                self._active_route = None
+                self._home_intent = home_intent
+                self._recovery_generation = None
+                self._recovery_deadline = None
+            generation = self.bridge.cancel_goal()
+            if not self.bridge.set_goal_pending_if_current(generation):
+                return "superseded", "", generation
+        else:
+            generation = expected_generation
+            if not self._owns_recovery(generation, home_intent):
+                return "superseded", "", generation
         try:
             x, y = float(goal["x"]), float(goal["y"])
             z = float(goal.get("z", 0.0))
@@ -235,48 +382,60 @@ class MggObjectivePlanning:
             graph_revision = int(goal.get("graph_revision", 0))
             map_revision = int(goal.get("map_revision", 0))
         except (KeyError, TypeError, ValueError) as exc:
-            self._fail(f"invalid MGG objective goal: {exc}")
-            return False
+            return "failed", f"invalid MGG objective goal: {exc}", generation
         if not all(math.isfinite(value) for value in (x, y, z, yaw)):
-            self._fail("MGG objective goal contains a nonfinite value")
-            return False
-
-        with self._active_lock:
-            self._active_route = None
-            self.bridge.cancel_goal()
-        generation = self.bridge._goal_generation
-        if not self.client.wait_for_service(timeout_sec=min(3.0, self.timeout_s)):
-            self._fail("MGG objective service is unavailable")
-            return False
+            return "failed", "MGG objective goal contains a nonfinite value", generation
+        quiet_deadline = min(
+            time.monotonic() + self.timeout_s,
+            overall_deadline if overall_deadline is not None else math.inf,
+        )
+        if not self.bridge.wait_goal_quiet(generation, quiet_deadline):
+            if not self._owns_generation(generation, expected_generation, home_intent):
+                return "superseded", "", generation
+            return (
+                "failed",
+                "previous navigation goal did not reach a terminal state",
+                generation,
+            )
+        remaining = self._remaining(overall_deadline)
+        if remaining <= 0.0:
+            return "failed", "MGG return-home recovery deadline expired", generation
+        if not self.client.wait_for_service(
+            timeout_sec=min(3.0, self.timeout_s, remaining)
+        ):
+            if not self._owns_generation(generation, expected_generation, home_intent):
+                return "superseded", "", generation
+            return "failed", "MGG objective service is unavailable", generation
+        if not self._owns_generation(generation, expected_generation, home_intent):
+            return "superseded", "", generation
 
         request = self.service_type.Request()
-        authority = self._authority() or {}
+        authority = (
+            authority if isinstance(authority, dict) else self._authority() or {}
+        )
         try:
             mapping_snapshot = self._mapping_snapshot(authority)
             authority_binding = self._authority_binding(authority)
         except ValueError as exc:
-            self._fail(str(exc))
-            return False
+            return "failed", str(exc), generation
         request.mission_id = str(
             goal.get("mission_id", authority.get("mission_id", ""))
         )
         request.objective = kind
         request.component_id = str(
-            goal.get(
-                "component_id", authority.get("component_id", self.component_id)
-            )
+            goal.get("component_id", authority.get("component_id", self.component_id))
         )
         if graph_revision < 0 or map_revision < 0:
-            self._fail("MGG objective revisions cannot be negative")
-            return False
+            return "failed", "MGG objective revisions cannot be negative", generation
         request.graph_revision = graph_revision
         request.map_revision = map_revision
         if mapping_snapshot is not None:
             if not hasattr(request, "map_epoch"):
-                self._fail(
-                    "installed mgg_msgs lacks indexed mapping snapshot fields"
+                return (
+                    "failed",
+                    "installed mgg_msgs lacks indexed mapping snapshot fields",
+                    generation,
                 )
-                return False
             (
                 request.map_epoch,
                 request.mapping_graph_revision,
@@ -290,57 +449,76 @@ class MggObjectivePlanning:
         request.goal.position.z = z
         request.goal.orientation.z = math.sin(yaw / 2.0)
         request.goal.orientation.w = math.cos(yaw / 2.0)
-        future = self.client.call_async(request)
-        deadline = time.monotonic() + self.timeout_s
+        try:
+            future = self.client.call_async(request)
+        except Exception as exc:
+            return "failed", f"MGG objective request failed: {exc}", generation
+        deadline = min(
+            time.monotonic() + self.timeout_s,
+            overall_deadline if overall_deadline is not None else math.inf,
+        )
         while not future.done() and time.monotonic() < deadline:
-            if generation != self.bridge._goal_generation:
+            if not self._owns_generation(generation, expected_generation, home_intent):
                 future.cancel()
-                return False
+                return "superseded", "", generation
             time.sleep(0.02)
         if not future.done():
             future.cancel()
-            self._fail("MGG objective request timed out")
-            return False
-        if generation != self.bridge._goal_generation:
-            return False
+            return "failed", "MGG objective request timed out", generation
+        if not self._owns_generation(generation, expected_generation, home_intent):
+            return "superseded", "", generation
         try:
             response = future.result()
         except Exception as exc:
-            self._fail(f"MGG objective request failed: {exc}")
-            return False
+            return "failed", f"MGG objective request failed: {exc}", generation
         if response.status != self.service_type.Response.SUCCEEDED:
-            self._fail(response.reason or f"MGG planning status {response.status}")
-            return False
+            return (
+                "failed",
+                response.reason or f"MGG planning status {response.status}",
+                generation,
+            )
         if response.component_id != request.component_id:
-            self._fail("MGG returned a path from another map component")
-            return False
+            return (
+                "failed",
+                "MGG returned a path from another map component",
+                generation,
+            )
         if request.graph_revision and response.graph_revision != request.graph_revision:
-            self._fail("MGG returned a different graph revision")
-            return False
+            return "failed", "MGG returned a different graph revision", generation
         if request.map_revision and response.map_revision != request.map_revision:
-            self._fail("MGG returned a different map revision")
-            return False
+            return "failed", "MGG returned a different map revision", generation
         if mapping_snapshot is not None and (
             response.map_epoch != request.map_epoch
             or response.mapping_graph_revision != request.mapping_graph_revision
             or response.geometry_revision.lower() != request.geometry_revision
             or response.map_source_stamp.sec != request.map_source_stamp.sec
-            or response.map_source_stamp.nanosec
-            != request.map_source_stamp.nanosec
+            or response.map_source_stamp.nanosec != request.map_source_stamp.nanosec
         ):
-            self._fail("MGG returned a different indexed map snapshot")
-            return False
-        if self._route_authority_changed(authority_binding, self._authority()):
-            self._fail("map authority changed while MGG planned the objective")
-            return False
+            return (
+                "failed",
+                "MGG returned a different indexed map snapshot",
+                generation,
+            )
+        current_authority = self._authority()
+        try:
+            current_snapshot = self._mapping_snapshot(current_authority or {})
+        except ValueError:
+            current_snapshot = object()
+        if (
+            self._route_authority_changed(authority_binding, current_authority)
+            or current_snapshot != mapping_snapshot
+        ):
+            return (
+                "authority_changed",
+                "map authority changed while MGG planned the objective",
+                generation,
+            )
 
         stamp = self.bridge.node.get_clock().now().to_msg()
         path = SimpleNamespace(
             header=SimpleNamespace(frame_id=self.frame, stamp=stamp),
             poses=[
-                SimpleNamespace(
-                    header=SimpleNamespace(frame_id=self.frame), pose=pose
-                )
+                SimpleNamespace(header=SimpleNamespace(frame_id=self.frame), pose=pose)
                 for pose in response.path
             ],
         )
@@ -352,22 +530,249 @@ class MggObjectivePlanning:
                 self.max_inclination_rad,
             )
         except (AttributeError, TypeError, ValueError) as exc:
-            self._fail(f"MGG returned an unsupported path: {exc}")
-            return False
+            return "failed", f"MGG returned an unsupported path: {exc}", generation
+        if not self._owns_generation(generation, expected_generation, home_intent):
+            return "superseded", "", generation
+        if self._remaining(overall_deadline) <= 0.0:
+            return "failed", "MGG return-home recovery deadline expired", generation
+        pre_submit_rejected = [False]
+
+        def validate_authority_for_dispatch():
+            valid = self._authority_matches_plan(
+                authority_binding, mapping_snapshot, home_intent
+            )
+            if not valid:
+                pre_submit_rejected[0] = True
+            return valid
+
+        submitted_generation = self.bridge.follow_path(
+            plan,
+            expected_generation=generation,
+            not_after=overall_deadline,
+            pre_submit=validate_authority_for_dispatch,
+        )
+        if type(submitted_generation) is not int:
+            if pre_submit_rejected[0]:
+                return (
+                    "authority_changed",
+                    "map authority changed before MGG route dispatch",
+                    generation,
+                )
+            if not self._owns_generation(generation, expected_generation, home_intent):
+                return "superseded", "", generation
+            if submitted_generation is None:
+                if self._remaining(overall_deadline) <= 0.0:
+                    return (
+                        "failed",
+                        "MGG return-home recovery deadline expired",
+                        generation,
+                    )
+                return "superseded", "", generation
+            return "failed", "MGG route could not be submitted", generation
+        with self._active_lock:
+            if self.bridge._goal_generation != submitted_generation:
+                return "superseded", "", generation
+            if expected_generation is not None and (
+                self._recovery_generation != generation
+                or self._home_intent != home_intent
+            ):
+                return "superseded", "", generation
+            self._recovery_generation = None
+            self._recovery_deadline = None
+            self._home_intent = home_intent
+            if authority_binding is not None:
+                self._active_route = (
+                    submitted_generation,
+                    authority_binding,
+                    home_intent,
+                )
+        return "submitted", "", submitted_generation
+
+    @staticmethod
+    def _remaining(deadline: float | None) -> float:
+        if deadline is None:
+            return math.inf
+        return max(0.0, deadline - time.monotonic())
+
+    def _owns_generation(self, generation, expected_generation, home_intent) -> bool:
         if generation != self.bridge._goal_generation:
             return False
-        submitted = bool(self.bridge.follow_path(plan))
-        if submitted and authority_binding is not None:
-            with self._active_lock:
-                self._active_route = (
-                    self.bridge._goal_generation,
-                    authority_binding,
-                )
-        return submitted
+        return expected_generation is None or self._owns_recovery(
+            generation, home_intent
+        )
 
-    def _fail(self, message: str) -> None:
-        self.bridge.node.get_logger().warning(f"[{self.bridge.id}] {message}")
-        self.bridge.nav_status = "failed"
+    def _owns_recovery(self, generation, home_intent) -> bool:
+        with self._active_lock:
+            return (
+                generation == self.bridge._goal_generation
+                and self._recovery_generation == generation
+                and self._home_intent == home_intent
+            )
+
+    def _authority_matches_home(self, authority, home_intent) -> bool:
+        home = self._authority_home_from(authority)
+        if (
+            home is None
+            or self._authority_home_identity(authority) != home_intent
+            or self._home_identity(home) != home_intent[:3]
+            or home_intent[4] != self.frame
+        ):
+            return False
+        try:
+            return self._authority_binding(authority) is not None
+        except ValueError:
+            return False
+
+    def _authority_matches_plan(self, binding, snapshot, home_intent) -> bool:
+        authority = self._authority()
+        if home_intent is not None and (
+            self._authority_home_identity(authority) != home_intent
+            or home_intent[4] != self.frame
+        ):
+            return False
+        try:
+            if self._route_authority_changed(binding, authority):
+                return False
+            return self._mapping_snapshot(authority or {}) == snapshot
+        except ValueError:
+            return False
+
+    def _start_recovery(self, generation, home_intent, *, cancel_route) -> bool:
+        if cancel_route:
+            generation = self.bridge.cancel_goal_if_current(generation, pending=True)
+            if generation is None:
+                return False
+        elif not self.bridge.set_goal_pending_if_current(generation):
+            return False
+        deadline = time.monotonic() + self.replan_deadline_s
+        with self._active_lock:
+            if generation != self.bridge._goal_generation:
+                return False
+            self._home_intent = home_intent
+            self._recovery_generation = generation
+            self._recovery_deadline = deadline
+            if self._recovery_thread is not None:
+                return True
+            worker = threading.Thread(
+                target=self._recovery_worker,
+                name=f"{self.bridge.id}-return-home-replan",
+                daemon=True,
+            )
+            self._recovery_thread = worker
+            try:
+                worker.start()
+            except Exception:
+                self._recovery_thread = None
+                self._recovery_generation = None
+                self._recovery_deadline = None
+                self._home_intent = None
+                raise
+        return True
+
+    def _recovery_worker(self) -> None:
+        while True:
+            with self._active_lock:
+                generation = self._recovery_generation
+                home_intent = self._home_intent
+                deadline = self._recovery_deadline
+                if generation is None or home_intent is None or deadline is None:
+                    self._recovery_thread = None
+                    return
+            try:
+                self._recover_home(generation, home_intent, deadline)
+            except Exception as exc:
+                self._finish_recovery_failure(
+                    generation, f"return-home recovery failed: {exc}"
+                )
+
+    def _recover_home(self, generation, home_intent, deadline) -> None:
+        last_error = "no fresh map authority was available"
+        attempts = 0
+        if not self.bridge.wait_goal_quiet(generation, deadline):
+            if self._owns_recovery(generation, home_intent):
+                self._finish_recovery_failure(
+                    generation,
+                    "return-home cancellation did not settle before deadline",
+                )
+            else:
+                self._clear_recovery(generation, home_intent)
+            return
+        while attempts < self.replan_max_attempts and self._remaining(deadline) > 0:
+            if not self._wait_for_recovery(generation, home_intent, deadline):
+                self._clear_recovery(generation, home_intent)
+                return
+            authority = self._authority()
+            identity = self._authority_home_identity(authority)
+            if identity is not None and identity != home_intent:
+                self._finish_recovery_failure(
+                    generation,
+                    "return-home authority identity changed during recovery",
+                )
+                return
+            home = self._authority_home_from(authority)
+            if home is None:
+                last_error = "no fresh return-home authority was available"
+                attempts += 1
+                continue
+            try:
+                if self._authority_binding(authority) is None:
+                    raise ValueError("map authority has no navigation transform")
+            except ValueError as exc:
+                last_error = str(exc)
+                attempts += 1
+                continue
+            attempts += 1
+            outcome, last_error, _ = self._plan_once(
+                "return_home",
+                home,
+                authority=authority,
+                expected_generation=generation,
+                home_intent=home_intent,
+                overall_deadline=deadline,
+            )
+            if outcome == "submitted":
+                return
+            if outcome == "superseded":
+                self._clear_recovery(generation, home_intent)
+                return
+            if not self.bridge.set_goal_pending_if_current(generation):
+                self._clear_recovery(generation, home_intent)
+                return
+        self._finish_recovery_failure(
+            generation,
+            f"return-home recovery exhausted after {attempts} attempts: {last_error}",
+        )
+
+    def _wait_for_recovery(self, generation, home_intent, deadline) -> bool:
+        wake_at = min(deadline, time.monotonic() + self.replan_backoff_s)
+        while time.monotonic() < wake_at:
+            if not self._owns_recovery(generation, home_intent):
+                return False
+            time.sleep(min(0.02, wake_at - time.monotonic()))
+        return self._owns_recovery(generation, home_intent)
+
+    def _finish_recovery_failure(self, generation, message) -> None:
+        with self._active_lock:
+            if self._recovery_generation != generation or self._home_intent is None:
+                return
+            self._recovery_generation = None
+            self._recovery_deadline = None
+            self._home_intent = None
+        self._fail_if_current(message, generation)
+
+    def _clear_recovery(self, generation, home_intent) -> None:
+        with self._active_lock:
+            if (
+                self._recovery_generation == generation
+                and self._home_intent == home_intent
+            ):
+                self._recovery_generation = None
+                self._recovery_deadline = None
+                self._home_intent = None
+
+    def _fail_if_current(self, message: str, generation: int) -> None:
+        if self.bridge.set_nav_status_if_current(generation, "failed"):
+            self.bridge.node.get_logger().warning(f"[{self.bridge.id}] {message}")
 
 
 def configure_objective_planning(bridge):

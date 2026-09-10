@@ -423,6 +423,11 @@ class RobotBridge(
         self._detections: list[dict] | None = None
         self._goal_handle = None
         self._goal_generation = 0
+        self._goal_lock = threading.RLock()
+        self._goal_request_future = None
+        self._goal_request_generation = None
+        self._cancel_events: dict[int, threading.Event] = {}
+        self._nav_quiet_unknown = False
         self._last_drive_at = 0.0
         # Wedge escape — see ESCAPE_SPEED. `_escape_from` is the pose the failed
         # goal ended at, which is what the retreat is measured against.
@@ -1092,9 +1097,6 @@ class RobotBridge(
         if planner is not None:
             planner.navigate(goal)
             return
-        self._cancel_nav()
-        generation = self._goal_generation
-
         if not self.nav_client.server_is_ready():
             self.node.get_logger().error(f"[{self.id}] Nav2 action server is not ready")
             self.goal = None
@@ -1111,10 +1113,19 @@ class RobotBridge(
         request.pose.pose.orientation.z = math.sin(yaw / 2)
         request.pose.pose.orientation.w = math.cos(yaw / 2)
 
-        future = self.nav_client.send_goal_async(request)
-        future.add_done_callback(lambda done: self._goal_response(done, generation))
-        self.goal = {"x": float(goal["x"]), "y": float(goal["y"]), "yaw": yaw}
-        self.nav_status, self.mode = "active", "nav"
+        with self._goal_lock:
+            self._cancel_nav()
+            generation = self._goal_generation
+            future = self.nav_client.send_goal_async(request)
+            self._goal_request_future = future
+            self._goal_request_generation = generation
+            self.goal = {
+                "x": float(goal["x"]),
+                "y": float(goal["y"]),
+                "yaw": yaw,
+            }
+            self.nav_status, self.mode = "active", "nav"
+            future.add_done_callback(lambda done: self._goal_response(done, generation))
 
     def plan_objective(self, objective: str, goal: dict | None = None) -> bool:
         planner = getattr(self, "objective_planner", None)
@@ -1126,78 +1137,171 @@ class RobotBridge(
         planner = getattr(self, "objective_planner", None)
         return bool(planner and planner.return_home(goal))
 
-    def follow_path(self, plan) -> bool:
+    def follow_path(
+        self,
+        plan,
+        expected_generation: int | None = None,
+        not_after: float | None = None,
+        pre_submit=None,
+    ) -> int | bool | None:
         """Execute every MGG waypoint through Nav2's controller server."""
         if not plan.poses:
             return False
-        self._cancel_nav()
-        generation = self._goal_generation
+        if expected_generation is not None:
+            with self._goal_lock:
+                if expected_generation != self._goal_generation:
+                    return None
+                if not_after is not None and time.monotonic() >= not_after:
+                    return None
         if not self.path_client.server_is_ready():
             self.node.get_logger().error(
                 f"[{self.id}] Nav2 FollowPath action server is not ready"
             )
-            self.goal = None
-            self.nav_status, self.mode = "failed", "idle"
+            if expected_generation is None:
+                self.goal = None
+                self.nav_status, self.mode = "failed", "idle"
             return False
 
         from adapters.exploration import follow_path_goal
 
         request = follow_path_goal(plan)
-
-        future = self.path_client.send_goal_async(request)
-        future.add_done_callback(lambda done: self._goal_response(done, generation))
         final = plan.poses[-1]
         yaw = math.atan2(
             2.0 * (final.qw * final.qz + final.qx * final.qy),
             1.0 - 2.0 * (final.qy * final.qy + final.qz * final.qz),
         )
-        self.goal = {"x": final.x, "y": final.y, "yaw": yaw}
-        self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
-        self.nav_status, self.mode = "active", "nav"
-        return True
+        with self._goal_lock:
+            if not_after is not None and time.monotonic() >= not_after:
+                return None
+            if (
+                expected_generation is not None
+                and expected_generation != self._goal_generation
+            ):
+                return None
+            if pre_submit is not None and not pre_submit():
+                return None
+            if expected_generation is None:
+                self._cancel_nav()
+            generation = self._goal_generation
+            try:
+                future = self.path_client.send_goal_async(request)
+            except Exception as exc:
+                self.node.get_logger().error(
+                    f"[{self.id}] path submission failed: {exc}"
+                )
+                if expected_generation is None:
+                    self.nav_status, self.mode = "failed", "idle"
+                else:
+                    self.goal = None
+                    self.planned_path = []
+                    self.nav_status, self.mode = "idle", "idle"
+                return False
+            self._goal_request_future = future
+            self._goal_request_generation = generation
+            self.goal = {"x": final.x, "y": final.y, "yaw": yaw}
+            self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
+            self.nav_status, self.mode = "active", "nav"
+            future.add_done_callback(lambda done: self._goal_response(done, generation))
+            return generation
 
     def _goal_response(self, future, generation: int) -> None:
-        if generation != self._goal_generation:
-            # A cancel can arrive before Nav2 accepts the request. Cancel the
-            # resulting handle instead of merely ignoring its callbacks.
-            try:
-                stale_handle = future.result()
-                if stale_handle.accepted:
-                    stale_handle.cancel_goal_async()
-            except Exception:
-                pass
-            return
         try:
             handle = future.result()
         except Exception as exc:
-            self.node.get_logger().error(f"[{self.id}] goal request failed: {exc}")
-            self._finish_goal("failed", generation)
+            with self._goal_lock:
+                if self._goal_request_generation == generation:
+                    self._goal_request_future = None
+                    self._goal_request_generation = None
+                self._nav_quiet_unknown = True
+                if generation != self._goal_generation:
+                    return
+                self.node.get_logger().error(f"[{self.id}] goal request failed: {exc}")
+                self._finish_goal("failed", generation)
             return
-        if not handle.accepted:
-            self.node.get_logger().warn(f"[{self.id}] navigation goal rejected")
-            self._finish_goal("failed", generation)
-            return
+        with self._goal_lock:
+            if self._goal_request_generation == generation:
+                self._goal_request_future = None
+                self._goal_request_generation = None
+            if generation != self._goal_generation:
+                # A cancel can arrive before Nav2 accepts the request. Cancel
+                # the resulting handle instead of ignoring its callbacks.
+                if handle.accepted:
+                    try:
+                        handle.cancel_goal_async()
+                    except Exception:
+                        pass
+                    try:
+                        result = handle.get_result_async()
+                        result.add_done_callback(
+                            lambda done: self._goal_result(done, generation)
+                        )
+                    except Exception:
+                        self._nav_quiet_unknown = True
+                else:
+                    event = self._cancel_events.get(generation)
+                    if event is not None:
+                        event.set()
+                return
+            if not handle.accepted:
+                self.node.get_logger().warn(f"[{self.id}] navigation goal rejected")
+                self._finish_goal("failed", generation)
+                return
 
-        self._goal_handle = handle
-        result = handle.get_result_async()
-        result.add_done_callback(lambda done: self._goal_result(done, generation))
+            self._goal_handle = handle
+            try:
+                result = handle.get_result_async()
+                result.add_done_callback(
+                    lambda done: self._goal_result(done, generation)
+                )
+            except Exception:
+                self._nav_quiet_unknown = True
+                try:
+                    handle.cancel_goal_async()
+                except Exception:
+                    pass
+                self._finish_goal("failed", generation)
 
     def _goal_result(self, future, generation: int) -> None:
-        if generation != self._goal_generation:
-            return
-        try:
-            status = future.result().status
-        except Exception as exc:
-            self.node.get_logger().error(f"[{self.id}] navigation result failed: {exc}")
-            self._finish_goal("failed", generation)
-            return
+        with self._goal_lock:
+            if generation != self._goal_generation:
+                try:
+                    status = future.result().status
+                except Exception:
+                    self._nav_quiet_unknown = True
+                    return
+                if status in {
+                    GoalStatus.STATUS_SUCCEEDED,
+                    GoalStatus.STATUS_CANCELED,
+                    GoalStatus.STATUS_ABORTED,
+                }:
+                    event = self._cancel_events.get(generation)
+                    if event is not None:
+                        event.set()
+                else:
+                    self._nav_quiet_unknown = True
+                return
+            try:
+                status = future.result().status
+            except Exception as exc:
+                self._nav_quiet_unknown = True
+                self.node.get_logger().error(
+                    f"[{self.id}] navigation result failed: {exc}"
+                )
+                self._finish_goal("failed", generation)
+                return
 
-        terminal = {
-            GoalStatus.STATUS_SUCCEEDED: "succeeded",
-            GoalStatus.STATUS_CANCELED: "cancelled",
-            GoalStatus.STATUS_ABORTED: "failed",
-        }.get(status, "failed")
-        self._finish_goal(terminal, generation)
+            terminal = {
+                GoalStatus.STATUS_SUCCEEDED: "succeeded",
+                GoalStatus.STATUS_CANCELED: "cancelled",
+                GoalStatus.STATUS_ABORTED: "failed",
+            }.get(status, "failed")
+            if status not in {
+                GoalStatus.STATUS_SUCCEEDED,
+                GoalStatus.STATUS_CANCELED,
+                GoalStatus.STATUS_ABORTED,
+            }:
+                self._nav_quiet_unknown = True
+            self._finish_goal(terminal, generation)
 
     def _finish_goal(self, status: str, generation: int) -> None:
         if generation != self._goal_generation:
@@ -1206,7 +1310,7 @@ class RobotBridge(
         self.goal = None
         self.planned_path = []
         self.nav_status, self.mode = status, "idle"
-        if status == "failed":
+        if status == "failed" and not self._nav_quiet_unknown:
             self._arm_escape()
 
     # -- Nav2 bringup recovery ------------------------------------------
@@ -1306,12 +1410,13 @@ class RobotBridge(
         reversing harder is the wrong answer and an operator needs to see a
         stopped robot rather than one grinding against a wall.
         """
-        if self._escape_from is None:
-            return
+        with self._goal_lock:
+            escape_from = self._escape_from
+            generation = self._goal_generation
+            if escape_from is None:
+                return
         pose = self.map_pose()
-        moved = math.hypot(
-            pose["x"] - self._escape_from[0], pose["y"] - self._escape_from[1]
-        )
+        moved = math.hypot(pose["x"] - escape_from[0], pose["y"] - escape_from[1])
         now = time.monotonic()
 
         if moved >= ESCAPE_DISTANCE or now - self._escape_started_at > ESCAPE_TIMEOUT_S:
@@ -1329,41 +1434,65 @@ class RobotBridge(
 
         command = Twist()
         command.linear.x = ESCAPE_SPEED
-        self.pub_cmd.publish(command)
+        with self._goal_lock:
+            if generation != self._goal_generation or self._escape_from != escape_from:
+                return
+            self.pub_cmd.publish(command)
 
-    def _cancel_nav(self) -> None:
-        self._goal_generation += 1  # Ignore callbacks from the superseded goal.
-        if self._goal_handle is not None:
-            self._goal_handle.cancel_goal_async()
-        self._goal_handle = None
-        # Every operator command that supersedes what the robot is doing comes
-        # through here — navigate_to, drive, stop, cancel and reset — so this is
-        # the one place that guarantees an escape can never drive a robot the
-        # operator has just taken control of.
-        self._clear_escape()
+    def _cancel_nav(self) -> int:
+        with self._goal_lock:
+            canceled_generation = self._goal_generation
+            self._goal_generation += 1  # Ignore callbacks from superseded goals.
+            quiet = threading.Event()
+            pending_acceptance = (
+                self._goal_request_future is not None
+                and self._goal_request_generation == canceled_generation
+            )
+            if self._goal_handle is not None:
+                try:
+                    self._goal_handle.cancel_goal_async()
+                except Exception:
+                    self._nav_quiet_unknown = True
+            elif not pending_acceptance:
+                quiet.set()
+            self._goal_handle = None
+            for old, event in list(self._cancel_events.items()):
+                if event.is_set():
+                    self._cancel_events.pop(old, None)
+            if not quiet.is_set():
+                if len(self._cancel_events) >= 8:
+                    self._nav_quiet_unknown = True
+                else:
+                    self._cancel_events[canceled_generation] = quiet
+            # Every operator command that supersedes what the robot is doing
+            # comes through here, so an escape can never outlive operator input.
+            self._clear_escape()
+            return self._goal_generation
 
     def stop(self) -> None:
         exploration = getattr(self, "exploration", None)
         if exploration is not None:
             exploration.stop()
-        self._cancel_nav()
-        self.pub_cmd.publish(Twist())
-        self.goal = None
-        self.planned_path = []
-        self.nav_status, self.mode = "idle", "estop"
+        with self._goal_lock:
+            self._cancel_nav()
+            self.pub_cmd.publish(Twist())
+            self.goal = None
+            self.planned_path = []
+            self.nav_status, self.mode = "idle", "estop"
 
     def drive(self, linear: float, angular: float) -> None:
         """Publish a bounded teleop command; the watchdog stops stale input."""
-        self._cancel_nav()
-        command = Twist()
-        command.linear.x = max(-0.45, min(0.45, float(linear)))
-        command.angular.z = max(-1.2, min(1.2, float(angular)))
-        self.pub_cmd.publish(command)
-        moving = abs(command.linear.x) > 1e-3 or abs(command.angular.z) > 1e-3
-        self._last_drive_at = time.monotonic() if moving else 0.0
-        self.goal = None
-        self.planned_path = []
-        self.nav_status, self.mode = "idle", "teleop" if moving else "idle"
+        with self._goal_lock:
+            self._cancel_nav()
+            command = Twist()
+            command.linear.x = max(-0.45, min(0.45, float(linear)))
+            command.angular.z = max(-1.2, min(1.2, float(angular)))
+            self.pub_cmd.publish(command)
+            moving = abs(command.linear.x) > 1e-3 or abs(command.angular.z) > 1e-3
+            self._last_drive_at = time.monotonic() if moving else 0.0
+            self.goal = None
+            self.planned_path = []
+            self.nav_status, self.mode = "idle", "teleop" if moving else "idle"
 
     def drive_watchdog(self) -> None:
         timeout = self._cfg_timeout("drive_timeout_s")
@@ -1372,15 +1501,73 @@ class RobotBridge(
             self._last_drive_at = 0.0
             self.mode = "idle"
 
-    def cancel(self) -> None:
-        self._cancel_nav()
-        self.pub_cmd.publish(Twist())
-        self.goal = None
-        self.planned_path = []
-        self.nav_status, self.mode = "cancelled", "idle"
+    def cancel(self) -> int:
+        with self._goal_lock:
+            self._cancel_nav()
+            self.pub_cmd.publish(Twist())
+            self.goal = None
+            self.planned_path = []
+            self.nav_status, self.mode = "cancelled", "idle"
+            return self._goal_generation
 
-    def cancel_goal(self) -> None:
-        self.cancel()
+    def cancel_goal(self) -> int:
+        return self.cancel()
+
+    def cancel_goal_if_current(self, expected_generation: int, *, pending=False):
+        """Cancel only the command owning ``expected_generation``."""
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return None
+            self.cancel_goal()
+            if pending:
+                self.nav_status = "idle"
+            return self._goal_generation
+
+    def set_nav_status_if_current(self, expected_generation: int, status: str) -> bool:
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return False
+            if self._nav_quiet_unknown:
+                return False
+            self.nav_status = status
+            return True
+
+    def set_goal_pending_if_current(self, expected_generation: int) -> bool:
+        # Nav2 controls the simulated robot directly, so do not claim that a
+        # replacement route is executing while cancellation settles.
+        return self.set_nav_status_if_current(expected_generation, "idle")
+
+    def wait_goal_quiet(self, expected_generation: int, not_after: float) -> bool:
+        """Wait off the ROS timer until the canceled simulated route settles."""
+        with self._goal_lock:
+            if expected_generation != self._goal_generation:
+                return False
+            if self._nav_quiet_unknown:
+                return False
+            events = [
+                event
+                for generation, event in sorted(self._cancel_events.items())
+                if generation < expected_generation and not event.is_set()
+            ]
+        for event in events:
+            while not event.is_set():
+                remaining = max(0.0, not_after - time.monotonic())
+                if remaining <= 0.0:
+                    return False
+                event.wait(min(0.02, remaining))
+                with self._goal_lock:
+                    if (
+                        expected_generation != self._goal_generation
+                        or self._nav_quiet_unknown
+                    ):
+                        return False
+        with self._goal_lock:
+            if expected_generation != self._goal_generation or self._nav_quiet_unknown:
+                return False
+            for old, event in list(self._cancel_events.items()):
+                if event.is_set():
+                    self._cancel_events.pop(old, None)
+            return True
 
     # -- reset ---------------------------------------------------------
 

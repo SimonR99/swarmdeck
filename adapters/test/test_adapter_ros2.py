@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -96,6 +97,10 @@ def _bridge(mod, cfg_override=None):
     bridge.nav_status = "idle"
     bridge.goal = None
     bridge._goal_generation = 0
+    # __new__ bypasses HardwareBridge.__init__, but command/callback tests
+    # exercise the same lock that protects generation ownership.
+    bridge._goal_lock = threading.RLock()
+    bridge._nav_execution_enabled = False
     bridge._goal_handle = None
     bridge._trajectory_target = None
     bridge._trajectory_step = ""
@@ -994,6 +999,7 @@ def test_cancel_trajectory_does_not_wait_for_stop_response(mod):
     client.call_async.return_value = future
     bridge._body_clients = {"stop": client}
     bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
 
     bridge.drive(0.2, 0.1)
 
@@ -1340,7 +1346,10 @@ def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod):
     with patch.object(
         sys.modules["geometry_msgs.msg"], "PoseStamped", side_effect=pose_stamped
     ):
-        assert bridge.follow_path(plan)
+        generation = bridge.follow_path(plan)
+
+    assert type(generation) is int
+    assert generation == bridge._goal_generation
 
     goal = bridge.path_client.send_goal_async.call_args.args[0]
     assert goal.path.header.frame_id == "map"
@@ -1366,14 +1375,402 @@ def test_follow_path_wait_is_bounded_and_rejection_is_failure(mod):
     )
     bridge.path_client.server_is_ready.return_value = False
     bridge.path_client.wait_for_server.return_value = False
-    plan = PlannerPath(
-        "map", 1, (PlannerPose(1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0),)
-    )
+    plan = PlannerPath("map", 1, (PlannerPose(1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0),))
 
     assert bridge.follow_path(plan) is False
     bridge.path_client.wait_for_server.assert_called_once_with(timeout_sec=3.0)
     bridge.path_client.send_goal_async.assert_not_called()
     assert bridge.nav_status == "failed"
+
+
+class _ImmediateFuture:
+    def __init__(self, value):
+        self._value = value
+
+    def result(self):
+        if isinstance(self._value, BaseException):
+            raise self._value
+        return self._value
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+def test_conditional_follow_path_submission_failure_keeps_reserved_generation(mod):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge._goal_generation = 7
+    bridge.path_client.server_is_ready.return_value = True
+    bridge.path_client.send_goal_async.side_effect = RuntimeError("send failed")
+
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        result = bridge.follow_path(_ownership_plan(), expected_generation=7)
+
+    assert result is False
+    assert bridge._goal_generation == 7
+    assert bridge.nav_status == "active"
+    assert bridge.mode == "idle"
+    assert bridge.goal is None
+    assert bridge.planned_path == []
+
+
+def test_immediate_follow_path_rejection_leaves_terminal_failure(mod):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge.path_client.server_is_ready.return_value = True
+    rejected = MagicMock()
+    rejected.accepted = False
+    bridge.path_client.send_goal_async.return_value = _ImmediateFuture(rejected)
+
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        result = bridge.follow_path(_ownership_plan())
+
+    assert type(result) is int
+    assert result == bridge._goal_generation
+    assert bridge.nav_status == "failed"
+    assert bridge.mode == "idle"
+    assert bridge.goal is None
+    assert bridge.planned_path == []
+
+
+def _ownership_plan(frame="map"):
+    from adapters.exploration import PlannerPath, PlannerPose
+
+    return PlannerPath(
+        frame,
+        1,
+        (
+            PlannerPose(1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            PlannerPose(2.0, 2.5, 0.0, 0.0, 0.0, 0.1, 0.995),
+        ),
+    )
+
+
+def test_stale_conditional_follow_path_does_not_preempt_newer_goal(mod):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    newer_handle = MagicMock()
+    bridge._goal_generation = 9
+    bridge._goal_handle = newer_handle
+    bridge.goal = {"x": 8.0, "y": 9.0}
+    bridge.planned_path = [{"x": 8.0, "y": 9.0}]
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+    bridge.path_client.server_is_ready.return_value = True
+
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        result = bridge.follow_path(_ownership_plan(), expected_generation=8)
+
+    assert result is None
+    bridge.path_client.send_goal_async.assert_not_called()
+    newer_handle.cancel_goal_async.assert_not_called()
+    assert bridge._goal_generation == 9
+    assert bridge._goal_handle is newer_handle
+    assert bridge.goal == {"x": 8.0, "y": 9.0}
+    assert bridge.planned_path == [{"x": 8.0, "y": 9.0}]
+    assert bridge.nav_status == "active"
+
+
+def test_cancel_while_follow_path_readiness_is_pending_wins_without_blocking(mod):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge._goal_generation = 4
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+    bridge.path_client.server_is_ready.return_value = False
+    readiness_entered = threading.Event()
+    release_readiness = threading.Event()
+    cancel_done = threading.Event()
+    result = []
+
+    def wait_for_server(*, timeout_sec):
+        readiness_entered.set()
+        release_readiness.wait(timeout=2.0)
+        return True
+
+    bridge.path_client.wait_for_server.side_effect = wait_for_server
+    worker = threading.Thread(
+        target=lambda: result.append(
+            bridge.follow_path(_ownership_plan(), expected_generation=4)
+        )
+    )
+    stopper = threading.Thread(target=lambda: (bridge.cancel_goal(), cancel_done.set()))
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        worker.start()
+        try:
+            assert readiness_entered.wait(timeout=2.0)
+            stopper.start()
+            assert cancel_done.wait(timeout=1.0), "cancel waited on readiness"
+        finally:
+            release_readiness.set()
+            worker.join(timeout=2.0)
+            if stopper.ident is not None:
+                stopper.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert not stopper.is_alive()
+    assert result == [None]
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "cancelled"
+    assert bridge.mode == "idle"
+
+
+def test_stop_while_follow_path_readiness_is_pending_estops_hardware(mod):
+    """The inherited protocol Stop must preempt a worker waiting on Nav2."""
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge._goal_generation = 4
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+    bridge.path_client.server_is_ready.return_value = False
+    readiness_entered = threading.Event()
+    release_readiness = threading.Event()
+    stop_done = threading.Event()
+    result = []
+
+    def wait_for_server(*, timeout_sec):
+        readiness_entered.set()
+        release_readiness.wait(timeout=2.0)
+        return True
+
+    bridge.path_client.wait_for_server.side_effect = wait_for_server
+    worker = threading.Thread(
+        target=lambda: result.append(
+            bridge.follow_path(_ownership_plan(), expected_generation=4)
+        )
+    )
+    stopper = threading.Thread(target=lambda: (bridge.stop(), stop_done.set()))
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        worker.start()
+        try:
+            assert readiness_entered.wait(timeout=2.0)
+            stopper.start()
+            assert stop_done.wait(
+                timeout=1.0
+            ), "HardwareBridge.stop waited on readiness"
+        finally:
+            release_readiness.set()
+            worker.join(timeout=2.0)
+            if stopper.ident is not None:
+                stopper.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert not stopper.is_alive()
+    assert result == [None]
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge.nav_status == "cancelled"
+    assert bridge.mode == "estop"
+    assert bridge.goal is None
+    assert bridge.planned_path == []
+    assert bridge._goal_handle is None
+    # Stop's zero command is the final motion authority while the delayed
+    # readiness worker is unwinding.
+    bridge.pub_cmd.publish.assert_called()
+
+
+def test_manual_drive_during_pending_follow_path_invalidates_cancelled_generation(mod):
+    """Teleop must supersede a planner handoff even after planner cancellation."""
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge._goal_generation = 7
+    bridge.nav_status = "cancelled"
+    bridge.mode = "idle"
+    bridge.path_client.server_is_ready.return_value = False
+    readiness_entered = threading.Event()
+    release_readiness = threading.Event()
+    result = []
+
+    def wait_for_server(*, timeout_sec):
+        readiness_entered.set()
+        release_readiness.wait(timeout=2.0)
+        return True
+
+    bridge.path_client.wait_for_server.side_effect = wait_for_server
+    worker = threading.Thread(
+        target=lambda: result.append(
+            bridge.follow_path(_ownership_plan(), expected_generation=7)
+        )
+    )
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        worker.start()
+        try:
+            assert readiness_entered.wait(timeout=2.0)
+            bridge.drive(0.2, 0.0)
+        finally:
+            release_readiness.set()
+            worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge._goal_generation == 8
+    assert bridge.nav_status == "cancelled"
+    assert bridge.mode == "teleop"
+    bridge.pub_cmd.publish.assert_called_once()
+
+
+def test_follow_path_expiry_during_readiness_prevents_send(mod, monkeypatch):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge._goal_generation = 6
+    bridge.path_client.server_is_ready.return_value = False
+    readiness_entered = threading.Event()
+    release_readiness = threading.Event()
+    result = []
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock["now"])
+
+    def wait_for_server(*, timeout_sec):
+        readiness_entered.set()
+        release_readiness.wait(timeout=2.0)
+        clock["now"] = 106.0
+        return True
+
+    bridge.path_client.wait_for_server.side_effect = wait_for_server
+    worker = threading.Thread(
+        target=lambda: result.append(
+            bridge.follow_path(
+                _ownership_plan(), expected_generation=6, not_after=105.0
+            )
+        )
+    )
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        worker.start()
+        try:
+            assert readiness_entered.wait(timeout=2.0)
+        finally:
+            release_readiness.set()
+            worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert result == [None]
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge._goal_generation == 6
+
+
+def test_stale_readiness_failure_preserves_estop(mod):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge._goal_generation = 10
+    bridge.nav_status = "estop"
+    bridge.mode = "idle"
+    bridge.goal = None
+    bridge.path_client.server_is_ready.return_value = False
+    bridge.path_client.wait_for_server.return_value = False
+
+    result = bridge.follow_path(_ownership_plan(), expected_generation=9)
+
+    assert result is None
+    bridge.path_client.send_goal_async.assert_not_called()
+    assert bridge._goal_generation == 10
+    assert bridge.nav_status == "estop"
+    assert bridge.mode == "idle"
+
+
+def test_accepted_callback_after_cancel_is_canceled_without_resurrecting_state(mod):
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "navigate_to_pose"}})
+    bridge._goal_generation = 12
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+    bridge.goal = {"x": 1.0, "y": 2.0}
+    bridge.planned_path = [{"x": 1.0, "y": 2.0}]
+    bridge.cancel_goal()
+    bridge.nav_status = "estop"
+    accepted_handle = MagicMock()
+    accepted_handle.accepted = True
+    future = MagicMock()
+    future.result.return_value = accepted_handle
+
+    bridge._on_goal_response(future, generation=12)
+
+    accepted_handle.cancel_goal_async.assert_called_once_with()
+    assert bridge._goal_handle is None
+    assert bridge.nav_status == "estop"
+    assert bridge.mode == "idle"
+    assert bridge.goal is None
+    assert bridge.planned_path == []
+
+
+def test_cancel_nav_goal_disables_relay_and_publishes_zero(mod):
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}},
+    )
+    handle = MagicMock()
+    bridge._goal_handle = handle
+    bridge._goal_generation = 5
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+    bridge._nav_execution_enabled = True
+
+    generation = bridge.cancel_goal()
+
+    assert generation == 6
+    handle.cancel_goal_async.assert_called_once_with()
+    assert bridge._nav_execution_enabled is False
+    bridge._on_nav_cmd_vel(MagicMock())
+    bridge.pub_cmd.publish.assert_called_once()
+    zero = bridge.pub_cmd.publish.call_args.args[0]
+    assert zero.linear.x == 0.0
+    assert zero.angular.z == 0.0
+
+
+def test_stale_conditional_cancel_does_not_zero_newer_motion(mod):
+    bridge = _bridge(
+        mod,
+        {"topics": {"nav_cmd_vel": "cmd_vel_nav"}},
+    )
+    bridge._goal_generation = 8
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+    bridge._nav_execution_enabled = True
+    newer_handle = MagicMock()
+    bridge._goal_handle = newer_handle
+
+    assert bridge.cancel_goal_if_current(7) is None
+
+    newer_handle.cancel_goal_async.assert_not_called()
+    bridge.pub_cmd.publish.assert_not_called()
+    assert bridge._goal_generation == 8
+    assert bridge._nav_execution_enabled is True
+    assert bridge.nav_status == "active"
+
+
+def test_stale_conditional_cancel_and_status_cannot_change_newer_state(mod):
+    bridge = _bridge(mod, {"actions": {"navigate_to_pose": "navigate_to_pose"}})
+    newer_handle = MagicMock()
+    bridge._goal_generation = 15
+    bridge._goal_handle = newer_handle
+    bridge.goal = {"x": 3.0, "y": 4.0}
+    bridge.planned_path = [{"x": 3.0, "y": 4.0}]
+    bridge.nav_status = "active"
+    bridge.mode = "nav"
+
+    assert bridge.cancel_goal_if_current(14) is None
+    assert bridge.set_nav_status_if_current(14, "failed") is False
+    newer_handle.cancel_goal_async.assert_not_called()
+    assert bridge._goal_generation == 15
+    assert bridge._goal_handle is newer_handle
+    assert bridge.goal == {"x": 3.0, "y": 4.0}
+    assert bridge.planned_path == [{"x": 3.0, "y": 4.0}]
+    assert bridge.nav_status == "active"
+    assert bridge.mode == "nav"
 
 
 def test_empty_follow_path_fails_without_canceling_active_motion(mod):
@@ -1402,6 +1799,13 @@ def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
     bridge.pub_cmd.publish.assert_not_called()
 
     bridge.nav_status = "active"
+    # A planner may keep the public status active while a replacement action
+    # is being prepared. Only an accepted, currently executing action may
+    # reopen the isolated Nav2 velocity relay.
+    bridge._on_nav_cmd_vel(twist)
+    bridge.pub_cmd.publish.assert_not_called()
+
+    bridge._nav_execution_enabled = True
     bridge._on_nav_cmd_vel(twist)
     bridge.pub_cmd.publish.assert_called_once_with(twist)
 
@@ -1541,6 +1945,7 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
         {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
     )
     bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
     bridge.note_link_activity()
 
     # Fresh link: autonomy is relayed as before.
@@ -1568,6 +1973,7 @@ def test_nav_relay_refuses_to_drive_while_the_link_is_stale(mod):
         {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 0.05},
     )
     bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
     bridge.note_link_activity()
     time.sleep(0.08)
 
@@ -1582,6 +1988,7 @@ def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
         {"topics": {"nav_cmd_vel": "cmd_vel_nav"}, "link_timeout_s": 5.0},
     )
     bridge.nav_status = "active"
+    bridge._nav_execution_enabled = True
     bridge.note_link_activity()
 
     bridge.link_watchdog()
