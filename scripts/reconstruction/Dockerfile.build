@@ -86,7 +86,9 @@ LABEL org.opencontainers.image.title="SwarmDeck private UMAMI runner" \
 # UMAMI's root CMake links against ORB-SLAM3/lib/libORB_SLAM3.so and its DBoW2
 # companion, but the pinned checkout does not contain built binaries and its
 # upstream build.sh is absent. Build DBoW2, g2o, and ORB-SLAM3 before the
-# Gaussian mapper.
+# Gaussian mapper. The pinned root CMakeLists also forces a project-local
+# jsoncpp install path and includes jsoncpp/json/json.h, so the builder links
+# that path and header layout to the isolated dependency before configuring.
 RUN --mount=type=bind,from=umami,source=.,target=/src/UMAMI-SLAM,readonly \
     cp -a /src/UMAMI-SLAM /tmp/UMAMI-SLAM \
     && export GIOJO_GLIBCXX_ABI=${GIOJO_GLIBCXX_ABI} \
@@ -120,15 +122,28 @@ RUN --mount=type=bind,from=umami,source=.,target=/src/UMAMI-SLAM,readonly \
     && build_logged g2o /tmp/orb-slam3-build g2o /tmp/g2o-build.log \
     && build_logged ORB-SLAM3 /tmp/orb-slam3-build ORB_SLAM3 /tmp/orb-build.log \
     && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/Thirdparty/DBoW2/lib/libDBoW2.so \
-    && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/lib/libORB_SLAM3.so \
+    && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/lib/libORB_SLAM3.so
+
+RUN mkdir -p /tmp/UMAMI-SLAM/third_party \
+    && ln -s /opt/deps/jsoncpp /tmp/UMAMI-SLAM/third_party/jsoncpp-install \
+    && ln -s . /opt/deps/jsoncpp/include/jsoncpp \
     && GIOJO_CUDA_ARCHS=${GIOJO_CUDA_ARCHS} GIOJO_GLIBCXX_ABI=${GIOJO_GLIBCXX_ABI} \
        cmake -S /tmp/UMAMI-SLAM -B /tmp/umami-build \
          -DCMAKE_BUILD_TYPE=Release \
          -DTorch_DIR=/opt/deps/libtorch/share/cmake/Torch \
          -DOpenCV_DIR=/opt/deps/opencv/lib/cmake/opencv4 \
-         -Djsoncpp_DIR=/opt/deps/jsoncpp/lib/cmake/jsoncpp \
          -DBOOST_ROOT=/opt/deps/boost \
-    && build_logged 'UMAMI train_colmap' /tmp/umami-build train_colmap /tmp/umami-build.log \
+    && UMAMI_BUILD_START=$(date +%s) \
+    && if cmake --build /tmp/umami-build --target train_colmap \
+         -j${NATIVE_BUILD_JOBS} > /tmp/umami-build.log 2>&1; then \
+         echo "UMAMI train_colmap build completed in $(($(date +%s) - UMAMI_BUILD_START))s"; \
+       else \
+         UMAMI_BUILD_STATUS=$?; \
+         grep -n -C 3 -E 'fatal error:|error:|Killed|No rule|Stop\.|undefined reference|collect2:|\*\*\*' \
+           /tmp/umami-build.log || true; \
+         tail -n 80 /tmp/umami-build.log; \
+         exit "${UMAMI_BUILD_STATUS}"; \
+       fi \
     && mkdir -p /opt/umami-runtime/bin /opt/umami-runtime/lib \
     && cp /tmp/UMAMI-SLAM/bin/train_colmap /opt/umami-runtime/bin/ \
     && find /tmp/UMAMI-SLAM/lib -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} /opt/umami-runtime/lib/ \; \
