@@ -198,7 +198,7 @@ not establish fleet completion.
 
 To switch the isolated simulation from shadow mapping to onboard navigation,
 append `docker-compose.mapping.yml` and `docker-compose.onboard-planning.yml`
-to that invocation, and also start `mapping` and `mapping-query`. This sets
+to that invocation, and also start `mapping` and `mapping-query`. This pins the adapter to `SWARMDECK_MISSION_ID` and sets
 `SWARMDECK_MAPPING_AUTHORITY=onboard`, `SWARMDECK_PLANNING_BACKEND=mgg`, and
 `SWARMDECK_PEER_COORDINATION=1` on the adapter. The adapter stops uploading
 keyframes to the central optimizer and stops downloading its navigation grid.
@@ -519,8 +519,8 @@ bounds both the current-pose and goal connections. Planner paths retain their
 internal driving-height convention and are converted to robot base poses only
 at response/publication boundaries. Explore retains the local graph's existing
 startup policy for a root whose ground has not yet been observed; explicit
-destinations still require mapped support. The updated patch has not yet been
-retested in Bistro. Local native Jazzy validation passes 59 GoogleTest cases,
+destinations still require mapped support. The updated patch was subsequently
+retested in Bistro as recorded below. Local native Jazzy validation passes 59 GoogleTest cases,
 including actual legacy Explore → revision-pinned Explore calls with identical
 base-height paths. Home service
 fixtures exercise an observed detour, blocked walls and geofences, correct
@@ -536,6 +536,38 @@ keys; strict swept envelopes cover motion between samples. All eight deployment
 patches replay from pinned MGG `902e868`; all 28 source files touched by the
 patch stack match the retained native test source byte for byte. These checks establish native service behavior,
 not end-to-end Bistro motion or successful arrival.
+
+A fresh workstation trial on 2026-09-10 used commit `bff4fb4`, mission
+`126bed69-9327-4d8f-a4b2-075fa7569d8e`, ROS domain 187, and newly built MGG and
+mapping images. All four robots executed paths during a 30-second Explore
+observation, all four replica revisions advanced, and Stop All cleared every
+active path. Scout reported blocked, one Bunker reported local exhaustion after
+less than a metre, and Spot lost a reservation. The peers remained in four
+separate components; this does not pass coordinated coverage or closure gates.
+
+Each subsequent Return Home request failed before producing a route:
+
+| Robot | Native planner reason | Final independent XY distance from start |
+| --- | --- | --- |
+| `robot_0` (Bunker) | Current pose or goal outside the graph | 9.438 m |
+| `robot_1` (Bunker) | Current pose or goal has no mapped terrain support | 0.773 m |
+| `robot_2` (Scout) | Corridor has an unsupported endpoint | 6.888 m |
+| `robot_3` (Spot) | Current pose or goal outside the graph | 6.861 m |
+
+The passive recorder captured initial world poses before motion and more than
+2,100 truth samples per robot without dropped samples. The distances above are
+ARGoS ground truth, independently confirming failed return navigation. Persistent
+graph growth stalled at six vertices for `robot_0` and one for `robot_3` despite
+local exploration movement. Native fixture success therefore does not close the
+Bistro acceptance gate. Preserve mapped-support and collision checks while
+investigating persistent connectivity and sensor coverage.
+
+Staged launch also exposed the ARGoS experiment freshness rule: starting ARGoS
+after the bridge has already generated `session.argos` makes its timestamp check
+wait for another generation. For this trial, the generated file was verified to
+postdate the current bridge start and contain four drift-odometry robots before
+using `ARGOS_ACCEPT_STALE=true` for the ARGoS restart. Do not use that override
+without checking that the experiment belongs to the current bridge session.
 
 The operator reports that Bistro needs `max_mean_error` near 0.6 in the existing
 registration pipeline. That parameter belongs to `swarmdeck_slam.verify`; native

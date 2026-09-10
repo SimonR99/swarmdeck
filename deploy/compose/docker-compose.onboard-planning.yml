@@ -3,6 +3,7 @@
 services:
   sim:
     environment:
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_MAPPING_AUTHORITY: onboard
       SWARMDECK_PEER_COORDINATION: "1"
       SWARMDECK_PLANNING_BACKEND: mgg
