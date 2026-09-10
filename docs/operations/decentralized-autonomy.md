@@ -654,7 +654,7 @@ exploration, and Home evidence. One upload-pump test was excluded because its
 hang reproduces on the unchanged baseline. The native DDS contract also passed
 with the new generation handoff, full-path execution, Stop, terminal planner
 states, and late-response fencing. Its action sink never publishes velocity;
-physical arrival still requires the next independent-ground-truth Bistro trial.
+physical arrival is measured separately in the fresh Bistro trial below.
 
 The tenth MGG patch makes blocked-route reports actionable without changing
 admission policy or repeating map queries. Reports identify the current pose,
@@ -666,7 +666,30 @@ center offset. Graph-binding reports identify which endpoint exceeds the
 existing tolerance. Native validation passed 176 GoogleTest cases across 20
 binaries (including four PCI cases); colcon reports 196 results with no errors,
 failures, or skips. All ten patches replay from the pinned MGG revision and
-reproduce the tested source. These diagnostics still need a fresh Bistro trial.
+reproduce the tested source.
+
+The fresh `211f8d6` Bistro trial used mission
+`92028a23-d1d1-45b8-8d0b-509815e35950` and ROS domain 189. The passive recorder
+captured 562.522 seconds without dropped truth samples. R3 (Spot) passed the
+offline physical-arrival check with `--allow-authority-replanning`: it started
+9.427 m from home, executed a 39-point route, and settled within 0.216 m for
+17 consecutive samples spanning 1.595 seconds. Authority changed during the
+trial while its Home identity remained the same; the evidence does not count
+or independently audit every intermediate retry.
+
+The other robots did not pass Home:
+
+| GUI label | Observed result |
+| --- | --- |
+| R0 | No route: current pose `(7.91, 3.36, 0.25)` exceeded the existing 1 m graph-binding tolerance. |
+| R1 | No route: home `(-0.01, 0.01, 0.07)` had no mapped ground support. It explored only 0.789 m and recorded three map revisions before local exhaustion. |
+| R2 | Home was not issued: fresh authority could not be captured. Its 2D SLAM node was inactive after a startup transition timeout; MGG lacked `map_frame` and odometry, and Nav2 bringup failed. |
+
+After recording ended, activating R2's existing SLAM node restored authority;
+its Nav2 controller also became active. This was a manual recovery, not a passed
+fresh-start gate. All robots were stopped after the bounded motion checks.
+The trial establishes one complete Home return while keeping terrain coverage,
+persistent graph connectivity, and reliable fleet startup as open gates.
 
 Staged launch also exposed the ARGoS experiment freshness rule: starting ARGoS
 after the bridge has already generated `session.argos` makes its timestamp check
