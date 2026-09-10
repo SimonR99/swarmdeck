@@ -124,7 +124,11 @@ RUN --mount=type=bind,from=umami,source=.,target=/src/UMAMI-SLAM,readonly \
     && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/Thirdparty/DBoW2/lib/libDBoW2.so \
     && test -s /tmp/UMAMI-SLAM/ORB-SLAM3/lib/libORB_SLAM3.so
 
-RUN mkdir -p /tmp/UMAMI-SLAM/third_party \
+COPY scripts/reconstruction/patches/umami-b1251d-colmap-sparse-points.patch /tmp/
+
+RUN patch --batch --forward --fuzz=0 -d /tmp/UMAMI-SLAM -p1 \
+      < /tmp/umami-b1251d-colmap-sparse-points.patch \
+    && mkdir -p /tmp/UMAMI-SLAM/third_party \
     && ln -s /opt/deps/jsoncpp /tmp/UMAMI-SLAM/third_party/jsoncpp-install \
     && ln -s . /opt/deps/jsoncpp/include/jsoncpp \
     && GIOJO_CUDA_ARCHS=${GIOJO_CUDA_ARCHS} GIOJO_GLIBCXX_ABI=${GIOJO_GLIBCXX_ABI} \

@@ -48,7 +48,9 @@ server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
 [integration and simulation guide](docs/operations/decentralized-autonomy.md)
 for build commands, component inspection, validation status, and rollout limits.
 This remains an opt-in development path; multi-host fault recovery, successful Bistro
-return-home execution, and native GPU reconstruction still have acceptance work.
+return-home execution, and Gaussian quality and resource scaling still have
+acceptance work. The [native CUDA smoke test](docs/operations/reconstruction-jobs.md)
+passes with fixed poses.
 
 ## Quick start
 

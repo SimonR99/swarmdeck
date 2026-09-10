@@ -1,0 +1,14 @@
+diff --git a/src/gaussian_model.cpp b/src/gaussian_model.cpp
+--- a/src/gaussian_model.cpp
++++ b/src/gaussian_model.cpp
+@@ -148,6 +148,10 @@ void GaussianModel::createFromPcd(
+         ++pcd_it;
+     }
+ 
++    // trainColmap saves the original sparse input beside the trained model.
++    this->sparse_points_xyz_ = fused_point_cloud.detach().clone();
++    this->sparse_points_color_ = color.detach().clone();
++
+     torch::Tensor fused_color = sh_utils::RGB2SH(color);
+     auto temp = this->max_sh_degree_ + 1;
+     torch::Tensor features = torch::zeros(

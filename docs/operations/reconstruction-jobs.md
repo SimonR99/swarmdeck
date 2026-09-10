@@ -239,9 +239,8 @@ or viewer performance. The private UMAMI commit recorded by the architecture
 plan is an integration target, not a substitute for validating the exact built
 executable and configuration in its authorized CUDA environment.
 
-Native UMAMI/GPU validation was not run for this repository slice. A bounded
-RTX 3080 validation is feasible in an isolated CUDA image, using the pinned
-private checkout only as a build input. The reproducible build recipe is
+Native UMAMI/GPU validation uses an isolated CUDA image and the pinned private
+checkout only as a build input. The reproducible build recipe is
 [`scripts/reconstruction/Dockerfile.build`](../../scripts/reconstruction/Dockerfile.build):
 it uses BuildKit named contexts for the private source and machine-provided
 dependencies, so no private source is copied from the public repository. The
@@ -254,8 +253,13 @@ LibTorch 2.0.1 cu118 with the cxx11 ABI. The recipe selects
 Build and run the pinned native trainer in the isolated image:
 
 ```bash
-UMAMI_SRC=/tmp/swarmdeck-umami-inspect
-UMAMI_REF=$(git -C "$UMAMI_SRC" rev-parse HEAD)
+UMAMI_SRC=/path/to/verified/UMAMI-SLAM
+UMAMI_REF=b1251d435b09f4298a414dbc1151c9bae42c3c37
+# Use a new directory outside the public SwarmDeck checkout.
+git clone git@github.com:lemonci/UMAMI-SLAM.git "$UMAMI_SRC"
+git -C "$UMAMI_SRC" checkout --detach "$UMAMI_REF"
+test "$(git -C "$UMAMI_SRC" rev-parse HEAD)" = "$UMAMI_REF"
+test -z "$(git -C "$UMAMI_SRC" status --porcelain --untracked-files=all)"
 DOCKER_BUILDKIT=1 docker build \
   -f scripts/reconstruction/Dockerfile.build \
   --build-context umami="$UMAMI_SRC" \
@@ -286,17 +290,26 @@ checkout has no prebuilt `.so` files. ORB links g2o by filename, so selecting
 the ORB target alone does not build its g2o prerequisite.
 `BUILD_JOBS` controls dependency builds; `NATIVE_BUILD_JOBS` independently limits
 UMAMI/ORB compilation and defaults to two jobs. This lets native concurrency
-change without rebuilding CUDA/OpenCV dependencies. ORB's upstream configuration
-forces Debug while adding `-O3`; the image disables its debug symbols with `-g0`.
-The three-view fixture bounds the input size; native training time and GPU
-memory use still need to be measured.
+change without rebuilding CUDA/OpenCV dependencies. The ORB build and UMAMI
+build use separate image layers, so an UMAMI-only retry reuses the expensive
+ORB result. ORB's upstream configuration forces Debug while adding `-O3`; the
+image disables its debug symbols with `-g0`.
+
+The pinned CMake project expects a project-local jsoncpp installation and the
+`jsoncpp/json/json.h` include layout. The image supplies both compatibility
+links from its isolated jsoncpp dependency. The pinned `train_colmap` path also
+fails its shutdown save because `createFromPcd` does not retain the initial
+sparse positions and colours consumed by `saveSparsePointsPly`. The build
+applies the exact-commit patch
+[`umami-b1251d-colmap-sparse-points.patch`](../../scripts/reconstruction/patches/umami-b1251d-colmap-sparse-points.patch)
+to its temporary source copy. It does not modify the private checkout.
 
 The source manifest for this validation target is UMAMI-SLAM
 `b1251d435b09f4298a414dbc1151c9bae42c3c37`; the native command above is the
-actual `train_colmap` interface found in `examples/train_colmap.cpp`. No
-native config has completed validation yet; the CPU tests use an inert trainer and a
-minimal `fixed_pose: true` test config. The repository includes a deterministic
-three-view, 64x48 calibrated loader fixture for the next authorized GPU run:
+actual `train_colmap` interface found in `examples/train_colmap.cpp`. The CPU
+tests still use an inert trainer and a minimal `fixed_pose: true` test config.
+The repository also includes a deterministic three-view, 64x48 calibrated
+loader fixture for bounded native validation:
 
 ```bash
 python3 scripts/reconstruction/umami_native_fixture.py /data/umami-native-smoke
@@ -308,11 +321,26 @@ docker run --rm --gpus all \
   /inputs/config/umami_smoke.yaml /inputs/dataset /outputs no_viewer
 ```
 
-The fixture checks binary COLMAP export and native loading/training only; it is
-not a quality or convergence benchmark. Run the image only on the authorized
-GPU workstation, mounting capture/config/output data as shown. This validates
-the native executable in its isolated environment; it does not grant the
-trainer pose refinement, checkpoint, incremental, or depth-loss capabilities.
+On 2026-09-10 this fixture completed on an RTX 3080 with driver 595.84 using
+image `sha256:5bf5bc11d9562f43614288a29614347aebb4dd1481d9a11c53d6e48d9c784dc4`.
+The clean private checkout was detached at the full source manifest above. The
+native process initialized CUDA, loaded three cameras, three images and 540
+seed points, completed nine optimizer iterations with each keyframe selected
+three times, and exited successfully. Wall time around the complete Docker
+invocation, including container startup and teardown, was 1.311 seconds. Seven
+total-device samples at 200 ms intervals observed at most 455 MiB from a 131
+MiB idle baseline. The final 39,320-byte PLY had
+SHA-256 `d6db2830d6fec21fa817ac95107d1bfef4e584601d60d4d41be526e9799f0969`.
+The existing converter published all 540 records as a 30,256-byte SWGS v1 file
+with SHA-256 `4ff9ddc378cbffb8d3052e69ff449f0158b85757b1920c9569c574959aac009d`.
+
+The fixture checks binary COLMAP export, native CUDA loading, short training,
+shutdown output, and structural SWGS conversion only. It is not a quality or
+convergence benchmark. Run the image only on an authorized GPU workstation,
+mounting capture/config/output data as shown. This validation does not grant
+the trainer pose refinement, checkpoint, incremental, or depth-loss
+capabilities. Real-capture alignment, training time, memory scaling, and
+rendering cost remain acceptance work.
 
 After a real job, inspect the generated manifest and compare the Gaussian model
 against an independent geometric reference. A successful SWGS conversion only

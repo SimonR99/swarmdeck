@@ -1,2 +1,3 @@
 # Unified diffs preserve upstream whitespace and prefix blank context with a space.
 deploy/patches/*.patch whitespace=-blank-at-eol
+scripts/reconstruction/patches/*.patch whitespace=-blank-at-eol
