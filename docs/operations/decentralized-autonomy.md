@@ -231,6 +231,48 @@ onboard correction; the server does not substitute its cached home coordinates.
 Nav2 FollowPath receives the complete MGG path. Removing the onboard overlay
 and restarting the adapter restores the legacy central map path.
 
+Explicit Navigate and Return Home routes use `mgg_core::BoundedGridPlanner`
+through the transport-free `GridPlanner` interface. Direct terrain-checked
+segments remain the fast path. A blocked segment triggers deterministic local
+8-neighbor A* within a bounded rectangle; unknown space, unsupported ground,
+body collisions, excessive steps/inclines, and geofence violations cannot form
+a detour. The output retains the checked terrain polyline and exact final goal
+heading, then passes through base-height conversion and the optional indexed
+snapshot gate. Explore retains its existing selector and startup policy.
+
+| ROS parameter | Default | Bound |
+| --- | --- | --- |
+| `grid_refinement_resolution_m` | 0.25 m | Map resolution through `max(2 m, map resolution)` |
+| `grid_refinement_margin_m` | 1 m | 0–10 m around each segment |
+| `grid_refinement_max_cells` | 4096 | 16–65536 cells per segment |
+| `grid_refinement_max_expansions` | 2048 | 1–65536 expansions across the request |
+| `grid_refinement_timeout_ms` | 50 ms | 1–5000 ms, checked between map calls |
+
+The deadline is cooperative: an individual map callback is not preempted. The
+core accepts a cancellation callback, but the ROS wrapper does not wire one and
+the planning service has no cancel request. Stop invalidates the adapter's
+pending result and stops execution while the bounded planner call finishes.
+This is a local ground-plane search using the existing axis-aligned robot box and terrain support model, not a legged motion
+planner or a full 3D search. Each XY cell keeps its first observed support height;
+stacked-surface ambiguity can conservatively reject a feasible alternative.
+All corridor vertices and the exact destination must remain valid. A blocked
+vertex or a wall beyond the detour window returns `BLOCKED`; exclusion of the
+failed edge from a new topological search and path speed limits remain future
+work. Every projected segment receives a strict swept-box check at the actual
+body center, including robots with zero center offset. These queries enumerate
+all touched voxel keys and reject even one unknown voxel. Short swept AABB
+envelopes cover motion between samples, including diagonal voxel crossings;
+this adds conservative padding of at most one map resolution per axis.
+Legacy box queries retain their existing partial-unknown policy (25% for
+`getBoxStatus(..., true)`), and exploration continues through that interface.
+Their voxel enumeration also now includes both faces. The underlying ground
+predicate can conservatively reject some nonzero-offset footprints.
+
+Map callbacks also bound their work: boxes exceeding 1,048,576 voxel keys and
+strict sweeps exceeding an estimated 4,194,304 voxel visits return unknown.
+These limits prevent oversized geometry from monopolizing a callback between
+deadline checks; they are not hard real-time guarantees.
+
 Every fleet Explore command carries a shared run UUID and participant list.
 Robots exchange progress over `/swarmdeck/exploration_reports`. Completion means
 all participants freshly report exhaustion of reachable frontiers, with no
@@ -387,8 +429,8 @@ opacity is not occupancy and is not supplied to collision planning.
 
 ## Validation record
 
-Local validation on 2026-09-09 includes the native MGG image, 18 ROS planner
-tests, and a DDS fixture exercising full-path Explore, Navigate, cancellation,
+Earlier baseline validation on 2026-09-09, before grid refinement, included the
+native MGG image, ROS planner suites, and a DDS fixture exercising full-path Explore, Navigate, cancellation,
 and late-response fencing. The indexed fixture checks the exact component
 transform and a 50 ms deadline against a delayed service response. The Python
 autonomy, adapter, replication, reconstruction, command-routing, and backend
@@ -478,15 +520,21 @@ internal driving-height convention and are converted to robot base poses only
 at response/publication boundaries. Explore retains the local graph's existing
 startup policy for a root whose ground has not yet been observed; explicit
 destinations still require mapped support. The updated patch has not yet been
-retested in Bistro. Local native Jazzy tests now pass 40 cases, including actual
-legacy Explore → revision-pinned Explore service calls with identical base-height
-paths and an actual Home service that changes from a valid route to `BLOCKED`
-with an empty path after an obstacle is inserted. The fixtures exposed two
-OctoMap query defects: path sampling could omit the final endpoint, and floating
-point stepping in `augmentFreeBox` could leave an unknown voxel slice. Sampling
-now includes both endpoints and free-box insertion iterates discrete keys. All
-seven deployment patches replay from pinned MGG `902e868`; the resulting ten
-source files match the compiled fixture. These tests establish service behavior,
+retested in Bistro. Local native Jazzy validation passes 59 GoogleTest cases,
+including actual legacy Explore → revision-pinned Explore calls with identical
+base-height paths. Home service
+fixtures exercise an observed detour, blocked walls and geofences, correct
+nonzero body-center offsets, and rejection of one unknown body voxel. The
+functional grid-service fixtures allow a one-second cooperative budget to
+isolate behavior from host scheduling; they do not establish a 50 ms latency
+result. Core tests separately exercise cancellation and deadline expiry.
+
+The fixtures exposed incomplete voxel enumeration in free-box insertion and
+collision queries, omitted path endpoints, and missed diagonal crossings in
+sampled strict queries. Free-box and collision queries now enumerate discrete
+keys; strict swept envelopes cover motion between samples. All eight deployment
+patches replay from pinned MGG `902e868`; all 28 source files touched by the
+patch stack match the retained native test source byte for byte. These checks establish native service behavior,
 not end-to-end Bistro motion or successful arrival.
 
 The operator reports that Bistro needs `max_mean_error` near 0.6 in the existing
@@ -524,6 +572,19 @@ against the corrected home projected into the server's display frame. Its
 success evidence still requires review against independent ground truth and
 stable map-authority transforms.
 
+Additional local validation covers replica retention under concurrent publication,
+indexed terrain support on stacked floors, authority reordering/freshness, and
+frame-bound reconstruction delivery. The affected Python suite passed 291 tests
+from a clean commit export; the subsequent Gaussian frame-ID checks passed in
+the 45-test reconstruction suite. The native indexed-map DDS fixture passed
+FREE/OCCUPIED/UNKNOWN queries and exact revision/source-stamp rejection.
+UI replica/map tests, Svelte checking, and the production build passed. In an
+isolated headless browser with a synthetic stored component, a six-second network
+interruption retained the displayed map and its 1.15 m ceiling; reconnect loaded
+the next pose revision without resetting the ceiling. Quality changes were
+checked separately. These fixtures do not measure physical map accuracy or GPU
+performance on deployed robots.
+
 ## Remaining acceptance work
 
 The integration boundaries are implemented; the full rollout plan remains in
@@ -537,11 +598,10 @@ progress. In particular:
   transparent restart with preserved native graph state is not implemented.
 - Validate each physical robot's calibrated capture, ARM image, and local
   controller. Moving-obstacle and blind-corner behavior needs controlled trials.
-- Implement the reusable grid-search stage: `mgg_core::GridPlanner` is currently
-  an abstract interface. `PlannerNode::refineCorridor` terrain-projects and checks
-  a graph corridor against the live map, but cannot search around a newly blocked
-  segment or generate speed limits. Explore still uses its existing selector;
-  the reusable topological stage handles Navigate and Home.
+- Extend grid refinement to shared exploration objectives and feed failed
+  corridors back into topological replanning. Current local detours require
+  clear corridor vertices, and speed limits are not yet generated. The reusable
+  topological stage handles Navigate and Home; Explore retains its selector.
 - Establish a sensor coverage/bootstrap policy before enabling the strict indexed
   terrain gate. MGG still uses its local OctoMap for frontier construction and
   information gain; Inspect and Rendezvous remain unsupported objectives.

@@ -1,0 +1,1486 @@
+diff --git a/ros2/src/mgg_core/CMakeLists.txt b/ros2/src/mgg_core/CMakeLists.txt
+index 56a864b..fcb0d62 100644
+--- a/ros2/src/mgg_core/CMakeLists.txt
++++ b/ros2/src/mgg_core/CMakeLists.txt
+@@ -44,6 +44,7 @@ add_library(${PROJECT_NAME}
+   src/trajectory.cpp
+   src/path_selection.cpp
+   src/planning_stages.cpp
++  src/grid_refinement.cpp
+   src/log.cpp)
+ target_include_directories(${PROJECT_NAME} PUBLIC
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+@@ -89,6 +90,8 @@ if(BUILD_TESTING)
+   target_link_libraries(test_path_selection ${PROJECT_NAME})
+   ament_add_gtest(test_planning_stages test/test_planning_stages.cpp)
+   target_link_libraries(test_planning_stages ${PROJECT_NAME})
++  ament_add_gtest(test_grid_refinement test/test_grid_refinement.cpp)
++  target_link_libraries(test_grid_refinement ${PROJECT_NAME})
+ endif()
+ 
+ ament_package()
+diff --git a/ros2/src/mgg_core/include/mgg_core/grid_refinement.h b/ros2/src/mgg_core/include/mgg_core/grid_refinement.h
+new file mode 100644
+index 0000000..163073f
+--- /dev/null
++++ b/ros2/src/mgg_core/include/mgg_core/grid_refinement.h
+@@ -0,0 +1,65 @@
++// Bounded transport-free grid refinement for explicit topological routes.
++
++#ifndef MGG_CORE_GRID_REFINEMENT_H_
++#define MGG_CORE_GRID_REFINEMENT_H_
++
++#include <chrono>
++#include <cstddef>
++#include <functional>
++
++#include "mgg_core/planning_stages.h"
++
++namespace mgg {
++
++struct GridRefinementLimits {
++  double resolution_m = 0.25;
++  double detour_margin_m = 1.0;
++  std::size_t max_cells = 4096;
++  std::size_t max_expansions = 2048;
++  std::chrono::milliseconds timeout{50};
++};
++
++/// Projects a pose onto supported terrain and verifies that the robot's full
++/// footprint fits there. The input z is the nearest parent's driving height;
++/// implementations must fail rather than select an unrelated stacked surface.
++using GridProjectState = std::function<bool(StateVec&)>;
++
++/// Verifies a swept segment, including occupancy, footprint, terrain step,
++/// incline, and geofence policy. Unknown space must return false. On success,
++/// `terrain_path` contains the checked source-to-target geometry, including
++/// endpoints; returning only a chord after validating a terrain polyline is
++/// forbidden.
++using GridTraverseSegment =
++    std::function<bool(const StateVec&, const StateVec&,
++                       std::vector<StateVec>& terrain_path)>;
++
++using GridCancelled = std::function<bool()>;
++
++/// Refines blocked segments with bounded deterministic 8-neighbour A*.
++///
++/// The search is deliberately local and two-dimensional. Each XY cell is
++/// projected once from its first deterministic adjacent-parent observation
++/// and never silently rebound to another stacked surface. This may reject a
++/// feasible multi-level route, but cannot jump floors based on expansion
++/// order. Diagonal moves require both cardinal side transitions, preventing
++/// corner cutting.
++class BoundedGridPlanner final : public GridPlanner {
++ public:
++  BoundedGridPlanner(StateVec current, GridRefinementLimits limits,
++                     GridProjectState project,
++                     GridTraverseSegment traversable,
++                     GridCancelled cancelled = {});
++
++  FeasiblePath refine(const RouteCorridor& corridor) override;
++
++ private:
++  StateVec current_;
++  GridRefinementLimits limits_;
++  GridProjectState project_;
++  GridTraverseSegment traversable_;
++  GridCancelled cancelled_;
++};
++
++}  // namespace mgg
++
++#endif  // MGG_CORE_GRID_REFINEMENT_H_
+diff --git a/ros2/src/mgg_core/src/grid_refinement.cpp b/ros2/src/mgg_core/src/grid_refinement.cpp
+new file mode 100644
+index 0000000..ad5dd8f
+--- /dev/null
++++ b/ros2/src/mgg_core/src/grid_refinement.cpp
+@@ -0,0 +1,431 @@
++#include "mgg_core/grid_refinement.h"
++
++#include <algorithm>
++#include <climits>
++#include <cmath>
++#include <limits>
++#include <queue>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace mgg {
++namespace {
++
++constexpr std::size_t kNoParent = std::numeric_limits<std::size_t>::max();
++
++struct Cell {
++  StateVec state = StateVec::Zero();
++  double cost = std::numeric_limits<double>::infinity();
++  std::size_t parent = kNoParent;
++  bool projection_tried = false;
++  bool valid = false;
++  bool closed = false;
++};
++
++struct QueueEntry {
++  double estimate = 0.0;
++  double cost = 0.0;
++  std::size_t index = 0;
++  std::size_t sequence = 0;
++};
++
++struct LaterEntry {
++  bool operator()(const QueueEntry& a, const QueueEntry& b) const {
++    if (a.estimate != b.estimate) return a.estimate > b.estimate;
++    if (a.cost != b.cost) return a.cost > b.cost;
++    if (a.index != b.index) return a.index > b.index;
++    return a.sequence > b.sequence;
++  }
++};
++
++void copyRequest(const RouteCorridor& corridor, FeasiblePath& path) {
++  path.status = corridor.status;
++  path.mission_id = corridor.request.mission_id;
++  path.component_id = corridor.request.component_id;
++  path.graph_revision = corridor.request.graph_revision;
++  path.map_revision = corridor.request.map_revision;
++  path.map_epoch = corridor.request.map_epoch;
++  path.mapping_graph_revision = corridor.request.mapping_graph_revision;
++  path.geometry_revision = corridor.request.geometry_revision;
++  path.map_source_stamp_sec = corridor.request.map_source_stamp_sec;
++  path.map_source_stamp_nanosec = corridor.request.map_source_stamp_nanosec;
++  path.reason = corridor.reason;
++}
++
++bool samePosition(const StateVec& a, const StateVec& b) {
++  return (a.head<3>() - b.head<3>()).cwiseAbs().maxCoeff() <= 1e-6;
++}
++
++double pathLength(const std::vector<StateVec>& path,
++                  const StateVec& from, const StateVec& to) {
++  if (path.size() < 2) return (to.head<3>() - from.head<3>()).norm();
++  double length = 0.0;
++  for (std::size_t i = 1; i < path.size(); ++i) {
++    length += (path[i].head<3>() - path[i - 1].head<3>()).norm();
++  }
++  return length;
++}
++
++void appendCheckedPath(const std::vector<StateVec>& checked,
++                       std::vector<StateVec>& output) {
++  for (std::size_t i = 1; i < checked.size(); ++i) {
++    if (output.empty() || !samePosition(output.back(), checked[i])) {
++      output.push_back(checked[i]);
++    }
++  }
++}
++
++}  // namespace
++
++BoundedGridPlanner::BoundedGridPlanner(
++    StateVec current, GridRefinementLimits limits, GridProjectState project,
++    GridTraverseSegment traversable, GridCancelled cancelled)
++    : current_(std::move(current)),
++      limits_(limits),
++      project_(std::move(project)),
++      traversable_(std::move(traversable)),
++      cancelled_(std::move(cancelled)) {}
++
++FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
++  FeasiblePath result;
++  copyRequest(corridor, result);
++  if (corridor.status != PlanningStatus::kSucceeded) return result;
++  const auto fail = [&result](const std::string& reason) {
++    result.status = PlanningStatus::kBlocked;
++    result.poses.clear();
++    result.reason = reason;
++    return result;
++  };
++  if (corridor.request.objective != ObjectiveKind::kNavigate &&
++      corridor.request.objective != ObjectiveKind::kReturnHome) {
++    return fail("grid refinement supports Navigate and ReturnHome only");
++  }
++  if (!current_.allFinite() || !std::isfinite(limits_.resolution_m) ||
++      !std::isfinite(limits_.detour_margin_m) ||
++      limits_.resolution_m <= 0.0 || limits_.detour_margin_m < 0.0 ||
++      limits_.max_cells == 0 || limits_.max_expansions == 0 || !project_ ||
++      !traversable_ || limits_.timeout.count() <= 0) {
++    return fail("grid refinement configuration or current pose is invalid");
++  }
++
++  const auto started = std::chrono::steady_clock::now();
++  const auto timedOut = [this, started]() {
++    return std::chrono::steady_clock::now() - started >= limits_.timeout;
++  };
++  const auto interrupted = [this, &timedOut](std::string& reason) {
++    if (cancelled_ && cancelled_()) {
++      reason = "grid refinement was cancelled";
++      return true;
++    }
++    if (timedOut()) {
++      reason = "grid refinement exceeded its cooperative deadline";
++      return true;
++    }
++    return false;
++  };
++
++  std::string interruption_reason;
++  if (interrupted(interruption_reason)) return fail(interruption_reason);
++  StateVec start = current_;
++  const bool start_supported = project_(start);
++  if (interrupted(interruption_reason)) return fail(interruption_reason);
++  if (!start_supported || !start.allFinite()) {
++    return fail("current pose has no supported collision-free grid state");
++  }
++
++  std::vector<StateVec> waypoints;
++  waypoints.reserve(corridor.poses.size() + 2);
++  waypoints.push_back(start);
++  for (StateVec waypoint : corridor.poses) {
++    if (interrupted(interruption_reason)) return fail(interruption_reason);
++    if (!waypoint.allFinite()) {
++      return fail("route corridor has an unsupported endpoint");
++    }
++    const bool waypoint_supported = project_(waypoint);
++    if (interrupted(interruption_reason)) return fail(interruption_reason);
++    if (!waypoint_supported || !waypoint.allFinite()) {
++      return fail("route corridor has an unsupported endpoint");
++    }
++    if (!samePosition(waypoints.back(), waypoint)) {
++      waypoints.push_back(waypoint);
++    }
++  }
++  StateVec goal = corridor.request.goal.pose;
++  const double requested_goal_yaw = goal[3];
++  if (interrupted(interruption_reason)) return fail(interruption_reason);
++  if (!goal.allFinite()) {
++    return fail("the exact goal has no supported collision-free grid state");
++  }
++  const bool goal_supported = project_(goal);
++  if (interrupted(interruption_reason)) return fail(interruption_reason);
++  goal[3] = requested_goal_yaw;
++  if (!goal_supported || !goal.allFinite()) {
++    return fail("the exact goal has no supported collision-free grid state");
++  }
++  if (!samePosition(waypoints.back(), goal)) {
++    waypoints.push_back(goal);
++  } else {
++    // The graph vertex supplies XYZ, but the request owns exact final yaw.
++    waypoints.back() = goal;
++  }
++  if (waypoints.size() == 1) {
++    if (interrupted(interruption_reason)) return fail(interruption_reason);
++    result.status = PlanningStatus::kSucceeded;
++    result.poses.push_back(goal);
++    result.reason.clear();
++    return result;
++  }
++
++  std::size_t expansions = 0;
++  std::size_t sequence = 0;
++  const auto traverse = [this, &interrupted](const StateVec& a,
++                               const StateVec& b,
++                               std::vector<StateVec>* checked,
++                               double* length,
++                               std::string& interruption_reason) {
++    if (interrupted(interruption_reason)) return false;
++    std::vector<StateVec> local;
++    const bool accepted = traversable_(a, b, local);
++    if (interrupted(interruption_reason)) return false;
++    if (!accepted) return false;
++    if (local.size() < 2 || !samePosition(local.front(), a) ||
++        !samePosition(local.back(), b)) {
++      return false;
++    }
++    for (const StateVec& pose : local) {
++      if (!pose.allFinite()) return false;
++    }
++    local.front()[3] = a[3];
++    local.back()[3] = b[3];
++    const double checked_length = pathLength(local, a, b);
++    if (!std::isfinite(checked_length) || checked_length <= 0.0) return false;
++    if (length != nullptr) *length = checked_length;
++    if (checked != nullptr) *checked = std::move(local);
++    return true;
++  };
++  for (std::size_t segment = 1; segment < waypoints.size(); ++segment) {
++    const StateVec& from = waypoints[segment - 1];
++    const StateVec& to = waypoints[segment];
++    if (interrupted(interruption_reason)) return fail(interruption_reason);
++    std::vector<StateVec> direct_path;
++    if (traverse(from, to, &direct_path, nullptr, interruption_reason)) {
++      if (result.poses.empty()) result.poses.push_back(from);
++      appendCheckedPath(direct_path, result.poses);
++      continue;
++    }
++    if (!interruption_reason.empty()) return fail(interruption_reason);
++
++    const double resolution = limits_.resolution_m;
++    const long double cells_bound = static_cast<long double>(
++        std::min<std::size_t>(limits_.max_cells,
++                              static_cast<std::size_t>(
++                                  std::numeric_limits<long>::max())));
++    const long double width_bound =
++        std::ceil((std::abs(static_cast<long double>(to.x()) - from.x()) +
++                   2.0L * limits_.detour_margin_m) /
++                  limits_.resolution_m) +
++        3.0L;
++    const long double height_bound =
++        std::ceil((std::abs(static_cast<long double>(to.y()) - from.y()) +
++                   2.0L * limits_.detour_margin_m) /
++                  limits_.resolution_m) +
++        3.0L;
++    if (!std::isfinite(width_bound) || !std::isfinite(height_bound) ||
++        width_bound > cells_bound || height_bound > cells_bound) {
++      return fail("grid refinement bounds are invalid or exceed the cell limit");
++    }
++    const double min_x = std::min(from.x(), to.x()) - limits_.detour_margin_m;
++    const double max_x = std::max(from.x(), to.x()) + limits_.detour_margin_m;
++    const double min_y = std::min(from.y(), to.y()) - limits_.detour_margin_m;
++    const double max_y = std::max(from.y(), to.y()) + limits_.detour_margin_m;
++    const double left = std::ceil((from.x() - min_x) / resolution);
++    const double down = std::ceil((from.y() - min_y) / resolution);
++    const double origin_x = from.x() - left * resolution;
++    const double origin_y = from.y() - down * resolution;
++    const double nx_d = std::ceil((max_x - origin_x) / resolution) + 1.0;
++    const double ny_d = std::ceil((max_y - origin_y) / resolution) + 1.0;
++    if (!std::isfinite(origin_x) || !std::isfinite(origin_y) ||
++        !std::isfinite(nx_d) || !std::isfinite(ny_d) || nx_d < 1.0 ||
++        ny_d < 1.0 || nx_d > static_cast<double>(limits_.max_cells) ||
++        ny_d > static_cast<double>(limits_.max_cells) ||
++        left < 0.0 || down < 0.0 || left >= nx_d || down >= ny_d) {
++      return fail("grid refinement bounds are invalid or exceed the cell limit");
++    }
++    const std::size_t nx = static_cast<std::size_t>(nx_d);
++    const std::size_t ny = static_cast<std::size_t>(ny_d);
++    if (nx > limits_.max_cells / ny) {
++      return fail("grid refinement exceeds the cell limit");
++    }
++    const std::size_t cell_count = nx * ny;
++    if (cell_count > limits_.max_cells) {
++      return fail("grid refinement exceeds the cell limit");
++    }
++    const std::size_t start_x = static_cast<std::size_t>(left);
++    const std::size_t start_y = static_cast<std::size_t>(down);
++    if (start_x >= nx || start_y >= ny) {
++      return fail("grid refinement could not represent the segment start");
++    }
++
++    std::vector<Cell> cells(cell_count);
++    const auto index = [nx](std::size_t x, std::size_t y) {
++      return y * nx + x;
++    };
++    const auto xy = [nx](std::size_t cell) {
++      return std::pair<std::size_t, std::size_t>(cell % nx, cell / nx);
++    };
++    const auto ensureCell = [&](std::size_t cell, double parent_z,
++                                std::string& reason) {
++      Cell& value = cells[cell];
++      if (value.projection_tried) return value.valid;
++      value.projection_tried = true;
++      const auto [x, y] = xy(cell);
++      const double lattice_x = origin_x + static_cast<double>(x) * resolution;
++      const double lattice_y = origin_y + static_cast<double>(y) * resolution;
++      value.state = StateVec(lattice_x, lattice_y, parent_z, 0.0);
++      if (interrupted(reason)) return false;
++      const bool supported = project_(value.state);
++      if (interrupted(reason)) return false;
++      if (!supported || !value.state.allFinite()) return false;
++      // Keep the discrete XY identity separate from a small support-probe
++      // correction, but reject a projection that jumps into another cell.
++      if (std::abs(value.state.x() - lattice_x) > 0.5 * resolution + 1e-9 ||
++          std::abs(value.state.y() - lattice_y) > 0.5 * resolution + 1e-9) {
++        return false;
++      }
++      value.valid = true;
++      return true;
++    };
++
++    const std::size_t source = index(start_x, start_y);
++    cells[source].projection_tried = true;
++    cells[source].valid = true;
++    cells[source].state = from;
++    cells[source].cost = 0.0;
++    std::priority_queue<QueueEntry, std::vector<QueueEntry>, LaterEntry> open;
++    open.push({(to.head<2>() - from.head<2>()).norm(), 0.0, source,
++               sequence++});
++
++    constexpr int kDx[8] = {1, 0, -1, 0, 1, -1, -1, 1};
++    constexpr int kDy[8] = {0, 1, 0, -1, 1, 1, -1, -1};
++    std::size_t reached = kNoParent;
++    while (!open.empty()) {
++      if (interrupted(interruption_reason)) return fail(interruption_reason);
++      const QueueEntry entry = open.top();
++      open.pop();
++      Cell& active = cells[entry.index];
++      if (active.closed || entry.cost > active.cost + 1e-12) continue;
++      if (expansions >= limits_.max_expansions) {
++        return fail("grid refinement exceeded the expansion limit");
++      }
++      ++expansions;
++      active.closed = true;
++
++      if ((to.head<2>() - active.state.head<2>()).norm() <=
++              std::sqrt(2.0) * resolution + 1e-9 &&
++          traverse(active.state, to, nullptr, nullptr, interruption_reason)) {
++        reached = entry.index;
++        break;
++      }
++      if (!interruption_reason.empty()) return fail(interruption_reason);
++
++      const auto [active_x, active_y] = xy(entry.index);
++      for (int direction = 0; direction < 8; ++direction) {
++        if (interrupted(interruption_reason)) return fail(interruption_reason);
++        const long next_x = static_cast<long>(active_x) + kDx[direction];
++        const long next_y = static_cast<long>(active_y) + kDy[direction];
++        if (next_x < 0 || next_y < 0 ||
++            next_x >= static_cast<long>(nx) ||
++            next_y >= static_cast<long>(ny)) {
++          continue;
++        }
++        const std::size_t next =
++            index(static_cast<std::size_t>(next_x),
++                  static_cast<std::size_t>(next_y));
++        if (!ensureCell(next, active.state.z(), interruption_reason) ||
++            cells[next].closed) {
++          if (!interruption_reason.empty()) return fail(interruption_reason);
++          continue;
++        }
++
++        if (kDx[direction] != 0 && kDy[direction] != 0) {
++          const std::size_t side_x =
++              index(static_cast<std::size_t>(next_x), active_y);
++          const std::size_t side_y =
++              index(active_x, static_cast<std::size_t>(next_y));
++          if (!ensureCell(side_x, active.state.z(), interruption_reason) ||
++              !ensureCell(side_y, active.state.z(), interruption_reason) ||
++              !traverse(active.state, cells[side_x].state, nullptr, nullptr,
++                        interruption_reason) ||
++              !traverse(active.state, cells[side_y].state, nullptr, nullptr,
++                        interruption_reason)) {
++            if (!interruption_reason.empty()) return fail(interruption_reason);
++            continue;
++          }
++        }
++        double edge = 0.0;
++        if (!traverse(active.state, cells[next].state, nullptr, &edge,
++                      interruption_reason)) {
++          if (!interruption_reason.empty()) return fail(interruption_reason);
++          continue;
++        }
++        const double candidate = active.cost + edge;
++        if (candidate + 1e-12 >= cells[next].cost) continue;
++        cells[next].cost = candidate;
++        cells[next].parent = entry.index;
++        const double heuristic =
++            (to.head<2>() - cells[next].state.head<2>()).norm();
++        open.push({candidate + heuristic, candidate, next, sequence++});
++      }
++    }
++    if (reached == kNoParent) {
++      return fail("no observed traversable grid detour for route segment " +
++                  std::to_string(segment - 1) + "->" +
++                  std::to_string(segment));
++    }
++
++    std::vector<StateVec> reversed;
++    for (std::size_t cell = reached; cell != source;) {
++      if (cell == kNoParent || cells[cell].parent == kNoParent) {
++        return fail("grid refinement produced an invalid parent chain");
++      }
++      reversed.push_back(cells[cell].state);
++      cell = cells[cell].parent;
++    }
++    std::reverse(reversed.begin(), reversed.end());
++    StateVec previous = from;
++    for (const StateVec& pose : reversed) {
++      std::vector<StateVec> checked;
++      if (!traverse(previous, pose, &checked, nullptr,
++                    interruption_reason)) {
++        if (!interruption_reason.empty()) return fail(interruption_reason);
++        return fail("grid detour failed final segment validation");
++      }
++      if (result.poses.empty()) result.poses.push_back(previous);
++      appendCheckedPath(checked, result.poses);
++      previous = pose;
++    }
++    std::vector<StateVec> checked_goal;
++    if (!traverse(previous, to, &checked_goal, nullptr,
++                  interruption_reason)) {
++      if (!interruption_reason.empty()) return fail(interruption_reason);
++      return fail("grid detour failed final goal-connector validation");
++    }
++    if (result.poses.empty()) result.poses.push_back(previous);
++    appendCheckedPath(checked_goal, result.poses);
++  }
++
++  for (std::size_t i = 1; i < result.poses.size(); ++i) {
++    if (interrupted(interruption_reason)) return fail(interruption_reason);
++    result.poses[i - 1][3] = std::atan2(
++        result.poses[i].y() - result.poses[i - 1].y(),
++        result.poses[i].x() - result.poses[i - 1].x());
++  }
++  if (interrupted(interruption_reason)) return fail(interruption_reason);
++  result.poses.back()[3] = goal[3];
++  result.status = PlanningStatus::kSucceeded;
++  result.reason.clear();
++  return result;
++}
++
++}  // namespace mgg
+diff --git a/ros2/src/mgg_core/test/test_grid_refinement.cpp b/ros2/src/mgg_core/test/test_grid_refinement.cpp
+new file mode 100644
+index 0000000..9c23527
+--- /dev/null
++++ b/ros2/src/mgg_core/test/test_grid_refinement.cpp
+@@ -0,0 +1,281 @@
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <set>
++#include <thread>
++#include <utility>
++#include <vector>
++
++#include <gtest/gtest.h>
++
++#include "mgg_core/grid_refinement.h"
++
++namespace {
++
++using mgg::BoundedGridPlanner;
++using mgg::FeasiblePath;
++using mgg::GridRefinementLimits;
++using mgg::PlanningStatus;
++using mgg::RouteCorridor;
++using mgg::StateVec;
++
++RouteCorridor routeTo(double x, double y) {
++  RouteCorridor route;
++  route.status = PlanningStatus::kSucceeded;
++  route.request.objective = mgg::ObjectiveKind::kReturnHome;
++  route.request.goal.pose = StateVec(x, y, 0.0, 0.7);
++  route.poses.push_back(route.request.goal.pose);
++  return route;
++}
++
++GridRefinementLimits limits() {
++  GridRefinementLimits value;
++  value.resolution_m = 1.0;
++  value.detour_margin_m = 1.0;
++  value.max_cells = 64;
++  value.max_expansions = 64;
++  value.timeout = std::chrono::milliseconds(100);
++  return value;
++}
++
++auto flatProjection() {
++  return [](StateVec& state) {
++    state.z() = 0.0;
++    return state.allFinite();
++  };
++}
++
++auto sampledTraversal(std::vector<Eigen::Vector2d> obstacles) {
++  return [obstacles = std::move(obstacles)](
++             const StateVec& from, const StateVec& to,
++             std::vector<StateVec>& checked) {
++    const double length = (to.head<2>() - from.head<2>()).norm();
++    const int steps = std::max(1, static_cast<int>(std::ceil(length / 0.1)));
++    checked.clear();
++    for (int i = 0; i <= steps; ++i) {
++      const double t = static_cast<double>(i) / steps;
++      StateVec sample = from + t * (to - from);
++      for (const auto& obstacle : obstacles) {
++        if ((sample.head<2>() - obstacle).norm() < 0.35) return false;
++      }
++      checked.push_back(sample);
++    }
++    return true;
++  };
++}
++
++TEST(GridRefinement, ReturnsTheCheckedTerrainPolyline) {
++  auto traverse = [](const StateVec& from, const StateVec& to,
++                     std::vector<StateVec>& checked) {
++    StateVec middle = 0.5 * (from + to);
++    middle.z() = 0.2;
++    checked = {from, middle, to};
++    return true;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), flatProjection(),
++                             traverse);
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  ASSERT_EQ(path.status, PlanningStatus::kSucceeded) << path.reason;
++  ASSERT_EQ(path.poses.size(), 3u);
++  EXPECT_NEAR(path.poses[1].z(), 0.2, 1e-9);
++  EXPECT_NEAR(path.poses.back()[3], 0.7, 1e-9);
++}
++
++TEST(GridRefinement, RejectsMalformedSuccessfulTraversalCallback) {
++  auto malformed = [](const StateVec&, const StateVec&,
++                      std::vector<StateVec>& checked) {
++    checked.clear();
++    return true;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), flatProjection(),
++                             malformed);
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_TRUE(path.poses.empty());
++}
++
++TEST(GridRefinement, ExactGoalYawOverridesMatchingGraphVertex) {
++  RouteCorridor route = routeTo(2.0, 0.0);
++  route.poses.back()[3] = -0.4;
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), flatProjection(),
++                             sampledTraversal({}));
++  const FeasiblePath path = planner.refine(route);
++  ASSERT_EQ(path.status, PlanningStatus::kSucceeded) << path.reason;
++  ASSERT_FALSE(path.poses.empty());
++  EXPECT_NEAR(path.poses.back()[3], 0.7, 1e-9);
++}
++
++TEST(GridRefinement, ProjectorCannotReplaceRequestOwnedGoalYaw) {
++  auto yaw_mutating_projector = [](StateVec& state) {
++    state.z() = 0.0;
++    state[3] = -2.4;
++    return true;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(),
++                             yaw_mutating_projector, sampledTraversal({}));
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  ASSERT_EQ(path.status, PlanningStatus::kSucceeded) << path.reason;
++  ASSERT_FALSE(path.poses.empty());
++  EXPECT_NEAR(path.poses.back()[3], 0.7, 1e-9);
++}
++
++TEST(GridRefinement, RejectsExploreBeforeCallingMapPredicates) {
++  RouteCorridor route = routeTo(1.0, 0.0);
++  route.request.objective = mgg::ObjectiveKind::kExplore;
++  int projections = 0;
++  auto project = [&projections](StateVec&) {
++    ++projections;
++    return true;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), project,
++                             sampledTraversal({}));
++  const FeasiblePath path = planner.refine(route);
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_EQ(projections, 0);
++}
++
++TEST(GridRefinement, FindsObservedDetourAroundBlockedChord) {
++  BoundedGridPlanner planner(
++      StateVec::Zero(), limits(), flatProjection(),
++      sampledTraversal({Eigen::Vector2d(1.0, 0.0)}));
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  ASSERT_EQ(path.status, PlanningStatus::kSucceeded) << path.reason;
++  ASSERT_GE(path.poses.size(), 2u);
++  bool left_chord = false;
++  for (const StateVec& pose : path.poses) {
++    left_chord = left_chord || std::abs(pose.y()) > 0.5;
++  }
++  EXPECT_TRUE(left_chord);
++}
++
++TEST(GridRefinement, UnknownCellsCannotFormADetour) {
++  const std::set<std::pair<int, int>> known{{0, 0}, {1, 0}, {2, 0}};
++  auto project = [known](StateVec& state) {
++    return known.count({static_cast<int>(std::lround(state.x())),
++                        static_cast<int>(std::lround(state.y()))}) != 0;
++  };
++  BoundedGridPlanner planner(
++      StateVec::Zero(), limits(), project,
++      sampledTraversal({Eigen::Vector2d(1.0, 0.0)}));
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_TRUE(path.poses.empty());
++  EXPECT_NE(path.reason.find("no observed traversable"), std::string::npos);
++}
++
++TEST(GridRefinement, DoesNotCutDiagonallyBetweenBlockedCardinalCells) {
++  const std::set<std::pair<int, int>> known{{0, 0}, {1, 1}, {2, 2}};
++  auto project = [known](StateVec& state) {
++    return known.count({static_cast<int>(std::lround(state.x())),
++                        static_cast<int>(std::lround(state.y()))}) != 0;
++  };
++  auto traverse = [](const StateVec& from, const StateVec& to,
++                     std::vector<StateVec>& checked) {
++    checked = {from, to};
++    return (to.head<2>() - from.head<2>()).norm() < 1.5;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), project, traverse);
++  const FeasiblePath path = planner.refine(routeTo(2.0, 2.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_TRUE(path.poses.empty());
++}
++
++TEST(GridRefinement, RejectsCellCountBeforeAllocation) {
++  GridRefinementLimits bounded = limits();
++  bounded.max_cells = 8;
++  BoundedGridPlanner planner(StateVec::Zero(), bounded, flatProjection(),
++                             sampledTraversal({{1.0, 0.0}}));
++  const FeasiblePath path = planner.refine(routeTo(10.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("cell limit"), std::string::npos);
++}
++
++TEST(GridRefinement, ExpansionLimitIsGlobalAndDeterministic) {
++  GridRefinementLimits bounded = limits();
++  bounded.max_expansions = 1;
++  BoundedGridPlanner planner(StateVec::Zero(), bounded, flatProjection(),
++                             sampledTraversal({{1.0, 0.0}}));
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("expansion limit"), std::string::npos);
++}
++
++TEST(GridRefinement, CancellationStopsInsideTheSearch) {
++  std::atomic<bool> cancelled{false};
++  int traversals = 0;
++  auto cancel_from_search = [&cancelled, &traversals](
++                                const StateVec&, const StateVec&,
++                                std::vector<StateVec>&) {
++    ++traversals;
++    // The first call is the blocked direct chord. Raise cancellation only
++    // when the search evaluates its first candidate transition.
++    if (traversals >= 2) cancelled = true;
++    return false;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), flatProjection(),
++                             cancel_from_search,
++                             [&cancelled]() { return cancelled.load(); });
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_GE(traversals, 2);
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("cancelled"), std::string::npos);
++}
++
++TEST(GridRefinement, CooperativeDeadlineIsCheckedBetweenMapCalls) {
++  GridRefinementLimits bounded = limits();
++  bounded.timeout = std::chrono::milliseconds(1);
++  auto slow_blocked = [](const StateVec&, const StateVec&,
++                         std::vector<StateVec>&) {
++    std::this_thread::sleep_for(std::chrono::milliseconds(3));
++    return false;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), bounded, flatProjection(),
++                             slow_blocked);
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("cooperative deadline"), std::string::npos);
++}
++
++TEST(GridRefinement, SlowSuccessfulDirectPathCannotBypassDeadline) {
++  GridRefinementLimits bounded = limits();
++  bounded.timeout = std::chrono::milliseconds(1);
++  auto slow_success = [](const StateVec& from, const StateVec& to,
++                         std::vector<StateVec>& checked) {
++    std::this_thread::sleep_for(std::chrono::milliseconds(3));
++    checked = {from, to};
++    return true;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), bounded, flatProjection(),
++                             slow_success);
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("cooperative deadline"), std::string::npos);
++}
++
++TEST(GridRefinement, CancellationRaisedByEndpointProjectionIsObserved) {
++  std::atomic<bool> cancelled{false};
++  int projections = 0;
++  auto project = [&cancelled, &projections](StateVec& state) {
++    state.z() = 0.0;
++    if (++projections == 2) cancelled = true;
++    return true;
++  };
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), project,
++                             sampledTraversal({}),
++                             [&cancelled]() { return cancelled.load(); });
++  const FeasiblePath path = planner.refine(routeTo(2.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("cancelled"), std::string::npos);
++}
++
++TEST(GridRefinement, ZeroTimeoutIsInvalidInsteadOfDisablingDeadline) {
++  GridRefinementLimits unbounded = limits();
++  unbounded.timeout = std::chrono::milliseconds(0);
++  BoundedGridPlanner planner(StateVec::Zero(), unbounded, flatProjection(),
++                             sampledTraversal({}));
++  const FeasiblePath path = planner.refine(routeTo(1.0, 0.0));
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_NE(path.reason.find("configuration"), std::string::npos);
++}
++
++}  // namespace
+diff --git a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h
+index f0d77ef..be72f45 100644
+--- a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h
++++ b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h
+@@ -82,6 +82,14 @@ class OctomapMap : public MapInterface {
+                             const Eigen::Vector3d& box_size,
+                             bool stop_at_unknown_voxel) const override;
+ 
++  /// Explicit objectives require every touched voxel to be observed free.
++  /// Legacy MapInterface queries retain their configured historical tolerance.
++  VoxelStatus getStrictBoxStatus(const Eigen::Vector3d& center,
++                                  const Eigen::Vector3d& size) const;
++  VoxelStatus getStrictPathStatus(const Eigen::Vector3d& start,
++                                   const Eigen::Vector3d& end,
++                                   const Eigen::Vector3d& box_size) const;
++
+   void getScanStatus(
+       const Eigen::Vector3d& pos,
+       const std::vector<Eigen::Vector3d>& multiray_endpoints, GainCounts& gain,
+@@ -128,6 +136,9 @@ class OctomapMap : public MapInterface {
+                Visitor visit) const;
+ 
+   VoxelStatus statusAt(const octomap::point3d& p) const;
++  VoxelStatus queryBox(const Eigen::Vector3d& center,
++                       const Eigen::Vector3d& size,
++                       double unknown_fraction) const;
+ 
+   std::unique_ptr<octomap::OcTree> tree_;
+   OctomapConfig config_;
+diff --git a/ros2/src/mgg_map_octomap/src/octomap_map.cpp b/ros2/src/mgg_map_octomap/src/octomap_map.cpp
+index 55daf23..e319116 100644
+--- a/ros2/src/mgg_map_octomap/src/octomap_map.cpp
++++ b/ros2/src/mgg_map_octomap/src/octomap_map.cpp
+@@ -113,32 +113,64 @@ VoxelStatus OctomapMap::getRayStatus(const Eigen::Vector3d& view_point,
+   return result;
+ }
+ 
++VoxelStatus OctomapMap::queryBox(const Eigen::Vector3d& center,
++                                  const Eigen::Vector3d& size,
++                                  double unknown_fraction) const {
++  // Bound a single map callback even for invalid/oversized robot geometry.
++  constexpr std::uint64_t kMaxBoxCells = 1u << 20;
++  if (!center.allFinite() || !size.allFinite() || (size.array() < 0).any()) {
++    return VoxelStatus::kUnknown;
++  }
++  const Eigen::Vector3d lower = center - size / 2.0;
++  const Eigen::Vector3d upper = center + size / 2.0;
++  const double extent = tree_->getResolution() * 32768.0;
++  if (!std::isfinite(extent) || extent <= 0.0 || !lower.allFinite() ||
++      !upper.allFinite() ||
++      (lower.array() < -extent).any() || (upper.array() >= extent).any()) {
++    return VoxelStatus::kUnknown;
++  }
++  octomap::OcTreeKey first, last;
++  if (!tree_->coordToKeyChecked(toOct(lower), first) ||
++      !tree_->coordToKeyChecked(toOct(upper), last)) {
++    return VoxelStatus::kUnknown;
++  }
++  std::uint64_t total = 1;
++  for (int axis = 0; axis < 3; ++axis) {
++    const std::uint64_t count = std::uint64_t(last[axis]) - first[axis] + 1;
++    if (count > kMaxBoxCells / total) return VoxelStatus::kUnknown;
++    total *= count;
++  }
++  std::uint64_t unknown = 0;
++  // Floating coordinate stepping can skip a positive-face key. Iterate every
++  // touched key exactly once, as augmentFreeBox does, including both faces.
++  for (std::uint32_t x = first[0]; x <= last[0]; ++x)
++    for (std::uint32_t y = first[1]; y <= last[1]; ++y)
++      for (std::uint32_t z = first[2]; z <= last[2]; ++z) {
++        const octomap::OcTreeKey key(static_cast<octomap::key_type>(x),
++                                    static_cast<octomap::key_type>(y),
++                                    static_cast<octomap::key_type>(z));
++        const VoxelStatus status = statusAt(tree_->keyToCoord(key));
++        if (status == VoxelStatus::kOccupied) return status;
++        if (status == VoxelStatus::kUnknown) {
++          if (unknown_fraction == 0.0) return status;
++          ++unknown;
++        }
++      }
++  return double(unknown) > unknown_fraction * double(total)
++             ? VoxelStatus::kUnknown : VoxelStatus::kFree;
++}
++
+ VoxelStatus OctomapMap::getBoxStatus(const Eigen::Vector3d& center,
+                                      const Eigen::Vector3d& size,
+                                      bool stop_at_unknown_voxel) const {
+-  const double r = tree_->getResolution();
+-  int total = 0;
+-  int unknown_count = 0;
+-  for (double dx = -size.x() / 2; dx <= size.x() / 2; dx += r)
+-    for (double dy = -size.y() / 2; dy <= size.y() / 2; dy += r)
+-      for (double dz = -size.z() / 2; dz <= size.z() / 2; dz += r) {
+-        ++total;
+-        const VoxelStatus s =
+-            statusAt(toOct(center + Eigen::Vector3d(dx, dy, dz)));
+-        if (s == VoxelStatus::kOccupied) return VoxelStatus::kOccupied;
+-        if (s == VoxelStatus::kUnknown) ++unknown_count;
+-
+-      }
+-  // If stop_at_unknown_voxel is requested, allow a small fraction of unknown
+-  // voxels (e.g. beam dispersion / ray gaps between elevation rings), but
+-  // reject if a significant portion (>25%) of the box is unmapped.
+-  if (stop_at_unknown_voxel && total > 0 &&
+-      double(unknown_count) / double(total) > 0.25) {
+-    return VoxelStatus::kUnknown;
+-  }
+-  return VoxelStatus::kFree;
++  // Preserve the existing exploration policy while fixing voxel enumeration.
++  return queryBox(center, size, stop_at_unknown_voxel ? 0.25 : 1.0);
+ }
+ 
++VoxelStatus OctomapMap::getStrictBoxStatus(const Eigen::Vector3d& center,
++                                           const Eigen::Vector3d& size) const {
++  return queryBox(center, size, 0.0);
++}
+ 
+ VoxelStatus OctomapMap::getPathStatus(const Eigen::Vector3d& start,
+                                       const Eigen::Vector3d& end,
+@@ -164,6 +196,51 @@ VoxelStatus OctomapMap::getPathStatus(const Eigen::Vector3d& start,
+   return saw_unknown ? VoxelStatus::kUnknown : VoxelStatus::kFree;
+ }
+ 
++VoxelStatus OctomapMap::getStrictPathStatus(
++    const Eigen::Vector3d& start, const Eigen::Vector3d& end,
++    const Eigen::Vector3d& box_size) const {
++  if (!start.allFinite() || !end.allFinite() || !box_size.allFinite() ||
++      (box_size.array() < 0).any()) return VoxelStatus::kUnknown;
++  const double resolution = tree_->getResolution();
++  const double length = (end - start).norm();
++  if (!std::isfinite(resolution) || resolution <= 0.0 ||
++      !std::isfinite(length)) {
++    return VoxelStatus::kUnknown;
++  }
++  if (length < 1e-9) return getStrictBoxStatus(start, box_size);
++  // Conservative upper bound on total voxel visits in this non-preemptible
++  // callback. The grid's cooperative deadline is checked around it.
++  constexpr std::uint64_t kMaxSweepCells = 1u << 22;
++  const double steps_d = std::max(1.0, std::ceil(length / resolution));
++  if (!std::isfinite(steps_d) || steps_d > double(kMaxSweepCells)) {
++    return VoxelStatus::kUnknown;
++  }
++  const std::uint64_t steps = static_cast<std::uint64_t>(steps_d);
++  const Eigen::Vector3d step = (end - start) / double(steps);
++  // Each query is the axis-aligned envelope of the continuously swept body
++  // over one <=resolution segment. It is conservative on diagonals and also
++  // covers every crossed voxel when box_size is zero.
++  const Eigen::Vector3d swept_size = box_size + step.cwiseAbs();
++  std::uint64_t box_cells = 1;
++  for (int axis = 0; axis < 3; ++axis) {
++    const double count = std::ceil(swept_size[axis] / resolution) + 2.0;
++    if (!std::isfinite(count) || count > double(kMaxSweepCells / box_cells)) {
++      return VoxelStatus::kUnknown;
++    }
++    box_cells *= static_cast<std::uint64_t>(count);
++  }
++  if (steps > kMaxSweepCells / box_cells) {
++    return VoxelStatus::kUnknown;
++  }
++  for (std::uint64_t i = 0; i < steps; ++i) {
++    const double fraction = (double(i) + 0.5) / double(steps);
++    const VoxelStatus status =
++        getStrictBoxStatus(start + fraction * (end - start), swept_size);
++    if (status != VoxelStatus::kFree) return status;
++  }
++  return VoxelStatus::kFree;
++}
++
+ void OctomapMap::getScanStatus(
+     const Eigen::Vector3d& pos,
+     const std::vector<Eigen::Vector3d>& multiray_endpoints, GainCounts& gain,
+diff --git a/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp b/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
+index 8ab4617..a15020a 100644
+--- a/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
++++ b/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
+@@ -95,6 +95,67 @@ OctomapMap buildScene() {
+   return map;
+ }
+ 
++TEST(OctomapMap, BoxesIncludePositiveFaceOccupiedKeys) {
++  OctomapConfig cfg;
++  cfg.resolution = 0.05;
++  OctomapMap map(cfg);
++  map.augmentFreeBox({0.9, 0.0, 0.625}, {0.8, 0.8, 0.8});
++  octomap::OcTreeKey key;
++  ASSERT_TRUE(map.tree()->coordToKeyChecked(octomap::point3d(0.9f, 0.0f, 0.675f), key));
++  map.tree()->setNodeValue(key, map.tree()->getClampingThresMaxLog());
++  const Eigen::Vector3d center(0.9, 0.0, 0.625), body(0.2, 0.2, 0.15);
++  ASSERT_EQ(map.getVoxelStatus({0.9, 0.0, 0.675}), VoxelStatus::kOccupied);
++  EXPECT_EQ(map.getBoxStatus(center, body, true), VoxelStatus::kOccupied);
++  EXPECT_EQ(map.getStrictBoxStatus(center, body), VoxelStatus::kOccupied);
++  EXPECT_EQ(map.getStrictPathStatus({1.2, 0, 0.625}, {0.6, 0, 0.625}, body),
++            VoxelStatus::kOccupied);
++}
++
++TEST(OctomapMap, StrictPathEnvelopeIncludesDiagonalCrossedVoxel) {
++  OctomapConfig cfg;
++  cfg.resolution = 0.05;
++  OctomapMap map(cfg);
++  map.augmentFreeBox({0.05, 0.025, 0.0}, {0.15, 0.15, 0.10});
++  octomap::OcTreeKey key;
++  ASSERT_TRUE(map.tree()->coordToKeyChecked(
++      octomap::point3d(0.075F, 0.025F, 0.0F), key));
++  map.tree()->setNodeValue(key, map.tree()->getClampingThresMaxLog());
++  EXPECT_EQ(map.getStrictPathStatus({0.045, 0.01, 0.0}, {0.055, 0.055, 0.0},
++                                    Eigen::Vector3d::Zero()),
++            VoxelStatus::kOccupied);
++}
++
++TEST(OctomapMap, ExplicitQueriesRejectEvenOneUnknownKey) {
++  OctomapConfig cfg;
++  cfg.resolution = 0.05;
++  OctomapMap map(cfg);
++  map.augmentFreeBox({0.0, 0.0, 0.0}, {0.4, 0.4, 0.4});
++  octomap::OcTreeKey key;
++  ASSERT_TRUE(map.tree()->coordToKeyChecked(octomap::point3d(0.075f, 0.025f, 0.025f), key));
++  // Force this pruned free branch to maximum depth before deleting one leaf.
++  ASSERT_NE(map.tree()->updateNode(key, true), nullptr);
++  // deleteNode's bool indicates that the recursive caller may delete its
++  // child, not whether a leaf disappeared from a non-empty tree.
++  map.tree()->deleteNode(key, map.tree()->getTreeDepth());
++  ASSERT_EQ(map.tree()->search(key), nullptr);
++  const Eigen::Vector3d center = Eigen::Vector3d::Zero(), body(0.2, 0.2, 0.2);
++  EXPECT_EQ(map.getBoxStatus(center, body, true), VoxelStatus::kFree);
++  EXPECT_EQ(map.getStrictBoxStatus(center, body), VoxelStatus::kUnknown);
++  EXPECT_EQ(map.getStrictPathStatus(center, {0.1, 0.0, 0.0}, body),
++            VoxelStatus::kUnknown);
++}
++
++TEST(OctomapMap, ExplicitQueryBoundsRejectInvalidOrExcessiveWork) {
++  OctomapMap map;
++  EXPECT_EQ(map.getStrictBoxStatus({1e300, 0, 0}, {0.2, 0.2, 0.2}),
++            VoxelStatus::kUnknown);
++  EXPECT_EQ(map.getStrictBoxStatus({0, 0, 0}, {-1, 1, 1}), VoxelStatus::kUnknown);
++  EXPECT_EQ(map.getStrictBoxStatus({0, 0, 0}, {1000, 1000, 1000}),
++            VoxelStatus::kUnknown);
++  EXPECT_EQ(map.getStrictPathStatus({0, 0, 0}, {1e300, 0, 0}, {0.2, 0.2, 0.2}),
++            VoxelStatus::kUnknown);
++}
++
+ TEST(OctomapMap, ResolutionMatchesBaseline) {
+   OctomapMap map = buildScene();
+   EXPECT_DOUBLE_EQ(map.getResolution(), 0.2);  // baseline: resolution,...,0.2
+diff --git a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+index ffc1f4d..ddd599c 100644
+--- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
++++ b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+@@ -42,6 +42,7 @@
+ #include "mgg_core/graph_manager.h"
+ #include "mgg_core/graph_merge.h"
+ #include "mgg_core/grid_graph.h"
++#include "mgg_core/grid_refinement.h"
+ #include "mgg_core/path_selection.h"
+ #include "mgg_core/planning_stages.h"
+ #include "mgg_core/ground_projection.h"
+@@ -112,6 +113,7 @@ class PlannerNode : public rclcpp::Node {
+   mgg::RobotParams robot_params_;
+   mgg::PlanningParams planning_params_;
+   mgg::GridGraphParams grid_params_;
++  mgg::GridRefinementLimits grid_refinement_limits_;
+   mgg::BoundedSpaceParams global_space_;
+   std::vector<mgg::BoundedSpaceParams> no_gain_zones_;
+   std::unordered_map<std::string, mgg::SensorParams> sensors_;
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index 2ebd752..fdb7d8c 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -1,5 +1,6 @@
+ #include "mgg_ros/planner_node.h"
+ 
++#include <algorithm>
+ #include <chrono>
+ #include <cmath>
+ #include <cstdio>
+@@ -42,6 +43,24 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+   map_cfg.max_range = declareOrGet<double>(this, "map.max_range", 20.0);
+   map_ = std::make_unique<mgg::OctomapMap>(map_cfg);
+   ground_ = std::make_unique<mgg::GroundProjection>(*map_, planning_params_);
++  const double grid_resolution_floor = map_->getResolution();
++  grid_refinement_limits_.resolution_m = std::clamp(
++      declareOrGet<double>(this, "grid_refinement_resolution_m", 0.25),
++      grid_resolution_floor, std::max(2.0, grid_resolution_floor));
++  grid_refinement_limits_.detour_margin_m = std::clamp(
++      declareOrGet<double>(this, "grid_refinement_margin_m", 1.0), 0.0,
++      10.0);
++  grid_refinement_limits_.max_cells = static_cast<std::size_t>(std::clamp(
++      declareOrGet<std::int64_t>(this, "grid_refinement_max_cells", 4096),
++      std::int64_t{16}, std::int64_t{65536}));
++  grid_refinement_limits_.max_expansions =
++      static_cast<std::size_t>(std::clamp(
++          declareOrGet<std::int64_t>(this, "grid_refinement_max_expansions",
++                                     2048),
++          std::int64_t{1}, std::int64_t{65536}));
++  grid_refinement_limits_.timeout = std::chrono::milliseconds(std::clamp(
++      declareOrGet<std::int64_t>(this, "grid_refinement_timeout_ms", 50),
++      std::int64_t{1}, std::int64_t{5000}));
+   geofence_ = std::make_unique<mgg::GeofenceManager>();
+   local_graph_ = std::make_shared<mgg::GraphManager>();
+   global_graph_ = std::make_shared<mgg::GraphManager>();
+@@ -1124,70 +1143,93 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+     return result;
+   }
+ 
+-  const auto admissible = [this](const mgg::StateVec& a,
+-                                 const mgg::StateVec& b) {
+-    mgg::StateVec projected_a = a;
+-    mgg::StateVec projected_b = b;
+-    if (robot_params_.type == mgg::RobotType::kGroundRobot &&
+-        (!projectStateToDrivingHeight(projected_a) ||
+-         !projectStateToDrivingHeight(projected_b))) {
+-      return false;
+-    }
+-    const Eigen::Vector3d from = projected_a.head(3);
+-    const Eigen::Vector3d to = projected_b.head(3);
+-    if (from.isApprox(to)) return true;
+-    const Eigen::Vector3d body = robot_params_.getPlanningSize();
+-    if (robot_params_.type == mgg::RobotType::kAerialRobot) {
+-      return map_->getPathStatus(from, to, body, true) ==
+-             mgg::VoxelStatus::kFree;
+-    }
+-    std::vector<Eigen::Vector3d> projected;
+-    return ground_->getProjectedEdgeStatus(from, to, body, true, projected,
+-                                           false) ==
+-           mgg::ProjectedEdgeStatus::kAdmissible;
++  const Eigen::Vector3d body = robot_params_.getPlanningSize();
++  const Eigen::Vector3d center_offset = robot_params_.center_offset;
++  const auto geofenceContains = [this, &body](const Eigen::Vector3d& center) {
++    if (!planning_params_.geofence_checking_enable) return true;
++    if (!geofence_) return false;
++    return geofence_->getBoxStatus(center.head<2>(), body.head<2>()) !=
++           mgg::GeofenceManager::CoordinateStatus::kViolated;
+   };
+-  if (result.poses.empty() || !admissible(current_state_, result.poses.front())) {
+-    result.status = mgg::PlanningStatus::kBlocked;
+-    result.poses.clear();
+-    result.reason = "current pose cannot connect to the route corridor";
+-    return result;
+-  }
+-  for (std::size_t i = 1; i < result.poses.size(); ++i) {
+-    if (!admissible(result.poses[i - 1], result.poses[i])) {
+-      result.status = mgg::PlanningStatus::kBlocked;
+-      result.poses.clear();
+-      result.reason = "route corridor segment " + std::to_string(i - 1) +
+-                      "->" + std::to_string(i) +
+-                      " is blocked in the current map";
+-      return result;
+-    }
+-  }
+-
+-  // Explicit objectives retain the requested target separately from the
+-  // graph vertex. Connect it only after the same terrain/footprint check.
+-  if (!result.poses.empty()) {
+-    mgg::StateVec projected_goal = corridor.request.goal.pose;
+-    if (!projectStateToDrivingHeight(projected_goal)) {
+-      result.status = mgg::PlanningStatus::kBlocked;
+-      result.poses.clear();
+-      result.reason = "the exact goal has no mapped terrain support";
+-      return result;
+-    }
+-    // Internally keep the whole corridor in the terrain-projected graph
+-    // convention.  The response is converted back to navigation/base poses
+-    // below, avoiding an artificial vertical tail from graph height to the
+-    // caller's exact ground-robot goal.
+-    if (!result.poses.back().isApprox(projected_goal) &&
+-        !admissible(result.poses.back(), projected_goal)) {
+-      result.status = mgg::PlanningStatus::kBlocked;
+-      result.poses.clear();
+-      result.reason = "the exact goal cannot be connected to its graph corridor";
+-      return result;
++  const auto geofenceAllows = [this, &body](const Eigen::Vector3d& from,
++                                            const Eigen::Vector3d& to) {
++    if (!planning_params_.geofence_checking_enable) return true;
++    if (!geofence_) return false;
++    if ((from.head<2>() - to.head<2>()).norm() <= 1e-9) {
++      return geofence_->getBoxStatus(from.head<2>(), body.head<2>()) !=
++             mgg::GeofenceManager::CoordinateStatus::kViolated;
+     }
+-    if (!result.poses.back().isApprox(projected_goal)) {
+-      result.poses.push_back(projected_goal);
++    return geofence_->getPathStatus(
++               from.head<2>(), to.head<2>(), body.head<2>()) !=
++           mgg::GeofenceManager::CoordinateStatus::kViolated;
++  };
++  const auto project = [this, body, center_offset,
++                        &geofenceContains](mgg::StateVec& state) {
++    if (robot_params_.type == mgg::RobotType::kGroundRobot) {
++      if (!ground_ || !projectStateToDrivingHeight(state)) return false;
+     }
+-  }
++    const Eigen::Vector3d center = state.head<3>() + center_offset;
++    return map_->getStrictBoxStatus(center, body) == mgg::VoxelStatus::kFree &&
++           geofenceContains(center);
++  };
++  const auto traverse =
++      [this, body, center_offset,
++       &geofenceAllows](const mgg::StateVec& a, const mgg::StateVec& b,
++                        std::vector<mgg::StateVec>& checked) {
++        checked.clear();
++        const Eigen::Vector3d body_from = a.head<3>() + center_offset;
++        const Eigen::Vector3d body_to = b.head<3>() + center_offset;
++        if (!geofenceAllows(body_from, body_to)) return false;
++        if (robot_params_.type == mgg::RobotType::kAerialRobot) {
++          if (map_->getStrictPathStatus(body_from, body_to, body) !=
++              mgg::VoxelStatus::kFree) {
++            return false;
++          }
++          checked = {a, b};
++          return true;
++        }
++        if (!ground_) return false;
++        std::vector<Eigen::Vector3d> projected;
++        // GroundProjection owns the planner/driving-height convention.  The
++        // robot center offset is applied only to the additional collision
++        // sweep below; passing an offset pose to GroundProjection would shift
++        // the returned driving pose by -center_offset.z.
++        if (ground_->getProjectedEdgeStatus(a.head<3>(), b.head<3>(), body,
++                                            true, projected, false) !=
++                mgg::ProjectedEdgeStatus::kAdmissible ||
++            projected.size() < 2) {
++          return false;
++        }
++        checked.reserve(projected.size());
++        for (const Eigen::Vector3d& driving_pose : projected) {
++          mgg::StateVec pose = mgg::StateVec::Zero();
++          pose.head<3>() = driving_pose;
++          checked.push_back(pose);
++        }
++        if ((checked.front().head<3>() - a.head<3>()).cwiseAbs().maxCoeff() >
++                1e-6 ||
++            (checked.back().head<3>() - b.head<3>()).cwiseAbs().maxCoeff() >
++                1e-6) {
++          return false;
++        }
++        for (std::size_t i = 1; i < checked.size(); ++i) {
++          const Eigen::Vector3d checked_from =
++              checked[i - 1].head<3>() + center_offset;
++          const Eigen::Vector3d checked_to =
++              checked[i].head<3>() + center_offset;
++          if (!geofenceAllows(checked_from, checked_to) ||
++              map_->getStrictPathStatus(checked_from, checked_to, body) !=
++                  mgg::VoxelStatus::kFree) {
++            return false;
++          }
++        }
++        return true;
++      };
++  mgg::BoundedGridPlanner grid_planner(current_state_,
++                                       grid_refinement_limits_, project,
++                                       traverse);
++  result = grid_planner.refine(corridor);
++  if (result.status != mgg::PlanningStatus::kSucceeded) return result;
+   convertPathToNavigationBase(result);
+   queryIndexedMap(result);
+   return result;
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index 1b89626..22a1714 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -1,5 +1,6 @@
+ #include <chrono>
+ #include <atomic>
++#include <cmath>
+ #include <memory>
+ #include <sstream>
+ #include <thread>
+@@ -139,6 +140,71 @@ class PlannerNodeTestPeer {
+     ++node.map_revision_;
+   }
+ 
++  static void configureGridServiceScene(PlannerNode& node,
++                                        double body_offset_z = 0.0,
++                                        double margin = 1.0) {
++    configureBackboneTest(node);
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.robot_params_.center_offset = Eigen::Vector3d(0, 0, body_offset_z);
++    node.grid_refinement_limits_.detour_margin_m = margin;
++    // Functional service fixture, not a CPU latency benchmark. Core tests
++    // exercise deadline expiry independently of DDS scheduling on the host.
++    node.grid_refinement_limits_.timeout = std::chrono::milliseconds(1000);
++    std::vector<Eigen::Vector3d> floor;
++    for (int x = -8; x <= 32; ++x) {
++      for (int y = -24; y <= 24; ++y) {
++        floor.emplace_back(x * 0.05 + 0.025, y * 0.05 + 0.025, 0.025);
++      }
++    }
++    for (int repeat = 0; repeat < 6; ++repeat) {
++      node.map_->insertPointCloud(floor, Eigen::Vector3d(0.6, 0.0, 1.5));
++    }
++    // The known body volume is separate from the occupied supporting floor.
++    node.map_->augmentFreeBox({0.6, 0.0, 0.5}, {3.2, 3.0, 0.8});
++    ++node.map_revision_;
++  }
++
++  static void addGridObstacle(PlannerNode& node, double z, bool wall) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    for (int repeat = 0; repeat < 20; ++repeat) {
++      const int bound = wall ? 26 : 0;
++      for (int y = -bound; y <= bound; ++y) {
++        node.map_->tree()->updateNode(
++            octomap::point3d(0.9F, static_cast<float>(y * 0.05),
++                             static_cast<float>(z)),
++            true);
++      }
++    }
++    ++node.map_revision_;
++  }
++
++  static bool makeGridVoxelUnknown(PlannerNode& node, double x, double y,
++                                   double z) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    octomap::OcTreeKey key;
++    if (!node.map_->tree()->coordToKeyChecked(
++            octomap::point3d(static_cast<float>(x), static_cast<float>(y),
++                             static_cast<float>(z)),
++            key)) {
++      return false;
++    }
++    if (!node.map_->tree()->updateNode(key, true)) return false;
++    node.map_->tree()->deleteNode(key, node.map_->tree()->getTreeDepth());
++    const bool removed = node.map_->tree()->search(key) == nullptr;
++    if (removed) ++node.map_revision_;
++    return removed;
++  }
++
++  static void setGridGeofence(PlannerNode& node, double xmin, double xmax,
++                              double ymin, double ymax) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.planning_params_.geofence_checking_enable = true;
++    node.geofence_->clear();
++    mgg::Polygon2d polygon(std::vector<Eigen::Vector2d>{
++        {xmin, ymin}, {xmin, ymax}, {xmax, ymax}, {xmax, ymin}, {xmin, ymin}});
++    node.geofence_->addGeofenceArea(polygon);
++  }
++
+   static std::uint64_t localGraphRevision(const PlannerNode& node) {
+     return node.local_graph_revision_;
+   }
+@@ -496,7 +562,131 @@ TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
+   ASSERT_NE(response, nullptr);
+   EXPECT_EQ(response->status, Service::Response::BLOCKED);
+   EXPECT_TRUE(response->path.empty());
+-  EXPECT_NE(response->reason.find("blocked"), std::string::npos);
++}
++
++TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configureGridServiceScene(*planner);
++  for (const double x : {0.0, 0.6, 1.2}) {
++    Peer::acceptOdometry(*planner, x, 0.0, 0.075);
++  }
++  ASSERT_GE(Peer::globalVertices(*planner), 3);
++  auto home = std::make_shared<Service::Request>();
++  home->objective = Service::Request::RETURN_HOME;
++  home->goal.position.z = 0.075;
++  const double yaw = 0.7;
++  home->goal.orientation.z = std::sin(yaw / 2);
++  home->goal.orientation.w = std::cos(yaw / 2);
++  home->graph_revision = Peer::globalGraphRevision(*planner);
++  auto response = call(home);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED) << response->reason;
++
++  // Block the edge between graph vertices, leaving both endpoints clear.
++  Peer::addGridObstacle(*planner, 0.325, false);
++  response = call(home);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED) << response->reason;
++  ASSERT_GT(response->path.size(), 3u);
++  bool detoured = false;
++  for (const auto& pose : response->path) {
++    detoured = detoured || std::abs(pose.position.y) > 0.15;
++    EXPECT_NEAR(pose.position.z, 0.1, 1e-6);
++  }
++  EXPECT_TRUE(detoured);
++  EXPECT_NEAR(response->path.front().position.x, 1.2, 1e-6);
++  EXPECT_NEAR(response->path.back().position.x, 0.0, 1e-6);
++  EXPECT_NEAR(response->path.back().orientation.z, std::sin(yaw / 2), 1e-6);
++  EXPECT_NEAR(response->path.back().orientation.w, std::cos(yaw / 2), 1e-6);
++
++  // The wall spans the observed floor and detour window; unknown space beyond
++  // it must not be invented as a route around the ends.
++  Peer::addGridObstacle(*planner, 0.325, true);
++  response = call(home);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
++  EXPECT_TRUE(response->path.empty());
++}
++
++TEST_F(ObjectiveService, GridBodyOffsetPreservesHeightAndChecksRaisedObstacle) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configureGridServiceScene(*planner, 0.30, 0.0);
++  for (const double x : {0.0, 0.6, 1.2}) {
++    Peer::acceptOdometry(*planner, x, 0.0, 0.075);
++  }
++  auto home = std::make_shared<Service::Request>();
++  home->objective = Service::Request::RETURN_HOME;
++  home->goal.position.z = 0.075;
++  home->goal.orientation.w = 1.0;
++  home->graph_revision = Peer::globalGraphRevision(*planner);
++  auto response = call(home);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED) << response->reason;
++  ASSERT_GT(response->path.size(), 3u);
++  for (const auto& pose : response->path) EXPECT_NEAR(pose.position.z, 0.1, 1e-6);
++
++  // Above the unoffset box and its ground probes, but inside the real box
++  // centered 30cm higher. The zero-margin search cannot sidestep this obstacle.
++  Peer::addGridObstacle(*planner, 0.675, false);
++  response = call(home);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
++  EXPECT_TRUE(response->path.empty());
++}
++
++TEST_F(ObjectiveService, GridRejectsSingleUnknownBodyVoxelWithZeroOffset) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configureGridServiceScene(*planner, 0.0, 0.0);
++  for (const double x : {0.0, 0.6, 1.2}) {
++    Peer::acceptOdometry(*planner, x, 0.0, 0.075);
++  }
++  auto home = std::make_shared<Service::Request>();
++  home->objective = Service::Request::RETURN_HOME;
++  home->goal.position.z = 0.075;
++  home->goal.orientation.w = 1.0;
++  home->graph_revision = Peer::globalGraphRevision(*planner);
++  auto response = call(home);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED) << response->reason;
++
++  // This is one body-volume key between graph vertices. The legacy 25%
++  // tolerance accepts it; explicit refinement must treat any unknown as
++  // blocked even when center_offset is zero.
++  ASSERT_TRUE(Peer::makeGridVoxelUnknown(*planner, 0.9, 0.025, 0.325));
++  response = call(home);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
++  EXPECT_TRUE(response->path.empty());
++}
++
++TEST_F(ObjectiveService, GridGeofenceRejectsStationaryAndCrossingRoutes) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configureGridServiceScene(*planner);
++  for (const double x : {0.0, 0.6, 1.2}) {
++    Peer::acceptOdometry(*planner, x, 0.0, 0.075);
++  }
++  auto goal = std::make_shared<Service::Request>();
++  goal->objective = Service::Request::RETURN_HOME;
++  goal->goal.position.x = 1.2;
++  goal->goal.position.z = 0.075;
++  goal->goal.orientation.w = 1.0;
++  goal->graph_revision = Peer::globalGraphRevision(*planner);
++  auto response = call(goal);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED) << response->reason;
++
++  Peer::setGridGeofence(*planner, 1.1, 1.3, -0.15, 0.15);
++  response = call(goal);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
++  EXPECT_TRUE(response->path.empty());
++
++  Peer::setGridGeofence(*planner, 0.85, 0.95, -1.3, 1.3);
++  goal->goal.position.x = 0.0;
++  response = call(goal);
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
++  EXPECT_TRUE(response->path.empty());
+ }
+ 
+ TEST_F(ObjectiveService, AuthorityBindingDoesNotRequireIndexedQuery) {
