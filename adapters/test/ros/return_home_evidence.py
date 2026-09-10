@@ -160,6 +160,38 @@ def _material_authority_change(
     )
 
 
+def _same_home_identity(original: dict[str, Any], updated: dict[str, Any]) -> bool:
+    """Allow corrections within one Home mission, never a replacement landmark."""
+    if any(
+        original.get(field) != updated.get(field)
+        for field in (
+            "robot_id",
+            "mission_id",
+            "component_id",
+            "map_epoch",
+            "navigation_frame",
+        )
+    ):
+        return False
+    original_home = original.get("home")
+    home = updated.get("home")
+    if (
+        not isinstance(original_home, dict)
+        or not isinstance(home, dict)
+        or home.get("keyframe_id") != original_home.get("keyframe_id")
+    ):
+        return False
+    revision = updated.get("correction_revision")
+    original_revision = original.get("correction_revision")
+    return (
+        type(revision) is int
+        and type(original_revision) is int
+        and revision >= original_revision >= 0
+        and _matrix4(updated.get("T_component_navigation"))
+        and _matrix4(home.get("T_navigation_home"))
+    )
+
+
 def _pose(sample: dict[str, Any]) -> tuple[float, float, float] | None:
     position = sample.get("position")
     orientation = sample.get("orientation_xyzw")
@@ -200,6 +232,7 @@ def analyze(
     max_gap_s: float = 1.0,
     min_settled_s: float = 1.0,
     post_stop_grace_s: float = 1.0,
+    allow_authority_replanning: bool = False,
 ) -> dict[str, Any]:
     """Return ``passed`` only for one fully bound, continuously observed trial"""
 
@@ -228,6 +261,7 @@ def analyze(
         "max_gap_s": max_gap_s,
         "minimum_settled_duration_s": min_settled_s,
         "post_stop_grace_s": post_stop_grace_s,
+        "allow_authority_replanning": allow_authority_replanning,
     }
 
     if observer.get("schema_version") != 1:
@@ -674,15 +708,29 @@ def analyze(
         )
 
     if authority is not None and authority_match and coverage:
-        changed = [
+        trial_authorities = [
             state
             for when, state in parsed_authority
             if authority_match[0] < when <= coverage["wall"]
-            and _material_authority_change(authority, state)
+        ]
+        changed = [
+            state
+            for state in trial_authorities
+            if _material_authority_change(authority, state)
         ]
         checks["authority_changes_during_trial"] = len(changed)
-        if changed:
+        if changed and not allow_authority_replanning:
             failed.append("map authority changed during the accepted trial window")
+        if allow_authority_replanning:
+            if not all(
+                _same_home_identity(authority, state) for state in trial_authorities
+            ):
+                failed.append(
+                    "authority replanning changed Home identity or lost valid transforms"
+                )
+            checks["replanning_transition_audit"] = (
+                "not established by these samples; validate cancellation and retry lifecycle separately"
+            )
     if recorder_end and coverage and recorder_end < coverage["wall"]:
         failed.append("recorder end precedes selected post-stop truth")
 
@@ -701,6 +749,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-gap-s", type=float, default=1.0)
     parser.add_argument("--min-settled-s", type=float, default=1.0)
     parser.add_argument("--post-stop-grace-s", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-authority-replanning",
+        action="store_true",
+        help="accept physical arrival across corrections to the same Home identity; does not audit every retry",
+    )
     args = parser.parse_args(argv)
     try:
         observer = json.loads(args.observer_report.read_text())
@@ -714,6 +767,7 @@ def main(argv: list[str] | None = None) -> int:
             max_gap_s=args.max_gap_s,
             min_settled_s=args.min_settled_s,
             post_stop_grace_s=args.post_stop_grace_s,
+            allow_authority_replanning=args.allow_authority_replanning,
         )
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         result = _result(

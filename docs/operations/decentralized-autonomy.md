@@ -675,6 +675,12 @@ and advancing world-frame truth through arrival and the post-stop settling
 window. Missing evidence is inconclusive; a server success flag alone cannot
 pass. Exit codes are 0 for passed, 1 for failed, and 2 for inconclusive. Keep the
 recorder running for at least one second beyond the observer's post-stop sample.
+For a trial that deliberately exercises authority-change recovery, append
+`--allow-authority-replanning`. This keeps the physical arrival and settling
+requirements, rejects mission/component/frame/epoch/home-identity changes, and
+reports transform corrections instead of rejecting them. It does not prove
+every intermediate cancellation and retry; validate that lifecycle separately.
+The default remains the stricter unchanged-authority trial.
 
 Additional local validation covers replica retention under concurrent publication,
 indexed terrain support on stacked floors, authority reordering/freshness, and

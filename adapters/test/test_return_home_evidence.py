@@ -1,6 +1,8 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from adapters.test.ros.return_home_evidence import AUTHORITY_FIELDS, analyze
 
 BASE = datetime(2026, 9, 10, 10, 0, tzinfo=timezone.utc)
@@ -313,6 +315,56 @@ def test_geometry_revision_and_small_transform_heartbeat_are_allowed():
     result = analyze(_observer(), evidence, ROBOT)
     assert result["status"] == "passed", result["reasons"]
     assert result["checks"]["authority_changes_during_trial"] == 0
+
+
+def _corrected_evidence():
+    evidence = _evidence()
+    changed = deepcopy(evidence["robots"][ROBOT]["authority_events"][0])
+    changed["received_elapsed_s"] = 70.0
+    changed["state"]["correction_revision"] += 1
+    changed["state"]["T_component_navigation"] = _matrix(0.1)
+    changed["state"]["home"]["T_navigation_home"] = _matrix(-0.1)
+    evidence["robots"][ROBOT]["authority_events"].append(changed)
+    return evidence, changed["state"]
+
+
+def test_recovery_mode_accepts_physical_arrival_to_same_home():
+    evidence, _ = _corrected_evidence()
+    assert analyze(_observer(), evidence, ROBOT)["status"] == "failed"
+    result = analyze(_observer(), evidence, ROBOT, allow_authority_replanning=True)
+    assert result["status"] == "passed", result["reasons"]
+    assert result["checks"]["authority_changes_during_trial"] == 1
+    assert "not established" in result["checks"]["replanning_transition_audit"]
+
+
+@pytest.mark.parametrize(
+    "field", ["mission_id", "component_id", "navigation_frame", "map_epoch"]
+)
+def test_recovery_mode_rejects_replaced_identity(field):
+    evidence, changed = _corrected_evidence()
+    changed[field] = 99 if field == "map_epoch" else "replacement"
+    result = analyze(_observer(), evidence, ROBOT, allow_authority_replanning=True)
+    assert result["status"] == "failed"
+    assert any("Home identity" in reason for reason in result["reasons"])
+
+
+def test_recovery_mode_still_requires_physical_arrival():
+    evidence, _ = _corrected_evidence()
+    for sample in evidence["robots"][ROBOT]["truth_samples"]:
+        if sample["received_elapsed_s"] >= 70:
+            sample["position"]["x"] = 2.0
+    result = analyze(_observer(), evidence, ROBOT, allow_authority_replanning=True)
+    assert result["status"] == "failed"
+    assert any("outside the home tolerance" in reason for reason in result["reasons"])
+
+
+@pytest.mark.parametrize("home", [None, {"keyframe_id": "another-home"}])
+def test_recovery_mode_rejects_missing_or_replaced_home(home):
+    evidence, changed = _corrected_evidence()
+    changed["home"] = home
+    result = analyze(_observer(), evidence, ROBOT, allow_authority_replanning=True)
+    assert result["status"] == "failed"
+    assert any("Home identity" in reason for reason in result["reasons"])
 
 
 def test_reactivation_after_success_fails():
