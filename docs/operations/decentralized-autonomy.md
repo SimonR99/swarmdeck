@@ -231,6 +231,29 @@ onboard correction; the server does not substitute its cached home coordinates.
 Nav2 FollowPath receives the complete MGG path. Removing the onboard overlay
 and restarting the adapter restores the legacy central map path.
 
+MGG retains a bounded sequence of travelled poses while initial terrain support
+or a connecting edge is unavailable. It admits samples in travel order after
+map updates, preserving observed corners between regularly spaced samples.
+Interpolated samples still require mapped support and collision checks. A
+blocked sample holds back later samples; unchanged map revisions do not repeat
+that failed query. Nearby owned vertices can be reused only after checking the
+travelled transition and the connection to the existing vertex.
+
+| ROS parameter | Default | Bound |
+| --- | --- | --- |
+| `global_vertex_spacing` | 1 m | 0.01–100 m |
+| `global_backbone_pending_max_samples` | 128 | 8–4096 samples |
+| `global_backbone_pending_max_length_m` | 128 m | Vertex spacing through 10000 m |
+| `global_backbone_drain_max_samples` | 32 | 1–512 admissions per callback |
+
+The pending limits bound retained history, not the complete mission graph.
+Exceeding a history limit or receiving an unrepresentable displacement latches
+a diagnostic and blocks Return Home until the planner restarts under a fresh
+mission. Navigate can still use its local graph. These checks preserve evidence
+requirements; they do not infer free terrain from the robot having travelled
+through an area. The drain count bounds work between callbacks, without
+preempting an individual terrain query.
+
 Explicit Navigate and Return Home routes use `mgg_core::BoundedGridPlanner`
 through the transport-free `GridPlanner` interface. Direct terrain-checked
 segments remain the fast path. A blocked segment triggers deterministic local
@@ -520,7 +543,7 @@ internal driving-height convention and are converted to robot base poses only
 at response/publication boundaries. Explore retains the local graph's existing
 startup policy for a root whose ground has not yet been observed; explicit
 destinations still require mapped support. The updated patch was subsequently
-retested in Bistro as recorded below. Local native Jazzy validation passes 59 GoogleTest cases,
+retested in Bistro as recorded below. That native Jazzy validation passed 59 GoogleTest cases,
 including actual legacy Explore → revision-pinned Explore calls with identical
 base-height paths. Home service
 fixtures exercise an observed detour, blocked walls and geofences, correct
@@ -561,6 +584,16 @@ graph growth stalled at six vertices for `robot_0` and one for `robot_3` despite
 local exploration movement. Native fixture success therefore does not close the
 Bistro acceptance gate. Preserve mapped-support and collision checks while
 investigating persistent connectivity and sensor coverage.
+
+The trajectory-history follow-up preserves poses recorded while terrain
+admission is delayed, then checks them chronologically. Native Jazzy validation
+passed 169 GoogleTest cases across 19 binaries, including 17 objective-service
+cases. The delayed-support fixture retains an off-grid corner beyond the old
+parent search radius; repeated travel reuses vertices, and lost history blocks
+Home. The complete bent-path fixture took 78 ms including map construction,
+which is not a per-callback latency benchmark. All nine deployment patches
+replay from the pinned MGG revision and reproduce the tested source. These
+results still require a fresh Bistro arrival test.
 
 Staged launch also exposed the ARGoS experiment freshness rule: starting ARGoS
 after the bridge has already generated `session.argos` makes its timestamp check
