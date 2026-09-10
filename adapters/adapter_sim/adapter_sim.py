@@ -92,6 +92,7 @@ from sim_reset import (
     reset_module_state,
     reset_world,
 )
+from slam_startup import SlamToolboxStartup, uses_slam_toolbox
 
 # The platform table, imported from the spawner rather than restated here.
 #
@@ -266,6 +267,12 @@ NAV_READY_GRACE_S = 30.0
 # A re-bringup that did not take is nearly always a node still starting, so
 # leave real time between attempts rather than hammering the service.
 NAV_RECOVER_INTERVAL_S = 30.0
+
+# A direct, one-shot repair for SLAM Toolbox's own lifecycle manager timing out
+# during the crowded fleet startup. This is separate from Nav2 recovery below:
+# Nav2 cannot become useful until its map producer is active.
+SLAM_STARTUP_DEADLINE_S = 30.0
+SLAM_STARTUP_SERVICE_TIMEOUT_S = 2.0
 
 WORLD_SETTLE_S = 0.5
 SERVICE_TIMEOUT_S = 8.0
@@ -443,6 +450,20 @@ class RobotBridge(
         # first, and one that starts during the reset is skipped.
         self._upload_lock = threading.Lock()
         self._service_clients: dict = {}
+        self._slam_startup = None
+        if uses_slam_toolbox(os.environ.get("SLAM_BACKEND")):
+            # Both simulation entrypoints start adapter_sim only after their
+            # 60 s ADAPTER_DELAY lifecycle grace. Query immediately here: an
+            # inactive node at this point is the abandoned startup we repair.
+            self._slam_startup = SlamToolboxStartup(
+                self._slam_toolbox_state,
+                self._change_slam_toolbox_state,
+                lambda detail: self.node.get_logger().error(
+                    f"[{self.id}] SLAM Toolbox startup recovery exhausted: {detail}; "
+                    "map and navigation readiness remain unavailable"
+                ),
+                deadline_s=SLAM_STARTUP_DEADLINE_S,
+            )
         self._reset_report: dict | None = None
         self._start_pose: dict | None = None
 
@@ -1603,6 +1624,72 @@ class RobotBridge(
             return False
         return True
 
+    def _slam_service_response(self, name: str, srv_type, request, not_after: float):
+        """Call one lifecycle service within a shared startup deadline.
+
+        This intentionally does not log per-attempt failures. The bounded
+        recovery reports one final readiness diagnostic with its last reason.
+        """
+        remaining = not_after - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError("startup deadline expired")
+
+        client = self._service_clients.get(name)
+        if client is None:
+            client = self.node.create_client(srv_type, name)
+            self._service_clients[name] = client
+        wait_s = min(SLAM_STARTUP_SERVICE_TIMEOUT_S, remaining)
+        if not client.wait_for_service(timeout_sec=wait_s):
+            raise TimeoutError(f"service unavailable: {name}")
+
+        if time.monotonic() >= not_after:
+            raise TimeoutError("startup deadline expired")
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            raise RuntimeError(f"service submission failed: {name}: {exc}") from exc
+        while not future.done():
+            remaining = not_after - time.monotonic()
+            if remaining <= 0.0:
+                future.cancel()
+                raise TimeoutError(f"service timed out: {name}")
+            time.sleep(min(0.02, remaining))
+        if time.monotonic() >= not_after:
+            raise TimeoutError(f"service response exceeded deadline: {name}")
+        error = future.exception()
+        if error is not None:
+            raise RuntimeError(f"service failed: {name}: {error}")
+        response = future.result()
+        if response is None:
+            raise RuntimeError(f"service returned no response: {name}")
+        return response
+
+    def _slam_toolbox_state(self, not_after: float) -> int:
+        get_state = _srv_type("lifecycle_msgs.srv", "GetState")
+        if get_state is None:
+            raise RuntimeError("lifecycle_msgs.srv.GetState is not installed")
+        response = self._slam_service_response(
+            f"/{self.id}/slam_toolbox/get_state",
+            get_state,
+            get_state.Request(),
+            not_after,
+        )
+        return int(response.current_state.id)
+
+    def _change_slam_toolbox_state(self, transition: int, not_after: float) -> bool:
+        change_state = _srv_type("lifecycle_msgs.srv", "ChangeState")
+        if change_state is None:
+            raise RuntimeError("lifecycle_msgs.srv.ChangeState is not installed")
+        request = change_state.Request()
+        request.transition.id = int(transition)
+        response = self._slam_service_response(
+            f"/{self.id}/slam_toolbox/change_state",
+            change_state,
+            request,
+            not_after,
+        )
+        return bool(response.success)
+
     def _configured_start_pose(self) -> dict | None:
         """Where this robot was spawned, according to the backend's config.
 
@@ -1824,6 +1911,14 @@ class RobotBridge(
         return self.take_reset_report()
 
     async def session_maps_tick(self, now: float, send, loop) -> None:
+        startup = self._slam_startup
+        if startup is not None:
+            # Claim the one startup episode before yielding. Reconnects and
+            # later map ticks must not keep scheduling executor no-ops.
+            self._slam_startup = None
+            # The state pump and ROS executor are separate threads. Only this
+            # map coroutine waits for the bounded recovery worker.
+            await loop.run_in_executor(None, startup.run_once)
         graph = SLAM_GRAPHS.get(self.id)
         last_graph = getattr(self, "_session_last_graph", 0.0)
         if graph is not None and now - last_graph > 3.0:

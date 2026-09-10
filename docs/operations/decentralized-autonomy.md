@@ -691,6 +691,32 @@ fresh-start gate. All robots were stopped after the bounded motion checks.
 The trial establishes one complete Home return while keeping terrain coverage,
 persistent graph connectivity, and reliable fleet startup as open gates.
 
+Simulation startup now includes one bounded SLAM Toolbox recovery episode per
+robot, after the entrypoint's existing adapter launch delay (60 seconds by
+default). It observes active nodes without changing them, activates inactive
+nodes, and configures unconfigured nodes before querying again. Unknown or
+transitional states are retried without a reset. State queries have a two-second
+limit, transitions a ten-second limit, and the whole episode a thirty-second
+deadline. Recovery runs outside the state pump and ROS callbacks; later map
+ticks do not schedule more recovery work. RTABMap does not use this helper.
+
+The isolated native ROS fixture exercised configure/activate, inactive-only
+activation, and active-state observation through the adapter's real service
+client methods on domain 222, with no velocity publishers. Run
+`python3 adapters/test/ros/slam_startup_smoke.py` inside the simulation image
+with a separate ROS domain and Docker bridge network to repeat it. This verifies
+the recovery mechanism; a new four-robot launch is still required to pass the
+fleet startup gate.
+
+A subsequent five-second read-only probe confirmed that R1's limited coverage
+was not caused by missing depth or LiDAR input. It received 18 valid 320×240
+depth images, eight depth-derived mapping clouds containing 38,400 finite
+points, and five LiDAR clouds containing 152,875 finite points. Its base-to-camera
+transform matched R0's. These measurements confirm sensor delivery, but do not
+establish that MGG's terrain rejection is correct: ground support and graph
+admission still need investigation. Known-free body volume alone does not prove
+that a candidate has traversable ground beneath it.
+
 Staged launch also exposed the ARGoS experiment freshness rule: starting ARGoS
 after the bridge has already generated `session.argos` makes its timestamp check
 wait for another generation. For this trial, the generated file was verified to

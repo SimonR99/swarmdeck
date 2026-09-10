@@ -397,12 +397,11 @@ def generate_launch_description() -> LaunchDescription:
                         "autostart": True,
                         "node_names": ["slam_toolbox"],
                         "bond_timeout": 0.0,
-                        # Four staggered SLAM instances can briefly saturate a
-                        # CPU while Ceres allocates its first graph. Nav2's 5 s
-                        # default abandoned robot_2 after configure completed,
-                        # leaving a healthy node inactive forever. This is a
-                        # startup transaction timeout, not a navigation delay.
-                        "service_timeout": 30.0,
+                        # Jazzy's manager does not declare a service-timeout
+                        # parameter; its GetState confirmation uses the
+                        # compiled client timeout. adapter_sim performs one
+                        # bounded direct repair after the launch grace if that
+                        # confirmation leaves Toolbox inactive.
                     }
                 ],
                 output="screen",
