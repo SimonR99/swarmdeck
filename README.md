@@ -47,6 +47,8 @@ native MOLA map consumer, full-path MGG execution through Nav2, and resumable
 server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
 [integration and simulation guide](docs/operations/decentralized-autonomy.md)
 for build commands, component inspection, validation status, and rollout limits.
+This remains an opt-in development path; multi-host fault recovery, fresh Bistro
+return-home execution, and native GPU reconstruction still have acceptance work.
 
 ## Quick start
 
@@ -129,6 +131,14 @@ sorting run in workers; representations and color buffers are reused. Rendering
 and map requests pause when the view is hidden. These are workload limits,
 not guaranteed frame rates. Balanced and High detail profiles raise the limits.
 
+For onboard maps, open **Onboard map replicas**, select a robot/session/component,
+and choose **Open component in tactical map**. The viewer assembles stored submaps
+using their verified component poses and reuses cached geometry across pose
+updates. Camera and ceiling settings persist while that component refreshes.
+This view is read-only: world-frame robot overlays and Gaussian models remain
+hidden until their alignment with the selected component is established.
+**Live map** returns to the normal fleet view.
+
 ### Camera colors and Gaussian reconstruction
 
 **Camera** becomes available when the cloud contains RGB. Simulator keyframes
@@ -148,7 +158,12 @@ export a COLMAP dataset, train externally, and publish a compact `.swgs` model.
 The optional UMAMI-SLAM integration requires access to the private repository
 via `git@github.com:lemonci/UMAMI-SLAM.git` and its CUDA build environment.
 UMAMI is not bundled and is not required for the dashboard or other map modes.
-The initial Gaussian integration supports global, world-aligned models.
+The dashboard's Gaussian view consumes world-aligned models. The publication API
+also supports explicitly selected component artifacts; raw `odom` captures cannot
+be displayed as global maps. Durable jobs bind each artifact to its capture,
+calibration, and corrected pose revisions. See the
+[reconstruction job guide](docs/operations/reconstruction-jobs.md) for frame
+requirements, stale-result rejection, and the pending native CUDA validation.
 
 Follow the [3D mapping and reconstruction guide](docs/operations/tactical-3d-map.md)
 for controls, quality budgets, calibration, capture, and publishing commands.
