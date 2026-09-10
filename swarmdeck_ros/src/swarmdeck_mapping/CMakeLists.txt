@@ -11,7 +11,11 @@ find_package(mrpt-serialization REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(OpenSSL REQUIRED)
 
-add_library(${PROJECT_NAME} SHARED src/chunk_io.cpp src/mola_submap_bridge.cpp)
+add_library(${PROJECT_NAME} SHARED
+  src/chunk_io.cpp
+  src/mola_submap_bridge.cpp
+  src/persistent_mola_runtime.cpp
+  src/snapshot_io.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
 target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(${PROJECT_NAME}
@@ -26,6 +30,7 @@ target_link_libraries(${PROJECT_NAME}
     mrpt::obs
     mrpt::io
     mrpt::serialization
+    nlohmann_json::nlohmann_json
     OpenSSL::Crypto)
 
 add_executable(swarmdeck-mola-import src/mola_snapshot_import.cpp)
@@ -44,7 +49,9 @@ install(TARGETS ${PROJECT_NAME} swarmdeck-mola-import
 install(DIRECTORY include/ DESTINATION include)
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
-ament_export_dependencies(mola_kernel mola_metric_maps mrpt-maps mrpt-obs mrpt-io mrpt-serialization OpenSSL)
+ament_export_dependencies(
+  mola_kernel mola_metric_maps mrpt-maps mrpt-obs mrpt-io mrpt-serialization
+  nlohmann_json OpenSSL)
 
 if(BUILD_TESTING)
   enable_testing()
@@ -56,5 +63,10 @@ if(BUILD_TESTING)
   target_compile_features(test_chunk_io PRIVATE cxx_std_17)
   target_link_libraries(test_chunk_io PRIVATE ${PROJECT_NAME})
   add_test(NAME mola_chunk_io_guards COMMAND test_chunk_io)
+  add_executable(test_persistent_mola_runtime test/test_persistent_mola_runtime.cpp)
+  target_compile_features(test_persistent_mola_runtime PRIVATE cxx_std_17)
+  target_link_libraries(test_persistent_mola_runtime PRIVATE ${PROJECT_NAME} nlohmann_json::nlohmann_json)
+  add_test(NAME persistent_mola_runtime_guards COMMAND test_persistent_mola_runtime)
+  set_tests_properties(persistent_mola_runtime_guards PROPERTIES TIMEOUT 30)
 endif()
 ament_package()

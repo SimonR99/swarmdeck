@@ -1,4 +1,4 @@
-# Native MOLA map bridge build and contract smoke test.
+# Native MOLA map bridge and persistent runtime build/smoke test.
 #
 # Build from the repository root:
 #   docker build -f deploy/docker/Dockerfile.mapping -t swarmdeck-mapping:local .
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       "ros-jazzy-mola=${MOLA_VERSION}-*" \
       "ros-jazzy-mola-kernel=${MOLA_VERSION}-*" \
       "ros-jazzy-mola-metric-maps=${MOLA_VERSION}-*" \
+      "ros-jazzy-mola-launcher=${MOLA_VERSION}-*" \
     && rm -rf /var/lib/apt/lists/*
 
 # Build only MGG's small generated wire-contract package. The mapping runtime
@@ -34,20 +35,29 @@ RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
 FROM mapping-contracts AS mapping-runtime
 
 ENV LD_LIBRARY_PATH=/mapping_ws/install/swarmdeck_mapping/lib
+ENV MOLA_MODULES_LIB_PATH=/mapping_ws/install/swarmdeck_mola/lib
 
 WORKDIR /mapping_ws
 COPY swarmdeck_ros/src/swarmdeck_mapping src/swarmdeck_mapping
+COPY swarmdeck_ros/src/swarmdeck_mola src/swarmdeck_mola
 COPY autonomy /opt/swarmdeck/autonomy
 COPY deploy/autonomy/mola_worker.py /usr/local/bin/swarmdeck-mola-worker
+COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py
 COPY deploy/autonomy/indexed_map_server.py /opt/swarmdeck/deploy/autonomy/indexed_map_server.py
 COPY deploy/autonomy/run_indexed_map_server.sh /usr/local/bin/swarmdeck-indexed-map-server
+COPY tests/deployment/mola_jsonl_smoke.py /usr/local/bin/mola-jsonl-smoke.py
+COPY tests/deployment/mola_launcher_smoke.py /usr/local/bin/mola-launcher-smoke.py
 
-RUN chmod 0755 /usr/local/bin/swarmdeck-mola-worker /usr/local/bin/swarmdeck-indexed-map-server
+RUN chmod 0755 /usr/local/bin/swarmdeck-mola-worker /usr/local/bin/mola_process.py \
+    /usr/local/bin/swarmdeck-indexed-map-server /usr/local/bin/mola-jsonl-smoke.py \
+    /usr/local/bin/mola-launcher-smoke.py
 
 RUN source /opt/ros/jazzy/setup.bash \
-    && colcon build --packages-select swarmdeck_mapping \
+    && colcon build --packages-select swarmdeck_mapping swarmdeck_mola \
          --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON \
-    && ctest --test-dir build/swarmdeck_mapping --output-on-failure
+    && test -x install/swarmdeck_mapping/bin/swarmdeck-mola-import \
+    && ctest --test-dir build/swarmdeck_mapping --output-on-failure \
+    && ctest --test-dir build/swarmdeck_mola --output-on-failure
 
 # Cross the Python/native boundary with the actual canonical snapshot and chunk
 # format, then ensure MRPT serialization emits a nonempty MOLA metric map.
@@ -57,5 +67,31 @@ RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py
          /tmp/map-fixture/snapshot.json \
          /tmp/map-fixture/chunks /tmp/smoke.metricmap \
     && test -s /tmp/smoke.metricmap
+
+# Drive ``swarmdeck-mola-import --serve`` through one persistent JSONL process.
+# The script has per-read deadlines and the outer timeout bounds image build
+# time if the native process hangs before ready or response.
+# Create this fixture in the same layer: overlayfs cannot rename a directory
+# inherited from an earlier layer when the smoke hides its geometry chunks.
+RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py /tmp/protocol-fixture \
+    && source /opt/ros/jazzy/setup.bash \
+    && timeout 45s python3 /usr/local/bin/mola-jsonl-smoke.py --root /tmp/protocol-fixture
+
+# Verify the loadable MOLA module discovers its factory and MapSource service
+# from the installed module directory using a fresh coherent fixture.
+RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py /tmp/module-fixture \
+    && source /opt/ros/jazzy/setup.bash \
+    && timeout 30s build/swarmdeck_mola/bin/test_mola_module \
+         /mapping_ws/install/swarmdeck_mola/lib /tmp/module-fixture
+
+# Exercise the actual MOLA launcher with the installed module configuration.
+# The smoke injects an artifact output so it verifies scheduling and framework
+# publication while keeping the checked-in config's artifact key optional.
+RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py /tmp/launcher-fixture \
+    && source /opt/ros/jazzy/setup.bash \
+    && timeout 15s python3 /usr/local/bin/mola-launcher-smoke.py \
+         --fixture /tmp/launcher-fixture \
+         --config /mapping_ws/install/swarmdeck_mola/share/swarmdeck_mola/config/external-map.yaml \
+         --timeout 10
 
 CMD ["bash"]

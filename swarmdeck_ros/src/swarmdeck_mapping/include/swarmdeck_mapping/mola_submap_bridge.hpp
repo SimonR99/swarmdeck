@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -46,6 +47,33 @@ struct SolutionVersion
   std::string digest;
 };
 
+/** Exact source and geometry identities carried with an immutable map view. */
+struct SnapshotIdentity
+{
+  std::string geometry_revision;
+  std::string native_geometry_digest;
+  std::string canonical_manifest_digest;
+  std::string source_snapshot_id;
+  std::string source_sha256;
+  std::string reference_frame;
+};
+
+/**
+ * One atomically captured native point-geometry publication.
+ *
+ * This is intentionally not an occupancy/free-space representation. A future
+ * planner adapter may consume the MOLA layers without guessing unknown-space
+ * semantics which the point cloud does not contain.
+ */
+struct NativeGeometrySnapshot
+{
+  std::shared_ptr<const mola::KeyframePointCloudMap> geometry_map;
+  SolutionVersion graph_version;
+  SnapshotIdentity identity;
+  std::string canonical_metadata_json;
+  std::vector<PoseUpdate> submap_poses;
+};
+
 /**
  * Adapter for a Swarm-SLAM-authoritative map.
  *
@@ -61,6 +89,9 @@ struct SolutionVersion
 class MolaSubmapBridge final : public mola::MapSourceBase
 {
  public:
+  using BeforeCommit = std::function<void(
+      const std::shared_ptr<const mola::KeyframePointCloudMap>&)>;
+
   enum class ApplyResult
   {
     Applied,
@@ -69,15 +100,21 @@ class MolaSubmapBridge final : public mola::MapSourceBase
 
   MolaSubmapBridge();
 
-  void replaceGeometrySnapshot(
+  ApplyResult replaceGeometrySnapshot(
       const std::vector<SubmapInput>& submaps, const SolutionVersion& version,
-      const std::string& canonical_metadata_json);
+      const std::string& canonical_metadata_json,
+      const SnapshotIdentity& identity = {}, const BeforeCommit& before_commit = {},
+      bool publish_update = true);
 
   ApplyResult applyPoseSolution(
       const std::vector<PoseUpdate>& updates, const SolutionVersion& version,
-      const std::string& canonical_metadata_json);
+      const std::string& canonical_metadata_json,
+      const SnapshotIdentity& identity = {}, const BeforeCommit& before_commit = {},
+      bool require_complete_membership = false, bool publish_update = true);
 
   [[nodiscard]] std::shared_ptr<const mola::KeyframePointCloudMap> currentMap() const;
+  [[nodiscard]] std::optional<NativeGeometrySnapshot> currentSnapshot() const;
+  void publishSnapshot(const NativeGeometrySnapshot& snapshot);
 
  private:
   static void validateVersion(const SolutionVersion& version);
@@ -85,11 +122,15 @@ class MolaSubmapBridge final : public mola::MapSourceBase
   static std::string frameName(const std::string& component_id);
   void publish(
       const std::shared_ptr<mola::KeyframePointCloudMap>& map,
-      const SolutionVersion& version, const std::string& metadata_json);
+      const SolutionVersion& version, const std::string& metadata_json,
+      const std::string& reference_frame);
 
   mutable std::mutex mutex_;
   std::shared_ptr<mola::KeyframePointCloudMap> map_;
   std::unordered_map<std::string, mola::KeyframePointCloudMap::KeyFrameID> ids_;
   std::optional<SolutionVersion> version_;
+  SnapshotIdentity identity_;
+  std::string metadata_json_;
+  std::unordered_map<std::string, Matrix4> poses_;
 };
 }  // namespace swarmdeck_mapping

@@ -42,12 +42,38 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.mapping
-    image: swarmdeck-mapping:phase0
+    image: swarmdeck-mapping:mola-native
     environment:
       SWARMDECK_MAPS_ROOT: /maps
+      # The sidecar is mission pinned. Its volume is robot-local, while the
+      # worker still uses the same snapshot discovery contract as the fleet
+      # overlay.
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_MOLA_IMPORTER: /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
+      SWARMDECK_MOLA_MODE: persistent
+      SWARMDECK_MOLA_TIMEOUT_S: "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
+      SWARMDECK_MOLA_POLL_S: "${SWARMDECK_MOLA_POLL_S:-1}"
+      SWARMDECK_MOLA_RETRY_S: "${SWARMDECK_MOLA_RETRY_S:-5}"
+      SWARMDECK_MOLA_MAX_OUTPUT_BYTES: "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
+      SWARMDECK_MOLA_KEEP_GENERATIONS: "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
     volumes:
       - onboard_peer_maps:/maps
-    command: ["swarmdeck-mola-worker", "--maps-root", "/maps"]
+    command:
+      - swarmdeck-mola-worker
+      - --mode
+      - persistent
+      - --maps-root
+      - /maps
+      - --timeout
+      - "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
+      - --poll
+      - "${SWARMDECK_MOLA_POLL_S:-1}"
+      - --retry
+      - "${SWARMDECK_MOLA_RETRY_S:-5}"
+      - --max-output-bytes
+      - "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
+      - --keep-generations
+      - "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
     restart: "no"
 
   # Bounded batch validation for MGG's final corridor. The adapter publishes
@@ -57,7 +83,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.mapping
-    image: swarmdeck-mapping:phase0
+    image: swarmdeck-mapping:mola-native
     network_mode: host
     ipc: host
     environment:

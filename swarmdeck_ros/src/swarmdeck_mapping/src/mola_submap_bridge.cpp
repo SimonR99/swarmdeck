@@ -86,13 +86,15 @@ std::string MolaSubmapBridge::frameName(const std::string& component_id)
   return frame;
 }
 
-void MolaSubmapBridge::replaceGeometrySnapshot(
+MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
     const std::vector<SubmapInput>& submaps, const SolutionVersion& version,
-    const std::string& canonical_metadata_json)
+    const std::string& canonical_metadata_json, const SnapshotIdentity& identity,
+    const BeforeCommit& before_commit, const bool publish_update)
 {
   validateVersion(version);
   auto next_map = std::make_shared<mola::KeyframePointCloudMap>();
   std::unordered_map<std::string, mola::KeyframePointCloudMap::KeyFrameID> next_ids;
+  std::unordered_map<std::string, Matrix4> next_poses;
   std::unordered_set<std::string> seen;
   for (const auto& submap : submaps)
   {
@@ -114,6 +116,7 @@ void MolaSubmapBridge::replaceGeometrySnapshot(
     const auto internal_id = next_map->lastInsertedKeyFrameID();
     if (!internal_id) throw std::runtime_error("MOLA inserted a keyframe without assigning an ID");
     next_ids.emplace(submap.external_id, *internal_id);
+    next_poses.emplace(submap.external_id, submap.T_component_submap);
   }
 
   bool duplicate = false;
@@ -127,9 +130,17 @@ void MolaSubmapBridge::replaceGeometrySnapshot(
           throw std::invalid_argument("stale MOLA geometry snapshot");
         if (sameVersion(version, *version_))
         {
-          if (version.digest != version_->digest)
+          const bool geometry_changed =
+              !identity.native_geometry_digest.empty() &&
+              !identity_.native_geometry_digest.empty() &&
+              identity.native_geometry_digest != identity_.native_geometry_digest;
+          if (version.digest != version_->digest && !geometry_changed)
             throw std::invalid_argument("conflicting MOLA geometry snapshot revision");
-          duplicate = true;
+          duplicate = identity.native_geometry_digest.empty() ||
+                      identity.native_geometry_digest == identity_.native_geometry_digest;
+          if (duplicate && !identity.canonical_manifest_digest.empty() &&
+              identity.canonical_manifest_digest != identity_.canonical_manifest_digest)
+            throw std::invalid_argument("conflicting MOLA manifest identity");
         }
       }
       else if (version.epoch <= version_->epoch)
@@ -137,19 +148,28 @@ void MolaSubmapBridge::replaceGeometrySnapshot(
         throw std::invalid_argument("a component replacement must advance the epoch");
       }
     }
+    const auto& candidate = duplicate ? map_ : next_map;
+    if (before_commit) before_commit(candidate);
     if (!duplicate)
     {
       map_ = next_map;
       ids_ = std::move(next_ids);
-      version_ = version;
+      poses_ = std::move(next_poses);
     }
+    version_ = version;
+    identity_ = identity;
+    metadata_json_ = canonical_metadata_json;
   }
-  if (!duplicate) publish(next_map, version, canonical_metadata_json);
+  if (!duplicate && publish_update)
+    publish(next_map, version, canonical_metadata_json, identity.reference_frame);
+  return duplicate ? ApplyResult::Duplicate : ApplyResult::Applied;
 }
 
 MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
     const std::vector<PoseUpdate>& updates, const SolutionVersion& version,
-    const std::string& canonical_metadata_json)
+    const std::string& canonical_metadata_json, const SnapshotIdentity& identity,
+    const BeforeCommit& before_commit, const bool require_complete_membership,
+    const bool publish_update)
 {
   validateVersion(version);
   std::shared_ptr<mola::KeyframePointCloudMap> current;
@@ -166,6 +186,15 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
       {
         if (version.digest != version_->digest)
           throw std::invalid_argument("conflicting MOLA pose solution revision");
+        if (!identity.native_geometry_digest.empty() &&
+            identity.native_geometry_digest != identity_.native_geometry_digest)
+          throw std::invalid_argument("pose-only request changed native geometry identity");
+        if (!identity.canonical_manifest_digest.empty() &&
+            identity.canonical_manifest_digest != identity_.canonical_manifest_digest)
+          throw std::invalid_argument("conflicting MOLA manifest identity");
+        if (before_commit) before_commit(map_);
+        identity_ = identity;
+        metadata_json_ = canonical_metadata_json;
         return ApplyResult::Duplicate;
       }
     }
@@ -179,15 +208,23 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
       if (id == ids_.end()) throw std::out_of_range("pose update references an unknown submap");
       checked.emplace_back(id->second, checkedPose(update.T_component_submap));
     }
+    if (require_complete_membership && seen.size() != ids_.size())
+      throw std::invalid_argument("pose solution does not exactly cover resident submaps");
     // Geometry buffers may be shared by MOLA's copy constructor, but keyframe
     // poses and caches belong to this new map. Previously published map objects
     // therefore remain coherent while all corrections land on the new copy.
     current = std::make_shared<mola::KeyframePointCloudMap>(*map_);
     for (const auto& [id, pose] : checked) current->setKeyframePose(id, pose);
+    if (before_commit) before_commit(current);
     map_ = current;
+    for (const auto& update : updates)
+      poses_[update.external_id] = update.T_component_submap;
     version_ = version;
+    identity_ = identity;
+    metadata_json_ = canonical_metadata_json;
   }
-  publish(current, version, canonical_metadata_json);
+  if (publish_update)
+    publish(current, version, canonical_metadata_json, identity.reference_frame);
   return ApplyResult::Applied;
 }
 
@@ -197,13 +234,39 @@ std::shared_ptr<const mola::KeyframePointCloudMap> MolaSubmapBridge::currentMap(
   return map_;
 }
 
+std::optional<NativeGeometrySnapshot> MolaSubmapBridge::currentSnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!version_) return std::nullopt;
+  std::vector<PoseUpdate> poses;
+  poses.reserve(poses_.size());
+  for (const auto& item : poses_) poses.push_back({item.first, item.second});
+  std::sort(
+      poses.begin(), poses.end(), [](const PoseUpdate& lhs, const PoseUpdate& rhs) {
+        return lhs.external_id < rhs.external_id;
+      });
+  return NativeGeometrySnapshot{map_, *version_, identity_, metadata_json_, std::move(poses)};
+}
+
+void MolaSubmapBridge::publishSnapshot(const NativeGeometrySnapshot& snapshot)
+{
+  if (!snapshot.geometry_map)
+    throw std::invalid_argument("cannot publish an empty native geometry snapshot");
+  publish(
+      std::const_pointer_cast<mola::KeyframePointCloudMap>(snapshot.geometry_map),
+      snapshot.graph_version, snapshot.canonical_metadata_json,
+      snapshot.identity.reference_frame);
+}
+
 void MolaSubmapBridge::publish(
     const std::shared_ptr<mola::KeyframePointCloudMap>& map,
-    const SolutionVersion& version, const std::string& metadata_json)
+    const SolutionVersion& version, const std::string& metadata_json,
+    const std::string& reference_frame)
 {
   mola::MapSourceBase::MapUpdate update;
   update.timestamp = mrpt::Clock::now();
-  update.reference_frame = frameName(version.component_id);
+  update.reference_frame =
+      reference_frame.empty() ? frameName(version.component_id) : reference_frame;
   update.method = "swarm_slam";
   update.map_name = "swarmdeck_persistent_geometry";
   update.map = map;

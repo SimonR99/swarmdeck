@@ -1,0 +1,13 @@
+# A coherent onboard snapshot; select one component when it contains several.
+# MOLA_MODULES_LIB_PATH must include the installed swarmdeck_mola/lib directory.
+modules:
+  - type: swarmdeck_mola::SwarmDeckMapSource
+    name: corrected_map
+    execution_rate: 10
+    params:
+      snapshot_file: ${SWARMDECK_MOLA_SNAPSHOT}
+      chunks_dir: ${SWARMDECK_MOLA_CHUNKS}
+      component_id: ${SWARMDECK_MOLA_COMPONENT}
+      # Optional: omit this key to publish maps entirely in memory.
+      poll_s: 1.0
+      max_points: 2000000

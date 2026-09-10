@@ -95,6 +95,10 @@ Add `deploy/compose/docker-compose.mapping.yml` to a peer compose invocation to
 run the server-independent MOLA consumer. It watches the shared `peer_maps`
 volume and publishes a checked per-component artifact index under each peer's
 `mola/` directory. The worker does not join the ROS graph and owns no TF edges.
+It now supervises a persistent native runtime and reuses keyframe geometry for
+pose-only revisions. The same runtime backs a loadable MOLA framework module;
+see the [MOLA runtime guide](mola-runtime.md) for configuration, limits and the
+remaining planner-map boundary.
 For the ARGoS stack, start both mapping consumers with:
 
 ```bash

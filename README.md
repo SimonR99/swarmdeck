@@ -45,7 +45,7 @@ video through LAN connections, HTTPS proxies, and SSH tunnels.
 ## Decentralized autonomy development
 
 The opt-in onboard pipeline combines peer Swarm-SLAM, persistent submaps, a
-native MOLA map consumer, full-path MGG execution through Nav2, and resumable
+native MOLA map runtime, full-path MGG execution through Nav2, and resumable
 server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
 [integration and simulation guide](docs/operations/decentralized-autonomy.md)
 for build commands, component inspection, validation status, and rollout limits.
@@ -53,6 +53,10 @@ This remains an opt-in development path; multi-host fault recovery, successful B
 return-home execution, and Gaussian quality and resource scaling still have
 acceptance work. The [native CUDA smoke test](docs/operations/reconstruction-jobs.md)
 passes with fixed poses.
+The [MOLA runtime guide](docs/operations/mola-runtime.md) describes persistent
+geometry reuse, the loadable framework module, and resource limits. The
+[remaining integration plan](docs/architecture/planning-refactor-remaining.md)
+prioritizes MOLA map products and odometry providers before broader rollout.
 
 ## Quick start
 

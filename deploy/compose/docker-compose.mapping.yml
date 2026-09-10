@@ -10,18 +10,43 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.mapping
-    image: swarmdeck-mapping:phase0
+    image: swarmdeck-mapping:mola-native
     environment:
       SWARMDECK_MAPS_ROOT: /maps
+      # A worker is scoped to one fleet mission.  The native runtime must not
+      # accidentally consume a stale mission left on a durable map volume.
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_MOLA_IMPORTER: /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
+      SWARMDECK_MOLA_MODE: persistent
+      SWARMDECK_MOLA_TIMEOUT_S: "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
+      SWARMDECK_MOLA_POLL_S: "${SWARMDECK_MOLA_POLL_S:-1}"
+      SWARMDECK_MOLA_RETRY_S: "${SWARMDECK_MOLA_RETRY_S:-5}"
+      SWARMDECK_MOLA_MAX_OUTPUT_BYTES: "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
+      SWARMDECK_MOLA_KEEP_GENERATIONS: "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
     volumes:
       - peer_maps:/maps
-    command: ["swarmdeck-mola-worker", "--maps-root", "/maps"]
+    command:
+      - swarmdeck-mola-worker
+      - --mode
+      - persistent
+      - --maps-root
+      - /maps
+      - --timeout
+      - "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
+      - --poll
+      - "${SWARMDECK_MOLA_POLL_S:-1}"
+      - --retry
+      - "${SWARMDECK_MOLA_RETRY_S:-5}"
+      - --max-output-bytes
+      - "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
+      - --keep-generations
+      - "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
     restart: unless-stopped
   mapping-query:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.mapping
-    image: swarmdeck-mapping:phase0
+    image: swarmdeck-mapping:mola-native
     network_mode: service:sim
     environment:
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"

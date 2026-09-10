@@ -3,7 +3,7 @@
   <name>swarmdeck_mapping</name>
   <version>0.1.0</version>
   <description>
-    Correction-aware bridge from SwarmDeck map snapshots to MOLA keyframe maps.
+    Bounded persistent bridge from SwarmDeck snapshots to MOLA keyframe maps.
   </description>
   <maintainer email="swarmdeck@mistlab.ca">SwarmDeck</maintainer>
   <!-- mola_kernel and mola_metric_maps are GPL-3.0. -->
