@@ -16,9 +16,10 @@ import json
 import math
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -27,6 +28,7 @@ from .contracts import (
     MapManifest,
     MapSnapshot,
     Matrix4,
+    RayEvidence,
     SCHEMA_VERSION,
     SubmapId,
     validate_se3,
@@ -129,10 +131,19 @@ class _SubmapInput:
     chunks: tuple[tuple[str, int, int, str], ...]
     origins: tuple[tuple[float, float, float], ...]
     observed_at_ns: int
+    ray_evidence_qualified: bool
 
 
 @dataclass(frozen=True)
-class _Index:
+class IndexedGrid:
+    """Immutable planner-grid publication shared by map providers.
+
+    Providers own construction and source-integrity checks. The query view
+    owns publication ordering, freshness, work bounds, and terrain semantics.
+    The constructor takes defensive copies so a provider cannot mutate a grid
+    after it has been published to concurrent queries.
+    """
+
     key: SnapshotKey
     manifest_digest: str
     source_stamp_ns: int
@@ -142,6 +153,64 @@ class _Index:
     columns: Mapping[tuple[int, int], tuple[float, ...]]
     resolution_m: float
     point_count: int
+
+    def refreshed(
+        self, *, source_stamp_ns: int, received_monotonic_ns: int
+    ) -> "IndexedGrid":
+        """Reuse grid storage while updating only verified liveness metadata."""
+
+        _strict_uint(source_stamp_ns, "source_stamp_ns")
+        _strict_uint(received_monotonic_ns, "received_monotonic_ns")
+        result = object.__new__(type(self))
+        for name in (
+            "key",
+            "manifest_digest",
+            "occupied",
+            "free",
+            "columns",
+            "resolution_m",
+            "point_count",
+        ):
+            object.__setattr__(result, name, getattr(self, name))
+        object.__setattr__(result, "source_stamp_ns", source_stamp_ns)
+        object.__setattr__(result, "received_monotonic_ns", received_monotonic_ns)
+        return result
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, SnapshotKey):
+            raise ValueError("key must be a SnapshotKey")
+        if (
+            not isinstance(self.manifest_digest, str)
+            or len(self.manifest_digest) != 64
+            or any(c not in "0123456789abcdef" for c in self.manifest_digest)
+        ):
+            raise ValueError("manifest_digest must be lowercase SHA-256")
+        for name in ("source_stamp_ns", "received_monotonic_ns", "point_count"):
+            _strict_uint(getattr(self, name), name)
+        if (
+            not isinstance(self.resolution_m, (int, float))
+            or isinstance(self.resolution_m, bool)
+            or not math.isfinite(self.resolution_m)
+            or self.resolution_m <= 0
+        ):
+            raise ValueError("resolution_m must be finite and positive")
+
+        occupied = frozenset(_voxel(value, "occupied voxel") for value in self.occupied)
+        free = frozenset(_voxel(value, "free voxel") for value in self.free)
+        if occupied & free:
+            raise ValueError("occupied and free voxels must be disjoint")
+        columns: dict[tuple[int, int], tuple[float, ...]] = {}
+        for key, raw_values in self.columns.items():
+            column = _column(key)
+            values = tuple(float(value) for value in raw_values)
+            if not values or any(not math.isfinite(value) for value in values):
+                raise ValueError("terrain columns must contain finite heights")
+            if any(left > right for left, right in zip(values, values[1:])):
+                raise ValueError("terrain column heights must be sorted")
+            columns[column] = values
+        object.__setattr__(self, "occupied", occupied)
+        object.__setattr__(self, "free", free)
+        object.__setattr__(self, "columns", MappingProxyType(columns))
 
 
 ChunkLoader = Callable[[str], bytes]
@@ -157,6 +226,7 @@ def _manifest_digest(submaps: Sequence[_SubmapInput], tombstones: Sequence[str])
                 "chunks": submap.chunks,
                 "origins": submap.origins,
                 "observed_at_ns": submap.observed_at_ns,
+                "ray_evidence_qualified": submap.ray_evidence_qualified,
             }
             for submap in submaps
         ],
@@ -176,6 +246,28 @@ def _strict_uint(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{field} must be a non-negative integer")
     return value
+
+
+def _voxel(value: object, field: str) -> tuple[int, int, int]:
+    if not isinstance(value, (tuple, list)) or len(value) != 3:
+        raise ValueError(f"{field} must contain three integers")
+    result = tuple(value)
+    if any(not isinstance(axis, int) or isinstance(axis, bool) for axis in result):
+        raise ValueError(f"{field} must contain three integers")
+    if any(abs(axis) >= 2**63 for axis in result):
+        raise ValueError(f"{field} exceeds signed 64-bit range")
+    return result  # type: ignore[return-value]
+
+
+def _column(value: object) -> tuple[int, int]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError("terrain column key must contain two integers")
+    result = tuple(value)
+    if any(not isinstance(axis, int) or isinstance(axis, bool) for axis in result):
+        raise ValueError("terrain column key must contain two integers")
+    if any(abs(axis) >= 2**63 for axis in result):
+        raise ValueError("terrain column key exceeds signed 64-bit range")
+    return result  # type: ignore[return-value]
 
 
 class IndexedMapView:
@@ -233,7 +325,7 @@ class IndexedMapView:
         self.max_roughness_m = float(max_roughness_m)
         self._lock = threading.RLock()
         self._chunk_cache: dict[str, np.ndarray] = {}
-        self._index: _Index | None = None
+        self._index: IndexedGrid | None = None
         self._unavailable_key: SnapshotKey | None = None
         self._unavailable_detail = "no snapshot loaded"
         self._chunk_loads = 0
@@ -269,6 +361,47 @@ class IndexedMapView:
                     self._index.key if self._index is not None else None
                 )
             self._unavailable_detail = detail
+
+    def publish(self, grid: IndexedGrid) -> SnapshotKey:
+        """Atomically install one verified immutable provider publication."""
+
+        if not isinstance(grid, IndexedGrid):
+            raise TypeError("grid must be an IndexedGrid")
+        detail = ""
+        if not math.isclose(
+            grid.resolution_m, self.resolution_m, rel_tol=0.0, abs_tol=1e-12
+        ):
+            detail = "grid resolution does not match query view"
+        elif grid.point_count > self.max_points:
+            detail = "index point budget exceeded"
+        elif len(grid.occupied) > self.max_voxels:
+            detail = "occupied voxel budget exceeded"
+        elif len(grid.occupied) + len(grid.free) > self.max_voxels:
+            detail = "total voxel budget exceeded"
+        if detail:
+            with self._lock:
+                self._unavailable_key = grid.key
+                self._unavailable_detail = detail
+            raise ValueError(detail)
+
+        with self._lock:
+            current = self._index
+            if current is not None and current.key == grid.key:
+                if current.manifest_digest != grid.manifest_digest:
+                    self._unavailable_key = grid.key
+                    self._unavailable_detail = (
+                        "snapshot key was reused with different map content"
+                    )
+                    raise ValueError(self._unavailable_detail)
+                rebuilt = False
+            else:
+                rebuilt = True
+            self._index = grid
+            self._unavailable_key = None
+            self._unavailable_detail = ""
+            if rebuilt:
+                self._rebuilds += 1
+        return grid.key
 
     def refresh(
         self,
@@ -311,8 +444,7 @@ class IndexedMapView:
                 # A coherent republish may refresh liveness without changing
                 # geometry. Preserve the expensive index and update only its
                 # immutable publication metadata.
-                self._index = replace(
-                    self._index,
+                self._index = self._index.refreshed(
                     source_stamp_ns=source_stamp_ns,
                     received_monotonic_ns=received,
                 )
@@ -333,12 +465,7 @@ class IndexedMapView:
                 self._unavailable_key = key
                 self._unavailable_detail = str(exc)
             raise
-        with self._lock:
-            self._index = built
-            self._unavailable_key = None
-            self._unavailable_detail = ""
-            self._rebuilds += 1
-        return key
+        return self.publish(built)
 
     def query(self, request: QueryRequest) -> QueryResult:
         with self._lock:
@@ -524,7 +651,7 @@ class IndexedMapView:
         )
 
     def _terrain(
-        self, index: _Index, sample: np.ndarray, half_body: np.ndarray
+        self, index: IndexedGrid, sample: np.ndarray, half_body: np.ndarray
     ) -> tuple[float, float, float] | None:
         radius = max(self.terrain_radius_m, float(max(half_body[0], half_body[1])))
         center = np.floor(sample[:2] / index.resolution_m).astype(np.int64)
@@ -579,7 +706,7 @@ class IndexedMapView:
         submaps: tuple[_SubmapInput, ...],
         loader: ChunkLoader,
         received: int,
-    ) -> _Index:
+    ) -> IndexedGrid:
         started = time.monotonic()
         occupied: set[tuple[int, int, int]] = set()
         free: set[tuple[int, int, int]] = set()
@@ -593,7 +720,11 @@ class IndexedMapView:
                 if submap.origins
                 else np.empty((0, 3))
             )
-            origin = transformed_origins[0] if len(transformed_origins) == 1 else None
+            origin = (
+                transformed_origins[0]
+                if submap.ray_evidence_qualified and len(transformed_origins) == 1
+                else None
+            )
             for digest, size, declared_count, encoding in submap.chunks:
                 if encoding != XYZ_F32_ENCODING or size > MAX_CHUNK_BYTES:
                     raise ValueError("unsupported or oversized map chunk")
@@ -668,7 +799,7 @@ class IndexedMapView:
         immutable_columns = {
             key_value: tuple(sorted(values)) for key_value, values in columns.items()
         }
-        return _Index(
+        return IndexedGrid(
             key,
             manifest_digest,
             source_stamp_ns,
@@ -712,6 +843,7 @@ class IndexedMapView:
                     ),
                     submap.sensor_origins,
                     submap.observed_at_ns,
+                    submap.ray_evidence.certifies_free_space,
                 )
                 for submap in manifest.submaps
             )
@@ -810,6 +942,14 @@ class IndexedMapView:
                 for origin in origins
             ):
                 raise ValueError("sensor origins must be finite XYZ triples")
+            evidence_value = submap.get("ray_evidence", {})
+            if not isinstance(evidence_value, dict):
+                raise ValueError("ray_evidence must be an object")
+            evidence = RayEvidence(**evidence_value)
+            if evidence.certifies_free_space and len(origins) != 1:
+                raise ValueError(
+                    "qualified ray evidence requires exactly one sensor origin"
+                )
             chunks_value = submap.get("chunks")
             if not isinstance(chunks_value, list):
                 raise ValueError("submap chunks must be a list")
@@ -843,6 +983,7 @@ class IndexedMapView:
                     tuple(chunks),
                     origins,
                     _strict_uint(submap.get("observed_at_ns", 0), "observed_at_ns"),
+                    evidence.certifies_free_space,
                 )
             )
         expected_geometry = hashlib.sha256(
@@ -868,18 +1009,49 @@ class SnapshotDirectorySource:
     ):
         self.peer_root = Path(peer_root)
         self.snapshot_path = self.peer_root / "snapshot.json"
+        self.publication_path = self.snapshot_path
         self.chunks_path = self.peer_root / "geometry" / "chunks"
         self.max_snapshot_bytes = max_snapshot_bytes
-        self._last_sha: str | None = None
+
+    def component_ids(self) -> tuple[str, ...]:
+        value, _ = self._read_snapshot()
+        manifests = value.get("manifests")
+        if not isinstance(manifests, list):
+            raise ValueError("snapshot manifests are missing")
+        result: list[str] = []
+        for manifest in manifests:
+            revision = (
+                manifest.get("graph_revision") if isinstance(manifest, dict) else None
+            )
+            component = (
+                revision.get("component_id") if isinstance(revision, dict) else None
+            )
+            if not isinstance(component, str) or not component:
+                raise ValueError("manifest component_id is invalid")
+            result.append(component)
+        if len(set(result)) != len(result):
+            raise ValueError("snapshot repeats a component_id")
+        return tuple(result)
+
+    def signature(self) -> tuple[int, ...]:
+        stat = self.publication_path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
     def refresh(self, view: IndexedMapView, component_id: str) -> SnapshotKey:
+        value, raw = self._read_snapshot()
+        key = view.refresh(value, component_id, self.get_chunk)
+        if self.snapshot_path.read_bytes() != raw:
+            view.invalidate("snapshot changed during index build")
+            raise ValueError("snapshot changed during index build")
+        return key
+
+    def _read_snapshot(self) -> tuple[dict[str, object], bytes]:
         size = self.snapshot_path.stat().st_size
         if size <= 0 or size > self.max_snapshot_bytes:
             raise ValueError("snapshot file has invalid size")
         raw = self.snapshot_path.read_bytes()
         if len(raw) != size:
             raise ValueError("snapshot changed while reading")
-        digest = hashlib.sha256(raw).hexdigest()
 
         def reject_constant(value: str) -> None:
             raise ValueError(f"nonfinite JSON constant: {value}")
@@ -887,12 +1059,7 @@ class SnapshotDirectorySource:
         value = json.loads(raw, parse_constant=reject_constant)
         if not isinstance(value, dict):
             raise ValueError("snapshot root must be an object")
-        key = view.refresh(value, component_id, self.get_chunk)
-        if self.snapshot_path.read_bytes() != raw:
-            view.invalidate("snapshot changed during index build")
-            raise ValueError("snapshot changed during index build")
-        self._last_sha = digest
-        return key
+        return value, raw
 
     def get_chunk(self, digest: str) -> bytes:
         if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):

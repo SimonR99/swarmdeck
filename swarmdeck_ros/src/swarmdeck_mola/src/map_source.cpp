@@ -37,7 +37,7 @@ struct SwarmDeckMapSource::State
   std::unique_ptr<swarmdeck_mapping::PersistentMolaRuntime> runtime;
   std::filesystem::path source, chunks, artifact;
   std::string successful_sha, failed_sha, last_error;
-  std::string component_id;
+  std::string component_id, active_map_id;
   std::string frame{"map"};
   bool ready{false};
   unsigned failures{0};
@@ -66,7 +66,8 @@ void SwarmDeckMapSource::initialize(const mola::Yaml& config)
   if (!std::isfinite(next->poll_s) || next->poll_s < 0.05 || next->poll_s > 60.0)
     throw std::invalid_argument("poll_s must be in [0.05, 60]");
   swarmdeck_mapping::RuntimeLimits limits;
-  limits.max_maps = 1;
+  // Keep the previous component until a coherent replacement is ready.
+  limits.max_maps = 2;
   const auto points = params.getOrDefault<int>("max_points", 2'000'000);
   if (points < 1 || points > 20'000'000)
     throw std::invalid_argument("max_points must be in [1, 20000000]");
@@ -107,6 +108,7 @@ void SwarmDeckMapSource::spinOnce()
   state.next_poll = now + std::chrono::duration_cast<Clock::duration>(
       std::chrono::duration<double>(state.poll_s));
   std::string sha;
+  std::string candidate_map_id;
   std::filesystem::path pending_artifact;
   try
   {
@@ -115,9 +117,15 @@ void SwarmDeckMapSource::spinOnce()
     if (state.ready && sha == state.successful_sha) return;
     if (sha == state.failed_sha && now < state.retry_after) return;
 
+    const auto limits = state.runtime->limits();
+    const auto selected = swarmdeck_mapping::parseComponentSnapshot(
+        state.source, sha, limits.max_snapshot_bytes, limits.max_submaps_per_map,
+        limits.max_chunks_per_map, limits.max_points_per_map, state.component_id);
+    candidate_map_id = "source:" + selected.graph_version.component_id;
+
     swarmdeck_mapping::ApplyRequest request;
     request.request_id = sha;
-    request.map_id = "source";
+    request.map_id = candidate_map_id;
     request.mode = swarmdeck_mapping::ApplyMode::Auto;
     request.snapshot_path = state.source;
     request.snapshot_sha256 = sha;
@@ -136,7 +144,7 @@ void SwarmDeckMapSource::spinOnce()
             state.source, state.runtime->limits().max_snapshot_bytes) != sha)
     {
       // A discarded source must not become the base of a subsequent correction.
-      state.runtime->release("source");
+      state.runtime->release(candidate_map_id);
       throw std::runtime_error("snapshot superseded during import");
     }
     if (!pending_artifact.empty())
@@ -159,6 +167,9 @@ void SwarmDeckMapSource::spinOnce()
         {"source_snapshot_id", snapshot.identity.source_snapshot_id},
         {"manifest", json::parse(snapshot.canonical_metadata_json)}}.dump();
     advertiseUpdatedMap(update);
+    if (!state.active_map_id.empty() && state.active_map_id != candidate_map_id)
+      state.runtime->release(state.active_map_id);
+    state.active_map_id = candidate_map_id;
     state.successful_sha = sha;
     state.failed_sha.clear();
     state.last_error.clear();
@@ -167,6 +178,9 @@ void SwarmDeckMapSource::spinOnce()
   }
   catch (const std::exception& error)
   {
+    if (!candidate_map_id.empty() && candidate_map_id != state.active_map_id &&
+        state.runtime->provider(candidate_map_id))
+      state.runtime->release(candidate_map_id);
     if (!pending_artifact.empty())
     {
       std::error_code ignored;

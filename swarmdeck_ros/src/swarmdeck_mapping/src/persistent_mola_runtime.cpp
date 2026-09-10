@@ -164,7 +164,7 @@ PersistentMolaRuntime::PersistentMolaRuntime(RuntimeLimits limits) : limits_(lim
       limits_.max_response_bytes == 0 || limits_.max_maps == 0 ||
       limits_.max_submaps_per_map == 0 || limits_.max_chunks_per_map == 0 ||
       limits_.max_points_per_map == 0 || limits_.max_resident_points == 0 ||
-      limits_.max_output_bytes == 0)
+      limits_.max_output_bytes == 0 || limits_.max_planner_output_bytes == 0)
     throw std::invalid_argument("runtime limits must be positive");
 }
 
@@ -178,6 +178,12 @@ try
   validatePath(request.snapshot_path, "snapshot_path");
   validatePath(request.chunks_dir, "chunks_dir");
   if (!request.output_path.empty()) validatePath(request.output_path, "output_path");
+  if (!request.planner_output_path.empty())
+    validatePath(request.planner_output_path, "planner_output_path");
+  if (!request.output_path.empty() && request.output_path == request.planner_output_path)
+    throw RuntimeError(
+        RuntimeErrorCode::InvalidRequest,
+        "geometry and planner output paths must differ");
 
   ParsedComponentSnapshot parsed;
   try
@@ -270,10 +276,46 @@ try
   const bool resident = static_cast<bool>(provider);
   if (!provider) provider = std::make_shared<MolaSubmapBridge>();
   Artifact artifact;
+  PlannerGridArtifact planner_artifact;
+  bool planner_installed = false;
   MolaSubmapBridge::BeforeCommit writer;
-  if (!request.output_path.empty())
-    writer = [&](const auto& map) {
-      serializeArtifact(map, request.output_path, limits_.max_output_bytes, artifact);
+  if (!request.output_path.empty() || !request.planner_output_path.empty())
+    writer = [&](const NativeGeometrySnapshot& candidate) {
+      if (!request.output_path.empty())
+        serializeArtifact(
+            candidate.geometry_map, request.output_path, limits_.max_output_bytes,
+            artifact);
+      if (!request.planner_output_path.empty())
+      {
+        std::shared_ptr<const NativePlannerGrid> planner;
+        try
+        {
+          planner = buildNativePlannerGrid(candidate);
+        }
+        catch (const std::invalid_argument& error)
+        {
+          throw RuntimeError(RuntimeErrorCode::Internal, error.what());
+        }
+        catch (const std::runtime_error& error)
+        {
+          throw RuntimeError(RuntimeErrorCode::ResourceLimit, error.what());
+        }
+        try
+        {
+          planner_artifact = writeNativePlannerGrid(
+              *planner, request.planner_output_path,
+              limits_.max_planner_output_bytes);
+        }
+        catch (const std::invalid_argument& error)
+        {
+          throw RuntimeError(RuntimeErrorCode::Internal, error.what());
+        }
+        catch (const std::runtime_error& error)
+        {
+          throw RuntimeError(RuntimeErrorCode::Io, error.what());
+        }
+        planner_installed = true;
+      }
     };
   MolaSubmapBridge::ApplyResult apply_result;
   try
@@ -305,6 +347,7 @@ try
   catch (...)
   {
     if (artifact.installed) removeQuietly(request.output_path);
+    if (planner_installed) removeQuietly(request.planner_output_path);
     throw;
   }
 
@@ -312,6 +355,7 @@ try
   if (!current)
   {
     if (artifact.installed) removeQuietly(request.output_path);
+    if (planner_installed) removeQuietly(request.planner_output_path);
     throw RuntimeError(RuntimeErrorCode::Internal, "MOLA provider committed no snapshot");
   }
   {
@@ -337,7 +381,9 @@ try
       parsed.submaps.size(),
       current->geometry_map->point_count(),
       artifact.size,
-      artifact.sha256};
+      artifact.sha256,
+      planner_artifact.size_bytes,
+      planner_artifact.sha256};
 }
 catch (const RuntimeError&)
 {

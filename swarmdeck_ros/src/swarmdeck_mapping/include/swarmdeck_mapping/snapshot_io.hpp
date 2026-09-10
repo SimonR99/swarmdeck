@@ -14,6 +14,7 @@ inline constexpr std::size_t kMaxSnapshotBytes = 4 * 1024 * 1024;
 inline constexpr std::size_t kMaxSubmapsPerMap = 4096;
 inline constexpr std::size_t kMaxChunksPerMap = 16384;
 inline constexpr std::size_t kMaxPointsPerMap = 2'000'000;
+inline constexpr std::size_t kMaxSensorOriginsPerSubmap = 16;
 
 struct ChunkDescriptor
 {
@@ -27,6 +28,9 @@ struct ParsedSubmap
   std::string external_id;
   Matrix4 T_component_submap;
   std::vector<ChunkDescriptor> chunks;
+  std::vector<PointXYZ> sensor_origins_local;
+  std::uint64_t observed_at_ns{};
+  bool ray_evidence_qualified{};
 };
 
 /** A fully validated one-component projection of an autonomy snapshot. */

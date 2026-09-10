@@ -11,13 +11,20 @@ import pytest
 
 from autonomy.contracts import (
     IDENTITY_SE3,
+    Calibration,
+    CalibratedCapture,
     ComponentRevision,
+    DeskewStatus,
     GraphSolution,
     KeyframeId,
+    RayEvidence,
+    RayOriginAssociation,
+    RayReturnSemantics,
     SubmapId,
     component_id_for_anchor,
 )
 from autonomy.indexed_mapping import (
+    IndexedGrid,
     IndexedMapView,
     QueryRequest,
     QueryStatus,
@@ -27,6 +34,11 @@ from autonomy.indexed_mapping import (
 from autonomy.mapping import SubmapStore
 
 SESSION = str(uuid.UUID("8c095aed-b093-43a4-997f-495b2a8b734c"))
+QUALIFIED_RAYS = RayEvidence(
+    RayReturnSemantics.FIRST_RETURN,
+    DeskewStatus.DESKEWED,
+    RayOriginAssociation.SINGLE_CAPTURE,
+)
 
 
 def pose(x: float = 0.0):
@@ -38,6 +50,10 @@ def pose(x: float = 0.0):
 def make_store(tmp_path, points, *, origin=((-0.1, 0.1, 0.5),)):
     store = SubmapStore(tmp_path)
     keyframe = KeyframeId("r0", SESSION, 0)
+    evidence = RayEvidence()
+    if len(origin) == 1:
+        record_qualified_capture(store, keyframe, origin[0], observed_at_ns=100)
+        evidence = QUALIFIED_RAYS
     store.add_submap(
         SubmapId.from_keyframe(keyframe),
         points,
@@ -45,8 +61,37 @@ def make_store(tmp_path, points, *, origin=((-0.1, 0.1, 0.5),)):
         sensor_origins_local=origin,
         resolution_m=0.2,
         observed_at_ns=100,
+        ray_evidence=evidence,
     )
     return store, keyframe
+
+
+def record_qualified_capture(store, keyframe, origin, *, observed_at_ns):
+    transform = [list(row) for row in IDENTITY_SE3]
+    for axis, value in enumerate(origin):
+        transform[axis][3] = value
+    sensor_frame = f"{keyframe.robot_id}/lidar"
+    calibration = Calibration(
+        "lidar-v1",
+        sensor_frame,
+        "x-forward/y-left/z-up",
+        (),
+        "none",
+        (),
+        tuple(tuple(row) for row in transform),
+    )
+    capture = CalibratedCapture(
+        keyframe,
+        observed_at_ns,
+        observed_at_ns,
+        sensor_frame,
+        calibration.version,
+        IDENTITY_SE3,
+        None,
+        DeskewStatus.DESKEWED,
+        ray_return_semantics=RayReturnSemantics.FIRST_RETURN,
+    )
+    store.record_capture(capture, calibration)
 
 
 def snapshot_key(snapshot, component):
@@ -72,6 +117,86 @@ def repair_snapshot_id(value):
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+
+
+def test_provider_publication_is_immutable_and_keeps_query_semantics() -> None:
+    occupied = {(0, 0, 2)}
+    free = {(0, 0, 3)}
+    columns = {(0, 0): [0.0, 1.0]}
+    key = SnapshotKey("component", 1, 2, "a" * 64)
+    grid = IndexedGrid(
+        key,
+        "b" * 64,
+        100,
+        10,
+        occupied,
+        free,
+        columns,
+        0.2,
+        2,
+    )
+    view = IndexedMapView()
+    view.publish(grid)
+
+    occupied.clear()
+    free.clear()
+    columns[(0, 0)].clear()
+    columns[(1, 1)] = [4.0]
+
+    result = view.query(
+        QueryRequest(
+            key,
+            ((0.1, 0.1, 0.5),),
+            (0.1, 0.1, 0.1),
+            now_monotonic_ns=11,
+            max_snapshot_age_ns=2,
+        )
+    )
+    assert result.status is QueryStatus.OK
+    assert result.occupancy == (VoxelOccupancy.OCCUPIED,)
+    assert tuple(grid.columns) == ((0, 0),)
+
+    stale = view.query(
+        QueryRequest(
+            key,
+            ((0.1, 0.1, 0.5),),
+            (0.1, 0.1, 0.1),
+            source_stamp_ns=101,
+        )
+    )
+    assert stale.status is QueryStatus.STALE
+
+    expired = view.query(
+        QueryRequest(
+            key,
+            ((0.1, 0.1, 0.5),),
+            (0.1, 0.1, 0.1),
+            now_monotonic_ns=13,
+            max_snapshot_age_ns=2,
+        )
+    )
+    assert expired.status is QueryStatus.UNAVAILABLE
+
+
+def test_unqualified_sensor_origin_does_not_claim_free_space(tmp_path) -> None:
+    store = SubmapStore(tmp_path)
+    keyframe = KeyframeId("r0", SESSION, 0)
+    store.add_submap(
+        SubmapId.from_keyframe(keyframe),
+        [[2.1, 0.1, 0.5]],
+        keyframe_poses_local={keyframe: IDENTITY_SE3},
+        sensor_origins_local=((-0.1, 0.1, 0.5),),
+        resolution_m=0.2,
+        observed_at_ns=100,
+    )
+    snapshot = store.snapshot()
+    component = component_id_for_anchor(keyframe)
+    view = IndexedMapView()
+    key = view.refresh(snapshot, component, store.get_chunk)
+
+    result = view.query(QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1)))
+    assert result.status is QueryStatus.OK
+    assert result.occupancy == (VoxelOccupancy.UNKNOWN,)
 
 
 def test_chunks_load_once_and_pose_revision_rebuilds_once(tmp_path) -> None:
@@ -390,6 +515,9 @@ def test_vlp16_history_accepts_body_corridor_and_rejects_wall_and_unknown(
         T_component_base = np.eye(4)
         T_component_base[:3, 3] = base_component
         keyframe = KeyframeId("r0", SESSION, seq)
+        record_qualified_capture(
+            store, keyframe, sensor_origin_base, observed_at_ns=100 + seq
+        )
         store.add_submap(
             SubmapId.from_keyframe(keyframe),
             returns_base,
@@ -398,6 +526,7 @@ def test_vlp16_history_accepts_body_corridor_and_rejects_wall_and_unknown(
             resolution_m=0.1,
             observed_at_ns=100 + seq,
             initial_T_component_submap=T_component_base,
+            ray_evidence=QUALIFIED_RAYS,
         )
 
     snapshot = store.snapshot()

@@ -22,11 +22,51 @@ namespace swarmdeck_mapping
 namespace
 {
 constexpr double kTolerance = 1e-5;
+constexpr std::size_t kMaxSensorOrigins = 16;
 
 bool sameVersion(const SolutionVersion& lhs, const SolutionVersion& rhs)
 {
   return lhs.component_id == rhs.component_id && lhs.epoch == rhs.epoch &&
          lhs.revision == rhs.revision;
+}
+
+std::vector<PoseUpdate> sortedPoses(
+    const std::unordered_map<std::string, Matrix4>& values)
+{
+  std::vector<PoseUpdate> result;
+  result.reserve(values.size());
+  for (const auto& item : values) result.push_back({item.first, item.second});
+  std::sort(
+      result.begin(), result.end(), [](const PoseUpdate& lhs, const PoseUpdate& rhs) {
+        return lhs.external_id < rhs.external_id;
+      });
+  return result;
+}
+
+std::vector<NativeKeyframeSnapshot> sortedKeyframes(
+    const std::unordered_map<std::string, NativeKeyframeSnapshot>& values)
+{
+  std::vector<NativeKeyframeSnapshot> result;
+  result.reserve(values.size());
+  for (const auto& item : values) result.push_back(item.second);
+  std::sort(
+      result.begin(), result.end(),
+      [](const NativeKeyframeSnapshot& lhs, const NativeKeyframeSnapshot& rhs) {
+        return lhs.external_id < rhs.external_id;
+      });
+  return result;
+}
+
+NativeGeometrySnapshot makeSnapshot(
+    const std::shared_ptr<const mola::KeyframePointCloudMap>& map,
+    const SolutionVersion& version, const SnapshotIdentity& identity,
+    const std::string& metadata,
+    const std::unordered_map<std::string, Matrix4>& poses,
+    const std::unordered_map<std::string, NativeKeyframeSnapshot>& keyframes)
+{
+  return NativeGeometrySnapshot{
+      map, version, identity, metadata, sortedPoses(poses),
+      sortedKeyframes(keyframes)};
 }
 }  // namespace
 
@@ -95,6 +135,7 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
   auto next_map = std::make_shared<mola::KeyframePointCloudMap>();
   std::unordered_map<std::string, mola::KeyframePointCloudMap::KeyFrameID> next_ids;
   std::unordered_map<std::string, Matrix4> next_poses;
+  std::unordered_map<std::string, NativeKeyframeSnapshot> next_keyframes;
   std::unordered_set<std::string> seen;
   for (const auto& submap : submaps)
   {
@@ -108,6 +149,11 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
         throw std::invalid_argument("submap point contains a nonfinite value");
       cloud->insertPointFast(point.x, point.y, point.z);
     }
+    if (submap.sensor_origins_local.size() > kMaxSensorOrigins)
+      throw std::invalid_argument("submap sensor origin count exceeds limit");
+    for (const auto& origin : submap.sensor_origins_local)
+      if (!(std::isfinite(origin.x) && std::isfinite(origin.y) && std::isfinite(origin.z)))
+        throw std::invalid_argument("submap sensor origin contains a nonfinite value");
     auto observation = mrpt::obs::CObservationPointCloud::Create();
     observation->timestamp = mrpt::Clock::now();
     observation->pointcloud = cloud;
@@ -117,6 +163,11 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
     if (!internal_id) throw std::runtime_error("MOLA inserted a keyframe without assigning an ID");
     next_ids.emplace(submap.external_id, *internal_id);
     next_poses.emplace(submap.external_id, submap.T_component_submap);
+    next_keyframes.emplace(
+        submap.external_id,
+        NativeKeyframeSnapshot{
+            submap.external_id, *internal_id, cloud, submap.sensor_origins_local,
+            submap.observed_at_ns, submap.ray_evidence_qualified});
   }
 
   bool duplicate = false;
@@ -149,12 +200,18 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::replaceGeometrySnapshot(
       }
     }
     const auto& candidate = duplicate ? map_ : next_map;
-    if (before_commit) before_commit(candidate);
+    const auto& candidate_poses = duplicate ? poses_ : next_poses;
+    const auto& candidate_keyframes = duplicate ? keyframes_ : next_keyframes;
+    if (before_commit)
+      before_commit(makeSnapshot(
+          candidate, version, identity, canonical_metadata_json,
+          candidate_poses, candidate_keyframes));
     if (!duplicate)
     {
       map_ = next_map;
       ids_ = std::move(next_ids);
       poses_ = std::move(next_poses);
+      keyframes_ = std::move(next_keyframes);
     }
     version_ = version;
     identity_ = identity;
@@ -192,7 +249,9 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
         if (!identity.canonical_manifest_digest.empty() &&
             identity.canonical_manifest_digest != identity_.canonical_manifest_digest)
           throw std::invalid_argument("conflicting MOLA manifest identity");
-        if (before_commit) before_commit(map_);
+        if (before_commit)
+          before_commit(makeSnapshot(
+              map_, version, identity, canonical_metadata_json, poses_, keyframes_));
         identity_ = identity;
         metadata_json_ = canonical_metadata_json;
         return ApplyResult::Duplicate;
@@ -215,10 +274,15 @@ MolaSubmapBridge::ApplyResult MolaSubmapBridge::applyPoseSolution(
     // therefore remain coherent while all corrections land on the new copy.
     current = std::make_shared<mola::KeyframePointCloudMap>(*map_);
     for (const auto& [id, pose] : checked) current->setKeyframePose(id, pose);
-    if (before_commit) before_commit(current);
-    map_ = current;
+    auto candidate_poses = poses_;
     for (const auto& update : updates)
-      poses_[update.external_id] = update.T_component_submap;
+      candidate_poses[update.external_id] = update.T_component_submap;
+    if (before_commit)
+      before_commit(makeSnapshot(
+          current, version, identity, canonical_metadata_json, candidate_poses,
+          keyframes_));
+    map_ = current;
+    poses_ = std::move(candidate_poses);
     version_ = version;
     identity_ = identity;
     metadata_json_ = canonical_metadata_json;
@@ -238,14 +302,7 @@ std::optional<NativeGeometrySnapshot> MolaSubmapBridge::currentSnapshot() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!version_) return std::nullopt;
-  std::vector<PoseUpdate> poses;
-  poses.reserve(poses_.size());
-  for (const auto& item : poses_) poses.push_back({item.first, item.second});
-  std::sort(
-      poses.begin(), poses.end(), [](const PoseUpdate& lhs, const PoseUpdate& rhs) {
-        return lhs.external_id < rhs.external_id;
-      });
-  return NativeGeometrySnapshot{map_, *version_, identity_, metadata_json_, std::move(poses)};
+  return makeSnapshot(map_, *version_, identity_, metadata_json_, poses_, keyframes_);
 }
 
 void MolaSubmapBridge::publishSnapshot(const NativeGeometrySnapshot& snapshot)

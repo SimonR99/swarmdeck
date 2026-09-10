@@ -1,6 +1,7 @@
 #pragma once
 
 #include <swarmdeck_mapping/mola_submap_bridge.hpp>
+#include <swarmdeck_mapping/planner_map.hpp>
 #include <swarmdeck_mapping/snapshot_io.hpp>
 
 #include <cstddef>
@@ -58,6 +59,7 @@ struct RuntimeLimits
   std::size_t max_points_per_map{2'000'000};
   std::size_t max_resident_points{8'000'000};
   std::size_t max_output_bytes{1024ULL * 1024ULL * 1024ULL};
+  std::size_t max_planner_output_bytes{kMaxPlannerArtifactBytes};
 };
 
 struct ApplyRequest
@@ -73,6 +75,9 @@ struct ApplyRequest
   // Empty preserves the one-component projection contract. Nonempty selects
   // one component from a bounded whole-peer snapshot.
   std::string component_id;
+  // Empty preserves existing runtime cost. When set, a coherent SDMGRID1
+  // product must be installed before the native geometry can commit.
+  std::filesystem::path planner_output_path;
 };
 
 struct ApplyReport
@@ -86,6 +91,8 @@ struct ApplyReport
   std::size_t point_count{};
   std::size_t output_size_bytes{};
   std::string output_sha256;
+  std::size_t planner_output_size_bytes{};
+  std::string planner_output_sha256;
 };
 
 /**

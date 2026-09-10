@@ -140,6 +140,66 @@ try
           "shutdown did not retract the public layer");
   std::filesystem::rename(fixture / "chunks-held", fixture / "chunks");
   writeAtomic(snapshot_path, first);
+
+  // Without a pinned selector, a single-component onboard source can change
+  // component identity after a merge. Publish its new frame and reclaim the
+  // previous native context; repeated changes must not exhaust the map limit.
+  auto following = mola::ExecutableBase::Factory("swarmdeck_mola::SwarmDeckMapSource");
+  following->setModuleInstanceName("following_map");
+  mola::MinimalModuleContainer following_container({following});
+  following->initialize(mola::Yaml::FromText(json{
+      {"snapshot_file", snapshot_path.string()}, {"chunks_dir", (fixture / "chunks").string()},
+      {"poll_s", 0.05}, {"max_points", 1000}}.dump()));
+  auto followed = std::make_shared<std::vector<mola::MapSourceBase::MapUpdate>>();
+  std::dynamic_pointer_cast<mola::MapSourceBase>(following)->subscribeToMapUpdates(
+      [followed](const auto& update) { followed->push_back(update); });
+  following->spinOnce();
+  require(json::parse(*followed->back().map_metadata).at("available"),
+          "unpinned single-component source did not start");
+
+  // An unpinned multi-component source is ambiguous. It must retract the
+  // public layer without releasing the previously committed context; restoring
+  // the valid source therefore recovers while chunks are unavailable.
+  auto ambiguous = first;
+  auto ambiguous_other = ambiguous["manifests"][0];
+  ambiguous_other["graph_revision"]["component_id"] = "component:ambiguous";
+  for (auto& submap : ambiguous_other["submaps"])
+    submap["pose_revision"] = ambiguous_other["graph_revision"];
+  ambiguous["manifests"].push_back(ambiguous_other);
+  ambiguous["snapshot_id"] = std::string(64, '7');
+  writeAtomic(snapshot_path, ambiguous);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  following->spinOnce();
+  require(!json::parse(*followed->back().map_metadata).at("available").get<bool>() &&
+              std::dynamic_pointer_cast<const mola::KeyframePointCloudMap>(
+                  followed->back().map)->point_count() == 0,
+          "ambiguous component selection left geometry advertised");
+  std::filesystem::rename(fixture / "chunks", fixture / "chunks-following-held");
+  writeAtomic(snapshot_path, first);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  following->spinOnce();
+  require(json::parse(*followed->back().map_metadata).at("available"),
+          "valid component did not recover from retained resident geometry");
+  std::filesystem::rename(fixture / "chunks-following-held", fixture / "chunks");
+
+  for (int index = 0; index < 3; ++index)
+  {
+    auto merged = first;
+    merged["snapshot_id"] = std::string(64, 'd' + index);
+    auto& next = merged["manifests"][0];
+    next["graph_revision"]["component_id"] = "component:merged" + std::to_string(index);
+    next["frame_id"] = "component_merged" + std::to_string(index);
+    for (auto& submap : next["submaps"])
+      submap["pose_revision"] = next["graph_revision"];
+    writeAtomic(snapshot_path, merged);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    following->spinOnce();
+    require(json::parse(*followed->back().map_metadata).at("available") &&
+                followed->back().reference_frame == next["frame_id"],
+            "automatic component reassignment failed");
+  }
+  following->onQuit();
+  writeAtomic(snapshot_path, first);
   std::cout << "PASS framework insertion, geometry reuse, immutable correction, invalidation and recovery\n";
   return 0;
 }

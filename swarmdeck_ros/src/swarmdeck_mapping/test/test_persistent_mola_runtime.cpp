@@ -99,7 +99,11 @@ std::string writeSnapshot(
       {"bounds", json::array({json::array({0, 0, 0}), json::array({1, 1, 1})})},
       {"resolution_m", 0.2},
       {"observed_at_ns", 100},
-      {"sensor_origins", json::array({json::array({0, 0, 0})})}};
+      {"sensor_origins", json::array({json::array({0, 0, 0})})},
+      {"ray_evidence",
+       {{"return_semantics", "first_return"},
+        {"deskew", "deskewed"},
+        {"origin_association", "single_capture"}}}};
   const json manifest{
       {"map_id", "onboard"},
       {"layer_id", "persistent_geometry"},
@@ -191,11 +195,39 @@ int main()
     swarmdeck_mapping::PersistentMolaRuntime runtime;
 
     const auto source0 = writeSnapshot(root / "snapshot0.json", chunk0, 0, 0, 'a');
+    (void)writeSnapshot(root / "partial-evidence.json", chunk1, 0, 0, '8');
+    json partial_evidence;
+    std::ifstream(root / "partial-evidence.json") >> partial_evidence;
+    partial_evidence["manifests"][0]["submaps"][0]["ray_evidence"] =
+        {{"return_semantics", "first_return"}};
+    {
+      std::ofstream output(root / "partial-evidence.json", std::ios::binary);
+      output << partial_evidence.dump();
+    }
+    const auto partial_sha = swarmdeck_mapping::boundedFileSha256(
+        root / "partial-evidence.json");
+    const auto partial = swarmdeck_mapping::parseComponentSnapshot(
+        root / "partial-evidence.json", partial_sha);
+    require(!partial.submaps.front().ray_evidence_qualified,
+            "partial ray evidence was treated as qualified");
+    swarmdeck_mapping::MolaSubmapBridge partial_bridge;
+    partial_bridge.replaceGeometrySnapshot(
+        swarmdeck_mapping::loadGeometry(partial, root / "chunks"),
+        partial.graph_version, partial.canonical_metadata_json, partial.identity);
+    const auto partial_grid = swarmdeck_mapping::buildNativePlannerGrid(
+        *partial_bridge.currentSnapshot());
+    require(!partial_grid->occupied.empty() && partial_grid->free.empty(),
+            "partial ray evidence did not remain occupied-only");
     const auto first = runtime.apply(
         {"request-0", "peer/component", swarmdeck_mapping::ApplyMode::Replace,
-         root / "snapshot0.json", source0, root / "chunks", root / "map0.metricmap"});
+         root / "snapshot0.json", source0, root / "chunks", root / "map0.metricmap",
+         {}, root / "map0.sdmgrid"});
     require(first.result == "replaced", "initial geometry was not replaced");
     require(first.point_count == 1, "initial point count is wrong");
+    require(first.planner_output_size_bytes > 0 &&
+                first.planner_output_sha256.size() == 64 &&
+                std::filesystem::exists(root / "map0.sdmgrid"),
+            "initial planner product was not installed");
     const auto held = first.snapshot.geometry_map;
     auto provider = runtime.provider("peer/component");
     require(static_cast<bool>(provider), "runtime exposes no MOLA provider");
@@ -217,9 +249,12 @@ int main()
     const auto source1 = writeSnapshot(root / "snapshot1.json", chunk0, 1, 5, 'b');
     const auto corrected = runtime.apply(
         {"request-1", "peer/component", swarmdeck_mapping::ApplyMode::PoseOnly,
-         root / "snapshot1.json", source1, root / "chunks", root / "map1.metricmap"});
+         root / "snapshot1.json", source1, root / "chunks", root / "map1.metricmap",
+         {}, root / "map1.sdmgrid"});
     require(corrected.result == "corrected", "pose-only correction was not applied");
     require(corrected.point_count == 1, "pose correction changed geometry count");
+    require(corrected.planner_output_size_bytes > 0,
+            "pose-only correction did not export resident planner geometry");
     require(
         corrected.snapshot.geometry_map->keyframePoses().at(0).x() == 5,
         "corrected pose is absent");

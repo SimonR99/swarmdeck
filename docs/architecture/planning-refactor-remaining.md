@@ -20,19 +20,15 @@ contains measured results and known failures.
 
 ## Current work split
 
-- **Sol — native MOLA:** shared persistent runtime, immutable native map snapshots,
-  pose-only geometry reuse, transaction boundaries and native regression tests.
-- **Sol — worker orchestration:** bounded process supervision, unchanged-product
-  reuse, mission filtering, coherent publication and process-boundary tests.
-- **Luna — deployment and acceptance:** image/profile wiring and reproducible
-  no-motion native acceptance fixtures.
-- **Lead review/integration:** MOLA framework module, interface review, independent
-  tests and isolated workstation validation. Agent changes are reviewed before
-  they are committed or deployed.
-
-The first milestone does not by itself replace MGG's terrain map or integrate
-every odometry frontend. Those are separate deliverables above, with explicit
-acceptance tests rather than implied completion from a successful native build.
+- **Sol — native MOLA:** resident MRPT point buffers, corrected planner-grid
+  construction, bounded binary export and native regression tests.
+- **Sol — planner provider:** strict product loading, immutable grid publication,
+  shared terrain queries and provider selection.
+- **Luna — acceptance:** captured-point fixtures across the native/Python
+  boundary, image integration and copied-map replay.
+- **Lead review/integration:** provenance contract review, atomic worker product
+  publication, framework component lifecycle, deployment wiring and independent
+  workstation tests. Agent changes are reviewed before inclusion.
 
 ## Validation and rollout
 
@@ -59,8 +55,23 @@ The complete image also passes actual MOLA launcher scheduling and worker
 acceptance with unavailable chunk payloads. The persistent worker is enabled in
 the isolated planning deployment and its four live indexes are coherent.
 
-The next implementation milestone is priority 2: a MOLA-backed planner map
-provider with explicit observed-free, occupied and unknown semantics. Automatic
-framework component reassignment on a verified merge should be completed at
-that boundary. Existing Bistro startup, terrain/Home and inter-robot closure
-failures remain acceptance work, not reasons to weaken map admission guards.
+## Second milestone implemented; motion qualification remains
+
+Native MOLA now produces occupied/free voxels and surface samples for a selectable
+planner provider. The provider reuses the existing terrain query implementation;
+metric maps and planner grids publish as one coherent worker generation. The
+framework's automatic selection follows a changed sole component and rejects
+ambiguous input. Corrected origins, disappearing walls, floor/step/drop/stacked
+surfaces and artifact failures are covered across the native/Python boundary.
+
+The deployment defaults remain the existing indexed provider. Bistro captures
+currently lack explicit first-return and deskew provenance, so both providers
+conservatively preserve unknown space instead of inferring free cells from a
+sensor origin alone. Priority 3 capture-provider qualification is therefore the
+next dependency for enabling MOLA in motion planning. MGG's exploration OctoMap
+and graph/grid/controller qualification also remain outstanding. See the
+[runtime guide](../operations/mola-runtime.md) for the provider settings and
+measured validation results.
+
+Existing Bistro startup, terrain/Home and inter-robot closure failures remain
+acceptance work, not reasons to weaken map admission guards.

@@ -177,6 +177,52 @@ class DeskewStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
+class RayReturnSemantics(str, Enum):
+    UNKNOWN = "unknown"
+    FIRST_RETURN = "first_return"
+
+
+class RayOriginAssociation(str, Enum):
+    UNKNOWN = "unknown"
+    SINGLE_CAPTURE = "single_capture"
+
+
+@dataclass(frozen=True)
+class RayEvidence:
+    """Compact certificate for endpoint-to-origin free-space evidence.
+
+    A qualified value means every endpoint in the submap came from the one
+    associated capture and its sole stored sensor origin. Missing or partial
+    evidence remains occupied-endpoint-only.
+    """
+
+    return_semantics: RayReturnSemantics = RayReturnSemantics.UNKNOWN
+    deskew: DeskewStatus = DeskewStatus.UNKNOWN
+    origin_association: RayOriginAssociation = RayOriginAssociation.UNKNOWN
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(
+                self, "return_semantics", RayReturnSemantics(self.return_semantics)
+            )
+            object.__setattr__(self, "deskew", DeskewStatus(self.deskew))
+            object.__setattr__(
+                self,
+                "origin_association",
+                RayOriginAssociation(self.origin_association),
+            )
+        except ValueError as exc:
+            raise ValueError("invalid ray evidence") from exc
+
+    @property
+    def certifies_free_space(self) -> bool:
+        return (
+            self.return_semantics is RayReturnSemantics.FIRST_RETURN
+            and self.deskew is DeskewStatus.DESKEWED
+            and self.origin_association is RayOriginAssociation.SINGLE_CAPTURE
+        )
+
+
 @dataclass(frozen=True)
 class PayloadRef:
     sha256: str
@@ -246,6 +292,7 @@ class CalibratedCapture:
     payloads: tuple[PayloadRef, ...] = ()
     rgb_timestamp_ns: int | None = None
     depth_timestamp_ns: int | None = None
+    ray_return_semantics: RayReturnSemantics = RayReturnSemantics.UNKNOWN
 
     def __post_init__(self) -> None:
         if (
@@ -272,8 +319,13 @@ class CalibratedCapture:
             object.__setattr__(self, "covariance", validate_covariance(self.covariance))
         try:
             object.__setattr__(self, "deskew_status", DeskewStatus(self.deskew_status))
+            object.__setattr__(
+                self,
+                "ray_return_semantics",
+                RayReturnSemantics(self.ray_return_semantics),
+            )
         except ValueError as exc:
-            raise ValueError(f"invalid deskew status: {self.deskew_status!r}") from exc
+            raise ValueError("invalid capture ray or deskew semantics") from exc
         object.__setattr__(self, "payloads", tuple(self.payloads))
         for name, value in (
             ("rgb_timestamp_ns", self.rgb_timestamp_ns),
@@ -398,6 +450,7 @@ class SubmapRevision:
     replaces_geometry_revision: int | None = None
     observed_at_ns: int = 0
     sensor_origins: tuple[tuple[float, float, float], ...] = ()
+    ray_evidence: RayEvidence = RayEvidence()
 
     def __post_init__(self) -> None:
         if (
@@ -441,6 +494,16 @@ class SubmapRevision:
         ):
             raise ValueError("sensor_origins must contain finite XYZ triples")
         object.__setattr__(self, "sensor_origins", origins)
+        evidence = self.ray_evidence
+        if isinstance(evidence, Mapping):
+            evidence = RayEvidence(**evidence)
+        if not isinstance(evidence, RayEvidence):
+            raise ValueError("ray_evidence must be RayEvidence")
+        if evidence.certifies_free_space and len(origins) != 1:
+            raise ValueError(
+                "qualified ray evidence requires exactly one sensor origin"
+            )
+        object.__setattr__(self, "ray_evidence", evidence)
 
 
 @dataclass(frozen=True)

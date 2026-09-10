@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""ROS 2 batch-query adapter for :mod:`autonomy.indexed_mapping`.
+"""ROS 2 batch-query adapter for planner-ready immutable map grids.
 
-The server watches ``/maps/<mission>/<robot>/snapshot.json`` off the executor
-thread. Service callbacks only read an immutable published index, so MGG can
-call it from a reentrant callback group without a callback cycle.
+The selected provider is refreshed off the executor thread. Service callbacks
+only read an immutable published index, so MGG can call it from a reentrant
+callback group without a callback cycle.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import threading
@@ -25,34 +24,7 @@ from autonomy.indexed_mapping import (
     SnapshotDirectorySource,
     SnapshotKey,
 )
-
-MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
-
-
-def _component_ids(snapshot_path: Path) -> tuple[str, ...]:
-    size = snapshot_path.stat().st_size
-    if size <= 0 or size > MAX_SNAPSHOT_BYTES:
-        raise ValueError("snapshot file has invalid size")
-
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"nonfinite JSON constant: {value}")
-
-    value = json.loads(snapshot_path.read_bytes(), parse_constant=reject_constant)
-    manifests = value.get("manifests") if isinstance(value, dict) else None
-    if not isinstance(manifests, list):
-        raise ValueError("snapshot manifests are missing")
-    result: list[str] = []
-    for manifest in manifests:
-        revision = (
-            manifest.get("graph_revision") if isinstance(manifest, dict) else None
-        )
-        component = revision.get("component_id") if isinstance(revision, dict) else None
-        if not isinstance(component, str) or not component:
-            raise ValueError("manifest component_id is invalid")
-        result.append(component)
-    if len(set(result)) != len(result):
-        raise ValueError("snapshot repeats a component_id")
-    return tuple(result)
+from autonomy.map_provider import MapProvider, MapProviderFactory
 
 
 def _stamp_ns(stamp: object) -> int:
@@ -75,6 +47,16 @@ def _unavailable(detail: str) -> QueryResult:
     return QueryResult(QueryStatus.UNAVAILABLE, None, detail=detail)
 
 
+def provider_factory(name: str) -> MapProviderFactory:
+    if name == "indexed":
+        return SnapshotDirectorySource
+    if name == "mola":
+        from autonomy.mola_mapping import MolaDirectorySource
+
+        return MolaDirectorySource
+    raise ValueError(f"unknown map provider: {name}")
+
+
 class IndexRegistry:
     """Filesystem monitor independent of ROS, with one view per component."""
 
@@ -86,6 +68,7 @@ class IndexRegistry:
         snapshot_age_s: float,
         poll_s: float,
         clock=time.monotonic,
+        provider_factory: MapProviderFactory = SnapshotDirectorySource,
     ):
         try:
             mission = str(uuid.UUID(mission_id))
@@ -98,15 +81,15 @@ class IndexRegistry:
         self.max_snapshot_age_ns = int(snapshot_age_s * 1e9)
         self.poll_s = poll_s
         self._clock = clock
+        self._provider_factory = provider_factory
         self._lock = threading.RLock()
         self._views: dict[tuple[str, str], IndexedMapView] = {}
         self._roots: dict[tuple[str, str], Path] = {}
+        self._providers: dict[Path, MapProvider] = {}
         # A failed source is retried exponentially, while a changed snapshot
         # identity gets an immediate attempt. Keep this keyed by root rather
         # than component so one bad publication cannot spin all its views.
-        self._failed_sources: dict[
-            Path, tuple[tuple[int, int, int, int], int, float]
-        ] = {}
+        self._failed_sources: dict[Path, tuple[tuple[int, ...], int, float]] = {}
         self._robots: set[str] = set()
         self._ambiguous: set[str] = set()
         self._stop = threading.Event()
@@ -136,11 +119,6 @@ class IndexRegistry:
             return _unavailable("component index is unavailable")
         return view.query(request)
 
-    @staticmethod
-    def _snapshot_signature(path: Path) -> tuple[int, int, int, int]:
-        stat = path.stat()
-        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-
     def _invalidate_root(self, root: Path, detail: str) -> None:
         with self._lock:
             affected = [
@@ -152,7 +130,7 @@ class IndexRegistry:
             view.invalidate(detail)
 
     def _record_failure(
-        self, root: Path, signature: tuple[int, int, int, int], now: float
+        self, root: Path, signature: tuple[int, ...], now: float
     ) -> None:
         previous = self._failed_sources.get(root)
         attempts = previous[1] + 1 if previous and previous[0] == signature else 1
@@ -164,7 +142,7 @@ class IndexRegistry:
         self._failed_sources[root] = (signature, attempts, now + delay)
 
     def _retry_allowed(
-        self, root: Path, signature: tuple[int, int, int, int], now: float
+        self, root: Path, signature: tuple[int, ...], now: float
     ) -> bool:
         previous = self._failed_sources.get(root)
         if previous is None:
@@ -177,20 +155,26 @@ class IndexRegistry:
         return now >= previous[2]
 
     def refresh_once(self) -> None:
-        paths = tuple(
-            sorted((self.maps_root / self.mission_id).glob("*/snapshot.json"))
-        )
+        mission_root = self.maps_root / self.mission_id
+        roots = tuple(sorted(path for path in mission_root.glob("*") if path.is_dir()))
+        sources: list[tuple[Path, MapProvider]] = []
+        for root in roots:
+            source = self._providers.get(root)
+            if source is None:
+                source = self._provider_factory(root)
+                self._providers[root] = source
+            if source.publication_path.is_file():
+                sources.append((root, source))
         robots_to_roots: dict[str, set[Path]] = {}
-        discovered: list[tuple[str, str, Path, tuple[int, int, int, int]]] = []
+        discovered: list[tuple[str, str, Path, MapProvider, tuple[int, ...]]] = []
         preserve_roots: set[Path] = set()
         validated_roots: set[Path] = set()
         now = self._clock()
-        for path in paths:
-            robot = path.parent.name
-            root = path.parent
+        for root, source in sources:
+            robot = root.name
             robots_to_roots.setdefault(robot, set()).add(root)
             try:
-                signature = self._snapshot_signature(path)
+                signature = source.signature()
             except OSError as exc:
                 self._invalidate_root(root, f"snapshot validation failed: {exc}")
                 continue
@@ -198,15 +182,15 @@ class IndexRegistry:
                 preserve_roots.add(root)
                 continue
             try:
-                components = _component_ids(path)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                self._invalidate_root(root, f"snapshot validation failed: {exc}")
+                components = source.component_ids()
+            except (OSError, ValueError) as exc:
+                self._invalidate_root(root, f"map publication validation failed: {exc}")
                 self._record_failure(root, signature, now)
                 preserve_roots.add(root)
                 continue
             validated_roots.add(root)
             discovered.extend(
-                (robot, component, root, signature) for component in components
+                (robot, component, root, source, signature) for component in components
             )
         with self._lock:
             self._robots = set(robots_to_roots)
@@ -214,19 +198,21 @@ class IndexRegistry:
                 robot for robot, roots in robots_to_roots.items() if len(roots) != 1
             }
         failed_roots: set[Path] = set()
-        for robot, component, root, signature in discovered:
+        for robot, component, root, source, signature in discovered:
             if root in failed_roots:
                 continue
             if robot in self._ambiguous:
                 continue
             identity = (robot, component)
             with self._lock:
-                view = self._views.setdefault(identity, IndexedMapView())
+                view = self._views.get(identity)
+                if view is None:
+                    view = IndexedMapView()
+                    self._views[identity] = view
                 self._roots[identity] = root
-            source = SnapshotDirectorySource(root)
             try:
                 source.refresh(view, component)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError) as exc:
                 # IndexedMapView invalidates its old publication on every
                 # extraction, integrity, or build failure.
                 # Snapshot parsing and chunk I/O can fail before the view is
@@ -235,7 +221,7 @@ class IndexRegistry:
                 # source is in the retry backoff window.
                 self._invalidate_root(root, f"index refresh failed: {exc}")
                 try:
-                    latest_signature = self._snapshot_signature(source.snapshot_path)
+                    latest_signature = source.signature()
                 except OSError:
                     latest_signature = signature
                 if latest_signature == signature:
@@ -255,7 +241,7 @@ class IndexRegistry:
         successful_roots = validated_roots & nonambiguous_roots - failed_roots
         for root in successful_roots:
             self._failed_sources.pop(root, None)
-        current = {(robot, component) for robot, component, _, _ in discovered}
+        current = {(robot, component) for robot, component, _, _, _ in discovered}
         with self._lock:
             current.update(
                 identity
@@ -268,17 +254,18 @@ class IndexRegistry:
                 if identity not in current
             ]
             removed_identities = [
-                identity
-                for identity in self._views
-                if identity not in current
+                identity for identity in self._views if identity not in current
             ]
             for identity in removed_identities:
                 self._views.pop(identity, None)
                 self._roots.pop(identity, None)
-            active_roots = {path.parent for path in paths}
+            active_roots = {root for root, _ in sources}
             for root in tuple(self._failed_sources):
                 if root not in active_roots:
                     self._failed_sources.pop(root, None)
+            for root in tuple(self._providers):
+                if root not in roots:
+                    self._providers.pop(root, None)
         for view in removed:
             view.invalidate("component is absent from the current coherent snapshot")
 
@@ -294,6 +281,12 @@ def main() -> None:
     parser.add_argument("--mission-id", default=os.environ.get("SWARMDECK_MISSION_ID"))
     parser.add_argument("--poll-s", type=float, default=0.5)
     parser.add_argument("--max-snapshot-age-s", type=float, default=3.0)
+    parser.add_argument(
+        "--map-provider",
+        choices=("indexed", "mola"),
+        default=os.environ.get("SWARMDECK_PLANNER_MAP_PROVIDER", "indexed"),
+        help="planner grid provider; MOLA is explicit opt-in and never falls back",
+    )
     args = parser.parse_args()
     if not args.mission_id:
         parser.error("--mission-id or SWARMDECK_MISSION_ID is required")
@@ -306,11 +299,13 @@ def main() -> None:
     from rclpy.executors import MultiThreadedExecutor
     from rclpy.node import Node
 
+    selected_provider = provider_factory(args.map_provider)
     registry = IndexRegistry(
         args.maps_root,
         args.mission_id,
         snapshot_age_s=args.max_snapshot_age_s,
         poll_s=args.poll_s,
+        provider_factory=selected_provider,
     )
 
     class QueryNode(Node):

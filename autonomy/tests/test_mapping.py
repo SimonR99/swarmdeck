@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 import uuid
 
 import numpy as np
@@ -15,6 +17,9 @@ from autonomy.contracts import (
     DeskewStatus,
     GraphSolution,
     KeyframeId,
+    RayEvidence,
+    RayOriginAssociation,
+    RayReturnSemantics,
     SubmapId,
     component_id_for_anchor,
 )
@@ -48,6 +53,8 @@ def capture(
     end_ns: int = 100,
     T_local_base=IDENTITY_SE3,
     covariance=ZERO_COVARIANCE,
+    deskew_status=DeskewStatus.DESKEWED,
+    ray_return_semantics=RayReturnSemantics.UNKNOWN,
 ):
     return CalibratedCapture(
         KeyframeId("r1", SESSION, seq),
@@ -57,7 +64,8 @@ def capture(
         "lidar-v1",
         T_local_base,
         covariance,
-        DeskewStatus.DESKEWED,
+        deskew_status,
+        ray_return_semantics=ray_return_semantics,
     )
 
 
@@ -270,3 +278,135 @@ def test_multiple_unassociated_origins_never_infer_free_space(tmp_path) -> None:
     component = component_id_for_anchor(cap.keyframe_id)
     assert m.occupancy_query(component, (1, 0, 0)).state is OccupancyState.UNKNOWN
     assert m.occupancy_query(component, (2, 0, 0)).state is OccupancyState.OCCUPIED
+
+
+def test_only_explicit_deskewed_first_returns_certify_free_rays(tmp_path) -> None:
+    store_path = tmp_path / "qualified"
+    m = CorrectionAwareMapper(SubmapStore(store_path), resolution_m=0.1)
+    cap = capture(ray_return_semantics=RayReturnSemantics.FIRST_RETURN)
+    m.add_capture(cap, calibration(), [[2, 0, 0]])
+    submap = m.snapshot().manifests[0].submaps[0]
+    assert submap.ray_evidence == RayEvidence(
+        RayReturnSemantics.FIRST_RETURN,
+        DeskewStatus.DESKEWED,
+        RayOriginAssociation.SINGLE_CAPTURE,
+    )
+    encoded = m.snapshot_dict()["manifests"][0]["submaps"][0]["ray_evidence"]
+    assert encoded == {
+        "return_semantics": "first_return",
+        "deskew": "deskewed",
+        "origin_association": "single_capture",
+    }
+    component = component_id_for_anchor(cap.keyframe_id)
+    assert m.occupancy_query(component, (1, 0, 0)).state is OccupancyState.FREE
+    m.store.close()
+
+    reopened = CorrectionAwareMapper(SubmapStore(store_path), resolution_m=0.1)
+    assert reopened.snapshot().manifests[0].submaps[0].ray_evidence.certifies_free_space
+    assert reopened.occupancy_query(component, (1, 0, 0)).state is OccupancyState.FREE
+    reopened.store.close()
+
+
+@pytest.mark.parametrize(
+    ("deskew_status", "return_semantics"),
+    [
+        (DeskewStatus.UNKNOWN, RayReturnSemantics.FIRST_RETURN),
+        (DeskewStatus.DESKEWED, RayReturnSemantics.UNKNOWN),
+    ],
+)
+def test_incomplete_capture_provenance_stays_unknown(
+    tmp_path, deskew_status, return_semantics
+) -> None:
+    m = mapper(tmp_path)
+    cap = capture(deskew_status=deskew_status, ray_return_semantics=return_semantics)
+    m.add_capture(cap, calibration(), [[2, 0, 0]])
+    submap = m.snapshot().manifests[0].submaps[0]
+    assert submap.ray_evidence == RayEvidence()
+    component = component_id_for_anchor(cap.keyframe_id)
+    assert m.occupancy_query(component, (1, 0, 0)).state is OccupancyState.UNKNOWN
+    assert m.occupancy_query(component, (2, 0, 0)).state is OccupancyState.OCCUPIED
+
+
+def test_generic_replacement_drops_qualified_ray_evidence(tmp_path) -> None:
+    m = mapper(tmp_path)
+    cap = capture(ray_return_semantics=RayReturnSemantics.FIRST_RETURN)
+    m.add_capture(cap, calibration(), [[2, 0, 0]])
+    component = component_id_for_anchor(cap.keyframe_id)
+    assert m.occupancy_query(component, (1, 0, 0)).state is OccupancyState.FREE
+
+    m.replace_submap_geometry(
+        SubmapId.from_keyframe(cap.keyframe_id),
+        [[3, 0, 0]],
+        keyframe_poses_local={cap.keyframe_id: IDENTITY_SE3},
+        sensor_origins_local=((0, 0, 0),),
+        observed_at_ns=cap.capture_end_ns,
+    )
+    assert m.snapshot().manifests[0].submaps[0].ray_evidence == RayEvidence()
+    assert m.occupancy_query(component, (1, 0, 0)).state is OccupancyState.UNKNOWN
+    assert m.occupancy_query(component, (3, 0, 0)).state is OccupancyState.OCCUPIED
+
+
+def test_qualified_origin_and_timestamp_must_match_durable_capture(tmp_path) -> None:
+    m = mapper(tmp_path)
+    cap = capture(ray_return_semantics=RayReturnSemantics.FIRST_RETURN)
+    m.store.record_capture(cap, calibration())
+    qualified = RayEvidence(
+        RayReturnSemantics.FIRST_RETURN,
+        DeskewStatus.DESKEWED,
+        RayOriginAssociation.SINGLE_CAPTURE,
+    )
+    with pytest.raises(ValueError, match="origin"):
+        m.store.add_submap(
+            SubmapId.from_keyframe(cap.keyframe_id),
+            [[2, 0, 0]],
+            keyframe_poses_local={cap.keyframe_id: IDENTITY_SE3},
+            sensor_origins_local=((0.1, 0, 0),),
+            resolution_m=0.1,
+            observed_at_ns=cap.capture_end_ns,
+            ray_evidence=qualified,
+        )
+    with pytest.raises(ValueError, match="timestamp"):
+        m.store.add_submap(
+            SubmapId.from_keyframe(cap.keyframe_id),
+            [[2, 0, 0]],
+            keyframe_poses_local={cap.keyframe_id: IDENTITY_SE3},
+            sensor_origins_local=((0, 0, 0),),
+            resolution_m=0.1,
+            observed_at_ns=cap.capture_end_ns + 1,
+            ray_evidence=qualified,
+        )
+    assert not m.snapshot().manifests
+    assert not list((tmp_path / "chunks").iterdir())
+
+
+def test_legacy_unknown_ray_rows_replay_after_restart(tmp_path) -> None:
+    store_path = tmp_path / "legacy"
+    m = CorrectionAwareMapper(SubmapStore(store_path))
+    cap = capture()
+    cloud = [[2, 0, 0]]
+    assert m.add_capture(cap, calibration(), cloud) == 0
+    m.store.close()
+
+    database = sqlite3.connect(store_path / "mapping.sqlite3")
+    capture_json, calibration_json = database.execute(
+        "SELECT capture_json, calibration_json FROM captures"
+    ).fetchone()
+    capture_value = json.loads(capture_json)
+    capture_value.pop("ray_return_semantics")
+    old_capture_json = json.dumps(capture_value, sort_keys=True, separators=(",", ":"))
+    old_digest = hashlib.sha256(
+        (old_capture_json + "\n" + calibration_json).encode()
+    ).hexdigest()
+    database.execute(
+        "UPDATE captures SET digest=?, capture_json=?", (old_digest, old_capture_json)
+    )
+    database.execute("UPDATE submap_revisions SET ray_evidence_json=NULL")
+    database.commit()
+    database.close()
+
+    reopened = CorrectionAwareMapper(SubmapStore(store_path))
+    assert reopened.snapshot().manifests[0].submaps[0].ray_evidence == RayEvidence()
+    assert reopened.add_capture(cap, calibration(), cloud) == 0
+    record = reopened.store.get_capture(cap.keyframe_id)
+    assert record["capture"]["ray_return_semantics"] == "unknown"
+    reopened.store.close()

@@ -14,6 +14,7 @@ find_package(OpenSSL REQUIRED)
 add_library(${PROJECT_NAME} SHARED
   src/chunk_io.cpp
   src/mola_submap_bridge.cpp
+  src/planner_map.cpp
   src/persistent_mola_runtime.cpp
   src/snapshot_io.cpp)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
@@ -68,5 +69,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_persistent_mola_runtime PRIVATE ${PROJECT_NAME} nlohmann_json::nlohmann_json)
   add_test(NAME persistent_mola_runtime_guards COMMAND test_persistent_mola_runtime)
   set_tests_properties(persistent_mola_runtime_guards PROPERTIES TIMEOUT 30)
+  add_executable(test_planner_map test/test_planner_map.cpp)
+  target_compile_features(test_planner_map PRIVATE cxx_std_17)
+  target_link_libraries(test_planner_map PRIVATE ${PROJECT_NAME} nlohmann_json::nlohmann_json)
+  add_test(NAME native_planner_map_guards COMMAND test_planner_map)
+  set_tests_properties(native_planner_map_guards PROPERTIES TIMEOUT 30)
 endif()
 ament_package()

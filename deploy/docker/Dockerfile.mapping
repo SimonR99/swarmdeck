@@ -41,16 +41,22 @@ WORKDIR /mapping_ws
 COPY swarmdeck_ros/src/swarmdeck_mapping src/swarmdeck_mapping
 COPY swarmdeck_ros/src/swarmdeck_mola src/swarmdeck_mola
 COPY autonomy /opt/swarmdeck/autonomy
+# Keep the worker's package import path available to deployment fixtures and
+# service wrappers. The executable copies below remain the installed CLI entry
+# points used by the runtime image.
+COPY deploy/autonomy/mola_worker.py /opt/swarmdeck/deploy/autonomy/mola_worker.py
+COPY deploy/autonomy/mola_process.py /opt/swarmdeck/deploy/autonomy/mola_process.py
 COPY deploy/autonomy/mola_worker.py /usr/local/bin/swarmdeck-mola-worker
 COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py
 COPY deploy/autonomy/indexed_map_server.py /opt/swarmdeck/deploy/autonomy/indexed_map_server.py
 COPY deploy/autonomy/run_indexed_map_server.sh /usr/local/bin/swarmdeck-indexed-map-server
 COPY tests/deployment/mola_jsonl_smoke.py /usr/local/bin/mola-jsonl-smoke.py
 COPY tests/deployment/mola_launcher_smoke.py /usr/local/bin/mola-launcher-smoke.py
+COPY tests/deployment/mola_planner_acceptance.py /usr/local/bin/mola-planner-acceptance.py
 
 RUN chmod 0755 /usr/local/bin/swarmdeck-mola-worker /usr/local/bin/mola_process.py \
     /usr/local/bin/swarmdeck-indexed-map-server /usr/local/bin/mola-jsonl-smoke.py \
-    /usr/local/bin/mola-launcher-smoke.py
+    /usr/local/bin/mola-launcher-smoke.py /usr/local/bin/mola-planner-acceptance.py
 
 RUN source /opt/ros/jazzy/setup.bash \
     && colcon build --packages-select swarmdeck_mapping swarmdeck_mola \
@@ -93,5 +99,20 @@ RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py
          --fixture /tmp/launcher-fixture \
          --config /mapping_ws/install/swarmdeck_mola/share/swarmdeck_mola/config/external-map.yaml \
          --timeout 10
+
+# Exercise the native SDMGRID1 planner artifact through the deployment worker
+# and MOLA directory provider. This is a bounded, no-ROS, no-motion fixture.
+RUN source /opt/ros/jazzy/setup.bash \
+    && timeout 45s env PYTHONPATH=/opt/swarmdeck \
+         python3 /usr/local/bin/mola-planner-acceptance.py \
+         --binary /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
+
+# Verify the generated MGG service contract against the actual query server.
+# Both ROS processes stay on loopback in a separate domain and send no motion.
+COPY tests/deployment/mola_ros_query_smoke.py /usr/local/bin/mola-ros-query-smoke.py
+RUN --network=none source /opt/ros/jazzy/setup.bash \
+    && source /opt/swarmdeck-mgg-msgs/local_setup.bash \
+    && timeout 45s env PYTHONPATH=/opt/swarmdeck:${PYTHONPATH} \
+         python3 /usr/local/bin/mola-ros-query-smoke.py
 
 CMD ["bash"]

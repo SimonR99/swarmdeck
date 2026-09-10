@@ -47,19 +47,31 @@ are bounded to 4 MiB manifests and 8 MiB per geometry chunk.
 `deploy/autonomy/mola_worker.py` is the continuous onboard consumer. It watches
 `/maps/<mission>/<robot>/snapshot.json`, invokes the importer once per component,
 and atomically publishes `/maps/<mission>/<robot>/mola/index.json` only after all
-generation-specific metric maps finish. The index contains the source snapshot
-ID/hash and, for each component, its epoch, graph revision, geometry revision,
-relative artifact path, byte size, and SHA-256. It coalesces unchanged inputs,
-uses a bounded subprocess timeout, retracts an index if the input races, and
-keeps the prior index on failure. It never publishes TF or runs optimization.
+generation-specific products finish. In addition to the MOLA metric map, an
+optional `planner_output_path` produces a deterministic `SDMGRID1` sparse grid
+from the resident keyframe map. The grid carries corrected occupied endpoints,
+observed-free voxels, exact surface-height samples, and the complete source and
+graph identities. Product construction is bounded by point, voxel, ray-step,
+elapsed-time, metadata and artifact-byte limits.
+
+Unknown is explicit: a voxel absent from both occupied and free sets is unknown,
+and occupied always wins. Sensor origins alone do not prove free space. Rays are
+carved only when the manifest declares `first_return`, `deskewed`,
+`single_capture` evidence with exactly one origin. Missing, legacy, ambiguous or
+otherwise unqualified evidence produces occupied endpoints and surface samples
+without any free-space claims.
 
 Run it directly in the mapping image:
 
 ```bash
-swarmdeck-mola-worker --maps-root /maps --timeout 120 --poll 1
+swarmdeck-mola-worker --maps-root /maps --mission-id "$SWARMDECK_MISSION_ID" \
+  --planner-maps --timeout 30 --poll 1
 ```
 
-The current worker rebuilds a serialized MOLA map per changed component. A
-future long-lived MOLA module can call `applyPoseSolution()` directly to avoid
-serialization on pose-only corrections; this is an optimization, not a missing
-consumer boundary.
+The persistent runtime reuses resident local point buffers for pose-only
+corrections. Planner export reads those exact immutable buffers and the corrected
+poses from `KeyframePointCloudMap`; it does not reread chunks or run another
+optimizer. Geometry replacement and retraction build a complete candidate grid,
+so old walls and their ray evidence disappear together. Requested metric-map and
+planner artifacts must both succeed in the pre-commit hook before the new native
+snapshot becomes current.

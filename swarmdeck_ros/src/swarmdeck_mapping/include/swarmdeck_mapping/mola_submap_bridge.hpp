@@ -2,6 +2,7 @@
 
 #include <mola_kernel/interfaces/MapSourceBase.h>
 #include <mola_metric_maps/KeyframePointCloudMap.h>
+#include <mrpt/maps/CSimplePointsMap.h>
 
 #include <array>
 #include <cstdint>
@@ -29,6 +30,9 @@ struct SubmapInput
   std::string external_id;
   std::vector<PointXYZ> points_local;
   Matrix4 T_component_submap;
+  std::vector<PointXYZ> sensor_origins_local;
+  std::uint64_t observed_at_ns{};
+  bool ray_evidence_qualified{};
 };
 
 struct PoseUpdate
@@ -58,6 +62,19 @@ struct SnapshotIdentity
   std::string reference_frame;
 };
 
+/** Immutable handles to the exact point buffers inserted into one MOLA KF. */
+struct NativeKeyframeSnapshot
+{
+  std::string external_id;
+  mola::KeyframePointCloudMap::KeyFrameID keyframe_id{};
+  std::shared_ptr<const mrpt::maps::CSimplePointsMap> points_local;
+  std::vector<PointXYZ> sensor_origins_local;
+  std::uint64_t observed_at_ns{};
+  // True only when the source explicitly proves one origin applies to all
+  // first returns and those returns are deskewed. Legacy metadata is false.
+  bool ray_evidence_qualified{};
+};
+
 /**
  * One atomically captured native point-geometry publication.
  *
@@ -72,6 +89,7 @@ struct NativeGeometrySnapshot
   SnapshotIdentity identity;
   std::string canonical_metadata_json;
   std::vector<PoseUpdate> submap_poses;
+  std::vector<NativeKeyframeSnapshot> keyframes;
 };
 
 /**
@@ -89,8 +107,7 @@ struct NativeGeometrySnapshot
 class MolaSubmapBridge final : public mola::MapSourceBase
 {
  public:
-  using BeforeCommit = std::function<void(
-      const std::shared_ptr<const mola::KeyframePointCloudMap>&)>;
+  using BeforeCommit = std::function<void(const NativeGeometrySnapshot&)>;
 
   enum class ApplyResult
   {
@@ -132,5 +149,6 @@ class MolaSubmapBridge final : public mola::MapSourceBase
   SnapshotIdentity identity_;
   std::string metadata_json_;
   std::unordered_map<std::string, Matrix4> poses_;
+  std::unordered_map<std::string, NativeKeyframeSnapshot> keyframes_;
 };
 }  // namespace swarmdeck_mapping

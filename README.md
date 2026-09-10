@@ -54,7 +54,8 @@ return-home execution, and Gaussian quality and resource scaling still have
 acceptance work. The [native CUDA smoke test](docs/operations/reconstruction-jobs.md)
 passes with fixed poses.
 The [MOLA runtime guide](docs/operations/mola-runtime.md) describes persistent
-geometry reuse, the loadable framework module, and resource limits. The
+geometry reuse, the loadable framework module, an optional native terrain-map
+provider, and resource limits. The
 [remaining integration plan](docs/architecture/planning-refactor-remaining.md)
 prioritizes MOLA map products and odometry providers before broader rollout.
 

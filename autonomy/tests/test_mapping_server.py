@@ -8,13 +8,20 @@ import pytest
 
 from autonomy.contracts import (
     IDENTITY_SE3,
+    Calibration,
+    CalibratedCapture,
     ComponentRevision,
+    DeskewStatus,
     GraphSolution,
     KeyframeId,
+    RayEvidence,
+    RayOriginAssociation,
+    RayReturnSemantics,
     SubmapId,
     component_id_for_anchor,
 )
 from autonomy.indexed_mapping import (
+    IndexedGrid,
     IndexedMapView,
     QueryRequest,
     QueryStatus,
@@ -26,6 +33,41 @@ from autonomy.mapping import SubmapStore
 from deploy.autonomy.indexed_map_server import IndexRegistry
 
 SESSION = str(uuid.UUID("caa7c022-0c69-43ef-bf06-1922b16b9f5e"))
+QUALIFIED_RAYS = RayEvidence(
+    RayReturnSemantics.FIRST_RETURN,
+    DeskewStatus.DESKEWED,
+    RayOriginAssociation.SINGLE_CAPTURE,
+)
+
+
+def record_qualified_capture(store, keyframe, origin, *, observed_at_ns):
+    transform = [list(row) for row in IDENTITY_SE3]
+    for axis, value in enumerate(origin):
+        transform[axis][3] = value
+    sensor_frame = f"{keyframe.robot_id}/lidar"
+    calibration = Calibration(
+        "lidar-v1",
+        sensor_frame,
+        "x-forward/y-left/z-up",
+        (),
+        "none",
+        (),
+        tuple(tuple(row) for row in transform),
+    )
+    store.record_capture(
+        CalibratedCapture(
+            keyframe,
+            observed_at_ns,
+            observed_at_ns,
+            sensor_frame,
+            calibration.version,
+            IDENTITY_SE3,
+            None,
+            DeskewStatus.DESKEWED,
+            ray_return_semantics=RayReturnSemantics.FIRST_RETURN,
+        ),
+        calibration,
+    )
 
 
 @pytest.mark.parametrize(
@@ -37,10 +79,69 @@ def test_registry_requires_canonical_mission_uuid(tmp_path, mission_id) -> None:
         IndexRegistry(tmp_path, mission_id, snapshot_age_s=3, poll_s=0.1)
 
 
+def test_registry_refreshes_through_selected_provider(tmp_path) -> None:
+    peer = tmp_path / SESSION / "robot_0"
+    peer.mkdir(parents=True)
+    publication = peer / "provider.index"
+    publication.write_text("ready")
+    key = SnapshotKey("provider-component", 1, 2, "a" * 64)
+    instances = []
+
+    class Provider:
+        def __init__(self, peer_root):
+            self.peer_root = peer_root
+            self.publication_path = peer_root / "provider.index"
+            self.refreshes = 0
+            instances.append(self)
+
+        def component_ids(self):
+            return (key.component_id,)
+
+        def signature(self):
+            stat = self.publication_path.stat()
+            return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+        def refresh(self, view, component_id):
+            assert component_id == key.component_id
+            self.refreshes += 1
+            return view.publish(
+                IndexedGrid(
+                    key,
+                    "b" * 64,
+                    123,
+                    self.refreshes,
+                    {(0, 0, 2)},
+                    set(),
+                    {(0, 0): (0.5,)},
+                    0.2,
+                    1,
+                )
+            )
+
+    registry = IndexRegistry(
+        tmp_path,
+        SESSION,
+        snapshot_age_s=3,
+        poll_s=0.1,
+        provider_factory=Provider,
+    )
+    registry.refresh_once()
+    registry.refresh_once()
+
+    assert len(instances) == 1
+    assert instances[0].refreshes == 2
+    result = registry.query(
+        "robot_0", QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+    )
+    assert result.status is QueryStatus.OK
+    assert result.occupancy == (VoxelOccupancy.OCCUPIED,)
+
+
 def test_registry_serves_persisted_snapshot_without_ros(tmp_path) -> None:
     peer = tmp_path / SESSION / "robot_0"
     store = SubmapStore(peer / "geometry")
     keyframe = KeyframeId("robot_0", SESSION, 0)
+    record_qualified_capture(store, keyframe, (-0.1, 0.1, 0.5), observed_at_ns=123)
     store.add_submap(
         SubmapId.from_keyframe(keyframe),
         [[2.1, 0.1, 0.5]],
@@ -48,6 +149,7 @@ def test_registry_serves_persisted_snapshot_without_ros(tmp_path) -> None:
         sensor_origins_local=((-0.1, 0.1, 0.5),),
         resolution_m=0.2,
         observed_at_ns=123,
+        ray_evidence=QUALIFIED_RAYS,
     )
     snapshot = store.snapshot()
     (peer / "snapshot.json").write_text(json.dumps(snapshot.to_dict()))
@@ -128,7 +230,9 @@ def test_registry_invalidates_previous_index_when_snapshot_corrupts(tmp_path) ->
     assert registry.query("robot_0", request).status is QueryStatus.UNAVAILABLE
 
 
-def test_registry_reports_failed_new_revision_as_unavailable(tmp_path, monkeypatch) -> None:
+def test_registry_reports_failed_new_revision_as_unavailable(
+    tmp_path, monkeypatch
+) -> None:
     peer = tmp_path / SESSION / "robot_0"
     store = SubmapStore(peer / "geometry")
     keyframe = KeyframeId("robot_0", SESSION, 0)
@@ -146,9 +250,12 @@ def test_registry_reports_failed_new_revision_as_unavailable(tmp_path, monkeypat
     old_key = SnapshotKey(component, 0, 0, first.manifests[0].geometry_revision)
     registry = IndexRegistry(tmp_path, SESSION, snapshot_age_s=3, poll_s=0.1)
     registry.refresh_once()
-    assert registry.query(
-        "robot_0", QueryRequest(old_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
-    ).status is QueryStatus.OK
+    assert (
+        registry.query(
+            "robot_0", QueryRequest(old_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        ).status
+        is QueryStatus.OK
+    )
 
     store.apply_solution(
         GraphSolution(
@@ -227,12 +334,18 @@ def test_registry_backoff_is_per_source_and_resets_on_snapshot_replacement(
     assert calls == {"robot_0": 1, "robot_1": 1}
     bad_view = registry._views[("robot_0", bad_key.component_id)]
     decoded_chunks = bad_view._chunk_cache
-    assert registry.query(
-        "robot_0", QueryRequest(bad_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
-    ).status is QueryStatus.OK
-    assert registry.query(
-        "robot_1", QueryRequest(good_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
-    ).status is QueryStatus.OK
+    assert (
+        registry.query(
+            "robot_0", QueryRequest(bad_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        ).status
+        is QueryStatus.OK
+    )
+    assert (
+        registry.query(
+            "robot_1", QueryRequest(good_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        ).status
+        is QueryStatus.OK
+    )
 
     # The first failed build is retried after one second, while the healthy
     # source still refreshes on every normal poll. The failed view and its
@@ -242,9 +355,12 @@ def test_registry_backoff_is_per_source_and_resets_on_snapshot_replacement(
     assert calls == {"robot_0": 2, "robot_1": 2}
     assert registry._views[("robot_0", bad_key.component_id)] is bad_view
     assert bad_view._chunk_cache is decoded_chunks
-    assert registry.query(
-        "robot_0", QueryRequest(bad_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
-    ).status is QueryStatus.UNAVAILABLE
+    assert (
+        registry.query(
+            "robot_0", QueryRequest(bad_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        ).status
+        is QueryStatus.UNAVAILABLE
+    )
     now[0] = 0.5
     registry.refresh_once()
     assert calls == {"robot_0": 2, "robot_1": 3}
@@ -278,6 +394,9 @@ def test_registry_backoff_is_per_source_and_resets_on_snapshot_replacement(
     registry.refresh_once()
     assert bad_peer not in registry._failed_sources
     assert registry._views[("robot_0", bad_key.component_id)] is bad_view
-    assert registry.query(
-        "robot_0", QueryRequest(bad_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
-    ).status is QueryStatus.OK
+    assert (
+        registry.query(
+            "robot_0", QueryRequest(bad_key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        ).status
+        is QueryStatus.OK
+    )

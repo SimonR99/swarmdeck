@@ -55,10 +55,7 @@ def write_snapshot(
 
 def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
     executable = tmp_path / "fake-mola-runtime"
-    executable.write_text(
-        "#!/usr/bin/env python3\n"
-        + textwrap.dedent(
-            f"""
+    executable.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(f"""
             import hashlib
             import json
             import os
@@ -177,10 +174,15 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                 }}
                 if {first_failure!r} == "wrong_hash_second" and request_number == 2:
                     response["output_sha256"] = "0" * 64
+                if "planner_output_path" in request:
+                    planner = b"planner|" + artifact
+                    Path(request["planner_output_path"]).write_bytes(planner)
+                    response["planner_output_size_bytes"] = len(planner)
+                    response["planner_output_sha256"] = hashlib.sha256(planner).hexdigest()
+                    if {first_failure!r} == "wrong_planner_hash_second" and request_number == 2:
+                        response["planner_output_sha256"] = "0" * 64
                 print(json.dumps(response), flush=True)
-            """
-        )
-    )
+            """))
     executable.chmod(0o755)
     return executable
 
@@ -188,6 +190,80 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
 def runtime_requests(tmp_path: Path) -> list[dict[str, object]]:
     lines = (tmp_path / "requests.log").read_text().splitlines()
     return [json.loads(line) for line in lines]
+
+
+def test_planner_products_reuse_unchanged_components_and_prune_pairs(tmp_path):
+    peer = tmp_path / "mission" / "robot_0"
+    first = manifest("component:a", 0)
+    second = manifest("component:b", 0)
+    write_snapshot(peer, "a" * 64, [first, second])
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path),
+        planner_maps=True,
+        keep_generations=1,
+        timeout_s=1,
+    )
+    try:
+        worker.process_peer(peer)
+        initial = json.loads((peer / "mola/index.json").read_text())
+        held = initial["artifacts"][0]["planner"]
+        for revision in range(1, 4):
+            write_snapshot(
+                peer, f"{revision:064x}", [first, manifest("component:b", revision)]
+            )
+            worker.process_peer(peer)
+        current = json.loads((peer / "mola/index.json").read_text())
+        assert current["artifacts"][0]["planner"] == held
+        assert held["source_snapshot_id"] == "a" * 64
+        assert len(runtime_requests(tmp_path)) == 5
+        components = peer / "mola/components"
+        assert len(list(components.glob("*.metricmap"))) == 2
+        assert len(list(components.glob("*.sdpg"))) == 2
+        for artifact in current["artifacts"]:
+            assert (peer / "mola" / artifact["planner"]["path"]).is_file()
+    finally:
+        worker.close()
+
+
+def test_invalid_planner_product_keeps_previous_generation(tmp_path):
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "wrong_planner_hash_second"),
+        planner_maps=True,
+        timeout_s=1,
+    )
+    try:
+        worker.process_peer(peer)
+        previous = (peer / "mola/index.json").read_bytes()
+        write_snapshot(peer, "b" * 64, [manifest("component:a", 1)])
+        with pytest.raises(WorkerError, match="planner artifact"):
+            worker.process_peer(peer)
+        assert (peer / "mola/index.json").read_bytes() == previous
+        assert not worker._resident_maps
+    finally:
+        worker.close()
+
+
+def test_enabling_planner_products_upgrades_a_cached_metric_map(tmp_path):
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 0)])
+    executable = fake_runtime(tmp_path)
+    previous = MolaWorker(tmp_path, importer=executable, timeout_s=1)
+    try:
+        previous.process_peer(peer)
+    finally:
+        previous.close()
+    upgraded = MolaWorker(tmp_path, importer=executable, planner_maps=True, timeout_s=1)
+    try:
+        assert not upgraded.run_once()
+        assert len(runtime_requests(tmp_path)) == 2
+        value = json.loads((peer / "mola/index.json").read_text())
+        assert "planner" in value["artifacts"][0]
+    finally:
+        upgraded.close()
 
 
 def test_bounded_read_stops_a_file_that_grows_after_stat() -> None:

@@ -104,6 +104,50 @@ void validateFiniteTriples(const json& values, const char* field)
   }
 }
 
+std::vector<PointXYZ> pointTriples(
+    const json& values, const char* field, const std::size_t maximum)
+{
+  validateFiniteTriples(values, field);
+  if (values.size() > maximum)
+    throw std::invalid_argument(std::string(field) + " exceeds count limit");
+  std::vector<PointXYZ> result;
+  result.reserve(values.size());
+  for (const auto& value : values)
+  {
+    const PointXYZ point{
+        value[0].get<float>(), value[1].get<float>(), value[2].get<float>()};
+    if (!(std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)))
+      throw std::invalid_argument(std::string(field) + " exceeds float range");
+    result.push_back(point);
+  }
+  return result;
+}
+
+bool qualifiedRayEvidence(const json& item)
+{
+  if (!item.contains("ray_evidence")) return false;
+  const auto& evidence = item.at("ray_evidence");
+  if (!evidence.is_object())
+    throw std::invalid_argument("ray_evidence must be an object");
+  const auto token = [&evidence](const char* key, const char* field) {
+    return evidence.contains(key)
+               ? boundedString(evidence.at(key), field, 32)
+               : std::string("unknown");
+  };
+  const auto returns = token("return_semantics", "ray return_semantics");
+  const auto deskew = token("deskew", "ray deskew");
+  const auto association = token("origin_association", "ray origin_association");
+  if (returns != "first_return" && returns != "unknown")
+    throw std::invalid_argument("invalid ray return_semantics");
+  if (deskew != "deskewed" && deskew != "not_required" &&
+      deskew != "not_deskewed" && deskew != "unknown")
+    throw std::invalid_argument("invalid ray deskew");
+  if (association != "single_capture" && association != "unknown")
+    throw std::invalid_argument("invalid ray origin_association");
+  return returns == "first_return" && deskew == "deskewed" &&
+         association == "single_capture";
+}
+
 void validateBounds(const json& values, const char* field)
 {
   validateFiniteTriples(values, field);
@@ -259,14 +303,22 @@ ParsedComponentSnapshot parseComponentSnapshot(
         uintValue(pose_revision.at("revision"), "pose revision") != graph_revision)
       throw std::invalid_argument("submap pose revision does not match manifest");
     const auto pose_value = matrix(item.at("T_component_submap"));
-    if (item.contains("sensor_origins"))
-      validateFiniteTriples(item.at("sensor_origins"), "sensor_origins");
+    const auto origins = item.contains("sensor_origins")
+                             ? pointTriples(
+                                   item.at("sensor_origins"), "sensor_origins",
+                                   kMaxSensorOriginsPerSubmap)
+                             : std::vector<PointXYZ>{};
+    const auto observed_at_ns = item.contains("observed_at_ns")
+                                    ? uintValue(item.at("observed_at_ns"), "observed_at_ns")
+                                    : 0;
+    const auto ray_evidence_qualified = qualifiedRayEvidence(item);
     if (item.contains("bounds")) validateBounds(item.at("bounds"), "submap bounds");
 
     const auto& chunks = item.at("chunks");
     if (!chunks.is_array() || chunks.size() > max_chunks - chunk_count)
       throw std::invalid_argument("manifest exceeds chunk count limit");
-    ParsedSubmap parsed{id, pose_value, {}};
+    ParsedSubmap parsed{
+        id, pose_value, {}, origins, observed_at_ns, ray_evidence_qualified};
     parsed.chunks.reserve(chunks.size());
     json hashes = json::array();
     for (const auto& chunk : chunks)
@@ -364,7 +416,10 @@ std::vector<SubmapInput> loadGeometry(
   std::size_t loaded = 0;
   for (const auto& source : snapshot.submaps)
   {
-    SubmapInput target{source.external_id, {}, source.T_component_submap};
+    SubmapInput target{
+        source.external_id, {}, source.T_component_submap,
+        source.sensor_origins_local, source.observed_at_ns,
+        source.ray_evidence_qualified};
     target.points_local.reserve(
         std::accumulate(source.chunks.begin(), source.chunks.end(), std::size_t{0},
                         [](const std::size_t value, const ChunkDescriptor& chunk) {

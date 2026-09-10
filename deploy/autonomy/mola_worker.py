@@ -59,7 +59,9 @@ def _default_runner(command: Sequence[str], timeout_s: float) -> None:
     except subprocess.TimeoutExpired as exc:
         raise WorkerError(f"MOLA import exceeded {timeout_s:g}s") from exc
     except subprocess.CalledProcessError as exc:
-        raise WorkerError(f"native importer failed with status {exc.returncode}") from exc
+        raise WorkerError(
+            f"native importer failed with status {exc.returncode}"
+        ) from exc
 
 
 def _strict_nonnegative_int(value: object, name: str) -> int:
@@ -242,6 +244,7 @@ class MolaWorker:
         max_maps: int = DEFAULT_MAX_MAPS,
         keep_generations: int = 2,
         mode: str = "persistent",
+        planner_maps: bool = False,
         mission_id: str | None = None,
         runner: Runner = _default_runner,
     ):
@@ -257,6 +260,8 @@ class MolaWorker:
             raise ValueError("worker runtime bounds are invalid")
         if mode not in ("persistent", "oneshot"):
             raise ValueError("worker mode must be persistent or oneshot")
+        if planner_maps and mode != "persistent":
+            raise ValueError("planner maps require the persistent native runtime")
         self.maps_root = Path(maps_root)
         self.importer = Path(importer)
         self.timeout_s = timeout_s
@@ -268,6 +273,7 @@ class MolaWorker:
         self.max_maps = max_maps
         self.keep_generations = keep_generations
         self.mode = mode
+        self.planner_maps = planner_maps
         self.mission_id = (
             _canonical_mission_id(mission_id) if mission_id is not None else None
         )
@@ -347,6 +353,15 @@ class MolaWorker:
             return False
         return size == item.get("size_bytes") and digest == item.get("sha256")
 
+    def _planner_matches(self, mola_root: Path, item: dict[str, object]) -> bool:
+        planner = item.get("planner")
+        if not isinstance(planner, dict):
+            return False
+        expected = Path(str(item["path"])).with_suffix(".sdpg")
+        if planner.get("path") != str(expected):
+            return False
+        return self._artifact_matches(mola_root, planner)
+
     @staticmethod
     def _validate_runtime_response(
         response: dict[str, object],
@@ -403,6 +418,7 @@ class MolaWorker:
         input_sha: str,
         chunks: Path,
         output_path: Path,
+        planner_output_path: Path | None,
         snapshot_id: str,
         manifest: dict[str, object],
     ) -> dict[str, object]:
@@ -415,6 +431,8 @@ class MolaWorker:
             "chunks_dir": str(chunks),
             "output_path": str(output_path),
         }
+        if planner_output_path is not None:
+            request["planner_output_path"] = str(planner_output_path)
         try:
             response = self._runtime.apply(request)
         except NativeRequestError as exc:
@@ -506,6 +524,9 @@ class MolaWorker:
                     prior is not None
                     and prior.get("manifest_sha256") == manifest_sha
                     and self._artifact_matches(mola_root, prior)
+                    and (
+                        not self.planner_maps or self._planner_matches(mola_root, prior)
+                    )
                 ):
                     artifacts.append(prior)
                     continue
@@ -527,6 +548,9 @@ class MolaWorker:
                 input_path.write_bytes(input_bytes)
                 input_sha = hashlib.sha256(input_bytes).hexdigest()
                 output_path = staging / filename
+                planner_path = (
+                    output_path.with_suffix(".sdpg") if self.planner_maps else None
+                )
                 map_id = self._map_id(peer_root, component_id)
                 request_mode = (
                     "pose_only"
@@ -544,6 +568,7 @@ class MolaWorker:
                         input_sha=input_sha,
                         chunks=chunks,
                         output_path=output_path,
+                        planner_output_path=planner_path,
                         snapshot_id=snapshot_id,
                         manifest=manifest,
                     )
@@ -580,6 +605,29 @@ class MolaWorker:
                         "sha256": digest,
                     }
                 )
+                if planner_path is not None:
+                    assert response is not None
+                    planner_size, planner_sha = _sha256_file(
+                        planner_path, self.max_output_bytes
+                    )
+                    if (
+                        type(response.get("planner_output_size_bytes")) is not int
+                        or response["planner_output_size_bytes"] != planner_size
+                        or response.get("planner_output_sha256") != planner_sha
+                    ):
+                        self._invalidate_runtime()
+                        raise WorkerError(
+                            "native planner artifact does not match its response"
+                        )
+                    planner_final = components_root / planner_path.name
+                    staged.append((planner_path, planner_final))
+                    artifacts[-1]["planner"] = {
+                        "path": f"components/{planner_path.name}",
+                        "size_bytes": planner_size,
+                        "sha256": planner_sha,
+                        "source_sha256": input_sha,
+                        "source_snapshot_id": snapshot_id,
+                    }
 
             # The bridge replaces snapshot.json atomically. Byte equality is a
             # stronger guard than revision alone and catches same-ID corruption.
@@ -642,6 +690,10 @@ class MolaWorker:
         keep_previous = max(0, self.keep_generations - 1) * max(1, len(current))
         for path in previous[keep_previous:]:
             path.unlink(missing_ok=True)
+            path.with_suffix(".sdpg").unlink(missing_ok=True)
+        for path in directory.glob("*.sdpg"):
+            if not path.with_suffix(".metricmap").exists():
+                path.unlink(missing_ok=True)
 
     def run_once(self) -> dict[Path, str]:
         """Process changed peers once; errors are retained for status/logging."""
@@ -711,6 +763,12 @@ def main() -> None:
     parser.add_argument("--retry", type=float, default=5.0)
     parser.add_argument("--keep-generations", type=int, default=2)
     parser.add_argument(
+        "--planner-maps",
+        action="store_true",
+        default=os.getenv("SWARMDECK_MOLA_PLANNER_MAPS", "false").lower() == "true",
+        help="publish native planner grids alongside MOLA metric maps",
+    )
+    parser.add_argument(
         "--max-output-bytes",
         type=int,
         default=int(
@@ -721,9 +779,7 @@ def main() -> None:
         "--max-points-per-map",
         type=int,
         default=int(
-            os.getenv(
-                "SWARMDECK_MOLA_MAX_POINTS_PER_MAP", DEFAULT_MAX_POINTS_PER_MAP
-            )
+            os.getenv("SWARMDECK_MOLA_MAX_POINTS_PER_MAP", DEFAULT_MAX_POINTS_PER_MAP)
         ),
     )
     parser.add_argument(
@@ -774,6 +830,7 @@ def main() -> None:
         max_resident_points=args.max_resident_points,
         max_maps=args.max_maps,
         mode=args.mode,
+        planner_maps=args.planner_maps,
         mission_id=None if args.all_missions else args.mission_id,
     ).run_forever()
 

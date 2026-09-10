@@ -30,11 +30,15 @@ from .contracts import (
     CalibratedCapture,
     ChunkRef,
     ComponentRevision,
+    DeskewStatus,
     GraphSolution,
     KeyframeId,
     MapManifest,
     MapSnapshot,
     Matrix4,
+    RayEvidence,
+    RayOriginAssociation,
+    RayReturnSemantics,
     SubmapId,
     SubmapRevision,
     component_id_for_anchor,
@@ -96,6 +100,7 @@ class _StoredSubmap:
     local_keyframe_poses: Mapping[KeyframeId, Matrix4]
     chunks: tuple[ChunkRef, ...]
     sensor_origins: tuple[tuple[float, float, float], ...]
+    ray_evidence: RayEvidence
     bounds: Bounds3
     resolution_m: float
     observed_at_ns: int
@@ -235,6 +240,7 @@ class SubmapStore:
               chunks_json TEXT NOT NULL, sensor_origins_json TEXT NOT NULL,
               bounds_json TEXT NOT NULL, resolution_m REAL NOT NULL,
               observed_at_ns INTEGER NOT NULL, replaces_revision INTEGER,
+              ray_evidence_json TEXT,
               PRIMARY KEY(submap_id, geometry_revision)
             );
             CREATE TABLE IF NOT EXISTS active_submaps (
@@ -258,6 +264,14 @@ class SubmapStore:
               calibration_json TEXT NOT NULL
             );
             """)
+        columns = {
+            row["name"]
+            for row in self._db.execute("PRAGMA table_info(submap_revisions)")
+        }
+        if "ray_evidence_json" not in columns:
+            self._db.execute(
+                "ALTER TABLE submap_revisions ADD COLUMN ray_evidence_json TEXT"
+            )
 
     def record_capture(
         self, capture: CalibratedCapture, calibration: Calibration
@@ -301,12 +315,32 @@ class SubmapStore:
                     ),
                 )
                 old_capture = self._db.execute(
-                    "SELECT digest FROM captures WHERE keyframe_id=?", (key.stable_id,)
+                    """SELECT digest, capture_json, calibration_json
+                       FROM captures WHERE keyframe_id=?""",
+                    (key.stable_id,),
                 ).fetchone()
                 if old_capture is not None:
                     if old_capture["digest"] != capture_digest:
-                        raise DuplicateConflictError(
-                            f"keyframe capture was reused with other values: {key.stable_id}"
+                        old_capture_value = json.loads(old_capture["capture_json"])
+                        old_capture_value.setdefault(
+                            "ray_return_semantics", RayReturnSemantics.UNKNOWN.value
+                        )
+                        if old_capture_value != json.loads(capture_json) or json.loads(
+                            old_capture["calibration_json"]
+                        ) != json.loads(calibration_json):
+                            raise DuplicateConflictError(
+                                "keyframe capture was reused with other values: "
+                                f"{key.stable_id}"
+                            )
+                        self._db.execute(
+                            """UPDATE captures SET digest=?, capture_json=?, calibration_json=?
+                               WHERE keyframe_id=?""",
+                            (
+                                capture_digest,
+                                capture_json,
+                                calibration_json,
+                                key.stable_id,
+                            ),
                         )
                     self._db.execute("COMMIT")
                     return False
@@ -459,6 +493,7 @@ class SubmapStore:
         observed_at_ns: int,
         replace: bool = False,
         initial_T_component_submap: Matrix4 = IDENTITY_SE3,
+        ray_evidence: RayEvidence = RayEvidence(),
     ) -> int:
         cloud = _points(points_local)
         if len(cloud) == 0:
@@ -479,6 +514,55 @@ class SubmapStore:
             for origin in origins
         ):
             raise ValueError("sensor origins must be finite XYZ triples")
+        if not isinstance(ray_evidence, RayEvidence):
+            raise ValueError("ray_evidence must be RayEvidence")
+        if ray_evidence.certifies_free_space:
+            if len(origins) != 1 or len(poses) != 1:
+                raise ValueError(
+                    "qualified ray evidence requires one capture and one sensor origin"
+                )
+            capture_key = next(iter(poses))
+            if SubmapId.from_keyframe(capture_key) != submap_id:
+                raise ValueError(
+                    "qualified ray evidence capture must identify the submap"
+                )
+            with self._lock:
+                capture_row = self._db.execute(
+                    """SELECT capture_json, calibration_json FROM captures
+                       WHERE keyframe_id=?""",
+                    (capture_key.stable_id,),
+                ).fetchone()
+            if capture_row is None:
+                raise ValueError(
+                    "qualified ray evidence requires a durable capture record"
+                )
+            capture_value = json.loads(capture_row["capture_json"])
+            calibration_value = json.loads(capture_row["calibration_json"])
+            if (
+                capture_value.get("deskew_status") != DeskewStatus.DESKEWED.value
+                or capture_value.get("ray_return_semantics")
+                != RayReturnSemantics.FIRST_RETURN.value
+            ):
+                raise ValueError(
+                    "capture record does not certify qualified ray evidence"
+                )
+            if observed_at_ns != capture_value.get("capture_end_ns"):
+                raise ValueError(
+                    "qualified ray evidence timestamp does not match its capture"
+                )
+            T_submap_keyframe = np.asarray(poses[capture_key], dtype=np.float64)
+            T_base_sensor = np.asarray(
+                calibration_value["T_base_sensor"], dtype=np.float64
+            )
+            expected_origin = _transform(
+                T_submap_keyframe, T_base_sensor[:3, 3].reshape(1, 3)
+            )[0]
+            if not np.allclose(
+                np.asarray(origins[0]), expected_origin, rtol=0.0, atol=1e-9
+            ):
+                raise ValueError(
+                    "qualified ray evidence origin does not match capture calibration"
+                )
         bounds = _bounds(cloud)
         initial_pose = validate_se3(
             initial_T_component_submap, "initial_T_component_submap"
@@ -510,6 +594,7 @@ class SubmapStore:
                         existing.chunks == chunks
                         and existing.local_keyframe_poses == poses
                         and existing.sensor_origins == stored_origins
+                        and existing.ray_evidence == ray_evidence
                         and existing.resolution_m == resolution_m
                         and existing.observed_at_ns == observed_at_ns
                     )
@@ -547,7 +632,7 @@ class SubmapStore:
                     )
                 self._db.execute(
                     """INSERT INTO submap_revisions VALUES
-                       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         stable_id,
                         revision,
@@ -570,6 +655,9 @@ class SubmapStore:
                         resolution_m,
                         observed_at_ns,
                         None if current is None else int(current["geometry_revision"]),
+                        json.dumps(
+                            asdict(ray_evidence), sort_keys=True, separators=(",", ":")
+                        ),
                     ),
                 )
                 self._db.execute(
@@ -777,6 +865,12 @@ class SubmapStore:
             )
             for c in json.loads(row["chunks_json"])
         )
+        evidence_value = (
+            json.loads(row["ray_evidence_json"])
+            if "ray_evidence_json" in row.keys()
+            and row["ray_evidence_json"] is not None
+            else {}
+        )
         return _StoredSubmap(
             SubmapId(row["robot_id"], row["session_id"], row["submap_seq"]),
             row["geometry_revision"],
@@ -784,6 +878,7 @@ class SubmapStore:
             local_poses,
             chunks,
             tuple(tuple(v) for v in json.loads(row["sensor_origins_json"])),
+            RayEvidence(**evidence_value),
             (
                 tuple(json.loads(row["bounds_json"])[0]),
                 tuple(json.loads(row["bounds_json"])[1]),
@@ -883,6 +978,7 @@ class SubmapStore:
             submap.replaces,
             submap.observed_at_ns,
             submap.sensor_origins,
+            submap.ray_evidence,
         )
 
 
@@ -922,6 +1018,16 @@ class CorrectionAwareMapper:
             observed_at_ns=capture.capture_end_ns,
             replace=replace,
             initial_T_component_submap=capture.T_local_base,
+            ray_evidence=(
+                RayEvidence(
+                    RayReturnSemantics.FIRST_RETURN,
+                    DeskewStatus.DESKEWED,
+                    RayOriginAssociation.SINGLE_CAPTURE,
+                )
+                if capture.ray_return_semantics is RayReturnSemantics.FIRST_RETURN
+                and capture.deskew_status is DeskewStatus.DESKEWED
+                else RayEvidence()
+            ),
         )
 
     def replace_submap_geometry(
@@ -983,7 +1089,8 @@ class CorrectionAwareMapper:
             pose = submap.T_component_submap
             unambiguous_origin = (
                 _transform(pose, np.asarray(submap.sensor_origins, dtype=np.float64))[0]
-                if len(submap.sensor_origins) == 1
+                if submap.ray_evidence.certifies_free_space
+                and len(submap.sensor_origins) == 1
                 else None
             )
             for chunk_index, chunk in enumerate(submap.chunks):

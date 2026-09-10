@@ -84,7 +84,8 @@ json ready(const swarmdeck_mapping::RuntimeLimits& limits)
         {"max_chunks_per_map", limits.max_chunks_per_map},
         {"max_points_per_map", limits.max_points_per_map},
         {"max_resident_points", limits.max_resident_points},
-        {"max_output_bytes", limits.max_output_bytes}}}};
+        {"max_output_bytes", limits.max_output_bytes},
+        {"max_planner_output_bytes", limits.max_planner_output_bytes}}}};
 }
 
 void validateEnvelope(const json& request)
@@ -160,7 +161,8 @@ int serve(const swarmdeck_mapping::RuntimeLimits& configured_limits)
              request.at("snapshot_sha256").get<std::string>(),
              request.at("chunks_dir").get<std::string>(),
              output_path,
-             request.value("component_id", "")});
+             request.value("component_id", ""),
+             request.value("planner_output_path", "")});
         const auto& version = report.snapshot.graph_version;
         const auto& identity = report.snapshot.identity;
         emit(
@@ -181,7 +183,9 @@ int serve(const swarmdeck_mapping::RuntimeLimits& configured_limits)
              {"submaps", report.submap_count},
              {"points", report.point_count},
              {"output_size_bytes", report.output_size_bytes},
-             {"output_sha256", report.output_sha256}},
+             {"output_sha256", report.output_sha256},
+             {"planner_output_size_bytes", report.planner_output_size_bytes},
+             {"planner_output_sha256", report.planner_output_sha256}},
             limits.max_response_bytes);
       }
       else if (op == "release")
@@ -241,7 +245,7 @@ int oneShot(char** argv)
     swarmdeck_mapping::PersistentMolaRuntime runtime;
     const auto report = runtime.apply(
         {"one-shot", "one-shot", swarmdeck_mapping::ApplyMode::Replace,
-         argv[1], swarmdeck_mapping::boundedFileSha256(argv[1]), argv[2], temporary, {}});
+         argv[1], swarmdeck_mapping::boundedFileSha256(argv[1]), argv[2], temporary, {}, {}});
     std::filesystem::rename(temporary, output);
     std::cout << "imported " << report.submap_count << " submaps and "
               << report.point_count << " points at "
@@ -273,6 +277,8 @@ try
       else if (option == "--max-resident-points") limits.max_resident_points = value;
       else if (option == "--max-maps") limits.max_maps = value;
       else if (option == "--max-output-bytes") limits.max_output_bytes = value;
+      else if (option == "--max-planner-output-bytes")
+        limits.max_planner_output_bytes = value;
       else throw std::invalid_argument("unknown runtime option: " + option);
     }
     return serve(limits);
