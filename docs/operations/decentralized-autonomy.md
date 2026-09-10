@@ -592,8 +592,32 @@ cases. The delayed-support fixture retains an off-grid corner beyond the old
 parent search radius; repeated travel reuses vertices, and lost history blocks
 Home. The complete bent-path fixture took 78 ms including map construction,
 which is not a per-callback latency benchmark. All nine deployment patches
-replay from the pinned MGG revision and reproduce the tested source. These
-results still require a fresh Bistro arrival test.
+replay from the pinned MGG revision and reproduce the tested source.
+
+The next Bistro trial used commit `74c3484`, mission
+`7bdcbb62-ddc3-438f-8bc5-0885fd374b1e`, and ROS domain 188. All four robots
+executed paths during 30 seconds of Explore; Stop All cleared every active path.
+Return Home then produced routes for the two robots previously outside the
+graph, but neither completed arrival:
+
+| Robot | Home result | Final independent XY distance from start |
+| --- | --- | --- |
+| `robot_0` | Executed a 37-point route; cancelled on an authority change | 8.380 m |
+| `robot_1` | Corridor has an unsupported endpoint; no route | 8.650 m |
+| `robot_2` | Current pose or goal outside the graph; no route | 9.076 m |
+| `robot_3` | Executed a 38-point route; cancelled on an authority change | 7.512 m |
+
+The passive recorder ran for 1118 seconds, including setup before physics.
+The offline evidence checker classified all four Home trials as failed.
+Trajectory retention improved connectivity, but arrival remains an open gate;
+authority-change recovery and terrain coverage still require investigation.
+For the two executing routes, cumulative navigation-transform shifts reached
+21.458 mm (`robot_0`) and 25.423 mm (`robot_3`); cancellation followed within
+84 ms. Mission, component, and optimizer correction revision stayed unchanged.
+The live TF and inverse home transform moved, so the existing 20 mm validity
+guard correctly rejected the routes. Routine map revision changes alone did
+not cancel them. Recovery must replan against fresh authority while preserving
+Stop and replacement-command precedence.
 
 Staged launch also exposed the ARGoS experiment freshness rule: starting ARGoS
 after the bridge has already generated `session.argos` makes its timestamp check
@@ -685,5 +709,7 @@ progress. In particular:
 - Establish a sensor coverage/bootstrap policy before enabling the strict indexed
   terrain gate. MGG still uses its local OctoMap for frontier construction and
   information gain; Inspect and Rendezvous remain unsupported objectives.
-- Run the native CUDA reconstruction and measure alignment, memory, training
-  time, and rendering cost. Online incremental training remains a later step.
+- Extend the passing native CUDA smoke to real captures and measure alignment,
+  memory scaling, training time, and rendering cost. The three-view fixture
+  completed nine optimizer iterations and converted 540 Gaussians; it does not
+  establish reconstruction quality. Online incremental training remains later.
