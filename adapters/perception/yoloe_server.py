@@ -27,6 +27,10 @@ from adapters.perception.object_detector import (
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
 
+class InferenceBusy(RuntimeError):
+    """The single model is already serving another inference request."""
+
+
 def outline(mask: np.ndarray) -> tuple[tuple[float, float], ...]:
     """Reduce a YOLOE instance mask to a normalized polygon.
 
@@ -115,7 +119,9 @@ class YoloeModel:
         if not active:
             return []
 
-        with self._lock:
+        if not self._lock.acquire(blocking=False):
+            raise InferenceBusy("inference busy")
+        try:
             result = self._model.predict(
                 image,
                 imgsz=640,
@@ -125,6 +131,8 @@ class YoloeModel:
                 device=self.device,
                 verbose=False,
             )[0]
+        finally:
+            self._lock.release()
 
         masks = None
         if result.masks is not None:
@@ -228,6 +236,8 @@ class DetectorHandler(BaseHTTPRequestHandler):
                     ]
                 },
             )
+        except InferenceBusy as exc:
+            self._json(503, {"error": str(exc)})
         except (TypeError, ValueError) as exc:
             self._json(400, {"error": str(exc)})
         except Exception as exc:  # model/runtime errors must be visible to health logs

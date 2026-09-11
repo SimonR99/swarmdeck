@@ -52,6 +52,7 @@ def rig():
     explorer.pending_plan = None
     explorer.executing_plan = None
     explorer.executing_goal_generation = None
+    explorer.completed_goal_generation = None
     explorer.replan_requested_generation = -1
     explorer.replan_requested_recovery = False
     explorer.controller_replan_generation = -1
@@ -60,7 +61,7 @@ def rig():
     explorer.controller_replan_deadline = 0.0
     explorer.controller_replan_due = 0.0
     explorer.awaiting_replan_path = False
-    explorer.controller_replan_max_attempts = 3
+    explorer.controller_replan_max_attempts = 2
     explorer.controller_replan_deadline_s = 15.0
     explorer.controller_replan_backoff_s = 0.0
     explorer.pending = None
@@ -494,7 +495,6 @@ def test_owned_controller_failure_requests_bounded_replan_and_recovers():
 
 def test_repeated_controller_failures_exhaust_replan_budget():
     bridge, explorer = rig()
-    explorer.controller_replan_max_attempts = 2
     requests = [Future(), Future()]
     explorer.replan_client.call_async.side_effect = requests
     _start_with_path(explorer)
@@ -512,6 +512,7 @@ def test_repeated_controller_failures_exhaust_replan_budget():
     assert not explorer.active
     assert explorer.status == "blocked"
     assert explorer.replan_client.call_async.call_count == 2
+    assert bridge.follow_path.call_count == 3
 
 
 def test_controller_replan_times_out_if_no_replacement_path_arrives():
@@ -621,3 +622,102 @@ def test_manual_goal_wins_over_stale_replan_service_response():
     assert not explorer.awaiting_replan_path
     bridge.cancel_goal.assert_not_called()
     bridge.drive.assert_not_called()
+
+
+def test_only_controller_success_requests_the_next_exploration_path():
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    for _ in range(5):
+        explorer.tick()
+    explorer.replan_client.call_async.assert_not_called()
+    generation = bridge._goal_generation
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    explorer.tick()
+    explorer.replan_client.call_async.assert_called_once()
+    assert explorer.status == "waiting"
+    assert explorer.completed_goal_generation == generation
+    explorer.pending.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=3))
+    assert explorer.executing_plan is not None
+    assert explorer.completed_goal_generation is None
+    assert bridge.follow_path.call_args.kwargs == {"expected_generation": generation}
+
+
+@pytest.mark.parametrize("event", ["path", "empty_path", "status", "reply"])
+def test_manual_command_wins_after_arrival_while_next_plan_is_pending(event):
+    import json
+
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    bridge._goal_generation += 1
+    bridge.nav_status = "active"
+    bridge.cancel_goal.reset_mock()
+    bridge.drive.reset_mock()
+    calls = bridge.follow_path.call_count
+    if event in ("path", "empty_path"):
+        explorer.on_path(path(stamp=3, empty=event == "empty_path"))
+    elif event == "status":
+        explorer.on_status(
+            NS(data=json.dumps({"state": "blocked", "stamp_ns": 3000000000}))
+        )
+    else:
+        explorer.pending.set_result(NS(success=True, message=""))
+    assert not explorer.active
+    assert bridge.follow_path.call_count == calls
+    bridge.cancel_goal.assert_not_called()
+    bridge.drive.assert_not_called()
+
+
+def test_next_path_after_arrival_wins_over_late_service_rejection():
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    request = explorer.pending
+    explorer.on_path(path(stamp=3))
+    request.set_result(NS(success=False, message="late reply"))
+    assert explorer.active and explorer.executing_plan is not None
+    assert bridge.nav_status == "active"
+
+
+@pytest.mark.parametrize("decision", ["pending", "rejected"])
+def test_peer_decision_on_next_path_wins_over_late_service_rejection(decision):
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    request = explorer.pending
+    explorer.replan_client.call_async.return_value = Future()
+    explorer.coordinator = Coordinator(decision)
+    bridge.cancel_goal.reset_mock()
+    explorer.on_path(path(stamp=3))
+    request.set_result(NS(success=False, message="late reply"))
+
+    assert explorer.active and explorer.status == "waiting"
+    bridge.cancel_goal.assert_not_called()
+    if decision == "pending":
+        assert explorer.pending_plan is not None
+        explorer.replan_client.call_async.assert_called_once()
+    else:
+        assert explorer.pending is not request
+        assert explorer.replan_client.call_async.call_count == 2
+
+
+def test_peer_rejection_after_arrival_preserves_waiting_goal_ownership():
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    generation = bridge._goal_generation
+    explorer.pending.set_result(NS(success=True, message=""))
+    explorer.replan_client.call_async.return_value = Future()
+    explorer.coordinator = Coordinator("rejected")
+    bridge.cancel_goal.reset_mock()
+    explorer.on_path(path(stamp=3))
+    assert explorer.active and explorer.status == "waiting"
+    assert bridge._goal_generation == generation
+    assert explorer.completed_goal_generation == generation
+    bridge.cancel_goal.assert_not_called()

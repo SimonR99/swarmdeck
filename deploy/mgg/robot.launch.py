@@ -95,7 +95,15 @@ def robot_nodes(
             package="mgg_pci",
             executable="mgg_pci_node",
             namespace=ns,
-            parameters=[common, {"world_frame": frame, "bootstrap_distance": 0.0}],
+            parameters=[
+                common,
+                {
+                    "world_frame": frame,
+                    "bootstrap_distance": 0.0,
+                    # Nav2 FollowPath owns arrival and controller recovery.
+                    "external_path_execution": True,
+                },
+            ],
             remappings=[("odometry", "map_odometry")],
         ),
     ]

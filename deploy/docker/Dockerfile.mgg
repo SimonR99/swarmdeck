@@ -25,6 +25,7 @@ COPY deploy/patches/mgg-home-backbone.patch /tmp/mgg-home-backbone.patch
 COPY deploy/patches/mgg-grid-refinement.patch /tmp/mgg-grid-refinement.patch
 COPY deploy/patches/mgg-trajectory-backbone.patch /tmp/mgg-trajectory-backbone.patch
 COPY deploy/patches/mgg-objective-diagnostics.patch /tmp/mgg-objective-diagnostics.patch
+COPY deploy/patches/mgg-external-path-execution.patch /tmp/mgg-external-path-execution.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -36,6 +37,7 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-grid-refinement.patch && \
     git apply /tmp/mgg-trajectory-backbone.patch && \
     git apply /tmp/mgg-objective-diagnostics.patch && \
+    git apply /tmp/mgg-external-path-execution.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

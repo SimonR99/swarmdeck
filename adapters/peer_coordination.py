@@ -40,6 +40,7 @@ class PeerCoordinator:
         self.authority, self.received_at = None, 0.0
         self.arbiter = None
         self.token, self.generation, self.invalid_token = None, -1, None
+        self.reservation_transform = None
         self.last_publish = 0.0
         self.radius = float(config.get("reservation_radius_m", 2.0))
         self.run_id, self.completion = None, None
@@ -88,28 +89,18 @@ class PeerCoordinator:
             ):
                 return
             transform = validate_se3(value["T_component_navigation"])
-            changed = (
-                transform_change_squared(
-                    transform, self.authority["T_component_navigation"]
-                )
-                if self.authority
-                else 0.0
-            )
-            correction = value.get("correction_revision")
             if "solution_order" not in value:
                 return
-            signature = (
-                value["mission_id"],
-                value["component_id"],
-                (
-                    correction
-                    if correction is not None
-                    else tuple(value["solution_order"])
-                ),
-            )
+            signature = (value["mission_id"], value["component_id"])
             if self.authority:
                 old = self.authority
-                if signature != old["signature"] or changed > 0.01:
+                reservation_changed = (
+                    self.token is not None
+                    and self.reservation_transform is not None
+                    and transform_change_squared(transform, self.reservation_transform)
+                    > 0.01
+                )
+                if signature != old["signature"] or reservation_changed:
                     self.invalid_token = self.token
                     self.release(self.generation)
             if self.arbiter is None or self.arbiter.session_id != value["mission_id"]:
@@ -154,6 +145,7 @@ class PeerCoordinator:
             self.generation, self.token = generation, token
             final = plan.poses[-1]
             T = np.asarray(self.authority["T_component_navigation"])
+            self.reservation_transform = self.authority["T_component_navigation"]
             target = (T @ np.array([final.x, final.y, final.z, 1.0]))[:3]
             cost = sum(
                 math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
@@ -212,6 +204,7 @@ class PeerCoordinator:
         if self.arbiter:
             self.publish(self.arbiter.release())
         self.token = None
+        self.reservation_transform = None
         self.generation = max(self.generation, generation)
 
     def begin_run(self, run_id, participants):

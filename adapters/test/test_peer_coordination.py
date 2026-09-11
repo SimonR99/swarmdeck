@@ -50,8 +50,10 @@ def test_authority_freshness_path_generation_and_correction(monkeypatch):
     assert messages[-1]["target"] == [5, 0, 0]
     authority["solution_order"] = [2, 0]
     coordinator.on_authority(NS(data=json.dumps(authority)))
-    assert coordinator.reserve(plan, 1) == "rejected"
-    assert not messages[-1]["active"]
+    # A causal optimizer advance with the same component transform is a fresh
+    # authority heartbeat, not a reason to abandon an executing path.
+    assert coordinator.reserve(plan, 1) == "granted"
+    assert messages[-1]["active"]
     newer = PlannerPath("map", 101, plan.poses)
     assert coordinator.reserve(newer, 1) == "pending"
     now[0] = 2
@@ -178,6 +180,8 @@ def test_reordered_authority_preserves_newer_reservation_and_freshness(monkeypat
 
     newer = authority((3, 0), 3)
     coordinator.on_authority(NS(data=json.dumps(newer)))
+    assert coordinator.token == (1, plan.revision_ns)
+    assert coordinator.reserve(plan, 1) == "granted"
     next_plan = PlannerPath("map", 101, plan.poses)
     assert coordinator.reserve(next_plan, 2) == "pending"
     now[0] = 2.0
@@ -204,24 +208,20 @@ def test_reordered_authority_preserves_newer_reservation_and_freshness(monkeypat
         assert len(sent) == messages
 
     corrected = {**newer, "T_component_navigation": np.eye(4).tolist()}
-    corrected["T_component_navigation"][0][3] = 0.05
+    corrected["T_component_navigation"][0][3] = 0.06
     now[0] = 2.6
     coordinator.on_authority(NS(data=json.dumps(corrected)))
     assert coordinator.token == active_token
     assert coordinator.received_at == 2.6
     assert len(sent) == messages
 
-    now[0] = 2.7
-    coordinator.on_authority(NS(data=json.dumps(corrected)))
-    assert coordinator.token == active_token
-    assert coordinator.received_at == 2.7
-    assert len(sent) == messages
-
+    # Compare against the transform that created the reservation. Small
+    # incremental corrections cannot evade the material-change threshold.
     material = {**newer, "T_component_navigation": np.eye(4).tolist()}
-    material["T_component_navigation"][0][3] = 0.2
+    material["T_component_navigation"][0][3] = 0.11
     now[0] = 3.0
     coordinator.on_authority(NS(data=json.dumps(material)))
-    assert coordinator.authority["T_component_navigation"][0][3] == 0.2
+    assert coordinator.authority["T_component_navigation"][0][3] == 0.11
     assert coordinator.invalid_token == active_token
     assert coordinator.token is None
     assert coordinator.received_at == 3.0

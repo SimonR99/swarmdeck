@@ -15,32 +15,61 @@ is called merely by launching the dashboard or containers.
 
 ## Interface checked
 
-This integration targets [MGGPlanner's ROS 2 branch](https://github.com/MISTLab/MGGPlanner/tree/ros2),
-commit `902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca`. Its top-level README still
-contains ROS 1 instructions; the relevant packages are under `ros2/src`.
+This integration starts from [MGGPlanner's ROS 2 branch](https://github.com/MISTLab/MGGPlanner/tree/ros2),
+commit `902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca`, and applies SwarmDeck's pinned
+patch series. The upstream commit alone does not provide the external path
+execution, replan, lifecycle, coordination-exclusion, or map-query contract
+described here. Its top-level README still contains ROS 1 instructions; the
+relevant packages are under `ros2/src`.
 
 Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 
 | Endpoint | ROS 2 type | Purpose |
 | --- | --- | --- |
 | `pci_trigger` | `std_srvs/srv/Trigger` | Start PCI's autonomous planning cycle |
+| `pci_replan` | `std_srvs/srv/Trigger` | Request the next path after controller success, failure, or a rejected reservation |
 | `pci_stop` | `std_srvs/srv/Trigger` | Stop planning; PCI also publishes an empty path |
-| `status` | `std_msgs/msg/String` | Timestamped JSON lifecycle state: starting, exploring, complete, blocked, stopped |
+| `status` | `std_msgs/msg/String` | Timestamped JSON lifecycle state: starting, exploring, waiting, complete, blocked, stopped |
 | `command_path` | `nav_msgs/msg/Path` | PCI's current exploration path; transient-local QoS |
 | `mggplanner` | `mgg_msgs/srv/PlannerSrv` | Internal PCI-to-planner request |
 | `map_odometry` | `nav_msgs/msg/Odometry` | Robot pose in the planner's map frame |
 | `mapping_cloud` | `sensor_msgs/msg/PointCloud2` | Live sensor clouds, retaining each sensor’s frame/stamp |
 
-The adapter passes each path's **final goal** to its existing navigation backend
-(Nav2 or the configured hardware trajectory action). The navigation backend
-plans and collision-checks the route; this is not exact MGG waypoint following.
-PCI observes map-frame odometry and requests the next plan on arrival or lack of
-progress. Empty paths stop navigation immediately. The accompanying lifecycle status
-distinguishes exhausted reachable planning from an unusable map or blocked
-route. The fleet card reports **EXPLORED** or **EXPLORE BLOCKED**. Completion
-is relative to the planner’s mapped, reachable space and configured bounds; it
-does not certify that every part of the physical scene has been observed. A failed start or 30-second start timeout
-stops local navigation and requests PCI stop.
+SwarmDeck launches PCI with `external_path_execution=true`. The adapter sends
+the complete ordered `command_path`, including every MGG waypoint, to Nav2
+`FollowPath` or the configured hardware trajectory action. That controller owns
+path tracking, collision handling, arrival, and movement-failure detection. PCI
+does not use its odometry proximity or stall watchdog to replace a path while
+the controller is still executing it.
+
+After the controller reports success, the adapter releases the peer reservation
+and calls `pci_replan` for the next path. A controller failure also releases the
+reservation, but enters bounded recovery. The default permits two replacement
+paths, which means at most three failed movement attempts including the original
+path. Replacement planning has a 15-second recovery window; a controller action
+already executing can finish, but a subsequent failure cannot extend that window.
+Publishing or accepting a replacement path does not reset
+this budget; only an actual controller success clears it. A rejected replan,
+an unavailable replan service, expiry of the recovery deadline, or the third
+controller failure changes the robot to **EXPLORE BLOCKED**. The operator can
+press Explore again to begin a new session after correcting the cause.
+
+An empty native plan, or a path ending within PCI's minimum progress distance
+(`reach_distance`, 0.3 m by default), is not arrival evidence and does not declare exploration
+complete in external-execution mode. PCI remains in `waiting` and retries after
+1, 2, 4, 8, then at most 10 seconds between attempts. A later usable path
+continues the same session. Fleet completion remains relative to the planner's
+mapped, reachable space, current component, and configured bounds; it does not
+certify full global or physical-scene coverage. A failed start or 30-second
+start timeout stops local navigation and requests PCI stop.
+
+Peer coordination reserves the path endpoint only after transforming it with a
+fresh, accepted map authority. Causal optimizer and map-revision metadata can
+advance without cancelling an otherwise unchanged active reservation. Reordered,
+stale, partial, or wrong-mission authority cannot refresh it. A component change,
+a materially changed component-to-navigation transform, an expired authority,
+or a conflicting lower-cost lease still invalidates it. Reservations use bounded
+receipt-relative leases and are renewed while the full path executes.
 
 Stops disable path intake first, cancel navigation, and issue zero velocity,
 even if PCI's stop service is unavailable. Old latched paths and late service
@@ -93,7 +122,7 @@ from SwarmDeck's platform table. The supplied simulation planning bounds are
 ±60 m horizontally; adjust `fleet.launch.py` for another site. Hardware requires
 its own site and robot parameter file.
 
-The upstream PCI's forward bootstrap is disabled (`bootstrap_distance=0`);
+PCI's forward bootstrap is disabled (`bootstrap_distance=0`);
 exploration waits for actual mapped geometry. Each planner maintains its own
 OctoMap and graph. Graph exchange is deliberately not connected across local
 map frames: enable it only with verified inter-robot transforms, not assumed
@@ -101,21 +130,24 @@ identity transforms.
 
 ## ROS 2 hardware
 
-Build MGG's ROS 2 packages on the robot's ROS distribution (the supplied Docker
-image uses Jazzy), then source that workspace. Only the planner process needs
-`mgg_msgs`; the SwarmDeck adapter uses standard Trigger and Path messages.
+Hardware must run the SwarmDeck-patched MGG image. A workspace built directly
+from the pinned upstream commit is incompatible with the adapter lifecycle.
+Build the image from the repository root, or use the equivalent image built by
+the robot-local deployment profiles:
 
 ```bash
-git clone --branch ros2 https://github.com/MISTLab/MGGPlanner.git /path/to/MGGPlanner
-git -C /path/to/MGGPlanner checkout 902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
-cd /path/to/MGGPlanner/ros2
-# Install dependencies for your ROS distribution, then:
-colcon build --packages-up-to mgg_ros mgg_pci \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-source install/setup.bash
+docker build -f deploy/docker/Dockerfile.mgg -t swarmdeck-mgg:local .
 ```
 
-Launch from the SwarmDeck repository, using the real topic and frame names:
+The Dockerfile checks out the pinned upstream revision, applies the complete
+patch series in order, and rebuilds `mgg_ros` and `mgg_pci`. For development
+outside the image, reproduce that exact patched source and build; do not launch
+an unpatched upstream workspace. Only the planner process needs `mgg_msgs`; the
+SwarmDeck adapter uses standard Trigger and Path messages.
+
+The supplied image launches `deploy/mgg/robot.launch.py`. Configure it with the
+real topic and frame names; the equivalent direct launch inside a patched and
+sourced workspace is:
 
 ```bash
 ros2 launch deploy/mgg/robot.launch.py \
@@ -199,11 +231,14 @@ probes can cross unobserved air to find known occupied floor, without inserting
 synthetic ground. Missing support retains the existing graph height instead of
 turning the `-1` sentinel into an artificial upward jump. The root uses the same
 collision-box offset as projected vertices even inside the sensor blind spot;
-Spot’s edge cap reaches 2.5 m so its graph can reach camera-observed floor. The pinned upstream patch is
-`deploy/patches/mgg-traversal-lifecycle.patch`; rebuild the MGG image when it changes.
-PCI stops after three consecutive empty/failed plans or three stalled legs.
-A leg also has a time limit of six times `stuck_timeout_sec` so circling cannot
-keep it active forever. A stopped session cannot publish a late planner result.
+Spot’s edge cap reaches 2.5 m so its graph can reach camera-observed floor. The
+pinned patch series includes `deploy/patches/mgg-traversal-lifecycle.patch` and
+`deploy/patches/mgg-external-path-execution.patch`; rebuild the MGG image when
+any MGG patch changes. External execution leaves movement failure and its
+bounded replacement budget to the robot controller boundary. Empty or
+near-endpoint planner results remain waiting work and use the bounded retry
+schedule described above. A stopped session cannot publish a late planner
+result.
 
 **Return home** is per robot. The simulation adapter records its first complete,
 finite `map_frame -> odom -> base_link` pose, rather than the startup `(0,0)`

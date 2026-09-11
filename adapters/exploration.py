@@ -153,6 +153,7 @@ class MggExploration:
         self.pending_plan = None
         self.executing_plan = None
         self.executing_goal_generation = None
+        self.completed_goal_generation = None
         self.replan_requested_generation = -1
         self.replan_requested_recovery = False
         self.controller_replan_generation = -1
@@ -180,7 +181,11 @@ class MggExploration:
             0.0, float(config.get("max_inclination_rad", math.radians(30.0)))
         )
         self.controller_replan_max_attempts = self._bounded_int(
-            config.get("controller_replan_max_attempts", 3), 1, 20, 3
+            # Two replacement paths allow three failed movement attempts total.
+            config.get("controller_replan_max_attempts", 2),
+            0,
+            20,
+            2,
         )
         self.controller_replan_deadline_s = self._bounded_float(
             config.get("controller_replan_deadline_s", 15.0), 0.1, 300.0, 15.0
@@ -259,6 +264,7 @@ class MggExploration:
         self.pending_plan = None
         self.executing_plan = None
         self.executing_goal_generation = None
+        self.completed_goal_generation = None
         self.replan_requested_generation = -1
         self.replan_requested_recovery = False
         self._clear_controller_replan()
@@ -285,8 +291,9 @@ class MggExploration:
             self.pending_recovery = False
         if generation != self.generation:
             return
+        if self._completed_goal_superseded():
+            return
         try:
-            response = future.result()
             if recovery and self.controller_replan_generation != generation:
                 return
             if (
@@ -296,11 +303,18 @@ class MggExploration:
                 self.warn("controller goal ownership changed before replan reply")
                 self._stop_without_motion(status="stopped")
                 return
-            if recovery and self.executing_plan is not None:
-                # A newer path can arrive independently of the Trigger reply.
-                # Its controller result, rather than this stale acknowledgement,
-                # decides whether the bounded recovery episode continues.
-                return
+            if request_kind == "replan":
+                # Path delivery and its peer decision can precede the Trigger
+                # reply. Preserve that newer work even if the reply fails.
+                if self.executing_plan is not None or self.pending_plan is not None:
+                    return
+                if self.replan_requested_generation == generation:
+                    requested_recovery = self.replan_requested_recovery
+                    self.replan_requested_generation = -1
+                    self.replan_requested_recovery = False
+                    self._request_replan(generation, recovery=requested_recovery)
+                    return
+            response = future.result()
             if not response.success:
                 self.warn(response.message or f"MGG rejected {request_kind}")
                 self.stop(status="blocked" if request_kind == "replan" else "stopped")
@@ -327,6 +341,7 @@ class MggExploration:
         self.pending_plan = None
         self.executing_plan = None
         self.executing_goal_generation = None
+        self.completed_goal_generation = None
         self.replan_requested_generation = -1
         self.replan_requested_recovery = False
         self._clear_controller_replan()
@@ -353,6 +368,7 @@ class MggExploration:
         # A planner restart can orphan a DDS request forever. Retire expired
         # futures even after Stop, so a later operator start can recover.
         now = time.monotonic()
+        self._completed_goal_superseded()
         self._check_controller_result(now)
         self._drive_controller_replan(now)
         if self.coordinator is not None:
@@ -424,9 +440,14 @@ class MggExploration:
         if nav_status == "succeeded":
             self.executing_plan = None
             self.executing_goal_generation = None
+            self.completed_goal_generation = goal_generation
             self._clear_controller_replan()
             if self.coordinator is not None:
                 self.coordinator.release(self.generation)
+            # PCI's external-execution mode leaves arrival to FollowPath. A
+            # waypoint proximity check must never replace an unfinished path.
+            self.status = "waiting"
+            self._request_replan(self.generation)
             return
         if nav_status != "failed":
             return
@@ -443,7 +464,11 @@ class MggExploration:
             self.controller_replan_attempts >= self.controller_replan_max_attempts
             or now >= self.controller_replan_deadline
         ):
-            self.warn("controller recovery exhausted; exploration is blocked")
+            self.warn(
+                f"controller recovery exhausted after "
+                f"{self.controller_replan_attempts + 1} failed movement attempts; "
+                "exploration is blocked"
+            )
             self.stop(status="blocked")
             return
         self.status = "waiting"
@@ -483,7 +508,17 @@ class MggExploration:
         """Retire MGG after another command has taken bridge goal ownership."""
         self.stop(status=status, cancel_navigation=False)
 
+    def _completed_goal_superseded(self):
+        """A manual command also wins while the next plan is being computed."""
+        expected = self.completed_goal_generation
+        if expected is None or expected == self.bridge._goal_generation:
+            return False
+        self._stop_without_motion(status="stopped")
+        return True
+
     def on_status(self, message):
+        if self._completed_goal_superseded():
+            return
         try:
             report = json.loads(message.data)
             stamp = int(report["stamp_ns"])
@@ -504,14 +539,17 @@ class MggExploration:
                 self.stop(notify_planner=False, status=terminal)
                 self.awaiting_terminal = False
         elif (
-            state in ("starting", "exploring")
+            state in ("starting", "exploring", "waiting")
             and self.active
             and self.pending_plan is None
+            and self.executing_plan is None
         ):
             self.status = state
 
     def on_path(self, path):
         if not self.active:
+            return
+        if self._completed_goal_superseded():
             return
         sec = int(path.header.stamp.sec)
         nanosec = int(path.header.stamp.nanosec)
@@ -565,7 +603,8 @@ class MggExploration:
                 self.status = "waiting"
                 return
             if decision == "rejected":
-                self.bridge.cancel_goal()
+                # Any previous executing path was cancelled above. Cancelling
+                # again also changes ownership of an already-completed goal.
                 self.status = "waiting"
                 self.coordinator.release(generation)
                 self._request_replan(generation)
@@ -578,16 +617,19 @@ class MggExploration:
         try:
             self.status = "exploring"
             recovering = self.controller_replan_generation == generation
-            accepted = (
-                self.bridge.follow_path(
-                    plan, expected_generation=self.controller_goal_generation
-                )
+            expected = (
+                self.controller_goal_generation
                 if recovering
+                else self.completed_goal_generation
+            )
+            accepted = (
+                self.bridge.follow_path(plan, expected_generation=expected)
+                if expected is not None
                 else self.bridge.follow_path(plan)
             )
             if type(accepted) is not int:
                 self.warn("full-path controller unavailable")
-                if recovering and accepted is None:
+                if expected is not None and accepted is None:
                     self._stop_without_motion(status="stopped")
                 else:
                     self.stop(status="blocked" if recovering else "stopped")
@@ -607,6 +649,7 @@ class MggExploration:
             return
         self.executing_plan = (plan, generation)
         self.executing_goal_generation = accepted
+        self.completed_goal_generation = None
 
     def _request_replan(self, generation, *, recovery=False):
         if not self.active or generation != self.generation:
