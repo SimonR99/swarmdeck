@@ -144,7 +144,8 @@ bool qualifiedRayEvidence(const json& item)
     throw std::invalid_argument("invalid ray deskew");
   if (association != "single_capture" && association != "unknown")
     throw std::invalid_argument("invalid ray origin_association");
-  return returns == "first_return" && deskew == "deskewed" &&
+  return returns == "first_return" &&
+         (deskew == "deskewed" || deskew == "not_required") &&
          association == "single_capture";
 }
 

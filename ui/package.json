@@ -9,7 +9,8 @@
     "preview": "vite preview --host",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:video": "node --experimental-strip-types --test tests/cameraStream.test.ts",
-    "test:replicas": "node --experimental-strip-types --test tests/replicaPreview.test.ts tests/replicaTactical.test.ts",
+    "test:replicas": "node --experimental-strip-types --test tests/replicaPreview.test.ts tests/replicaTactical.test.ts tests/replicaCatalogue.test.ts",
+    "test:replica-http": "node --experimental-strip-types --test tests/replicaCatalogue.http.test.ts",
     "test:map3d": "node --experimental-strip-types --test tests/cloudSnapshot.test.ts tests/terrainData.test.ts tests/mapFrames.test.ts tests/voxelTerrain.test.ts tests/mapstore.test.mjs tests/mapViewport.test.ts"
   },
   "devDependencies": {

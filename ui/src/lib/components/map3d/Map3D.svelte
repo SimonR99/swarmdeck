@@ -236,6 +236,16 @@
     return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : `live:${cloudScope()}`;
   }
 
+  function replicaPublicationLabel(view: ReplicaTacticalCloud['view']) {
+    return view.scope === 'fleet' ? 'fleet snapshot' : `replica r${view.revision}`;
+  }
+
+  function replicaPublicationTitle(view: ReplicaTacticalCloud['view']) {
+    return view.scope === 'fleet' && view.snapshot_id
+      ? `Aggregate snapshot ${view.snapshot_id.slice(0, 12)}`
+      : undefined;
+  }
+
   function prepareCloud(
     id: number,
     controller: AbortController,
@@ -824,7 +834,9 @@
     {#if error}
       <span class="text-warn">{error}</span>
       {#if replicaCloud}
-        <span>Keeping replica r{replicaCloud.view.revision} in {replicaCloud.view.selected?.frame_id}</span>
+        <span title={replicaPublicationTitle(replicaCloud.view)}>
+          Keeping {replicaPublicationLabel(replicaCloud.view)} in {replicaCloud.view.selected?.frame_id}
+        </span>
       {/if}
     {:else}
       <div class="flex items-center gap-2 font-mono text-fg-muted">
@@ -842,7 +854,9 @@
       </div>
       <div class="text-[9px] text-fg-dim/80">
         {#if replicaCloud}
-          {replicaCloud.view.selected?.frame_id} · replica r{replicaCloud.view.revision}
+          <span title={replicaPublicationTitle(replicaCloud.view)}>
+            {replicaCloud.view.selected?.frame_id} · {replicaPublicationLabel(replicaCloud.view)}
+          </span>
           {replicaCloud.partial ? ' · bounded chunk sample' : ''}<br />
         {/if}
         Left-drag to orbit · Right-drag to pan · Scroll to zoom
@@ -855,7 +869,7 @@
     {#if tacticalReplica}
       <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl backdrop-blur-xl">
         <div class="min-w-0">
-          <div class="font-semibold text-accent">Onboard component · read-only</div>
+          <div class="font-semibold text-accent">{tacticalReplica.scope === 'fleet' ? 'Fleet component' : 'Onboard component'} · read-only</div>
           <div class="max-w-72 truncate font-mono text-fg-dim" title={tacticalReplica.componentId}>{tacticalReplica.componentId}</div>
         </div>
         <button

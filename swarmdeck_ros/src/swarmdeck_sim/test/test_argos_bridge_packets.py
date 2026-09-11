@@ -1,6 +1,8 @@
 """Exercise actual binary packet decoding without a running ROS graph."""
 
 import io
+import hashlib
+import json
 from pathlib import Path
 import struct
 import sys
@@ -41,6 +43,7 @@ def rig(monkeypatch):
         "Image",
         "CameraInfo",
         "PointCloud2",
+        "String",
     ):
         monkeypatch.setattr(bridge, name, message, raising=False)
     for name in ("Point", "Quaternion", "Vector3", "TFMessage"):
@@ -65,6 +68,7 @@ def rig(monkeypatch):
         "odom",
         "tf",
         "points",
+        "capture",
         "scan",
         "prox",
         "image",
@@ -75,6 +79,8 @@ def rig(monkeypatch):
     node = bridge.ArgosBridge.__new__(bridge.ArgosBridge)
     node._robot = lambda _: robot
     node.get_logger = Mock()
+    node.capture_producer_id = "a" * 32
+    node.sensor_epoch = 3
     return node, robot
 
 
@@ -134,6 +140,31 @@ def test_nonempty_cloud_and_scans_share_capture_time(rig):
     ]
     assert all(stamp == stamps[0] for stamp in stamps)
     assert stamps[0].nanosec == 900_000_000
+    metadata = json.loads(robot.pub_capture.publish.call_args.args[0].data)
+    expected_points = np.asarray([[2.0, 0.0, 0.0]], dtype="<f4")
+    assert metadata == {
+        "clock": "ros_sim_time",
+        "first_return": True,
+        "frame_id": "lidar",
+        "geometry": "raw_ray_capture",
+        "instantaneous": True,
+        "producer_id": "a" * 32,
+        "point_count": 1,
+        "points_sha256": hashlib.sha256(expected_points.tobytes()).hexdigest(),
+        "provider": "simulation",
+        "schema": "swarmdeck.raw-capture.v1",
+        "sensor_epoch": 3,
+        "single_sensor_origin": True,
+        "source_contract": "argos.photorealistic_lidar.hit_endpoints.single_tick.v1",
+        "stamp_ns": 900_000_000,
+    }
+
+
+def test_fallback_scan_timestamp_never_claims_raw_capture_provenance(rig):
+    node, robot = rig
+    read(node, Socket(packet(sensor_tick=500, hits=1)))
+    robot.pub_points.publish.assert_called_once()
+    robot.pub_capture.publish.assert_not_called()
 
 
 def test_future_camera_and_odometry_not_relabelled_as_current(rig):

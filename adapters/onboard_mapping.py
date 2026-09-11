@@ -10,9 +10,16 @@ from __future__ import annotations
 import os
 import time
 
+from autonomy.capture_providers import (
+    CAPTURE_PROVIDER_SPECS,
+    CaptureProvider,
+    capture_provider,
+)
+
 
 MAPPING_AUTHORITY_ENV = "SWARMDECK_MAPPING_AUTHORITY"
 MAPPING_AUTHORITY_MODES = frozenset({"central", "onboard"})
+CAPTURE_PROVIDER_ENV = "SWARMDECK_CAPTURE_PROVIDER"
 
 
 def mapping_authority_mode(value: str | None = None) -> str:
@@ -24,6 +31,28 @@ def mapping_authority_mode(value: str | None = None) -> str:
         choices = ", ".join(sorted(MAPPING_AUTHORITY_MODES))
         raise ValueError(f"{MAPPING_AUTHORITY_ENV} must be one of: {choices}")
     return mode
+
+
+def capture_provider_name(value: str | None = None) -> str:
+    """Return the explicitly selected onboard capture provider.
+
+    Unknown is the safe default for existing deployments: selecting a named
+    provider still requires per-capture raw-source provenance before free-space
+    evidence can be issued.
+    """
+
+    raw = os.environ.get(CAPTURE_PROVIDER_ENV, "unknown") if value is None else value
+    name = str(raw).strip().lower()
+    if name not in CAPTURE_PROVIDER_SPECS:
+        choices = ", ".join(sorted(CAPTURE_PROVIDER_SPECS))
+        raise ValueError(f"{CAPTURE_PROVIDER_ENV} must be one of: {choices}")
+    return name
+
+
+def selected_capture_provider(value: str | None = None) -> CaptureProvider:
+    """Construct the selected ROS-free provider boundary."""
+
+    return capture_provider(capture_provider_name(value))
 
 
 def publish_onboard_map(bridge, msg) -> bool:

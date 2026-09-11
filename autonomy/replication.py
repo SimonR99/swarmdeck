@@ -96,6 +96,9 @@ class ReplicaStore:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS manifests (robot TEXT, session TEXT, revision INTEGER, body BLOB, PRIMARY KEY(robot, session))"
             )
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS manifests_session ON manifests(session, robot)"
+            )
             indexed = self.db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_refs'"
             ).fetchone()
@@ -315,6 +318,58 @@ class ReplicaStore:
                 "SELECT robot, session, revision FROM manifests ORDER BY robot, session"
             ).fetchall()
         return [{"robot_id": r, "session_id": s, "revision": v} for r, s, v in rows]
+
+    def snapshots(self, session_id: str | None = None):
+        """Read a bounded, consistent set of replica manifests for display.
+
+        Per-robot revisions are independent. A single SQLite read transaction
+        prevents the fleet viewer from assembling a mixture of database reads
+        while another server worker publishes a replacement.
+        """
+        if session_id is not None:
+            identity("replica", session_id)
+        where, args = (
+            ("", ()) if session_id is None else (" WHERE session=?", (session_id,))
+        )
+        with self.lock:
+            self.db.execute("BEGIN")
+            try:
+                sizes = self.db.execute(
+                    "SELECT length(body) FROM manifests" + where + " LIMIT 129", args
+                ).fetchall()
+                if len(sizes) > 128 or sum(row[0] for row in sizes) > 32 * 1024**2:
+                    raise OverflowError(
+                        "Replica catalogue exceeds its metadata budget; select a mission"
+                    )
+                rows = self.db.execute(
+                    "SELECT body FROM manifests" + where + " ORDER BY robot, session",
+                    args,
+                ).fetchall()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return [json.loads(row[0]) for row in rows]
+
+    def snapshot_versions(self, session_id: str | None = None):
+        """Cheap cache key: publication rejects changed bytes at one revision."""
+        if session_id is not None:
+            identity("replica", session_id)
+        where, args = (
+            ("", ()) if session_id is None else (" WHERE session=?", (session_id,))
+        )
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT robot, session, revision FROM manifests"
+                + where
+                + " ORDER BY robot, session LIMIT 129",
+                args,
+            ).fetchall()
+        if len(rows) > 128:
+            raise OverflowError(
+                "Replica catalogue exceeds its source budget; select a mission"
+            )
+        return tuple(rows)
 
 
 class ReplicaClient:

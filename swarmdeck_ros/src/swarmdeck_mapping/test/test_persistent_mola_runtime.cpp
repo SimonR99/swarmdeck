@@ -218,6 +218,25 @@ int main()
         *partial_bridge.currentSnapshot());
     require(!partial_grid->occupied.empty() && partial_grid->free.empty(),
             "partial ray evidence did not remain occupied-only");
+    partial_evidence["manifests"][0]["submaps"][0]["ray_evidence"]["deskew"] = "not_required";
+    partial_evidence["manifests"][0]["submaps"][0]["ray_evidence"]["origin_association"] = "single_capture";
+    {
+      std::ofstream output(root / "instantaneous.json", std::ios::binary);
+      output << partial_evidence.dump();
+    }
+    const auto instantaneous = swarmdeck_mapping::parseComponentSnapshot(
+        root / "instantaneous.json",
+        swarmdeck_mapping::boundedFileSha256(root / "instantaneous.json"));
+    require(instantaneous.submaps.front().ray_evidence_qualified,
+            "instantaneous first-return capture was not qualified");
+    swarmdeck_mapping::MolaSubmapBridge instantaneous_bridge;
+    instantaneous_bridge.replaceGeometrySnapshot(
+        swarmdeck_mapping::loadGeometry(instantaneous, root / "chunks"),
+        instantaneous.graph_version, instantaneous.canonical_metadata_json,
+        instantaneous.identity);
+    require(!swarmdeck_mapping::buildNativePlannerGrid(
+                 *instantaneous_bridge.currentSnapshot())->free.empty(),
+            "instantaneous first-return capture produced no measured free space");
     const auto first = runtime.apply(
         {"request-0", "peer/component", swarmdeck_mapping::ApplyMode::Replace,
          root / "snapshot0.json", source0, root / "chunks", root / "map0.metricmap",

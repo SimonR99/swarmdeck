@@ -44,6 +44,8 @@ this file assigned the ground-truth pose into the odometry message, which made
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import os
 import socket
@@ -51,6 +53,7 @@ import struct
 import sys
 import threading
 import time
+import uuid
 from typing import Optional
 
 import numpy as np
@@ -75,6 +78,7 @@ try:
         PointCloud2,
         PointField,
     )
+    from std_msgs.msg import String
     from std_srvs.srv import Trigger
     from tf2_msgs.msg import TFMessage
 except ImportError:
@@ -319,6 +323,9 @@ class RobotInterface:
         self.pub_points = node.create_publisher(
             PointCloud2, f"/{ns}/scan/points", reliable
         )
+        self.pub_capture = node.create_publisher(
+            String, f"/{ns}/scan/capture_provenance", reliable
+        )
         self.pub_scan = node.create_publisher(LaserScan, f"/{ns}/scan", reliable)
         self.pub_prox = node.create_publisher(
             LaserScan, f"/{ns}/proximity_scan", reliable
@@ -425,6 +432,8 @@ class ArgosBridge(Node):
         self.robots: dict[str, RobotInterface] = {}
         self.running = True
         self.world_reset_pending = False
+        self.capture_producer_id = uuid.uuid4().hex
+        self.sensor_epoch = 0
 
         self.pub_clock = self.create_publisher(Clock, "/clock", 10)
         self.create_service(Trigger, "/swarmdeck_sim/reset_world", self._on_reset_world)
@@ -496,6 +505,7 @@ class ArgosBridge(Node):
 
             # A reconnect or clock rewind starts a new sensor epoch.
             if previous_tick is None or tick < previous_tick:
+                self.sensor_epoch += 1
                 for robot in self.robots.values():
                     robot.last_scan_tick = -1
                     robot.last_camera_tick = -1
@@ -614,7 +624,8 @@ class ArgosBridge(Node):
             # not rotate old geometry using the robot's current heading.
             # Keep the existing one-second compatibility window for LiDAR.
             scan_age_ticks = tick - scan_tick
-            if 0 <= scan_age_ticks <= ticks_per_second:
+            scan_tick_valid = 0 <= scan_age_ticks <= ticks_per_second
+            if scan_tick_valid:
                 scan_stamp = _stamp_of(scan_tick, ticks_per_second)
             else:
                 scan_stamp = stamp
@@ -662,6 +673,38 @@ class ArgosBridge(Node):
                     cloud.is_dense = True
                     cloud.data = out.tobytes()
                     robot.pub_points.publish(cloud)
+                    if scan_tick_valid:
+                        points_sha256 = hashlib.sha256(
+                            np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
+                        ).hexdigest()
+                        robot.pub_capture.publish(
+                            String(
+                                data=json.dumps(
+                                    {
+                                        "schema": "swarmdeck.raw-capture.v1",
+                                        "provider": "simulation",
+                                        "source_contract": (
+                                            "argos.photorealistic_lidar.hit_endpoints."
+                                            "single_tick.v1"
+                                        ),
+                                        "geometry": "raw_ray_capture",
+                                        "stamp_ns": scan_stamp.sec * 1_000_000_000
+                                        + scan_stamp.nanosec,
+                                        "frame_id": robot.frame_lidar,
+                                        "clock": "ros_sim_time",
+                                        "first_return": True,
+                                        "instantaneous": True,
+                                        "single_sensor_origin": True,
+                                        "producer_id": self.capture_producer_id,
+                                        "sensor_epoch": self.sensor_epoch,
+                                        "point_count": hits,
+                                        "points_sha256": points_sha256,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                )
+                            )
+                        )
 
                 # 2. Planar LaserScan (SLAM Toolbox: horizontal ring slice in sensor frame)
                 scan_ranges = project_laserscan_slice(

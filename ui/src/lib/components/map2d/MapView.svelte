@@ -35,6 +35,7 @@
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
+  import ReplicaCatalogueSelector from '$lib/components/replicas/ReplicaCatalogueSelector.svelte';
   import type { MapRegistration } from '$lib/types/protocol';
   import {
     drawLoopClosures,
@@ -806,6 +807,8 @@
             </span>
           </div>
         {/if}
+
+        <ReplicaCatalogueSelector />
 
         <div class="my-2 border-t border-border"></div>
         <div class="mb-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-fg-dim">

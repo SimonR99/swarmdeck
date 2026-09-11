@@ -8,17 +8,76 @@ the server never invents a transform between disconnected components.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+from threading import Lock
 from typing import Any, Mapping
 import time
+from weakref import WeakKeyDictionary
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from autonomy.contracts import validate_se3
 from .autonomy_routes import store
-
+from .replica_components import ComponentCatalogue
 
 router = APIRouter(prefix="/api/autonomy/replicas", tags=["autonomy replica views"])
+_catalogues = WeakKeyDictionary()
+_catalogue_lock = Lock()
+
+
+def current_catalogue(session_id: str | None):
+    replica_store = store()
+    versions = replica_store.snapshot_versions(session_id)
+    with _catalogue_lock:
+        cache = _catalogues.setdefault(replica_store, OrderedDict())
+        previous = cache.get(session_id)
+        if previous is not None and previous[0] == versions:
+            cache.move_to_end(session_id)
+            return previous[1]
+    snapshots = replica_store.snapshots(session_id)
+    # A publication may have advanced during the first version read. Associate
+    # the cache with the actual coherent snapshot used to construct the view.
+    versions = tuple((e["robot_id"], e["session_id"], e["revision"]) for e in snapshots)
+    catalogue = ComponentCatalogue(snapshots)
+    with _catalogue_lock:
+        cache[session_id] = (versions, catalogue)
+        cache.move_to_end(session_id)
+        while len(cache) > 2:
+            cache.popitem(last=False)
+    return catalogue
+
+
+@router.get("/components")
+async def component_catalogue(session_id: str | None = None):
+    try:
+
+        def read():
+            return current_catalogue(session_id).index()
+
+        return await asyncio.to_thread(read)
+    except OverflowError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=413)
+    except (KeyError, TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@router.get("/components/view/{session_id}")
+async def component_view(session_id: str, component_id: str):
+    try:
+
+        def read():
+            return current_catalogue(session_id).view(session_id, component_id)
+
+        return await asyncio.to_thread(read)
+    except KeyError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except OverflowError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=413)
+    except (LookupError, TypeError, ValueError) as exc:
+        # The browser keeps its previous coherent publication while peers
+        # converge on a common solution or replace their geometry.
+        return JSONResponse({"error": str(exc)}, status_code=409)
 
 
 def _component_id(manifest: Mapping[str, Any]) -> str:
@@ -127,7 +186,9 @@ def build_view(
     # Treating either as wall time makes a simulation clock (or another host's
     # clock) look fresh or ancient.  Producers may opt in to a wall timestamp
     # when they can establish that clock domain; otherwise age is explicit.
-    wall_generated = snapshot.get("generated_at_wall_ns", envelope.get("generated_at_wall_ns"))
+    wall_generated = snapshot.get(
+        "generated_at_wall_ns", envelope.get("generated_at_wall_ns")
+    )
     age = (
         max(0.0, time.time() - int(wall_generated) / 1e9)
         if isinstance(wall_generated, (int, float)) and wall_generated > 0
@@ -148,7 +209,9 @@ def build_view(
         "source_age_s": age,
         "age_clock": "wall" if age is not None else "unknown",
         "geometry_encoding": "application/vnd.swarmdeck.xyz-f32.v1",
-        "reconstruction": envelope.get("reconstruction", snapshot.get("reconstruction")),
+        "reconstruction": envelope.get(
+            "reconstruction", snapshot.get("reconstruction")
+        ),
     }
 
 

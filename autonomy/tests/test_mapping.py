@@ -223,6 +223,27 @@ def test_retracted_keyframe_tombstones_and_removes_geometry(tmp_path) -> None:
         for value in manifest.tombstones
     )
 
+    # A later correction advances both the live geometry and the retained
+    # negative membership. It must not leave a historical tombstone-only
+    # manifest with the same component ID, which snapshot consumers reject.
+    correction = solution(cap.keyframe_id, 3, 3)
+    assert m.apply_solution(correction)
+    snapshot = m.snapshot()
+    assert len(snapshot.manifests) == 1
+    assert snapshot.manifests[0].graph_revision == correction.revision
+    assert len(snapshot.manifests[0].submaps) == 1
+    assert snapshot.manifests[0].tombstones == (
+        f"r1/{SESSION}/submap/1:keyframe_retracted",
+    )
+
+    m.store.close()
+    reopened = SubmapStore(tmp_path)
+    persisted = reopened.snapshot()
+    assert len(persisted.manifests) == 1
+    assert persisted.manifests[0].graph_revision == correction.revision
+    assert persisted.manifests[0].tombstones == snapshot.manifests[0].tombstones
+    reopened.close()
+
 
 def test_terrain_query_reports_surface_and_unknown(tmp_path) -> None:
     m = mapper(tmp_path)
@@ -280,21 +301,29 @@ def test_multiple_unassociated_origins_never_infer_free_space(tmp_path) -> None:
     assert m.occupancy_query(component, (2, 0, 0)).state is OccupancyState.OCCUPIED
 
 
-def test_only_explicit_deskewed_first_returns_certify_free_rays(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "deskew_status", [DeskewStatus.DESKEWED, DeskewStatus.NOT_REQUIRED]
+)
+def test_explicit_motion_compensated_first_returns_certify_free_rays(
+    tmp_path, deskew_status
+) -> None:
     store_path = tmp_path / "qualified"
     m = CorrectionAwareMapper(SubmapStore(store_path), resolution_m=0.1)
-    cap = capture(ray_return_semantics=RayReturnSemantics.FIRST_RETURN)
+    cap = capture(
+        ray_return_semantics=RayReturnSemantics.FIRST_RETURN,
+        deskew_status=deskew_status,
+    )
     m.add_capture(cap, calibration(), [[2, 0, 0]])
     submap = m.snapshot().manifests[0].submaps[0]
     assert submap.ray_evidence == RayEvidence(
         RayReturnSemantics.FIRST_RETURN,
-        DeskewStatus.DESKEWED,
+        deskew_status,
         RayOriginAssociation.SINGLE_CAPTURE,
     )
     encoded = m.snapshot_dict()["manifests"][0]["submaps"][0]["ray_evidence"]
     assert encoded == {
         "return_semantics": "first_return",
-        "deskew": "deskewed",
+        "deskew": deskew_status.value,
         "origin_association": "single_capture",
     }
     component = component_id_for_anchor(cap.keyframe_id)

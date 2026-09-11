@@ -11,10 +11,14 @@ import {
 export const MAX_TACTICAL_SOURCE_POINTS = 300_000;
 const MAX_DOWNLOADS = 3;
 
+export type ReplicaSelectionScope = 'robot' | 'fleet';
+
 export interface ReplicaTacticalSelection {
   robotId: string;
   sessionId: string;
   componentId: string;
+  /** Legacy inspector selections default to one robot; the catalogue uses fleet. */
+  scope?: ReplicaSelectionScope;
 }
 
 export interface ReplicaSubmap {
@@ -36,14 +40,24 @@ export interface ReplicaComponent {
 export interface ReplicaView {
   robot_id: string;
   session_id: string;
-  revision: number;
+  /** Aggregate fleet views have no authoritative per-robot revision. */
+  revision: number | null;
   snapshot_id?: string;
   component_id: string | null;
   components: ReplicaComponent[];
   selected: ReplicaComponent | null;
   chunks: ChunkRef[];
   source_age_s: number | null;
+  scope?: ReplicaSelectionScope;
+  sources?: ReplicaViewSource[];
   reconstruction?: { state?: string; artifact?: string } | null;
+}
+
+export interface ReplicaViewSource {
+  robot_id: string;
+  session_id: string;
+  revision: number;
+  snapshot_id: string;
 }
 
 export interface ReplicaTacticalCloud {
@@ -86,7 +100,11 @@ export class ReplicaRevisionTracker {
 }
 
 export function replicaSelectionKey(selection: ReplicaTacticalSelection): string {
-  return `${selection.robotId}\u0000${selection.sessionId}\u0000${selection.componentId}`;
+  return `${selection.scope ?? 'robot'}\u0000${selection.robotId}\u0000${selection.sessionId}\u0000${selection.componentId}`;
+}
+
+export function replicaSelectionScope(selection: ReplicaTacticalSelection): ReplicaSelectionScope {
+  return selection.scope ?? 'robot';
 }
 
 export function replicaTransition(
@@ -133,17 +151,24 @@ function ownerOf(submapId: string, fallback: string): string {
   return owner || fallback;
 }
 
-function frameKey(view: ReplicaView, selected: ReplicaComponent): string {
-  const revision = selected.graph_revision;
+function frameKey(
+  selection: ReplicaTacticalSelection,
+  selected: ReplicaComponent
+): string {
+  if (replicaSelectionScope(selection) === 'fleet') {
+    return JSON.stringify([
+      'fleet',
+      selection.sessionId,
+      selected.component_id,
+      selected.frame_id
+    ]);
+  }
+  const graphRevision = selected.graph_revision;
   return JSON.stringify([
-    replicaSelectionKey({
-      robotId: view.robot_id,
-      sessionId: view.session_id,
-      componentId: selected.component_id
-    }),
+    replicaSelectionKey(selection),
     selected.frame_id,
-    revision?.component_id ?? selected.component_id,
-    revision?.epoch ?? null
+    graphRevision?.component_id ?? selected.component_id,
+    graphRevision?.epoch ?? null
   ]);
 }
 
@@ -197,17 +222,21 @@ export class ReplicaTacticalLoader {
     known: ReplicaDisplayRevision | null = null
   ): Promise<ReplicaTacticalCloud | null> {
     const sourceKey = replicaSelectionKey(selection);
-    const response = await fetch(
-      `/api/autonomy/replicas/view/${encodeURIComponent(selection.robotId)}/${encodeURIComponent(selection.sessionId)}`
-        + `?component_id=${encodeURIComponent(selection.componentId)}`,
-      { cache: 'no-store', signal }
-    );
+    const scope = replicaSelectionScope(selection);
+    const endpoint = scope === 'fleet'
+      ? `/api/autonomy/replicas/components/view/${encodeURIComponent(selection.sessionId)}`
+        + `?component_id=${encodeURIComponent(selection.componentId)}`
+      : `/api/autonomy/replicas/view/${encodeURIComponent(selection.robotId)}/${encodeURIComponent(selection.sessionId)}`
+        + `?component_id=${encodeURIComponent(selection.componentId)}`;
+    const response = await fetch(endpoint, { cache: 'no-store', signal });
     if (!response.ok) throw new Error(`Replica view unavailable (${response.status})`);
     const view = await response.json() as ReplicaView;
     const selected = view.selected;
     if (!selected || view.component_id !== selection.componentId ||
         selected.component_id !== selection.componentId ||
-        view.robot_id !== selection.robotId || view.session_id !== selection.sessionId) {
+        view.robot_id !== (scope === 'fleet' ? 'fleet' : selection.robotId) ||
+        view.session_id !== selection.sessionId ||
+        (view.scope ?? 'robot') !== scope) {
       throw new Error('Replica view does not match the selected component');
     }
     if (!Array.isArray(selected.submaps) || !Array.isArray(view.chunks)) {
@@ -219,7 +248,7 @@ export class ReplicaTacticalLoader {
     }
     const metadata = {
       sourceKey,
-      frameKey: frameKey(view, selected),
+      frameKey: frameKey(selection, selected),
       revisionKey: revisionKey(view, selected)
     };
     if (known && replicaTransition(known, metadata) === 'unchanged') return null;

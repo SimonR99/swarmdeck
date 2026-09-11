@@ -24,6 +24,8 @@ to the point-geometry layer. Both the MOLA provider and the existing indexed
 provider use the same terrain-query implementation. MGG still uses its OctoMap
 for exploration; replacing that map and qualifying real capture provenance remain
 work in the [integration plan](../architecture/planning-refactor-remaining.md).
+The read-only fleet component catalogue and aggregate display path are described
+in the [replica component guide](replica-components.md).
 
 ## Worker deployment
 
@@ -100,13 +102,20 @@ Native JSON digests are opaque identities, since C++ and Python JSON number
 formatting differs. The worker's manifest digest and exact file hashes establish
 the publication chain.
 
-Free space requires explicit `RayEvidence`: first-return endpoints, a deskewed
-capture, and a single associated sensor origin. The store verifies the durable
-capture record, timestamp and calibrated origin before issuing this evidence.
-Old snapshots, missing/partial evidence, and generic geometry replacements
-remain occupied-only. Existing Bistro SLAM captures lack this qualification;
-turning on MOLA does not make their unknown cells traversable. Qualifying the
-capture providers is the next dependency for motion use.
+Free space requires explicit `RayEvidence`: `FIRST_RETURN`, `DESKEWED` or
+`NOT_REQUIRED`, and `SINGLE_CAPTURE`. The store verifies the durable capture
+record, source contract, clock domain, capture interval, capture-time transform,
+calibration, estimator session, and the one associated sensor origin before
+issuing this evidence. It is evidence about the original rays, not a property
+that can be inferred from a provider name or a registered point cloud.
+
+The simulation provider can qualify one-tick raw rays. The current
+SuperOdometry and FAST-LIVO2 raw contracts attest first returns but not deskew;
+FAST-LIVO2's registered cloud can attest deskew while losing the one-endpoint-
+per-ray guarantee. Those hardware paths therefore remain occupied-only until
+their capture contracts provide all three conditions. Old snapshots,
+missing/partial evidence, and generic geometry replacements remain occupied-only.
+Turning on MOLA does not make unqualified Bistro unknown cells traversable.
 
 | Native planner limit | Default |
 | --- | --- |
@@ -265,6 +274,7 @@ commands. Omit the last two options for the synthetic acceptance fixture.
 
 The planner image is `swarmdeck-mapping:mola-planner-review`, image ID
 `sha256:fa4f63725a37514d372ce4877d1b3a87de022f3fa7335c2eaee4353a932de16f`.
-It passed all image acceptance gates on the workstation. The isolated running
-mapping worker and query service retain their previous images; the new planner
-backend has not been enabled for robot motion.
+It passed all image acceptance gates on the workstation. That earlier run retained its existing deployment images. The subsequent
+[parallel acceptance run](planning-parallel-acceptance.md) enabled native planner
+products and the MOLA query provider in a separate simulation; MGG motion still
+uses its existing exploration map.

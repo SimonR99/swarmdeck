@@ -2,7 +2,8 @@ from types import SimpleNamespace as NS
 import uuid
 import numpy as np
 import pytest
-from autonomy.contracts import IDENTITY_SE3
+from autonomy.capture_providers import CaptureClock, CaptureGeometry, CaptureProvenance
+from autonomy.contracts import DeskewStatus, IDENTITY_SE3, RayReturnSemantics
 from autonomy.cslam import CslamMapper
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaStore, canonical
@@ -87,7 +88,7 @@ def test_normalized_points_keep_physical_lidar_origin(tmp_path):
     assert submap.sensor_origins == ((0, 0, 1.2),)
 
 
-def test_identical_new_solver_result_advances_clock_without_invalidating_map(tmp_path):
+def test_identical_new_solver_result_advances_replica_and_graph_revision(tmp_path):
     core = CslamMapper(
         CorrectionAwareMapper(SubmapStore(tmp_path)),
         "r0",
@@ -106,12 +107,94 @@ def test_identical_new_solver_result_advances_clock_without_invalidating_map(tmp
         anchor_estimates=[value(0, 0, 0)],
     )
     revision = core.revision
+    initial = core.envelope()
+    geometry_revision = initial["snapshot"]["manifests"][0][
+        "geometry_revision"
+    ]
+    replica = ReplicaStore(tmp_path / "replica")
+    for chunk in initial["chunks"]:
+        replica.put_chunk(chunk["sha256"], core.mapper.get_chunk(chunk["sha256"]))
+    assert replica.publish(initial)
     assert not core.solution(msg)
     assert core.solution_order == (1, 0)
-    assert core.revision == revision
+    assert core.revision == revision + 1
     assert core.correction_revision == 0
+    envelope = core.envelope()
+    assert envelope["solution_order"] == [1, 0]
+    assert envelope["revision"] == revision + 1
+    assert (
+        envelope["snapshot"]["manifests"][0]["geometry_revision"]
+        == geometry_revision
+    )
+    assert replica.publish(envelope)
     msg.solution_clock = 2
     msg.estimates = [value(0, 0, 1)]
     msg.anchor_estimates = [value(0, 0, 1)]
     assert core.solution(msg)
     assert core.correction_revision == 1
+    replica.close()
+
+
+def test_selected_provider_does_not_bless_a_cslam_keyframe_cloud(tmp_path):
+    mapper = CorrectionAwareMapper(SubmapStore(tmp_path))
+    core = CslamMapper(
+        mapper,
+        "r0",
+        0,
+        str(uuid.uuid4()),
+        {0: "r0"},
+        "simulation",
+    )
+    core.capture(0, 10, IDENTITY_SE3, [[1, 0, 0]])
+    stored = mapper.store.get_capture(core.key(0))["capture"]
+    assert stored["deskew_status"] == DeskewStatus.UNKNOWN.value
+    assert stored["ray_return_semantics"] == RayReturnSemantics.UNKNOWN.value
+
+
+def test_raw_simulation_capture_is_explicitly_paired_to_keyframe(tmp_path):
+    mapper = CorrectionAwareMapper(SubmapStore(tmp_path))
+    mission = str(uuid.uuid4())
+    core = CslamMapper(mapper, "r0", 0, mission, {0: "r0"}, "simulation")
+    keyframe = core.key(0)
+    evidence = CaptureProvenance(
+        keyframe,
+        CaptureGeometry.RAW_RAY_CAPTURE,
+        10,
+        10,
+        10,
+        CaptureClock.ROS_SIM_TIME,
+        mission,
+        True,
+        source_contract="argos.photorealistic_lidar.hit_endpoints.single_tick.v1",
+    )
+    core.capture(0, 10, IDENTITY_SE3, [[1, 0, 0]], provenance=evidence)
+    stored = mapper.store.get_capture(keyframe)["capture"]
+    assert stored["deskew_status"] == DeskewStatus.NOT_REQUIRED.value
+    assert stored["ray_return_semantics"] == RayReturnSemantics.FIRST_RETURN.value
+    assert mapper.store.active_submaps()[0].ray_evidence.certifies_free_space
+
+
+def test_keyframe_identity_includes_provider_evidence(tmp_path):
+    core = CslamMapper(
+        CorrectionAwareMapper(SubmapStore(tmp_path)),
+        "r0",
+        0,
+        str(uuid.uuid4()),
+        {0: "r0"},
+        "simulation",
+    )
+    core.capture(0, 10, IDENTITY_SE3, [[1, 0, 0]])
+    keyframe = core.key(0)
+    evidence = CaptureProvenance(
+        keyframe,
+        CaptureGeometry.RAW_RAY_CAPTURE,
+        10,
+        10,
+        10,
+        CaptureClock.ROS_SIM_TIME,
+        keyframe.session_id,
+        True,
+        source_contract="argos.photorealistic_lidar.hit_endpoints.single_tick.v1",
+    )
+    with pytest.raises(ValueError, match="different capture data"):
+        core.capture(0, 10, IDENTITY_SE3, [[1, 0, 0]], provenance=evidence)

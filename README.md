@@ -140,6 +140,11 @@ sorting run in workers; representations and color buffers are reused. Rendering
 and map requests pause when the view is hidden. These are workload limits,
 not guaranteed frame rates. Balanced and High detail profiles raise the limits.
 
+For a fleet component, open **Layers → Map source** and select the mission and
+component. Only maps with compatible accepted Swarm-SLAM results are displayed
+together; unmerged components stay separate. See the
+[fleet replica guide](docs/operations/replica-components.md).
+
 For onboard maps, open **Onboard map replicas**, select a robot/session/component,
 and choose **Open component in tactical map**. The viewer assembles stored submaps
 using their verified component poses and reuses cached geometry across pose

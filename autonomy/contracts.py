@@ -218,7 +218,7 @@ class RayEvidence:
     def certifies_free_space(self) -> bool:
         return (
             self.return_semantics is RayReturnSemantics.FIRST_RETURN
-            and self.deskew is DeskewStatus.DESKEWED
+            and self.deskew in (DeskewStatus.DESKEWED, DeskewStatus.NOT_REQUIRED)
             and self.origin_association is RayOriginAssociation.SINGLE_CAPTURE
         )
 

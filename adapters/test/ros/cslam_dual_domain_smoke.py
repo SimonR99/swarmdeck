@@ -9,6 +9,7 @@ sensor domain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -103,6 +104,10 @@ def main() -> None:
             "-p",
             "cloud_topic:=/raw_points",
             "-p",
+            "capture_provider:=simulation",
+            "-p",
+            "capture_provenance_topic:=/raw_capture_provenance",
+            "-p",
             f"sensor_domain_id:={sensor_domain}",
             "-p",
             "tf_topic:=/tf",
@@ -127,6 +132,9 @@ def main() -> None:
         sensor_tf = sensor_node.create_publisher(TFMessage, "/tf", 20)
         peer_tf = peer_node.create_publisher(TFMessage, "/tf", 20)
         raw_cloud = sensor_node.create_publisher(PointCloud2, "/raw_points", 10)
+        raw_provenance = sensor_node.create_publisher(
+            String, "/raw_capture_provenance", 10
+        )
         key_cloud = peer_node.create_publisher(
             KeyframePointCloud, "/r0/cslam/keyframe_data", 10
         )
@@ -198,6 +206,7 @@ def main() -> None:
             deadline = time.monotonic() + 20.0
             while time.monotonic() < deadline and (
                 raw_cloud.get_subscription_count() < 1
+                or raw_provenance.get_subscription_count() < 1
                 or key_cloud.get_subscription_count() < 1
                 or local_intention.get_subscription_count() < 2
                 or peer_intention.get_subscription_count() < 2
@@ -226,11 +235,36 @@ def main() -> None:
                 Header(stamp=stamp, frame_id="lidar"),
                 np.asarray([[2.0, 0.0, 0.0]], dtype=np.float32),
             )
+            stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+            raw_xyz = np.asarray([[2.0, 0.0, 0.0]], dtype="<f4")
+            provenance = String(
+                data=json.dumps(
+                    {
+                        "schema": "swarmdeck.raw-capture.v1",
+                        "provider": "simulation",
+                        "source_contract": (
+                            "argos.photorealistic_lidar.hit_endpoints.single_tick.v1"
+                        ),
+                        "geometry": "raw_ray_capture",
+                        "stamp_ns": stamp_ns,
+                        "frame_id": "lidar",
+                        "clock": "ros_sim_time",
+                        "first_return": True,
+                        "instantaneous": True,
+                        "single_sensor_origin": True,
+                        "producer_id": "a" * 32,
+                        "sensor_epoch": 1,
+                        "point_count": 1,
+                        "points_sha256": hashlib.sha256(raw_xyz.tobytes()).hexdigest(),
+                    }
+                )
+            )
             deadline = time.monotonic() + 10.0
             while time.monotonic() < deadline and not normalized_clouds:
                 sensor_tf.publish(local_transforms)
                 peer_tf.publish(conflicting_peer_tf)
                 raw_cloud.publish(cloud)
+                raw_provenance.publish(provenance)
                 spin_pair(sensor_executor, peer_executor, 0.1)
             require(
                 normalized_clouds and normalized_odometry,
@@ -254,9 +288,13 @@ def main() -> None:
                 "normalized cloud was unexpectedly published in the sensor domain",
             )
 
-            key_cloud.publish(
-                KeyframePointCloud(id=0, pointcloud=normalized_clouds[-1])
+            # Deliberately unlike the raw endpoint. The durable map must use
+            # the exact raw capture paired by stamp, not this SLAM cloud value.
+            slam_cloud = create_cloud_xyz32(
+                Header(stamp=stamp, frame_id="base_link"),
+                np.asarray([[9.0, 0.0, 0.0]], dtype=np.float32),
             )
+            key_cloud.publish(KeyframePointCloud(id=0, pointcloud=slam_cloud))
             key_odom.publish(KeyframeOdom(id=0, odom=normalized_odometry[-1]))
 
             own_intention = f'{{ "robot_id": "{robot}", "exact": "intention" }}'
@@ -280,10 +318,32 @@ def main() -> None:
             ):
                 sensor_tf.publish(local_transforms)
                 raw_cloud.publish(cloud)
+                raw_provenance.publish(provenance)
                 spin_pair(sensor_executor, peer_executor, 0.1)
             require(local_authorities, "map authority did not return to sensor domain")
             require(local_metadata, "keyframe metadata did not return to sensor domain")
             require(not peer_authorities, "map authority leaked into the peer domain")
+            snapshot_path = root / "maps" / mission / robot / "snapshot.json"
+            snapshot = json.loads(snapshot_path.read_text())
+            submap = snapshot["manifests"][0]["submaps"][0]
+            require(
+                submap["ray_evidence"]
+                == {
+                    "return_semantics": "first_return",
+                    "deskew": "not_required",
+                    "origin_association": "single_capture",
+                },
+                "simulation raw capture did not qualify ray provenance",
+            )
+            chunk = submap["chunks"][0]
+            payload = (
+                root / "maps" / mission / robot / "geometry" / "chunks" / chunk["sha256"]
+            ).read_bytes()
+            stored_point = np.frombuffer(payload, dtype="<f4", offset=16).reshape(-1, 3)[0]
+            require(
+                np.allclose(stored_point, [2.0, 0.0, 0.5], atol=1e-6),
+                f"map stored SLAM centroid instead of raw endpoint: {stored_point}",
+            )
             require(
                 json.loads(local_authorities[-1].data)["robot_id"] == robot,
                 "local authority payload is invalid",

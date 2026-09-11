@@ -20,15 +20,21 @@ contains measured results and known failures.
 
 ## Current work split
 
-- **Sol — native MOLA:** resident MRPT point buffers, corrected planner-grid
-  construction, bounded binary export and native regression tests.
-- **Sol — planner provider:** strict product loading, immutable grid publication,
-  shared terrain queries and provider selection.
-- **Luna — acceptance:** captured-point fixtures across the native/Python
-  boundary, image integration and copied-map replay.
-- **Lead review/integration:** provenance contract review, atomic worker product
-  publication, framework component lifecycle, deployment wiring and independent
-  workstation tests. Agent changes are reviewed before inclusion.
+- **Native MOLA and planner provider:** resident MRPT point buffers, corrected
+  planner-grid construction, bounded `SDMGRID1` export, strict product loading,
+  immutable publication, and shared terrain queries are implemented and covered
+  by local tests.
+- **Capture qualification:** new ARGoS captures pass the original-ray contract
+  and produce native free-space grids. SuperOdometry and FAST-LIVO2 still need
+  recorded hardware qualification. Legacy keyframe clouds remain occupied-only.
+- **Fleet display:** the read-only component catalogue and aggregate view are
+  available from the map Layers panel; the [replica component guide](../operations/replica-components.md)
+  documents its compatibility and failure rules. Per-robot inspection remains
+  available.
+- **Integration and acceptance:** worker publication, framework lifecycle,
+  deployment wiring, remote replay, MGG service checks, and measured budgets are
+  reviewed and recorded by the integration owner. No remote result is implied by
+  the local implementation status.
 
 ## Validation and rollout
 
@@ -64,14 +70,59 @@ framework's automatic selection follows a changed sole component and rejects
 ambiguous input. Corrected origins, disappearing walls, floor/step/drop/stacked
 surfaces and artifact failures are covered across the native/Python boundary.
 
-The deployment defaults remain the existing indexed provider. Bistro captures
-currently lack explicit first-return and deskew provenance, so both providers
-conservatively preserve unknown space instead of inferring free cells from a
-sensor origin alone. Priority 3 capture-provider qualification is therefore the
-next dependency for enabling MOLA in motion planning. MGG's exploration OctoMap
-and graph/grid/controller qualification also remain outstanding. See the
-[runtime guide](../operations/mola-runtime.md) for the provider settings and
-measured validation results.
+The deployment defaults remain the existing indexed provider. Legacy Bistro
+captures lack the qualified original-ray contract and remain occupied-only.
+The third milestone below qualifies new instantaneous simulation captures;
+hardware capture qualification, MGG's exploration OctoMap replacement, and
+graph/grid/controller qualification remain outstanding. See the [runtime guide](../operations/mola-runtime.md)
+for the provider settings and admission rules.
+
+## Capture provenance gate
+
+Free-space carving is admitted only when the stored endpoints retain their
+original-ray meaning. A qualified capture identifies one physical capture,
+uses first returns, has an instantaneous or deskewed frame, and associates all
+endpoints with one calibrated sensor origin. In the versioned contract this is
+`RayEvidence` with `FIRST_RETURN`, `DESKEWED` or `NOT_REQUIRED`, and
+`SINGLE_CAPTURE`.
+
+The capture provider also verifies the concrete source contract, clock domain,
+capture interval, capture-time transform, estimator session, and calibration.
+Simulation can qualify a one-tick ray capture (`NOT_REQUIRED`). The current
+SuperOdometry and FAST-LIVO2 raw boundaries attest first returns but do not yet
+attest deskew; a FAST-LIVO2 registered cloud may be deskewed but does not attest
+one endpoint per ray. Those paths therefore remain occupied-only until their
+capture contracts are completed. Missing, partial, stale, or generic geometry
+evidence never creates free space. This conservative rule is required on
+hardware, where a plausible sensor origin is not proof that intermediate cells
+were observed.
+
+## Remaining qualification
+
+The remaining work is to replace MGG's exploration OctoMap with the qualified
+planner product, complete shared graph-to-grid-to-controller behavior for
+Explore, Navigate, and Home, and extend four-robot startup validation to correction,
+replanning, and moving-obstacle trials. Physical ROS 2 gateways, ARM builds,
+calibration, bounded peer traffic, and low-speed controller trials remain
+hardware gates. Gaussian reconstruction remains a separate fixed-pose batch
+path until real-capture alignment, correction replacement, resource budgets,
+and cancellation are measured; Gaussian opacity is never collision occupancy.
 
 Existing Bistro startup, terrain/Home and inter-robot closure failures remain
 acceptance work, not reasons to weaken map admission guards.
+
+## Third milestone: captures, recovery, and fleet display
+
+The original ARGoS endpoint/provenance join, bounded controller-failure recovery,
+and fleet component Layers selector are implemented. Review added manual-goal
+ownership checks, strict replica identity/owner validation, and a tombstone fix
+for retraction followed by map correction. Sol and Luna implemented separate
+areas; Gemini 3.8 Flash reviewed display semantics through `agy`. Changes were
+reviewed and tested together before committing.
+
+The [benchbot acceptance record](../operations/planning-parallel-acceptance.md)
+records four-robot native free-space production, HTTP/browser checks, and the
+bounded Explore/Stop All trial. R1 still reaches a planner-generated blocked
+state. No live inter-robot closure or full MOLA-driven exploration qualification
+is claimed. The next priority is MGG's map-provider migration and blocked-route
+recovery, then Navigate/Home and coordinated multi-host acceptance.

@@ -21,7 +21,28 @@ def rig():
     bridge.follow_path = Mock()
     bridge.id = "r"
     bridge.cfg = {"link_timeout_s": 5}
+    bridge._goal_generation = 0
+    bridge.nav_status = "idle"
     bridge.node.get_clock().now().nanoseconds = 1000000000
+
+    def cancel_goal():
+        bridge._goal_generation += 1
+        bridge.nav_status = "cancelled"
+        return bridge._goal_generation
+
+    def follow_path(_plan, *, expected_generation=None):
+        if (
+            expected_generation is not None
+            and expected_generation != bridge._goal_generation
+        ):
+            return None
+        if expected_generation is None:
+            bridge._goal_generation += 1
+        bridge.nav_status = "active"
+        return bridge._goal_generation
+
+    bridge.cancel_goal.side_effect = cancel_goal
+    bridge.follow_path.side_effect = follow_path
     explorer = MggExploration.__new__(MggExploration)
     explorer.bridge = bridge
     explorer.active = False
@@ -30,8 +51,21 @@ def rig():
     explorer.last_path_revision_ns = 0
     explorer.pending_plan = None
     explorer.executing_plan = None
+    explorer.executing_goal_generation = None
     explorer.replan_requested_generation = -1
+    explorer.replan_requested_recovery = False
+    explorer.controller_replan_generation = -1
+    explorer.controller_goal_generation = None
+    explorer.controller_replan_attempts = 0
+    explorer.controller_replan_deadline = 0.0
+    explorer.controller_replan_due = 0.0
+    explorer.awaiting_replan_path = False
+    explorer.controller_replan_max_attempts = 3
+    explorer.controller_replan_deadline_s = 15.0
+    explorer.controller_replan_backoff_s = 0.0
     explorer.pending = None
+    explorer.pending_kind = None
+    explorer.pending_recovery = False
     explorer.pending_stop = None
     explorer.stop_deadline = 0
     explorer.deadline = 0
@@ -417,3 +451,173 @@ def test_manual_stop_releases_peer_reservation_before_motion_cancel():
     explorer.stop()
     assert explorer.coordinator.releases[-1] > generation
     assert explorer.pending_plan is None and explorer.executing_plan is None
+
+
+def _start_with_path(explorer, *, stamp=2):
+    explorer.start()
+    explorer.pending.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=stamp))
+
+
+def test_owned_controller_failure_requests_bounded_replan_and_recovers():
+    bridge, explorer = rig()
+    replacement_request = Future()
+    explorer.replan_client.call_async.return_value = replacement_request
+    _start_with_path(explorer)
+    first_goal_generation = explorer.executing_goal_generation
+
+    bridge.nav_status = "failed"
+    explorer.tick()
+
+    assert explorer.active
+    assert explorer.status == "waiting"
+    assert explorer.executing_plan is None
+    assert explorer.controller_replan_attempts == 1
+    explorer.replan_client.call_async.assert_called_once()
+
+    replacement_request.set_result(NS(success=True, message=""))
+    assert explorer.awaiting_replan_path
+    explorer.on_path(path(stamp=3, points=[(0.5, 0.0, 0.0), (1.5, 0.0, 0.0)]))
+    assert explorer.executing_goal_generation == first_goal_generation
+    assert not explorer.awaiting_replan_path
+    assert bridge.follow_path.call_args.kwargs == {
+        "expected_generation": first_goal_generation
+    }
+
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    assert explorer.active
+    assert explorer.executing_plan is None
+    assert explorer.controller_replan_generation == -1
+    assert explorer.controller_replan_attempts == 0
+
+
+def test_repeated_controller_failures_exhaust_replan_budget():
+    bridge, explorer = rig()
+    explorer.controller_replan_max_attempts = 2
+    requests = [Future(), Future()]
+    explorer.replan_client.call_async.side_effect = requests
+    _start_with_path(explorer)
+
+    for attempt, request in enumerate(requests, start=1):
+        bridge.nav_status = "failed"
+        explorer.tick()
+        assert explorer.controller_replan_attempts == attempt
+        request.set_result(NS(success=True, message=""))
+        explorer.on_path(path(stamp=2 + attempt))
+
+    bridge.nav_status = "failed"
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+    assert explorer.replan_client.call_async.call_count == 2
+
+
+def test_controller_replan_times_out_if_no_replacement_path_arrives():
+    bridge, explorer = rig()
+    request = Future()
+    explorer.replan_client.call_async.return_value = request
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+    request.set_result(NS(success=True, message=""))
+    assert explorer.awaiting_replan_path
+
+    explorer.controller_replan_deadline = time.monotonic() - 1.0
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+
+
+def test_replacement_goal_generation_retires_exploration_without_canceling_it():
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    bridge.cancel_goal.reset_mock()
+    bridge.drive.reset_mock()
+
+    bridge._goal_generation += 1
+    bridge.nav_status = "failed"
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "stopped"
+    explorer.replan_client.call_async.assert_not_called()
+    bridge.cancel_goal.assert_not_called()
+    bridge.drive.assert_not_called()
+
+
+def test_replan_rejection_reports_blocked_instead_of_stopped():
+    bridge, explorer = rig()
+    request = Future()
+    explorer.replan_client.call_async.return_value = request
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+
+    request.set_result(NS(success=False, message="no alternate frontier"))
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+
+
+def test_replacement_path_wins_over_late_replan_rejection():
+    bridge, explorer = rig()
+    request = Future()
+    explorer.replan_client.call_async.return_value = request
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+
+    explorer.on_path(path(stamp=3))
+    replacement_generation = explorer.executing_goal_generation
+    request.set_result(NS(success=False, message="late rejection"))
+
+    assert explorer.active
+    assert explorer.status == "exploring"
+    assert explorer.executing_goal_generation == replacement_generation
+    assert explorer.controller_replan_attempts == 1
+
+
+def test_manual_goal_while_waiting_for_replan_path_wins_without_cancellation():
+    bridge, explorer = rig()
+    request = Future()
+    explorer.replan_client.call_async.return_value = request
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+    request.set_result(NS(success=True, message=""))
+    assert explorer.awaiting_replan_path
+    bridge.cancel_goal.reset_mock()
+    bridge.drive.reset_mock()
+    prior_paths = bridge.follow_path.call_count
+
+    bridge._goal_generation += 1
+    bridge.nav_status = "active"
+    explorer.on_path(path(stamp=3))
+
+    assert not explorer.active
+    assert bridge.follow_path.call_count == prior_paths
+    bridge.cancel_goal.assert_not_called()
+    bridge.drive.assert_not_called()
+
+
+def test_manual_goal_wins_over_stale_replan_service_response():
+    bridge, explorer = rig()
+    request = Future()
+    explorer.replan_client.call_async.return_value = request
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+    bridge.cancel_goal.reset_mock()
+    bridge.drive.reset_mock()
+
+    bridge._goal_generation += 1
+    bridge.nav_status = "active"
+    request.set_result(NS(success=True, message=""))
+
+    assert not explorer.active
+    assert not explorer.awaiting_replan_path
+    bridge.cancel_goal.assert_not_called()
+    bridge.drive.assert_not_called()

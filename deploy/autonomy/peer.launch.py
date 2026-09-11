@@ -31,6 +31,13 @@ def generate_launch_description():
         raise ValueError("SWARMDECK_SENSOR_DOMAIN_ID must be between 0 and 232")
     ns = os.environ.get("SWARMDECK_SENSOR_NAMESPACE", robot).strip("/")
     sim_time = os.environ.get("SWARMDECK_USE_SIM_TIME", "false").lower() == "true"
+    capture_provider = os.environ.get(
+        "SWARMDECK_CAPTURE_PROVIDER", "unknown"
+    ).strip().lower()
+    capture_provenance_topic = os.environ.get(
+        "SWARMDECK_CAPTURE_PROVENANCE_TOPIC",
+        f"/{ns}/scan/capture_provenance" if capture_provider == "simulation" else "",
+    )
     config = "/cslam_ws/install/swarmdeck_cslam/share/swarmdeck_cslam/config/cslam_lidar.yaml"
     common = [
         config,
@@ -70,6 +77,11 @@ def generate_launch_description():
                 "odom_frame": os.environ.get("SWARMDECK_ODOM_FRAME", f"{ns}/odom"),
                 "cloud_topic": os.environ.get(
                     "SWARMDECK_CLOUD_TOPIC", f"/{ns}/scan/points"
+                ),
+                "capture_provider": capture_provider,
+                "capture_provenance_topic": capture_provenance_topic,
+                "max_stored_raw_capture_points": int(
+                    os.environ.get("SWARMDECK_MAX_STORED_RAW_CAPTURE_POINTS", "4096")
                 ),
                 "tf_topic": os.environ.get("SWARMDECK_TF_TOPIC", f"/{ns}/tf"),
                 "tf_static_topic": os.environ.get(

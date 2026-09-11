@@ -142,7 +142,7 @@ def _qualified_ray_keyframes(manifest: Mapping[str, object]) -> int:
         if (
             isinstance(evidence, dict)
             and evidence.get("return_semantics") == "first_return"
-            and evidence.get("deskew") == "deskewed"
+            and evidence.get("deskew") in ("deskewed", "not_required")
             and evidence.get("origin_association") == "single_capture"
             and isinstance(origins, list)
             and len(origins) == 1

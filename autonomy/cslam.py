@@ -7,14 +7,15 @@ This boundary never invents a transform for an unlocalized peer.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
+import json
 import numpy as np
 
+from .capture_providers import CaptureProvenance, CaptureProvider, capture_provider
 from .contracts import (
     Calibration,
-    CalibratedCapture,
     ComponentRevision,
-    DeskewStatus,
     GraphSolution,
     IDENTITY_SE3,
     KeyframeId,
@@ -52,10 +53,12 @@ class CslamMapper:
         robot_index: int,
         mission_id: str,
         robot_names: dict[int, str],
+        capture_provider_name: str | CaptureProvider | None = None,
     ):
         self.mapper = mapper
         self.robot_id, self.robot_index = robot_id, robot_index
         self.mission_id, self.robot_names = mission_id, robot_names
+        self.capture_provider = capture_provider(capture_provider_name)
         self.anchor = KeyframeId(robot_id, mission_id, 0)
         self.poses, self.local_poses, self.capture_digests = {}, {}, {}
         self.T_component_local = np.eye(4)
@@ -78,19 +81,10 @@ class CslamMapper:
         *,
         T_base_sensor=IDENTITY_SE3,
         sensor_frame="base",
+        provenance: CaptureProvenance | None = None,
     ):
         key = self.key(seq)
         local = validate_se3(T_local_base)
-        fingerprint = hashlib.sha256(
-            np.asarray(points_base, dtype="<f4").tobytes()
-        ).digest()
-        if key in self.local_poses:
-            if (
-                local != self.local_poses[key]
-                or fingerprint != self.capture_digests[key]
-            ):
-                raise ValueError("Keyframe identity reused with a different pose")
-            return False
         if not self.local_poses and seq != 0:
             raise ValueError(
                 "First keyframe must be zero; start the bridge before the frontend"
@@ -103,16 +97,28 @@ class CslamMapper:
         calibration = Calibration(
             calibration_id, sensor_frame, "x-forward/y-left/z-up", (), "none", (), mount
         )
-        capture = CalibratedCapture(
+        provenance = provenance or CaptureProvenance.unqualified(key, stamp_ns)
+        if provenance.transform_timestamp_ns != stamp_ns:
+            raise ValueError("keyframe pose timestamp does not match capture provenance")
+        capture = self.capture_provider.capture(
             key,
-            stamp_ns,
-            stamp_ns,
-            sensor_frame,
-            calibration.version,
+            provenance,
+            calibration,
             local,
             covariance,
-            DeskewStatus.UNKNOWN,
         )
+        identity = json.dumps(
+            {"capture": asdict(capture), "calibration": asdict(calibration)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        fingerprint = hashlib.sha256(
+            np.asarray(points_base, dtype="<f4").tobytes() + b"\n" + identity
+        ).digest()
+        if key in self.local_poses:
+            if fingerprint != self.capture_digests[key]:
+                raise ValueError("Keyframe identity reused with different capture data")
+            return False
         points_sensor = (np.asarray(points_base) - mount[:3, 3]) @ mount[:3, :3]
         self.mapper.add_capture(capture, calibration, points_sensor)
         self.local_poses[key] = local
@@ -163,6 +169,10 @@ class CslamMapper:
         )
         self.solution_order = order
         if not changed:
+            # Accepted solver clocks are causal map state even when the poses
+            # are numerically unchanged. Publish a new graph revision so the
+            # replica envelope can advance without conflicting at one revision.
+            self._apply()
             return False
         if anchor != self.anchor:
             self.epoch += 1

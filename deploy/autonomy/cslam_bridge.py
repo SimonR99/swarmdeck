@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Capture-time normalization and persistent onboard Swarm-SLAM mapping."""
 
+import hashlib
 import json
 import os
 import time
@@ -37,9 +38,20 @@ from autonomy.contracts import (
     KeyframeId,
     component_id_for_anchor,
 )
+from autonomy.capture_providers import (
+    MAX_RAW_CAPTURE_POINTS,
+    RawCaptureMetadata,
+    endpoint_preserving_sample,
+)
 from autonomy.cslam import CslamMapper, pose_matrix
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaClient
+
+
+DEFAULT_STORED_RAW_CAPTURE_POINTS = 4_096
+MAX_RAW_CAPTURE_CACHE_BYTES = 32 * 1024 * 1024
+MAX_RAW_CAPTURE_RECORDS = 32
+RAW_CAPTURE_JOIN_GRACE_S = 0.5
 
 
 def transform_pose(transform):
@@ -74,6 +86,9 @@ class Bridge(Node):
             "sensor_domain_id": -1,
             "tf_topic": "/tf",
             "tf_static_topic": "/tf_static",
+            "capture_provider": "unknown",
+            "capture_provenance_topic": "",
+            "max_stored_raw_capture_points": DEFAULT_STORED_RAW_CAPTURE_POINTS,
         }
         for key, value in params.items():
             self.declare_parameter(key, value)
@@ -109,6 +124,7 @@ class Bridge(Node):
             p["robot_index"],
             p["mission_id"],
             names,
+            p["capture_provider"],
         )
         self.closed = Event()
         self._shared_lock = Lock()
@@ -155,6 +171,29 @@ class Bridge(Node):
         self.pending_cloud = None
         self.last_sensor_at = 0.0
         self.clouds, self.odoms, self.capture_calibrations = {}, {}, {}
+        self.pending_capture_since = {}
+        self.raw_captures, self.raw_capture_metadata = {}, {}
+        self.raw_capture_collisions = {}
+        self.raw_capture_cache_bytes = 0
+        self.raw_capture_source = None
+        self.raw_capture_source_reset = False
+        self.raw_capture_invalid_metadata = 0
+        self.raw_capture_proof_mismatches = 0
+        self.raw_capture_warned_at = 0.0
+        self.qualified_capture_count = 0
+        self.raw_capture_points_received = 0
+        self.raw_capture_points_stored = 0
+        self.max_stored_raw_capture_points = int(p["max_stored_raw_capture_points"])
+        if not 1 <= self.max_stored_raw_capture_points <= MAX_RAW_CAPTURE_POINTS:
+            raise ValueError(
+                "max_stored_raw_capture_points must be between 1 and "
+                f"{MAX_RAW_CAPTURE_POINTS}"
+            )
+        provenance_topic = str(p["capture_provenance_topic"] or "")
+        self.raw_capture_enabled = bool(
+            provenance_topic
+            and self.core.capture_provider.spec.raw_source_contract is not None
+        )
         self.normalized_count = self.capture_count = self.solution_count = (
             self.dropped
         ) = 0
@@ -164,6 +203,13 @@ class Bridge(Node):
         self.sensor_node.create_subscription(
             PointCloud2, p["cloud_topic"], self.raw_cloud, qos_profile_sensor_data
         )
+        if self.raw_capture_enabled:
+            self.sensor_node.create_subscription(
+                String,
+                provenance_topic,
+                self.raw_capture_provenance,
+                qos_profile_sensor_data,
+            )
         self.create_subscription(
             KeyframePointCloud, "cslam/keyframe_data", self.key_cloud, 100
         )
@@ -174,6 +220,7 @@ class Bridge(Node):
             OptimizationResult, "cslam/optimized_estimates", self.optimized, 100
         )
         self.sensor_node.create_timer(0.05, self.normalize)
+        self.create_timer(0.1, self.flush_captures)
         if self.sensor_context is not None:
             self._configure_coordination_relays()
             self.sensor_executor = SingleThreadedExecutor(context=self.sensor_context)
@@ -268,6 +315,108 @@ class Bridge(Node):
     def raw_cloud(self, cloud):
         self.pending_cloud = cloud  # latest-only under sensor overload
 
+    def raw_capture_provenance(self, message):
+        try:
+            metadata = RawCaptureMetadata.from_json(message.data)
+            if metadata.provider != self.core.capture_provider.spec.name:
+                raise ValueError("raw capture metadata names another provider")
+        except (AttributeError, ValueError) as exc:
+            self.raw_capture_invalid_metadata += 1
+            now = time.monotonic()
+            if now - self.raw_capture_warned_at >= 10.0:
+                self.raw_capture_warned_at = now
+                self.get_logger().warn(f"raw capture provenance rejected: {exc}")
+            return
+        source = (metadata.producer_id, metadata.sensor_epoch)
+        with self._shared_lock:
+            if self.raw_capture_source_reset:
+                return
+            if self.raw_capture_source is None:
+                self.raw_capture_source = source
+            elif source != self.raw_capture_source:
+                self.raw_capture_source_reset = True
+                self.raw_captures.clear()
+                self.raw_capture_metadata.clear()
+                self.raw_capture_collisions.clear()
+                self.raw_capture_cache_bytes = 0
+                self.get_logger().error(
+                    "raw capture producer epoch changed; a new mission is required"
+                )
+                return
+            previous = self.raw_capture_metadata.get(metadata.stamp_ns)
+            if previous is not None and previous != metadata:
+                self.raw_capture_collisions[metadata.stamp_ns] = None
+                self.raw_capture_metadata.pop(metadata.stamp_ns, None)
+            elif metadata.stamp_ns not in self.raw_capture_collisions:
+                self.raw_capture_metadata[metadata.stamp_ns] = metadata
+            while len(self.raw_capture_metadata) > MAX_RAW_CAPTURE_RECORDS:
+                self.raw_capture_metadata.pop(next(iter(self.raw_capture_metadata)))
+
+    def _cache_raw_capture(
+        self,
+        stamp_ns,
+        points_base,
+        mount,
+        sensor_frame,
+        point_count,
+        points_sha256,
+        source_points_finite,
+    ):
+        if not self.raw_capture_enabled:
+            return
+        with self._shared_lock:
+            self.raw_capture_points_received += point_count
+            source_reset = self.raw_capture_source_reset
+        if source_reset:
+            return
+        if point_count > MAX_RAW_CAPTURE_POINTS or not source_points_finite:
+            with self._shared_lock:
+                self.raw_capture_collisions[stamp_ns] = None
+                while len(self.raw_capture_collisions) > 2 * MAX_RAW_CAPTURE_RECORDS:
+                    self.raw_capture_collisions.pop(next(iter(self.raw_capture_collisions)))
+            return
+        points = endpoint_preserving_sample(
+            np.asarray(points_base, dtype=np.float64), self.max_stored_raw_capture_points
+        )
+        points.setflags(write=False)
+        record = (
+            points,
+            np.asarray(mount).copy(),
+            sensor_frame,
+            point_count,
+            points_sha256,
+        )
+        with self._shared_lock:
+            previous = self.raw_captures.get(stamp_ns)
+            if previous is not None:
+                same = (
+                    previous[2] == sensor_frame
+                    and np.array_equal(previous[0], points)
+                    and np.array_equal(previous[1], mount)
+                    and previous[3] == point_count
+                    and previous[4] == points_sha256
+                )
+                if not same:
+                    self.raw_capture_cache_bytes -= previous[0].nbytes
+                    self.raw_captures.pop(stamp_ns, None)
+                    self.raw_capture_collisions[stamp_ns] = None
+                return
+            if stamp_ns in self.raw_capture_collisions:
+                return
+            self.raw_captures[stamp_ns] = record
+            self.raw_capture_cache_bytes += points.nbytes
+            self.raw_capture_points_stored += len(points)
+            while self.raw_captures and (
+                len(self.raw_captures) > MAX_RAW_CAPTURE_RECORDS
+                or self.raw_capture_cache_bytes > MAX_RAW_CAPTURE_CACHE_BYTES
+            ):
+                old_stamp = next(iter(self.raw_captures))
+                old = self.raw_captures.pop(old_stamp)
+                self.raw_capture_cache_bytes -= old[0].nbytes
+                self.raw_capture_metadata.pop(old_stamp, None)
+            while len(self.raw_capture_collisions) > 2 * MAX_RAW_CAPTURE_RECORDS:
+                self.raw_capture_collisions.pop(next(iter(self.raw_capture_collisions)))
+
     def normalize(self):
         cloud = self.pending_cloud
         if cloud is None:
@@ -279,10 +428,22 @@ class Bridge(Node):
         except TransformException:
             return  # never substitute a latest transform for capture-time TF
         self.pending_cloud = None
-        xyz = point_cloud2.read_points_numpy(
-            cloud, field_names=("x", "y", "z"), skip_nans=True
+        raw_xyz = point_cloud2.read_points_numpy(
+            cloud, field_names=("x", "y", "z"), skip_nans=False
         )
-        xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+        raw_xyz = np.asarray(raw_xyz).reshape(-1, 3)
+        raw_point_count = len(raw_xyz)
+        raw_source_finite = bool(np.isfinite(raw_xyz).all())
+        # Oversized captures can still feed the legacy normalized topic, but
+        # never spend another full-cloud allocation computing an attestation.
+        raw_points_sha256 = (
+            hashlib.sha256(
+                np.ascontiguousarray(raw_xyz, dtype="<f4").tobytes()
+            ).hexdigest()
+            if raw_point_count <= MAX_RAW_CAPTURE_POINTS and raw_source_finite
+            else ""
+        )
+        xyz = np.asarray(raw_xyz, dtype=np.float64)
         xyz = xyz[
             np.isfinite(xyz).all(axis=1)
             & (np.linalg.norm(xyz, axis=1) <= self.max_range)
@@ -302,6 +463,15 @@ class Bridge(Node):
             self.capture_calibrations[stamp_ns] = (T, cloud.header.frame_id)
             while len(self.capture_calibrations) > 1024:
                 self.capture_calibrations.pop(next(iter(self.capture_calibrations)))
+        self._cache_raw_capture(
+            stamp_ns,
+            xyz,
+            T,
+            cloud.header.frame_id,
+            raw_point_count,
+            raw_points_sha256,
+            raw_source_finite,
+        )
         self.odom_pub.publish(odom)
         self.cloud_pub.publish(out)
         with self._shared_lock:
@@ -310,25 +480,76 @@ class Bridge(Node):
 
     def key_cloud(self, msg):
         self.clouds[msg.id] = msg.pointcloud
+        self.pending_capture_since.setdefault(msg.id, time.monotonic())
         self.consume(msg.id)
 
     def key_odom(self, msg):
         self.odoms[msg.id] = msg.odom
+        self.pending_capture_since.setdefault(msg.id, time.monotonic())
         self.consume(msg.id)
+
+    def flush_captures(self):
+        for seq in tuple(self.clouds.keys() & self.odoms.keys()):
+            self.consume(seq)
+
+    def _take_raw_capture(self, stamp, keyframe):
+        with self._shared_lock:
+            if stamp in self.raw_capture_collisions or self.raw_capture_source_reset:
+                return None
+            raw = self.raw_captures.get(stamp)
+            metadata = self.raw_capture_metadata.get(stamp)
+            if raw is None or metadata is None:
+                return None
+            if (
+                metadata.frame_id != raw[2]
+                or metadata.point_count != raw[3]
+                or metadata.points_sha256 != raw[4]
+            ):
+                self.raw_captures.pop(stamp)
+                self.raw_capture_metadata.pop(stamp)
+                self.raw_capture_cache_bytes -= raw[0].nbytes
+                self.raw_capture_collisions[stamp] = None
+                self.raw_capture_proof_mismatches += 1
+                return None
+            self.raw_captures.pop(stamp)
+            self.raw_capture_metadata.pop(stamp)
+            self.raw_capture_cache_bytes -= raw[0].nbytes
+        return raw[0], raw[1], raw[2], metadata.provenance(keyframe)
 
     def consume(self, seq):
         if seq in self.clouds and seq in self.odoms:
+            cloud, odom = self.clouds[seq], self.odoms[seq]
+            stamp = odom.header.stamp.sec * 1_000_000_000 + odom.header.stamp.nanosec
+            if self.raw_capture_enabled:
+                with self._shared_lock:
+                    raw_ready = (
+                        stamp in self.raw_captures
+                        and stamp in self.raw_capture_metadata
+                    )
+                    terminal = (
+                        stamp in self.raw_capture_collisions
+                        or self.raw_capture_source_reset
+                    )
+                age = time.monotonic() - self.pending_capture_since.get(
+                    seq, time.monotonic()
+                )
+                if not raw_ready and not terminal and age < RAW_CAPTURE_JOIN_GRACE_S:
+                    return
             cloud, odom = self.clouds.pop(seq), self.odoms.pop(seq)
+            self.pending_capture_since.pop(seq, None)
             xyz = point_cloud2.read_points_numpy(
                 cloud, field_names=("x", "y", "z"), skip_nans=True
             )
-            stamp = odom.header.stamp.sec * 1_000_000_000 + odom.header.stamp.nanosec
             with self._shared_lock:
                 calibration = self.capture_calibrations.get(stamp)
             if calibration is None:
                 self.dropped += 1
                 return
             mount, sensor_frame = calibration
+            provenance = None
+            raw = self._take_raw_capture(stamp, self.core.key(seq))
+            if raw is not None:
+                xyz, mount, sensor_frame, provenance = raw
             accepted = self.core.capture(
                 seq,
                 stamp,
@@ -336,8 +557,11 @@ class Bridge(Node):
                 xyz,
                 T_base_sensor=mount,
                 sensor_frame=sensor_frame,
+                provenance=provenance,
             )
             if accepted:
+                if provenance is not None:
+                    self.qualified_capture_count += 1
                 keyframe = self.core.key(seq)
                 self.keyframe_metadata_pub.publish(
                     String(
@@ -480,6 +704,15 @@ class Bridge(Node):
             "mission_id": self.core.mission_id,
             "normalized_scans": normalized_count,
             "keyframes": self.capture_count,
+            "qualified_raw_captures": self.qualified_capture_count,
+            "capture_provider": self.core.capture_provider.spec.name,
+            "raw_capture_source_reset": self.raw_capture_source_reset,
+            "raw_capture_invalid_metadata": self.raw_capture_invalid_metadata,
+            "raw_capture_proof_mismatches": self.raw_capture_proof_mismatches,
+            "raw_capture_timestamp_collisions": len(self.raw_capture_collisions),
+            "raw_capture_points_received": self.raw_capture_points_received,
+            "raw_capture_points_stored": self.raw_capture_points_stored,
+            "max_stored_raw_capture_points": self.max_stored_raw_capture_points,
             # `solutions` is retained for compatibility and has always counted
             # pose-changing corrections rather than native optimizer messages.
             "solutions": self.solution_count,

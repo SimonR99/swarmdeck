@@ -152,8 +152,18 @@ class MggExploration:
         self.last_path_revision_ns = 0
         self.pending_plan = None
         self.executing_plan = None
+        self.executing_goal_generation = None
         self.replan_requested_generation = -1
+        self.replan_requested_recovery = False
+        self.controller_replan_generation = -1
+        self.controller_goal_generation = None
+        self.controller_replan_attempts = 0
+        self.controller_replan_deadline = 0.0
+        self.controller_replan_due = 0.0
+        self.awaiting_replan_path = False
         self.pending = None
+        self.pending_kind = None
+        self.pending_recovery = False
         self.pending_stop = None
         self.deadline = 0.0
         self.stop_deadline = 0.0
@@ -168,6 +178,15 @@ class MggExploration:
         )
         self.max_inclination_rad = max(
             0.0, float(config.get("max_inclination_rad", math.radians(30.0)))
+        )
+        self.controller_replan_max_attempts = self._bounded_int(
+            config.get("controller_replan_max_attempts", 3), 1, 20, 3
+        )
+        self.controller_replan_deadline_s = self._bounded_float(
+            config.get("controller_replan_deadline_s", 15.0), 0.1, 300.0, 15.0
+        )
+        self.controller_replan_backoff_s = self._bounded_float(
+            config.get("controller_replan_backoff_s", 0.25), 0.0, 10.0, 0.25
         )
         self.coordinator = None
         if config.get("peer_coordination", False):
@@ -201,6 +220,22 @@ class MggExploration:
     def warn(self, text):
         self.bridge.node.get_logger().warning(f"[{self.bridge.id}] exploration: {text}")
 
+    @staticmethod
+    def _bounded_float(value, lower, upper, default):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return min(upper, max(lower, parsed)) if math.isfinite(parsed) else default
+
+    @staticmethod
+    def _bounded_int(value, lower, upper, default):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return min(upper, max(lower, parsed))
+
     def start(self):
         if self.active:
             return
@@ -223,38 +258,65 @@ class MggExploration:
         self.last_path_revision_ns = 0
         self.pending_plan = None
         self.executing_plan = None
+        self.executing_goal_generation = None
         self.replan_requested_generation = -1
+        self.replan_requested_recovery = False
+        self._clear_controller_replan()
         self.awaiting_terminal = False
         self.status = "starting"
         self.active = True
         self.deadline = time.monotonic() + 30.0
         try:
             self.pending = self.start_client.call_async(self.request_type())
+            self.pending_kind = "start"
+            self.pending_recovery = False
         except Exception as exc:
             self.warn(f"start request failed: {exc}")
             self.stop()
             return
-        self.pending.add_done_callback(lambda future: self.started(future, generation))
+        self.pending.add_done_callback(
+            lambda future: self.started(future, generation, "start", False)
+        )
 
-    def started(self, future, generation):
+    def started(self, future, generation, request_kind="start", recovery=False):
         if self.pending is future:
             self.pending = None
+            self.pending_kind = None
+            self.pending_recovery = False
         if generation != self.generation:
             return
         try:
             response = future.result()
-            if not response.success:
-                self.warn(response.message or "MGG rejected start")
-                self.stop()
+            if recovery and self.controller_replan_generation != generation:
                 return
+            if (
+                recovery
+                and self.controller_goal_generation != self.bridge._goal_generation
+            ):
+                self.warn("controller goal ownership changed before replan reply")
+                self._stop_without_motion(status="stopped")
+                return
+            if recovery and self.executing_plan is not None:
+                # A newer path can arrive independently of the Trigger reply.
+                # Its controller result, rather than this stale acknowledgement,
+                # decides whether the bounded recovery episode continues.
+                return
+            if not response.success:
+                self.warn(response.message or f"MGG rejected {request_kind}")
+                self.stop(status="blocked" if request_kind == "replan" else "stopped")
+                return
+            if recovery and self.executing_plan is None:
+                self.awaiting_replan_path = True
             if self.replan_requested_generation == generation:
+                requested_recovery = self.replan_requested_recovery
                 self.replan_requested_generation = -1
-                self._request_replan(generation)
+                self.replan_requested_recovery = False
+                self._request_replan(generation, recovery=requested_recovery)
         except Exception as exc:
-            self.warn(f"start failed: {exc}")
-            self.stop()
+            self.warn(f"{request_kind} failed: {exc}")
+            self.stop(status="blocked" if request_kind == "replan" else "stopped")
 
-    def stop(self, *, notify_planner=True, status="stopped"):
+    def stop(self, *, notify_planner=True, status="stopped", cancel_navigation=True):
         self.status = status
         self.awaiting_terminal = False
         # Disable intake before touching ROS: a late service response or path
@@ -264,7 +326,10 @@ class MggExploration:
         self.generation += 1
         self.pending_plan = None
         self.executing_plan = None
+        self.executing_goal_generation = None
         self.replan_requested_generation = -1
+        self.replan_requested_recovery = False
+        self._clear_controller_replan()
         if self.coordinator is not None:
             self.coordinator.release(self.generation)
         if was_active:
@@ -280,13 +345,16 @@ class MggExploration:
                     )
             except Exception as exc:
                 self.warn(f"stop request failed; navigation stopped locally: {exc}")
-            self.bridge.cancel_goal()
-            self.bridge.drive(0.0, 0.0)
+            if cancel_navigation:
+                self.bridge.cancel_goal()
+                self.bridge.drive(0.0, 0.0)
 
     def tick(self):
         # A planner restart can orphan a DDS request forever. Retire expired
         # futures even after Stop, so a later operator start can recover.
         now = time.monotonic()
+        self._check_controller_result(now)
+        self._drive_controller_replan(now)
         if self.coordinator is not None:
             self.coordinator.tick()
             candidate = self.executing_plan or self.pending_plan
@@ -305,6 +373,7 @@ class MggExploration:
                     self.warn("peer reservation lost; stopping path")
                     self.bridge.cancel_goal()
                     self.executing_plan = None
+                    self.executing_goal_generation = None
                     self.status = "waiting"
                     if decision == "pending":
                         self.pending_plan = candidate
@@ -313,10 +382,19 @@ class MggExploration:
                         self._request_replan(generation)
         if self.pending is not None and now > self.deadline:
             future, self.pending = self.pending, None
+            request_kind, self.pending_kind = self.pending_kind or "start", None
+            recovery, self.pending_recovery = self.pending_recovery, False
             if self.active:
-                self.warn("MGG start timed out")
-                self.stop()
-            self.start_client.remove_pending_request(future)
+                self.warn(f"MGG {request_kind} timed out")
+                self.stop(
+                    status=(
+                        "blocked" if request_kind == "replan" or recovery else "stopped"
+                    )
+                )
+            client = (
+                self.replan_client if request_kind == "replan" else self.start_client
+            )
+            client.remove_pending_request(future)
             future.cancel()
         if self.pending_stop is not None and now > self.stop_deadline:
             future, self.pending_stop = self.pending_stop, None
@@ -327,6 +405,83 @@ class MggExploration:
         ):
             self.warn("operator link lost")
             self.stop()
+
+    def _check_controller_result(self, now):
+        if not self.active or self.executing_plan is None:
+            return
+        session_generation = self.executing_plan[1]
+        goal_generation = self.executing_goal_generation
+        if session_generation != self.generation:
+            return
+        if (
+            type(goal_generation) is not int
+            or goal_generation != self.bridge._goal_generation
+        ):
+            self.warn("controller goal ownership changed; stopping MGG session")
+            self._stop_without_motion(status="stopped")
+            return
+        nav_status = self.bridge.nav_status
+        if nav_status == "succeeded":
+            self.executing_plan = None
+            self.executing_goal_generation = None
+            self._clear_controller_replan()
+            if self.coordinator is not None:
+                self.coordinator.release(self.generation)
+            return
+        if nav_status != "failed":
+            return
+        self.executing_plan = None
+        self.executing_goal_generation = None
+        if self.coordinator is not None:
+            self.coordinator.release(self.generation)
+        if self.controller_replan_generation != self.generation:
+            self.controller_replan_generation = self.generation
+            self.controller_goal_generation = goal_generation
+            self.controller_replan_attempts = 0
+            self.controller_replan_deadline = now + self.controller_replan_deadline_s
+        if (
+            self.controller_replan_attempts >= self.controller_replan_max_attempts
+            or now >= self.controller_replan_deadline
+        ):
+            self.warn("controller recovery exhausted; exploration is blocked")
+            self.stop(status="blocked")
+            return
+        self.status = "waiting"
+        self.awaiting_replan_path = False
+        self.controller_replan_due = now + self.controller_replan_backoff_s
+
+    def _drive_controller_replan(self, now):
+        if (
+            not self.active
+            or self.controller_replan_generation != self.generation
+            or self.executing_plan is not None
+        ):
+            return
+        if now >= self.controller_replan_deadline:
+            self.warn("controller recovery timed out waiting for a replacement path")
+            self.stop(status="blocked")
+            return
+        if self.controller_goal_generation != self.bridge._goal_generation:
+            self.warn("controller goal ownership changed during recovery")
+            self._stop_without_motion(status="stopped")
+            return
+        if self.awaiting_replan_path or now < self.controller_replan_due:
+            return
+        self.controller_replan_attempts += 1
+        self.controller_replan_due = math.inf
+        self._request_replan(self.generation, recovery=True)
+
+    def _clear_controller_replan(self):
+        self.controller_replan_generation = -1
+        self.controller_goal_generation = None
+        self.controller_replan_attempts = 0
+        self.controller_replan_deadline = 0.0
+        self.controller_replan_due = 0.0
+        self.awaiting_replan_path = False
+
+    def _stop_without_motion(self, *, status):
+        """Retire MGG after another command has taken bridge goal ownership."""
+        self.stop(status=status, cancel_navigation=False)
 
     def on_status(self, message):
         try:
@@ -388,12 +543,22 @@ class MggExploration:
             return
         self.last_path_revision_ns = plan.revision_ns
         generation = self.generation
+        if (
+            self.controller_replan_generation == generation
+            and self.controller_goal_generation != self.bridge._goal_generation
+        ):
+            self.warn("controller goal ownership changed before replacement path")
+            self._stop_without_motion(status="stopped")
+            return
+        self.awaiting_replan_path = False
+        self.controller_replan_due = math.inf
         if not self.active:
             return
         if self.coordinator is not None:
             if self.executing_plan is not None:
                 self.bridge.cancel_goal()
                 self.executing_plan = None
+                self.executing_goal_generation = None
             decision = self.coordinator.reserve(plan, generation)
             if decision == "pending":
                 self.pending_plan = (plan, generation)
@@ -412,10 +577,21 @@ class MggExploration:
             return
         try:
             self.status = "exploring"
-            accepted = self.bridge.follow_path(plan)
-            if accepted is False:
+            recovering = self.controller_replan_generation == generation
+            accepted = (
+                self.bridge.follow_path(
+                    plan, expected_generation=self.controller_goal_generation
+                )
+                if recovering
+                else self.bridge.follow_path(plan)
+            )
+            if type(accepted) is not int:
                 self.warn("full-path controller unavailable")
-                self.stop()
+                if recovering and accepted is None:
+                    self._stop_without_motion(status="stopped")
+                else:
+                    self.stop(status="blocked" if recovering else "stopped")
+                return
         except Exception as exc:
             self.warn(f"path execution failed: {exc}")
             self.stop()
@@ -425,13 +601,23 @@ class MggExploration:
             self.bridge.cancel_goal()
             self.bridge.drive(0.0, 0.0)
             return
+        if accepted != self.bridge._goal_generation:
+            self.warn("controller goal ownership changed during path submission")
+            self._stop_without_motion(status="stopped")
+            return
         self.executing_plan = (plan, generation)
+        self.executing_goal_generation = accepted
 
-    def _request_replan(self, generation):
+    def _request_replan(self, generation, *, recovery=False):
         if not self.active or generation != self.generation:
             return
-        if self.pending is not None and not self.pending.done():
+        if recovery and self.controller_goal_generation != self.bridge._goal_generation:
+            self.warn("controller goal ownership changed before replan")
+            self._stop_without_motion(status="stopped")
+            return
+        if self.pending is not None:
             self.replan_requested_generation = generation
+            self.replan_requested_recovery = self.replan_requested_recovery or recovery
             return
         self.replan_requested_generation = -1
         if not self.replan_client.service_is_ready():
@@ -440,12 +626,21 @@ class MggExploration:
             return
         try:
             self.pending = self.replan_client.call_async(self.request_type())
-            self.deadline = time.monotonic() + 30.0
+            self.pending_kind = "replan"
+            self.pending_recovery = recovery
+            request_deadline = time.monotonic() + 30.0
+            self.deadline = (
+                min(request_deadline, self.controller_replan_deadline)
+                if recovery
+                else request_deadline
+            )
         except Exception as exc:
             self.warn(f"replan request failed: {exc}")
             self.stop(status="blocked")
             return
-        self.pending.add_done_callback(lambda future: self.started(future, generation))
+        self.pending.add_done_callback(
+            lambda future: self.started(future, generation, "replan", recovery)
+        )
 
 
 def configure_exploration(bridge):

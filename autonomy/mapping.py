@@ -539,7 +539,8 @@ class SubmapStore:
             capture_value = json.loads(capture_row["capture_json"])
             calibration_value = json.loads(capture_row["calibration_json"])
             if (
-                capture_value.get("deskew_status") != DeskewStatus.DESKEWED.value
+                capture_value.get("deskew_status")
+                not in (DeskewStatus.DESKEWED.value, DeskewStatus.NOT_REQUIRED.value)
                 or capture_value.get("ray_return_semantics")
                 != RayReturnSemantics.FIRST_RETURN.value
             ):
@@ -807,6 +808,17 @@ class SubmapStore:
                              epoch=excluded.epoch, revision=excluded.revision, digest=excluded.digest""",
                         (rev.component_id, rev.epoch, rev.revision, solution.digest),
                     )
+                    # A tombstone is current negative membership for its
+                    # component, not a historical component manifest. Carry it
+                    # to that component's new head so snapshots retain the
+                    # retraction without emitting the component twice. Rows for
+                    # other components remain untouched until their own solver
+                    # result establishes a new head.
+                    self._db.execute(
+                        """UPDATE active_submaps SET epoch=?, solution_revision=?
+                           WHERE active=0 AND component_id=?""",
+                        (rev.epoch, rev.revision, rev.component_id),
+                    )
                 self._db.execute("COMMIT")
                 return adopted
             except Exception:
@@ -1021,11 +1033,12 @@ class CorrectionAwareMapper:
             ray_evidence=(
                 RayEvidence(
                     RayReturnSemantics.FIRST_RETURN,
-                    DeskewStatus.DESKEWED,
+                    capture.deskew_status,
                     RayOriginAssociation.SINGLE_CAPTURE,
                 )
                 if capture.ray_return_semantics is RayReturnSemantics.FIRST_RETURN
-                and capture.deskew_status is DeskewStatus.DESKEWED
+                and capture.deskew_status
+                in (DeskewStatus.DESKEWED, DeskewStatus.NOT_REQUIRED)
                 else RayEvidence()
             ),
         )

@@ -93,6 +93,25 @@ test('pose-only replica revisions transform in the component frame and reuse imm
   }
 });
 
+test('robot graph epoch changes require a viewport reset for the same component', async () => {
+  const oldFetch = globalThis.fetch;
+  let current = replicaView(1, 0, 'component_a', 2);
+  globalThis.fetch = async (input) => String(input).includes('/chunks/')
+    ? new Response(xyz([[0, 0, 0], [1, 0, 0]]))
+    : Response.json(current);
+  try {
+    const loader = new ReplicaTacticalLoader(1024, 10);
+    const first = await loader.load(selection, new AbortController().signal);
+    assert.ok(first);
+    current = replicaView(2, 0, 'component_a', 3);
+    const second = await loader.load(selection, new AbortController().signal, first);
+    assert.ok(second);
+    assert.equal(replicaTransition(first, second), 'frame');
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
 test('component epoch or frame changes require a viewport reset', () => {
   const common = { sourceKey: replicaSelectionKey(selection), revisionKey: 'one' };
   assert.equal(replicaTransition(null, { ...common, frameKey: 'epoch-1' }), 'selection');
@@ -128,6 +147,38 @@ test('loader requires the server to return the explicitly selected component', a
       new ReplicaTacticalLoader().load(selection, new AbortController().signal),
       /does not match the selected component/
     );
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
+test('fleet catalogue selections use the aggregate view and scope-specific cache key', async () => {
+  const oldFetch = globalThis.fetch;
+  const fleetSelection: ReplicaTacticalSelection = {
+    scope: 'fleet', robotId: 'fleet', sessionId: selection.sessionId, componentId: selection.componentId
+  };
+  const fleetView = replicaView(3, 0);
+  fleetView.scope = 'fleet';
+  fleetView.robot_id = 'fleet';
+  fleetView.revision = null;
+  fleetView.selected!.graph_revision = null;
+  let requested = '';
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes('/chunks/')) return new Response(xyz([[0, 0, 0], [1, 0, 0]]));
+    requested = url;
+    return Response.json(fleetView);
+  };
+  try {
+    const loaded = await new ReplicaTacticalLoader(1024, 10)
+      .load(fleetSelection, new AbortController().signal);
+    assert.ok(loaded);
+    assert.ok(requested.startsWith(
+      `/api/autonomy/replicas/components/view/${selection.sessionId}?`
+    ));
+    assert.match(requested, /component_id=component%3Amerged|component_id=component%3Aa/);
+    assert.match(loaded.sourceKey, /^fleet\u0000/);
+    assert.match(loaded.frameKey, /fleet/);
   } finally {
     globalThis.fetch = oldFetch;
   }

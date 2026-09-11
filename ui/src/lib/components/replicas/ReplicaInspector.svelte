@@ -63,6 +63,7 @@
   function showInTacticalMap() {
     if (!view?.selected || !view.component_id) return;
     replicaTactical.show({
+      scope: 'robot',
       robotId: view.robot_id,
       sessionId: view.session_id,
       componentId: view.component_id
