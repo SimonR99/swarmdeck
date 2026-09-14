@@ -1,0 +1,149 @@
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -2674,29 +2674,29 @@
+         // support before any motion path can be returned.
+         graph_current = physicalAnchorAtDrivingHeight(current_state_);
+       }
++      const mgg::Vertex* home_root = global_graph_->getVertex(0);
++      const double home_delta =
++          have_initial_state_
++              ? (core.goal.pose.head<3>() - initial_state_.head<3>())
++                    .cwiseAbs().maxCoeff()
++              : std::numeric_limits<double>::infinity();
++      const double home_association_tolerance =
++          std::clamp(2.0 * map_->getResolution(), 0.01, 0.25);
++      const bool requests_physical_home =
++          core.objective == mgg::ObjectiveKind::kReturnHome &&
++          have_initial_state_ && home_root != nullptr &&
++          (home_delta <= 1e-3 ||
++           (!core.goal.landmark_id.empty() &&
++            home_delta <= home_association_tolerance));
++      provisional_physical_home =
++          provisional_unknown_ground_ && requests_physical_home;
+       bool home_goal_supported = true;
+       if (core.objective == mgg::ObjectiveKind::kReturnHome &&
+           !projectStateToDrivingHeight(graph_request.goal.pose, true)) {
+         home_goal_supported = false;
+-        const mgg::Vertex* root = global_graph_->getVertex(0);
+-        const double home_delta =
+-            have_initial_state_
+-                ? (core.goal.pose.head<3>() - initial_state_.head<3>())
+-                      .cwiseAbs()
+-                      .maxCoeff()
+-                : std::numeric_limits<double>::infinity();
+-        const double home_association_tolerance =
+-            std::clamp(2.0 * map_->getResolution(), 0.01, 0.25);
+-        const bool requests_physical_home =
+-            have_initial_state_ && root != nullptr &&
+-            (home_delta <= 1e-3 ||
+-             (!core.goal.landmark_id.empty() &&
+-              home_delta <= home_association_tolerance));
+-        provisional_physical_home =
+-            provisional_unknown_ground_ && requests_physical_home;
+         if ((initial_anchor_supported_ || provisional_unknown_ground_) &&
+             requests_physical_home) {
+-          graph_request.goal.pose = root->state;
++          graph_request.goal.pose = home_root->state;
+           home_goal_supported = true;
+         }
+       }
+@@ -2747,10 +2747,13 @@
+           ? &objective_grid_limits_
+           : nullptr;
+   mgg::RouteCorridor primary = corridor;
+-  if (explicit_objective_planned &&
+-      core.objective == mgg::ObjectiveKind::kNavigate &&
++  const bool direct_primary =
++      explicit_objective_planned &&
++      (core.objective == mgg::ObjectiveKind::kNavigate ||
++       provisional_physical_home) &&
+       (corridor.status == mgg::PlanningStatus::kSucceeded ||
+-       corridor.status == mgg::PlanningStatus::kUnreachable)) {
++       corridor.status == mgg::PlanningStatus::kUnreachable);
++  if (direct_primary) {
+     // The operator's exact goal is the primary corridor. A stale or sparse
+     // breadcrumb graph must not consume the entire bounded grid budget trying
+     // to repair one of its segments before the direct, unknown-permissive
+@@ -2762,29 +2765,15 @@
+   }
+   const auto objective_refinement_started = std::chrono::steady_clock::now();
+   mgg::FeasiblePath path = refineCorridor(primary, objective_limits);
+-  if (((core.objective == mgg::ObjectiveKind::kNavigate &&
+-        corridor.status == mgg::PlanningStatus::kSucceeded &&
+-       !corridor.poses.empty()) ||
+-       (core.objective == mgg::ObjectiveKind::kReturnHome &&
+-        explicit_objective_planned && provisional_physical_home &&
+-        (corridor.status == mgg::PlanningStatus::kSucceeded ||
+-         corridor.status == mgg::PlanningStatus::kUnreachable))) &&
++  if (direct_primary && corridor.status == mgg::PlanningStatus::kSucceeded &&
++      !corridor.poses.empty() &&
+       path.status != mgg::PlanningStatus::kSucceeded) {
+     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+         std::chrono::steady_clock::now() - objective_refinement_started);
+     if (elapsed < objective_grid_limits_.timeout) {
+       mgg::GridRefinementLimits remaining = objective_grid_limits_;
+       remaining.timeout -= elapsed;
+-      if (core.objective == mgg::ObjectiveKind::kNavigate) {
+-        path = refineCorridor(corridor, &remaining);
+-      } else {
+-        mgg::RouteCorridor direct = corridor;
+-        direct.status = mgg::PlanningStatus::kSucceeded;
+-        direct.poses.clear();
+-        direct.partial = false;
+-        direct.reason.clear();
+-        path = refineCorridor(direct, &remaining);
+-      }
++      path = refineCorridor(corridor, &remaining);
+     }
+   }
+   const IndexedQueryContext query_context = indexedQueryContext();
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -636,6 +636,18 @@
+   static mgg::StateVec globalVertexState(const PlannerNode& node, int id) {
+     return node.global_graph_->getVertex(id)->state;
+   }
++  static void addBadHomeCorridor(PlannerNode& node) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    auto* bad = new mgg::Vertex(
++        1, mgg::StateVec(0.60, 0.46, 0.34, 0.0));
++    auto* current = new mgg::Vertex(
++        2, mgg::StateVec(1.20, 0.0, 0.30, 0.0));
++    node.global_graph_->addVertex(bad);
++    node.global_graph_->addVertex(current);
++    node.global_graph_->addEdge(node.global_graph_->getVertex(0), bad, 0.8);
++    node.global_graph_->addEdge(bad, current, 0.8);
++    ++node.graph_revision_;
++  }
+ 
+   static bool initialAnchorSupported(const PlannerNode& node) {
+     return node.initial_anchor_supported_;
+@@ -920,6 +932,28 @@
+             mgg_msgs::srv::PlanObjective::Response::STALE_REVISION);
+ }
+ 
++TEST(PlannerObjective, PhysicalHomeUsesDirectRouteBeforeBadBreadcrumb) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy", "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*node);
++  Peer::acceptOdometry(*node, 1.20, 0.0, 0.075);
++  Peer::addBadHomeCorridor(*node);
++  const auto response = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kReturnHome,
++      mgg::StateVec(0.0, 0.0, 0.075, 0.2), "kf-home");
++  ASSERT_EQ(response->status,
++            mgg_msgs::srv::PlanObjective::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_GE(response->path.size(), 2u);
++  EXPECT_NEAR(response->path.back().position.x, 0.0, 1e-9);
++}
++
+ TEST(PlannerExplore, FullSizeGroundRobotsExpandAtProjectedDrivingHeight) {
+   using Peer = mgg_ros::PlannerNodeTestPeer;
+   for (const auto& body : {

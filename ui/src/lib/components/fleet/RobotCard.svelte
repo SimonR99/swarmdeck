@@ -9,6 +9,7 @@
   import { session } from '$lib/stores/session.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import type { RobotState } from '$lib/types/protocol';
+  import { explorationLabel, navigationFailureTooltip } from './navigationStatus';
 
   let { robot, unattendedThreshold = 45 }: { robot: RobotState; unattendedThreshold?: number } =
     $props();
@@ -43,7 +44,7 @@
     robot.mode === 'estop'
       ? 'E-STOP'
       : robot.mode === 'explore'
-        ? 'EXPLORING'
+        ? explorationLabel(robot.exploration_status)
         : robot.mode === 'recover'
           ? 'BACKING OFF'
           : robot.nav_status === 'active'
@@ -62,6 +63,11 @@
   );
 
   const shortName = $derived(robotDisplayName(robot.robot_id));
+  const failureTooltip = $derived(
+    robot.mode === 'explore' || robot.exploration_status === 'blocked'
+      ? robot.exploration_reason ?? navigationFailureTooltip(robot.nav_status, robot.nav_failure_reason)
+      : navigationFailureTooltip(robot.nav_status, robot.nav_failure_reason)
+  );
 
   function chooseRobot(event: MouseEvent | KeyboardEvent) {
     if (event.shiftKey) fleet.select(robot.robot_id, true);
@@ -120,19 +126,21 @@
 
   <div class="mt-1.5 flex items-center justify-between gap-2">
     <div class="flex items-center gap-1.5">
-      <Badge
-        tone={robot.mode === 'estop'
-          ? 'danger'
-          : robot.mode === 'recover'
-            ? 'warn'
-            : (robot.nav_status === 'active' || robot.mode === 'explore')
-              ? 'accent'
-              : robot.nav_status === 'failed'
-                ? 'warn'
-                : 'neutral'}
-      >
-        {modeLabel}
-      </Badge>
+      <span title={failureTooltip ?? undefined} aria-label={failureTooltip ?? undefined}>
+        <Badge
+          tone={robot.mode === 'estop'
+            ? 'danger'
+            : robot.mode === 'recover'
+              ? 'warn'
+              : (robot.nav_status === 'active' || robot.mode === 'explore')
+                ? 'accent'
+                : robot.nav_status === 'failed'
+                  ? 'warn'
+                  : 'neutral'}
+        >
+          {modeLabel}
+        </Badge>
+      </span>
       {#if fleet.can(robot.robot_id, 'navigate')}
         <button
           class="inline-flex h-7 items-center gap-1 rounded-full bg-surface-3 px-2 text-[10px] font-semibold text-fg-muted hover:bg-surface-4 disabled:opacity-40"

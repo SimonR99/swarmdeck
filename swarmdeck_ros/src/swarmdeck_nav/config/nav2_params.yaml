@@ -28,9 +28,14 @@ controller_server:
     controller_plugins: ["FollowPath"]
 
     progress_checker:
+      # Exploration paths can begin with a skid-steer turn. Translation-only
+      # progress needs enough time for that turn, especially when four
+      # controller loops share the host. Rotation itself must not reset the
+      # watchdog indefinitely: a robot oscillating in place still needs to
+      # enter the adapter's bounded recovery attempts.
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      required_movement_radius: 0.2
+      movement_time_allowance: 20.0
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"

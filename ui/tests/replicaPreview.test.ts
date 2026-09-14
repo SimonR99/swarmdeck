@@ -4,6 +4,7 @@ import {
   ReplicaChunkCache,
   ReplicaRequestGate,
   parseXYZF32,
+  parseXYZRGBAF32U8,
   samplePreviewChunks,
   selectPreviewRefs
 } from '../src/lib/components/replicas/replicaPreview.ts';
@@ -21,6 +22,24 @@ function xyz(count: number) {
 test('XYZ-F32 parser validates framing and preserves little-endian points', () => {
   assert.deepEqual([...parseXYZF32(xyz(2))], [0, 1, 2, 3, 4, 5]);
   assert.throws(() => parseXYZF32(xyz(2).subarray(0, 20)), /Invalid replica chunk length/);
+});
+
+test('colored replica parser and preview sampling keep RGBA aligned with XYZ', () => {
+  const bytes = new Uint8Array(16 + 2 * 16);
+  bytes.set(new TextEncoder().encode('SDRGB1\0\0'));
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(8, 2n, true);
+  for (let i = 0; i < 6; i++) view.setFloat32(16 + i * 4, i, true);
+  bytes.set([240, 10, 20, 255, 148, 148, 148, 0], 40);
+  const decoded = parseXYZRGBAF32U8(bytes);
+  assert.deepEqual([...decoded.points], [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual([...decoded.rgba], [240, 10, 20, 255, 148, 148, 148, 0]);
+  const sampled = samplePreviewChunks([
+    { submapId: 'a', sha256: 'x', points: decoded.points, rgba: decoded.rgba }
+  ], 1);
+  assert.equal(sampled[0].points.length, 3);
+  assert.equal(sampled[0].rgba!.length, 4);
+  assert.equal(sampled[0].rgba![3], 255);
 });
 
 test('preview sampling applies one global cap across chunks', () => {

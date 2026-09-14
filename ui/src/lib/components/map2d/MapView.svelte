@@ -36,6 +36,7 @@
   import { actions } from '$lib/api/connection';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import ReplicaCatalogueSelector from '$lib/components/replicas/ReplicaCatalogueSelector.svelte';
+  import ReplicaCatalogueAuto from '$lib/components/replicas/ReplicaCatalogueAuto.svelte';
   import type { MapRegistration } from '$lib/types/protocol';
   import {
     drawLoopClosures,
@@ -69,8 +70,13 @@
   let show3D = $state(
     typeof location === 'undefined' || new URLSearchParams(location.search).get('view') !== '2d'
   );
+  let observedExplicitShowRevision = replicaTactical.explicitShowRevision;
   $effect(() => {
-    if (replicaTactical.selection) show3D = true;
+    const revision = replicaTactical.explicitShowRevision;
+    if (revision !== observedExplicitShowRevision) {
+      observedExplicitShowRevision = revision;
+      show3D = true;
+    }
   });
   let showGrid = $state(true);
   let showTrails = $state(true);
@@ -603,6 +609,7 @@
 </script>
 
 <div class="panel-glow relative h-full w-full overflow-hidden rounded-[--radius-panel] border border-transparent bg-bg">
+  <ReplicaCatalogueAuto enabled={show3D} />
   <!--
     The 3D view sits over the 2D one rather than replacing it. 2D stays the
     operator's working surface — it is where goals are set and where the fleet
@@ -756,7 +763,6 @@
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
           aria-pressed={show3D}
           onclick={() => {
-            if (show3D && replicaTactical.selection) replicaTactical.clear();
             show3D = !show3D;
           }}
         >

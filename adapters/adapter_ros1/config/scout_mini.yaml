@@ -171,6 +171,9 @@ topics:
 # (0.4 m/s) regardless, so this only widens the range of bearings over which it
 # reaches that cap.
 nav_joy_throttle: 0.75
+# localPlanner.joystickHandler negates atan2(axes[2], axes[1]) when axes[1]<0.
+# Compensate here so a target behind-left remains behind-left in the path search.
+nav_joy_reverse_steering: true
 
 # No gbplanner (global exploration planner) is running — only local_planner's
 # reactive local avoidance, whose adjacentRange is 5 m. A goal beyond what the
@@ -204,3 +207,8 @@ map_color:
   enabled: true
   max_age_s: 0.05
   history_s: 2.0
+
+# Match the 0.35 m corridor used by the shared global planner. Rejoining uses
+# the original downloaded grid; it never carves occupied cells around the robot.
+nav_route_clearance_m: 0.35
+nav_route_lookahead_m: 0.8

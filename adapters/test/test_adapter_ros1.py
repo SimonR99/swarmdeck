@@ -910,10 +910,14 @@ def test_empty_plan_clears_the_route(mod):
     """local_planner publishes an empty path when it finds no clear route."""
     bridge = _plan_bridge(mod)
     bridge.planned_path = [{"x": 1.0, "y": 1.0}]
+    bridge._local_planned_path = bridge.planned_path.copy()
+    bridge._global_planned_path = [{"x": 5.0, "y": 2.0}]
 
     bridge._on_plan(_plan_msg("chassis_link", []))
 
     assert bridge.planned_path == []
+    assert bridge._local_planned_path == []
+    assert bridge._global_planned_path == [{"x": 5.0, "y": 2.0}]
 
 
 def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
@@ -1226,3 +1230,139 @@ def test_upload_colored_cloud_keeps_xyz_rgb_snapshot_together(mod, monkeypatch):
     request = upload.call_args.args[0]
     assert "format=xyzrgb32" in request.full_url
     assert mod.zlib.decompress(request.data) == points.tobytes() + rgb.tobytes()
+
+
+def _give_route_map(bridge):
+    import time
+    from types import SimpleNamespace
+    import numpy as np
+
+    bridge._nav_map = SimpleNamespace(
+        last_success_at=time.monotonic(),
+        cached=SimpleNamespace(
+            cells=np.zeros((300, 300), dtype=np.int8),
+            resolution=0.1,
+            origin_x=-15.0,
+            origin_y=-15.0,
+        ),
+    )
+
+
+def test_nav_route_overshoot_keeps_target_ahead(mod):
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}})
+    _give_route_map(bridge)
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 5.0, "y": 0.0}
+    bridge._nav_waypoints = [{"x": x, "y": 0.0} for x in (0.0, 1.0, 5.0)]
+    bridge.map_pose = lambda: {"x": 1.8, "y": 0.0, "yaw": 0.0}
+    bridge._pump_nav_joy()
+    assert _bearing_of(bridge.pub_nav_joy.publish.call_args[0][0]) == pytest.approx(0)
+    assert bridge._nav_route_tracker.progress >= 1.0
+    assert bridge.pub_nav_joy.publish.call_args[0][0].axes[1] > 0
+
+
+def test_nav_route_looks_across_a_collision_checked_clear_bend(mod):
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}})
+    _give_route_map(bridge)
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 2.0, "y": 2.0}
+    bridge._nav_waypoints = [
+        {"x": 0.0, "y": 0.0},
+        {"x": 2.0, "y": 0.0},
+        bridge.goal.copy(),
+    ]
+    bridge.map_pose = lambda: {"x": 1.5, "y": 0.0, "yaw": 0.0}
+    bridge._pump_nav_joy()
+    assert 0 < _bearing_of(bridge.pub_nav_joy.publish.call_args[0][0]) < 90
+    bridge.map_pose = lambda: {"x": 2.0, "y": 0.0, "yaw": 0.0}
+    bridge._pump_nav_joy()
+    assert _bearing_of(bridge.pub_nav_joy.publish.call_args[0][0]) == pytest.approx(90)
+
+
+def test_following_route_does_not_consume_displayed_global_path(mod):
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy", "nav_goal": "goal"}})
+    _give_route_map(bridge)
+    path = [{"x": x, "y": 0.0} for x in (0.0, 1.0, 5.0)]
+    bridge.navigate_to(path[-1], path)
+    bridge.map_pose = lambda: {"x": 1.8, "y": 0.0, "yaw": 0.0}
+    bridge._pump_nav_joy()
+    assert bridge._nav_route_tracker.progress >= 1.0
+    assert bridge._global_planned_path == path
+
+
+@pytest.mark.parametrize("bearing", [-179, -135, -91, -89, 0, 89, 91, 135, 179])
+def test_scout_native_joystick_decoder_preserves_target_bearing(mod, bearing):
+    import yaml
+
+    cfg = yaml.safe_load(
+        (REPO / "adapters/adapter_ros1/config/scout_mini.yaml").read_text()
+    )
+    bridge = _bridge(mod, cfg)
+    bridge.nav_status = "active"
+    bridge.map_pose = lambda: {"x": 0, "y": 0, "yaw": 0}
+    angle = math.radians(bearing)
+    bridge.goal = {"x": 5 * math.cos(angle), "y": 5 * math.sin(angle)}
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    # Actual Scout localPlanner.cpp joystickHandler contract, including its
+    # reverse-steering sign change (a raw atan2-only test misses this bug).
+    decoded = _bearing_of(sent)
+    if sent.axes[1] < 0:
+        decoded *= -1
+    assert decoded == pytest.approx(bearing)
+    assert math.hypot(sent.axes[1], sent.axes[2]) == pytest.approx(0.75)
+    assert len(sent.buttons) >= 7
+    assert not any(sent.buttons)
+
+
+def test_idle_joystick_supplies_native_obstacle_check_buttons(mod):
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}})
+    bridge._pump_nav_joy()
+    sent = bridge.pub_nav_joy.publish.call_args[0][0]
+    assert sent.axes == [0, 0, 0]
+    assert sent.buttons[4] == sent.buttons[6] == 0
+
+
+@pytest.mark.parametrize(
+    "pose,next_pt",
+    [
+        ({"x": 2.3, "y": 0.25, "yaw": 0}, {"x": 5.0, "y": 0.0}),
+        ({"x": 2.1, "y": 0.7, "yaw": math.pi / 2}, {"x": 2.0, "y": 3.0}),
+    ],
+)
+def test_doorway_detour_advances_to_outgoing_route(mod, pose, next_pt):
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy"}})
+    _give_route_map(bridge)
+    bridge.nav_status = "active"
+    bridge.goal = next_pt
+    corner = {"x": 2.0, "y": 0.0}
+    bridge._nav_waypoints = [{"x": 0.0, "y": 0.0}, corner, next_pt.copy()]
+    bridge.map_pose = lambda: {"x": 1.5, "y": 0.0, "yaw": 0.0}
+    bridge._pump_nav_joy()
+    bridge.map_pose = lambda: pose
+    bridge._pump_nav_joy()
+    assert bridge._nav_route_tracker.progress >= 2.0
+    assert bridge.pub_nav_joy.publish.call_args[0][0].axes[1] > 0
+    # Pose noise after passing cannot restore the consumed incoming segment.
+    bridge.map_pose = lambda: {**pose, "x": pose["x"] - 0.15}
+    bridge._pump_nav_joy()
+    assert bridge._nav_route_tracker.progress >= 2.0
+
+
+def test_missing_rejoin_map_holds_motion_and_blocks_native_velocity(mod):
+    bridge = _bridge(mod, {"topics": {"nav_joy": "joy", "nav_cmd_vel": "cmd_vel_nav"}})
+    bridge.nav_status = "active"
+    bridge.goal = {"x": 5.0, "y": 0.0}
+    bridge._nav_waypoints = [{"x": 0.0, "y": 0.0}, bridge.goal.copy()]
+    bridge.map_pose = lambda: {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    bridge._pump_nav_joy()
+    assert bridge._nav_route_blocked
+    assert bridge.pub_nav_joy.publish.call_args[0][0].axes == [0.0, 0.0, 0.0]
+    assert bridge.pub_cmd.publish.call_count == 1
+    bridge._on_nav_cmd_vel(MagicMock())
+    assert bridge.pub_cmd.publish.call_count == 1
+    _give_route_map(bridge)
+    bridge._pump_nav_joy()
+    assert not bridge._nav_route_blocked
+    bridge._on_nav_cmd_vel(MagicMock())
+    assert bridge.pub_cmd.publish.call_count == 2

@@ -6,9 +6,10 @@ export type PreviewChunk = {
   submapId: string;
   sha256: string;
   points: Float32Array;
+  rgba?: Uint8Array;
 };
 
-export type ChunkRef = { sha256: string; point_count?: number; size_bytes?: number };
+export type ChunkRef = { sha256: string; point_count?: number; size_bytes?: number; encoding?: string };
 
 /** Bound downloads as well as GPU points, sampling across the full submap list. */
 export function selectPreviewRefs(refs: ChunkRef[], maxBytes = MAX_CACHE_BYTES): ChunkRef[] {
@@ -47,6 +48,18 @@ export function parseXYZF32(bytes: Uint8Array): Float32Array {
   const values = new DataView(bytes.buffer, bytes.byteOffset + 16, count * 12);
   for (let index = 0; index < points.length; index += 1) points[index] = values.getFloat32(index * 4, true);
   return points;
+}
+
+export function parseXYZRGBAF32U8(bytes: Uint8Array): { points: Float32Array; rgba: Uint8Array } {
+  if (bytes.byteLength < 16 || bytes.byteLength > MAX_CHUNK_BYTES) throw new Error('Replica chunk exceeds the browser safety limit');
+  const magic = new TextDecoder().decode(bytes.subarray(0, 8));
+  if (magic !== 'SDRGB1\0\0') throw new Error('Unsupported colored replica chunk encoding');
+  const count = Number(new DataView(bytes.buffer, bytes.byteOffset + 8, 8).getBigUint64(0, true));
+  if (!Number.isSafeInteger(count) || count < 0 || bytes.byteLength !== 16 + count * 16) throw new Error('Invalid colored replica chunk length');
+  const points = new Float32Array(count * 3);
+  const view = new DataView(bytes.buffer, bytes.byteOffset + 16, count * 12);
+  for (let i = 0; i < points.length; i++) points[i] = view.getFloat32(i * 4, true);
+  return { points, rgba: bytes.slice(16 + count * 12) };
 }
 
 /** A small LRU cache whose retained typed arrays have an explicit byte budget. */
@@ -111,13 +124,15 @@ export function samplePreviewChunks(chunks: PreviewChunk[], maxPoints = MAX_PREV
     const first = (stride - offset % stride) % stride;
     offset += sourceCount;
     const sampled = new Float32Array(Math.max(0, Math.ceil((sourceCount - first) / stride)) * 3);
+    const rgba = chunk.rgba ? new Uint8Array((sampled.length / 3) * 4) : undefined;
     let output = 0;
     for (let point = first; point < sourceCount; point += stride) {
       sampled[output++] = chunk.points[point * 3];
       sampled[output++] = chunk.points[point * 3 + 1];
       sampled[output++] = chunk.points[point * 3 + 2];
+      if (rgba && chunk.rgba) rgba.set(chunk.rgba.subarray(point * 4, point * 4 + 4), (output / 3 - 1) * 4);
     }
-    return { ...chunk, points: sampled };
+    return { ...chunk, points: sampled, rgba };
   });
 }
 

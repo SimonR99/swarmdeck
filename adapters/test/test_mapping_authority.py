@@ -9,7 +9,9 @@ import pytest
 from adapters.mapping_authority import (
     MappingAuthority,
     accepts_authority_update,
+    authority_for_frame,
     expected_mission_id,
+    planning_frame,
     snapshot_values,
 )
 from autonomy.cslam import pose_matrix
@@ -27,6 +29,71 @@ def authority():
         map_source_stamp={"sec": 3, "nanosec": 4},
         T_component_navigation=np.eye(4).tolist(),
     )
+
+
+def test_planning_frame_defaults_to_map_and_expands_robot(monkeypatch):
+    bridge = NS(id="r0", map_frame="/r0/map_frame")
+    monkeypatch.delenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", raising=False)
+    assert planning_frame(bridge) == "r0/map_frame"
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "/{robot}/odom")
+    assert planning_frame(bridge) == "r0/odom"
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{unknown}/odom")
+    with pytest.raises(ValueError, match="template"):
+        planning_frame(bridge)
+    for invalid in (" {robot}/odom", "{robot}//odom", "{robot}/odom/"):
+        monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", invalid)
+        with pytest.raises(ValueError, match="planning frame"):
+            planning_frame(bridge)
+
+
+def test_authority_for_stable_frame_preserves_component_home():
+    value = authority()
+    value["navigation_frame"] = "r0/map_frame"
+    # Live evidence showed these two translations changing together while
+    # component<-odom remained invariant.
+    component_from_map = np.eye(4)
+    component_from_map[0, 3] = 1.04
+    value["T_component_navigation"] = component_from_map.tolist()
+    value["planning_frame"] = "r0/odom"
+    value["T_component_planning"] = np.eye(4).tolist()
+    map_from_home = np.eye(4)
+    map_from_home[0, 3] = 2.0
+    value["home"] = {
+        "keyframe_id": "home:0",
+        "T_navigation_home": map_from_home.tolist(),
+    }
+
+    selected = authority_for_frame(value, "/r0/odom")
+    assert selected["navigation_frame"] == "r0/odom"
+    np.testing.assert_allclose(selected["T_component_navigation"], np.eye(4))
+    expected_odom_home = component_from_map @ map_from_home
+    np.testing.assert_allclose(
+        selected["home"]["T_navigation_home"], expected_odom_home
+    )
+    # Selection is a copy and cannot alter the UI authority.
+    assert value["navigation_frame"] == "r0/map_frame"
+    np.testing.assert_allclose(value["home"]["T_navigation_home"], map_from_home)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {},
+        {"planning_frame": "r0/other", "T_component_planning": np.eye(4).tolist()},
+        {"planning_frame": "r0/odom", "T_component_planning": [[1.0]]},
+    ],
+)
+def test_authority_for_stable_frame_never_falls_back(change):
+    value = {**authority(), **change}
+    with pytest.raises(ValueError):
+        authority_for_frame(value, "r0/odom")
+
+
+def test_same_frame_missing_transform_has_bounded_error():
+    value = authority()
+    del value["T_component_navigation"]
+    with pytest.raises(ValueError, match="no navigation transform"):
+        authority_for_frame(value, "map")
 
 
 @pytest.mark.parametrize("axis", range(3))
@@ -93,6 +160,44 @@ def test_authority_relays_exact_key_and_expires(monkeypatch):
     assert reader.received_at == 10
     clock[0] = 14
     assert reader.current() is None
+
+
+def test_snapshot_uses_opted_in_planning_authority_but_current_stays_ui(monkeypatch):
+    published = []
+
+    def message():
+        return NS(
+            source_stamp=NS(sec=0, nanosec=0),
+            component_from_navigation=NS(
+                translation=NS(x=0, y=0, z=0),
+                rotation=NS(x=0, y=0, z=0, w=1),
+            ),
+        )
+
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=object))
+    monkeypatch.setitem(sys.modules, "mgg_msgs.msg", NS(MappingSnapshot=message))
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy.qos",
+        NS(QoSProfile=lambda **kw: kw, DurabilityPolicy=NS(TRANSIENT_LOCAL=1)),
+    )
+    node = NS(
+        create_subscription=lambda *args: None,
+        create_publisher=lambda *args: NS(publish=published.append),
+    )
+    reader = MappingAuthority(NS(node=node, id="r0", map_frame="map"))
+    value = authority()
+    value["planning_frame"] = "r0/odom"
+    component_from_odom = np.eye(4)
+    component_from_odom[0, 3] = 5.0
+    value["T_component_planning"] = component_from_odom.tolist()
+    reader.receive(NS(data=json.dumps(value)))
+
+    assert reader.current()["navigation_frame"] == "map"
+    assert reader.current_for_frame("r0/odom")["navigation_frame"] == "r0/odom"
+    assert published[-1].component_from_navigation.translation.x == 5.0
 
 
 def test_reordered_authority_cannot_rollback_or_renew_freshness(monkeypatch):

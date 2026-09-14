@@ -67,6 +67,7 @@ from adapters.runtime import (
     yaw_of,
 )
 from adapters.session import run_adapter_session
+from adapters.navigation_result import navigation_failure_reason
 from adapters.keyframe_producer import (
     DEFAULT_MAX_YAW_RATE,
     KeyframeUploader,
@@ -401,6 +402,7 @@ class RobotBridge(
         self.goal: dict | None = None
         self.planned_path: list[dict[str, float]] = []
         self.nav_status = "idle"
+        self._nav_failure_reason: str | None = None
         self.mode = "idle"
         self.grid: OccupancyGrid | None = None
         self._grid_dirty = False
@@ -1005,19 +1007,59 @@ class RobotBridge(
         # Deduplicate onto a voxel lattice: one point per occupied cell.
         keys = np.round(points / CLOUD_VOXEL).astype(np.int32)
         keep = unique_row_index(keys)
-        quantised = np.round(points[keep] / CLOUD_SCALE).astype(np.int16)
+        selected = points[keep]
+        rgb = self._display_cloud_colors(selected)
+        body = (
+            np.round(selected / CLOUD_SCALE).astype("<i2").tobytes()
+            if rgb is None
+            else selected.astype("<f4").tobytes() + rgb.tobytes()
+        )
+        format_query = "" if rgb is None else "&format=xyzrgb32"
         try:
             urllib.request.urlopen(
                 urllib.request.Request(
                     f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
-                    f"&scale={CLOUD_SCALE}",
-                    data=zlib.compress(quantised.tobytes(), 1),
+                    f"&scale={CLOUD_SCALE}{format_query}",
+                    data=zlib.compress(body, 1),
                     headers={"Content-Type": "application/octet-stream"},
                 ),
                 timeout=self._cfg_timeout("upload_timeout_s"),
             ).read()
         except Exception as exc:
             self.node.get_logger().warn(f"[{self.id}] cloud upload failed: {exc}")
+
+    def _display_cloud_colors(self, points_map: np.ndarray) -> np.ndarray | None:
+        """Project the latest synchronized RGB-D frame onto display-map points."""
+        from adapters.reconstruction import colorize_ros_rgbd
+
+        image = getattr(self, "_camera_frame", None)
+        depth = getattr(self, "_camera_depth", None)
+        info = getattr(self, "_camera_info", None)
+        if image is None or depth is None or info is None:
+            return None
+        at = stamp_seconds(getattr(image, "header", None))
+        depth_at = stamp_seconds(getattr(depth, "header", None))
+        if at is None or depth_at is None or abs(at - depth_at) > 0.05:
+            return None
+        camera_pose = self.map_pose_at(at, require_history=True)
+        if camera_pose is None:
+            return None
+        t_map_camera_base = se3_from_quat_xyz(
+            pose7_from_xy_yaw(camera_pose["x"], camera_pose["y"], camera_pose["yaw"])
+        )
+        optical_from_base = np.array(
+            [
+                [0.0, -1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0, self.camera_z],
+                [1.0, 0.0, 0.0, -self.camera_x],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        rgba = colorize_ros_rgbd(
+            points_map, image, depth, info,
+            optical_from_base @ np.linalg.inv(t_map_camera_base),
+        )
+        return rgba[:, :3].copy() if rgba is not None and np.any(rgba[:, 3]) else None
 
     def _on_camera(self, msg: Image) -> None:
         self._camera_frame = msg
@@ -1137,6 +1179,7 @@ class RobotBridge(
         with self._goal_lock:
             self._cancel_nav()
             generation = self._goal_generation
+            self._nav_failure_reason = None
             future = self.nav_client.send_goal_async(request)
             self._goal_request_future = future
             self._goal_request_generation = generation
@@ -1219,8 +1262,12 @@ class RobotBridge(
                 return False
             self._goal_request_future = future
             self._goal_request_generation = generation
-            self.goal = {"x": final.x, "y": final.y, "yaw": yaw}
+            self.goal = {
+                "x": final.x, "y": final.y, "z": final.z,
+                "yaw": yaw, "frame_id": plan.frame_id,
+            }
             self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
+            self._follow_path_display = (generation, plan)
             self.nav_status, self.mode = "active", "nav"
             future.add_done_callback(lambda done: self._goal_response(done, generation))
             return generation
@@ -1302,7 +1349,8 @@ class RobotBridge(
                     self._nav_quiet_unknown = True
                 return
             try:
-                status = future.result().status
+                outcome = future.result()
+                status = outcome.status
             except Exception as exc:
                 self._nav_quiet_unknown = True
                 self.node.get_logger().error(
@@ -1316,25 +1364,45 @@ class RobotBridge(
                 GoalStatus.STATUS_CANCELED: "cancelled",
                 GoalStatus.STATUS_ABORTED: "failed",
             }.get(status, "failed")
+            result = getattr(outcome, "result", None)
             if status not in {
                 GoalStatus.STATUS_SUCCEEDED,
                 GoalStatus.STATUS_CANCELED,
                 GoalStatus.STATUS_ABORTED,
             }:
                 self._nav_quiet_unknown = True
-            self._finish_goal(terminal, generation)
+            self._finish_goal(
+                terminal,
+                generation,
+                reason=navigation_failure_reason(result),
+            )
 
-    def _finish_goal(self, status: str, generation: int) -> None:
+    def _finish_goal(
+        self, status: str, generation: int, *, reason: str | None = None
+    ) -> None:
         if generation != self._goal_generation:
             return
         self._goal_handle = None
         self.goal = None
         self.planned_path = []
         self.nav_status, self.mode = status, "idle"
+        self._nav_failure_reason = reason if status == "failed" else None
         if status == "failed" and not self._nav_quiet_unknown:
             self._arm_escape()
 
     # -- Nav2 bringup recovery ------------------------------------------
+
+    def navigation_ready(self) -> bool:
+        """Whether the action servers and configured objective planner are live."""
+        actions_ready = bool(
+            self.nav_client.server_is_ready()
+            and self.path_client.server_is_ready()
+        )
+        planner = getattr(self, "objective_planner", None)
+        planner_client = getattr(planner, "client", None)
+        return actions_ready and (
+            planner_client is None or planner_client.service_is_ready()
+        )
 
     def recover_nav_if_down(self) -> bool:
         """Re-run Nav2's bringup if its action server never appeared.
@@ -1477,6 +1545,7 @@ class RobotBridge(
             elif not pending_acceptance:
                 quiet.set()
             self._goal_handle = None
+            self._nav_failure_reason = None
             for old, event in list(self._cancel_events.items()):
                 if event.is_set():
                     self._cancel_events.pop(old, None)
@@ -1846,6 +1915,30 @@ class RobotBridge(
         recognisable failure — the operator sees robots back at the start
         drawing their old map — and naming it beats reporting `false`.
         """
+        if os.environ.get("SWARMDECK_SIM_BACKEND", "gazebo").lower() == "argos":
+            # ARGoS owns the physical world through its socket bridge. Gazebo's
+            # SetPose and robot_localization SetPose services cannot reset that
+            # world and would only create a false estimator origin. Onboard
+            # mapping also requires a fresh frontend mission. The host reset
+            # supervisor performs that composition-wide lifecycle operation.
+            self.node.get_logger().warn(
+                f"[{self.id}] refusing legacy per-robot reset under ARGoS; "
+                "use the epoch-safe simulation reset supervisor"
+            )
+            steps = {"supervisor_required": False}
+            # The session transmitter, rather than this executor worker, owns
+            # the websocket. Queue the negative acknowledgement just like the
+            # normal reset path so a misconfigured legacy server fails promptly
+            # instead of waiting the full fleet reset timeout for silence.
+            self._reset_report = {
+                "type": "reset_done",
+                "robot_id": self.id,
+                "t_mono": round(time.monotonic() - self.t0, 4),
+                "ok": False,
+                "steps": steps,
+            }
+            return steps
+
         steps: dict[str, bool] = {}
         with self._upload_lock:
             self._cancel_nav()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import math
 import os
 import re
@@ -20,6 +21,70 @@ _INDEXED_FIELDS = frozenset(
         "map_source_stamp",
     }
 )
+
+PLANNING_FRAME_TEMPLATE_ENV = "SWARMDECK_PLANNING_FRAME_TEMPLATE"
+
+
+def planning_frame(bridge):
+    """Return the explicitly configured MGG frame, defaulting to the UI frame."""
+    template = os.environ.get(PLANNING_FRAME_TEMPLATE_ENV)
+    if template is None:
+        value = getattr(bridge, "map_frame", "")
+    else:
+        if template.count("{robot}") != 1:
+            raise ValueError("invalid planning frame template")
+        value = template.replace("{robot}", str(bridge.id))
+    value = str(value).lstrip("/")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_/-]*", value)
+        or "//" in value
+        or value.endswith("/")
+    ):
+        raise ValueError("invalid planning frame")
+    return value
+
+
+def authority_for_frame(authority, frame):
+    """Return one validated authority expressed in ``frame``.
+
+    The published navigation pair remains the UI contract. An alternate
+    planning pair is accepted only when both its frame and transform are
+    present and exactly name the requested frame.
+    """
+    if not isinstance(authority, dict):
+        raise ValueError("map authority is unavailable")
+    target = str(frame).lstrip("/")
+    navigation = str(authority.get("navigation_frame", "")).lstrip("/")
+    if not target:
+        raise ValueError("planning frame is empty")
+    selected = deepcopy(authority)
+    if target == navigation:
+        try:
+            validate_se3(authority["T_component_navigation"])
+        except KeyError as exc:
+            raise ValueError("map authority has no navigation transform") from exc
+        return selected
+    else:
+        planning = str(authority.get("planning_frame", "")).lstrip("/")
+        if planning != target or "T_component_planning" not in authority:
+            raise ValueError(f"map authority has no transform for frame {target!r}")
+        transform = validate_se3(authority["T_component_planning"])
+        selected["navigation_frame"] = authority["planning_frame"]
+        selected["T_component_navigation"] = transform
+
+    # Home is transported as navigation<-home. Re-express it through the
+    # component frame so its physical landmark remains unchanged.
+    home = authority.get("home")
+    if target != navigation and isinstance(home, dict) and "T_navigation_home" in home:
+        source = np.asarray(validate_se3(authority["T_component_navigation"]))
+        target_transform = np.asarray(transform)
+        source_home = np.asarray(validate_se3(home["T_navigation_home"]))
+        selected_home = deepcopy(home)
+        selected_home["T_navigation_home"] = (
+            np.linalg.inv(target_transform) @ source @ source_home
+        ).tolist()
+        selected["home"] = selected_home
+    return selected
 
 
 def _snapshot_order(authority):
@@ -148,6 +213,7 @@ class MappingAuthority:
         self.value, self.received_at = None, 0.0
         self.clock = time.monotonic
         self.expected_mission = expected_mission_id(bridge.id)
+        self.planning_frame = planning_frame(bridge)
         self.publisher = None
         try:
             from mgg_msgs.msg import MappingSnapshot
@@ -176,6 +242,10 @@ class MappingAuthority:
             else None
         )
 
+    def current_for_frame(self, frame):
+        value = self.current()
+        return None if value is None else authority_for_frame(value, frame)
+
     def receive(self, message):
         try:
             if len(message.data) > 32768:
@@ -192,8 +262,9 @@ class MappingAuthority:
                 return
             # Old authorities remain readable for non-indexed planning. A
             # partial new snapshot is invalid rather than a fallback to old data.
+            selected = authority_for_frame(value, self.planning_frame)
             converted = (
-                snapshot_values(value) if _INDEXED_FIELDS.issubset(value) else None
+                snapshot_values(selected) if _INDEXED_FIELDS.issubset(value) else None
             )
             if converted is not None and self.publisher is not None:
                 out = self.message_type()

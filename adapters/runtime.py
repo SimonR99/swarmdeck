@@ -557,7 +557,7 @@ class AdapterLinkMixin:
 
     def _on_nav_cmd_vel(self, msg) -> None:
         if self.nav_status == "active" and self.pub_cmd is not None:
-            if self.link_ok():
+            if self.link_ok() and not getattr(self, "_nav_route_blocked", False):
                 self.pub_cmd.publish(msg)
 
     def note_drive_command(self, linear: float, angular: float) -> None:
@@ -641,6 +641,39 @@ class AdapterTelemetryMixin:
         except TypeError:
             return read_link_quality(iface)
 
+    def navigation_route_target(self, path, pose):
+        """Shared opt-in tracker for adapters following supplied route points.
+
+        ROS 1/ROS 2/simulation inherit this API. Native Nav2 controllers retain
+        their own path tracking; callers must hold motion when this returns None.
+        """
+        from adapters.route_tracking import GridCollisionChecker, RouteTracker
+
+        key = tuple((float(p["x"]), float(p["y"])) for p in path)
+        if key != getattr(self, "_nav_route_key", None):
+            self._nav_route_key = key
+            self._nav_route_tracker = RouteTracker(
+                path, float(self.cfg.get("nav_route_lookahead_m", 0.8))
+            )
+        client = getattr(self, "_nav_map", None)
+        snapshot = getattr(client, "cached", None)
+        checker = None
+        if (
+            snapshot is not None
+            and time.monotonic() - getattr(client, "last_success_at", 0.0) <= 10.0
+        ):
+            checker = GridCollisionChecker(
+                snapshot,
+                float(
+                    self.cfg.get(
+                        "nav_route_clearance_m", self.cfg.get("footprint_radius", 0.35)
+                    )
+                ),
+            )
+        result = self._nav_route_tracker.target(pose, checker)
+        self._nav_route_blocked = result is None
+        return result
+
     def state(self) -> dict[str, Any]:
         planned_path = list(getattr(self, "planned_path", []) or [])
         global_planned_path = getattr(self, "global_planned_path", None)
@@ -670,12 +703,16 @@ class AdapterTelemetryMixin:
             "exploration_status": getattr(
                 getattr(self, "exploration", None), "status", "idle"
             ),
+            "exploration_reason": getattr(
+                getattr(self, "exploration", None), "reason", None
+            ),
             "fleet_exploration_status": getattr(
                 getattr(getattr(self, "exploration", None), "coordinator", None),
                 "completion_state",
                 "unknown",
             ),
             "nav_status": self.nav_status,
+            "nav_failure_reason": getattr(self, "_nav_failure_reason", None),
             "goal": self.goal,
             # Backward-compatible effective route: local when available,
             # otherwise global. The two explicit fields below let the UI show
@@ -684,6 +721,12 @@ class AdapterTelemetryMixin:
             "global_planned_path": list(global_planned_path or []),
             "local_planned_path": list(local_planned_path or []),
         }
+        readiness = getattr(self, "navigation_ready", None)
+        if callable(readiness):
+            # A connected adapter can precede Nav2 activation. Publish the
+            # action-server fact so lifecycle consumers do not confuse an open
+            # fleet websocket with a robot that can accept a route.
+            state["navigation_ready"] = bool(readiness())
         network_iface = str(self.cfg.get("network_iface", ""))
         if network_iface:
             state["network"] = self._network_quality(network_iface)

@@ -1,5 +1,8 @@
 # Remaining integration work
 
+The current navigation and live-map defects, parallel owners, and acceptance
+matrix are consolidated in the [navigation and mapping issue plan](navigation-mapping-issue-plan.md).
+
 This work continues on `planning-refactor`, with MOLA integration first. The
 existing robot deployments remain available while each replacement passes its
 acceptance checks. The [full design](decentralized-autonomy-plan.md) defines the
@@ -27,10 +30,11 @@ contains measured results and known failures.
 - **Capture qualification:** new ARGoS captures pass the original-ray contract
   and produce native free-space grids. SuperOdometry and FAST-LIVO2 still need
   recorded hardware qualification. Legacy keyframe clouds remain occupied-only.
-- **Fleet display:** the read-only component catalogue and aggregate view are
-  available from the map Layers panel; the [replica component guide](../operations/replica-components.md)
-  documents its compatibility and failure rules. Per-robot inspection remains
-  available.
+- **Fleet display:** automatic Live Map selects owned robot submaps for Local
+  and verified shared components for Global, with separately qualified live
+  poses, paths and component-frame goals. Explicit catalogue/history inspection
+  remains read-only. The [replica component guide](../operations/replica-components.md)
+  documents compatibility, freshness and failure rules.
 - **Integration and acceptance:** worker publication, framework lifecycle,
   deployment wiring, remote replay, MGG service checks, and measured budgets are
   reviewed and recorded by the integration owner. No remote result is implied by
@@ -58,8 +62,8 @@ autonomy suite passes 100 tests. See the
 [runtime guide](../operations/mola-runtime.md) for measured replay results and
 the distinction between point geometry and the planner's required map products.
 The complete image also passes actual MOLA launcher scheduling and worker
-acceptance with unavailable chunk payloads. The persistent worker is enabled in
-the isolated planning deployment and its four live indexes are coherent.
+acceptance with unavailable chunk payloads. The persistent worker was enabled in
+the isolated planning acceptance run, where all four indexes were coherent.
 
 ## Second milestone implemented; motion qualification remains
 
@@ -73,7 +77,7 @@ surfaces and artifact failures are covered across the native/Python boundary.
 The deployment defaults remain the existing indexed provider. Legacy Bistro
 captures lack the qualified original-ray contract and remain occupied-only.
 The third milestone below qualifies new instantaneous simulation captures;
-hardware capture qualification, MGG's exploration OctoMap replacement, and
+hardware capture qualification, MGG's direct map-backend motion acceptance, and
 graph/grid/controller qualification remain outstanding. See the [runtime guide](../operations/mola-runtime.md)
 for the provider settings and admission rules.
 
@@ -97,10 +101,29 @@ evidence never creates free space. This conservative rule is required on
 hardware, where a plausible sensor origin is not proof that intermediate cells
 were observed.
 
+## Current graph-provider milestone
+
+MGG's opt-in native `mola_snapshot` backend is implemented and has passed 216
+native tests plus actual mapper-to-planner initial/reused/corrected fixtures.
+A live Bistro request built a graph for R3; the other robots rejected their
+connections. Four-robot motion qualification is therefore still open.
+
+Next work should first distinguish unknown body clearance from occupied and
+unsupported terrain in aggregate graph diagnostics, then align graph, refined
+corridor and controller admission without relaxing unknown-space checks.
+Unchanged solver clocks also cause unnecessary rematerialization: reduce repeated
+artifact validation and the snapshot-to-ready-index availability gap while
+preserving exact authority and correction fences. The
+[acceptance record](../operations/navigation-live-map-acceptance.md) contains
+image identities, timings and failed motion cases.
+
 ## Remaining qualification
 
-The remaining work is to replace MGG's exploration OctoMap with the qualified
-planner product, complete shared graph-to-grid-to-controller behavior for
+The direct `mola_snapshot` MGG backend now connects the qualified planner product
+to graph construction through `MapInterface`. It uses OctoMap as a read-only
+query index over MOLA's explicit free/occupied cells; MOLA owns the geometry.
+This path is opt-in until its acceptance checks pass. The remaining work is to
+qualify that backend under motion, complete shared graph-to-grid-to-controller behavior for
 Explore, Navigate, and Home, and extend four-robot startup validation to correction,
 replanning, and moving-obstacle trials. Physical ROS 2 gateways, ARM builds,
 calibration, bounded peer traffic, and low-speed controller trials remain

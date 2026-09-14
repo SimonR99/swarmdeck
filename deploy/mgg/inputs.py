@@ -18,6 +18,33 @@ from tf2_ros import (
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
+from organized_depth import rasterize_flat_depth_quads
+
+
+SIM_DEPTH_FAR_PLANE_M = 40.0
+# A 3-pixel grid leaves holes in a Bunker body-volume query at 12 m. Two is
+# the coarsest sensor-faithful grid that covers that bounded regression model.
+SIM_DEPTH_PIXEL_STRIDE = 2
+
+
+def valid_depth_samples(depth, sim_depth, mapping_max_range=20.0):
+    """Keep simulator far-plane rays for downstream max-range truncation."""
+    valid = np.isfinite(depth) & (depth > 0.05)
+    if sim_depth:
+        # ARGoS encodes both no-return pixels and far-clamped geometry at its
+        # finite 40 m far plane. MGG's 20 m OctoMap range truncates these rays
+        # as observed free space and does not insert their endpoint occupied.
+        if not 0.0 < mapping_max_range < SIM_DEPTH_FAR_PLANE_M:
+            return valid & (depth < min(mapping_max_range, SIM_DEPTH_FAR_PLANE_M))
+        return valid & (depth <= SIM_DEPTH_FAR_PLANE_M)
+    # Hardware zero/NaN/Inf and out-of-contract far values remain unknown.
+    return valid & (depth < 20.0)
+
+
+def has_capture_stamp(msg):
+    """Reject ROS zero time, which TF2 interprets as a request for latest."""
+    stamp = msg.header.stamp
+    return int(stamp.sec) != 0 or int(stamp.nanosec) != 0
 
 
 class Inputs(Node):
@@ -26,6 +53,10 @@ class Inputs(Node):
         self.frame = self.declare_parameter("map_frame", "map").value
         self.base_frame = self.declare_parameter("base_frame", "").value
         self.sim_depth = self.declare_parameter("sim_depth", False).value
+        self.mapping_max_range = float(
+            self.declare_parameter("mapping_max_range", 20.0).value
+        )
+        self.surface_budget_warning = False
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.odom = self.create_publisher(Odometry, "map_odometry", 10)
@@ -51,7 +82,8 @@ class Inputs(Node):
             ).value
             transform.transform.rotation.w = 1.0
             self.camera_tf.sendTransform(transform)
-        if self.declare_parameter("depth_enabled", self.sim_depth).value:
+        cloud_enabled = self.declare_parameter("cloud_enabled", True).value
+        if self.declare_parameter("depth_enabled", self.sim_depth).value and cloud_enabled:
             self.create_subscription(
                 Image, "depth", self.on_depth, qos_profile_sensor_data
             )
@@ -61,11 +93,12 @@ class Inputs(Node):
         self.create_subscription(
             Odometry, "input_odometry", self.on_odom, qos_profile_sensor_data
         )
-        self.create_subscription(
-            PointCloud2, "input_cloud", self.on_cloud, qos_profile_sensor_data
-        )
+        if cloud_enabled:
+            self.create_subscription(
+                PointCloud2, "input_cloud", self.on_cloud, qos_profile_sensor_data
+            )
+            self.create_timer(0.5, self.publish_cloud)
         self.create_timer(0.1, self.publish_odom)
-        self.create_timer(0.5, self.publish_cloud)
 
     def on_odom(self, msg):
         self.pending_odom.append(msg)
@@ -102,9 +135,13 @@ class Inputs(Node):
             self.odom.publish(output)
 
     def on_cloud(self, msg):
+        if not has_capture_stamp(msg):
+            return
         self.latest = msg
 
     def on_depth(self, msg):
+        if not has_capture_stamp(msg):
+            return
         self.depth = msg
 
     def on_info(self, msg):
@@ -129,16 +166,18 @@ class Inputs(Node):
         # labels its camera frame forward/left/up. Preserve sensor origin/time.
         is_mm = depth.encoding == "16UC1"
         item_size = 2 if is_mm else 4
-        z = np.ndarray(
+        depth_values = np.ndarray(
             (depth.height, depth.width),
             dtype=(">" if depth.is_bigendian else "<") + ("u2" if is_mm else "f4"),
             buffer=depth.data,
             strides=(depth.step, item_size),
-        )[::4, ::4]
+        )
+        stride = SIM_DEPTH_PIXEL_STRIDE if self.sim_depth else 4
+        z = depth_values[::stride, ::stride]
         if is_mm:
             z = z.astype(np.float32) * 0.001
-        v, u = np.mgrid[0 : depth.height : 4, 0 : depth.width : 4]
-        valid = np.isfinite(z) & (z > 0.05) & (z < 20.0)
+        v, u = np.mgrid[0 : depth.height : stride, 0 : depth.width : stride]
+        valid = valid_depth_samples(z, self.sim_depth, self.mapping_max_range)
         points = np.column_stack(
             (
                 z[valid],
@@ -146,6 +185,23 @@ class Inputs(Node):
                 -(v[valid] - cy) * z[valid] / fy,
             )
         ).astype("<f4")
+        if self.sim_depth:
+            # Reconstruct only continuous, nearly level surfaces between
+            # adjacent real depth pixels. Keep these mapping-only samples in
+            # the same insertion as the rays so occupied endpoints win.
+            try:
+                surface = rasterize_flat_depth_quads(
+                    depth_values.astype(np.float32) * (0.001 if is_mm else 1.0),
+                    fx=fx, fy=fy, cx=cx, cy=cy,
+                    max_range_m=min(self.mapping_max_range, 20.0),
+                )
+            except ValueError as exc:
+                if not self.surface_budget_warning:
+                    self.get_logger().warning(f"Depth surface reconstruction skipped: {exc}")
+                    self.surface_budget_warning = True
+            else:
+                if len(surface):
+                    points = np.concatenate((points, surface)).astype("<f4")
         if not self.sim_depth:
             points = points[:, [1, 2, 0]] * [-1, -1, 1]
             points = points.astype("<f4")

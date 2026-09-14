@@ -187,6 +187,12 @@ def test_shared_telemetry_envelope_includes_split_paths():
     assert state["planned_path"] == [{"x": 1.0, "y": 2.0}]
 
 
+def test_shared_telemetry_reports_navigation_action_readiness():
+    bridge = _ProtocolBridge("adapter_sim/0.1.0")
+    bridge.navigation_ready = lambda: True
+    assert bridge.state()["navigation_ready"] is True
+
+
 def test_transport_defaults_are_the_hardware_keepalive():
     assert websocket_connect_kwargs(TRANSPORT_DEFAULTS) == {
         "ping_interval": 2.0,

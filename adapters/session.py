@@ -14,6 +14,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from adapters.live_mapping import live_state
+
 from adapters.runtime import (
     RECONNECT_BACKOFF_S,
     TRANSPORT_DEFAULTS,
@@ -98,6 +100,32 @@ async def dispatch_command(
             exploration.stop()
     if kind == "plan_objective":
         objective = msg.get("objective")
+        planner = getattr(bridge, "objective_planner", None)
+        claim = getattr(planner, "claim_objective", None)
+        execute = getattr(planner, "execute_claimed", None)
+        if objective in ("navigate", "return_home") and callable(
+            claim
+        ) and callable(execute):
+            try:
+                owned = claim(
+                    objective,
+                    msg.get("goal", {}) if objective == "navigate" else None,
+                )
+            except (TypeError, ValueError) as exc:
+                _emit(bridge, "warning", f"Invalid planning objective: {exc}")
+                return
+            pending = loop.run_in_executor(None, execute, owned)
+
+            def completed(future):
+                try:
+                    future.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    _emit(bridge, "warning", f"Objective planning failed: {exc}")
+
+            pending.add_done_callback(completed)
+            return
         if objective == "return_home":
             fn = getattr(bridge, "return_home", None)
             if callable(fn):
@@ -158,7 +186,7 @@ async def _rx(bridge: Any, ws: Any) -> None:
 async def _tx_state(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
     period = 1.0 / float(cfg["rates"]["state_hz"])
     while True:
-        await send(bridge.state())
+        await send(live_state(bridge))
         exploration = getattr(bridge, "exploration", None)
         if exploration is not None:
             exploration.last_link = time.monotonic()

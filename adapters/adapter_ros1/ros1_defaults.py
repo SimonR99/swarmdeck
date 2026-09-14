@@ -114,6 +114,9 @@ DEFAULTS: dict[str, Any] = deep_merge(
         # refuses to path through real doors. Per-robot: see
         # config/scout_mini.yaml, which works the numbers through for a Scout Mini.
         "nav_joy_throttle": 0.5,
+        # Some native joystick planners reverse the lateral steering convention
+        # while backing up. Enable only for a verified consumer of that format.
+        "nav_joy_reverse_steering": False,
         # Height band for `map_cloud` points, metres, in the map_frame (NOT
         # relative to the robot — this stack has no live z estimate to be relative
         # to, since the EKF publishing map_frame runs `two_d_mode: true`). Points

@@ -91,11 +91,32 @@ port. The long-lived Botman adapter, lidar, SLAM, and Nav2 nodes use
 `fastdds_large_data.xml` for efficient local cloud transport. MGG remains on UDP
 in its private IPC namespace.
 
+On 2026-09-09, Aslan had the same initialization hang on
+`/dev/shm/fastrtps_port19669`, but the file was **52,416 bytes with an all-zero
+initialization header**, not zero-length. Its adapter and eight Nav2 processes
+held this file open, and the adapter's native stack was sleeping under
+`SharedMemTransport::CreateInputChannelResource`. The base driver, camera
+launcher, odometry TF, and six SLAM processes also held the same file. Other
+ports started with `02 00 00 00`; this port's first 64 bytes were zero.
+Quarantining only this diagnosed port and restarting those six affected
+containers restored adapter registration and activated Nav2. SLAM's
+process-presence health check had reported healthy during the hang, so verify
+actual telemetry as well. Zero-byte `_el` lock files are normal and are not,
+by themselves, evidence of this fault. The event that left the port
+uninitialized was not captured.
+
 Do not blanket-delete `/dev/shm/fastrtps_*` while ROS is running. Diagnose the
 specific object and its users first; preserve a verified old, empty port outside
 the DDS naming scheme when recovering it. Processes already waiting on its old
 file descriptor need restarting. Changing ROS domain is a diagnostic only;
 robot services must remain on their configured domain to communicate.
+
+Aslan now has a once-per-boot cleanup guard installed for its next boot. The
+[systemd installer](../../deploy/robots/systemd/README.md#fast-dds-shared-memory-cleanup-at-boot)
+orders cleanup before Docker/containerd and skips the installation boot. It
+refuses to remove files while container runtimes or DDS users are active. This
+prevents stale files present at startup from blocking DDS; it does not clean
+files left by a crash after ROS has started.
 
 ### LiDAR return range
 

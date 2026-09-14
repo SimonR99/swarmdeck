@@ -22,11 +22,12 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, String
 from tf2_ros import Buffer, TransformListener, TransformException
 from cslam_common_interfaces.msg import (
+    InterRobotLoopClosure,
     KeyframePointCloud,
     KeyframeOdom,
     OptimizationResult,
@@ -43,6 +44,11 @@ from autonomy.capture_providers import (
     RawCaptureMetadata,
     endpoint_preserving_sample,
 )
+from autonomy.capture_color import (
+    retain_bounded_image,
+    select_geometry_and_color,
+    select_rgbd_observation,
+)
 from autonomy.cslam import CslamMapper, pose_matrix
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaClient
@@ -51,6 +57,11 @@ from autonomy.replication import ReplicaClient
 DEFAULT_STORED_RAW_CAPTURE_POINTS = 4_096
 MAX_RAW_CAPTURE_CACHE_BYTES = 32 * 1024 * 1024
 MAX_RAW_CAPTURE_RECORDS = 32
+MAX_RGBD_RECORDS = 8
+# Eight 1080p 32FC1 frames fit while malformed dimensions and unusually large
+# individual messages remain unable to consume the whole cache allowance.
+MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
+MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
 
 
@@ -88,6 +99,11 @@ class Bridge(Node):
             "tf_static_topic": "/tf_static",
             "capture_provider": "unknown",
             "capture_provenance_topic": "",
+            "color_topic": "",
+            "depth_topic": "",
+            "color_info_topic": "",
+            "color_frame": "",
+            "color_frame_convention": "optical",
             "max_stored_raw_capture_points": DEFAULT_STORED_RAW_CAPTURE_POINTS,
         }
         for key, value in params.items():
@@ -171,6 +187,17 @@ class Bridge(Node):
         self.pending_cloud = None
         self.last_sensor_at = 0.0
         self.clouds, self.odoms, self.capture_calibrations = {}, {}, {}
+        self.color_images, self.depth_images = {}, {}
+        self.color_info = None
+        self.color_images_received = self.depth_images_received = 0
+        self.color_frames_rejected = 0
+        self.color_capture_attempts = self.color_pairs_selected = 0
+        self.color_pair_rejections = self.color_tf_rejections = 0
+        self.color_projection_rejections = self.colored_captures = 0
+        self.color_frame = str(p["color_frame"] or "")
+        self.color_frame_convention = str(p["color_frame_convention"])
+        if self.color_frame_convention not in {"optical", "body"}:
+            raise ValueError("color_frame_convention must be optical or body")
         self.pending_capture_since = {}
         self.raw_captures, self.raw_capture_metadata = {}, {}
         self.raw_capture_collisions = {}
@@ -200,9 +227,16 @@ class Bridge(Node):
         self.solution_results_received = self.solution_results_accepted = (
             self.solution_results_unchanged
         ) = 0
+        self.closure_candidates = self.verified_closures = 0
+        self.rejected_closures = 0
+        self.closures_by_peer = {}
         self.sensor_node.create_subscription(
             PointCloud2, p["cloud_topic"], self.raw_cloud, qos_profile_sensor_data
         )
+        if p["color_topic"] and p["depth_topic"] and p["color_info_topic"]:
+            self.sensor_node.create_subscription(Image, p["color_topic"], self._color_image, qos_profile_sensor_data)
+            self.sensor_node.create_subscription(Image, p["depth_topic"], self._depth_image, qos_profile_sensor_data)
+            self.sensor_node.create_subscription(CameraInfo, p["color_info_topic"], self._color_info, qos_profile_sensor_data)
         if self.raw_capture_enabled:
             self.sensor_node.create_subscription(
                 String,
@@ -218,6 +252,16 @@ class Bridge(Node):
         )
         self.create_subscription(
             OptimizationResult, "cslam/optimized_estimates", self.optimized, 100
+        )
+        # Verification outcomes are published on a fleet-global topic. Keep
+        # bounded counters in the local status file so an absent descriptor
+        # exchange can be distinguished from geometric rejection and from a
+        # later optimizer/replication failure without recording sensor data.
+        self.create_subscription(
+            InterRobotLoopClosure,
+            "/cslam/inter_robot_loop_closure",
+            self.inter_robot_closure,
+            100,
         )
         self.sensor_node.create_timer(0.05, self.normalize)
         self.create_timer(0.1, self.flush_captures)
@@ -243,6 +287,94 @@ class Bridge(Node):
         self.snapshot_file = root / "snapshot.json"
         self.graph_solution_file = root / "graph_solution.json"
         self.graph_solution_revision = -1
+
+    def _color_image(self, message):
+        accepted = self._remember_color_frame(self.color_images, message, "color")
+        with self._shared_lock:
+            self.color_images_received += 1
+            self.color_frames_rejected += not accepted
+
+    def _depth_image(self, message):
+        accepted = self._remember_color_frame(self.depth_images, message, "depth")
+        with self._shared_lock:
+            self.depth_images_received += 1
+            self.color_frames_rejected += not accepted
+
+    def _color_info(self, message):
+        with self._shared_lock:
+            self.color_info = message
+
+    def _remember_color_frame(self, cache, message, kind):
+        with self._shared_lock:
+            return retain_bounded_image(
+                cache,
+                message,
+                kind,
+                MAX_RGBD_RECORDS,
+                MAX_RGBD_STREAM_BYTES,
+                MAX_RGBD_MESSAGE_BYTES,
+            )
+
+    def _capture_colors(self, points_base, capture_header):
+        """Return measured RGBA only for a timestamp-qualified RGB-D observation."""
+        from adapters.reconstruction import colorize_ros_rgbd
+
+        self.color_capture_attempts += 1
+        try:
+            cloud_ns = (
+                int(capture_header.stamp.sec) * 1_000_000_000
+                + int(capture_header.stamp.nanosec)
+            )
+        except (AttributeError, TypeError, ValueError):
+            self.color_pair_rejections += 1
+            return None
+        with self._shared_lock:
+            images = tuple(self.color_images.values())
+            depths = tuple(self.depth_images.values())
+            info = self.color_info
+        selected = select_rgbd_observation(
+            cloud_ns, images, depths, info, self.color_frame,
+        )
+        if selected is None:
+            self.color_pair_rejections += 1
+            return None
+        image, depth, frame = selected
+        self.color_pairs_selected += 1
+        try:
+            # The selected endpoints are expressed in base at LiDAR capture
+            # time, while RGB-D may come from a nearby camera tick.  Ask tf2
+            # for that exact temporal transform through fixed odometry so
+            # robot motion between the two observations is preserved.
+            transform = self.tf.lookup_transform_full(
+                frame,
+                Time.from_msg(image.header.stamp),
+                self.base,
+                Time.from_msg(capture_header.stamp),
+                self.odom_frame,
+            )
+        except TransformException:
+            self.color_tf_rejections += 1
+            return None
+        camera_from_base = np.asarray(
+            pose_matrix(transform_pose(transform.transform)), dtype=np.float64
+        )
+        if self.color_frame_convention == "body":
+            camera_from_base = np.asarray(
+                [[0, -1, 0, 0], [0, 0, -1, 0], [1, 0, 0, 0], [0, 0, 0, 1]],
+                dtype=np.float64,
+            ) @ camera_from_base
+        try:
+            rgba = colorize_ros_rgbd(
+                points_base, image, depth, info,
+                camera_from_base,
+            )
+        except (BufferError, TypeError, ValueError):
+            rgba = None
+        if rgba is None or not np.any(rgba[:, 3]):
+            self.color_projection_rejections += 1
+            return None
+        self.colored_captures += 1
+        return rgba
 
     @staticmethod
     def _relay_robot_id(message):
@@ -545,11 +677,14 @@ class Bridge(Node):
             if calibration is None:
                 self.dropped += 1
                 return
-            mount, sensor_frame = calibration
-            provenance = None
             raw = self._take_raw_capture(stamp, self.core.key(seq))
-            if raw is not None:
-                xyz, mount, sensor_frame, provenance = raw
+            xyz, mount, sensor_frame, provenance, colors = select_geometry_and_color(
+                xyz, calibration, raw,
+                # Swarm-SLAM rebuilds the keyframe PointCloud2 with a default
+                # zero header. Its paired odometry retains the original
+                # normalized scan timestamp used by calibration/raw joins.
+                lambda selected: self._capture_colors(selected, odom.header),
+            )
             accepted = self.core.capture(
                 seq,
                 stamp,
@@ -558,6 +693,7 @@ class Bridge(Node):
                 T_base_sensor=mount,
                 sensor_frame=sensor_frame,
                 provenance=provenance,
+                colors_rgba=colors,
             )
             if accepted:
                 if provenance is not None:
@@ -597,6 +733,24 @@ class Bridge(Node):
             self.solution_count += 1
         elif accepted:
             self.solution_results_unchanged += 1
+
+    def inter_robot_closure(self, msg):
+        try:
+            first, second = int(msg.robot0_id), int(msg.robot1_id)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if self.core.robot_index not in (first, second):
+            return
+        other = second if first == self.core.robot_index else first
+        peer = self.core.robot_names.get(other)
+        if peer is None:
+            return
+        self.closure_candidates += 1
+        if bool(getattr(msg, "success", False)):
+            self.verified_closures += 1
+            self.closures_by_peer[peer] = self.closures_by_peer.get(peer, 0) + 1
+        else:
+            self.rejected_closures += 1
 
     def snapshot(self):
         with self._shared_lock:
@@ -681,6 +835,19 @@ class Bridge(Node):
                         "T_component_navigation": (
                             self.core.T_component_local @ local_navigation
                         ).tolist(),
+                        # MGG may use continuous odometry while the UI remains
+                        # in the SLAM navigation frame. Publish both pairs from
+                        # one snapshot so no consumer composes different times.
+                        "planning_frame": self.odom_frame,
+                        "T_component_planning": self.core.T_component_local.tolist(),
+                        "peer_slam": {
+                            "robot_id": self.robot,
+                            "mission_id": self.core.mission_id,
+                            "keyframes": len(self.core.local_poses),
+                            "verified": self.verified_closures,
+                            "rejected": self.rejected_closures,
+                            "by_peer": dict(self.closures_by_peer),
+                        },
                     }
                     home_key = self.core.key(0)
                     if home_key in self.core.poses:
@@ -713,12 +880,25 @@ class Bridge(Node):
             "raw_capture_points_received": self.raw_capture_points_received,
             "raw_capture_points_stored": self.raw_capture_points_stored,
             "max_stored_raw_capture_points": self.max_stored_raw_capture_points,
+            "color_images_received": self.color_images_received,
+            "depth_images_received": self.depth_images_received,
+            "color_frames_rejected": self.color_frames_rejected,
+            "color_capture_attempts": self.color_capture_attempts,
+            "color_pairs_selected": self.color_pairs_selected,
+            "color_pair_rejections": self.color_pair_rejections,
+            "color_tf_rejections": self.color_tf_rejections,
+            "color_projection_rejections": self.color_projection_rejections,
+            "colored_captures": self.colored_captures,
             # `solutions` is retained for compatibility and has always counted
             # pose-changing corrections rather than native optimizer messages.
             "solutions": self.solution_count,
             "solution_results_received": self.solution_results_received,
             "solution_results_accepted": self.solution_results_accepted,
             "solution_results_unchanged": self.solution_results_unchanged,
+            "inter_robot_closure_candidates": self.closure_candidates,
+            "inter_robot_closures_verified": self.verified_closures,
+            "inter_robot_closures_rejected": self.rejected_closures,
+            "inter_robot_closures_by_peer": dict(sorted(self.closures_by_peer.items())),
             "corrections_applied": self.solution_count,
             "last_solution_order": list(self.core.solution_order),
             "revision": self.core.revision,

@@ -1,0 +1,1275 @@
+diff --git a/ros2/src/mgg_core/include/mgg_core/planning_stages.h b/ros2/src/mgg_core/include/mgg_core/planning_stages.h
+index e8ba5aa..9fbcb84 100644
+--- a/ros2/src/mgg_core/include/mgg_core/planning_stages.h
++++ b/ros2/src/mgg_core/include/mgg_core/planning_stages.h
+@@ -58,6 +58,10 @@ struct RouteCorridor {
+   // Topological route in source-to-target order. The exact requested goal is
+   // retained separately: a grid planner must decide how to connect it safely.
+   std::vector<StateVec> poses;
++  // True when poses end at a local progress proxy rather than the exact goal
++  // retained in request.goal. A controller success for this corridor must
++  // trigger continuation, never completion of the operator objective.
++  bool partial = false;
+   std::string reason;
+ };
+ 
+@@ -74,6 +78,10 @@ struct FeasiblePath {
+   std::uint32_t map_source_stamp_nanosec = 0;
+   std::vector<StateVec> poses;
+   std::vector<double> speed_limits;
++  bool partial = false;
++  // True only after the complete emitted path passed QueryMapBatch against
++  // the exact mapping snapshot carried above.
++  bool indexed_map_validated = false;
+   std::string reason;
+ };
+ 
+@@ -91,7 +99,8 @@ class TopologicalGoalPlanner {
+   TopologicalGoalPlanner(std::string component_id,
+                          std::uint64_t graph_revision,
+                          std::uint64_t map_revision,
+-                         double goal_vertex_tolerance);
++                         double goal_vertex_tolerance,
++                         double minimum_partial_progress = 0.0);
+ 
+   RouteCorridor plan(GraphManager& graph, const StateVec& current,
+                      const PlanningRequest& request) const;
+@@ -101,6 +110,7 @@ class TopologicalGoalPlanner {
+   std::uint64_t graph_revision_;
+   std::uint64_t map_revision_;
+   double goal_vertex_tolerance_;
++  double minimum_partial_progress_;
+ };
+ 
+ }  // namespace mgg
+diff --git a/ros2/src/mgg_core/src/grid_refinement.cpp b/ros2/src/mgg_core/src/grid_refinement.cpp
+index d602e56..ab914d9 100644
+--- a/ros2/src/mgg_core/src/grid_refinement.cpp
++++ b/ros2/src/mgg_core/src/grid_refinement.cpp
+@@ -51,6 +51,7 @@ void copyRequest(const RouteCorridor& corridor, FeasiblePath& path) {
+   path.geometry_revision = corridor.request.geometry_revision;
+   path.map_source_stamp_sec = corridor.request.map_source_stamp_sec;
+   path.map_source_stamp_nanosec = corridor.request.map_source_stamp_nanosec;
++  path.partial = corridor.partial;
+   path.reason = corridor.reason;
+ }
+ 
+@@ -122,6 +123,7 @@ FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
+   const auto fail = [&result](const std::string& reason) {
+     result.status = PlanningStatus::kBlocked;
+     result.poses.clear();
++    result.partial = false;
+     result.reason = reason;
+     return result;
+   };
+@@ -187,7 +189,11 @@ FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
+       waypoints.push_back(waypoint);
+     }
+   }
+-  StateVec goal = corridor.request.goal.pose;
++  if (corridor.partial && waypoints.size() < 2) {
++    return fail("partial route has no progress proxy");
++  }
++  StateVec goal = corridor.partial ? waypoints.back()
++                                   : corridor.request.goal.pose;
+   const double requested_goal_yaw = goal[3];
+   if (interrupted(interruption_reason)) return fail(interruption_reason);
+   if (!goal.allFinite()) {
+@@ -199,7 +205,11 @@ FeasiblePath BoundedGridPlanner::refine(const RouteCorridor& corridor) {
+   if (goal_status != GridProjectionStatus::kSupported || !goal.allFinite()) {
+     return fail(projectionFailure("exact goal", goal_status, goal));
+   }
+-  if (!samePosition(waypoints.back(), goal)) {
++  if (corridor.partial) {
++    // The final corridor pose is the checked local proxy. The exact operator
++    // goal remains only in corridor.request.goal for the next continuation.
++    waypoints.back() = goal;
++  } else if (!samePosition(waypoints.back(), goal)) {
+     waypoints.push_back(goal);
+   } else {
+     // The graph vertex supplies XYZ, but the request owns exact final yaw.
+diff --git a/ros2/src/mgg_core/src/planning_stages.cpp b/ros2/src/mgg_core/src/planning_stages.cpp
+index f4d3079..e078530 100644
+--- a/ros2/src/mgg_core/src/planning_stages.cpp
++++ b/ros2/src/mgg_core/src/planning_stages.cpp
+@@ -1,18 +1,23 @@
+ #include "mgg_core/planning_stages.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <cstdio>
++#include <limits>
++#include <tuple>
+ #include <utility>
+ 
+ namespace mgg {
+ 
+ TopologicalGoalPlanner::TopologicalGoalPlanner(
+     std::string component_id, std::uint64_t graph_revision,
+-    std::uint64_t map_revision, double goal_vertex_tolerance)
++    std::uint64_t map_revision, double goal_vertex_tolerance,
++    double minimum_partial_progress)
+     : component_id_(std::move(component_id)),
+       graph_revision_(graph_revision),
+       map_revision_(map_revision),
+-      goal_vertex_tolerance_(std::max(0.0, goal_vertex_tolerance)) {}
++      goal_vertex_tolerance_(std::max(0.0, goal_vertex_tolerance)),
++      minimum_partial_progress_(std::max(0.0, minimum_partial_progress)) {}
+ 
+ RouteCorridor TopologicalGoalPlanner::plan(
+     GraphManager& graph, const StateVec& current,
+@@ -55,22 +60,89 @@ RouteCorridor TopologicalGoalPlanner::plan(
+     result.reason = reason;
+     return result;
+   }
+-  if (!graph.getNearestVertexInRange(&goal, goal_vertex_tolerance_, &target)) {
+-    char reason[192];
+-    std::snprintf(reason, sizeof(reason),
+-                  "goal is outside the graph tolerance %.2f m at "
+-                  "(%.2f, %.2f, %.2f)",
+-                  goal_vertex_tolerance_, goal.x(), goal.y(), goal.z());
+-    result.reason = reason;
+-    return result;
+-  }
+-
+   ShortestPathsReport shortest;
+   if (!graph.findShortestPaths(source->id, shortest)) {
+     result.reason = "could not solve the topological graph";
+     return result;
+   }
+-  graph.getShortestPath(target->id, shortest, true, result.poses);
++
++  if (!graph.getNearestVertexInRange(&goal, goal_vertex_tolerance_, &target)) {
++    // getNearestVertexInRange reports an out-of-range nearest vertex through
++    // its output pointer even when it returns false.  Do not let that vertex
++    // masquerade as a selected proxy when no candidate makes progress.
++    target = nullptr;
++    if (request.objective != ObjectiveKind::kNavigate ||
++        minimum_partial_progress_ <= 0.0) {
++      char reason[192];
++      std::snprintf(reason, sizeof(reason),
++                    "goal is outside the graph tolerance %.2f m at "
++                    "(%.2f, %.2f, %.2f)",
++                    goal_vertex_tolerance_, goal.x(), goal.y(), goal.z());
++      result.reason = reason;
++      return result;
++    }
++
++    const double initial_remaining =
++        (goal.head<2>() - current.head<2>()).norm();
++    struct RankedProxy {
++      Vertex* vertex;
++      double remaining;
++      double cost;
++    };
++    std::vector<RankedProxy> eligible;
++    eligible.reserve(graph.vertices_map_.size());
++    for (const auto& entry : graph.vertices_map_) {
++      Vertex* candidate = entry.second;
++      if (candidate == nullptr || candidate == source) continue;
++      const auto distance = shortest.distance_map.find(candidate->id);
++      if (distance == shortest.distance_map.end() ||
++          !std::isfinite(distance->second) ||
++          distance->second == std::numeric_limits<double>::max()) {
++        continue;
++      }
++      const double remaining =
++          (goal.head<2>() - candidate->state.head<2>()).norm();
++      const double progress = initial_remaining - remaining;
++      if (!std::isfinite(remaining) ||
++          progress + 1e-9 < minimum_partial_progress_) {
++        continue;
++      }
++      eligible.push_back({candidate, remaining, distance->second});
++    }
++    std::sort(eligible.begin(), eligible.end(),
++              [](const RankedProxy& a, const RankedProxy& b) {
++                return std::tie(a.remaining, a.cost, a.vertex->id) <
++                       std::tie(b.remaining, b.cost, b.vertex->id);
++              });
++    for (const RankedProxy& candidate : eligible) {
++      std::vector<StateVec> candidate_path;
++      graph.getShortestPath(candidate.vertex->id, shortest, true,
++                            candidate_path);
++      if (candidate_path.size() >= 2 &&
++          candidate_path.front().isApprox(source->state)) {
++        target = candidate.vertex;
++        result.poses = std::move(candidate_path);
++        break;
++      }
++    }
++    if (target == nullptr) {
++      char reason[224];
++      std::snprintf(reason, sizeof(reason),
++                    "no reachable local proxy makes the required %.2f m "
++                    "progress toward the exact goal",
++                    minimum_partial_progress_);
++      result.reason = reason;
++      return result;
++    }
++    result.partial = true;
++    // Face the remaining objective at the segment boundary. The exact target
++    // pose and its requested yaw remain untouched in result.request.goal.
++    result.poses.back()[3] =
++        std::atan2(goal.y() - target->state.y(),
++                   goal.x() - target->state.x());
++  } else {
++    graph.getShortestPath(target->id, shortest, true, result.poses);
++  }
+   if (result.poses.empty() || !result.poses.front().isApprox(source->state)) {
+     result.poses.clear();
+     result.reason = "goal is in a disconnected graph component";
+diff --git a/ros2/src/mgg_core/test/test_grid_refinement.cpp b/ros2/src/mgg_core/test/test_grid_refinement.cpp
+index f062dfd..e17cb13 100644
+--- a/ros2/src/mgg_core/test/test_grid_refinement.cpp
++++ b/ros2/src/mgg_core/test/test_grid_refinement.cpp
+@@ -107,6 +107,38 @@ TEST(GridRefinement, ExactGoalYawOverridesMatchingGraphVertex) {
+   EXPECT_NEAR(path.poses.back()[3], 0.7, 1e-9);
+ }
+ 
++TEST(GridRefinement, PartialRouteStopsAtProxyAndRetainsExactGoal) {
++  RouteCorridor route = routeTo(30.0, 4.0);
++  route.request.objective = mgg::ObjectiveKind::kNavigate;
++  route.poses = {StateVec(0.0, 0.0, 0.0, 0.0),
++                 StateVec(2.0, 0.0, 0.0, 0.25)};
++  route.partial = true;
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), flatProjection(),
++                             sampledTraversal({}));
++  const FeasiblePath path = planner.refine(route);
++  ASSERT_EQ(path.status, PlanningStatus::kSucceeded) << path.reason;
++  EXPECT_TRUE(path.partial);
++  ASSERT_FALSE(path.poses.empty());
++  EXPECT_NEAR(path.poses.back().x(), 2.0, 1e-9);
++  EXPECT_NEAR(path.poses.back().y(), 0.0, 1e-9);
++  EXPECT_NEAR(path.poses.back()[3], 0.25, 1e-9);
++  EXPECT_DOUBLE_EQ(route.request.goal.pose.x(), 30.0);
++  EXPECT_DOUBLE_EQ(route.request.goal.pose.y(), 4.0);
++}
++
++TEST(GridRefinement, FailedPartialRouteCannotAdvertiseContinuation) {
++  RouteCorridor route = routeTo(30.0, 0.0);
++  route.request.objective = mgg::ObjectiveKind::kNavigate;
++  route.poses.clear();
++  route.partial = true;
++  BoundedGridPlanner planner(StateVec::Zero(), limits(), flatProjection(),
++                             sampledTraversal({}));
++  const FeasiblePath path = planner.refine(route);
++  EXPECT_EQ(path.status, PlanningStatus::kBlocked);
++  EXPECT_FALSE(path.partial);
++  EXPECT_TRUE(path.poses.empty());
++}
++
+ TEST(GridRefinement, ProjectorCannotReplaceRequestOwnedGoalYaw) {
+   auto yaw_mutating_projector = [](StateVec& state) {
+     state.z() = 0.0;
+diff --git a/ros2/src/mgg_core/test/test_planning_stages.cpp b/ros2/src/mgg_core/test/test_planning_stages.cpp
+index a2cf555..500e499 100644
+--- a/ros2/src/mgg_core/test/test_planning_stages.cpp
++++ b/ros2/src/mgg_core/test/test_planning_stages.cpp
+@@ -47,9 +47,65 @@ TEST(PlanningStages, NavigateAndReturnHomeShareTheGraphStage) {
+     EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
+     // The graph corridor does not silently replace the requested exact goal.
+     EXPECT_DOUBLE_EQ(route.request.goal.pose.x(), 3.1);
++    EXPECT_FALSE(route.partial);
+   }
+ }
+ 
++TEST(PlanningStages, FarNavigateUsesReachableProxyWithStrictProgress) {
++  Chain chain;
++  TopologicalGoalPlanner planner("component-a", 12, 34, 0.25, 1.0);
++  auto far = request(ObjectiveKind::kNavigate);
++  far.goal.pose = StateVec(30.0, 4.0, 0.0, 1.2);
++  const auto route = planner.plan(
++      chain.graph, StateVec(0.1, 0.0, 0.0, 0.0), far);
++  ASSERT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
++  ASSERT_TRUE(route.partial);
++  ASSERT_EQ(route.poses.size(), 4u);
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
++  EXPECT_NEAR(route.poses.back()[3], std::atan2(4.0, 27.0), 1e-12);
++  // The proxy is transport state only; the operator's exact goal and yaw stay
++  // immutable for the next continuation request.
++  EXPECT_DOUBLE_EQ(route.request.goal.pose.x(), 30.0);
++  EXPECT_DOUBLE_EQ(route.request.goal.pose.y(), 4.0);
++  EXPECT_DOUBLE_EQ(route.request.goal.pose[3], 1.2);
++}
++
++TEST(PlanningStages, FarNavigateFailsAtALocalMinimum) {
++  Chain chain;
++  TopologicalGoalPlanner planner("component-a", 12, 34, 0.25, 1.0);
++  auto far = request(ObjectiveKind::kNavigate);
++  far.goal.pose = StateVec(-30.0, 0.0, 0.0, 0.0);
++  const auto route = planner.plan(chain.graph, StateVec::Zero(), far);
++  EXPECT_EQ(route.status, PlanningStatus::kUnreachable);
++  EXPECT_FALSE(route.partial);
++  EXPECT_TRUE(route.poses.empty());
++  EXPECT_NE(route.reason.find("no reachable local proxy"), std::string::npos);
++}
++
++TEST(PlanningStages, PartialProgressMustMeetTheConfiguredMinimum) {
++  Chain chain;
++  TopologicalGoalPlanner planner("component-a", 12, 34, 0.25, 3.5);
++  auto far = request(ObjectiveKind::kNavigate);
++  far.goal.pose = StateVec(30.0, 0.0, 0.0, 0.0);
++  const auto route = planner.plan(chain.graph, StateVec::Zero(), far);
++  EXPECT_EQ(route.status, PlanningStatus::kUnreachable);
++  EXPECT_FALSE(route.partial);
++}
++
++TEST(PlanningStages, DisconnectedCloserProxyIsNotSelected) {
++  Chain chain;
++  auto* disconnected = new Vertex(4, StateVec(29.0, 0.0, 0.0, 0.0));
++  chain.graph.addVertex(disconnected);
++  TopologicalGoalPlanner planner("component-a", 12, 34, 0.25, 1.0);
++  auto far = request(ObjectiveKind::kNavigate);
++  far.goal.pose = StateVec(30.0, 0.0, 0.0, 0.0);
++  const auto route = planner.plan(chain.graph, StateVec::Zero(), far);
++  ASSERT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
++  ASSERT_TRUE(route.partial);
++  ASSERT_FALSE(route.poses.empty());
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
++}
++
+ TEST(PlanningStages, StaleMapOrGraphSnapshotIsRejected) {
+   Chain chain;
+   TopologicalGoalPlanner planner("component-a", 12, 34, 0.25);
+diff --git a/ros2/src/mgg_msgs/srv/PlanObjective.srv b/ros2/src/mgg_msgs/srv/PlanObjective.srv
+index 358e25c..08155d4 100644
+--- a/ros2/src/mgg_msgs/srv/PlanObjective.srv
++++ b/ros2/src/mgg_msgs/srv/PlanObjective.srv
+@@ -27,4 +27,6 @@ uint64 mapping_graph_revision
+ string geometry_revision
+ builtin_interfaces/Time map_source_stamp
+ geometry_msgs/Pose[] path
++bool partial
++bool indexed_map_validated
+ string reason
+diff --git a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+index 7a6914e..7033054 100644
+--- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
++++ b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+@@ -84,7 +84,23 @@ class PlannerNode : public rclcpp::Node {
+       std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> response);
+   mgg::FeasiblePath refineCorridor(const mgg::RouteCorridor& corridor);
+   void convertPathToNavigationBase(mgg::FeasiblePath& path) const;
+-  bool queryIndexedMap(mgg::FeasiblePath& path);
++  struct IndexedQueryContext {
++    mgg::StateVec route_start = mgg::StateVec::Zero();
++    Eigen::Isometry3d component_from_navigation = Eigen::Isometry3d::Identity();
++    Eigen::Vector3d body = Eigen::Vector3d::Zero();
++    Eigen::Vector3d physical_size = Eigen::Vector3d::Zero();
++    Eigen::Vector3d center_offset = Eigen::Vector3d::Zero();
++    mgg::RobotType robot_type = mgg::RobotType::kGroundRobot;
++    double max_step_height = 0.0;
++    double max_inclination = 0.0;
++    double graph_to_base = 0.0;
++    bool have_mapping_snapshot = false;
++    mgg_msgs::msg::MappingSnapshot mapping_snapshot;
++    std::chrono::steady_clock::time_point mapping_snapshot_received;
++  };
++  IndexedQueryContext indexedQueryContext() const;
++  bool queryIndexedMap(mgg::FeasiblePath& path,
++                       const IndexedQueryContext& context);
+   void publishOwnGraph();
+   void publishPath();
+   void publishMarkers();
+@@ -118,6 +134,7 @@ class PlannerNode : public rclcpp::Node {
+   mgg::PlanningParams planning_params_;
+   mgg::GridGraphParams grid_params_;
+   mgg::GridRefinementLimits grid_refinement_limits_;
++  double partial_route_min_progress_m_ = 1.0;
+   mgg::BoundedSpaceParams global_space_;
+   std::vector<mgg::BoundedSpaceParams> no_gain_zones_;
+   std::unordered_map<std::string, mgg::SensorParams> sensors_;
+@@ -210,6 +227,10 @@ class PlannerNode : public rclcpp::Node {
+   double indexed_map_snapshot_ttl_s_ = 3.0;
+   double indexed_map_sample_spacing_m_ = 0.20;
+   double indexed_map_max_roughness_m_ = 0.10;
++  // Half of the currently pinned 0.20 m indexed-grid resolution. QueryMapBatch
++  // does not transport resolution, so deployments must change this parameter
++  // together with the provider resolution.
++  double indexed_map_ground_tolerance_m_ = 0.10;
+   // Zero disables ROS-clock source-age expiry. A keyframe timestamp binds the
+   // snapshot but does not advance while a healthy robot is stationary.
+   double indexed_map_max_source_age_s_ = 0.0;
+@@ -248,6 +269,9 @@ class PlannerNode : public rclcpp::Node {
+   /// Reentrant, so the planning service and the subscriptions can run
+   /// concurrently under a MultiThreadedExecutor. See the note in main().
+   rclcpp::CallbackGroup::SharedPtr callback_group_;
++  /// Serializes service-side graph/refinement work without occupying executor
++  /// threads on planner_mutex_ while an indexed query is in flight.
++  rclcpp::CallbackGroup::SharedPtr planning_callback_group_;
+ };
+ 
+ }  // namespace mgg_ros
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index 0959be3..1e5bca2 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -61,6 +61,12 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+   grid_refinement_limits_.timeout = std::chrono::milliseconds(std::clamp(
+       declareOrGet<std::int64_t>(this, "grid_refinement_timeout_ms", 50),
+       std::int64_t{1}, std::int64_t{5000}));
++  const double requested_partial_progress = declareOrGet<double>(
++      this, "partial_route_min_progress_m", partial_route_min_progress_m_);
++  partial_route_min_progress_m_ =
++      std::isfinite(requested_partial_progress)
++          ? std::clamp(requested_partial_progress, 0.10, 5.0)
++          : 1.0;
+   geofence_ = std::make_unique<mgg::GeofenceManager>();
+   local_graph_ = std::make_shared<mgg::GraphManager>();
+   global_graph_ = std::make_shared<mgg::GraphManager>();
+@@ -93,6 +99,8 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+ 
+   callback_group_ =
+       create_callback_group(rclcpp::CallbackGroupType::Reentrant);
++  planning_callback_group_ =
++      create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+   rclcpp::SubscriptionOptions sub_opts;
+   sub_opts.callback_group = callback_group_;
+ 
+@@ -143,6 +151,10 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+   indexed_map_max_roughness_m_ = std::max(
+       0.0, declareOrGet<double>(this, "indexed_map_max_roughness_m",
+                                 indexed_map_max_roughness_m_));
++  indexed_map_ground_tolerance_m_ = std::clamp(
++      declareOrGet<double>(this, "indexed_map_ground_tolerance_m",
++                           indexed_map_ground_tolerance_m_),
++      0.0, 0.50);
+   indexed_map_max_source_age_s_ = std::max(
+       0.0, declareOrGet<double>(this, "indexed_map_max_source_age_s",
+                                 indexed_map_max_source_age_s_));
+@@ -173,7 +185,7 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+              std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+         onBuildRequest(req, res);
+       },
+-      rclcpp::ServicesQoS(), callback_group_);
++      rclcpp::ServicesQoS(), planning_callback_group_);
+ 
+   const double requested_global_spacing =
+       declareOrGet<double>(this, "global_vertex_spacing", 1.0);
+@@ -201,7 +213,7 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+              std::shared_ptr<mgg_msgs::srv::PlannerSrv::Response> res) {
+         onPlanRequest(req, res);
+       },
+-      rclcpp::ServicesQoS(), callback_group_);
++      rclcpp::ServicesQoS(), planning_callback_group_);
+ 
+   objective_srv_ = create_service<mgg_msgs::srv::PlanObjective>(
+       "plan_objective",
+@@ -209,7 +221,7 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+              std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> res) {
+         onObjectiveRequest(req, res);
+       },
+-      rclcpp::ServicesQoS(), callback_group_);
++      rclcpp::ServicesQoS(), planning_callback_group_);
+ 
+   const double publish_period =
+       declareOrGet<double>(this, "graph_publish_period_sec", 2.0);
+@@ -785,12 +797,15 @@ std::string PlannerNode::buildLocalGraph() {
+   publishPath();
+   publishMarkers();
+ 
+-  // Free cells with no vertices is the characteristic bring-up failure: the
+-  // lattice is finding space but every candidate is being turned away. The
+-  // reason breakdown is the only thing that separates a geometry mistake from
+-  // a genuinely blocked robot, so report it whenever it happens.
++  // A very low graph acceptance ratio is the characteristic support failure:
++  // the lattice finds free body boxes while projection or swept edges reject
++  // nearly every candidate. Keep this aggregate; per-sample logs would flood
++  // the fleet and perturb planning timing.
+   char why[128] = "";
+-  if (r.vertices_added == 0 && r.free_cells > 0) {
++  const bool low_acceptance =
++      r.free_cells > 0 &&
++      static_cast<std::int64_t>(r.vertices_added) * 20 < r.free_cells;
++  if (low_acceptance) {
+     std::snprintf(why, sizeof(why),
+                   " (rejected: %d collision, %d no ground; edges: %d ok, "
+                   "%d steep, %d occupied, %d unmapped, %d hanging)",
+@@ -1042,6 +1057,7 @@ void PlannerNode::updateGlobalGraph() {
+ void PlannerNode::onBuildRequest(
+     const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+     std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
++  const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
+   response->message = buildLocalGraph();
+   response->success = local_graph_->getNumVertices() > 1;
+   RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+@@ -1050,7 +1066,7 @@ void PlannerNode::onBuildRequest(
+ void PlannerNode::onPlanRequest(
+     const std::shared_ptr<mgg_msgs::srv::PlannerSrv::Request> request,
+     std::shared_ptr<mgg_msgs::srv::PlannerSrv::Response> response) {
+-  const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
++  std::unique_lock<std::recursive_mutex> lock(planner_mutex_);
+   // A caller may pin the bound mode for this cycle, e.g. to squeeze through a
+   // gap it would normally refuse.
+   const mgg::BoundModeType previous = robot_params_.bound_mode;
+@@ -1085,6 +1101,12 @@ void PlannerNode::onPlanRequest(
+   corridor.status = best_path_.empty() ? mgg::PlanningStatus::kUnreachable
+                                        : mgg::PlanningStatus::kSucceeded;
+   mgg::FeasiblePath feasible = refineCorridor(corridor);
++  const IndexedQueryContext query_context = indexedQueryContext();
++  lock.unlock();
++  if (feasible.status == mgg::PlanningStatus::kSucceeded) {
++    queryIndexedMap(feasible, query_context);
++  }
++  lock.lock();
+   const bool indexed_snapshot_missing =
+       indexed_map_client_ &&
+       (!have_mapping_snapshot_ ||
+@@ -1117,12 +1139,33 @@ void PlannerNode::onPlanRequest(
+   RCLCPP_INFO(get_logger(), "plan request: %s", summary.c_str());
+ }
+ 
+-bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path) {
++PlannerNode::IndexedQueryContext PlannerNode::indexedQueryContext() const {
++  IndexedQueryContext context;
++  context.route_start = current_state_;
++  context.component_from_navigation = component_from_navigation_;
++  context.body = robot_params_.getPlanningSize();
++  context.physical_size = robot_params_.size;
++  context.center_offset = robot_params_.center_offset;
++  context.robot_type = robot_params_.type;
++  context.max_step_height = planning_params_.max_step_height;
++  context.max_inclination = planning_params_.max_inclination;
++  context.graph_to_base =
++      planning_params_.max_ground_height - robot_params_.size.z() / 2.0;
++  context.have_mapping_snapshot = have_mapping_snapshot_;
++  context.mapping_snapshot = mapping_snapshot_;
++  context.mapping_snapshot_received = mapping_snapshot_received_;
++  return context;
++}
++
++bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path,
++                                  const IndexedQueryContext& context) {
++  path.indexed_map_validated = false;
+   if (!indexed_map_client_) return true;
+   const auto fail = [&path](mgg::PlanningStatus status,
+                             const std::string& reason) {
+     path.status = status;
+     path.poses.clear();
++    path.partial = false;
+     path.reason = reason;
+     return false;
+   };
+@@ -1135,19 +1178,20 @@ bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path) {
+     return fail(mgg::PlanningStatus::kStaleRevision,
+                 "indexed mapping snapshot key or source stamp is invalid");
+   }
+-  if (!have_mapping_snapshot_ ||
++  if (!context.have_mapping_snapshot ||
+       std::chrono::duration<double>(std::chrono::steady_clock::now() -
+-                                    mapping_snapshot_received_).count() >
++                                    context.mapping_snapshot_received).count() >
+           indexed_map_snapshot_ttl_s_) {
+     return fail(mgg::PlanningStatus::kStaleRevision,
+                 "indexed mapping authority is unavailable or expired");
+   }
+-  if (mapping_snapshot_.component_id != path.component_id ||
+-      mapping_snapshot_.epoch != path.map_epoch ||
+-      mapping_snapshot_.graph_revision != path.mapping_graph_revision ||
+-      mapping_snapshot_.geometry_revision != path.geometry_revision ||
+-      mapping_snapshot_.source_stamp.sec != path.map_source_stamp_sec ||
+-      mapping_snapshot_.source_stamp.nanosec != path.map_source_stamp_nanosec) {
++  if (context.mapping_snapshot.component_id != path.component_id ||
++      context.mapping_snapshot.epoch != path.map_epoch ||
++      context.mapping_snapshot.graph_revision != path.mapping_graph_revision ||
++      context.mapping_snapshot.geometry_revision != path.geometry_revision ||
++      context.mapping_snapshot.source_stamp.sec != path.map_source_stamp_sec ||
++      context.mapping_snapshot.source_stamp.nanosec !=
++          path.map_source_stamp_nanosec) {
+     return fail(mgg::PlanningStatus::kStaleRevision,
+                 "indexed mapping authority changed during planning");
+   }
+@@ -1173,16 +1217,38 @@ bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path) {
+   request->geometry_revision = path.geometry_revision;
+   request->source_stamp.sec = path.map_source_stamp_sec;
+   request->source_stamp.nanosec = path.map_source_stamp_nanosec;
+-  const Eigen::Vector3d body = robot_params_.getPlanningSize();
+-  request->body_size.x = body.x();
+-  request->body_size.y = body.y();
+-  request->body_size.z = body.z();
++  const Eigen::Vector3d body = context.body;
++  const Eigen::Vector3d component_body =
++      context.component_from_navigation.linear().cwiseAbs() * body;
++  const Eigen::Vector3d component_up =
++      context.component_from_navigation.linear() * Eigen::Vector3d::UnitZ();
++  if (!body.allFinite() || (body.array() <= 0.0).any() ||
++      !component_body.allFinite() || (component_body.array() <= 0.0).any() ||
++      !context.physical_size.allFinite() ||
++      (context.physical_size.array() <= 0.0).any() ||
++      !context.center_offset.allFinite() ||
++      context.center_offset.head<2>().norm() > 1e-9 ||
++      !component_up.allFinite() ||
++      (component_up - Eigen::Vector3d::UnitZ()).norm() > 1e-6 ||
++      !std::isfinite(indexed_map_ground_tolerance_m_) ||
++      !std::isfinite(context.max_step_height) ||
++      context.max_step_height < 0.0 ||
++      !std::isfinite(context.max_inclination) ||
++      context.max_inclination < 0.0 ||
++      !std::isfinite(context.graph_to_base)) {
++    return fail(mgg::PlanningStatus::kBlocked,
++                "indexed map body, terrain limits, or gravity alignment is invalid");
++  }
++  request->body_size.x = component_body.x();
++  request->body_size.y = component_body.y();
++  request->body_size.z = component_body.z();
+   request->stop_at_unknown = true;
+ 
+   std::vector<mgg::StateVec> route;
+   route.reserve(path.poses.size() + 1);
+-  route.push_back(current_state_);
++  route.push_back(context.route_start);
+   route.insert(route.end(), path.poses.begin(), path.poses.end());
++  std::vector<double> expected_ground_z;
+   for (std::size_t segment = 1; segment < route.size(); ++segment) {
+     const Eigen::Vector3d a = route[segment - 1].head(3);
+     const Eigen::Vector3d b = route[segment].head(3);
+@@ -1191,15 +1257,27 @@ bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path) {
+         1, static_cast<std::size_t>(std::ceil(distance /
+                                               indexed_map_sample_spacing_m_)));
+     for (std::size_t i = segment == 1 ? 0 : 1; i <= steps; ++i) {
+-      const Eigen::Vector3d navigation =
+-          a + (b - a) * (static_cast<double>(i) / steps) +
+-          robot_params_.center_offset;
+-      const Eigen::Vector3d component = component_from_navigation_ * navigation;
++      const Eigen::Vector3d base =
++          a + (b - a) * (static_cast<double>(i) / steps);
++      Eigen::Vector3d navigation = base + context.center_offset;
++      if (context.robot_type == mgg::RobotType::kGroundRobot) {
++        navigation.z() += context.graph_to_base;
++      }
++      const Eigen::Vector3d component =
++          context.component_from_navigation * navigation;
+       geometry_msgs::msg::Point sample;
+       sample.x = component.x();
+       sample.y = component.y();
+       sample.z = component.z();
+       request->samples.push_back(sample);
++      if (context.robot_type == mgg::RobotType::kGroundRobot) {
++        Eigen::Vector3d contact = base;
++        contact.x() += context.center_offset.x();
++        contact.y() += context.center_offset.y();
++        contact.z() -= context.physical_size.z() / 2.0;
++        expected_ground_z.push_back(
++            (context.component_from_navigation * contact).z());
++      }
+     }
+   }
+   if (request->samples.empty()) {
+@@ -1207,9 +1285,9 @@ bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path) {
+                 "indexed map query has no route samples");
+   }
+ 
+-  // The client and service use the node's reentrant callback group, and
+-  // planner_main runs a MultiThreadedExecutor. Waiting on the future is
+-  // bounded and never invokes nested spin_until_future_complete.
++  // The caller releases planner_mutex_ before this bounded wait. Snapshot and
++  // odometry callbacks therefore cannot occupy executor threads while blocked
++  // behind the planning callback. The exact authority is rechecked below.
+   auto future = indexed_map_client_->async_send_request(request);
+   if (future.wait_for(std::chrono::duration<double>(
+           indexed_map_query_timeout_s_)) != std::future_status::ready) {
+@@ -1255,17 +1333,54 @@ bool PlannerNode::queryIndexedMap(mgg::FeasiblePath& path) {
+       return fail(mgg::PlanningStatus::kBlocked,
+                   "indexed map route is occupied or unknown");
+     }
+-    if (robot_params_.type != mgg::RobotType::kAerialRobot &&
++    if (context.robot_type != mgg::RobotType::kAerialRobot &&
+         (!std::isfinite(response->ground_z[i]) ||
+          !std::isfinite(response->roughness[i]) ||
+          response->roughness[i] > indexed_map_max_roughness_m_ ||
+          !std::isfinite(response->clearance[i]) ||
+-         response->clearance[i] < body.z() || response->step[i] ||
++        response->clearance[i] < component_body.z() || response->step[i] ||
+          response->drop[i])) {
+       return fail(mgg::PlanningStatus::kBlocked,
+                   "indexed map terrain or clearance is unsupported");
+     }
++    if (context.robot_type != mgg::RobotType::kAerialRobot) {
++      if (expected_ground_z.size() != count ||
++          std::abs(expected_ground_z[i] - response->ground_z[i]) >
++          indexed_map_ground_tolerance_m_ + 1e-9) {
++        return fail(mgg::PlanningStatus::kBlocked,
++                    "indexed map ground does not support the emitted body height");
++      }
++      if (i > 0) {
++        const double dx = request->samples[i].x - request->samples[i - 1].x;
++        const double dy = request->samples[i].y - request->samples[i - 1].y;
++        const double dz =
++            std::abs(response->ground_z[i] - response->ground_z[i - 1]);
++        const double inclination = std::atan2(dz, std::hypot(dx, dy));
++        if (dz > context.max_step_height + 1e-6 &&
++            inclination > context.max_inclination + 1e-6) {
++          return fail(mgg::PlanningStatus::kBlocked,
++                      "indexed map route exceeds platform step or inclination limits");
++        }
++      }
++    }
++  }
++  {
++    const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
++    const auto& snapshot = context.mapping_snapshot;
++    if (!have_mapping_snapshot_ ||
++        mapping_snapshot_.component_id != snapshot.component_id ||
++        mapping_snapshot_.epoch != snapshot.epoch ||
++        mapping_snapshot_.graph_revision != snapshot.graph_revision ||
++        mapping_snapshot_.geometry_revision != snapshot.geometry_revision ||
++        mapping_snapshot_.source_stamp.sec != snapshot.source_stamp.sec ||
++        mapping_snapshot_.source_stamp.nanosec != snapshot.source_stamp.nanosec ||
++        !component_from_navigation_.matrix().isApprox(
++            context.component_from_navigation.matrix(), 1e-9)) {
++      return fail(mgg::PlanningStatus::kStaleRevision,
++                  "indexed mapping authority changed during query");
++    }
+   }
++  path.indexed_map_validated = true;
+   return true;
+ }
+ 
+@@ -1282,6 +1397,7 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+   result.geometry_revision = corridor.request.geometry_revision;
+   result.map_source_stamp_sec = corridor.request.map_source_stamp_sec;
+   result.map_source_stamp_nanosec = corridor.request.map_source_stamp_nanosec;
++  result.partial = corridor.partial;
+   result.reason = corridor.reason;
+   if (corridor.status != mgg::PlanningStatus::kSucceeded) return result;
+ 
+@@ -1292,9 +1408,9 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+     // deliberately permits a hanging local root and unknown beyond observed
+     // rays during cold start.  Rechecking with the strict explicit-objective
+     // policy here deadlocks a stationary robot whose lidar cannot see beneath
+-    // itself.  The optional indexed query remains a stricter opt-in gate.
++    // itself. The caller applies the optional indexed query after releasing
++    // planner_mutex_.
+     convertPathToNavigationBase(result);
+-    queryIndexedMap(result);
+     return result;
+   }
+ 
+@@ -1397,7 +1513,6 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+   result = grid_planner.refine(corridor);
+   if (result.status != mgg::PlanningStatus::kSucceeded) return result;
+   convertPathToNavigationBase(result);
+-  queryIndexedMap(result);
+   return result;
+ }
+ 
+@@ -1411,7 +1526,7 @@ void PlannerNode::convertPathToNavigationBase(mgg::FeasiblePath& path) const {
+ void PlannerNode::onObjectiveRequest(
+     const std::shared_ptr<mgg_msgs::srv::PlanObjective::Request> request,
+     std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> response) {
+-  const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
++  std::unique_lock<std::recursive_mutex> lock(planner_mutex_);
+   mgg::PlanningRequest core;
+   core.mission_id = request->mission_id;
+   core.objective = static_cast<mgg::ObjectiveKind>(request->objective);
+@@ -1511,8 +1626,6 @@ void PlannerNode::onObjectiveRequest(
+       mgg::GraphManager& graph =
+           core.objective == mgg::ObjectiveKind::kReturnHome ? *global_graph_
+                                                             : *local_graph_;
+-      mgg::TopologicalGoalPlanner planner(
+-          core.component_id, core.graph_revision, core.map_revision, 1.0);
+       mgg::StateVec graph_current = current_state_;
+       mgg::PlanningRequest graph_request = core;
+       if (!projectStateToDrivingHeight(graph_current)) {
+@@ -1524,7 +1637,8 @@ void PlannerNode::onObjectiveRequest(
+                       "(%.2f, %.2f, %.2f)",
+                       graph_current.x(), graph_current.y(), graph_current.z());
+         corridor.reason = reason;
+-      } else if (!projectStateToDrivingHeight(graph_request.goal.pose)) {
++      } else if (core.objective == mgg::ObjectiveKind::kReturnHome &&
++                 !projectStateToDrivingHeight(graph_request.goal.pose)) {
+         corridor.request = core;
+         corridor.status = mgg::PlanningStatus::kUnreachable;
+         char reason[192];
+@@ -1535,7 +1649,20 @@ void PlannerNode::onObjectiveRequest(
+                       graph_request.goal.pose.z());
+         corridor.reason = reason;
+       } else {
+-        corridor = planner.plan(graph, graph_current, graph_request);
++        // A supported nearby goal must bind at its projected driving height.
++        // A distant unsupported goal may still receive a checked local proxy;
++        // its exact terrain is assessed only when a later horizon reaches it.
++        mgg::StateVec projected_goal = graph_request.goal.pose;
++        if (projectStateToDrivingHeight(projected_goal)) {
++          graph_request.goal.pose = projected_goal;
++        }
++        mgg::TopologicalGoalPlanner objective_planner(
++            core.component_id, core.graph_revision, core.map_revision, 1.0,
++            core.objective == mgg::ObjectiveKind::kNavigate
++                ? partial_route_min_progress_m_
++                : 0.0);
++        corridor =
++            objective_planner.plan(graph, graph_current, graph_request);
+         // Graph lookup uses driving height, while refinement and the response
+         // retain the caller's exact base-pose goal.
+         corridor.request = core;
+@@ -1543,7 +1670,12 @@ void PlannerNode::onObjectiveRequest(
+     }
+   }
+ 
+-  const mgg::FeasiblePath path = refineCorridor(corridor);
++  mgg::FeasiblePath path = refineCorridor(corridor);
++  const IndexedQueryContext query_context = indexedQueryContext();
++  lock.unlock();
++  if (path.status == mgg::PlanningStatus::kSucceeded) {
++    queryIndexedMap(path, query_context);
++  }
+   response->status = static_cast<std::uint8_t>(path.status);
+   response->component_id = path.component_id;
+   response->graph_revision = path.graph_revision;
+@@ -1553,6 +1685,11 @@ void PlannerNode::onObjectiveRequest(
+   response->geometry_revision = path.geometry_revision;
+   response->map_source_stamp.sec = path.map_source_stamp_sec;
+   response->map_source_stamp.nanosec = path.map_source_stamp_nanosec;
++  response->partial = path.status == mgg::PlanningStatus::kSucceeded &&
++                      path.partial;
++  response->indexed_map_validated =
++      path.status == mgg::PlanningStatus::kSucceeded &&
++      path.indexed_map_validated;
+   response->reason = path.reason;
+   for (const auto& pose : path.poses) response->path.push_back(toPoseMsg(pose));
+ }
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index d52a7f5..af9f382 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -1,6 +1,7 @@
+ #include <chrono>
+ #include <atomic>
+ #include <cmath>
++#include <future>
+ #include <memory>
+ #include <sstream>
+ #include <thread>
+@@ -250,6 +251,69 @@ class PlannerNodeTestPeer {
+     node.geofence_->addGeofenceArea(polygon);
+   }
+ 
++  static void addRaisedFloor(PlannerNode& node, double step_height) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    for (int repeat = 0; repeat < 20; ++repeat) {
++      for (int x = 15; x <= 36; ++x) {
++        for (int y = -12; y <= 12; ++y) {
++          node.map_->tree()->updateNode(
++              octomap::point3d(static_cast<float>(x * 0.05 + 0.025),
++                               static_cast<float>(y * 0.05 + 0.025),
++                               static_cast<float>(step_height + 0.025)),
++              true);
++        }
++      }
++    }
++    ++node.map_revision_;
++  }
++
++  static void configurePartialNavigateScene(PlannerNode& node,
++                                            bool blocked_by_wall = false,
++                                            double step_height = 0.0,
++                                            double step_cap = 0.10) {
++    configureGridServiceScene(node);
++    acceptOdometry(node, 0.0, 0.0, 0.075);
++    if (blocked_by_wall) addGridObstacle(node, 0.325, true, 0.75);
++    if (step_height > 0.0) addRaisedFloor(node, step_height);
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.planning_params_.max_step_height = step_cap;
++    node.local_graph_->reset();
++    mgg::Vertex* previous = nullptr;
++    for (int id = 0; id < 4; ++id) {
++      auto* vertex =
++          new mgg::Vertex(id, mgg::StateVec(id * 0.50, 0.0, 0.30, 0.0));
++      node.local_graph_->addVertex(vertex);
++      if (previous != nullptr) node.local_graph_->addEdge(previous, vertex, 0.50);
++      previous = vertex;
++    }
++    node.local_graph_revision_ = 7;
++    node.local_graph_map_revision_ = node.map_revision_;
++  }
++
++  static std::shared_ptr<mgg_msgs::srv::PlanObjective::Response>
++  requestBoundNavigate(PlannerNode& node, const mgg::StateVec& goal) {
++    auto request = std::make_shared<mgg_msgs::srv::PlanObjective::Request>();
++    request->objective = mgg_msgs::srv::PlanObjective::Request::NAVIGATE;
++    request->component_id = node.component_id_;
++    request->graph_revision = node.local_graph_revision_;
++    request->map_revision = node.local_graph_map_revision_;
++    request->goal.position.x = goal.x();
++    request->goal.position.y = goal.y();
++    request->goal.position.z = goal.z();
++    request->goal.orientation.z = std::sin(goal[3] / 2.0);
++    request->goal.orientation.w = std::cos(goal[3] / 2.0);
++    if (node.have_mapping_snapshot_) {
++      request->map_epoch = node.mapping_snapshot_.epoch;
++      request->mapping_graph_revision = node.mapping_snapshot_.graph_revision;
++      request->geometry_revision = node.mapping_snapshot_.geometry_revision;
++      request->map_source_stamp = node.mapping_snapshot_.source_stamp;
++    }
++    auto response =
++        std::make_shared<mgg_msgs::srv::PlanObjective::Response>();
++    node.onObjectiveRequest(request, response);
++    return response;
++  }
++
+   static std::uint64_t localGraphRevision(const PlannerNode& node) {
+     return node.local_graph_revision_;
+   }
+@@ -393,7 +457,12 @@ class PlannerNodeTestPeer {
+   }
+ 
+   static bool query(PlannerNode& node, mgg::FeasiblePath& path) {
+-    return node.queryIndexedMap(path);
++    PlannerNode::IndexedQueryContext context;
++    {
++      const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++      context = node.indexedQueryContext();
++    }
++    return node.queryIndexedMap(path, context);
+   }
+ 
+   static bool queryReady(const PlannerNode& node) {
+@@ -404,6 +473,26 @@ class PlannerNodeTestPeer {
+     return static_cast<bool>(node.indexed_map_client_);
+   }
+ 
++  static void setIndexedTerrainLimits(PlannerNode& node, double step,
++                                      double inclination) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.planning_params_.max_step_height = step;
++    node.planning_params_.max_inclination = inclination;
++  }
++
++  static void configureIndexedRobotGeometry(
++      PlannerNode& node, const Eigen::Vector3d& physical_size,
++      const Eigen::Vector3d& extension,
++      const Eigen::Vector3d& center_offset, double max_ground_height) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.robot_params_.size = physical_size;
++    node.robot_params_.size_extension = extension;
++    node.robot_params_.size_extension_min.setZero();
++    node.robot_params_.bound_mode = mgg::BoundModeType::kExtendedBound;
++    node.robot_params_.center_offset = center_offset;
++    node.planning_params_.max_ground_height = max_ground_height;
++  }
++
+   static void expireSnapshot(PlannerNode& node) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     node.mapping_snapshot_received_ =
+@@ -541,6 +630,186 @@ TEST(PlannerBackbone, ExplicitGroundFailureIdentifiesCurrentOrGoal) {
+       << response->reason;
+ }
+ 
++TEST(PlannerObjective, FarNavigateReturnsCheckedPartialProxy) {
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05),
++       rclcpp::Parameter("partial_route_min_progress_m", 1.0)});
++  auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configurePartialNavigateScene(*planner);
++
++  const mgg::StateVec exact_goal(30.0, 4.0, 0.075, 1.1);
++  const auto response = Peer::requestBoundNavigate(*planner, exact_goal);
++  ASSERT_NE(response, nullptr);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_TRUE(response->partial);
++  EXPECT_FALSE(response->indexed_map_validated);
++  ASSERT_GE(response->path.size(), 2u);
++  EXPECT_NEAR(response->path.back().position.x, 1.50, 0.06);
++  EXPECT_LT(response->path.back().position.x, exact_goal.x());
++  EXPECT_EQ(response->graph_revision, 7u);
++  EXPECT_GT(response->map_revision, 0u);
++}
++
++TEST(PlannerObjective, SnapshotRefreshCannotStarveIndexedResponse) {
++  using Query = mgg_msgs::srv::QueryMapBatch;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05),
++       rclcpp::Parameter("partial_route_min_progress_m", 1.0),
++       rclcpp::Parameter("indexed_map_query_timeout_s", 0.25),
++       rclcpp::Parameter("indexed_map_query_service",
++                         "/robot_1/mapping/query_batch")});
++  auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configurePartialNavigateScene(*planner);
++
++  mgg_msgs::msg::MappingSnapshot snapshot;
++  snapshot.component_id = "local";
++  snapshot.epoch = 7;
++  snapshot.graph_revision = 8;
++  snapshot.geometry_revision = std::string(64, 'a');
++  const auto stamp = planner->now();
++  snapshot.source_stamp.sec = static_cast<std::int32_t>(stamp.seconds());
++  snapshot.source_stamp.nanosec =
++      static_cast<std::uint32_t>(stamp.nanoseconds() % 1000000000LL);
++  snapshot.component_from_navigation.rotation.w = 1.0;
++  Peer::acceptSnapshot(*planner, snapshot);
++
++  auto io = std::make_shared<rclcpp::Node>("partial_two_thread_io");
++  auto query_service = io->create_service<Query>(
++      "/robot_1/mapping/query_batch",
++      [planner, snapshot](const Query::Request::SharedPtr request,
++                          Query::Response::SharedPtr response) {
++        // This callback occupies the executor's second thread. With the old
++        // objective-wide mutex, refreshing the authority here blocked forever
++        // behind thread one and the indexed response could only time out.
++        mgg_ros::PlannerNodeTestPeer::acceptSnapshot(*planner, snapshot);
++        response->status = Query::Response::OK;
++        response->component_id = request->component_id;
++        response->epoch = request->epoch;
++        response->graph_revision = request->graph_revision;
++        response->geometry_revision = request->geometry_revision;
++        const auto n = request->samples.size();
++        response->occupancy.assign(n, Query::Response::FREE);
++        response->ground_z.assign(n, 0.0);
++        response->roughness.assign(n, 0.0);
++        response->clearance.assign(n, 100.0);
++        response->step.assign(n, false);
++        response->drop.assign(n, false);
++      });
++  auto client = io->create_client<Service>("plan_objective");
++  rclcpp::executors::MultiThreadedExecutor executor(
++      rclcpp::ExecutorOptions{}, 2);
++  executor.add_node(planner);
++  executor.add_node(io);
++  std::thread spinner([&executor]() { executor.spin(); });
++  const bool objective_ready = client->wait_for_service(3s);
++  const auto query_deadline = std::chrono::steady_clock::now() + 3s;
++  while (!Peer::queryReady(*planner) &&
++         std::chrono::steady_clock::now() < query_deadline) {
++    std::this_thread::sleep_for(10ms);
++  }
++  const bool query_ready = Peer::queryReady(*planner);
++  EXPECT_TRUE(objective_ready);
++  EXPECT_TRUE(query_ready);
++  if (!objective_ready || !query_ready) {
++    executor.cancel();
++    spinner.join();
++    return;
++  }
++
++  auto request = std::make_shared<Service::Request>();
++  request->objective = Service::Request::NAVIGATE;
++  request->component_id = snapshot.component_id;
++  request->graph_revision = Peer::localGraphRevision(*planner);
++  request->map_revision = Peer::localGraphMapRevision(*planner);
++  request->map_epoch = snapshot.epoch;
++  request->mapping_graph_revision = snapshot.graph_revision;
++  request->geometry_revision = snapshot.geometry_revision;
++  request->map_source_stamp = snapshot.source_stamp;
++  request->goal.position.x = 30.0;
++  request->goal.position.y = 4.0;
++  request->goal.position.z = 0.075;
++  request->goal.orientation.w = 1.0;
++  auto future = client->async_send_request(request);
++  const bool completed = future.wait_for(3s) == std::future_status::ready;
++  EXPECT_TRUE(completed);
++  if (completed) {
++    const auto response = future.get();
++    EXPECT_NE(response, nullptr);
++    if (response) {
++      EXPECT_EQ(response->status, Service::Response::SUCCEEDED)
++          << response->reason;
++      EXPECT_TRUE(response->partial);
++      EXPECT_TRUE(response->indexed_map_validated) << response->reason;
++    }
++  }
++
++  executor.cancel();
++  spinner.join();
++}
++
++TEST(PlannerObjective, PartialProxyCannotCrossObservedWall) {
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05),
++       rclcpp::Parameter("partial_route_min_progress_m", 1.0)});
++  auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  Peer::configurePartialNavigateScene(*planner, /*blocked_by_wall=*/true);
++
++  const auto response = Peer::requestBoundNavigate(
++      *planner, mgg::StateVec(30.0, 0.0, 0.075, 0.0));
++  ASSERT_NE(response, nullptr);
++  EXPECT_EQ(response->status, Service::Response::BLOCKED) << response->reason;
++  EXPECT_FALSE(response->partial);
++  EXPECT_TRUE(response->path.empty());
++}
++
++TEST(PlannerObjective, PartialProxyHonorsPlatformStepCapInOctomap) {
++  struct Scenario {
++    double step_height;
++    double step_cap;
++    bool accepted;
++  };
++  const std::vector<Scenario> scenarios{
++      {0.05, 0.10, true},   // Bunker/Scout: sub-cap curb.
++      {0.15, 0.10, false},  // Bunker/Scout: sharp curb above cap.
++      {0.20, 0.30, true},   // Spot: same terrain remains below its cap.
++  };
++  for (const Scenario& scenario : scenarios) {
++    SCOPED_TRACE("height=" + std::to_string(scenario.step_height) +
++                 " cap=" + std::to_string(scenario.step_cap));
++    rclcpp::NodeOptions options;
++    options.parameter_overrides(
++        {rclcpp::Parameter("map.resolution", 0.05),
++         rclcpp::Parameter("partial_route_min_progress_m", 1.0)});
++    auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++    using Peer = mgg_ros::PlannerNodeTestPeer;
++    Peer::configurePartialNavigateScene(
++        *planner, /*blocked_by_wall=*/false, scenario.step_height,
++        scenario.step_cap);
++
++    const auto response = Peer::requestBoundNavigate(
++        *planner, mgg::StateVec(30.0, 0.0, 0.075, 0.0));
++    ASSERT_NE(response, nullptr);
++    if (scenario.accepted) {
++      EXPECT_EQ(response->status, Service::Response::SUCCEEDED)
++          << response->reason;
++      EXPECT_TRUE(response->partial);
++      EXPECT_FALSE(response->path.empty());
++    } else {
++      EXPECT_EQ(response->status, Service::Response::BLOCKED)
++          << response->reason;
++      EXPECT_FALSE(response->partial);
++      EXPECT_TRUE(response->path.empty());
++    }
++  }
++}
++
+ TEST(PlannerBackbone, DelayedSupportBackfillsBentTrajectoryBeyondParentRadius) {
+   rclcpp::NodeOptions options;
+   options.parameter_overrides(
+@@ -1116,6 +1385,7 @@ TEST(IndexedObjectiveService, MissingSnapshotFailsClosedWithoutNestedSpin) {
+     EXPECT_NE(response, nullptr);
+     if (response) {
+       EXPECT_EQ(response->status, Service::Response::STALE_REVISION);
++      EXPECT_FALSE(response->indexed_map_validated);
+     }
+   }
+ 
+@@ -1129,24 +1399,41 @@ TEST(IndexedObjectiveService, BatchedQueryIsBoundedAndUsesComponentFrame) {
+   options.append_parameter_override("indexed_map_query_service",
+                                     "/robot_1/mapping/query_batch");
+   options.append_parameter_override("indexed_map_query_timeout_s", 0.05);
++  options.append_parameter_override("indexed_map_sample_spacing_m", 0.30);
+   auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  mgg_ros::PlannerNodeTestPeer::configureBackboneTest(*planner);
+   auto server = std::make_shared<rclcpp::Node>("indexed_query_test_server");
+   std::atomic<bool> delay{false};
++  std::atomic<std::uint8_t> response_status{Query::Response::OK};
++  std::atomic<double> ground_offset{0.0};
++  std::atomic<double> ground_from_sample{0.30};
++  std::atomic<double> received_body_x{0.0};
++  std::atomic<double> received_body_y{0.0};
++  std::atomic<double> received_body_z{0.0};
+   std::vector<geometry_msgs::msg::Point> received;
+   auto service = server->create_service<Query>(
+       "/robot_1/mapping/query_batch",
+-      [&delay, &received](const Query::Request::SharedPtr request,
+-                          Query::Response::SharedPtr response) {
++      [&delay, &response_status, &ground_offset, &ground_from_sample,
++       &received_body_x, &received_body_y, &received_body_z, &received](
++          const Query::Request::SharedPtr request,
++          Query::Response::SharedPtr response) {
+         received = request->samples;
+         if (delay.load()) std::this_thread::sleep_for(200ms);
+-        response->status = Query::Response::OK;
++        response->status = response_status.load();
+         response->component_id = request->component_id;
+         response->epoch = request->epoch;
+         response->graph_revision = request->graph_revision;
+         response->geometry_revision = request->geometry_revision;
+         const auto n = request->samples.size();
++        received_body_x = request->body_size.x;
++        received_body_y = request->body_size.y;
++        received_body_z = request->body_size.z;
+         response->occupancy.assign(n, Query::Response::FREE);
+-        response->ground_z.assign(n, 0.0);
++        response->ground_z.reserve(n);
++        for (const auto& sample : request->samples) {
++          response->ground_z.push_back(
++              sample.z - ground_from_sample.load() + ground_offset.load());
++        }
+         response->roughness.assign(n, 0.0);
+         response->clearance.assign(n, 100.0);
+         response->step.assign(n, false);
+@@ -1186,15 +1473,78 @@ TEST(IndexedObjectiveService, BatchedQueryIsBoundedAndUsesComponentFrame) {
+   path.map_source_stamp_sec = snapshot.source_stamp.sec;
+   path.map_source_stamp_nanosec = snapshot.source_stamp.nanosec;
+   path.poses.push_back(mgg::StateVec(1.0, 0.0, 0.0, 0.0));
++  mgg_ros::PlannerNodeTestPeer::setIndexedTerrainLimits(*planner, 0.10, 0.52);
+   EXPECT_TRUE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_TRUE(path.indexed_map_validated);
+   EXPECT_GE(received.size(), 2u);
+   if (received.size() >= 2) {
+     EXPECT_NEAR(received.front().x, 10.0, 1e-6);
+     EXPECT_NEAR(received.back().x, 11.0, 1e-6);
++    EXPECT_NEAR(received.front().z, 0.225, 1e-6);
++  }
++
++  ground_offset = 0.101;
++  EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_FALSE(path.indexed_map_validated);
++  EXPECT_NE(path.reason.find("ground does not support"), std::string::npos);
++
++  path.status = mgg::PlanningStatus::kSucceeded;
++  path.poses.push_back(mgg::StateVec(0.20, 0.0, 0.15, 0.0));
++  ground_offset = 0.0;
++  EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_FALSE(path.indexed_map_validated);
++  EXPECT_NE(path.reason.find("step or inclination"), std::string::npos);
++
++  path.status = mgg::PlanningStatus::kSucceeded;
++  path.poses.push_back(mgg::StateVec(1.0, 0.0, 0.0, 0.0));
++  ground_offset = 0.0;
++  response_status = Query::Response::UNAVAILABLE;
++  EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_FALSE(path.indexed_map_validated);
++  EXPECT_EQ(path.status, mgg::PlanningStatus::kBlocked);
++
++  mgg_ros::PlannerNodeTestPeer::configureIndexedRobotGeometry(
++      *planner, Eigen::Vector3d(0.80, 0.50, 1.00),
++      Eigen::Vector3d(0.05, 0.05, 0.05),
++      Eigen::Vector3d(0.0, 0.0, 0.02), 0.975);
++  mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 0.0, 0.0, 0.50);
++  snapshot.component_from_navigation.rotation.z = std::sin(M_PI / 4.0);
++  snapshot.component_from_navigation.rotation.w = std::cos(M_PI / 4.0);
++  mgg_ros::PlannerNodeTestPeer::acceptSnapshot(*planner, snapshot);
++  path.status = mgg::PlanningStatus::kSucceeded;
++  path.poses.push_back(mgg::StateVec(1.0, 0.0, 0.50, 0.0));
++  response_status = Query::Response::OK;
++  ground_from_sample = 0.995;
++  EXPECT_TRUE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_TRUE(path.indexed_map_validated);
++  EXPECT_NEAR(received_body_x.load(), 0.55, 1e-6);
++  EXPECT_NEAR(received_body_y.load(), 0.85, 1e-6);
++  EXPECT_NEAR(received_body_z.load(), 1.05, 1e-6);
++  EXPECT_FALSE(received.empty());
++  if (!received.empty()) {
++    EXPECT_NEAR(received.front().z, 0.995, 1e-6);
+   }
+ 
++  mgg_ros::PlannerNodeTestPeer::configureIndexedRobotGeometry(
++      *planner, Eigen::Vector3d(0.80, 0.50, 1.00),
++      Eigen::Vector3d(0.05, 0.05, 0.05),
++      Eigen::Vector3d(0.10, 0.0, 0.02), 0.975);
++  path.status = mgg::PlanningStatus::kSucceeded;
++  path.poses.push_back(mgg::StateVec(1.0, 0.0, 0.50, 0.0));
++  EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_FALSE(path.indexed_map_validated);
++  EXPECT_NE(path.reason.find("gravity alignment is invalid"), std::string::npos);
++
++  mgg_ros::PlannerNodeTestPeer::configureIndexedRobotGeometry(
++      *planner, Eigen::Vector3d(0.80, 0.50, 1.00),
++      Eigen::Vector3d(0.05, 0.05, 0.05),
++      Eigen::Vector3d(0.0, 0.0, 0.02), 0.975);
++  path.status = mgg::PlanningStatus::kSucceeded;
++  path.poses.push_back(mgg::StateVec(1.0, 0.0, 0.0, 0.0));
++  response_status = Query::Response::OK;
+   delay = true;
+   EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
++  EXPECT_FALSE(path.indexed_map_validated);
+   EXPECT_EQ(path.status, mgg::PlanningStatus::kBlocked);
+   executor.cancel();
+   spinner.join();

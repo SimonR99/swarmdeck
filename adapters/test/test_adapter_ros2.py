@@ -844,6 +844,57 @@ def test_alignment_abort_fails_when_spot_made_no_progress(mod, monkeypatch):
     assert bridge.nav_status == "failed"
 
 
+@pytest.mark.parametrize("code, message", [(4, "Failed to make progress"), (105, "")])
+def test_follow_path_result_exposes_nav2_failure_reason(mod, monkeypatch, code, message):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 11
+    goal_status = type("GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5})
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    result_future = MagicMock()
+    result_future.result.return_value = type(
+        "Outcome",
+        (),
+        {
+            "status": 6,
+            "result": type(
+                "Result",
+                (),
+                {"success": False, "error_msg": message, "error_code": code,
+                 "FAILED_TO_MAKE_PROGRESS": 105},
+            )(),
+        },
+    )()
+
+    bridge._on_goal_result(result_future, 11)
+
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_failure_reason == f"Failed to make progress; error_code={code}"
+
+
+def test_stale_follow_path_result_cannot_replace_current_failure_reason(mod, monkeypatch):
+    bridge = _bridge(mod)
+    bridge._goal_generation = 12
+    bridge._nav_failure_reason = "current goal failure"
+    goal_status = type("GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5})
+    monkeypatch.setattr(sys.modules["action_msgs.msg"], "GoalStatus", goal_status)
+    result_future = MagicMock()
+    result_future.result.return_value = type(
+        "Outcome",
+        (),
+        {
+            "status": 6,
+            "result": type(
+                "Result", (), {"error_msg": "stale failure", "error_code": 9}
+            )(),
+        },
+    )()
+
+    bridge._on_goal_result(result_future, 11)
+
+    assert bridge.nav_status == "idle"
+    assert bridge._nav_failure_reason == "current goal failure"
+
+
 def test_trajectory_does_not_run_unlimited_when_limit_service_is_down(mod):
     bridge = _bridge(
         mod,
@@ -1311,7 +1362,8 @@ def test_nav_goal_waits_briefly_for_a_starting_nav2_server(mod):
     assert bridge.nav_status == "active"
 
 
-def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod):
+@pytest.mark.parametrize("plan_frame", ["map", "robot_0/odom"])
+def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod, plan_frame):
     from adapters.exploration import PlannerPath, PlannerPose
 
     bridge = _bridge(
@@ -1325,7 +1377,7 @@ def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod):
     )
     bridge.path_client.server_is_ready.return_value = True
     plan = PlannerPath(
-        "map",
+        plan_frame,
         12_345_678_901,
         (
             PlannerPose(0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0),
@@ -1352,7 +1404,7 @@ def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod):
     assert generation == bridge._goal_generation
 
     goal = bridge.path_client.send_goal_async.call_args.args[0]
-    assert goal.path.header.frame_id == "map"
+    assert goal.path.header.frame_id == plan_frame
     assert goal.path.header.stamp.sec == 12
     assert goal.path.header.stamp.nanosec == 345_678_901
     assert [pose.pose.position.x for pose in goal.path.poses] == [0.0, 1.0, 2.0]
@@ -1364,6 +1416,8 @@ def test_mgg_full_path_uses_follow_path_and_preserves_revision(mod):
         {"x": 2.0, "y": 1.0},
     ]
     assert bridge.nav_status == "active"
+    assert bridge.goal["frame_id"] == plan_frame
+    assert bridge._follow_path_display == (generation, plan)
 
 
 def test_follow_path_wait_is_bounded_and_rejection_is_failure(mod):

@@ -21,7 +21,7 @@ from autonomy.contracts import (
 from autonomy.mapping import SubmapStore
 from autonomy.replication import ReplicaStore
 from swarmdeck_server.api import autonomy_routes, replica_views
-from swarmdeck_server.api.replica_components import ComponentCatalogue
+from swarmdeck_server.api.replica_components import ComponentCatalogue, _chunk
 
 
 def hashed(value):
@@ -110,6 +110,17 @@ def selected(envelope):
     return envelope["snapshot"]["manifests"][0]
 
 
+def test_component_catalogue_accepts_versioned_colored_geometry(tmp_path):
+    value = {
+        "sha256": "a" * 64,
+        "encoding": "application/vnd.swarmdeck.xyzrgba-f32-u8.v1",
+        "size_bytes": 32,
+        "point_count": 1,
+        "bounds": ((0, 0, 0), (0, 0, 0)),
+    }
+    assert _chunk(value).encoding.endswith("xyzrgba-f32-u8.v1")
+
+
 def test_unclosed_components_remain_visible_and_separate(tmp_path):
     session = str(uuid4())
     first, _ = peer(tmp_path, "robot_0", session)
@@ -118,6 +129,38 @@ def test_unclosed_components_remain_visible_and_separate(tmp_path):
     assert len(result) == 2
     assert all(c["available"] and c["source_count"] == 1 for c in result)
     assert all(c["solution_order"] is None for c in result)
+    assert all(c["solution_order_known"] is True for c in result)
+
+
+def test_legacy_missing_order_remains_readable_but_is_marked_noninteractive(tmp_path):
+    session = str(uuid4())
+    source, _ = peer(tmp_path, "robot_0", session)
+    del source["solution_order"]
+    component_id = selected(source)["graph_revision"]["component_id"]
+
+    direct = replica_views.build_view(source, component_id=component_id)
+    assembled = ComponentCatalogue([source]).view(session, component_id)
+
+    assert direct["selected"] is not None
+    assert direct["solution_order"] is None
+    assert direct["solution_order_known"] is False
+    assert assembled["selected"] is not None
+    assert assembled["solution_order"] is None
+    assert assembled["solution_order_known"] is False
+
+
+def test_explicit_initial_order_is_known_in_direct_and_assembled_views(tmp_path):
+    session = str(uuid4())
+    source, _ = peer(tmp_path, "robot_0", session)
+    component_id = selected(source)["graph_revision"]["component_id"]
+
+    direct = replica_views.build_view(source, component_id=component_id)
+    assembled = ComponentCatalogue([source]).view(session, component_id)
+
+    assert direct["solution_order"] == [0, -1]
+    assert direct["solution_order_known"] is True
+    assert assembled["solution_order"] is None
+    assert assembled["solution_order_known"] is True
 
 
 def test_merge_uses_common_solution_not_local_epochs_or_revisions(tmp_path):
@@ -255,10 +298,17 @@ def test_catalogue_routes_use_real_committed_metadata_without_chunk_reads(
     app.include_router(autonomy_routes.router)  # Production registration order.
     app.include_router(replica_views.router)
     with TestClient(app) as client:
+        monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+        assert (
+            client.get("/api/autonomy/replicas/components").json()["active_session_id"]
+            is None
+        )
+        monkeypatch.setenv("SWARMDECK_MISSION_ID", session)
         response = client.get(
             "/api/autonomy/replicas/components", params={"session_id": session}
         )
         assert response.status_code == 200
+        assert response.json()["active_session_id"] == session
         (entry,) = response.json()["components"]
         response = client.get(
             f"/api/autonomy/replicas/components/view/{session}",

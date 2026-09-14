@@ -224,10 +224,14 @@ not resolve R1's limited exploration or qualify moving-robot terrain planning.
 
 The tested image is `swarmdeck-mapping:mola-runtime-review`, image ID
 `sha256:9868a7a0a4e74c85f25c22ae756c5123032013fece4f27a1c514ebfc5fb1d337`.
-It is running as `planning-mapping-1` in the isolated workstation project, on
-mission `92028a23-d1d1-45b8-8d0b-509815e35950`. All four live artifact indexes
-match their source snapshot SHA-256 and one native process serves them. The
-simulator, MGG, peer SLAM and production deployment were not restarted.
+It was used as `planning-mapping-1` in the stopped isolated workstation project,
+on mission `92028a23-d1d1-45b8-8d0b-509815e35950`. During that historical run,
+all four artifact indexes matched their source snapshot SHA-256 and one native
+process served them; the simulator, MGG, peer SLAM and production deployment
+were not restarted. The latest deployment scope and acceptance status are in
+the [parallel acceptance record](planning-parallel-acceptance.md), which keeps
+MGG motion on its existing OctoMap and does not claim this direct backend as a
+motion result.
 
 ### Planner-product validation
 
@@ -278,3 +282,92 @@ It passed all image acceptance gates on the workstation. That earlier run retain
 [parallel acceptance run](planning-parallel-acceptance.md) enabled native planner
 products and the MOLA query provider in a separate simulation; MGG motion still
 uses its existing exploration map.
+
+The direct MGG snapshot backend is a separate opt-in integration. The normal
+backend remains the live cloud-fed OctoMap:
+
+```bash
+export SWARMDECK_MGG_MAP_BACKEND=mola_snapshot
+export SWARMDECK_PLANNER_MAP_PROVIDER=mola
+export SWARMDECK_MOLA_PLANNER_MAPS=true
+export SWARMDECK_MISSION_ID='replace-with-canonical-mission-uuid'
+export SWARMDECK_MAPS_ROOT=/maps
+```
+
+`SWARMDECK_MGG_MAP_BACKEND=cloud_octomap` is the default. The MGG launch rejects
+any other value. With `mola_snapshot`, each planner instance reads exactly one
+peer root, `${SWARMDECK_MAPS_ROOT}/${SWARMDECK_MISSION_ID}/${ROBOT_ID}`. The
+mission must be a canonical UUID, the robot ID must match the launcher's simple
+identifier grammar, and the maps root must be absolute. There is no search for
+the newest mission and no fallback to raw clouds when the selected snapshot is
+missing or invalid.
+
+The onboard compose overlay supplies `SWARMDECK_MAPS_ROOT=/maps` and mounts the
+shared `peer_maps` volume read-only in the MGG service. The mapping worker owns
+the writable side and must publish native planner products first, with
+`SWARMDECK_MOLA_PLANNER_MAPS=true`. The `SWARMDECK_PLANNER_MAP_PROVIDER=mola`
+setting selects the separate mapping query service and is required by the MGG
+launcher in this mode.
+
+MOLA mode always configures `/<robot>/mapping/query_batch` for final corridor
+validation, even when `SWARMDECK_INDEXED_MAP_QUERY=0`. That switch controls only
+the legacy cloud backend. MGG's voxel index is useful for graph construction,
+but its 20 cm voxel centers cannot resolve a platform's 10 cm step limit. The
+final query uses MOLA's exact surface heights and checks the entire route.
+A missing or rejecting query service prevents path dispatch; the direct backend
+must not silently fall back to quantized terrain checks.
+
+The launch sets `map.resolution=0.20` for this backend, overriding the legacy
+Bistro cloud-map value of 0.15 m. The loader checks that the SDMGRID metadata
+also says 0.20 m, so a product at another resolution is unavailable. In this
+mode the input relay still publishes transformed odometry and keeps TF alive,
+but `cloud_enabled=false` disables raw cloud and depth subscriptions and the
+cloud publication timer. This prevents duplicate sensor-cloud ingestion while
+MGG reads the immutable peer snapshot.
+
+### Asynchronous snapshot and query contract
+
+`MolaMap` queues the newest authority request on a worker thread. Planner
+callbacks never decode the snapshot or grid. The worker reads
+`snapshot.json`, `mola/index.json`, and the referenced `SDMGRID1` artifact with
+stable-read checks, verifies the mission/component/revision/geometry/source
+stamp identity and SHA-256 chain, then atomically publishes an immutable tree.
+A changed identity retracts the prior tree while the replacement loads; an
+older load cannot publish over a newer request.
+
+The product is ternary. Occupied voxels and qualified observed-free voxels are
+stored explicitly; unknown space is absent. Occupied wins if an observation
+would overlap free space. A missing, stale, invalid, or not-yet-loaded product
+reports `unknown`, and explicit strict box/path checks stop at unknown, so
+unknown space cannot be treated as traversable. Free voxels are emitted only
+when the source carries the required first-return, deskew/not-required and
+single-capture provenance. Unqualified captures therefore produce an occupied-
+only product.
+
+The provider bounds both work and input size. Defaults are a 3 s snapshot TTL,
+2 s load deadline, 4 MiB each for the snapshot and index, a 256 MiB grid, and
+2,000,000 combined occupied/free voxels. The native parameters clamp TTL to
+0.1–60 s, load time to 1–10,000 ms, and each byte/count budget to its hard limit;
+malformed or over-limit metadata is rejected. A resident tree expires when its
+TTL elapses even if the authority heartbeat is unchanged, so a stale map cannot
+remain usable indefinitely.
+
+The native test target also builds `mola_map_probe`, which accepts
+`mola_map_probe PEER_ROOT REQUEST.json` and reports `free`, `occupied`, or
+`unknown` for bounded sample points. `tests/deployment/mola_mgg_fixture.py`
+can generate real worker publications and matching `probe.json` requests in an
+empty temporary directory. Fixture generation and the native probe/build/motion
+gates are separate checks; this guide does not treat an unrun gate as passed.
+
+With a test-enabled MGG image (`BUILD_TESTING=ON`, including its build tree), run
+the cross-image fixture on the machine holding both images:
+
+```bash
+MAPPING_IMAGE=swarmdeck-mapping:navigation-map-review \
+MGG_IMAGE=swarmdeck-mgg:mola-graph-review \
+  bash tests/deployment/mola_mgg_acceptance.sh
+```
+
+The script prints image identities and checks initial, reused and corrected
+publications. It uses temporary synthetic maps and containers with networking
+disabled. It does not restart a deployment or establish motion acceptance.

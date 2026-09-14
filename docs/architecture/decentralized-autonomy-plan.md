@@ -357,8 +357,9 @@ must include measured sensing/compute latency and braking distance at current sp
 
 ## 7. Peer collaboration and mission semantics
 
-Run discovery, SLAM exchange, and coordination on robot-to-robot links. Keep local
-ROS traffic local where possible. Select DDS or Zenoh deployment after testing
+Run SLAM exchange and coordination over explicit robot-to-robot channels. Confine
+internal ROS discovery and traffic to each robot. Phase 6N below qualifies a
+per-robot Zenoh gateway as the preferred initial fleet transport, including
 Humble/Jazzy interoperability, network loss, and payload limits. A server-hosted
 router/discovery service must not be the only route between peers. Same-host
 shared memory remains an independent transport choice.
@@ -463,6 +464,7 @@ switch of hardware defaults before the corresponding hardware validation.
 | 5. Peer exploration | Graph/target exchange, reservations, map access and completion semantics | Four robots reduce redundant coverage versus independent MGG; no starvation; partitions/rejoin do not duplicate commands or falsely declare completion |
 | 6. Server replica and UI | Resumable chunks/revisions, component display, mission acknowledgments | No-server operation under selected mission policy; reconnect gives consistent maps without full geometry retransmission; stale chunks and duplicate relays are handled |
 | 6G. Gaussian reconstruction | Shared RGB-D capture IDs, batch UMAMI/alternative worker, corrected submap jobs, artifact delivery and UI state | Fixed-pose metric alignment; loop correction replaces stale geometry; cancel/retry/reconnect are safe; rendering and training fit separate budgets |
+| 6N. Isolated robot networking | Per-robot gateways, explicit peer endpoints, default-deny channel contracts, bounded traffic and authenticated access | After simulation acceptance: packet captures show no DDS discovery leakage onto fleet links; required collaboration survives server/peer loss and reconnection within measured traffic budgets |
 | 7. Fleet rollout and retirement | Simulation parity, ROS 2 hardware deployments, Scout bridge, operator documentation | Per-platform sensor/TF validation followed by low-speed controlled trials; rollback demonstrated; central optimizer disabled only for migrated profiles |
 
 Dependencies: 0 → 1 → 2 → 3 is the mapping spine; phase 4 can begin once phase 1
@@ -473,8 +475,42 @@ artifact replication, and adds multi-robot training only after phase 3's frame
 validation. It is optional for core-autonomy rollout: UMAMI availability or GPU
 capacity must not block phases 3–5 or non-Gaussian deployments. Online incremental
 training is a later 6G milestone after batch correctness and resource isolation.
+Phase 6N follows simulation acceptance of core mapping, planning, exploration,
+and replication, and is required before real-robot fleet rollout.
 Phase 7 requires all applicable gates. Do not estimate calendar dates until the
 phase 0 API/build risks have been measured.
+
+### Phase 6N: post-simulation communication qualification
+
+Each robot must remain an independent mapping, planning, and control system.
+Keep local ROS 2/DDS and supported shared-memory transport within the robot;
+evaluate a Zenoh ROS 2 gateway on each robot for external communication. A full
+`rmw_zenoh` migration is a separate decision. Qualify the bridge's interface
+filtering and discovery controls against the deployed ROS versions.
+[Zenoh ROS 2 bridge configuration](https://github.com/eclipse-zenoh/zenoh-plugin-ros2dds/blob/main/DEFAULT_CONFIG.json5)
+
+- Restrict DDS to robot-internal interfaces, including an internal LAN for robots
+  with multiple computers. Domain IDs alone do not establish network isolation.
+  Configure explicit gateway peer endpoints and disable fleet-link multicast
+  scouting; robot-to-robot collaboration must not depend on the server gateway.
+- Define a default-deny channel inventory with sender, receiver, message schema,
+  direction, maximum size/rate, reliability, expiry, and reconnect behavior.
+  Permit required Swarm-SLAM exchanges, MGG reservations/progress, mission
+  commands, and selected telemetry. Keep raw sensor streams, high-rate odometry,
+  and internal TF local unless an explicit use case requires a bounded export.
+- Exchange descriptors and revision metadata first. Request verification
+  keyframes/submaps on demand; deduplicate immutable chunks and send pose/map
+  deltas. Bound queues, retries, catch-up traffic, and per-link rates; prioritize
+  control and coordination over bulk maps, video, and Gaussian assets.
+- Authenticate peers and enforce publishing/subscription permissions. Prevent
+  duplicate DDS and gateway routes, stale command replay, and cross-mission
+  delivery. Preserve the selected operator-loss motion policy.
+- Set numerical idle, active, and reconnect traffic budgets before qualification.
+  Use packet captures to prove no DDS discovery escapes onto fleet links and no
+  unapproved channels cross robot boundaries. Measure bytes, packet rates,
+  discovery overhead, latency, and queue growth as fleet size increases. Test
+  server loss, peer loss, partitions/rejoin, and bandwidth caps; verify local
+  autonomy and required peer exchanges continue under the selected mission policy.
 
 ## 11. Validation and performance evidence
 

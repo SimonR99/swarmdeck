@@ -1,9 +1,10 @@
 # Fleet replica components
 
-The replica component view is a read-only inspection path over accepted
-per-robot map snapshots. It lets the ordinary map Layers panel select a coherent
-fleet component while keeping the existing per-robot Replica Inspector. It does
-not register a map, estimate a transform, publish a goal, or enable planning.
+The replica component view assembles accepted per-robot map snapshots for the
+ordinary Layers panel and the Replica Inspector. Automatic Live Map selections
+can add fresh robot telemetry and send frame-qualified navigation objectives.
+Explicit historical inspection remains read-only. Assembly never registers maps
+or estimates transforms: those remain onboard mapping/Swarm-SLAM responsibilities.
 
 ## Compatibility and assembly
 
@@ -57,19 +58,71 @@ The response uses the existing replica view shape and adds `scope: "fleet"` and
 is still converging or conflicting. The UI keeps the last coherent display in
 that case and does not draw a new overlay.
 
+Views also expose `solution_order_known`. Current publications set it to true;
+an older publication without a solution order remains available for read-only
+inspection with the flag false, but cannot qualify live overlays or goals.
+
 ## Map behavior
 
-The Layers panel's **Map source** selector lists Live map and explicit catalogue
-entries labeled with a short mission ID, component ID, and robot sources. It
-loads all sessions by default; selecting a mission is always explicit. A current
-per-robot inspector selection is shown separately, and Live map clears tactical
-selection.
+The catalogue advertises `active_session_id` when the server has an explicit
+`SWARMDECK_MISSION_ID`; the onboard-planning overlay supplies it. This identifies
+the live mission without guessing from UUID order or independent robot revisions.
+Without that configuration, the existing central-map default remains available.
+
+The Layers panel's **Map source** selector also lists explicit catalogue entries
+labeled with a short mission ID, component ID, and robot sources. Historical
+missions remain available for deliberate inspection. Disconnected components
+are never combined using assumed transforms.
+
+Local filters submaps by the selected robot's ownership, including when that
+robot's replica also carries relayed peer geometry. Global selects a verified
+component shared by multiple robots. Before an
+inter-robot closure establishes that frame, it reports waiting for alignment;
+select Local to inspect a robot's accumulated map. It never substitutes the
+selected robot's map under the Global label.
 
 Fleet selections use a cache and frame key containing scope, mission, component,
 and frame. Per-robot selections retain their graph epoch behavior. A verified
 frame change resets the viewport; a failed or stale request leaves the previous
-coherent geometry visible. Tactical fleet views are read-only: navigation,
-network, sensor, plan, and costmap overlays remain disabled while selected.
+coherent geometry visible. Automatic live views add robot icons, goals and plans
+from separately qualified telemetry. Explicit catalogue/history views remain
+read-only. Legacy world-frame costmaps and histories cannot be overlaid on a
+component without their own qualified transform.
+
+### Live telemetry and goals
+
+```text
+GET /api/autonomy/replicas/components/live/<mission UUID>?component_id=<ID>
+POST /api/autonomy/replicas/components/live/<mission UUID>/goal
+```
+
+GET returns mission/component/frame identity, `solution_order`, and bounded
+per-robot navigation poses, goals, paths, and `T_component_navigation`. The adapter reuses its current
+mapping-authority subscription and serializes state before the server's legacy
+world conversion. Pose is planar (`z=0` unless supplied by the adapter); the
+transform is full SE(3). Freshness combines the adapter's authority age and the
+server's monotonic receipt age, with a three-second budget. ROS timestamps are
+never compared with wall time. Missing or stale authority suppresses the overlay
+without discarding cached map geometry. Ordinary geometry revision increments
+do not hide robot icons.
+
+POST accepts `{robot_id, component_id, solution_order, goal: {x, y, z, yaw}}`
+in the displayed component frame. The server requires the displayed solution
+order, fresh matching authority, and onboard
+Navigate capability, applies the inverse rigid transform once, and dispatches
+an objective containing the frame token, navigation-frame projection, and
+immutable `component_goal`. The robot rejects a token that changed before
+initial admission, then re-resolves the accepted anchor against current
+authority during execution and correction recovery. Historical missions, stale membership, and
+unavailable command links are rejected. A successful HTTP response acknowledges
+dispatch; the onboard planner/controller still determine feasibility and arrival.
+Navigate/Home require a complete path to the requested XY before controller
+submission. Partial responses are rejected. Fleet telemetry exposes
+`objective_continuation` with phase `planning` or `following_final`, plus the
+`mgg_native`/`mola_indexed` evidence source. Planning also covers replacement of a
+full route after a material map correction; reaching a short proxy no longer
+starts another planner request. Long display paths retain both endpoints while
+sampling to at most 200 points. Controller paths remain complete.
 
 The aggregate route is deliberately three segments deep so it cannot be
 captured by the legacy `/api/autonomy/replicas/{robot_id}/{session_id}` route.
@@ -80,6 +133,18 @@ Reads are bounded to 128 sources and 32 MiB of metadata; select a mission when
 the all-mission catalogue exceeds that budget.
 
 ## Qualification boundaries
+
+The SLAM panel uses live peer diagnostics when onboard peers are active. It
+shows keyframe counts, verified reports and current shared-component membership
+instead of the inactive centralized backend's zero counters. Verification
+reports are grouped by mission and unordered robot pair, taking the larger
+count from the two endpoints to avoid counting their mirrored reports twice.
+They are diagnostic outcomes, not a count of unique optimized graph edges.
+Only an accepted optimizer result can establish a shared component.
+
+Robot markers retain their last qualified placement for up to three seconds
+during transient telemetry gaps. Mission/component/frame changes clear that
+placement immediately; stale telemetry cannot authorize goal input.
 
 This view proves coherent publication and frame identity. It does not qualify
 free-space carving, planner safety, MGG exploration behavior, Home, hardware

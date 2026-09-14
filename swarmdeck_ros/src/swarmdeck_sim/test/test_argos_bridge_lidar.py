@@ -7,8 +7,8 @@ Tests:
    - Respects min/max range limits.
    - Bins into 360 angular bins (-pi to +pi).
 2. `project_laserscan_proximity`: 2.5D obstacle projection for Nav2 costmaps.
-   - Preserves obstacles in height band [0.15, 1.80] m above ground.
-   - Rejects ground returns (< 0.15 m) and overhead structures (> 1.80 m).
+   - Preserves obstacles above a conservatively capped ground-return band.
+   - Rejects low ground returns and overhead structures (> 1.80 m).
    - Accurately applies extrinsic translation to base_link frame.
 """
 
@@ -26,6 +26,7 @@ if str(NODES_DIR) not in sys.path:
     sys.path.insert(0, str(NODES_DIR))
 
 import swarmdeck_argos_bridge as bridge
+from spawn_fleet import robot_spec
 
 
 def test_empty_cloud_returns_all_inf():
@@ -35,7 +36,12 @@ def test_empty_cloud_returns_all_inf():
     assert np.all(np.isinf(slice_scan))
 
     prox_scan = bridge.project_laserscan_proximity(
-        empty, lidar_x=-0.07, lidar_z=0.402, base_height=0.138, prox_range_max=8.0
+        empty,
+        lidar_x=-0.07,
+        lidar_z=0.402,
+        base_height=0.138,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
+        prox_range_max=8.0,
     )
     assert len(prox_scan) == bridge.SCAN_BEAMS
     assert np.all(np.isinf(prox_scan))
@@ -85,7 +91,7 @@ def test_slice_range_limits():
 
 
 def test_proximity_ground_filter():
-    """Ground plane at z_floor = 0.05 m must be rejected (< 0.15 m threshold)."""
+    """Observed ground at z_floor = 0.05 m stays below the climb threshold."""
     lidar_x, lidar_z, base_height = -0.07, 0.402, 0.138
     # z_sensor = z_floor - lidar_z - base_height
     z_ground = 0.05 - lidar_z - base_height
@@ -97,13 +103,18 @@ def test_proximity_ground_filter():
     pts[0]["hit"] = 1
 
     prox = bridge.project_laserscan_proximity(
-        pts, lidar_x, lidar_z, base_height, prox_range_max=8.0
+        pts,
+        lidar_x,
+        lidar_z,
+        base_height,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
+        prox_range_max=8.0,
     )
     assert np.all(np.isinf(prox))
 
 
 def test_proximity_detects_low_and_high_obstacles():
-    """Obstacles between 0.15 and 1.80 m above ground must be detected."""
+    """Obstacles above the Bunker's 0.10 m limit through 1.80 m are detected."""
     lidar_x, lidar_z, base_height = -0.07, 0.402, 0.138
     angle_0_bin = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
 
@@ -125,7 +136,12 @@ def test_proximity_detects_low_and_high_obstacles():
     )
 
     prox = bridge.project_laserscan_proximity(
-        pts, lidar_x, lidar_z, base_height, prox_range_max=8.0
+        pts,
+        lidar_x,
+        lidar_z,
+        base_height,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
+        prox_range_max=8.0,
     )
     assert np.isclose(prox[angle_0_bin], 2.0, atol=0.01)
     assert np.isclose(prox[angle_left_bin], 4.0, atol=0.01)
@@ -142,9 +158,43 @@ def test_proximity_rejects_overhead_obstacles():
     pts[0]["hit"] = 1
 
     prox = bridge.project_laserscan_proximity(
-        pts, lidar_x, lidar_z, base_height, prox_range_max=8.0
+        pts,
+        lidar_x,
+        lidar_z,
+        base_height,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
+        prox_range_max=8.0,
     )
     assert np.all(np.isinf(prox))
+
+
+def test_proximity_keeps_max_height_and_filters_observed_floor():
+    physical = robot_spec("bunker")
+    projection = bridge.proximity_spec("bunker")
+    args = (
+        projection["lidar_x"],
+        projection["lidar_z"],
+        projection["base_height"],
+    )
+
+    def scan_at(height):
+        point = np.zeros(1, dtype=bridge.LIDAR_DTYPE)
+        point[0]["x"] = 2.0 - physical.lidar_x
+        point[0]["z"] = height - physical.lidar_z - physical.base_height
+        point[0]["hit"] = 1
+        return bridge.project_laserscan_proximity(
+            point,
+            *args,
+            prox_min_height=projection["prox_min_height"],
+            prox_range_max=projection["prox_range_max"],
+        )
+
+    ahead = int(
+        np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC)
+    )
+    assert np.all(np.isinf(scan_at(0.0)))
+    assert scan_at(bridge.PROX_MAX_HEIGHT)[ahead] == pytest.approx(2.0, abs=0.01)
+    assert np.all(np.isinf(scan_at(bridge.PROX_MAX_HEIGHT + 0.01)))
 
 
 def test_proximity_minimum_distance_aggregation():
@@ -166,6 +216,117 @@ def test_proximity_minimum_distance_aggregation():
     pts[1]["hit"] = 1
 
     prox = bridge.project_laserscan_proximity(
-        pts, lidar_x, lidar_z, base_height, prox_range_max=8.0
+        pts,
+        lidar_x,
+        lidar_z,
+        base_height,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
+        prox_range_max=8.0,
     )
     assert np.isclose(prox[angle_0_bin], 1.8, atol=0.01)
+
+
+@pytest.mark.parametrize(
+    ("platform", "climbable_height", "blocking_height"),
+    [
+        ("bunker", 0.10, 0.11),
+        ("scout_mini", 0.10, 0.11),
+    ],
+)
+def test_proximity_uses_canonical_mount_and_bounded_ground_filter(
+    platform, climbable_height, blocking_height
+):
+    """The small-platform limit bounds filtering; the next centimetre blocks."""
+    physical = robot_spec(platform)
+    projection = bridge.proximity_spec(platform)
+    assert projection == {
+        "lidar_x": physical.lidar_x,
+        "lidar_z": physical.lidar_z,
+        "base_height": physical.base_height,
+        "prox_min_height": min(
+            physical.max_step_height, bridge.PROX_GROUND_FILTER_CAP
+        )
+        + bridge.PROX_HEIGHT_EPSILON,
+        "prox_range_max": physical.prox_range_max,
+    }
+
+    points = np.zeros(2, dtype=bridge.LIDAR_DTYPE)
+    # Raw hits are in the lidar frame. The first exceeds this platform's step
+    # capability; the second sits exactly on its climbable limit.
+    for point, height in zip(points, (blocking_height, climbable_height)):
+        point["x"] = 2.0 - physical.lidar_x
+        point["z"] = height - physical.lidar_z - physical.base_height
+        point["hit"] = 1
+
+    args = (
+        projection["lidar_x"],
+        projection["lidar_z"],
+        projection["base_height"],
+    )
+    blocking = bridge.project_laserscan_proximity(
+        points[:1],
+        *args,
+        prox_min_height=projection["prox_min_height"],
+        prox_range_max=projection["prox_range_max"],
+    )
+    climbable = bridge.project_laserscan_proximity(
+        points[1:],
+        *args,
+        prox_min_height=projection["prox_min_height"],
+        prox_range_max=projection["prox_range_max"],
+    )
+    ahead = int(
+        np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC)
+    )
+    assert blocking[ahead] == pytest.approx(2.0, abs=0.01)
+    assert np.all(np.isinf(climbable))
+
+
+def test_spot_proximity_keeps_low_robots_and_uncertified_steps_visible():
+    """Spot's 0.30 m capability does not make every low return traversable."""
+    physical = robot_spec("spot")
+    projection = bridge.proximity_spec("spot")
+    assert projection["prox_min_height"] == pytest.approx(
+        bridge.PROX_GROUND_FILTER_CAP + bridge.PROX_HEIGHT_EPSILON
+    )
+
+    def scan_at(height):
+        point = np.zeros(1, dtype=bridge.LIDAR_DTYPE)
+        point[0]["x"] = 2.0 - physical.lidar_x
+        point[0]["z"] = height - physical.lidar_z - physical.base_height
+        point[0]["hit"] = 1
+        return bridge.project_laserscan_proximity(
+            point,
+            projection["lidar_x"],
+            projection["lidar_z"],
+            projection["base_height"],
+            prox_min_height=projection["prox_min_height"],
+            prox_range_max=projection["prox_range_max"],
+        )
+
+    ahead = int(
+        np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC)
+    )
+    assert np.all(np.isinf(scan_at(0.15)))
+    for height in (0.20, 0.245, 0.30, 0.31):
+        assert scan_at(height)[ahead] == pytest.approx(2.0, abs=0.01)
+
+
+def test_bridge_loads_each_fleet_platform_from_canonical_profiles(tmp_path):
+    config = tmp_path / "fleet.yaml"
+    config.write_text(
+        """fleet:
+  robot_count: 3
+  robot_prefix: robot_
+  robot_type: bunker
+  robot_types:
+    robot_1: scout_mini
+    robot_2: spot
+"""
+    )
+
+    loaded = bridge.ArgosBridge._load_robot_specs(str(config))
+    assert loaded == {
+        f"robot_{index}": bridge.proximity_spec(platform)
+        for index, platform in enumerate(("bunker", "scout_mini", "spot"))
+    }

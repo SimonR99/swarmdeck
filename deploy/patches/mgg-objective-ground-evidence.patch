@@ -1,0 +1,396 @@
+diff --git a/ros2/src/mgg_core/include/mgg_core/map_interface.h b/ros2/src/mgg_core/include/mgg_core/map_interface.h
+index d24f894..0acb9b8 100644
+--- a/ros2/src/mgg_core/include/mgg_core/map_interface.h
++++ b/ros2/src/mgg_core/include/mgg_core/map_interface.h
+@@ -24,6 +24,9 @@
+ #ifndef MGG_CORE_MAP_INTERFACE_H_
+ #define MGG_CORE_MAP_INTERFACE_H_
+ 
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
+ #include <utility>
+ #include <vector>
+ 
+@@ -84,6 +87,47 @@ class MapInterface {
+       const Eigen::Vector3d& box_size) const {
+     return getPathStatus(start, end, box_size, true);
+   }
++  /// Conservatively reject occupied swept volume while allowing valid map
++  /// queries to contain unknown air. Each sample is the AABB swept over one
++  /// <=voxel-resolution interval, so obstacles at sample boundaries cannot
++  /// fall through gaps. kUnknown remains an error signal from invalid or
++  /// over-budget map queries rather than being silently accepted.
++  virtual VoxelStatus getOccupiedOnlyPathStatus(
++      const Eigen::Vector3d& start, const Eigen::Vector3d& end,
++      const Eigen::Vector3d& box_size) const {
++    if (!start.allFinite() || !end.allFinite() || !box_size.allFinite() ||
++        (box_size.array() < 0).any())
++      return VoxelStatus::kUnknown;
++    const double resolution = getResolution();
++    const double length = (end - start).norm();
++    if (!std::isfinite(resolution) || resolution <= 0.0 ||
++        !std::isfinite(length))
++      return VoxelStatus::kUnknown;
++    if (length < 1e-9) return getBoxStatus(start, box_size, false);
++    constexpr std::uint64_t kMaxSweepCells = 1u << 22;
++    const double steps_d = std::max(1.0, std::ceil(length / resolution));
++    if (!std::isfinite(steps_d) || steps_d > double(kMaxSweepCells))
++      return VoxelStatus::kUnknown;
++    const auto steps = static_cast<std::uint64_t>(steps_d);
++    const Eigen::Vector3d step = (end - start) / double(steps);
++    const Eigen::Vector3d swept_size = box_size + step.cwiseAbs();
++    std::uint64_t box_cells = 1;
++    for (int axis = 0; axis < 3; ++axis) {
++      const double count = std::ceil(swept_size[axis] / resolution) + 2.0;
++      if (!std::isfinite(count) ||
++          count > double(kMaxSweepCells / box_cells))
++        return VoxelStatus::kUnknown;
++      box_cells *= static_cast<std::uint64_t>(count);
++    }
++    if (steps > kMaxSweepCells / box_cells) return VoxelStatus::kUnknown;
++    for (std::uint64_t i = 0; i < steps; ++i) {
++      const double fraction = (double(i) + 0.5) / double(steps);
++      const VoxelStatus status = getBoxStatus(
++          start + fraction * (end - start), swept_size, false);
++      if (status != VoxelStatus::kFree) return status;
++    }
++    return VoxelStatus::kFree;
++  }
+   // ------------------------------------------------------- volumetric gain
+ 
+   /// Casts a ray to every endpoint and tallies what each one passes through.
+diff --git a/ros2/src/mgg_core/test/test_map_interface.cpp b/ros2/src/mgg_core/test/test_map_interface.cpp
+index 89600c8..12891ec 100644
+--- a/ros2/src/mgg_core/test/test_map_interface.cpp
++++ b/ros2/src/mgg_core/test/test_map_interface.cpp
+@@ -168,6 +168,23 @@ TEST(MapInterface, ClassifiesTheThreeStates) {
+   EXPECT_EQ(map.getVoxelStatus({50.0, 0.0, 1.0}), VoxelStatus::kUnknown);
+ }
+ 
++TEST(MapInterface, OccupiedOnlySweepAllowsUnknownButRejectsInteriorAndBoundaryObstacles) {
++  AnalyticMap map;
++  const Eigen::Vector3d body(0.4, 0.4, 0.4);
++  EXPECT_EQ(map.getOccupiedOnlyPathStatus({11.0, 0.0, 1.0},
++                                          {12.0, 0.0, 1.0}, body),
++            VoxelStatus::kFree);
++  EXPECT_EQ(map.getOccupiedOnlyPathStatus({0.0, 0.0, 1.0},
++                                          {5.0, 0.0, 1.0}, body),
++            VoxelStatus::kOccupied);
++  EXPECT_EQ(map.getOccupiedOnlyPathStatus({0.0, 1.7, 1.0},
++                                          {5.0, 1.7, 1.0}, body),
++            VoxelStatus::kOccupied);
++  EXPECT_EQ(map.getOccupiedOnlyPathStatus(
++                {0.0, 0.0, 1.0}, {1e300, 0.0, 1.0}, body),
++            VoxelStatus::kUnknown);
++}
++
+ TEST(MapInterface, RayStopsAtTheObstacleAndReportsWhere) {
+   AnalyticMap map;
+   Eigen::Vector3d end_voxel;
+diff --git a/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp b/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
+index a15020a..fbe68ca 100644
+--- a/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
++++ b/ros2/src/mgg_map_octomap/test/test_octomap_map.cpp
+@@ -125,6 +125,34 @@ TEST(OctomapMap, StrictPathEnvelopeIncludesDiagonalCrossedVoxel) {
+             VoxelStatus::kOccupied);
+ }
+ 
++TEST(OctomapMap, OccupiedOnlySweepCoversEveryAabbFaceAndSegmentBoundary) {
++  const Eigen::Vector3d start(0.0, 0.0, 0.0);
++  const Eigen::Vector3d end(0.20, 0.0, 0.0);
++  const Eigen::Vector3d body(0.10, 0.10, 0.10);
++  const auto classify = [&](const Eigen::Vector3d& obstacle) {
++    OctomapConfig cfg;
++    cfg.resolution = 0.05;
++    OctomapMap map(cfg);
++    EXPECT_NE(map.tree()->updateNode(
++                  octomap::point3d(static_cast<float>(obstacle.x()),
++                                   static_cast<float>(obstacle.y()),
++                                   static_cast<float>(obstacle.z())),
++                  true),
++              nullptr);
++    return map.getOccupiedOnlyPathStatus(start, end, body);
++  };
++
++  // The continuously swept AABB is x=[-0.05, 0.25], y/z=[-0.05, 0.05].
++  // Pin both end faces, a boundary between resolution-sized segments, and a
++  // lateral face. Unknown space around each occupied key remains admissible.
++  EXPECT_EQ(classify({-0.05, 0.0, 0.0}), VoxelStatus::kOccupied);
++  EXPECT_EQ(classify({0.10, 0.0, 0.0}), VoxelStatus::kOccupied);
++  EXPECT_EQ(classify({0.25, 0.0, 0.0}), VoxelStatus::kOccupied);
++  EXPECT_EQ(classify({0.10, 0.05, 0.0}), VoxelStatus::kOccupied);
++  EXPECT_EQ(classify({0.10, 0.0, 0.05}), VoxelStatus::kOccupied);
++  EXPECT_EQ(classify({0.10, 0.15, 0.0}), VoxelStatus::kFree);
++}
++
+ TEST(OctomapMap, ExplicitQueriesRejectEvenOneUnknownKey) {
+   OctomapConfig cfg;
+   cfg.resolution = 0.05;
+diff --git a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+index 13ec8e5..1e94e60 100644
+--- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
++++ b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+@@ -127,6 +127,11 @@ class PlannerNode : public rclcpp::Node {
+   bool validateObjectiveStartSupport(
+       const mgg::StateVec& anchor, const mgg::StateVec& supported,
+       std::vector<mgg::StateVec>& checked) const;
++  mgg::VoxelStatus objectiveBodyStatus(const Eigen::Vector3d& center,
++                                       const Eigen::Vector3d& body) const;
++  mgg::VoxelStatus objectiveSweptBodyStatus(
++      const Eigen::Vector3d& from, const Eigen::Vector3d& to,
++      const Eigen::Vector3d& body) const;
+   void refreshMolaRevision();
+ 
+   mgg::ExpandContext makeContext();
+@@ -137,6 +142,7 @@ class PlannerNode : public rclcpp::Node {
+   mgg::OctomapMap* cloud_map_ = nullptr;
+   mgg::MolaMap* mola_map_ = nullptr;
+   std::string map_backend_ = "cloud_octomap";
++  bool observed_ground_body_evidence_ = false;
+   std::uint64_t observed_mola_generation_ = 0;
+   std::unique_ptr<mgg::GroundProjection> ground_;
+   std::unique_ptr<mgg::GeofenceManager> geofence_;
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index 77ce84b..3defed1 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -86,6 +86,22 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+   } else {
+     throw std::invalid_argument("map.backend must be cloud_octomap or mola_snapshot");
+   }
++  const std::string body_evidence_policy = declareOrGet<std::string>(
++      this, "objective_body_evidence_policy", "strict_volume");
++  if (body_evidence_policy == "observed_ground") {
++    if (map_backend_ != "cloud_octomap" ||
++        !get_parameter("use_sim_time").as_bool() ||
++        robot_params_.type != mgg::RobotType::kGroundRobot) {
++      throw std::invalid_argument(
++          "objective_body_evidence_policy=observed_ground requires a "
++          "simulated ground robot using map.backend=cloud_octomap");
++    }
++    observed_ground_body_evidence_ = true;
++  } else if (body_evidence_policy != "strict_volume") {
++    throw std::invalid_argument(
++        "objective_body_evidence_policy must be strict_volume or "
++        "observed_ground");
++  }
+   ground_ = std::make_unique<mgg::GroundProjection>(*map_, planning_params_);
+   const double grid_resolution_floor = map_->getResolution();
+   grid_refinement_limits_.resolution_m = std::clamp(
+@@ -999,8 +1015,8 @@ bool PlannerNode::validateObjectiveStartSupport(
+   }
+ 
+   // Missing ground may bridge one physical anchor to a mapped endpoint, but
+-  // it never makes occupancy free: the full swept body remains a strict,
+-  // unknown-rejecting query.
++  // it never makes occupancy free: the full swept body follows the selected
++  // objective evidence policy and always rejects occupied or invalid queries.
+   std::vector<Eigen::Vector3d> projected;
+   const Eigen::Vector3d body = robot_params_.getPlanningSize();
+   if (ground_->getProjectedEdgeStatus(
+@@ -1055,7 +1071,7 @@ bool PlannerNode::validateObjectiveStartSupport(
+       checked.clear();
+       return false;
+     }
+-    const mgg::VoxelStatus swept = map_->getStrictPathStatus(from, to, body);
++    const mgg::VoxelStatus swept = objectiveSweptBodyStatus(from, to, body);
+     if (swept != mgg::VoxelStatus::kFree) {
+       const bool collect_detail =
+           objective_start_support_failure_.empty() ||
+@@ -1075,7 +1091,7 @@ bool PlannerNode::validateObjectiveStartSupport(
+           for (std::size_t sample = 0; sample < steps; ++sample) {
+             const Eigen::Vector3d point =
+                 from + (static_cast<double>(sample) + 0.5) * step;
+-            if (map_->getStrictBoxStatus(point, swept_size) !=
++            if (objectiveBodyStatus(point, swept_size) !=
+                 mgg::VoxelStatus::kFree) {
+               first = point;
+               break;
+@@ -1085,7 +1101,8 @@ bool PlannerNode::validateObjectiveStartSupport(
+         char detail[160];
+         std::snprintf(
+             detail, sizeof(detail),
+-            "strict swept body %s near (%.2f, %.2f, %.2f)",
++            "%s swept body %s near (%.2f, %.2f, %.2f)",
++            observed_ground_body_evidence_ ? "occupied-only" : "strict",
+             swept == mgg::VoxelStatus::kOccupied ? "occupied" : "unknown",
+             first.x(), first.y(), first.z());
+         objective_start_support_failure_ = detail;
+@@ -1097,6 +1114,21 @@ bool PlannerNode::validateObjectiveStartSupport(
+   return true;
+ }
+ 
++mgg::VoxelStatus PlannerNode::objectiveBodyStatus(
++    const Eigen::Vector3d& center, const Eigen::Vector3d& body) const {
++  return observed_ground_body_evidence_
++             ? map_->getBoxStatus(center, body, false)
++             : map_->getStrictBoxStatus(center, body);
++}
++
++mgg::VoxelStatus PlannerNode::objectiveSweptBodyStatus(
++    const Eigen::Vector3d& from, const Eigen::Vector3d& to,
++    const Eigen::Vector3d& body) const {
++  return observed_ground_body_evidence_
++             ? map_->getOccupiedOnlyPathStatus(from, to, body)
++             : map_->getStrictPathStatus(from, to, body);
++}
++
+ void PlannerNode::updateGlobalGraph() {
+   auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
+                                        : mgg::MolaMap::ReadLease{};
+@@ -1825,7 +1857,7 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+       }
+     }
+     const Eigen::Vector3d center = state.head<3>() + center_offset;
+-    const mgg::VoxelStatus body_status = map_->getStrictBoxStatus(center, body);
++    const mgg::VoxelStatus body_status = objectiveBodyStatus(center, body);
+     if (body_status == mgg::VoxelStatus::kOccupied) {
+       return mgg::GridProjectionStatus::kBodyOccupied;
+     }
+@@ -1898,8 +1930,10 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+         // robot center offset is applied only to the additional collision
+         // sweep below; passing an offset pose to GroundProjection would shift
+         // the returned driving pose by -center_offset.z.
+-        if (ground_->getProjectedEdgeStatus(a.head<3>(), b.head<3>(), body,
+-                                            true, projected, false) !=
++        if (ground_->getProjectedEdgeStatus(
++                a.head<3>(), b.head<3>(), body,
++                /*stop_at_unknown_voxel=*/!observed_ground_body_evidence_,
++                projected, false) !=
+                 mgg::ProjectedEdgeStatus::kAdmissible ||
+             projected.size() < 2) {
+           return false;
+@@ -1922,7 +1956,7 @@ mgg::FeasiblePath PlannerNode::refineCorridor(
+           const Eigen::Vector3d checked_to =
+               checked[i].head<3>() + center_offset;
+           if (!geofenceAllows(checked_from, checked_to) ||
+-              map_->getStrictPathStatus(checked_from, checked_to, body) !=
++              objectiveSweptBodyStatus(checked_from, checked_to, body) !=
+                   mgg::VoxelStatus::kFree) {
+             return false;
+           }
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index 22c9820..5747696 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -635,6 +635,119 @@ TEST(PlannerConfiguration, MolaBackendRequiresExactRouteValidator) {
+       std::invalid_argument);
+ }
+ 
++TEST(PlannerConfiguration, ObservedGroundPolicyIsExplicitAndSimulationCloudOnly) {
++  for (const std::string policy : {"unknown", "ObservedGround"}) {
++    rclcpp::NodeOptions options;
++    options.parameter_overrides(
++        {rclcpp::Parameter("objective_body_evidence_policy", policy)});
++    EXPECT_THROW(
++        { auto planner = std::make_shared<mgg_ros::PlannerNode>(options); },
++        std::invalid_argument);
++  }
++  rclcpp::NodeOptions hardware;
++  hardware.parameter_overrides(
++      {rclcpp::Parameter("objective_body_evidence_policy", "observed_ground")});
++  EXPECT_THROW(
++      { auto planner = std::make_shared<mgg_ros::PlannerNode>(hardware); },
++      std::invalid_argument);
++
++  rclcpp::NodeOptions mola;
++  mola.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("map.backend", "mola_snapshot"),
++       rclcpp::Parameter("indexed_map_query_service", "/query"),
++       rclcpp::Parameter("map.mola.peer_root", "/tmp")});
++  EXPECT_THROW(
++      { auto planner = std::make_shared<mgg_ros::PlannerNode>(mola); },
++      std::invalid_argument);
++}
++
++TEST(PlannerObjective, ObservedGroundAllowsUnknownAirButNotWallOrMissingGround) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  auto make = [](const std::string& policy) {
++    rclcpp::NodeOptions options;
++    options.parameter_overrides(
++        {rclcpp::Parameter("use_sim_time", true),
++         rclcpp::Parameter("map.resolution", 0.05),
++         rclcpp::Parameter("objective_body_evidence_policy", policy)});
++    auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++    Peer::configureBackboneTest(*node);
++    Peer::acceptOdometry(*node, 0.0, 0.0, 0.075);
++    Peer::observeGroundRectangle(*node, -0.3, 2.3, -0.3, 0.3);
++    Peer::finishMapRevision(*node);
++    return node;
++  };
++  auto corridor = [](double goal_x) {
++    mgg::RouteCorridor route;
++    route.status = mgg::PlanningStatus::kSucceeded;
++    route.request.objective = mgg::ObjectiveKind::kNavigate;
++    route.request.goal.pose = mgg::StateVec(goal_x, 0.0, 0.075, 0.4);
++    return route;
++  };
++
++  auto strict = make("strict_volume");
++  EXPECT_EQ(Peer::refine(*strict, corridor(2.0)).status,
++            mgg::PlanningStatus::kBlocked);
++
++  auto observed = make("observed_ground");
++  const mgg::FeasiblePath clear = Peer::refine(*observed, corridor(2.0));
++  ASSERT_EQ(clear.status, mgg::PlanningStatus::kSucceeded) << clear.reason;
++  EXPECT_NEAR(clear.poses.back().x(), 2.0, 1e-9);
++  EXPECT_FALSE(clear.indexed_map_validated);
++
++  Peer::addOccupiedVoxel(*observed, 1.0, 0.0, 0.30);
++  EXPECT_EQ(Peer::refine(*observed, corridor(2.0)).status,
++            mgg::PlanningStatus::kBlocked);
++
++  auto unsupported = make("observed_ground");
++  EXPECT_EQ(Peer::refine(*unsupported, corridor(4.0)).status,
++            mgg::PlanningStatus::kBlocked);
++
++  auto stepped = make("observed_ground");
++  Peer::addRaisedFloor(*stepped, 0.30);
++  EXPECT_EQ(Peer::refine(*stepped, corridor(2.0)).status,
++            mgg::PlanningStatus::kBlocked);
++
++  auto fenced = make("observed_ground");
++  Peer::setGridGeofence(*fenced, -0.5, 0.5, -0.5, 0.5);
++  EXPECT_EQ(Peer::refine(*fenced, corridor(2.0)).status,
++            mgg::PlanningStatus::kBlocked);
++}
++
++TEST(PlannerObjective, ObservedGroundBlindStartConnectorRetainsDistanceBound) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  auto make = [](double support_x) {
++    rclcpp::NodeOptions options;
++    options.parameter_overrides(
++        {rclcpp::Parameter("use_sim_time", true),
++         rclcpp::Parameter("map.resolution", 0.05),
++         rclcpp::Parameter("objective_body_evidence_policy", "observed_ground")});
++    auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++    Peer::configureBackboneTest(*node);
++    Peer::acceptOdometry(*node, 0.0, 0.0, 0.075);
++    Peer::observeDestinationSupport(*node, support_x);
++    return node;
++  };
++  auto corridor = [](double goal_x) {
++    mgg::RouteCorridor route;
++    route.status = mgg::PlanningStatus::kSucceeded;
++    route.request.objective = mgg::ObjectiveKind::kNavigate;
++    route.request.goal.pose = mgg::StateVec(goal_x, 0.0, 0.075, 0.0);
++    return route;
++  };
++
++  auto within = make(2.5);
++  const mgg::FeasiblePath connected = Peer::refine(*within, corridor(2.5));
++  ASSERT_EQ(connected.status, mgg::PlanningStatus::kSucceeded)
++      << connected.reason;
++  EXPECT_NEAR(connected.poses.back().x(), 2.5, 1e-9);
++
++  auto beyond = make(3.25);
++  const mgg::FeasiblePath refused = Peer::refine(*beyond, corridor(3.25));
++  EXPECT_EQ(refused.status, mgg::PlanningStatus::kBlocked);
++}
++
+ TEST(PlannerBackbone, CapturesHomeBeforeMotionAndConnectsOnlyMappedTerrain) {
+   rclcpp::NodeOptions options;
+   options.parameter_overrides(

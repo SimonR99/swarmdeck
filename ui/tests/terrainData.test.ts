@@ -2,14 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { prepareTerrain, QUALITY } from '../src/lib/components/map3d/terrainData.ts';
 
-test('adjacent occupied cells share no internal mesh faces', () => {
+test('mesh triangulates a connected observed surface instead of voxel faces', () => {
   const d = prepareTerrain({
-    positions: new Float32Array([0.01, 0.01, 0.01, 0.16, 0.01, 0.01]),
-    owners: new Uint8Array([0, 1]),
+    positions: new Float32Array([
+      0.01, 0.01, 0.01, 0.16, 0.01, 0.04,
+      0.01, 0.16, 0.02, 0.16, 0.16, 0.05
+    ]),
+    owners: new Uint8Array([0, 1, 0, 1]),
     quality: 'low'
   });
-  assert.equal(d.samples.length, 2);
-  assert.equal(d.meshPositions.length / 9, 20); // ten quads, not twelve
+  assert.equal(d.samples.length, 4);
+  assert.equal(d.meshPositions.length / 9, 2);
   // Every triangle winds toward its outward normal.
   for (let i = 0; i < d.meshPositions.length; i += 9) {
     const p = d.meshPositions,
@@ -23,6 +26,38 @@ test('adjacent occupied cells share no internal mesh faces', () => {
         0
     );
   }
+});
+
+test('mesh does not bridge large vertical discontinuities', () => {
+  const d = prepareTerrain({
+    positions: new Float32Array([
+      0.01, 0.01, 0.01, 0.16, 0.01, 1.01,
+      0.01, 0.16, 0.01, 0.16, 0.16, 1.01
+    ]),
+    owners: new Uint8Array(4), quality: 'low'
+  });
+  // No XY triangles span the discontinuity (other projections may retain the
+  // vertical silhouette of the measured points).
+  for (let i = 0; i < d.meshPositions.length; i += 9) {
+    const z = [d.meshPositions[i + 2], d.meshPositions[i + 5], d.meshPositions[i + 8]];
+    const normalZ = Math.abs(d.meshNormals[i + 2]);
+    if (normalZ > 0.5) assert.ok(Math.max(...z) - Math.min(...z) <= d.size * 2.01);
+  }
+});
+
+test('mesh retains connected vertical walls', () => {
+  const d = prepareTerrain({
+    positions: new Float32Array([
+      0.01, 0.01, 0.01, 0.01, 0.16, 0.01,
+      0.01, 0.01, 0.16, 0.01, 0.16, 0.16
+    ]),
+    owners: new Uint8Array(4), quality: 'low'
+  });
+  assert.ok(d.meshPositions.length >= 18);
+  assert.ok(Array.from({ length: d.meshNormals.length / 3 }, (_, i) => i).some((i) =>
+    Math.hypot(d.meshNormals[i * 3], d.meshNormals[i * 3 + 1]) > 0.9 &&
+    Math.abs(d.meshNormals[i * 3 + 2]) < 0.1
+  ));
 });
 
 test('negative coordinates, invalid samples, and color ownership survive reduction', () => {

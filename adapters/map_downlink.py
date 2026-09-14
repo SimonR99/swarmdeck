@@ -8,6 +8,7 @@ must never load this product — only the global planner's static layer.
 from __future__ import annotations
 
 import array
+import time
 import urllib.error
 import urllib.request
 import zlib
@@ -38,6 +39,7 @@ class NavMapClient:
         self.timeout_s = timeout_s
         self.seq = -1
         self.last_error = ""
+        self.last_success_at = 0.0
         self.cached: DownloadedMap | None = None
 
     def poll(self) -> DownloadedMap | None:
@@ -59,6 +61,7 @@ class NavMapClient:
                 raw = zlib.decompress(response.read(), bufsize=MAX_BYTES)
         except urllib.error.HTTPError as exc:
             if exc.code == 304:
+                self.last_success_at = time.monotonic()
                 self.last_error = ""
                 return self.cached
             if exc.code == 404:
@@ -82,6 +85,7 @@ class NavMapClient:
             self.last_error = "nav map size mismatch"
             return None
         self.seq = seq
+        self.last_success_at = time.monotonic()
         self.last_error = ""
         self.cached = DownloadedMap(
             seq=seq,

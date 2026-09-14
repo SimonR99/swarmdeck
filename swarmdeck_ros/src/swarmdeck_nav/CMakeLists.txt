@@ -20,5 +20,9 @@ install(PROGRAMS scripts/odom_to_tf.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME odom_to_tf
 )
+install(PROGRAMS scripts/lifecycle_startup.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME lifecycle_startup
+)
 install(TARGETS footprint_cloud_to_scan DESTINATION lib/${PROJECT_NAME})
 ament_package()

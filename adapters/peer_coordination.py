@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 
-from autonomy.contracts import KeyframeId, validate_se3
+from autonomy.contracts import KeyframeId
 from autonomy.coordination import (
     CompletionTracker,
     ExplorationReport,
@@ -16,7 +16,9 @@ from autonomy.coordination import (
 )
 from adapters.mapping_authority import (
     accepts_authority_update,
+    authority_for_frame,
     get_mapping_authority,
+    planning_frame,
     transform_change_squared,
 )
 
@@ -35,12 +37,21 @@ class PeerCoordinator:
 
         self.bridge, self.msg_type = bridge, String
         self.mapping_authority = get_mapping_authority(bridge)
+        self.frame = planning_frame(bridge)
+        configured_frame = str(config.get("frame") or "").lstrip("/")
+        if configured_frame and configured_frame != self.frame:
+            raise ValueError(
+                "peer coordination frame must match the configured MGG planning frame"
+            )
         self.pose_type, self.exclusions_type = Pose, PoseArray
         self.clock = time.monotonic
-        self.authority, self.received_at = None, 0.0
+        self.authority, self.raw_authority, self.received_at = None, None, 0.0
         self.arbiter = None
         self.token, self.generation, self.invalid_token = None, -1, None
+        self.invalid_token_reason = None
+        self.last_decision_reason = "unassigned"
         self.reservation_transform = None
+        self.reservation_signature = None
         self.last_publish = 0.0
         self.radius = float(config.get("reservation_radius_m", 2.0))
         self.run_id, self.completion = None, None
@@ -85,23 +96,33 @@ class PeerCoordinator:
             if frame != self.bridge.map_frame.lstrip("/"):
                 return
             if not accepts_authority_update(
-                value, self.authority, self.mapping_authority.expected_mission
+                value, self.raw_authority, self.mapping_authority.expected_mission
             ):
                 return
-            transform = validate_se3(value["T_component_navigation"])
+            selected = authority_for_frame(value, self.frame)
+            transform = selected["T_component_navigation"]
             if "solution_order" not in value:
                 return
             signature = (value["mission_id"], value["component_id"])
             if self.authority:
-                old = self.authority
                 reservation_changed = (
                     self.token is not None
                     and self.reservation_transform is not None
                     and transform_change_squared(transform, self.reservation_transform)
                     > 0.01
                 )
-                if signature != old["signature"] or reservation_changed:
+                component_changed = (
+                    self.token is not None
+                    and self.reservation_signature is not None
+                    and signature != self.reservation_signature
+                )
+                if component_changed or reservation_changed:
                     self.invalid_token = self.token
+                    self.invalid_token_reason = (
+                        "map component changed"
+                        if component_changed
+                        else "material map correction"
+                    )
                     self.release(self.generation)
             if self.arbiter is None or self.arbiter.session_id != value["mission_id"]:
                 self.arbiter = LeaseArbiter(
@@ -111,8 +132,9 @@ class PeerCoordinator:
                     clock=self.clock,
                 )
             self.arbiter.set_component(value["component_id"])
+            self.raw_authority = value
             self.authority = {
-                **value,
+                **selected,
                 "signature": signature,
                 "T_component_navigation": transform,
             }
@@ -130,22 +152,32 @@ class PeerCoordinator:
 
     def reserve(self, plan, generation):
         token = (generation, plan.revision_ns)
-        if token == self.invalid_token or generation < self.generation:
+        if token == self.invalid_token:
+            self.last_decision_reason = (
+                f"reservation invalidated by {self.invalid_token_reason or 'map correction'}"
+            )
+            return "rejected"
+        if generation < self.generation:
+            self.last_decision_reason = "stale exploration generation"
             return "rejected"
         if self.authority is None or self.clock() - self.received_at > 3.0:
-            self.release(generation)
+            self.last_decision_reason = "map authority unavailable or stale"
+            preserve = generation == self.generation and token == self.token
+            self._release_lease(generation, preserve_binding=preserve)
             return "pending"
         if (
             plan.frame_id.lstrip("/") != self.authority["navigation_frame"].lstrip("/")
             or not plan.poses
         ):
+            self.last_decision_reason = "path does not match verified map authority"
             return "rejected"
-        if token != self.token:
+        if token != self.token or self.arbiter.local is None:
             self.release(generation)
             self.generation, self.token = generation, token
             final = plan.poses[-1]
             T = np.asarray(self.authority["T_component_navigation"])
             self.reservation_transform = self.authority["T_component_navigation"]
+            self.reservation_signature = self.authority["signature"]
             target = (T @ np.array([final.x, final.y, final.z, 1.0]))[:3]
             cost = sum(
                 math.dist((a.x, a.y, a.z), (b.x, b.y, b.z))
@@ -153,17 +185,28 @@ class PeerCoordinator:
             )
             self.publish(self.arbiter.propose(target, radius_m=self.radius, cost=cost))
         self.tick()
-        return {
+        decision, winner = self.arbiter.decision_with_winner()
+        result = {
             "granted": "granted",
             "pending": "pending",
             "conflict": "rejected",
             "expired": "pending",
             "unassigned": "pending",
-        }[self.arbiter.decision()]
+        }[decision]
+        if decision == "conflict":
+            self.last_decision_reason = f"conflict won by {winner}"
+        else:
+            self.last_decision_reason = {
+                "granted": "reservation granted",
+                "pending": "reservation settling",
+                "expired": "local reservation lease expired",
+                "unassigned": "local reservation is unassigned",
+            }[decision]
+        return result
 
     def publish_exclusions(self):
         message = self.exclusions_type()
-        message.header.frame_id = self.bridge.map_frame
+        message.header.frame_id = self.frame
         if self.authority and self.arbiter and self.clock() - self.received_at <= 3.0:
             inverse = np.linalg.inv(self.authority["T_component_navigation"])
             local = self.arbiter.local
@@ -188,7 +231,7 @@ class PeerCoordinator:
         if self.arbiter is None or self.arbiter.local is None:
             return
         if self.clock() - self.received_at > 3.0:
-            self.release(self.generation)
+            self._release_lease(self.generation, preserve_binding=True)
             return
         if self.clock() - self.last_publish >= 1.0:
             claim = self.arbiter.local
@@ -199,12 +242,17 @@ class PeerCoordinator:
             )
 
     def release(self, generation):
+        self._release_lease(generation, preserve_binding=False)
+
+    def _release_lease(self, generation, *, preserve_binding):
         if generation < self.generation:
             return
         if self.arbiter:
             self.publish(self.arbiter.release())
-        self.token = None
-        self.reservation_transform = None
+        if not preserve_binding:
+            self.token = None
+            self.reservation_transform = None
+            self.reservation_signature = None
         self.generation = max(self.generation, generation)
 
     def begin_run(self, run_id, participants):

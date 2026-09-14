@@ -50,79 +50,68 @@ export function prepareTerrain(input: CloudInput) {
     normals: number[] = [],
     meshSamples: number[] = [];
   let cellIndex = 0;
-  // Outward CCW faces. Mesh contains only the boundary of observed occupied cells.
-  const faces = [
-    {
-      n: [1, 0, 0],
-      v: [
-        [1, 0, 0],
-        [1, 1, 0],
-        [1, 1, 1],
-        [1, 0, 1]
-      ]
-    },
-    {
-      n: [-1, 0, 0],
-      v: [
-        [0, 1, 0],
-        [0, 0, 0],
-        [0, 0, 1],
-        [0, 1, 1]
-      ]
-    },
-    {
-      n: [0, 1, 0],
-      v: [
-        [1, 1, 0],
-        [0, 1, 0],
-        [0, 1, 1],
-        [1, 1, 1]
-      ]
-    },
-    {
-      n: [0, -1, 0],
-      v: [
-        [0, 0, 0],
-        [1, 0, 0],
-        [1, 0, 1],
-        [0, 0, 1]
-      ]
-    },
-    {
-      n: [0, 0, 1],
-      v: [
-        [0, 0, 1],
-        [1, 0, 1],
-        [1, 1, 1],
-        [0, 1, 1]
-      ]
-    },
-    {
-      n: [0, 0, -1],
-      v: [
-        [0, 1, 0],
-        [1, 1, 0],
-        [1, 0, 0],
-        [0, 0, 0]
-      ]
-    }
-  ];
   for (const cell of cells.values()) {
     centers.set(
       [(cell.x + 0.5) * size, (cell.y + 0.5) * size, (cell.z + 0.5) * size],
       cellIndex * 3
     );
     samples[cellIndex++] = cell.point;
-    for (const f of faces) {
-      if (cells.has(`${cell.x + f.n[0]},${cell.y + f.n[1]},${cell.z + f.n[2]}`)) continue;
-      for (const corner of [0, 1, 2, 0, 2, 3]) {
-        const v = f.v[corner];
-        vertices.push((cell.x + v[0]) * size, (cell.y + v[1]) * size, (cell.z + v[2]) * size);
-        normals.push(...f.n);
-        meshSamples.push(cell.point);
+  }
+
+  const addTriangle = (...triangle: { x: number; y: number; z: number; point: number }[]) => {
+    const [a, b, c] = triangle;
+    const ax = b.x - a.x, ay = b.y - a.y, az = b.z - a.z;
+    const bx = c.x - a.x, by = c.y - a.y, bz = c.z - a.z;
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    if (nz < 0) return addTriangle(a, c, b);
+    const length = Math.hypot(nx, ny, nz) || 1;
+    nx /= length; ny /= length; nz /= length;
+    for (const p of triangle) {
+      vertices.push((p.x + 0.5) * size, (p.y + 0.5) * size, (p.z + 0.5) * size);
+      normals.push(nx, ny, nz);
+      meshSamples.push(p.point);
+    }
+  };
+  const connected = (axis: 'x' | 'y' | 'z', ...points: ({ x: number; y: number; z: number } | undefined)[]) => {
+    if (points.some((point) => !point)) return false;
+    const offsets = points.map((point) => point![axis]);
+    // Do not bridge disconnected surfaces across an empty voxel band.
+    return Math.max(...offsets) - Math.min(...offsets) <= 2;
+  };
+  type Cell = { x: number; y: number; z: number; point: number };
+  const triangulateProjection = (
+    u: 'x' | 'y' | 'z', v: 'x' | 'y' | 'z', depth: 'x' | 'y' | 'z'
+  ) => {
+    const columns = new Map<string, { low: Cell; high: Cell }>();
+    for (const cell of cells.values()) {
+      const key = `${cell[u]},${cell[v]}`;
+      const column = columns.get(key);
+      if (!column) columns.set(key, { low: cell, high: cell });
+      else {
+        if (cell[depth] < column.low[depth]) column.low = cell;
+        if (cell[depth] > column.high[depth]) column.high = cell;
       }
     }
-  }
+    for (const side of ['low', 'high'] as const) {
+      for (const column of columns.values()) {
+        const cell = column[side];
+        // A one-voxel-thick surface is represented once, rather than drawing
+        // coincident min/max triangles and doubling its opacity.
+        if (side === 'high' && column.high === column.low) continue;
+        const east = columns.get(`${cell[u] + 1},${cell[v]}`)?.[side];
+        const north = columns.get(`${cell[u]},${cell[v] + 1}`)?.[side];
+        const diagonal = columns.get(`${cell[u] + 1},${cell[v] + 1}`)?.[side];
+        if (connected(depth, cell, east, north)) addTriangle(cell, east!, north!);
+        if (connected(depth, east, diagonal, north)) addTriangle(east!, diagonal!, north!);
+      }
+    }
+  };
+  // Three orthogonal projections retain floors/ceilings, both sides of walls,
+  // and overhang silhouettes. Each surface only joins immediate neighbors and
+  // may vary by at most two voxels in depth, bounding false cross-room joins.
+  triangulateProjection('x', 'y', 'z');
+  triangulateProjection('x', 'z', 'y');
+  triangulateProjection('y', 'z', 'x');
   return {
     xyz,
     owners: source,

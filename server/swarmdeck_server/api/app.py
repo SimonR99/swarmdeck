@@ -10,7 +10,7 @@ import json
 import math
 import os
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -577,7 +577,7 @@ def detection_position(robot_id: str, position: Any) -> dict[str, float] | None:
 # ----------------------------------------------------------------- reset
 
 
-async def reset_fleet() -> dict[str, Any]:
+async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
     """Put the simulation back to its start state.
 
     Two halves that must happen in this order. The adapters reset the things only
@@ -594,6 +594,23 @@ async def reset_fleet() -> dict[str, Any]:
     couple of seconds and the operator needs to know why.
     """
     global _reset_done, _reset_running
+
+    from .simulation_reset import request_reset, reset_root
+
+    supervisor_root = reset_root()
+    if supervisor_root is not None:
+        result = request_reset(supervisor_root, request_id)
+        await broadcast(
+            {
+                "type": "sim_reset",
+                "phase": "start" if result.get("phase") in {"accepted", "stopping", "starting", "verifying"} else "done",
+                "request_id": result.get("request_id"),
+                "ok": result.get("ok"),
+                "error": result.get("error"),
+                "skipped": [],
+            }
+        )
+        return result
 
     if _reset_running:
         return {"ok": False, "error": "a reset is already running"}
@@ -876,8 +893,15 @@ async def stop_session() -> dict[str, Any]:
 
 
 @app.post("/api/sim/reset")
-async def post_sim_reset() -> dict[str, Any]:
+async def post_sim_reset(request_id: UUID | None = None) -> dict[str, Any]:
     from .control_routes import post_sim_reset as handler
+
+    return await handler(str(request_id) if request_id is not None else None)
+
+
+@app.get("/api/sim/reset")
+async def get_sim_reset() -> dict[str, Any]:
+    from .control_routes import get_sim_reset as handler
 
     return await handler()
 
@@ -1277,7 +1301,13 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             if robot.coordinate_frame == "merged"
             else map_service.robot_to_world(rid, local_goal)
         )
-        planned_world = map_service.plan_path(rid, start_pose, world_goal)
+        from ..mapsvc.planner import PathPlanningError
+
+        try:
+            planned_world = map_service.plan_path(rid, start_pose, world_goal)
+        except PathPlanningError as exc:
+            await raise_alert(f"no_route_{rid}", "warn", "fault", str(exc), rid)
+            return
         local_planned = (
             (
                 planned_world

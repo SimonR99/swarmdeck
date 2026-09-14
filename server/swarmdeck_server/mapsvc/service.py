@@ -837,10 +837,9 @@ class MapService:
             )
             return [self.robot_to_world(robot_id, pt) for pt in local_path]
 
-        return [
-            {"x": round(start_world["x"], 3), "y": round(start_world["y"], 3)},
-            {"x": round(goal_world["x"], 3), "y": round(goal_world["y"], 3)},
-        ]
+        # No map: leave planning to the onboard stack without drawing a
+        # fabricated obstacle-free global route.
+        return []
 
     # ---------------------------------------------------------------- ingest
 

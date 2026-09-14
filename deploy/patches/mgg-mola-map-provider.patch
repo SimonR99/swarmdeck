@@ -1,0 +1,2312 @@
+diff --git a/ros2/src/mgg_core/include/mgg_core/map_interface.h b/ros2/src/mgg_core/include/mgg_core/map_interface.h
+index 55a130f..d24f894 100644
+--- a/ros2/src/mgg_core/include/mgg_core/map_interface.h
++++ b/ros2/src/mgg_core/include/mgg_core/map_interface.h
+@@ -75,6 +75,15 @@ class MapInterface {
+                                     const Eigen::Vector3d& box_size,
+                                     bool stop_at_unknown_voxel) const = 0;
+ 
++  virtual VoxelStatus getStrictBoxStatus(const Eigen::Vector3d& center,
++                                         const Eigen::Vector3d& size) const {
++    return getBoxStatus(center, size, true);
++  }
++  virtual VoxelStatus getStrictPathStatus(
++      const Eigen::Vector3d& start, const Eigen::Vector3d& end,
++      const Eigen::Vector3d& box_size) const {
++    return getPathStatus(start, end, box_size, true);
++  }
+   // ------------------------------------------------------- volumetric gain
+ 
+   /// Casts a ray to every endpoint and tallies what each one passes through.
+diff --git a/ros2/src/mgg_map_octomap/CMakeLists.txt b/ros2/src/mgg_map_octomap/CMakeLists.txt
+index ae8db9c..642736c 100644
+--- a/ros2/src/mgg_map_octomap/CMakeLists.txt
++++ b/ros2/src/mgg_map_octomap/CMakeLists.txt
+@@ -25,19 +25,21 @@ find_package(ament_cmake REQUIRED)
+ find_package(mgg_core REQUIRED)
+ find_package(octomap REQUIRED)
+ find_package(Eigen3 REQUIRED)
++find_package(nlohmann_json REQUIRED)
++find_package(OpenSSL REQUIRED)
+ find_package(rclcpp REQUIRED)
+ find_package(sensor_msgs REQUIRED)
+ find_package(tf2 REQUIRED)
+ find_package(tf2_ros REQUIRED)
+ find_package(tf2_geometry_msgs REQUIRED)
+ 
+-add_library(${PROJECT_NAME} src/octomap_map.cpp)
++add_library(${PROJECT_NAME} src/octomap_map.cpp src/mola_map.cpp)
+ target_include_directories(${PROJECT_NAME} PUBLIC
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+   $<INSTALL_INTERFACE:include>
+   ${OCTOMAP_INCLUDE_DIRS})
+ target_link_libraries(${PROJECT_NAME} mgg_core::mgg_core ${OCTOMAP_LIBRARIES}
+-  Eigen3::Eigen)
++  Eigen3::Eigen nlohmann_json::nlohmann_json OpenSSL::Crypto)
+ 
+ install(DIRECTORY include/ DESTINATION include)
+ install(TARGETS ${PROJECT_NAME} EXPORT export_${PROJECT_NAME}
+@@ -51,13 +53,18 @@ ament_target_dependencies(octomap_map_node
+ install(TARGETS octomap_map_node DESTINATION lib/${PROJECT_NAME})
+ 
+ ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+-ament_export_dependencies(mgg_core octomap Eigen3)
++ament_export_dependencies(mgg_core octomap Eigen3 nlohmann_json OpenSSL)
+ ament_export_include_directories(include)
+ 
+ if(BUILD_TESTING)
+   find_package(ament_cmake_gtest REQUIRED)
+   ament_add_gtest(test_octomap_map test/test_octomap_map.cpp)
+   target_link_libraries(test_octomap_map ${PROJECT_NAME})
++  ament_add_gtest(test_mola_map test/test_mola_map.cpp)
++  target_link_libraries(test_mola_map ${PROJECT_NAME})
++  add_executable(mola_map_probe test/mola_map_probe.cpp)
++  target_link_libraries(mola_map_probe ${PROJECT_NAME})
++  install(TARGETS mola_map_probe DESTINATION lib/${PROJECT_NAME})
+ endif()
+ 
+ ament_package()
+diff --git a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h
+new file mode 100644
+index 0000000..491528a
+--- /dev/null
++++ b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h
+@@ -0,0 +1,164 @@
++// Immutable MOLA planner snapshots exposed through MapInterface.
++
++#ifndef MGG_MAP_OCTOMAP_MOLA_MAP_H_
++#define MGG_MAP_OCTOMAP_MOLA_MAP_H_
++
++#include <chrono>
++#include <atomic>
++#include <condition_variable>
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <utility>
++#include <vector>
++
++#include <Eigen/Dense>
++
++#include "mgg_core/map_interface.h"
++#include "mgg_map_octomap/octomap_map.h"
++
++namespace mgg {
++
++struct MolaMapConfig {
++  std::string peer_root;
++  double resolution = 0.2;
++  double snapshot_ttl_sec = 3.0;
++  std::size_t max_snapshot_bytes = 4u * 1024u * 1024u;
++  std::size_t max_index_bytes = 4u * 1024u * 1024u;
++  std::size_t max_grid_bytes = 256u * 1024u * 1024u;
++  std::size_t max_voxels = 2000000u;
++  std::chrono::milliseconds max_load_time{2000};
++};
++
++/// Exact authority identity associated with one MappingSnapshot message.
++struct MolaSnapshotRequest {
++  std::string component_id;
++  std::uint64_t epoch = 0;
++  std::uint64_t graph_revision = 0;
++  std::string geometry_revision;
++  std::uint64_t source_stamp_ns = 0;
++  /// Transform from navigation coordinates into the component map frame.
++  Eigen::Isometry3d component_from_navigation = Eigen::Isometry3d::Identity();
++};
++
++/// A correction-aware MOLA provider. Requests enqueue bounded filesystem
++/// validation and tree construction on one worker; planner callbacks never
++/// decode a grid. The active immutable tree is replaced atomically.
++class MolaMap : public MapInterface {
++ public:
++  /// Keeps one immutable active snapshot installed for a bounded group of
++  /// MapInterface calls. Publication can continue decoding off-thread, but
++  /// commits wait until the lease is released.
++  class ReadLease {
++   public:
++    ReadLease() = default;
++    ReadLease(ReadLease&&) = default;
++    ReadLease& operator=(ReadLease&&) = default;
++
++    ReadLease(const ReadLease&) = delete;
++    ReadLease& operator=(const ReadLease&) = delete;
++
++   private:
++    friend class MolaMap;
++    explicit ReadLease(std::recursive_mutex& mutex) : lock_(mutex) {}
++    std::unique_lock<std::recursive_mutex> lock_;
++  };
++
++  explicit MolaMap(MolaMapConfig config);
++  ~MolaMap() override;
++
++  MolaMap(const MolaMap&) = delete;
++  MolaMap& operator=(const MolaMap&) = delete;
++
++  /// Queue the latest authority heartbeat. Even an unchanged key is
++  /// revalidated, so disappearance or retraction cannot refresh freshness.
++  void requestSnapshot(const MolaSnapshotRequest& request);
++  ReadLease acquireReadLease() const;
++  std::string lastError() const;
++  std::uint64_t activeGeneration() const;
++
++  double getResolution() const override;
++  bool getStatus() const override;
++  VoxelStatus getVoxelStatus(const Eigen::Vector3d& position) const override;
++  VoxelStatus getRayStatus(const Eigen::Vector3d& view_point,
++                           const Eigen::Vector3d& voxel_to_test,
++                           bool stop_at_unknown_voxel) const override;
++  VoxelStatus getRayStatus(const Eigen::Vector3d& view_point,
++                           const Eigen::Vector3d& voxel_to_test,
++                           bool stop_at_unknown_voxel,
++                           Eigen::Vector3d& end_voxel) const override;
++  VoxelStatus getBoxStatus(const Eigen::Vector3d& center,
++                           const Eigen::Vector3d& size,
++                           bool stop_at_unknown_voxel) const override;
++  VoxelStatus getPathStatus(const Eigen::Vector3d& start,
++                            const Eigen::Vector3d& end,
++                            const Eigen::Vector3d& box_size,
++                            bool stop_at_unknown_voxel) const override;
++  VoxelStatus getStrictBoxStatus(const Eigen::Vector3d& center,
++                                 const Eigen::Vector3d& size) const override;
++  VoxelStatus getStrictPathStatus(const Eigen::Vector3d& start,
++                                  const Eigen::Vector3d& end,
++                                  const Eigen::Vector3d& box_size) const override;
++  void getScanStatus(
++      const Eigen::Vector3d& pos,
++      const std::vector<Eigen::Vector3d>& multiray_endpoints, GainCounts& gain,
++      std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
++      const SensorModel& sensor) override;
++  void getScanStatusIterative(
++      const Eigen::Vector3d& pos,
++      const std::vector<Eigen::Vector3d>& multiray_endpoints, GainCounts& gain,
++      std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
++      const SensorModel& sensor) override;
++  bool augmentFreeBox(const Eigen::Vector3d& position,
++                      const Eigen::Vector3d& box_size) override;
++  void augmentFreeFrustum() override;
++  void resetMap() override;
++  void extractLocalMap(const Eigen::Vector3d& center,
++                       const Eigen::Vector3d& bounding_box_size,
++                       std::vector<Eigen::Vector3d>& occupied_voxels,
++                       std::vector<Eigen::Vector3d>& free_voxels) override;
++  void extractLocalMapAlongAxis(
++      const Eigen::Vector3d& center, const Eigen::Vector3d& axis,
++      const Eigen::Vector3d& bounding_box_size,
++      std::vector<Eigen::Vector3d>& occupied_voxels,
++      std::vector<Eigen::Vector3d>& free_voxels) override;
++  void getLocalPointcloud(const Eigen::Vector3d& center, double range,
++                          double yaw, std::vector<Eigen::Vector3d>& points,
++                          bool include_unknown_voxels = false) override;
++  void getFreeSpacePointCloud(
++      const std::vector<Eigen::Vector3d>& multiray_endpoints,
++      const StateVec& state, std::vector<Eigen::Vector3d>& points) override;
++  void setRaycastingParams(bool nonuniform_ray_cast,
++                           double ray_cast_step_size_multiplier) override;
++  void setRobotRadius(double robot_radius) override;
++
++ private:
++  struct Snapshot;
++  struct PendingRequest;
++
++  std::shared_ptr<const Snapshot> current() const;
++  void workerLoop();
++  std::shared_ptr<const Snapshot> load(const PendingRequest& pending) const;
++  void failIfLatest(std::uint64_t generation, const std::string& error);
++
++  MolaMapConfig config_;
++  mutable std::mutex request_mutex_;
++  std::condition_variable request_ready_;
++  std::unique_ptr<PendingRequest> pending_;
++  std::uint64_t generation_ = 0;
++  bool stopping_ = false;
++  std::thread worker_;
++
++  mutable std::mutex error_mutex_;
++  std::string last_error_;
++  mutable std::recursive_mutex publication_mutex_;
++  mutable std::shared_ptr<const Snapshot> active_;
++  mutable std::atomic<std::uint64_t> active_generation_{0};
++};
++
++}  // namespace mgg
++
++#endif  // MGG_MAP_OCTOMAP_MOLA_MAP_H_
+diff --git a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h
+index be72f45..e3a1c68 100644
+--- a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h
++++ b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/octomap_map.h
+@@ -85,10 +85,10 @@ class OctomapMap : public MapInterface {
+   /// Explicit objectives require every touched voxel to be observed free.
+   /// Legacy MapInterface queries retain their configured historical tolerance.
+   VoxelStatus getStrictBoxStatus(const Eigen::Vector3d& center,
+-                                  const Eigen::Vector3d& size) const;
++                                  const Eigen::Vector3d& size) const override;
+   VoxelStatus getStrictPathStatus(const Eigen::Vector3d& start,
+                                    const Eigen::Vector3d& end,
+-                                   const Eigen::Vector3d& box_size) const;
++                                   const Eigen::Vector3d& box_size) const override;
+ 
+   void getScanStatus(
+       const Eigen::Vector3d& pos,
+diff --git a/ros2/src/mgg_map_octomap/package.xml b/ros2/src/mgg_map_octomap/package.xml
+index b808c3e..3058986 100644
+--- a/ros2/src/mgg_map_octomap/package.xml
++++ b/ros2/src/mgg_map_octomap/package.xml
+@@ -21,6 +21,8 @@
+   <depend>mgg_core</depend>
+   <depend>octomap</depend>
+   <depend>eigen</depend>
++  <depend>nlohmann_json</depend>
++  <depend>openssl</depend>
+ 
+   <!-- ROS dependencies of the ingest node only; the OctomapMap class itself
+        links none of these. -->
+diff --git a/ros2/src/mgg_map_octomap/src/mola_map.cpp b/ros2/src/mgg_map_octomap/src/mola_map.cpp
+new file mode 100644
+index 0000000..23dcf04
+--- /dev/null
++++ b/ros2/src/mgg_map_octomap/src/mola_map.cpp
+@@ -0,0 +1,954 @@
++#include "mgg_map_octomap/mola_map.h"
++
++#include <nlohmann/json.hpp>
++#include <openssl/evp.h>
++
++#include <algorithm>
++#include <array>
++#include <cerrno>
++#include <cmath>
++#include <cstring>
++#include <fcntl.h>
++#include <filesystem>
++#include <iomanip>
++#include <iterator>
++#include <limits>
++#include <regex>
++#include <sstream>
++#include <stdexcept>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <unordered_set>
++
++namespace mgg {
++namespace {
++
++using Clock = std::chrono::steady_clock;
++using json = nlohmann::json;
++constexpr char kSnapshotSchema[] = "swarmdeck.autonomy.v1";
++constexpr char kGridSchema[] = "swarmdeck.mola_planner_grid.v1";
++constexpr std::size_t kMetadataLimit = 64u * 1024u;
++constexpr std::size_t kComponentLimit = 256u;
++constexpr std::size_t kSnapshotLimit = 4u * 1024u * 1024u;
++constexpr std::size_t kIndexLimit = 4u * 1024u * 1024u;
++constexpr std::size_t kGridLimit = 256u * 1024u * 1024u;
++constexpr std::size_t kVoxelLimit = 2000000u;
++
++struct Voxel {
++  std::int64_t x = 0;
++  std::int64_t y = 0;
++  std::int64_t z = 0;
++  friend bool operator==(const Voxel& a, const Voxel& b) {
++    return a.x == b.x && a.y == b.y && a.z == b.z;
++  }
++  friend bool operator<(const Voxel& a, const Voxel& b) {
++    if (a.x != b.x) return a.x < b.x;
++    if (a.y != b.y) return a.y < b.y;
++    return a.z < b.z;
++  }
++};
++
++bool isDigest(const std::string& value) {
++  static const std::regex pattern("^[0-9a-f]{64}$");
++  return std::regex_match(value, pattern);
++}
++
++std::string digest(const std::vector<std::uint8_t>& bytes) {
++  EVP_MD_CTX* context = EVP_MD_CTX_new();
++  if (context == nullptr) throw std::runtime_error("SHA-256 allocation failed");
++  std::array<unsigned char, EVP_MAX_MD_SIZE> output{};
++  unsigned int output_size = 0;
++  const bool ok = EVP_DigestInit_ex(context, EVP_sha256(), nullptr) == 1 &&
++                  EVP_DigestUpdate(context, bytes.data(), bytes.size()) == 1 &&
++                  EVP_DigestFinal_ex(context, output.data(), &output_size) == 1;
++  EVP_MD_CTX_free(context);
++  if (!ok || output_size != 32) throw std::runtime_error("SHA-256 failed");
++  std::ostringstream text;
++  text << std::hex << std::setfill('0');
++  for (unsigned int i = 0; i < output_size; ++i)
++    text << std::setw(2) << static_cast<unsigned int>(output[i]);
++  return text.str();
++}
++
++std::string digest(const json& value) {
++  const std::string encoded = value.dump();
++  return digest(std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
++}
++
++void checkDeadline(const Clock::time_point deadline) {
++  if (Clock::now() > deadline)
++    throw std::runtime_error("MOLA map load exceeded its time bound");
++}
++
++bool sameFile(const struct stat& a, const struct stat& b) {
++  return a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
++         a.st_size == b.st_size && a.st_mtim.tv_sec == b.st_mtim.tv_sec &&
++         a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
++         a.st_ctim.tv_sec == b.st_ctim.tv_sec &&
++         a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
++}
++
++class FileDescriptor {
++ public:
++  explicit FileDescriptor(const int value) : value_(value) {}
++  ~FileDescriptor() {
++    if (value_ >= 0) ::close(value_);
++  }
++  FileDescriptor(const FileDescriptor&) = delete;
++  FileDescriptor& operator=(const FileDescriptor&) = delete;
++  int get() const { return value_; }
++
++ private:
++  int value_;
++};
++
++std::vector<std::uint8_t> stableRead(const std::filesystem::path& path,
++                                     const std::size_t maximum,
++                                     const char* label,
++                                     const Clock::time_point deadline) {
++  const int raw_fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++  if (raw_fd < 0)
++    throw std::runtime_error(std::string("cannot open ") + label + ": " +
++                             std::strerror(errno));
++  const FileDescriptor fd(raw_fd);
++  struct stat opened {};
++  if (::fstat(fd.get(), &opened) != 0 || !S_ISREG(opened.st_mode) ||
++      opened.st_size <= 0 || static_cast<std::uint64_t>(opened.st_size) > maximum) {
++    throw std::runtime_error(std::string(label) + " has invalid size or type");
++  }
++  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(opened.st_size));
++  std::size_t offset = 0;
++  while (offset < bytes.size()) {
++    const ssize_t count =
++        ::read(fd.get(), bytes.data() + offset, bytes.size() - offset);
++    if (count < 0 && errno == EINTR) continue;
++    if (count <= 0) {
++      throw std::runtime_error(std::string(label) + " changed while reading");
++    }
++    offset += static_cast<std::size_t>(count);
++    checkDeadline(deadline);
++  }
++  struct stat after {};
++  struct stat named {};
++  const bool stable = ::fstat(fd.get(), &after) == 0 &&
++                      ::stat(path.c_str(), &named) == 0 && sameFile(opened, after) &&
++                      sameFile(after, named);
++  if (!stable) throw std::runtime_error(std::string(label) + " changed while reading");
++  return bytes;
++}
++
++json decodeJson(const std::vector<std::uint8_t>& bytes, const char* label) {
++  try {
++    return json::parse(bytes.begin(), bytes.end(), nullptr, true, true);
++  } catch (const json::exception& error) {
++    throw std::runtime_error(std::string(label) + " is invalid JSON: " + error.what());
++  }
++}
++
++std::uint64_t asUint(const json& value, const char* label) {
++  if (!value.is_number_unsigned())
++    throw std::runtime_error(std::string(label) + " must be an unsigned integer");
++  return value.get<std::uint64_t>();
++}
++
++std::size_t asSize(const json& value, const char* label,
++                   const std::size_t maximum) {
++  const auto raw = asUint(value, label);
++  if (raw > maximum) throw std::runtime_error(std::string(label) + " exceeds its bound");
++  return static_cast<std::size_t>(raw);
++}
++
++std::uint32_t readU32(const std::vector<std::uint8_t>& bytes,
++                      const std::size_t offset) {
++  if (offset > bytes.size() || bytes.size() - offset < 4)
++    throw std::runtime_error("MOLA planner grid is truncated");
++  std::uint32_t result = 0;
++  for (unsigned int i = 0; i < 4; ++i)
++    result |= static_cast<std::uint32_t>(bytes[offset + i]) << (8u * i);
++  return result;
++}
++
++std::uint64_t readU64(const std::vector<std::uint8_t>& bytes,
++                      const std::size_t offset) {
++  if (offset > bytes.size() || bytes.size() - offset < 8)
++    throw std::runtime_error("MOLA planner grid is truncated");
++  std::uint64_t result = 0;
++  for (unsigned int i = 0; i < 8; ++i)
++    result |= static_cast<std::uint64_t>(bytes[offset + i]) << (8u * i);
++  return result;
++}
++
++std::int64_t readI64(const std::vector<std::uint8_t>& bytes,
++                     const std::size_t offset) {
++  const std::uint64_t raw = readU64(bytes, offset);
++  std::int64_t result = 0;
++  std::memcpy(&result, &raw, sizeof(result));
++  return result;
++}
++
++double readF64(const std::vector<std::uint8_t>& bytes,
++               const std::size_t offset) {
++  const std::uint64_t raw = readU64(bytes, offset);
++  double result = 0.0;
++  std::memcpy(&result, &raw, sizeof(result));
++  return result;
++}
++
++std::size_t checkedProduct(const std::size_t a, const std::size_t b) {
++  if (a != 0 && b > std::numeric_limits<std::size_t>::max() / a)
++    throw std::runtime_error("MOLA planner grid size overflow");
++  return a * b;
++}
++
++std::size_t checkedSum(const std::size_t a, const std::size_t b) {
++  if (b > std::numeric_limits<std::size_t>::max() - a)
++    throw std::runtime_error("MOLA planner grid size overflow");
++  return a + b;
++}
++
++bool sameIdentity(const MolaSnapshotRequest& a, const MolaSnapshotRequest& b) {
++  return a.component_id == b.component_id && a.epoch == b.epoch &&
++         a.graph_revision == b.graph_revision &&
++         a.geometry_revision == b.geometry_revision &&
++         a.source_stamp_ns == b.source_stamp_ns;
++}
++
++Eigen::Vector3d enclosingSize(const Eigen::Matrix3d& rotation,
++                              const Eigen::Vector3d& size) {
++  return rotation.cwiseAbs() * size;
++}
++
++void transformPoints(const Eigen::Isometry3d& transform,
++                     std::vector<Eigen::Vector3d>& points) {
++  for (auto& point : points) point = transform * point;
++}
++
++bool canRepresent(const OctomapMap& map, const Eigen::Vector3d& point) {
++  if (!point.allFinite()) return false;
++  octomap::OcTreeKey key;
++  return map.tree()->coordToKeyChecked(
++      octomap::point3d(static_cast<float>(point.x()),
++                       static_cast<float>(point.y()),
++                       static_cast<float>(point.z())),
++      key);
++}
++
++}  // namespace
++
++struct MolaMap::Snapshot {
++  MolaSnapshotRequest request;
++  std::shared_ptr<OctomapMap> map;
++  std::string artifact_digest;
++  Clock::time_point validated_at;
++};
++
++struct MolaMap::PendingRequest {
++  MolaSnapshotRequest request;
++  std::uint64_t generation = 0;
++  Clock::time_point received_at;
++};
++
++MolaMap::MolaMap(MolaMapConfig config) : config_(std::move(config)) {
++  if (config_.peer_root.empty() || !std::filesystem::path(config_.peer_root).is_absolute() ||
++      !std::isfinite(config_.resolution) || config_.resolution <= 0.0 ||
++      !std::isfinite(config_.snapshot_ttl_sec) || config_.snapshot_ttl_sec <= 0.0 ||
++      config_.max_snapshot_bytes == 0 || config_.max_index_bytes == 0 ||
++      config_.max_grid_bytes == 0 || config_.max_voxels == 0 ||
++      config_.max_snapshot_bytes > kSnapshotLimit ||
++      config_.max_index_bytes > kIndexLimit || config_.max_grid_bytes > kGridLimit ||
++      config_.max_voxels > kVoxelLimit || config_.max_load_time.count() <= 0 ||
++      config_.max_load_time > std::chrono::seconds(10))
++    throw std::invalid_argument("MOLA map configuration is invalid or unbounded");
++  worker_ = std::thread([this]() { workerLoop(); });
++}
++
++MolaMap::~MolaMap() {
++  {
++    std::lock_guard<std::mutex> lock(request_mutex_);
++    stopping_ = true;
++  }
++  request_ready_.notify_one();
++  if (worker_.joinable()) worker_.join();
++}
++
++void MolaMap::requestSnapshot(const MolaSnapshotRequest& request) {
++  const Eigen::Matrix4d& request_matrix =
++      request.component_from_navigation.matrix();
++  if (request.component_id.empty() || !isDigest(request.geometry_revision) ||
++      !request_matrix.allFinite() ||
++      !request_matrix.row(3).isApprox(Eigen::RowVector4d(0.0, 0.0, 0.0, 1.0),
++                                      1e-9) ||
++      !request.component_from_navigation.linear().isUnitary(1e-5) ||
++      request.component_from_navigation.linear().determinant() < 0.9999) {
++    const std::lock_guard<std::recursive_mutex> publication_lock(
++        publication_mutex_);
++    std::lock_guard<std::mutex> request_lock(request_mutex_);
++    pending_.reset();
++    ++generation_;
++    if (std::atomic_load(&active_) != nullptr) {
++      std::atomic_store(&active_, std::shared_ptr<const Snapshot>());
++      active_generation_.fetch_add(1, std::memory_order_release);
++    }
++    std::lock_guard<std::mutex> lock(error_mutex_);
++    last_error_ = "invalid MOLA snapshot request";
++    return;
++  }
++  {
++    const std::lock_guard<std::recursive_mutex> publication_lock(
++        publication_mutex_);
++    std::lock_guard<std::mutex> lock(request_mutex_);
++    const auto active = std::atomic_load(&active_);
++    if (active != nullptr &&
++        (!sameIdentity(active->request, request) ||
++         !active->request.component_from_navigation.matrix().isApprox(
++             request.component_from_navigation.matrix(), 1e-9))) {
++      // A corrected key or authority transform must never coexist with the old
++      // geometry, even while the new product is being decoded.
++      std::atomic_store(&active_, std::shared_ptr<const Snapshot>());
++      active_generation_.fetch_add(1, std::memory_order_release);
++    }
++    pending_ = std::make_unique<PendingRequest>(
++        PendingRequest{request, ++generation_, Clock::now()});
++  }
++  request_ready_.notify_one();
++}
++
++MolaMap::ReadLease MolaMap::acquireReadLease() const {
++  return ReadLease(publication_mutex_);
++}
++
++std::string MolaMap::lastError() const {
++  std::lock_guard<std::mutex> lock(error_mutex_);
++  return last_error_;
++}
++
++std::uint64_t MolaMap::activeGeneration() const {
++  return active_generation_.load(std::memory_order_acquire);
++}
++
++void MolaMap::failIfLatest(const std::uint64_t generation,
++                           const std::string& error) {
++  const std::lock_guard<std::recursive_mutex> publication_lock(
++      publication_mutex_);
++  std::lock_guard<std::mutex> request_lock(request_mutex_);
++  if (generation != generation_) return;
++  if (std::atomic_load(&active_) != nullptr) {
++    std::atomic_store(&active_, std::shared_ptr<const Snapshot>());
++    active_generation_.fetch_add(1, std::memory_order_release);
++  }
++  std::lock_guard<std::mutex> lock(error_mutex_);
++  last_error_ = error;
++}
++
++void MolaMap::workerLoop() {
++  while (true) {
++    std::unique_ptr<PendingRequest> pending;
++    {
++      std::unique_lock<std::mutex> lock(request_mutex_);
++      request_ready_.wait(lock, [this]() { return stopping_ || pending_ != nullptr; });
++      if (stopping_) return;
++      pending = std::move(pending_);
++    }
++    try {
++      auto loaded = load(*pending);
++      const std::lock_guard<std::recursive_mutex> publication_lock(
++          publication_mutex_);
++      std::lock_guard<std::mutex> request_lock(request_mutex_);
++      if (pending->generation != generation_) {
++        // An equivalent heartbeat that arrived during validation is covered
++        // by the just-finished coherent read. Consume it to avoid starvation
++        // when validation takes longer than the heartbeat interval.
++        if (pending_ == nullptr ||
++            !sameIdentity(pending_->request, loaded->request) ||
++            !pending_->request.component_from_navigation.matrix().isApprox(
++                loaded->request.component_from_navigation.matrix(), 1e-9))
++          continue;
++        pending_.reset();
++      }
++      const auto prior = std::atomic_load(&active_);
++      const bool semantic_change =
++          prior == nullptr || !sameIdentity(prior->request, loaded->request) ||
++          prior->artifact_digest != loaded->artifact_digest ||
++          !prior->request.component_from_navigation.matrix().isApprox(
++              loaded->request.component_from_navigation.matrix(), 1e-9);
++      std::atomic_store(&active_, std::move(loaded));
++      if (semantic_change)
++        active_generation_.fetch_add(1, std::memory_order_release);
++      std::lock_guard<std::mutex> error_lock(error_mutex_);
++      last_error_.clear();
++    } catch (const std::exception& error) {
++      failIfLatest(pending->generation, error.what());
++    }
++  }
++}
++
++std::shared_ptr<const MolaMap::Snapshot> MolaMap::load(
++    const PendingRequest& pending) const {
++  const Clock::time_point deadline = Clock::now() + config_.max_load_time;
++  const std::filesystem::path root(config_.peer_root);
++  const auto snapshot_bytes = stableRead(root / "snapshot.json",
++                                         config_.max_snapshot_bytes,
++                                         "mapping snapshot", deadline);
++  const auto index_bytes = stableRead(root / "mola" / "index.json",
++                                      config_.max_index_bytes,
++                                      "MOLA index", deadline);
++  const json source = decodeJson(snapshot_bytes, "mapping snapshot");
++  const json index = decodeJson(index_bytes, "MOLA index");
++  const std::string source_digest = digest(snapshot_bytes);
++  if (!source.is_object() || source.value("schema", std::string()) != kSnapshotSchema ||
++      !source.contains("manifests") || !source["manifests"].is_array() ||
++      source["manifests"].size() > kComponentLimit)
++    throw std::runtime_error("mapping snapshot schema is invalid");
++  const std::string snapshot_id = source.value("snapshot_id", std::string());
++  if (!isDigest(snapshot_id)) throw std::runtime_error("mapping snapshot ID is invalid");
++  std::unordered_set<std::string> component_ids;
++  const json* requested_manifest = nullptr;
++  for (const auto& raw : source["manifests"]) {
++    if (!raw.is_object()) throw std::runtime_error("mapping manifest is invalid");
++    json manifest = raw;
++    if (!manifest.contains("schema")) manifest["schema"] = kSnapshotSchema;
++    if (manifest.value("schema", std::string()) != kSnapshotSchema ||
++        !manifest.contains("graph_revision") ||
++        !manifest["graph_revision"].is_object())
++      throw std::runtime_error("mapping manifest schema is invalid");
++    const auto& graph = raw["graph_revision"];
++    const std::string component = graph.value("component_id", std::string());
++    if (component.empty() || !component_ids.emplace(component).second)
++      throw std::runtime_error("mapping snapshot component identity is invalid");
++    if (component == pending.request.component_id) requested_manifest = &raw;
++  }
++  if (requested_manifest == nullptr)
++    throw std::runtime_error("requested component is absent from mapping snapshot");
++  const auto& manifest_graph = (*requested_manifest)["graph_revision"];
++  if (asUint(manifest_graph.at("epoch"), "manifest epoch") != pending.request.epoch ||
++      asUint(manifest_graph.at("revision"), "manifest revision") !=
++          pending.request.graph_revision ||
++      requested_manifest->value("geometry_revision", std::string()) !=
++          pending.request.geometry_revision)
++    throw std::runtime_error("mapping manifest does not match authority key");
++
++  if (!index.is_object() || index.value("version", 0) != 1 ||
++      index.value("source_snapshot_id", std::string()) != snapshot_id ||
++      index.value("source_sha256", std::string()) != source_digest ||
++      !index.contains("artifacts") || !index["artifacts"].is_array() ||
++      index["artifacts"].size() != source["manifests"].size())
++    throw std::runtime_error("MOLA index is not coherent with the mapping snapshot");
++  const json* requested_artifact = nullptr;
++  std::unordered_set<std::string> artifact_components;
++  for (const auto& artifact : index["artifacts"]) {
++    if (!artifact.is_object()) throw std::runtime_error("MOLA artifact is invalid");
++    const std::string component = artifact.value("component_id", std::string());
++    if (!component_ids.count(component) || !artifact_components.emplace(component).second)
++      throw std::runtime_error("MOLA index component coverage is invalid");
++    if (component == pending.request.component_id) requested_artifact = &artifact;
++  }
++  if (artifact_components != component_ids || requested_artifact == nullptr)
++    throw std::runtime_error("MOLA index does not cover the coherent snapshot");
++  json canonical_manifest = *requested_manifest;
++  canonical_manifest["schema"] = kSnapshotSchema;
++  const std::string manifest_digest = digest(canonical_manifest);
++  const std::string index_manifest_digest =
++      requested_artifact->value("manifest_sha256", std::string());
++  if (asUint(requested_artifact->at("epoch"), "artifact epoch") !=
++          pending.request.epoch ||
++      asUint(requested_artifact->at("revision"), "artifact revision") !=
++          pending.request.graph_revision ||
++      requested_artifact->value("geometry_revision", std::string()) !=
++          pending.request.geometry_revision ||
++      !isDigest(index_manifest_digest) ||
++      !requested_artifact->contains("planner") ||
++      !(*requested_artifact)["planner"].is_object())
++    throw std::runtime_error("MOLA artifact does not match the mapping manifest");
++
++  const auto& planner = (*requested_artifact)["planner"];
++  const std::string relative_text = planner.value("path", std::string());
++  const std::filesystem::path relative(relative_text);
++  if (relative.empty() || relative.is_absolute() || relative.extension() != ".sdpg" ||
++      relative.parent_path() != "components" || relative.filename().empty())
++    throw std::runtime_error("MOLA planner path is invalid");
++  const std::string expected_grid_digest = planner.value("sha256", std::string());
++  const std::string planner_snapshot_id =
++      planner.value("source_snapshot_id", std::string());
++  const std::string planner_source_digest =
++      planner.value("source_sha256", std::string());
++  if (!isDigest(expected_grid_digest) || !isDigest(planner_snapshot_id) ||
++      !isDigest(planner_source_digest))
++    throw std::runtime_error("MOLA planner identity is invalid");
++  const std::size_t expected_size = asSize(planner.at("size_bytes"),
++                                           "planner size", config_.max_grid_bytes);
++  const auto grid_bytes = stableRead(root / "mola" / relative, config_.max_grid_bytes,
++                                     "MOLA planner grid", deadline);
++  if (grid_bytes.size() != expected_size || digest(grid_bytes) != expected_grid_digest)
++    throw std::runtime_error("MOLA planner grid integrity check failed");
++  // Re-read both transaction markers after the artifact. This catches a
++  // source correction or index replacement during decode preparation.
++  if (stableRead(root / "snapshot.json", config_.max_snapshot_bytes,
++                 "mapping snapshot", deadline) != snapshot_bytes ||
++      stableRead(root / "mola" / "index.json", config_.max_index_bytes,
++                 "MOLA index", deadline) != index_bytes)
++    throw std::runtime_error("MOLA publication changed during validation");
++
++  if (grid_bytes.size() < 12 ||
++      std::memcmp(grid_bytes.data(), "SDMGRID1", 8) != 0)
++    throw std::runtime_error("MOLA planner grid magic is invalid");
++  const std::size_t metadata_size = readU32(grid_bytes, 8);
++  if (metadata_size == 0 || metadata_size > kMetadataLimit ||
++      metadata_size > grid_bytes.size() - 12)
++    throw std::runtime_error("MOLA planner metadata size is invalid");
++  const std::vector<std::uint8_t> metadata_bytes(
++      grid_bytes.begin() + 12, grid_bytes.begin() + 12 + metadata_size);
++  const json metadata = decodeJson(metadata_bytes, "MOLA planner metadata");
++  if (!metadata.is_object() || metadata.value("schema", std::string()) != kGridSchema ||
++      !metadata.contains("graph_version") || !metadata["graph_version"].is_object() ||
++      !metadata.contains("identity") || !metadata["identity"].is_object())
++    throw std::runtime_error("MOLA planner metadata schema is invalid");
++  const auto& graph = metadata["graph_version"];
++  const auto& identity = metadata["identity"];
++  if (graph.size() != 4 || identity.size() != 6 ||
++      !isDigest(graph.value("digest", std::string())) ||
++      !isDigest(identity.value("native_geometry_digest", std::string())) ||
++      graph.value("component_id", std::string()) != pending.request.component_id ||
++      asUint(graph.at("epoch"), "grid epoch") != pending.request.epoch ||
++      asUint(graph.at("revision"), "grid revision") != pending.request.graph_revision ||
++      identity.value("geometry_revision", std::string()) !=
++          pending.request.geometry_revision ||
++      identity.value("canonical_manifest_digest", std::string()) != manifest_digest ||
++      identity.value("source_snapshot_id", std::string()) != planner_snapshot_id ||
++      identity.value("source_sha256", std::string()) != planner_source_digest ||
++      identity.value("reference_frame", std::string()) !=
++          requested_manifest->value("frame_id", std::string()) ||
++      asUint(metadata.at("source_stamp_ns"), "grid source stamp") !=
++          pending.request.source_stamp_ns)
++    throw std::runtime_error("MOLA planner metadata does not match authority identity");
++  const double resolution = metadata.value("resolution_m", 0.0);
++  const double angular_resolution =
++      metadata.value("ray_angular_resolution_rad", 0.0);
++  const double ray_step_fraction = metadata.value("ray_step_fraction", 0.0);
++  if (!std::isfinite(resolution) ||
++      std::abs(resolution - config_.resolution) > 1e-9 ||
++      !std::isfinite(angular_resolution) ||
++      std::abs(angular_resolution - 0.08726646259971647) > 1e-12 ||
++      ray_step_fraction != 0.75)
++    throw std::runtime_error("MOLA planner resolution does not match configuration");
++  static const std::unordered_set<std::string> metadata_fields{
++      "schema", "graph_version", "identity", "source_stamp_ns",
++      "resolution_m", "ray_angular_resolution_rad", "ray_step_fraction",
++      "point_count", "occupied_count", "free_count", "surface_count",
++      "ray_steps", "qualified_ray_keyframes"};
++  if (metadata.size() != metadata_fields.size())
++    throw std::runtime_error("MOLA planner metadata fields are invalid");
++  for (auto it = metadata.begin(); it != metadata.end(); ++it)
++    if (!metadata_fields.count(it.key()))
++      throw std::runtime_error("MOLA planner metadata fields are invalid");
++  if (!requested_manifest->contains("submaps") ||
++      !(*requested_manifest)["submaps"].is_array())
++    throw std::runtime_error("mapping manifest submaps are invalid");
++  std::uint64_t expected_points = 0;
++  std::uint64_t expected_source_stamp = 0;
++  std::size_t expected_qualified = 0;
++  std::size_t provenance_records = 0;
++  for (const auto& submap : (*requested_manifest)["submaps"]) {
++    if (!submap.is_object() || !submap.contains("chunks") ||
++        !submap["chunks"].is_array())
++      throw std::runtime_error("mapping submap provenance is invalid");
++    expected_source_stamp = std::max(
++        expected_source_stamp,
++        asUint(submap.value("observed_at_ns", json(0)), "observed_at_ns"));
++    for (const auto& chunk : submap["chunks"]) {
++      if (!chunk.is_object()) throw std::runtime_error("mapping chunk is invalid");
++      const auto count = asUint(chunk.at("point_count"), "chunk point count");
++      if (count > std::numeric_limits<std::uint64_t>::max() - expected_points)
++        throw std::runtime_error("mapping point count overflow");
++      expected_points += count;
++      if ((++provenance_records & 4095u) == 0) checkDeadline(deadline);
++    }
++    const auto evidence = submap.find("ray_evidence");
++    const auto origins = submap.find("sensor_origins");
++    if (evidence != submap.end() && evidence->is_object() &&
++        evidence->value("return_semantics", std::string()) == "first_return" &&
++        (evidence->value("deskew", std::string()) == "deskewed" ||
++         evidence->value("deskew", std::string()) == "not_required") &&
++        evidence->value("origin_association", std::string()) == "single_capture" &&
++        origins != submap.end() && origins->is_array() && origins->size() == 1)
++      ++expected_qualified;
++  }
++  if (asUint(metadata.at("point_count"), "grid point count") != expected_points ||
++      asUint(metadata.at("source_stamp_ns"), "grid source stamp") !=
++          expected_source_stamp || expected_source_stamp != pending.request.source_stamp_ns)
++    throw std::runtime_error("MOLA planner source count or stamp is invalid");
++  const std::size_t occupied_count = asSize(metadata.at("occupied_count"),
++                                            "occupied count", config_.max_voxels);
++  const std::size_t free_count = asSize(metadata.at("free_count"), "free count",
++                                        config_.max_voxels);
++  if (free_count > config_.max_voxels - occupied_count)
++    throw std::runtime_error("MOLA planner voxel count exceeds its bound");
++  const std::size_t surface_count = asSize(metadata.at("surface_count"),
++                                           "surface count", config_.max_voxels);
++  const std::size_t qualified = asSize(metadata.at("qualified_ray_keyframes"),
++                                       "qualified ray count", config_.max_voxels);
++  const std::size_t ray_steps = asSize(metadata.at("ray_steps"), "ray steps",
++                                       std::numeric_limits<std::size_t>::max());
++  if (qualified != expected_qualified)
++    throw std::runtime_error("MOLA planner qualified-ray provenance is invalid");
++  if (surface_count != expected_points)
++    throw std::runtime_error("MOLA planner surfaces do not match source points");
++  if (qualified == 0 && (free_count != 0 || ray_steps != 0))
++    throw std::runtime_error("MOLA free voxels lack qualified ray evidence");
++  std::size_t expected_body = checkedProduct(occupied_count + free_count, 24u);
++  expected_body = checkedSum(expected_body, checkedProduct(surface_count, 24u));
++  const std::size_t body = 12u + metadata_size;
++  if (body > grid_bytes.size() || expected_body != grid_bytes.size() - body)
++    throw std::runtime_error("MOLA planner body size is invalid");
++
++  std::vector<Voxel> occupied;
++  std::vector<Voxel> free;
++  occupied.reserve(occupied_count);
++  free.reserve(free_count);
++  std::size_t offset = body;
++  auto readVoxels = [&](const std::size_t count, std::vector<Voxel>& out,
++                        const char* label) {
++    for (std::size_t i = 0; i < count; ++i, offset += 24) {
++      const Voxel value{readI64(grid_bytes, offset), readI64(grid_bytes, offset + 8),
++                        readI64(grid_bytes, offset + 16)};
++      if (!out.empty() && !(out.back() < value))
++        throw std::runtime_error(std::string("MOLA ") + label +
++                                 " voxels are not strictly sorted");
++      out.push_back(value);
++      if ((i & 4095u) == 0) checkDeadline(deadline);
++    }
++  };
++  readVoxels(occupied_count, occupied, "occupied");
++  readVoxels(free_count, free, "free");
++  std::size_t occupied_index = 0;
++  std::size_t free_index = 0;
++  while (occupied_index < occupied.size() && free_index < free.size()) {
++    if (occupied[occupied_index] == free[free_index])
++      throw std::runtime_error("MOLA occupied and free voxels overlap");
++    if (occupied[occupied_index] < free[free_index])
++      ++occupied_index;
++    else
++      ++free_index;
++    if (((occupied_index + free_index) & 4095u) == 0) checkDeadline(deadline);
++  }
++  std::array<std::int64_t, 2> prior_xy{};
++  double prior_z = 0.0;
++  bool have_prior = false;
++  for (std::size_t i = 0; i < surface_count; ++i, offset += 24) {
++    const std::int64_t x = readI64(grid_bytes, offset);
++    const std::int64_t y = readI64(grid_bytes, offset + 8);
++    const double z = readF64(grid_bytes, offset + 16);
++    if (!std::isfinite(z) ||
++        (have_prior && (x < prior_xy[0] ||
++                        (x == prior_xy[0] && (y < prior_xy[1] ||
++                         (y == prior_xy[1] && z < prior_z))))))
++      throw std::runtime_error("MOLA surface records are invalid or unsorted");
++    const double scaled_z = std::floor(z / resolution);
++    if (!std::isfinite(scaled_z) ||
++        scaled_z < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
++        scaled_z >= -static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
++        !std::binary_search(occupied.begin(), occupied.end(),
++                            Voxel{x, y, static_cast<std::int64_t>(scaled_z)}))
++      throw std::runtime_error("MOLA surface has no occupied endpoint");
++    prior_xy = {x, y};
++    prior_z = z;
++    have_prior = true;
++    if ((i & 4095u) == 0) checkDeadline(deadline);
++  }
++
++  const auto previous = std::atomic_load(&active_);
++  std::shared_ptr<OctomapMap> map;
++  if (previous != nullptr && previous->artifact_digest == expected_grid_digest) {
++    map = previous->map;
++  } else {
++    OctomapConfig map_config;
++    map_config.resolution = resolution;
++    map_config.max_range = -1.0;
++    map = std::make_shared<OctomapMap>(map_config);
++    const auto install = [&](const std::vector<Voxel>& voxels, const bool occupied_value) {
++      const float log_odds = occupied_value ? map->tree()->getClampingThresMaxLog()
++                                            : map->tree()->getClampingThresMinLog();
++      for (std::size_t i = 0; i < voxels.size(); ++i) {
++        const auto& voxel = voxels[i];
++        const Eigen::Vector3d centre = resolution *
++            (Eigen::Vector3d(static_cast<double>(voxel.x),
++                             static_cast<double>(voxel.y),
++                             static_cast<double>(voxel.z)) +
++             Eigen::Vector3d::Constant(0.5));
++        octomap::OcTreeKey key;
++        if (!centre.allFinite() || !map->tree()->coordToKeyChecked(
++                octomap::point3d(static_cast<float>(centre.x()),
++                                 static_cast<float>(centre.y()),
++                                 static_cast<float>(centre.z())), key))
++          throw std::runtime_error("MOLA voxel lies outside OctoMap bounds");
++        map->tree()->setNodeValue(key, log_odds, true);
++        if ((i & 4095u) == 0) checkDeadline(deadline);
++      }
++    };
++    install(free, false);
++    install(occupied, true);
++    // Maximum-depth leaves are queried directly; a full inner-occupancy pass
++    // is unnecessary and would be one long OctoMap call that cannot observe
++    // the load deadline. Lazy insertion keeps every loop interruptible.
++  }
++  checkDeadline(deadline);
++  // Tree construction may dominate the request. Ensure the source/index pair
++  // is still the pair validated above before this candidate can become live.
++  if (stableRead(root / "snapshot.json", config_.max_snapshot_bytes,
++                 "mapping snapshot", deadline) != snapshot_bytes ||
++      stableRead(root / "mola" / "index.json", config_.max_index_bytes,
++                 "MOLA index", deadline) != index_bytes)
++    throw std::runtime_error("MOLA publication changed during tree construction");
++  auto result = std::make_shared<Snapshot>();
++  result->request = pending.request;
++  result->map = std::move(map);
++  result->artifact_digest = expected_grid_digest;
++  result->validated_at = Clock::now();
++  return result;
++}
++
++std::shared_ptr<const MolaMap::Snapshot> MolaMap::current() const {
++  auto value = std::atomic_load(&active_);
++  if (value == nullptr) return nullptr;
++  if (std::chrono::duration<double>(Clock::now() - value->validated_at).count() >
++      config_.snapshot_ttl_sec) {
++    const std::lock_guard<std::recursive_mutex> lock(publication_mutex_);
++    value = std::atomic_load(&active_);
++    if (value != nullptr &&
++        std::chrono::duration<double>(Clock::now() - value->validated_at).count() >
++            config_.snapshot_ttl_sec) {
++      std::atomic_store(&active_, std::shared_ptr<const Snapshot>());
++      active_generation_.fetch_add(1, std::memory_order_release);
++      return nullptr;
++    }
++  }
++  return value;
++}
++
++double MolaMap::getResolution() const { return config_.resolution; }
++bool MolaMap::getStatus() const { return current() != nullptr; }
++
++VoxelStatus MolaMap::getVoxelStatus(const Eigen::Vector3d& position) const {
++  const auto snapshot = current();
++  if (snapshot == nullptr) return VoxelStatus::kUnknown;
++  const Eigen::Vector3d component =
++      snapshot->request.component_from_navigation * position;
++  return canRepresent(*snapshot->map, component)
++             ? snapshot->map->getVoxelStatus(component)
++             : VoxelStatus::kUnknown;
++}
++
++VoxelStatus MolaMap::getRayStatus(const Eigen::Vector3d& view_point,
++                                  const Eigen::Vector3d& voxel_to_test,
++                                  const bool stop_at_unknown_voxel) const {
++  Eigen::Vector3d ignored;
++  return getRayStatus(view_point, voxel_to_test, stop_at_unknown_voxel, ignored);
++}
++
++VoxelStatus MolaMap::getRayStatus(const Eigen::Vector3d& view_point,
++                                  const Eigen::Vector3d& voxel_to_test,
++                                  const bool stop_at_unknown_voxel,
++                                  Eigen::Vector3d& end_voxel) const {
++  const auto snapshot = current();
++  if (snapshot == nullptr) {
++    end_voxel = view_point;
++    return VoxelStatus::kUnknown;
++  }
++  const Eigen::Vector3d component_start =
++      snapshot->request.component_from_navigation * view_point;
++  const Eigen::Vector3d component_target =
++      snapshot->request.component_from_navigation * voxel_to_test;
++  if (!canRepresent(*snapshot->map, component_start) ||
++      !canRepresent(*snapshot->map, component_target)) {
++    end_voxel = view_point;
++    return VoxelStatus::kUnknown;
++  }
++  Eigen::Vector3d component_end;
++  const auto status = snapshot->map->getRayStatus(
++      component_start, component_target, stop_at_unknown_voxel, component_end);
++  end_voxel = snapshot->request.component_from_navigation.inverse() * component_end;
++  return status;
++}
++
++VoxelStatus MolaMap::getBoxStatus(const Eigen::Vector3d& center,
++                                  const Eigen::Vector3d& size,
++                                  const bool stop_at_unknown_voxel) const {
++  const auto snapshot = current();
++  if (snapshot == nullptr) return VoxelStatus::kUnknown;
++  if (!center.allFinite() || !size.allFinite() || (size.array() < 0.0).any())
++    return VoxelStatus::kUnknown;
++  const auto& transform = snapshot->request.component_from_navigation;
++  return snapshot->map->getBoxStatus(transform * center,
++                                     enclosingSize(transform.linear(), size),
++                                     stop_at_unknown_voxel);
++}
++
++VoxelStatus MolaMap::getPathStatus(const Eigen::Vector3d& start,
++                                   const Eigen::Vector3d& end,
++                                   const Eigen::Vector3d& box_size,
++                                   const bool stop_at_unknown_voxel) const {
++  const auto snapshot = current();
++  if (snapshot == nullptr) return VoxelStatus::kUnknown;
++  if (!start.allFinite() || !end.allFinite() || !box_size.allFinite() ||
++      (box_size.array() < 0.0).any())
++    return VoxelStatus::kUnknown;
++  const auto& transform = snapshot->request.component_from_navigation;
++  return snapshot->map->getPathStatus(transform * start, transform * end,
++                                      enclosingSize(transform.linear(), box_size),
++                                      stop_at_unknown_voxel);
++}
++
++VoxelStatus MolaMap::getStrictBoxStatus(const Eigen::Vector3d& center,
++                                        const Eigen::Vector3d& size) const {
++  const auto snapshot = current();
++  if (snapshot == nullptr) return VoxelStatus::kUnknown;
++  if (!center.allFinite() || !size.allFinite() || (size.array() < 0.0).any())
++    return VoxelStatus::kUnknown;
++  const auto& transform = snapshot->request.component_from_navigation;
++  return snapshot->map->getStrictBoxStatus(
++      transform * center, enclosingSize(transform.linear(), size));
++}
++
++VoxelStatus MolaMap::getStrictPathStatus(
++    const Eigen::Vector3d& start, const Eigen::Vector3d& end,
++    const Eigen::Vector3d& box_size) const {
++  const auto snapshot = current();
++  if (snapshot == nullptr) return VoxelStatus::kUnknown;
++  if (!start.allFinite() || !end.allFinite() || !box_size.allFinite() ||
++      (box_size.array() < 0.0).any())
++    return VoxelStatus::kUnknown;
++  const auto& transform = snapshot->request.component_from_navigation;
++  return snapshot->map->getStrictPathStatus(
++      transform * start, transform * end,
++      enclosingSize(transform.linear(), box_size));
++}
++
++void MolaMap::getScanStatus(
++    const Eigen::Vector3d& pos,
++    const std::vector<Eigen::Vector3d>& multiray_endpoints, GainCounts& gain,
++    std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
++    const SensorModel& sensor) {
++  const auto snapshot = current();
++  gain = GainCounts{};
++  voxel_log.clear();
++  if (snapshot == nullptr) return;
++  const auto& transform = snapshot->request.component_from_navigation;
++  std::vector<Eigen::Vector3d> endpoints = multiray_endpoints;
++  transformPoints(transform, endpoints);
++  snapshot->map->getScanStatus(transform * pos, endpoints, gain, voxel_log, sensor);
++  const Eigen::Isometry3d inverse = transform.inverse();
++  for (auto& item : voxel_log) item.first = inverse * item.first;
++}
++
++void MolaMap::getScanStatusIterative(
++    const Eigen::Vector3d& pos,
++    const std::vector<Eigen::Vector3d>& multiray_endpoints, GainCounts& gain,
++    std::vector<std::pair<Eigen::Vector3d, VoxelStatus>>& voxel_log,
++    const SensorModel& sensor) {
++  const auto snapshot = current();
++  gain = GainCounts{};
++  voxel_log.clear();
++  if (snapshot == nullptr) return;
++  const auto& transform = snapshot->request.component_from_navigation;
++  std::vector<Eigen::Vector3d> endpoints = multiray_endpoints;
++  transformPoints(transform, endpoints);
++  snapshot->map->getScanStatusIterative(transform * pos, endpoints, gain, voxel_log,
++                                        sensor);
++  const Eigen::Isometry3d inverse = transform.inverse();
++  for (auto& item : voxel_log) item.first = inverse * item.first;
++}
++
++bool MolaMap::augmentFreeBox(const Eigen::Vector3d&, const Eigen::Vector3d&) {
++  // Only the qualified free set in SDMGRID1 may establish known free space.
++  return false;
++}
++void MolaMap::augmentFreeFrustum() {}
++
++void MolaMap::resetMap() {
++  const std::lock_guard<std::recursive_mutex> publication_lock(
++      publication_mutex_);
++  std::lock_guard<std::mutex> lock(request_mutex_);
++  pending_.reset();
++  ++generation_;
++  if (std::atomic_load(&active_) != nullptr) {
++    std::atomic_store(&active_, std::shared_ptr<const Snapshot>());
++    active_generation_.fetch_add(1, std::memory_order_release);
++  }
++}
++
++void MolaMap::extractLocalMap(
++    const Eigen::Vector3d& center, const Eigen::Vector3d& bounding_box_size,
++    std::vector<Eigen::Vector3d>& occupied_voxels,
++    std::vector<Eigen::Vector3d>& free_voxels) {
++  occupied_voxels.clear();
++  free_voxels.clear();
++  const auto snapshot = current();
++  if (snapshot == nullptr) return;
++  const auto& transform = snapshot->request.component_from_navigation;
++  snapshot->map->extractLocalMap(transform * center,
++      enclosingSize(transform.linear(), bounding_box_size), occupied_voxels, free_voxels);
++  const Eigen::Isometry3d inverse = transform.inverse();
++  transformPoints(inverse, occupied_voxels);
++  transformPoints(inverse, free_voxels);
++  const auto outside = [&](const Eigen::Vector3d& p) {
++    return ((p - center).array().abs() > bounding_box_size.array() / 2.0).any();
++  };
++  occupied_voxels.erase(std::remove_if(occupied_voxels.begin(), occupied_voxels.end(),
++                                       outside), occupied_voxels.end());
++  free_voxels.erase(std::remove_if(free_voxels.begin(), free_voxels.end(), outside),
++                    free_voxels.end());
++}
++
++void MolaMap::extractLocalMapAlongAxis(
++    const Eigen::Vector3d& center, const Eigen::Vector3d& axis,
++    const Eigen::Vector3d& bounding_box_size,
++    std::vector<Eigen::Vector3d>& occupied_voxels,
++    std::vector<Eigen::Vector3d>& free_voxels) {
++  const double radius = bounding_box_size.norm();
++  extractLocalMap(center, Eigen::Vector3d::Constant(radius), occupied_voxels,
++                  free_voxels);
++  const Eigen::Vector3d direction = axis.norm() > 1e-9 ? axis.normalized()
++                                                       : Eigen::Vector3d::UnitX();
++  const Eigen::Matrix3d frame = Eigen::Quaterniond::FromTwoVectors(
++      Eigen::Vector3d::UnitX(), direction).toRotationMatrix();
++  const auto outside = [&](const Eigen::Vector3d& p) {
++    return ((frame.transpose() * (p - center)).array().abs() >
++            bounding_box_size.array() / 2.0).any();
++  };
++  occupied_voxels.erase(std::remove_if(occupied_voxels.begin(), occupied_voxels.end(),
++                                       outside), occupied_voxels.end());
++  free_voxels.erase(std::remove_if(free_voxels.begin(), free_voxels.end(), outside),
++                    free_voxels.end());
++}
++
++void MolaMap::getLocalPointcloud(const Eigen::Vector3d& center, const double range,
++                                 const double yaw,
++                                 std::vector<Eigen::Vector3d>& points,
++                                 const bool include_unknown_voxels) {
++  points.clear();
++  const auto snapshot = current();
++  if (snapshot == nullptr) return;
++  const auto& transform = snapshot->request.component_from_navigation;
++  snapshot->map->getLocalPointcloud(transform * center, range, yaw, points,
++                                    include_unknown_voxels);
++  transformPoints(transform.inverse(), points);
++}
++
++void MolaMap::getFreeSpacePointCloud(
++    const std::vector<Eigen::Vector3d>& multiray_endpoints, const StateVec& state,
++    std::vector<Eigen::Vector3d>& points) {
++  points.clear();
++  const auto snapshot = current();
++  if (snapshot == nullptr) return;
++  const auto& transform = snapshot->request.component_from_navigation;
++  std::vector<Eigen::Vector3d> endpoints = multiray_endpoints;
++  transformPoints(transform, endpoints);
++  StateVec component_state = state;
++  component_state.head<3>() = transform * state.head<3>();
++  snapshot->map->getFreeSpacePointCloud(endpoints, component_state, points);
++  transformPoints(transform.inverse(), points);
++}
++
++void MolaMap::setRaycastingParams(bool, double) {}
++void MolaMap::setRobotRadius(double) {}
++
++}  // namespace mgg
+diff --git a/ros2/src/mgg_map_octomap/test/mola_map_probe.cpp b/ros2/src/mgg_map_octomap/test/mola_map_probe.cpp
+new file mode 100644
+index 0000000..30e30fe
+--- /dev/null
++++ b/ros2/src/mgg_map_octomap/test/mola_map_probe.cpp
+@@ -0,0 +1,104 @@
++#include <nlohmann/json.hpp>
++
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "mgg_map_octomap/mola_map.h"
++
++namespace {
++using json = nlohmann::json;
++
++Eigen::Isometry3d transform(const json& value) {
++  if (!value.is_array() || value.size() != 4)
++    throw std::invalid_argument("T_component_navigation must be 4x4");
++  Eigen::Matrix4d matrix;
++  for (std::size_t row = 0; row < 4; ++row) {
++    if (!value[row].is_array() || value[row].size() != 4)
++      throw std::invalid_argument("T_component_navigation must be 4x4");
++    for (std::size_t column = 0; column < 4; ++column)
++      matrix(row, column) = value[row][column].get<double>();
++  }
++  Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
++  result.matrix() = matrix;
++  return result;
++}
++
++std::vector<Eigen::Vector3d> points(const json& value) {
++  const json defaults = json::array(
++      {json::array({2.0, 0.0, 0.6}), json::array({3.0, 0.0, 0.6}),
++       json::array({4.0, 0.0, 0.6})});
++  const json& source = value.contains("points") ? value["points"] : defaults;
++  if (!source.is_array() || source.size() > 4096)
++    throw std::invalid_argument("points must be a bounded array");
++  std::vector<Eigen::Vector3d> result;
++  result.reserve(source.size());
++  for (const auto& point : source) {
++    if (!point.is_array() || point.size() != 3)
++      throw std::invalid_argument("points must contain XYZ triples");
++    result.emplace_back(point[0].get<double>(), point[1].get<double>(),
++                        point[2].get<double>());
++  }
++  return result;
++}
++
++const char* name(const mgg::VoxelStatus status) {
++  switch (status) {
++    case mgg::VoxelStatus::kFree: return "free";
++    case mgg::VoxelStatus::kOccupied: return "occupied";
++    case mgg::VoxelStatus::kUnknown: return "unknown";
++  }
++  return "unknown";
++}
++}  // namespace
++
++int main(int argc, char** argv) {
++  try {
++    if (argc != 3)
++      throw std::invalid_argument("usage: mola_map_probe PEER_ROOT REQUEST.json");
++    std::ifstream input(argv[2]);
++    if (!input) throw std::runtime_error("cannot open request JSON");
++    json request;
++    input >> request;
++    mgg::MolaMapConfig config;
++    config.peer_root = std::filesystem::absolute(argv[1]).string();
++    config.resolution = request.value("resolution_m", 0.2);
++    config.snapshot_ttl_sec = request.value("snapshot_ttl_sec", 3.0);
++    config.max_load_time = std::chrono::milliseconds(
++        request.value("max_load_ms", 2000));
++    mgg::MolaMap provider(config);
++    mgg::MolaSnapshotRequest snapshot;
++    snapshot.component_id = request.at("component_id").get<std::string>();
++    snapshot.epoch = request.at("epoch").get<std::uint64_t>();
++    snapshot.graph_revision = request.at("graph_revision").get<std::uint64_t>();
++    snapshot.geometry_revision =
++        request.at("geometry_revision").get<std::string>();
++    snapshot.source_stamp_ns = request.at("source_stamp_ns").get<std::uint64_t>();
++    snapshot.component_from_navigation =
++        transform(request.at("T_component_navigation"));
++    provider.requestSnapshot(snapshot);
++    const auto deadline = std::chrono::steady_clock::now() +
++                          config.max_load_time + std::chrono::seconds(1);
++    while (!provider.getStatus() && provider.lastError().empty() &&
++           std::chrono::steady_clock::now() < deadline)
++      std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    json output{{"status", provider.getStatus() ? "ready" : "unavailable"},
++                {"detail", provider.lastError()},
++                {"generation", provider.activeGeneration()},
++                {"voxels", json::array()}};
++    if (provider.getStatus())
++      for (const auto& point : points(request))
++        output["voxels"].push_back(name(provider.getVoxelStatus(point)));
++    std::cout << output.dump() << '\n';
++    return provider.getStatus() ? 0 : 2;
++  } catch (const std::exception& error) {
++    std::cout << json{{"status", "error"}, {"detail", error.what()}}.dump()
++              << '\n';
++    return 1;
++  }
++}
+diff --git a/ros2/src/mgg_map_octomap/test/test_mola_map.cpp b/ros2/src/mgg_map_octomap/test/test_mola_map.cpp
+new file mode 100644
+index 0000000..90639cb
+--- /dev/null
++++ b/ros2/src/mgg_map_octomap/test/test_mola_map.cpp
+@@ -0,0 +1,446 @@
++#include <gtest/gtest.h>
++
++#include <nlohmann/json.hpp>
++#include <openssl/evp.h>
++
++#include <array>
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <functional>
++#include <iomanip>
++#include <limits>
++#include <sstream>
++#include <string>
++#include <thread>
++#include <vector>
++#include <unistd.h>
++
++#include "mgg_core/graph_manager.h"
++#include "mgg_core/grid_graph.h"
++#include "mgg_map_octomap/mola_map.h"
++
++namespace {
++using json = nlohmann::json;
++using mgg::MolaMap;
++using mgg::MolaMapConfig;
++using mgg::MolaSnapshotRequest;
++using mgg::VoxelStatus;
++
++struct Voxel {
++  std::int64_t x;
++  std::int64_t y;
++  std::int64_t z;
++};
++
++std::string sha256(const std::string& bytes) {
++  std::array<unsigned char, EVP_MAX_MD_SIZE> output{};
++  unsigned int size = 0;
++  EXPECT_EQ(EVP_Digest(bytes.data(), bytes.size(), output.data(), &size,
++                       EVP_sha256(), nullptr), 1);
++  std::ostringstream text;
++  text << std::hex << std::setfill('0');
++  for (unsigned int i = 0; i < size; ++i)
++    text << std::setw(2) << static_cast<unsigned int>(output[i]);
++  return text.str();
++}
++
++void u32(std::string& bytes, std::uint32_t value) {
++  for (unsigned int shift = 0; shift < 32; shift += 8)
++    bytes.push_back(static_cast<char>((value >> shift) & 0xff));
++}
++
++void u64(std::string& bytes, std::uint64_t value) {
++  for (unsigned int shift = 0; shift < 64; shift += 8)
++    bytes.push_back(static_cast<char>((value >> shift) & 0xff));
++}
++
++void i64(std::string& bytes, std::int64_t value) {
++  std::uint64_t raw = 0;
++  std::memcpy(&raw, &value, sizeof(raw));
++  u64(bytes, raw);
++}
++
++void f64(std::string& bytes, double value) {
++  std::uint64_t raw = 0;
++  std::memcpy(&raw, &value, sizeof(raw));
++  u64(bytes, raw);
++}
++
++void write(const std::filesystem::path& path, const std::string& bytes) {
++  std::ofstream output(path, std::ios::binary | std::ios::trunc);
++  ASSERT_TRUE(output.good());
++  output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
++  ASSERT_TRUE(output.good());
++}
++
++std::vector<Voxel> freeBlock() {
++  std::vector<Voxel> result;
++  for (std::int64_t x = -10; x <= 10; ++x)
++    for (std::int64_t y = -4; y <= 4; ++y)
++      for (std::int64_t z = -1; z <= 2; ++z) result.push_back({x, y, z});
++  return result;
++}
++
++class Publication {
++ public:
++  Publication() {
++    root = std::filesystem::temp_directory_path() /
++           ("mgg-mola-map-test-" + std::to_string(::getpid()) + "-" +
++            std::to_string(sequence++));
++    std::filesystem::create_directories(root / "mola" / "components");
++  }
++  ~Publication() { std::filesystem::remove_all(root); }
++
++  MolaSnapshotRequest publish(std::uint64_t revision,
++                              std::vector<Voxel> occupied,
++                              std::vector<Voxel> free,
++                              bool qualified = true,
++                              Eigen::Isometry3d transform =
++                                  Eigen::Isometry3d::Identity(),
++                              std::string artifact_snapshot_id = {},
++                              std::string artifact_source_digest = {}) {
++    std::sort(occupied.begin(), occupied.end(), less);
++    std::sort(free.begin(), free.end(), less);
++    free.erase(std::remove_if(free.begin(), free.end(), [&](const Voxel& value) {
++                 return std::binary_search(occupied.begin(), occupied.end(), value, less);
++               }), free.end());
++    const std::string geometry(64, static_cast<char>('a' + revision));
++    const std::string snapshot_id(64, static_cast<char>('1' + revision));
++    const std::uint64_t source_stamp = 1000 + revision;
++    const std::size_t points = occupied.size();
++    const json chunk{{"sha256", std::string(64, 'c')},
++                     {"size_bytes", 16 + 12 * points},
++                     {"point_count", points},
++                     {"encoding", "application/vnd.swarmdeck.xyz-f32.v1"}};
++    json submap{{"observed_at_ns", source_stamp}, {"chunks", json::array({chunk})}};
++    if (qualified) {
++      submap["sensor_origins"] = json::array({json::array({0.0, 0.0, 0.0})});
++      submap["ray_evidence"] = {
++          {"return_semantics", "first_return"},
++          {"deskew", "not_required"},
++          {"origin_association", "single_capture"}};
++    }
++    json manifest{{"map_id", "onboard"},
++                  {"layer_id", "persistent_geometry"},
++                  {"frame_id", "component_test"},
++                  {"graph_revision", {{"component_id", "component:test"},
++                                      {"epoch", 1}, {"revision", revision}}},
++                  {"geometry_revision", geometry},
++                  {"submaps", json::array({submap})},
++                  {"chunks", json::array({chunk})},
++                  {"tombstones", json::array()}};
++    json canonical_manifest = manifest;
++    canonical_manifest["schema"] = "swarmdeck.autonomy.v1";
++    json source{{"schema", "swarmdeck.autonomy.v1"},
++                {"snapshot_id", snapshot_id},
++                {"generated_at_ns", source_stamp},
++                {"manifests", json::array({manifest})}};
++    const std::string source_bytes = source.dump();
++    const std::string source_digest = sha256(source_bytes);
++    if (artifact_snapshot_id.empty()) artifact_snapshot_id = snapshot_id;
++    if (artifact_source_digest.empty()) artifact_source_digest = source_digest;
++
++    json metadata{
++        {"schema", "swarmdeck.mola_planner_grid.v1"},
++        {"graph_version", {{"component_id", "component:test"}, {"epoch", 1},
++                           {"revision", revision}, {"digest", std::string(64, 'd')}}},
++        {"identity", {{"geometry_revision", geometry},
++                      {"native_geometry_digest", std::string(64, 'e')},
++                      {"canonical_manifest_digest", sha256(canonical_manifest.dump())},
++                      {"source_snapshot_id", artifact_snapshot_id},
++                      {"source_sha256", artifact_source_digest},
++                      {"reference_frame", "component_test"}}},
++        {"source_stamp_ns", source_stamp},
++        {"resolution_m", 0.2},
++        {"ray_angular_resolution_rad", 0.08726646259971647},
++        {"ray_step_fraction", 0.75},
++        {"point_count", points},
++        {"occupied_count", occupied.size()},
++        {"free_count", free.size()},
++        {"surface_count", points},
++        {"ray_steps", free.empty() ? 0 : free.size()},
++        {"qualified_ray_keyframes", qualified ? 1 : 0}};
++    const std::string metadata_bytes = metadata.dump();
++    std::string grid("SDMGRID1", 8);
++    u32(grid, static_cast<std::uint32_t>(metadata_bytes.size()));
++    grid += metadata_bytes;
++    for (const auto& voxel : occupied) {
++      i64(grid, voxel.x); i64(grid, voxel.y); i64(grid, voxel.z);
++    }
++    for (const auto& voxel : free) {
++      i64(grid, voxel.x); i64(grid, voxel.y); i64(grid, voxel.z);
++    }
++    for (const auto& voxel : occupied) {
++      i64(grid, voxel.x); i64(grid, voxel.y); f64(grid, (voxel.z + 0.5) * 0.2);
++    }
++    const std::string grid_digest = sha256(grid);
++    json index{{"version", 1},
++               {"source_snapshot_id", snapshot_id},
++               {"source_sha256", source_digest},
++               {"generated_at_ns", source_stamp},
++               {"artifacts", json::array({
++                   {{"component_id", "component:test"}, {"epoch", 1},
++                    {"revision", revision}, {"geometry_revision", geometry},
++                    // This is Python's canonical manifest digest in a real
++                    // worker publication. It deliberately differs from the
++                    // native nlohmann canonical digest carried by SDPG.
++                    {"manifest_sha256", std::string(64, '9')},
++                    {"path", "components/native.mola"}, {"size_bytes", 1},
++                    {"sha256", std::string(64, 'f')},
++                    {"planner", {{"path", "components/native.sdpg"},
++                                 {"size_bytes", grid.size()},
++                                 {"sha256", grid_digest},
++                                 {"source_sha256", artifact_source_digest},
++                                 {"source_snapshot_id", artifact_snapshot_id}}}}})}};
++    write(root / "mola" / "components" / "native.sdpg", grid);
++    write(root / "snapshot.json", source_bytes);
++    write(root / "mola" / "index.json", index.dump());
++    return {"component:test", 1, revision, geometry, source_stamp, transform};
++  }
++
++  std::filesystem::path root;
++
++ private:
++  static bool less(const Voxel& a, const Voxel& b) {
++    if (a.x != b.x) return a.x < b.x;
++    if (a.y != b.y) return a.y < b.y;
++    return a.z < b.z;
++  }
++  static int sequence;
++};
++int Publication::sequence = 0;
++
++bool waitFor(const std::function<bool()>& predicate) {
++  for (int i = 0; i < 200; ++i) {
++    if (predicate()) return true;
++    std::this_thread::sleep_for(std::chrono::milliseconds(5));
++  }
++  return false;
++}
++
++MolaMapConfig config(const Publication& publication) {
++  MolaMapConfig value;
++  value.peer_root = publication.root.string();
++  value.snapshot_ttl_sec = 2.0;
++  value.max_load_time = std::chrono::milliseconds(1000);
++  return value;
++}
++
++TEST(MolaMap, LoadsQualifiedTernaryMapAndAppliesFullSe3) {
++  Publication publication;
++  Eigen::Isometry3d component_from_navigation = Eigen::Isometry3d::Identity();
++  component_from_navigation.linear() =
++      Eigen::AngleAxisd(M_PI / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
++  component_from_navigation.translation() = Eigen::Vector3d(1.0, 2.0, 0.4);
++  auto free = freeBlock();
++  const Voxel endpoint{10, 0, 2};
++  free.erase(std::remove_if(free.begin(), free.end(), [&](const Voxel& value) {
++               return value.x == endpoint.x && value.y == endpoint.y &&
++                      value.z == endpoint.z;
++             }), free.end());
++  const auto request = publication.publish(0, {endpoint}, free, true,
++                                           component_from_navigation);
++  MolaMap provider(config(publication));
++  mgg::MapInterface* map = &provider;
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return map->getStatus(); })) << provider.lastError();
++  const Eigen::Vector3d occupied_component(2.1, 0.1, 0.5);
++  const Eigen::Vector3d occupied_navigation =
++      component_from_navigation.inverse() * occupied_component;
++  EXPECT_EQ(map->getVoxelStatus(occupied_navigation), VoxelStatus::kOccupied);
++  const Eigen::Vector3d free_navigation =
++      component_from_navigation.inverse() * Eigen::Vector3d(0.1, 0.1, 0.1);
++  EXPECT_EQ(map->getVoxelStatus(free_navigation), VoxelStatus::kFree);
++  EXPECT_EQ(map->getVoxelStatus(free_navigation + Eigen::Vector3d(0, 0, 20)),
++            VoxelStatus::kUnknown);
++  EXPECT_FALSE(map->augmentFreeBox(free_navigation + Eigen::Vector3d(5, 0, 0),
++                                   Eigen::Vector3d::Ones()));
++}
++
++TEST(MolaMap, InvalidAndUnrepresentableQueriesRemainUnknown) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  const auto request = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++
++  const double nan = std::numeric_limits<double>::quiet_NaN();
++  EXPECT_EQ(provider.getVoxelStatus({nan, 0.0, 0.0}), VoxelStatus::kUnknown);
++  EXPECT_EQ(provider.getVoxelStatus({1e12, 0.0, 0.0}), VoxelStatus::kUnknown);
++  Eigen::Vector3d reached;
++  EXPECT_EQ(provider.getRayStatus({0.1, 0.1, 0.1}, {nan, 0.0, 0.0}, true,
++                                  reached),
++            VoxelStatus::kUnknown);
++  EXPECT_TRUE(reached.isApprox(Eigen::Vector3d(0.1, 0.1, 0.1)));
++  EXPECT_EQ(provider.getRayStatus({0.1, 0.1, 0.1}, {1e12, 0.0, 0.0}, false,
++                                  reached),
++            VoxelStatus::kUnknown);
++}
++
++TEST(MolaMap, CorrectedSnapshotAtomicallyRetractsOldGeometry) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  auto first = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(first);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); })) << provider.lastError();
++  EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}), VoxelStatus::kOccupied);
++
++  auto second = publication.publish(1, {{8, 0, 0}}, freeBlock());
++  provider.requestSnapshot(second);
++  // The fixture is small enough that the worker may already have installed
++  // the correction when requestSnapshot returns. If it has, it must be the
++  // new geometry; the retracted tree may never reappear.
++  if (provider.getStatus()) {
++    EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}), VoxelStatus::kFree);
++    EXPECT_EQ(provider.getVoxelStatus({1.7, 0.1, 0.1}),
++              VoxelStatus::kOccupied);
++  }
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); })) << provider.lastError();
++  EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}), VoxelStatus::kFree);
++  EXPECT_EQ(provider.getVoxelStatus({1.7, 0.1, 0.1}), VoxelStatus::kOccupied);
++
++  std::filesystem::remove(publication.root / "mola" / "index.json");
++  provider.requestSnapshot(second);
++  ASSERT_TRUE(waitFor([&]() {
++    return !provider.getStatus() && !provider.lastError().empty();
++  }));
++  EXPECT_NE(provider.lastError().find("cannot open MOLA index"), std::string::npos);
++}
++
++TEST(MolaMap, ReadLeaseKeepsOneSnapshotAcrossAQueryTransaction) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  const auto first = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(first);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++
++  const auto second = publication.publish(1, {{8, 0, 0}}, freeBlock());
++  std::atomic<bool> correction_started{false};
++  std::atomic<bool> correction_returned{false};
++  std::thread correction;
++  {
++    auto lease = provider.acquireReadLease();
++    correction = std::thread([&]() {
++      correction_started.store(true, std::memory_order_release);
++      provider.requestSnapshot(second);
++      correction_returned.store(true, std::memory_order_release);
++    });
++    ASSERT_TRUE(waitFor([&]() {
++      return correction_started.load(std::memory_order_acquire);
++    }));
++    std::this_thread::sleep_for(std::chrono::milliseconds(20));
++    EXPECT_FALSE(correction_returned.load(std::memory_order_acquire));
++    EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++              VoxelStatus::kOccupied);
++    EXPECT_EQ(provider.getVoxelStatus({1.7, 0.1, 0.1}), VoxelStatus::kFree);
++  }
++  correction.join();
++  EXPECT_FALSE(provider.getStatus());
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}), VoxelStatus::kFree);
++  EXPECT_EQ(provider.getVoxelStatus({1.7, 0.1, 0.1}),
++            VoxelStatus::kOccupied);
++}
++
++TEST(MolaMap, RejectsFreeCellsWithoutQualifiedRayEvidence) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  const auto request = publication.publish(0, {{5, 0, 0}}, {{0, 0, 0}}, false);
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return !provider.lastError().empty(); }));
++  EXPECT_FALSE(provider.getStatus());
++  EXPECT_NE(provider.lastError().find("qualified ray"), std::string::npos);
++  EXPECT_EQ(provider.getVoxelStatus({0.1, 0.1, 0.1}), VoxelStatus::kUnknown);
++}
++
++TEST(MolaMap, AcceptsVerifiedReuseOfHistoricalComponentArtifact) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  // A global snapshot can advance because another component changed while
++  // this component's immutable artifact is reused. The index binds current
++  // source bytes; planner/SDPG provenance consistently names the historical
++  // source that originally produced this same component artifact.
++  const auto request = publication.publish(
++      0, {{5, 0, 0}}, freeBlock(), true, Eigen::Isometry3d::Identity(),
++      std::string(64, '7'), std::string(64, '8'));
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++            VoxelStatus::kOccupied);
++}
++
++TEST(MolaMap, HeartbeatRefreshDoesNotChurnButExpiryAndRecoveryDo) {
++  Publication publication;
++  auto map_config = config(publication);
++  map_config.snapshot_ttl_sec = 0.1;
++  MolaMap provider(map_config);
++  const auto request = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  const auto loaded_generation = provider.activeGeneration();
++  provider.requestSnapshot(request);
++  std::this_thread::sleep_for(std::chrono::milliseconds(30));
++  EXPECT_TRUE(provider.getStatus());
++  EXPECT_EQ(provider.activeGeneration(), loaded_generation);
++
++  std::this_thread::sleep_for(std::chrono::milliseconds(120));
++  EXPECT_FALSE(provider.getStatus());
++  EXPECT_GT(provider.activeGeneration(), loaded_generation);
++  const auto expired_generation = provider.activeGeneration();
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  EXPECT_GT(provider.activeGeneration(), expired_generation);
++}
++
++TEST(MolaMap, DrivesCoreGridConstructionThroughMapInterface) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  const auto request = publication.publish(0, {{10, 10, 10}}, freeBlock());
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); })) << provider.lastError();
++
++  mgg::RobotParams robot;
++  robot.type = mgg::RobotType::kAerialRobot;
++  robot.size = Eigen::Vector3d::Zero();
++  mgg::PlanningParams planning;
++  planning.edge_length_min = 0.05;
++  planning.edge_length_max = 1.0;
++  planning.edge_overshoot = 0.0;
++  planning.nearest_range = 0.5;
++  planning.nearest_range_min = 0.05;
++  planning.nearest_range_max = 2.0;
++  planning.nearest_range_z = 1.0;
++  planning.num_vertices_max = 100;
++  planning.num_edges_max = 1000;
++  planning.num_loops_max = 1000;
++  mgg::ExpandContext context;
++  context.map = &provider;
++  context.robot = &robot;
++  context.planning = &planning;
++  context.robot_box_size = Eigen::Vector3d::Zero();
++  mgg::GraphManager graph;
++  graph.addVertex(new mgg::Vertex(0, mgg::StateVec(0.1, 0.1, 0.1, 0.0)));
++  mgg::GridGraphParams grid;
++  grid.min_val = {-0.4, -0.4, 0.0};
++  grid.max_val = {0.4, 0.4, 0.0};
++  grid.resolution = {0.2, 0.2, 0.2};
++  const auto result = mgg::buildGridGraph(
++      graph, mgg::StateVec(0.1, 0.1, 0.1, 0.0), grid, context, 0.0);
++  EXPECT_EQ(result.status, mgg::GridGraphStatus::kOk);
++  EXPECT_GT(result.free_cells, 0);
++  EXPECT_GT(result.vertices_added, 0);
++}
++
++}  // namespace
+diff --git a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+index cdfe788..d41e812 100644
+--- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
++++ b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+@@ -51,6 +51,7 @@
+ #include "mgg_core/ground_projection.h"
+ #include "mgg_core/params.h"
+ #include "mgg_core/sensor_params.h"
++#include "mgg_map_octomap/mola_map.h"
+ #include "mgg_map_octomap/octomap_map.h"
+ 
+ namespace mgg_ros {
+@@ -123,12 +124,17 @@ class PlannerNode : public rclcpp::Node {
+   bool validateObjectiveStartSupport(
+       const mgg::StateVec& anchor, const mgg::StateVec& supported,
+       std::vector<mgg::StateVec>& checked) const;
++  void refreshMolaRevision();
+ 
+   mgg::ExpandContext makeContext();
+   mgg::GainContext makeGainContext();
+ 
+   // Core state. None of these know about ROS.
+-  std::unique_ptr<mgg::OctomapMap> map_;
++  std::unique_ptr<mgg::MapInterface> map_;
++  mgg::OctomapMap* cloud_map_ = nullptr;
++  mgg::MolaMap* mola_map_ = nullptr;
++  std::string map_backend_ = "cloud_octomap";
++  std::uint64_t observed_mola_generation_ = 0;
+   std::unique_ptr<mgg::GroundProjection> ground_;
+   std::unique_ptr<mgg::GeofenceManager> geofence_;
+   std::shared_ptr<mgg::GraphManager> local_graph_;
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index d3568cc..f6d4fea 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -6,6 +6,7 @@
+ #include <cstdio>
+ #include <future>
+ #include <regex>
++#include <stdexcept>
+ #include <geometry_msgs/msg/transform_stamped.hpp>
+ #include <sensor_msgs/msg/point_cloud2.hpp>
+ #include <sensor_msgs/point_cloud2_iterator.hpp>
+@@ -38,10 +39,53 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+ 
+   loadParameters();
+ 
+-  mgg::OctomapConfig map_cfg;
+-  map_cfg.resolution = declareOrGet<double>(this, "map.resolution", 0.2);
+-  map_cfg.max_range = declareOrGet<double>(this, "map.max_range", 20.0);
+-  map_ = std::make_unique<mgg::OctomapMap>(map_cfg);
++  const double map_resolution = declareOrGet<double>(this, "map.resolution", 0.2);
++  map_backend_ = declareOrGet<std::string>(this, "map.backend", map_backend_);
++  indexed_map_query_service_ = declareOrGet<std::string>(
++      this, "indexed_map_query_service", indexed_map_query_service_);
++  if (map_backend_ == "mola_snapshot" && indexed_map_query_service_.empty()) {
++    throw std::invalid_argument(
++        "map.backend=mola_snapshot requires indexed_map_query_service for "
++        "exact route validation");
++  }
++  if (map_backend_ == "cloud_octomap") {
++    mgg::OctomapConfig map_cfg;
++    map_cfg.resolution = map_resolution;
++    map_cfg.max_range = declareOrGet<double>(this, "map.max_range", 20.0);
++    auto backend = std::make_unique<mgg::OctomapMap>(map_cfg);
++    cloud_map_ = backend.get();
++    map_ = std::move(backend);
++  } else if (map_backend_ == "mola_snapshot") {
++    mgg::MolaMapConfig map_cfg;
++    map_cfg.resolution = map_resolution;
++    map_cfg.peer_root = declareOrGet<std::string>(this, "map.mola.peer_root", "");
++    map_cfg.snapshot_ttl_sec = std::clamp(
++        declareOrGet<double>(this, "map.mola.snapshot_ttl_sec", 3.0), 0.1, 60.0);
++    map_cfg.max_snapshot_bytes = static_cast<std::size_t>(std::clamp(
++        declareOrGet<std::int64_t>(this, "map.mola.max_snapshot_bytes", 4194304),
++        std::int64_t{1024}, std::int64_t{4 * 1024 * 1024}));
++    map_cfg.max_index_bytes = static_cast<std::size_t>(std::clamp(
++        declareOrGet<std::int64_t>(this, "map.mola.max_index_bytes", 4194304),
++        std::int64_t{1024}, std::int64_t{4 * 1024 * 1024}));
++    map_cfg.max_grid_bytes = static_cast<std::size_t>(std::clamp(
++        declareOrGet<std::int64_t>(this, "map.mola.max_grid_bytes", 268435456),
++        std::int64_t{1024}, std::int64_t{256 * 1024 * 1024}));
++    map_cfg.max_voxels = static_cast<std::size_t>(std::clamp(
++        declareOrGet<std::int64_t>(this, "map.mola.max_voxels", 2000000),
++        std::int64_t{1}, std::int64_t{2000000}));
++    map_cfg.max_load_time = std::chrono::milliseconds(std::clamp(
++        declareOrGet<std::int64_t>(this, "map.mola.max_load_ms", 2000),
++        std::int64_t{1}, std::int64_t{10000}));
++    auto backend = std::make_unique<mgg::MolaMap>(map_cfg);
++    mola_map_ = backend.get();
++    map_ = std::move(backend);
++    RCLCPP_INFO(get_logger(),
++                "map backend '%s': source '%s', resolution %.3f m, TTL %.1f s",
++                map_backend_.c_str(), map_cfg.peer_root.c_str(), map_cfg.resolution,
++                map_cfg.snapshot_ttl_sec);
++  } else {
++    throw std::invalid_argument("map.backend must be cloud_octomap or mola_snapshot");
++  }
+   ground_ = std::make_unique<mgg::GroundProjection>(*map_, planning_params_);
+   const double grid_resolution_floor = map_->getResolution();
+   grid_refinement_limits_.resolution_m = std::clamp(
+@@ -99,10 +143,12 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+     }
+   }
+ 
+-  cloud_tf_timeout_sec_ =
+-      declareOrGet<double>(this, "cloud_tf_timeout_sec", cloud_tf_timeout_sec_);
+-  tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+-  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
++  if (cloud_map_ != nullptr) {
++    cloud_tf_timeout_sec_ =
++        declareOrGet<double>(this, "cloud_tf_timeout_sec", cloud_tf_timeout_sec_);
++    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
++    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
++  }
+ 
+   callback_group_ =
+       create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+@@ -116,14 +162,16 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+       [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { onOdometry(m); },
+       sub_opts);
+ 
+-  rclcpp::QoS cloud_qos(rclcpp::KeepLast(10));
+-  cloud_qos.best_effort();
+-  cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+-      "pointcloud", cloud_qos,
+-      [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr m) {
+-        onPointCloud(m);
+-      },
+-      sub_opts);
++  if (cloud_map_ != nullptr) {
++    rclcpp::QoS cloud_qos(rclcpp::KeepLast(10));
++    cloud_qos.best_effort();
++    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
++        "pointcloud", cloud_qos,
++        [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr m) {
++          onPointCloud(m);
++        },
++        sub_opts);
++  }
+ 
+   neighbour_sub_ = create_subscription<mgg_msgs::msg::Graph>(
+       "neighbour_graph_in", rclcpp::QoS(10),
+@@ -144,8 +192,6 @@ PlannerNode::PlannerNode(const rclcpp::NodeOptions& options)
+           },
+           sub_opts);
+ 
+-  indexed_map_query_service_ = declareOrGet<std::string>(
+-      this, "indexed_map_query_service", indexed_map_query_service_);
+   indexed_map_query_timeout_s_ = std::max(
+       0.01, declareOrGet<double>(this, "indexed_map_query_timeout_s",
+                                  indexed_map_query_timeout_s_));
+@@ -326,6 +372,14 @@ mgg::ExpandContext PlannerNode::makeContext() {
+   return ctx;
+ }
+ 
++void PlannerNode::refreshMolaRevision() {
++  if (mola_map_ == nullptr) return;
++  const std::uint64_t generation = mola_map_->activeGeneration();
++  if (generation == observed_mola_generation_) return;
++  observed_mola_generation_ = generation;
++  ++map_revision_;
++}
++
+ void PlannerNode::stageGlobalBreadcrumbs(const mgg::StateVec& state) {
+   if (!have_global_sampling_anchor_) {
+     global_sampling_anchor_ = state;
+@@ -457,12 +511,13 @@ void PlannerNode::onOdometry(nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+     have_initial_state_ = true;
+   }
+   stageGlobalBreadcrumbs(state);
++  refreshMolaRevision();
+   updateGlobalGraph();
+ }
+ 
+ void PlannerNode::onPointCloud(
+     sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+-  if (msg->data.empty()) return;
++  if (cloud_map_ == nullptr || msg->data.empty()) return;
+ 
+   // Transform into world coordinates before projecting into the octree.
+   // The sensor publishes in its own frame (e.g. "r0/lidar") and the map lives
+@@ -503,7 +558,7 @@ void PlannerNode::onPointCloud(
+   }
+   if (!points.empty()) {
+     const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
+-    map_->insertPointCloud(points, origin);
++    cloud_map_->insertPointCloud(points, origin);
+     ++map_revision_;
+     // A new map revision may admit the first blocked chronological breadcrumb.
+     if (have_odometry_ &&
+@@ -564,6 +619,20 @@ void PlannerNode::onMappingSnapshot(
+   mapping_snapshot_ = *msg;
+   mapping_snapshot_received_ = std::chrono::steady_clock::now();
+   have_mapping_snapshot_ = true;
++  if (mola_map_ != nullptr) {
++    refreshMolaRevision();
++    const std::string prior_error = mola_map_->lastError();
++    if (!prior_error.empty()) {
++      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
++                           "MOLA map unavailable: %s", prior_error.c_str());
++    }
++    const std::uint64_t source_stamp_ns =
++        static_cast<std::uint64_t>(msg->source_stamp.sec) * 1000000000ull +
++        msg->source_stamp.nanosec;
++    mola_map_->requestSnapshot({msg->component_id, msg->epoch,
++                                msg->graph_revision, msg->geometry_revision,
++                                source_stamp_ns, component_from_navigation_});
++  }
+ }
+ 
+ void PlannerNode::onNeighbourGraph(mgg_msgs::msg::Graph::ConstSharedPtr msg) {
+@@ -573,6 +642,9 @@ void PlannerNode::onNeighbourGraph(mgg_msgs::msg::Graph::ConstSharedPtr msg) {
+ 
+   // Merging reads the map to decide reachability and writes the global graph.
+   const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
++  auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                       : mgg::MolaMap::ReadLease{};
++  refreshMolaRevision();
+ 
+   // Communication range filter: robots must be within direct radio range.
+   Eigen::Isometry3d t_ours_theirs = Eigen::Isometry3d::Identity();
+@@ -645,8 +717,18 @@ std::string PlannerNode::buildLocalGraph() {
+   // ray-casting through it. Point clouds arriving meanwhile queue up, and the
+   // subscription's best-effort depth decides how many survive.
+   const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
++  auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                       : mgg::MolaMap::ReadLease{};
++  refreshMolaRevision();
+   if (!have_odometry_) return "no odometry received yet";
+-  if (!map_->getStatus()) return "map is empty; no point cloud received yet";
++  if (!map_->getStatus()) {
++    if (mola_map_ != nullptr) {
++      const std::string detail = mola_map_->lastError();
++      return detail.empty() ? "MOLA map snapshot is missing or stale"
++                            : "MOLA map unavailable: " + detail;
++    }
++    return "map is empty; no point cloud received yet";
++  }
+ 
+   // Per-phase timing. A cycle that never returns says nothing about which of
+   // the three phases is responsible, and they scale with completely different
+@@ -947,6 +1029,9 @@ bool PlannerNode::validateObjectiveStartSupport(
+ }
+ 
+ void PlannerNode::updateGlobalGraph() {
++  auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                       : mgg::MolaMap::ReadLease{};
++  refreshMolaRevision();
+   if (!have_odometry_ || !have_initial_state_) return;
+ 
+   if (global_graph_->getNumVertices() == 0) {
+@@ -1206,6 +1291,8 @@ void PlannerNode::onBuildRequest(
+     const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+     std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+   const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
++  auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                       : mgg::MolaMap::ReadLease{};
+   response->message = buildLocalGraph();
+   response->success = local_graph_->getNumVertices() > 1;
+   RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+@@ -1215,6 +1302,11 @@ void PlannerNode::onPlanRequest(
+     const std::shared_ptr<mgg_msgs::srv::PlannerSrv::Request> request,
+     std::shared_ptr<mgg_msgs::srv::PlannerSrv::Response> response) {
+   std::unique_lock<std::recursive_mutex> lock(planner_mutex_);
++  auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                       : mgg::MolaMap::ReadLease{};
++  refreshMolaRevision();
++  const std::uint64_t mola_generation_at_start =
++      mola_map_ != nullptr ? mola_map_->activeGeneration() : 0;
+   // A caller may pin the bound mode for this cycle, e.g. to squeeze through a
+   // gap it would normally refuse.
+   const mgg::BoundModeType previous = robot_params_.bound_mode;
+@@ -1250,11 +1342,26 @@ void PlannerNode::onPlanRequest(
+                                        : mgg::PlanningStatus::kSucceeded;
+   mgg::FeasiblePath feasible = refineCorridor(corridor);
+   const IndexedQueryContext query_context = indexedQueryContext();
++  map_read = mgg::MolaMap::ReadLease{};
+   lock.unlock();
+   if (feasible.status == mgg::PlanningStatus::kSucceeded) {
+     queryIndexedMap(feasible, query_context);
+   }
+   lock.lock();
++  map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                  : mgg::MolaMap::ReadLease{};
++  const bool mola_ready = mola_map_ == nullptr || mola_map_->getStatus();
++  refreshMolaRevision();
++  if (mola_map_ != nullptr &&
++      feasible.status == mgg::PlanningStatus::kSucceeded &&
++      (!mola_ready ||
++       mola_map_->activeGeneration() != mola_generation_at_start)) {
++    feasible.status = mgg::PlanningStatus::kStaleRevision;
++    feasible.reason = "MOLA map snapshot changed during planning";
++    feasible.poses.clear();
++    feasible.partial = false;
++    feasible.indexed_map_validated = false;
++  }
+   const bool indexed_snapshot_missing =
+       indexed_map_client_ &&
+       (!have_mapping_snapshot_ ||
+@@ -1763,8 +1870,13 @@ void PlannerNode::convertPathToNavigationBase(mgg::FeasiblePath& path) const {
+ 
+ void PlannerNode::onObjectiveRequest(
+     const std::shared_ptr<mgg_msgs::srv::PlanObjective::Request> request,
+-    std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> response) {
++  std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> response) {
+   std::unique_lock<std::recursive_mutex> lock(planner_mutex_);
++  auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
++                                       : mgg::MolaMap::ReadLease{};
++  refreshMolaRevision();
++  const std::uint64_t mola_generation_at_start =
++      mola_map_ != nullptr ? mola_map_->activeGeneration() : 0;
+   mgg::PlanningRequest core;
+   core.mission_id = request->mission_id;
+   core.objective = static_cast<mgg::ObjectiveKind>(request->objective);
+@@ -1941,10 +2053,26 @@ void PlannerNode::onObjectiveRequest(
+ 
+   mgg::FeasiblePath path = refineCorridor(corridor);
+   const IndexedQueryContext query_context = indexedQueryContext();
++  map_read = mgg::MolaMap::ReadLease{};
+   lock.unlock();
+   if (path.status == mgg::PlanningStatus::kSucceeded) {
+     queryIndexedMap(path, query_context);
+   }
++  if (mola_map_ != nullptr) {
++    lock.lock();
++    map_read = mola_map_->acquireReadLease();
++    const bool mola_ready = mola_map_->getStatus();
++    refreshMolaRevision();
++    if (path.status == mgg::PlanningStatus::kSucceeded &&
++        (!mola_ready ||
++         mola_map_->activeGeneration() != mola_generation_at_start)) {
++      path.status = mgg::PlanningStatus::kStaleRevision;
++      path.reason = "MOLA map snapshot changed during planning";
++      path.poses.clear();
++      path.partial = false;
++      path.indexed_map_validated = false;
++    }
++  }
+   response->status = static_cast<std::uint8_t>(path.status);
+   response->component_id = path.component_id;
+   response->graph_revision = path.graph_revision;
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index 3844559..81c5084 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -58,7 +58,7 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 10; ++repeat) {
+       for (double x = -0.3; x <= 2.1; x += 0.10) {
+         for (const double y : {-0.2, 0.0, 0.2}) {
+-          node.map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
++          node.cloud_map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
+                                       Eigen::Vector3d(x, y, 1.5));
+         }
+       }
+@@ -70,7 +70,7 @@ class PlannerNodeTestPeer {
+   static void observeBodyCorridor(PlannerNode& node) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     // Model a fully observed free body volume after the ground-only phase.
+-    node.map_->augmentFreeBox(Eigen::Vector3d(0.75, 0.0, 0.35),
++    node.cloud_map_->augmentFreeBox(Eigen::Vector3d(0.75, 0.0, 0.35),
+                               Eigen::Vector3d(2.5, 0.8, 0.20));
+     ++node.map_revision_;
+     node.updateGlobalGraph();
+@@ -81,13 +81,13 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 10; ++repeat) {
+       for (const double dx : {-0.2, 0.0, 0.2}) {
+         for (const double dy : {-0.2, 0.0, 0.2}) {
+-          node.map_->insertPointCloud(
++          node.cloud_map_->insertPointCloud(
+               {Eigen::Vector3d(x + dx, dy, 0.0)},
+               Eigen::Vector3d(x + dx, dy, 1.5));
+         }
+       }
+     }
+-    node.map_->augmentFreeBox(Eigen::Vector3d(x, 0.0, 0.35),
++    node.cloud_map_->augmentFreeBox(Eigen::Vector3d(x, 0.0, 0.35),
+                               Eigen::Vector3d(0.25, 0.25, 0.20));
+     ++node.map_revision_;
+   }
+@@ -98,7 +98,7 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 6; ++repeat) {
+       for (double x = xmin; x <= xmax + 1e-9; x += 0.10) {
+         for (double y = ymin; y <= ymax + 1e-9; y += 0.10) {
+-          node.map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
++          node.cloud_map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
+                                       Eigen::Vector3d(x, y, 1.5));
+         }
+       }
+@@ -109,14 +109,14 @@ class PlannerNodeTestPeer {
+                                  const Eigen::Vector3d& center,
+                                  const Eigen::Vector3d& size) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+-    node.map_->augmentFreeBox(center, size);
++    node.cloud_map_->augmentFreeBox(center, size);
+   }
+ 
+   static void addOccupiedVoxel(PlannerNode& node, double x, double y,
+                                double z) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     for (int repeat = 0; repeat < 20; ++repeat) {
+-      node.map_->tree()->updateNode(
++      node.cloud_map_->tree()->updateNode(
+           octomap::point3d(static_cast<float>(x), static_cast<float>(y),
+                            static_cast<float>(z)),
+           true);
+@@ -161,17 +161,17 @@ class PlannerNodeTestPeer {
+ 
+     // Cover every footprint box and offset ground probe used by the strict
+     // global-edge check. Keep the lower face above the occupied floor.
+-    node.map_->augmentFreeBox(Eigen::Vector3d(0.60, 0.0, 0.40),
++    node.cloud_map_->augmentFreeBox(Eigen::Vector3d(0.60, 0.0, 0.40),
+                               Eigen::Vector3d(2.4, 1.2, 0.60));
+     for (int repeat = 0; repeat < 10; ++repeat) {
+       for (double x = support_root ? -0.3 : 0.30; x <= 1.3; x += 0.10) {
+         for (const double y : {-0.2, 0.0, 0.2}) {
+-          node.map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
++          node.cloud_map_->insertPointCloud({Eigen::Vector3d(x, y, 0.0)},
+                                       Eigen::Vector3d(x, y, 1.5));
+         }
+       }
+     }
+-    node.map_->augmentFreeBox(Eigen::Vector3d(0.60, 0.0, 0.40),
++    node.cloud_map_->augmentFreeBox(Eigen::Vector3d(0.60, 0.0, 0.40),
+                               Eigen::Vector3d(2.4, 1.2, 0.60));
+     ++node.map_revision_;
+   }
+@@ -179,7 +179,7 @@ class PlannerNodeTestPeer {
+   static void addCorridorObstacle(PlannerNode& node, double x) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     for (int repeat = 0; repeat < 20; ++repeat) {
+-      node.map_->insertPointCloud({Eigen::Vector3d(x, 0.0, 0.30)},
++      node.cloud_map_->insertPointCloud({Eigen::Vector3d(x, 0.0, 0.30)},
+                                   Eigen::Vector3d(x, 0.0, 1.5));
+     }
+     ++node.map_revision_;
+@@ -202,10 +202,10 @@ class PlannerNodeTestPeer {
+       }
+     }
+     for (int repeat = 0; repeat < 6; ++repeat) {
+-      node.map_->insertPointCloud(floor, Eigen::Vector3d(0.6, 0.0, 1.5));
++      node.cloud_map_->insertPointCloud(floor, Eigen::Vector3d(0.6, 0.0, 1.5));
+     }
+     // The known body volume is separate from the occupied supporting floor.
+-    node.map_->augmentFreeBox({0.6, 0.0, 0.5}, {3.2, 3.0, 0.8});
++    node.cloud_map_->augmentFreeBox({0.6, 0.0, 0.5}, {3.2, 3.0, 0.8});
+     ++node.map_revision_;
+   }
+ 
+@@ -215,7 +215,7 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 20; ++repeat) {
+       const int bound = wall ? 26 : 0;
+       for (int y = -bound; y <= bound; ++y) {
+-        node.map_->tree()->updateNode(
++        node.cloud_map_->tree()->updateNode(
+             octomap::point3d(static_cast<float>(x),
+                              static_cast<float>(y * 0.05),
+                              static_cast<float>(z)),
+@@ -229,15 +229,15 @@ class PlannerNodeTestPeer {
+                                    double z) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     octomap::OcTreeKey key;
+-    if (!node.map_->tree()->coordToKeyChecked(
++    if (!node.cloud_map_->tree()->coordToKeyChecked(
+             octomap::point3d(static_cast<float>(x), static_cast<float>(y),
+                              static_cast<float>(z)),
+             key)) {
+       return false;
+     }
+-    if (!node.map_->tree()->updateNode(key, true)) return false;
+-    node.map_->tree()->deleteNode(key, node.map_->tree()->getTreeDepth());
+-    const bool removed = node.map_->tree()->search(key) == nullptr;
++    if (!node.cloud_map_->tree()->updateNode(key, true)) return false;
++    node.cloud_map_->tree()->deleteNode(key, node.cloud_map_->tree()->getTreeDepth());
++    const bool removed = node.cloud_map_->tree()->search(key) == nullptr;
+     if (removed) ++node.map_revision_;
+     return removed;
+   }
+@@ -257,7 +257,7 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 20; ++repeat) {
+       for (int x = 15; x <= 36; ++x) {
+         for (int y = -12; y <= 12; ++y) {
+-          node.map_->tree()->updateNode(
++          node.cloud_map_->tree()->updateNode(
+               octomap::point3d(static_cast<float>(x * 0.05 + 0.025),
+                                static_cast<float>(y * 0.05 + 0.025),
+                                static_cast<float>(step_height + 0.025)),
+@@ -308,7 +308,7 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 20; ++repeat) {
+       for (double x = 1.0; x <= 1.5; x += 0.05) {
+         for (const double y : {-0.20, 0.0, 0.20}) {
+-          node.map_->tree()->updateNode(
++          node.cloud_map_->tree()->updateNode(
+               octomap::point3d(static_cast<float>(x), static_cast<float>(y),
+                                static_cast<float>(supported_ground_z + 0.025)),
+               true);
+@@ -343,7 +343,7 @@ class PlannerNodeTestPeer {
+     for (int repeat = 0; repeat < 20; ++repeat) {
+       for (double dx = -0.15; dx <= 0.15; dx += 0.05) {
+         for (double y = -0.20; y <= 0.20; y += 0.05) {
+-          node.map_->tree()->updateNode(
++          node.cloud_map_->tree()->updateNode(
+               octomap::point3d(static_cast<float>(x + dx),
+                                static_cast<float>(y),
+                                static_cast<float>(ground_z + 0.025)),
+@@ -598,6 +598,16 @@ using namespace std::chrono_literals;
+ using Service = mgg_msgs::srv::PlanObjective;
+ using LegacyService = mgg_msgs::srv::PlannerSrv;
+ 
++TEST(PlannerConfiguration, MolaBackendRequiresExactRouteValidator) {
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.backend", "mola_snapshot"),
++       rclcpp::Parameter("map.mola.peer_root", "/tmp")});
++  EXPECT_THROW(
++      { auto planner = std::make_shared<mgg_ros::PlannerNode>(options); },
++      std::invalid_argument);
++}
++
+ TEST(PlannerBackbone, CapturesHomeBeforeMotionAndConnectsOnlyMappedTerrain) {
+   rclcpp::NodeOptions options;
+   options.parameter_overrides(

@@ -104,6 +104,36 @@ def test_immediate_follow_path_rejection_leaves_terminal_failure(sim_module):
     assert bridge.planned_path == []
 
 
+@pytest.mark.parametrize("code, message", [(4, "Failed to make progress"), (105, "")])
+def test_follow_path_result_exposes_nav2_failure_reason(sim_module, code, message):
+    bridge = _bridge(sim_module)
+    bridge._goal_generation = 3
+    outcome = SimpleNamespace(
+        status=sim_module.GoalStatus.STATUS_ABORTED,
+        result=SimpleNamespace(error_msg=message, error_code=code,
+                               FAILED_TO_MAKE_PROGRESS=105),
+    )
+
+    bridge._goal_result(_ImmediateFuture(outcome), 3)
+
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_failure_reason == f"Failed to make progress; error_code={code}"
+
+
+def test_stale_follow_path_result_cannot_publish_failure_reason(sim_module):
+    bridge = _bridge(sim_module)
+    bridge._goal_generation = 4
+    outcome = SimpleNamespace(
+        status=sim_module.GoalStatus.STATUS_ABORTED,
+        result=SimpleNamespace(error_msg="stale", error_code=9),
+    )
+
+    bridge._goal_result(_ImmediateFuture(outcome), 3)
+
+    assert bridge.nav_status == "idle"
+    assert getattr(bridge, "_nav_failure_reason", None) is None
+
+
 def _active_goal_cancel_state(sim_module):
     """Return a live goal plus callbacks needed to drive cancellation races."""
     bridge = _bridge(sim_module)
@@ -272,11 +302,14 @@ def test_stale_conditional_follow_path_does_not_preempt_newer_goal(sim_module):
     assert bridge.nav_status == "active"
 
 
-def test_follow_path_returns_the_accepted_owned_generation(sim_module):
+@pytest.mark.parametrize("frame", ["r0/map_frame", "r0/odom"])
+def test_follow_path_returns_the_accepted_owned_generation(sim_module, frame):
     bridge = _bridge(sim_module)
+    plan = _plan(frame)
 
-    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
-        generation = bridge.follow_path(_plan())
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()) as convert:
+        generation = bridge.follow_path(plan)
+        convert.assert_called_once_with(plan)
 
     assert type(generation) is int
     assert generation == bridge._goal_generation
@@ -284,6 +317,8 @@ def test_follow_path_returns_the_accepted_owned_generation(sim_module):
     bridge.path_client.send_goal_async.assert_called_once()
     assert bridge.nav_status == "active"
     assert bridge.mode == "nav"
+    assert bridge.goal["frame_id"] == frame
+    assert bridge._follow_path_display == (generation, plan)
 
 
 def test_stop_while_follow_path_readiness_is_pending_wins_without_blocking(sim_module):

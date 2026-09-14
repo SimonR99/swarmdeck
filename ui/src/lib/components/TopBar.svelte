@@ -88,6 +88,7 @@
   // hardware, where "teleport to spawn and forget the map" is not a thing that
   // can happen. No robot advertising `reset` means no button at all.
   const canReset = $derived(fleet.robots.some((r) => r.capabilities?.includes('reset')));
+  const resetError = $derived(session.lastReset?.ok === false ? session.lastReset.error : null);
 
   // Which map the canvas is showing. This used to be a single button that
   // cycled, labelled with the mode it was ALREADY in — so it read as a status
@@ -131,7 +132,9 @@
       return;
     }
     disarm();
-    actions.resetSim();
+    void actions.resetSim().catch((error) =>
+      console.warn('[swarmdeck] simulation reset failed', error)
+    );
   }
 </script>
 
@@ -262,11 +265,11 @@
         size="sm"
         class="hidden 2xl:inline-flex"
         disabled={session.resetting}
-        title="Return the simulation to its start state: robots back at their spawn poses, every map discarded"
+        title={resetError ?? 'Return the simulation to its start state: robots back at their spawn poses, every map discarded'}
         onclick={onReset}
       >
         <RotateCcw class="h-3.5 w-3.5 {session.resetting ? 'animate-spin' : ''}" />
-        {session.resetting ? 'Resetting…' : armed ? 'Discard maps?' : 'Reset sim'}
+        {session.resetting ? 'Resetting…' : armed ? 'Discard maps?' : resetError ? 'Reset failed' : 'Reset sim'}
       </Button>
     {/if}
     <Button variant="danger" size="sm" onclick={() => actions.stopAll()}>

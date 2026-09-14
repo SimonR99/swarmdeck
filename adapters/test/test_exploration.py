@@ -2,15 +2,47 @@
 
 import asyncio
 from concurrent.futures import Future
+import json
 import math
+import sys
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 import time
 
 import pytest
 
-from adapters.exploration import MggExploration, planner_path
+from adapters.exploration import (
+    MggExploration,
+    is_physical_no_progress_failure,
+    planner_path,
+)
 from adapters.session import dispatch_command, _stop_on_disconnect
+
+
+def test_exploration_uses_configured_stable_planning_frame(monkeypatch):
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    monkeypatch.setitem(
+        sys.modules, "std_srvs.srv", NS(Trigger=NS(Request=lambda: None))
+    )
+    monkeypatch.setitem(sys.modules, "nav_msgs.msg", NS(Path=object))
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=object))
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy.qos",
+        NS(
+            QoSProfile=lambda **kwargs: NS(**kwargs),
+            DurabilityPolicy=NS(TRANSIENT_LOCAL="transient_local"),
+        ),
+    )
+    node = Mock()
+    node.create_client.return_value = Mock()
+    bridge = NS(id="r0", map_frame="r0/map_frame", node=node)
+
+    explorer = MggExploration(bridge, {})
+
+    assert explorer.frame == "r0/odom"
+    with pytest.raises(ValueError, match="configured MGG planning frame"):
+        MggExploration(bridge, {"frame": "r0/map_frame"})
 
 
 def rig():
@@ -23,6 +55,7 @@ def rig():
     bridge.cfg = {"link_timeout_s": 5}
     bridge._goal_generation = 0
     bridge.nav_status = "idle"
+    bridge._nav_failure_reason = "Failed to make progress; error_code=4"
     bridge.node.get_clock().now().nanoseconds = 1000000000
 
     def cancel_goal():
@@ -42,6 +75,13 @@ def rig():
         return bridge._goal_generation
 
     bridge.cancel_goal.side_effect = cancel_goal
+    bridge.cancel_goal_if_current = Mock(
+        side_effect=lambda expected_generation: (
+            bridge.cancel_goal()
+            if expected_generation == bridge._goal_generation
+            else None
+        )
+    )
     bridge.follow_path.side_effect = follow_path
     explorer = MggExploration.__new__(MggExploration)
     explorer.bridge = bridge
@@ -89,6 +129,44 @@ def rig():
     return bridge, explorer
 
 
+def test_unavailable_planner_is_blocked_with_a_reason():
+    bridge, explorer = rig()
+    explorer.start_client.service_is_ready.return_value = False
+    explorer.start()
+    assert explorer.status == "blocked"
+    assert not explorer.active
+    assert explorer.reason == "MGG start/stop services are unavailable"
+    bridge.follow_path.assert_not_called()
+
+
+def test_waiting_reason_is_retired_when_the_controller_starts():
+    bridge, explorer = rig()
+    explorer.start()
+    explorer.on_status(NS(data=json.dumps({
+        "stamp_ns": 2_000_000_000, "state": "waiting",
+        "reason": "No traversable frontier; retrying",
+    })))
+    assert explorer.status == "waiting"
+    assert explorer.reason == "No traversable frontier; retrying"
+    explorer.on_path(path())
+    assert explorer.status == "exploring"
+    assert explorer.reason is None
+    bridge.follow_path.assert_called_once()
+
+
+def test_old_planner_status_cannot_replace_current_waiting_reason():
+    _, explorer = rig()
+    explorer.start()
+    explorer.on_status(NS(data=json.dumps({
+        "stamp_ns": 2_000_000_000, "state": "waiting",
+    })))
+    reason = explorer.reason
+    explorer.on_status(NS(data=json.dumps({
+        "stamp_ns": 1, "state": "waiting", "reason": "old session",
+    })))
+    assert reason == explorer.reason
+
+
 def path(frame="map", stamp=2, empty=False, points=None):
     points = points or [(1.0, 2.0, 0.0)]
     poses = [
@@ -107,6 +185,15 @@ def path(frame="map", stamp=2, empty=False, points=None):
     )
 
 
+@pytest.mark.parametrize("cap", [0.10, 0.30])
+def test_native_step_cap_survives_voxel_height_roundoff(cap):
+    source = path(points=[(0, 0, 0.2), (0.01, 0, 0.2 + cap + 1e-12)])
+    assert len(planner_path(source, "map", cap).poses) == 2
+    source.poses[1].pose.position.z = 0.2 + cap + 1e-4
+    with pytest.raises(ValueError, match="cannot traverse"):
+        planner_path(source, "map", cap)
+
+
 def test_start_stop_and_late_paths():
     bridge, explorer = rig()
     explorer.start()
@@ -123,6 +210,71 @@ def test_start_stop_and_late_paths():
     bridge.follow_path.assert_called_once()
     bridge.drive.assert_called_with(0.0, 0.0)
     explorer.stop_client.call_async.assert_called_once()
+
+
+def test_newer_path_cannot_replace_active_controller_goal():
+    bridge, explorer = rig()
+    explorer.start()
+    explorer.on_path(path(stamp=2, points=[(1.0, 0.0, 0.0)]))
+
+    explorer.on_path(path(stamp=3, points=[(2.0, 0.0, 0.0)]))
+
+    bridge.follow_path.assert_called_once()
+    assert explorer.executing_plan[0].revision_ns == 2_000_000_000
+    assert explorer.last_path_revision_ns == 3_000_000_000
+    bridge.node.get_logger().warning.assert_called_with(
+        "[r] exploration: ignoring replacement path while controller goal is active"
+    )
+
+    bridge.nav_status = "succeeded"
+    explorer.tick()
+    explorer.on_path(path(stamp=3, points=[(2.0, 0.0, 0.0)]))
+    bridge.follow_path.assert_called_once()
+
+
+def test_ignored_replacement_does_not_prevent_operator_stop():
+    bridge, explorer = rig()
+    explorer.start()
+    explorer.on_path(path(stamp=2))
+    explorer.on_path(path(stamp=3))
+    bridge.cancel_goal.reset_mock()
+
+    explorer.stop()
+
+    bridge.cancel_goal.assert_called_once()
+    assert not explorer.active
+    assert explorer.executing_plan is None
+
+
+def test_ignored_replacement_does_not_prevent_authority_revocation():
+    bridge, explorer = rig()
+    explorer.coordinator = Coordinator("granted", "pending")
+    explorer.start()
+    explorer.on_path(path(stamp=2))
+    explorer.on_path(path(stamp=3))
+    bridge.cancel_goal.reset_mock()
+
+    explorer.tick()
+
+    bridge.cancel_goal.assert_called_once()
+    assert explorer.executing_plan is None
+    assert explorer.pending_plan is not None
+
+
+@pytest.mark.parametrize("state", ["complete", "blocked"])
+def test_planner_terminal_status_cannot_complete_active_controller_goal(state):
+    bridge, explorer = rig()
+    explorer.start()
+    explorer.on_path(path(stamp=2))
+
+    explorer.on_status(
+        NS(data=json.dumps({"state": state, "stamp_ns": 3_000_000_000}))
+    )
+
+    assert explorer.active
+    assert explorer.executing_plan is not None
+    bridge.cancel_goal.assert_called_once()  # Session start only.
+    explorer.stop_client.call_async.assert_not_called()
 
 
 def test_latched_wrong_frame_empty_and_lost_link():
@@ -389,10 +541,141 @@ def test_lost_peer_reservation_cancels_active_path_and_waits():
     bridge.cancel_goal.reset_mock()
 
     explorer.tick()
+    bridge.cancel_goal_if_current.assert_called_once()
     bridge.cancel_goal.assert_called_once()
     assert explorer.executing_plan is None
     assert explorer.pending_plan is not None
     assert explorer.status == "waiting"
+
+
+def test_recovery_authority_loss_gets_fresh_wait_without_new_attempt():
+    bridge, explorer = rig()
+    replacement_request = Future()
+    explorer.replan_client.call_async.return_value = replacement_request
+    _start_with_path(explorer)
+
+    bridge.nav_status = "failed"
+    explorer.tick()
+    replacement_request.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=3))
+    assert explorer.controller_replan_attempts == 1
+
+    # The replacement executes longer than the deadline that produced it.
+    # A transient authority loss must wait from this new event, rather than
+    # consuming another physical retry or timing out on the next tick.
+    explorer.controller_replan_deadline = time.monotonic() - 100.0
+    explorer.coordinator = Coordinator("pending", "granted")
+    explorer.tick()
+
+    assert explorer.active
+    assert explorer.status == "waiting"
+    assert explorer.pending_plan is not None
+    assert explorer.controller_replan_attempts == 1
+    assert explorer.controller_replan_deadline > time.monotonic()
+    cancelled_generation = bridge._goal_generation
+    assert explorer.controller_goal_generation == cancelled_generation
+
+    explorer.tick()
+
+    assert explorer.active
+    assert explorer.status == "exploring"
+    assert explorer.executing_plan is not None
+    assert explorer.controller_replan_attempts == 1
+    assert explorer.executing_goal_generation == cancelled_generation
+    assert not explorer.awaiting_replan_path
+
+
+def test_new_operator_goal_wins_authority_loss_without_cancellation():
+    bridge, explorer = rig()
+    explorer.start()
+    explorer.on_path(path())
+    new_owner = bridge._goal_generation + 1
+
+    class RacingCoordinator(Coordinator):
+        def reserve(self, _plan, _generation):
+            bridge._goal_generation = new_owner
+            return "pending"
+
+    explorer.coordinator = RacingCoordinator()
+    bridge.cancel_goal.reset_mock()
+
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "stopped"
+    assert bridge._goal_generation == new_owner
+    bridge.cancel_goal_if_current.assert_called_once()
+    bridge.cancel_goal.assert_not_called()
+
+
+def test_manual_goal_while_authority_pending_wins_late_grant():
+    bridge, explorer = rig()
+    explorer.start()
+    explorer.on_path(path())
+    explorer.coordinator = Coordinator("pending", "granted")
+
+    explorer.tick()
+    cancelled_generation = bridge._goal_generation
+    assert explorer.pending_plan is not None
+    assert explorer.completed_goal_generation == cancelled_generation
+    bridge.cancel_goal.reset_mock()
+
+    manual_generation = cancelled_generation + 1
+    bridge._goal_generation = manual_generation
+    bridge.nav_status = "active"
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "stopped"
+    assert bridge._goal_generation == manual_generation
+    bridge.cancel_goal.assert_not_called()
+
+
+def test_recovery_authority_rejection_keeps_attempt_and_fresh_bound():
+    bridge, explorer = rig()
+    first_request, authority_request = Future(), Future()
+    explorer.replan_client.call_async.side_effect = [
+        first_request,
+        authority_request,
+    ]
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+    first_request.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=3))
+    explorer.controller_replan_deadline = time.monotonic() - 100.0
+    explorer.coordinator = Coordinator("pending", "rejected")
+
+    explorer.tick()
+    fresh_deadline = explorer.controller_replan_deadline
+    explorer.tick()
+
+    assert explorer.active
+    assert explorer.controller_replan_attempts == 1
+    assert explorer.pending is authority_request
+    assert explorer.pending_recovery
+    assert explorer.deadline <= fresh_deadline
+
+
+def test_recovery_authority_wait_times_out_on_its_fresh_deadline():
+    bridge, explorer = rig()
+    replacement_request = Future()
+    explorer.replan_client.call_async.return_value = replacement_request
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    explorer.tick()
+    replacement_request.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=3))
+    explorer.coordinator = Coordinator("pending", "pending")
+    explorer.tick()
+    explorer.controller_replan_deadline = time.monotonic() - 1.0
+
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+    # Stop clears recovery bookkeeping; no second physical attempt was made.
+    assert explorer.replan_client.call_async.call_count == 1
 
 
 def test_rejected_peer_goal_requests_a_new_mgg_plan_after_start_finishes():
@@ -515,6 +798,56 @@ def test_repeated_controller_failures_exhaust_replan_budget():
     assert bridge.follow_path.call_count == 3
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [None, "", "NO_VALID_CONTROL", "controller transport failed", "progress pending"],
+)
+def test_generic_controller_failure_does_not_enter_movement_retry(reason):
+    bridge, explorer = rig()
+    _start_with_path(explorer)
+    bridge.nav_status = "failed"
+    bridge._nav_failure_reason = reason
+
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+    assert explorer.controller_replan_attempts == 0
+    explorer.replan_client.call_async.assert_not_called()
+    assert bridge.nav_status == "failed"
+    assert bridge._nav_failure_reason == reason
+    assert "without no-progress evidence" in (
+        bridge.node.get_logger().warning.call_args.args[0]
+    )
+
+
+def test_no_progress_classifier_matches_adapter_diagnostic_only():
+    assert is_physical_no_progress_failure(
+        "Failed to make progress; error_code=4"
+    )
+    assert not is_physical_no_progress_failure("NO_VALID_CONTROL; error_code=7")
+
+
+def test_controller_execution_time_does_not_consume_next_replan_deadline():
+    bridge, explorer = rig()
+    requests = [Future(), Future()]
+    explorer.replan_client.call_async.side_effect = requests
+    _start_with_path(explorer)
+
+    bridge.nav_status = "failed"
+    explorer.tick()
+    requests[0].set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=3))
+
+    explorer.controller_replan_deadline = time.monotonic() - 100.0
+    bridge.nav_status = "failed"
+    explorer.tick()
+
+    assert explorer.active
+    assert explorer.controller_replan_attempts == 2
+    assert explorer.controller_replan_deadline > time.monotonic()
+
+
 def test_controller_replan_times_out_if_no_replacement_path_arrives():
     bridge, explorer = rig()
     request = Future()
@@ -530,6 +863,42 @@ def test_controller_replan_times_out_if_no_replacement_path_arrives():
 
     assert not explorer.active
     assert explorer.status == "blocked"
+
+
+def test_controller_replan_deadline_never_cancels_a_new_owner():
+    bridge, explorer = rig()
+    explorer.active = True
+    explorer.controller_replan_generation = explorer.generation
+    explorer.controller_goal_generation = bridge._goal_generation
+    explorer.controller_replan_deadline = time.monotonic() - 1.0
+    bridge._goal_generation += 1
+    bridge.nav_status = "active"
+    bridge.cancel_goal.reset_mock()
+
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+    bridge.cancel_goal.assert_not_called()
+
+
+def test_pending_replan_timeout_without_execution_does_not_cancel_motion():
+    bridge, explorer = rig()
+    explorer.active = True
+    request = Future()
+    explorer.pending = request
+    explorer.pending_kind = "replan"
+    explorer.pending_recovery = True
+    explorer.deadline = time.monotonic() - 1.0
+    bridge.nav_status = "active"
+    bridge.cancel_goal.reset_mock()
+
+    explorer.tick()
+
+    assert not explorer.active
+    assert explorer.status == "blocked"
+    bridge.cancel_goal.assert_not_called()
+    explorer.replan_client.remove_pending_request.assert_called_once_with(request)
 
 
 def test_replacement_goal_generation_retires_exploration_without_canceling_it():

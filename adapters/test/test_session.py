@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 from types import SimpleNamespace
 import pytest
 
-from adapters.session import dispatch_command, _tx_maps
+from adapters.session import dispatch_command, _rx, _tx_maps
 
 
 class _Ros2Nav:
@@ -143,3 +145,78 @@ def test_home_objective_uses_onboard_home_after_stopping_exploration():
 
     asyncio.run(run())
     assert calls == ["stop_exploration", "onboard_home"]
+
+
+def test_receive_loop_processes_stop_while_claimed_objective_is_planning():
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    submitted = []
+
+    class Planner:
+        def __init__(self, bridge):
+            self.bridge = bridge
+
+        def claim_objective(self, objective, goal):
+            self.bridge._goal_generation += 1
+            return objective, goal, self.bridge._goal_generation
+
+        def execute_claimed(self, claim):
+            started.set()
+            release.wait(2.0)
+            if claim[2] == self.bridge._goal_generation:
+                submitted.append(claim)
+            finished.set()
+
+    class Bridge:
+        id = "robot_1"
+
+        def __init__(self):
+            self._goal_generation = 0
+            self.objective_planner = Planner(self)
+            self.stopped = False
+
+        def stop(self):
+            self._goal_generation += 1
+            self.stopped = True
+
+        def note_link_activity(self):
+            pass
+
+    class Socket:
+        def __init__(self):
+            self.index = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.index == 0:
+                self.index += 1
+                return json.dumps(
+                    {
+                        "type": "plan_objective",
+                        "objective": "navigate",
+                        "goal": {"x": 10.0, "y": 0.0},
+                    }
+                )
+            if self.index == 1:
+                self.index += 1
+                while not started.is_set():
+                    await asyncio.sleep(0.001)
+                return json.dumps({"type": "stop"})
+            raise StopAsyncIteration
+
+    bridge = Bridge()
+
+    async def run():
+        await _rx(bridge, Socket())
+        assert bridge.stopped
+        assert bridge._goal_generation == 2
+        assert not release.is_set()
+        release.set()
+        while not finished.is_set():
+            await asyncio.sleep(0.001)
+
+    asyncio.run(run())
+    assert submitted == []

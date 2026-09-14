@@ -1,0 +1,15 @@
+[Unit]
+Description=SwarmDeck: clear stale Fast DDS shared memory before containers
+After=local-fs.target
+RequiresMountsFor=/dev/shm
+Before=containerd.service docker.service
+ConditionPathExists=!/run/swarmdeck-dds-shm-cleaned
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/swarmdeck-clean-dds-shm
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

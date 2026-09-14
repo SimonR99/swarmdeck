@@ -8,6 +8,7 @@ the server never invents a transform between disconnected components.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import OrderedDict
 from threading import Lock
 from typing import Any, Mapping
@@ -20,8 +21,10 @@ from fastapi.responses import JSONResponse
 from autonomy.contracts import validate_se3
 from .autonomy_routes import store
 from .replica_components import ComponentCatalogue
+from .replica_live import router as live_router
 
 router = APIRouter(prefix="/api/autonomy/replicas", tags=["autonomy replica views"])
+router.include_router(live_router)
 _catalogues = WeakKeyDictionary()
 _catalogue_lock = Lock()
 
@@ -53,7 +56,12 @@ async def component_catalogue(session_id: str | None = None):
     try:
 
         def read():
-            return current_catalogue(session_id).index()
+            return {
+                **current_catalogue(session_id).index(),
+                # Deployment identity selects live data explicitly; UUID order
+                # and independent per-robot revisions do not imply recency.
+                "active_session_id": os.environ.get("SWARMDECK_MISSION_ID") or None,
+            }
 
         return await asyncio.to_thread(read)
     except OverflowError as exc:
@@ -200,6 +208,9 @@ def build_view(
         "session_id": envelope.get("session_id"),
         "revision": envelope.get("revision"),
         "solution_order": envelope.get("solution_order"),
+        "solution_order_known": (
+            "solution_order" in envelope and envelope["solution_order"] is not None
+        ),
         "snapshot_id": snapshot.get("snapshot_id"),
         "generated_at_ns": snapshot.get("generated_at_ns"),
         "component_id": selected,
@@ -208,7 +219,10 @@ def build_view(
         "chunks": list(chunks.values()),
         "source_age_s": age,
         "age_clock": "wall" if age is not None else "unknown",
-        "geometry_encoding": "application/vnd.swarmdeck.xyz-f32.v1",
+        "geometry_encodings": [
+            "application/vnd.swarmdeck.xyz-f32.v1",
+            "application/vnd.swarmdeck.xyzrgba-f32-u8.v1",
+        ],
         "reconstruction": envelope.get(
             "reconstruction", snapshot.get("reconstruction")
         ),

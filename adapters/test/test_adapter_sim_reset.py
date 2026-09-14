@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import subprocess
 import threading
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -224,6 +225,37 @@ def test_reset_moves_the_robot_before_re_zeroing_what_measures_its_movement(
         "slam": True,
         "costmaps": True,
     }
+
+
+def test_argos_reset_refuses_gazebo_pose_and_odometry_mutation(sim, monkeypatch):
+    bridge = make_bridge(sim)
+    monkeypatch.setenv("SWARMDECK_SIM_BACKEND", "argos")
+    bridge._reset_pose = MagicMock()
+    bridge._reset_odometry = MagicMock()
+
+    assert bridge.reset() == {"supervisor_required": False}
+    bridge._reset_pose.assert_not_called()
+    bridge._reset_odometry.assert_not_called()
+    assert bridge.take_reset_report() == {
+        "type": "reset_done",
+        "robot_id": "robot_0",
+        "t_mono": pytest.approx(time.monotonic(), abs=1.0),
+        "ok": False,
+        "steps": {"supervisor_required": False},
+    }
+
+
+def test_reset_readiness_requires_nav_actions_and_mgg_service(sim):
+    bridge = make_bridge(sim)
+    bridge.nav_client = MagicMock()
+    bridge.path_client = MagicMock()
+    bridge.objective_planner = MagicMock()
+    bridge.nav_client.server_is_ready.return_value = True
+    bridge.path_client.server_is_ready.return_value = True
+    bridge.objective_planner.client.service_is_ready.return_value = False
+    assert bridge.navigation_ready() is False
+    bridge.objective_planner.client.service_is_ready.return_value = True
+    assert bridge.navigation_ready() is True
 
 
 def test_reset_stops_the_robot_and_drops_every_cached_upload(sim, monkeypatch):

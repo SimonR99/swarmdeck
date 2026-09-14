@@ -131,24 +131,33 @@ class LeaseArbiter:
         self.local = None
         return claim
 
-    def decision(self):
+    def decision_with_winner(self):
+        """Return one atomic arbitration result and its winning robot, if any."""
         if self.local is None:
-            return "unassigned"
+            return "unassigned", None
         now = self.clock()
         alive = {robot: pair for robot, pair in self.leases.items() if pair[1] > now}
         self.leases = alive
         if self.robot_id not in alive:
-            return "expired"
+            return "expired", None
         if now - self.proposed_at < self.settle_s:
-            return "pending"
+            return "pending", None
         contenders = [
             claim
             for claim, _ in alive.values()
-            if math.dist(claim.target, self.local.target)
+            if claim.component_id == self.component_id
+            and math.dist(claim.target, self.local.target)
             < claim.radius_m + self.local.radius_m
         ]
         winner = min(contenders, key=lambda claim: (claim.cost, claim.robot_id))
-        return "granted" if winner.robot_id == self.robot_id else "conflict"
+        return (
+            ("granted", winner.robot_id)
+            if winner.robot_id == self.robot_id
+            else ("conflict", winner.robot_id)
+        )
+
+    def decision(self):
+        return self.decision_with_winner()[0]
 
 
 @dataclass(frozen=True)

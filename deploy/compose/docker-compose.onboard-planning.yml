@@ -1,14 +1,32 @@
 # Opt in after adding peers.yml and mapping.yml. Removing this overlay restores
 # the legacy central navigation map and optimizer uplink on adapter restart.
 services:
+  server:
+    environment:
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_SIM_RESET_DIR: /app/sessions/simulation-reset
   sim:
     environment:
+      # The simulation adapter, MGG, peers and indexed query service are one ROS
+      # graph. This domain is advanced on every reset to exclude delayed DDS
+      # traffic from the previous mission.
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_MAPPING_AUTHORITY: onboard
       SWARMDECK_PEER_COORDINATION: "1"
       SWARMDECK_PLANNING_BACKEND: mgg
+      SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
   mgg:
     environment:
+      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
+      SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
+      SWARMDECK_MGG_MAP_BACKEND: "${SWARMDECK_MGG_MAP_BACKEND:-cloud_octomap}"
+      SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-indexed}"
+      SWARMDECK_MAPS_ROOT: /maps
+      # Legacy cloud mode only; mola_snapshot always needs exact terrain queries.
       # Full body-volume evidence needs prior coverage; a sparse cold-start
       # LiDAR scan cannot certify it. Enable after validating sensor coverage.
       SWARMDECK_INDEXED_MAP_QUERY: "${SWARMDECK_INDEXED_MAP_QUERY:-0}"
+    volumes:
+      - peer_maps:/maps:ro

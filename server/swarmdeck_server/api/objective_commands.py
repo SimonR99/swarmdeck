@@ -11,6 +11,9 @@ async def send_objective(registry, robot_id, objective, goal=None):
         robot = registry.robots[robot_id]
         robot.goal = goal
         robot.nav_status, robot.mode = "active", "nav"
+        robot.nav_failure_reason = None
         robot.global_planned_path = []
         robot.local_planned_path = []
         robot.planned_path = []
+        return True
+    return False

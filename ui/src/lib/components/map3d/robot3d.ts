@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
 import type { MapRobot } from '../map2d/mapLayers';
+import { RobotPresenceTracker } from './robotPresence';
 
 export interface Robot3DEntry {
   id: string;
@@ -18,6 +19,7 @@ export interface Robot3DEntry {
 export class Robot3DManager {
   public group = new THREE.Group();
   private entries = new Map<string, Robot3DEntry>();
+  private presence = new RobotPresenceTracker(3);
 
   /**
    * Updates all 3D robots from the current fleet state.
@@ -30,12 +32,21 @@ export class Robot3DManager {
       time: number;
       getGroundZ?: (x: number, y: number) => number;
       markerScale?: (position: THREE.Vector3, selected: boolean) => number;
+      sourceIdentity?: string;
     }
   ) {
-    const activeIds = new Set<string>();
+    const presence = this.presence.update(
+      robots.map((robot) => robot.robot_id), options.time, options.sourceIdentity ?? 'live'
+    );
+    if (presence.reset) {
+      for (const entry of this.entries.values()) {
+        this.group.remove(entry.group);
+        this.disposeEntry(entry);
+      }
+      this.entries.clear();
+    }
 
     for (const robot of robots) {
-      activeIds.add(robot.robot_id);
       let entry = this.entries.get(robot.robot_id);
       if (!entry) {
         entry = this.createRobot3D(robot);
@@ -79,9 +90,10 @@ export class Robot3DManager {
       }
     }
 
-    // Remove any robots that have departed
+    // Membership and live replica snapshots can briefly miss a robot while a
+    // new frame is published. Retain the last pose through those short gaps.
     for (const [id, entry] of this.entries.entries()) {
-      if (!activeIds.has(id)) {
+      if (!presence.visible.has(id)) {
         this.group.remove(entry.group);
         this.disposeEntry(entry);
         this.entries.delete(id);
@@ -324,5 +336,6 @@ export class Robot3DManager {
       this.disposeEntry(entry);
     }
     this.entries.clear();
+    this.presence.clear();
   }
 }

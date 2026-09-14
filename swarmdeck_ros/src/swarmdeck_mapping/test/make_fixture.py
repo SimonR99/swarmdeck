@@ -33,6 +33,11 @@ def main() -> None:
         capture,
         calibration,
         [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0.5, 0.5, 0.1]],
+        colors_rgba=(
+            [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255],
+             [255, 255, 255, 0], [128, 128, 128, 255]]
+            if "--color" in sys.argv[2:] else None
+        ),
     )
     (destination / "snapshot.json").write_text(mapper.snapshot().to_json())
 

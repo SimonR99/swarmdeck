@@ -9,6 +9,21 @@ import yaml
 from launch import LaunchDescription
 
 
+def simulation_sensor_overrides(lidar):
+    """MGG gain model geometry for the selected simulated lidar profile."""
+    if lidar.rings <= 1 or not math.isfinite(lidar.vfov) or lidar.vfov <= 0.0:
+        raise ValueError(
+            "MGG 3D exploration requires a multi-ring simulated lidar with "
+            "positive vertical FOV; select a qualified 3D lidar profile"
+        )
+    return {
+        # SensorParams.fov contains total symmetric widths; LidarSpec.vfov is
+        # the half-angle passed to the ARGoS photorealistic lidar.
+        "SensorParams.VLP16.fov": [2.0 * math.pi, 2.0 * lidar.vfov],
+        "SensorParams.VLP16.rotations": [0.0, 0.0, 0.0],
+    }
+
+
 def generate_launch_description():
     here = Path(__file__).parent
     module_spec = importlib.util.spec_from_file_location(
@@ -18,18 +33,20 @@ def generate_launch_description():
     module_spec.loader.exec_module(module)
     sys.path.insert(0, "/app/swarmdeck_ros/src")
     sys.path.insert(0, "/app/adapters/protocol")
-    from swarmdeck_sim.scenario.spawn_fleet import robot_types, robot_spec
+    from swarmdeck_sim.scenario.spawn_fleet import lidar_spec, robot_types, robot_spec
 
     with open(os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot.yaml")) as stream:
         fleet = yaml.safe_load(stream)["fleet"]
     count = int(os.environ.get("SWARMDECK_ROBOT_COUNT") or fleet.get("robot_count", 4))
     platforms = robot_types(fleet, count, "robot_")
+    lidar = lidar_spec(fleet)
+    sensor_overrides = simulation_sensor_overrides(lidar)
     nodes = []
     params = "/opt/mgg/ros2/src/mgg_argos/config/bistro.yaml"
     for i, platform in enumerate(platforms):
         robot = f"robot_{i}"
         spec = robot_spec(platform)
-        step_height = 0.30 if platform == "spot" else 0.10
+        step_height = spec.max_step_height
         nodes += module.robot_nodes(
             robot,
             f"{robot}/map_frame",
@@ -43,6 +60,7 @@ def generate_launch_description():
             [spec.length, spec.width, 2 * spec.base_height],
             {
                 "SensorParams.VLP16.center_offset": [spec.lidar_x, 0.0, spec.lidar_z],
+                **sensor_overrides,
                 # Keep the extended body box above climbable terrain and the
                 # occupied floor voxel; max_ground_height is a box offset.
                 "PlanningParams.max_ground_height": spec.base_height

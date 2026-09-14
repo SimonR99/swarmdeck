@@ -61,8 +61,21 @@ export interface RobotState extends Stamps {
   battery: number | null;
   mode: RobotMode;
   nav_status: NavStatus;
+  /** True only after the adapter sees its navigation action servers. */
+  navigation_ready?: boolean | null;
+  /** Bounded native planner rejection, when the latest goal failed. */
+  nav_failure_reason?: string | null;
   goal: Point | null;
   exploration_status?: "idle" | "starting" | "exploring" | "waiting" | "locally_exhausted" | "complete" | "blocked" | "stopped";
+  exploration_reason?: string | null;
+  peer_slam?: {
+    robot_id: string;
+    mission_id: string;
+    keyframes: number;
+    verified: number;
+    rejected: number;
+    by_peer: Record<string, number>;
+  } | null;
   fleet_exploration_status?: "unknown" | "incomplete" | "complete";
   home_pose?: (Point & { yaw: number }) | null;
   planned_path: Point[];
@@ -426,6 +439,16 @@ export interface SimReset {
   partial?: Record<string, Record<string, boolean>>;
   failed?: string[];
   timed_out?: boolean;
+  request_id?: string;
+  error?: string;
+}
+
+export interface SimResetSupervisorStatus {
+  version: 1;
+  request_id?: string;
+  phase: 'idle' | 'accepted' | 'stopping' | 'starting' | 'verifying' | 'done' | 'failed' | 'legacy';
+  ok: boolean | null;
+  error?: string;
 }
 
 /* ---------- server → GUI ---------- */

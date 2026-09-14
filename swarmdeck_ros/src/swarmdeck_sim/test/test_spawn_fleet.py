@@ -220,6 +220,12 @@ def test_every_mapping_lidar_height_is_measured_from_the_ground(platform):
     assert spec.base_height + spec.lidar_z > 0.15
 
 
+def test_step_capability_matches_the_simulated_platforms():
+    assert robot_spec("bunker").max_step_height == pytest.approx(0.10)
+    assert robot_spec("scout_mini").max_step_height == pytest.approx(0.10)
+    assert robot_spec("spot").max_step_height == pytest.approx(0.30)
+
+
 @pytest.mark.parametrize("platform", sorted(ROBOT_PROFILES))
 def test_the_bumper_scan_starts_outside_the_chassis(platform):
     """Inside it, every scan returns the robot's own body at zero range."""

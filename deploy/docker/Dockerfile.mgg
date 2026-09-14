@@ -3,7 +3,7 @@ SHELL ["/bin/bash", "-c"]
 ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
-    libeigen3-dev libboost-dev libyaml-cpp-dev ros-jazzy-octomap \
+    libeigen3-dev libboost-dev libyaml-cpp-dev libssl-dev nlohmann-json3-dev ros-jazzy-octomap \
     ros-jazzy-octomap-msgs ros-jazzy-octomap-ros ros-jazzy-tf2-ros \
     ros-jazzy-nav2-msgs \
     ros-jazzy-rclpy \
@@ -26,6 +26,31 @@ COPY deploy/patches/mgg-grid-refinement.patch /tmp/mgg-grid-refinement.patch
 COPY deploy/patches/mgg-trajectory-backbone.patch /tmp/mgg-trajectory-backbone.patch
 COPY deploy/patches/mgg-objective-diagnostics.patch /tmp/mgg-objective-diagnostics.patch
 COPY deploy/patches/mgg-external-path-execution.patch /tmp/mgg-external-path-execution.patch
+COPY deploy/patches/mgg-partial-route-navigate.patch /tmp/mgg-partial-route-navigate.patch
+COPY deploy/patches/mgg-objective-start-support.patch /tmp/mgg-objective-start-support.patch
+COPY deploy/patches/mgg-mola-map-provider.patch /tmp/mgg-mola-map-provider.patch
+COPY deploy/patches/mgg-objective-projected-endpoint.patch /tmp/mgg-objective-projected-endpoint.patch
+COPY deploy/patches/mgg-grid-clearance-diagnostics.patch /tmp/mgg-grid-clearance-diagnostics.patch
+COPY deploy/patches/mgg-complete-distant-route.patch /tmp/mgg-complete-distant-route.patch
+COPY deploy/patches/mgg-forward-route-diagnostics.patch /tmp/mgg-forward-route-diagnostics.patch
+COPY deploy/patches/mgg-objective-start-connectivity.patch /tmp/mgg-objective-start-connectivity.patch
+COPY deploy/patches/mgg-objective-ground-evidence.patch /tmp/mgg-objective-ground-evidence.patch
+COPY deploy/patches/mgg-objective-footprint-terrain.patch /tmp/mgg-objective-footprint-terrain.patch
+COPY deploy/patches/mgg-octomap-measured-ground.patch /tmp/mgg-octomap-measured-ground.patch
+COPY deploy/patches/mgg-provisional-unknown-ground.patch /tmp/mgg-provisional-unknown-ground.patch
+COPY deploy/patches/mgg-exploration-terrain.patch /tmp/mgg-exploration-terrain.patch
+COPY deploy/patches/mgg-route-validation.patch /tmp/mgg-route-validation.patch
+COPY deploy/patches/mgg-objective-terrain-cache.patch /tmp/mgg-objective-terrain-cache.patch
+COPY deploy/patches/mgg-ground-projection-signed-clearance.patch /tmp/mgg-ground-projection-signed-clearance.patch
+COPY deploy/patches/mgg-distant-objective-regression.patch /tmp/mgg-distant-objective-regression.patch
+COPY deploy/patches/mgg-exploration-driving-height.patch /tmp/mgg-exploration-driving-height.patch
+COPY deploy/patches/mgg-live-navigation-followup.patch /tmp/mgg-live-navigation-followup.patch
+COPY deploy/patches/mgg-live-home-direct-followup.patch /tmp/mgg-live-home-direct-followup.patch
+COPY deploy/patches/mgg-footprint-circle-followup.patch /tmp/mgg-footprint-circle-followup.patch
+COPY deploy/patches/mgg-footprint-failure-diagnostic.patch /tmp/mgg-footprint-failure-diagnostic.patch
+COPY deploy/patches/mgg-home-objective-budget-followup.patch /tmp/mgg-home-objective-budget-followup.patch
+COPY deploy/patches/mgg-physical-current-start-followup.patch /tmp/mgg-physical-current-start-followup.patch
+COPY deploy/patches/mgg-footprint-grid-cells-followup.patch /tmp/mgg-footprint-grid-cells-followup.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -38,6 +63,31 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-trajectory-backbone.patch && \
     git apply /tmp/mgg-objective-diagnostics.patch && \
     git apply /tmp/mgg-external-path-execution.patch && \
+    git apply /tmp/mgg-partial-route-navigate.patch && \
+    git apply /tmp/mgg-objective-start-support.patch && \
+    git apply /tmp/mgg-mola-map-provider.patch && \
+    git apply /tmp/mgg-objective-projected-endpoint.patch && \
+    git apply /tmp/mgg-grid-clearance-diagnostics.patch && \
+    git apply /tmp/mgg-complete-distant-route.patch && \
+    git apply /tmp/mgg-forward-route-diagnostics.patch && \
+    git apply /tmp/mgg-objective-start-connectivity.patch && \
+    git apply /tmp/mgg-objective-ground-evidence.patch && \
+    git apply /tmp/mgg-objective-footprint-terrain.patch && \
+    git apply /tmp/mgg-octomap-measured-ground.patch && \
+    git apply /tmp/mgg-provisional-unknown-ground.patch && \
+    git apply /tmp/mgg-exploration-terrain.patch && \
+    git apply /tmp/mgg-route-validation.patch && \
+    git apply /tmp/mgg-objective-terrain-cache.patch && \
+    git apply /tmp/mgg-ground-projection-signed-clearance.patch && \
+    git apply /tmp/mgg-distant-objective-regression.patch && \
+    git apply /tmp/mgg-exploration-driving-height.patch && \
+    git apply /tmp/mgg-live-navigation-followup.patch && \
+    git apply /tmp/mgg-live-home-direct-followup.patch && \
+    git apply /tmp/mgg-footprint-circle-followup.patch && \
+    git apply /tmp/mgg-footprint-failure-diagnostic.patch && \
+    git apply /tmp/mgg-home-objective-budget-followup.patch && \
+    git apply /tmp/mgg-physical-current-start-followup.patch && \
+    git apply /tmp/mgg-footprint-grid-cells-followup.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

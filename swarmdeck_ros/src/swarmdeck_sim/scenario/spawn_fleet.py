@@ -231,6 +231,9 @@ class RobotSpec:
     camera_x: float
     camera_z: float
     prox_x: float  # bumper scan, forward of base_link
+    # Highest vertical discontinuity the platform can intentionally traverse.
+    # Both simulator contact assistance and planners must use the same limit.
+    max_step_height: float = 0.10
     # The highest thing on the robot's own back that the mapping lidar has to
     # see OVER, and how far it reaches from base_link. A multi-ring lidar sweeps
     # downwards as well as outwards, so a mount that clears the deck at zero
@@ -379,6 +382,7 @@ ROBOT_PROFILES: dict[str, RobotSpec] = {
         camera_x=0.598,
         camera_z=0.020,
         prox_x=0.580,
+        max_step_height=0.30,
         prox_range_max=8.0,
         deck_top=0.120,
         deck_half_length=0.450,

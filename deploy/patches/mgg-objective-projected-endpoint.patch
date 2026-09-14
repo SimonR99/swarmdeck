@@ -1,0 +1,175 @@
+--- a/ros2/src/mgg_core/include/mgg_core/graph_expansion.h
++++ b/ros2/src/mgg_core/include/mgg_core/graph_expansion.h
+@@ -51,6 +51,11 @@
+   /// sensor's near-field ground blind spot. The edge is only topology here;
+   /// explicit objectives revalidate it with strict body/unknown checks.
+   double hanging_root_edge_length_max = 0.0;
++  /// Explicit-objective graph builds require a ground-projected candidate's
++  /// final body box to be observed free. Explore leaves this false to retain
++  /// its legacy frontier policy; explicit refinement still validates the full
++  /// swept route independently.
++  bool strict_projected_endpoint = false;
+ };
+ 
+ /// Attaches `new_vertex` to `graph`: finds the nearest existing vertex, checks
+--- a/ros2/src/mgg_core/src/graph_expansion.cpp
++++ b/ros2/src/mgg_core/src/graph_expansion.cpp
+@@ -128,6 +128,17 @@
+     new_state[2] = new_pos[2];
+     direction = new_state.head<3>() - origin;
+     direction_norm = direction.norm();
++    // The lattice precheck happens before ground projection, so its Z may not
++    // describe the body box ultimately stored in the graph. Explicit
++    // objectives cannot admit a waypoint that their refiner must immediately
++    // reject at the projected driving height.
++    if (ctx.strict_projected_endpoint &&
++        ctx.map->getStrictBoxStatus(new_state.head<3>() +
++                                        ctx.robot->center_offset,
++                                    ctx.robot_box_size) != VoxelStatus::kFree) {
++      rep.status = ExpandGraphStatus::kErrorCollisionEdge;
++      return;
++    }
+   }
+ 
+   // Overshoot both ends, except at the root, so an edge that just grazes an
+--- a/ros2/src/mgg_core/test/test_grid_graph.cpp
++++ b/ros2/src/mgg_core/test/test_grid_graph.cpp
+@@ -1,6 +1,8 @@
+ // Tests for the grid local planner, the "grid" in Multi-robot Grid Graph.
+ // The ROS 1 version had none: it ran only inside a full planning cycle.
+ 
++#include <cmath>
++#include <memory>
+ #include <utility>
+ #include <vector>
+ 
+@@ -95,6 +97,23 @@
+   double wall_x_;
+ };
+ 
++/// Ground projection moves raw samples from z=1.0 to driving height z=0.5.
++/// The raw lattice box is free, while one projected endpoint is unknown.
++class ProjectionMismatchSpace : public OpenSpace {
++ public:
++  VoxelStatus getVoxelStatus(const Eigen::Vector3d& p) const override {
++    return p.z() <= 0.0 ? VoxelStatus::kOccupied : VoxelStatus::kFree;
++  }
++  VoxelStatus getStrictBoxStatus(const Eigen::Vector3d& center,
++                                 const Eigen::Vector3d&) const override {
++    if (std::abs(center.x() - 0.5) < 1e-9 &&
++        std::abs(center.z() - 0.5) < 1e-9) {
++      return VoxelStatus::kUnknown;
++    }
++    return VoxelStatus::kFree;
++  }
++};
++
+ struct Fixture {
+   Fixture() {
+     robot.type = RobotType::kAerialRobot;  // no ground projection needed
+@@ -220,4 +239,59 @@
+   EXPECT_EQ(r.free_cells, 25);
+ }
+ 
++TEST(GridGraph, ExplicitBuildRejectsUnknownProjectedEndpointAndKeepsAlternative) {
++  ProjectionMismatchSpace map;
++  RobotParams robot;
++  robot.type = RobotType::kGroundRobot;
++  robot.size = Eigen::Vector3d(0.2, 0.2, 0.2);
++  PlanningParams planning;
++  planning.max_ground_height = 0.5;
++  planning.max_step_height = 0.2;
++  planning.max_inclination = 0.6;
++  planning.edge_length_min = 0.1;
++  planning.edge_length_max = 2.0;
++  planning.edge_overshoot = 0.0;
++  planning.nearest_range = 1.1;
++  planning.nearest_range_min = 0.1;
++  planning.nearest_range_max = 100.0;
++  planning.nearest_range_z = 100.0;
++  planning.num_vertices_max = 20;
++  planning.num_edges_max = 40;
++  planning.num_loops_max = 20;
++  mgg::GroundProjection ground(map, planning);
++  ExpandContext ctx;
++  ctx.map = &map;
++  ctx.planning = &planning;
++  ctx.robot = &robot;
++  ctx.ground = &ground;
++  ctx.robot_box_size = robot.getPlanningSize();
++
++  GridGraphParams grid;
++  grid.min_val = Eigen::Vector3d(0.0, 0.0, 0.0);
++  grid.max_val = Eigen::Vector3d(1.0, 0.0, 0.0);
++  grid.resolution = Eigen::Vector3d(0.5, 0.5, 0.5);
++  const StateVec sample_origin(0.0, 0.0, 1.0, 0.0);
++
++  const auto build = [&](bool strict) {
++    auto graph = std::make_unique<GraphManager>();
++    graph->addVertex(new Vertex(0, StateVec(0.0, 0.0, 0.5, 0.0)));
++    ctx.strict_projected_endpoint = strict;
++    buildGridGraph(*graph, sample_origin, grid, ctx, 0.0);
++    return graph;
++  };
++  const auto legacy = build(false);
++  const auto explicit_graph = build(true);
++
++  StateVec unknown_endpoint(0.5, 0.0, 0.5, 0.0);
++  Vertex* found = nullptr;
++  EXPECT_TRUE(legacy->getNearestVertexInRange(&unknown_endpoint, 1e-6, &found));
++  found = nullptr;
++  EXPECT_FALSE(
++      explicit_graph->getNearestVertexInRange(&unknown_endpoint, 1e-6, &found));
++  StateVec observed_alternative(1.0, 0.0, 0.5, 0.0);
++  found = nullptr;
++  EXPECT_TRUE(explicit_graph->getNearestVertexInRange(
++      &observed_alternative, 1e-6, &found));
++}
++
+ }  // namespace
+--- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
++++ b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+@@ -108,7 +108,7 @@
+ 
+   /// Builds the local grid graph around the current state. Returns a summary
+   /// suitable for a service response.
+-  std::string buildLocalGraph();
++  std::string buildLocalGraph(bool strict_projected_endpoints = false);
+ 
+   /// Extends the global topological graph with the robot's current pose.
+   ///
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -712,7 +712,7 @@
+ 
+ 
+ 
+-std::string PlannerNode::buildLocalGraph() {
++std::string PlannerNode::buildLocalGraph(bool strict_projected_endpoints) {
+   // Held for the whole cycle: the map must not change under a planner that is
+   // ray-casting through it. Point clouds arriving meanwhile queue up, and the
+   // subscription's best-effort depth decides how many survive.
+@@ -763,7 +763,8 @@
+ 
+ 
+ 
+-  const mgg::ExpandContext ctx = makeContext();
++  mgg::ExpandContext ctx = makeContext();
++  ctx.strict_projected_endpoint = strict_projected_endpoints;
+   const auto t_global = Clock::now();
+   const mgg::GridGraphResult r = buildGridGraph(
+       *local_graph_, current_state_, grid_params_, ctx, current_state_[3]);
+@@ -1961,7 +1962,12 @@
+     // the already-built snapshot and never rebuild underneath the request.
+     std::string summary;
+     if (local_objective && request->graph_revision == 0) {
+-      summary = buildLocalGraph();
++      // Explore retains the legacy frontier policy that may admit projected
++      // endpoints with partially unknown body volume. A fresh Navigate graph
++      // filters those endpoints before topological selection so refinement
++      // can consider another observed candidate instead of failing on its
++      // first corridor waypoint.
++      summary = buildLocalGraph(core.objective == mgg::ObjectiveKind::kNavigate);
+     }
+     core.graph_revision = local_objective ? local_graph_revision_
+                                           : graph_revision_;

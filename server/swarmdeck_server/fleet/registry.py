@@ -7,13 +7,18 @@ declared at `hello`.
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from autonomy.live_mapping import display_path, validate_live_mapping
+from autonomy.slam_status import peer_status
+
 from ..bus import bus, stamps
 
 OFFLINE_AFTER_S = 4.0
+MAX_NAV_FAILURE_REASON_LENGTH = 512
 
 
 def parse_footprint(value: Any) -> list[list[float]] | None:
@@ -54,16 +59,23 @@ class Robot:
         default_factory=lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
     )
     exploration_status: str = "idle"
+    exploration_reason: str | None = None
     fleet_exploration_status: str = "unknown"
     home_pose: dict[str, float] | None = None
     battery: float | None = None
     mode: str = "idle"
     nav_status: str = "idle"
+    nav_failure_reason: str | None = None
+    navigation_ready: bool | None = None
     goal: dict[str, float] | None = None
     planned_path: list[dict[str, float]] = field(default_factory=list)
     global_planned_path: list[dict[str, float]] = field(default_factory=list)
     local_planned_path: list[dict[str, float]] = field(default_factory=list)
     network: dict[str, Any] | None = None
+    live_mapping: dict[str, Any] | None = None
+    peer_slam: dict[str, Any] | None = None
+    live_mapping_received_at: float = 0.0
+    objective_continuation: dict[str, Any] | None = None
 
     last_seen: float = field(default_factory=time.monotonic)
     last_attended: float = field(default_factory=time.monotonic)
@@ -92,10 +104,17 @@ class Robot:
             "pose": self.pose,
             "home_pose": self.home_pose,
             "exploration_status": self.exploration_status,
-            "fleet_exploration_status": self.fleet_exploration_status if self.online else "unknown",
+            "exploration_reason": self.exploration_reason,
+            "peer_slam": self.peer_slam if self.online else None,
+            "fleet_exploration_status": (
+                self.fleet_exploration_status if self.online else "unknown"
+            ),
             "battery": self.battery,
             "mode": self.mode,
             "nav_status": self.nav_status,
+            "nav_failure_reason": self.nav_failure_reason,
+            "navigation_ready": self.navigation_ready,
+            "objective_continuation": self.objective_continuation,
             "goal": self.goal,
             "planned_path": self.planned_path,
             "global_planned_path": self.global_planned_path,
@@ -137,6 +156,11 @@ class Registry:
         if "footprint" in msg:
             r.footprint = parse_footprint(msg.get("footprint"))
         r.last_seen = time.monotonic()
+        r.live_mapping = None
+        r.peer_slam = None
+        r.objective_continuation = None
+        r.nav_failure_reason = None
+        r.navigation_ready = None
         self.robots[rid] = r
         self._sinks[rid] = sink
         return r
@@ -146,6 +170,31 @@ class Registry:
         if not r:
             return None
         r.last_seen = time.monotonic()
+        try:
+            r.peer_slam = peer_status(
+                msg.get("peer_slam"), r.robot_id,
+                os.environ.get("SWARMDECK_MISSION_ID") or None,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            r.peer_slam = None
+        try:
+            r.live_mapping = validate_live_mapping(msg.get("live_mapping"), r.robot_id)
+            r.live_mapping_received_at = r.last_seen
+        except (KeyError, TypeError, ValueError, OverflowError):
+            r.live_mapping = None
+        continuation = msg.get("objective_continuation")
+        r.objective_continuation = None
+        if (
+            isinstance(continuation, dict)
+            and continuation.get("objective") in {"navigate", "return_home"}
+            and continuation.get("phase")
+            in {"following_final", "planning"}
+            and continuation.get("evidence_source") in {"mgg_native", "mola_indexed"}
+        ):
+            r.objective_continuation = {
+                key: continuation[key]
+                for key in ("objective", "phase", "evidence_source")
+            }
         if "pose" in msg:
             r.pose = msg["pose"]
         if r.home_pose is None and isinstance(msg.get("home_pose"), dict):
@@ -170,22 +219,46 @@ class Registry:
             "stopped",
         }:
             r.exploration_status = msg["exploration_status"]
+            reason = msg.get("exploration_reason")
+            r.exploration_reason = (
+                reason.strip()[:512] or None if isinstance(reason, str) else None
+            )
         if msg.get("fleet_exploration_status") in {"unknown", "incomplete", "complete"}:
             r.fleet_exploration_status = msg["fleet_exploration_status"]
         if "nav_status" in msg:
             r.nav_status = msg["nav_status"]
+            if r.nav_status == "failed" and isinstance(
+                msg.get("nav_failure_reason"), str
+            ):
+                reason = msg["nav_failure_reason"].strip()
+                r.nav_failure_reason = reason[:MAX_NAV_FAILURE_REASON_LENGTH] or None
+            else:
+                # A new objective, stop, success, or a generic controller
+                # state retires the prior planner diagnostic.
+                r.nav_failure_reason = None
+        elif "nav_failure_reason" in msg:
+            if r.nav_status == "failed" and isinstance(
+                msg.get("nav_failure_reason"), str
+            ):
+                reason = msg["nav_failure_reason"].strip()
+                r.nav_failure_reason = reason[:MAX_NAV_FAILURE_REASON_LENGTH] or None
+            else:
+                r.nav_failure_reason = None
+        if isinstance(msg.get("navigation_ready"), bool):
+            r.navigation_ready = msg["navigation_ready"]
         if "goal" in msg:
             r.goal = msg["goal"]
         is_nav_active = r.nav_status in ("active", "nav") or bool(r.goal)
         split_paths = "global_planned_path" in msg or "local_planned_path" in msg
         if is_nav_active:
-            if "global_planned_path" in msg and msg["global_planned_path"]:
-                r.global_planned_path = list(msg["global_planned_path"] or [])[:200]
+            if "global_planned_path" in msg:
+                r.global_planned_path = display_path(list(msg["global_planned_path"] or []))
             if "local_planned_path" in msg:
-                r.local_planned_path = list(msg["local_planned_path"] or [])[:200]
-            if not split_paths and "planned_path" in msg and msg["planned_path"]:
-                r.global_planned_path = r.planned_path.copy()
+                r.local_planned_path = display_path(list(msg["local_planned_path"] or []))
+            if not split_paths and "planned_path" in msg:
+                r.global_planned_path = display_path(list(msg["planned_path"] or []))
                 r.local_planned_path = []
+            r.planned_path = r.local_planned_path or r.global_planned_path
         else:
             r.global_planned_path = []
             r.local_planned_path = []
@@ -227,6 +300,11 @@ class Registry:
         if sink is not None and self._sinks.get(robot_id) is not sink:
             return
         self._sinks.pop(robot_id, None)
+        robot = self.robots.get(robot_id)
+        if robot is not None:
+            robot.live_mapping = None
+            robot.peer_slam = None
+            robot.objective_continuation = None
 
     def remove(self, robot_id: str) -> bool:
         """Remove a robot from the registry."""

@@ -11,6 +11,8 @@
   import { fleet } from '$lib/stores/fleet.svelte';
   import { mapStore } from '$lib/stores/mapstore.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
+  import { summarizePeerSlam } from './peerStatus';
+  import { fetchReplicaCatalogue, type ReplicaCatalogueEntry } from '$lib/components/replicas/replicaCatalogue';
   import type { SlamBackendStatus, SlamOperatorSettings } from '$lib/types/protocol';
 
   let {
@@ -37,6 +39,8 @@
   let status = $state<SlamBackendStatus | null>(null);
   let draft = $state<SlamOperatorSettings>(emptySettings());
   let defaults = $state<SlamOperatorSettings>(emptySettings());
+  let peerComponent = $state<ReplicaCatalogueEntry | null>(null);
+  const peerStatus = $derived(summarizePeerSlam(fleet.robots.filter((robot) => fleet.isEnabled(robot.robot_id))));
 
   const rows = $derived(
     Object.entries(mapStore.slamGraphs)
@@ -52,9 +56,11 @@
       0
     )
   );
-  const joined = $derived(rows.filter(([, graph]) => graph.in_common_frame).length);
+  const legacyJoined = $derived(rows.filter(([, graph]) => graph.in_common_frame).length);
+  const joined = $derived(Math.max(legacyJoined, peerComponent?.robot_ids.length ?? 0));
   const keyframes = $derived(
-    status?.keyframes ?? rows.reduce((total, [, graph]) => total + graph.keyframes, 0)
+    peerStatus.reporters ? peerStatus.keyframes
+      : status?.keyframes ?? rows.reduce((total, [, graph]) => total + graph.keyframes, 0)
   );
   const riskyMerge = $derived(draft.min_inter_robot_connections < 2);
 
@@ -78,6 +84,16 @@
   }
 
   async function loadBackend(includeSettings: boolean) {
+    try {
+      const catalogue = await fetchReplicaCatalogue();
+      peerComponent = catalogue.components
+        .filter((entry) =>
+          entry.available && entry.status === 'ready' &&
+          entry.session_id === catalogue.active_session_id && entry.robot_ids.length >= 2)
+        .sort((a, b) => b.robot_ids.length - a.robot_ids.length)[0] ?? null;
+    } catch {
+      peerComponent = null;
+    }
     try {
       const response = await fetch('/api/slam/backend', { cache: 'no-store' });
       const body = (await response.json()) as {
@@ -189,15 +205,15 @@
         <div class="px-4 py-3">
           <div class="text-[10px] font-medium text-fg-dim">Merged robots</div>
           <div class="mt-1 text-lg font-semibold tabular text-fg">
-            {joined}/{Math.max(rows.length, 1)}
+            {joined}/{Math.max(fleet.robots.filter((robot) => robot.online && fleet.isEnabled(robot.robot_id)).length, rows.length, joined, 1)}
           </div>
         </div>
         <div class="border-x border-border px-4 py-3">
           <div class="flex items-center gap-1.5 text-[10px] font-medium text-fg-dim">
-            <Link2 class="h-3.5 w-3.5" /> Closures
+            <Link2 class="h-3.5 w-3.5" /> {peerStatus.reporters ? 'Verified reports' : 'Closures'}
           </div>
           <div class="mt-1 text-lg font-semibold tabular text-fg">
-            {status?.accepted_closures ?? closures}
+            {peerStatus.reporters ? peerStatus.closures : status && (status.keyframes ?? 0) > 0 ? (status.accepted_closures ?? closures) : closures || '—'}
           </div>
         </div>
         <div class="px-4 py-3">
@@ -209,13 +225,13 @@
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto p-4">
-        {#if error || !reachable}
+        {#if (error || !reachable) && !peerStatus.reporters}
           <p class="mb-3 rounded-[--radius-control] bg-warn/10 px-3 py-2 text-[11px] text-warn">
             {error || 'SLAM service is not reachable'}
           </p>
         {/if}
 
-        {#if status}
+        {#if status && !peerStatus.reporters}
           <p class="mb-3 text-[11px] text-fg-dim">
             Queue {status.queued ?? 0}
             {#if (status.dropped ?? 0) > 0}
@@ -228,7 +244,14 @@
           </p>
         {/if}
 
-        {#if rows.length}
+        {#if peerComponent}
+          <p class="mb-3 rounded-[--radius-control] bg-ok/10 px-3 py-2 text-[11px] text-ok">
+            Verified shared component: {peerComponent.robot_ids.map(robotDisplayName).join(', ')}
+            · {peerComponent.submap_count} submaps
+          </p>
+        {/if}
+
+        {#if rows.length && ((status?.keyframes ?? 0) > 0 || !peerComponent)}
           <div class="mb-3 text-[10px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
             Robot graph status
           </div>

@@ -41,6 +41,10 @@ services:
   argos:
     image: swarmdeck-argos:planning
     devices: !reset []
+  fast_livo2:
+    # This overlay uses synthetic odometry; `--profile argos up` must not
+    # require the optional estimator image.
+    profiles: !override ["fast-livo2"]
   mgg:
     image: swarmdeck-mgg:planning
     environment:

@@ -7,6 +7,89 @@ from adapters.peer_coordination import PeerCoordinator
 from adapters.exploration import PlannerPath, PlannerPose
 
 
+def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
+    monkeypatch,
+):
+    strings, exclusions = [], []
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=lambda **kw: NS(**kw)))
+    monkeypatch.setitem(
+        sys.modules,
+        "geometry_msgs.msg",
+        NS(
+            Pose=lambda: NS(position=NS(x=0, y=0, z=0), orientation=NS(w=1)),
+            PoseArray=lambda: NS(header=NS(frame_id=""), poses=[]),
+        ),
+    )
+
+    def publisher(message_type, *_args):
+        return NS(
+            publish=lambda msg: (
+                strings.append(json.loads(msg.data))
+                if hasattr(msg, "data")
+                else exclusions.append(msg)
+            )
+        )
+
+    node = NS(create_publisher=publisher, create_subscription=lambda *args: None)
+    coordinator = PeerCoordinator(
+        NS(node=node, id="r0", map_frame="r0/map_frame"), {}
+    )
+    now = [0.0]
+    coordinator.clock = lambda: now[0]
+    mission = str(uuid.uuid4())
+
+    def authority(order, map_x, planning_x):
+        return {
+            "robot_id": "r0",
+            "mission_id": mission,
+            "participants": ["r0"],
+            "component_id": "component:test",
+            "solution_order": [order, 0],
+            "correction_revision": order,
+            "navigation_frame": "r0/map_frame",
+            "T_component_navigation": [
+                [1, 0, 0, map_x], [0, 1, 0, 0],
+                [0, 0, 1, 0], [0, 0, 0, 1],
+            ],
+            "planning_frame": "r0/odom",
+            "T_component_planning": [
+                [1, 0, 0, planning_x], [0, 1, 0, 0],
+                [0, 0, 1, 0], [0, 0, 0, 1],
+            ],
+        }
+
+    coordinator.on_authority(NS(data=json.dumps(authority(1, 0.0, 0.0))))
+    plan = PlannerPath(
+        "r0/odom",
+        100,
+        (
+            PlannerPose(0, 0, 0, 0, 0, 0, 1),
+            PlannerPose(5, 0, 0, 0, 0, 0, 1),
+        ),
+    )
+    assert coordinator.reserve(plan, 1) == "pending"
+    now[0] = 1.0
+    assert coordinator.reserve(plan, 1) == "granted"
+    token = coordinator.token
+    assert strings[-1]["target"] == [5, 0, 0]
+
+    coordinator.on_authority(NS(data=json.dumps(authority(2, 0.27, 0.0))))
+    assert coordinator.token == token
+    assert coordinator.reserve(plan, 1) == "granted"
+    coordinator.publish_exclusions()
+    assert exclusions[-1].header.frame_id == "r0/odom"
+
+    coordinator.on_authority(NS(data=json.dumps(authority(3, 0.27, 0.27))))
+    assert coordinator.token is None
+    assert coordinator.invalid_token == token
+    assert coordinator.reserve(plan, 1) == "rejected"
+    assert coordinator.last_decision_reason == (
+        "reservation invalidated by material map correction"
+    )
+
+
 def test_authority_freshness_path_generation_and_correction(monkeypatch):
     messages = []
     monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
@@ -48,6 +131,22 @@ def test_authority_freshness_path_generation_and_correction(monkeypatch):
     now[0] = 1
     assert coordinator.reserve(plan, 1) == "granted"
     assert messages[-1]["target"] == [5, 0, 0]
+    peer = {
+        "robot_id": "r1",
+        "session_id": authority["mission_id"],
+        "sequence": 1,
+        "component_id": authority["component_id"],
+        "target": [5, 0, 0],
+        "radius_m": 2.0,
+        "cost": 0.0,
+        "lease_s": 3.0,
+        "active": True,
+    }
+    coordinator.receive(NS(data=json.dumps(peer)))
+    assert coordinator.reserve(plan, 1) == "rejected"
+    assert coordinator.last_decision_reason == "conflict won by r1"
+    coordinator.receive(NS(data=json.dumps({**peer, "sequence": 2, "active": False})))
+    assert coordinator.reserve(plan, 1) == "granted"
     authority["solution_order"] = [2, 0]
     coordinator.on_authority(NS(data=json.dumps(authority)))
     # A causal optimizer advance with the same component transform is a fresh
@@ -60,6 +159,7 @@ def test_authority_freshness_path_generation_and_correction(monkeypatch):
     assert coordinator.reserve(newer, 1) == "granted"
     now[0] = 5
     assert coordinator.reserve(newer, 1) == "pending"
+    assert coordinator.last_decision_reason == "map authority unavailable or stale"
     assert not messages[-1]["active"]
     assert coordinator.reserve(plan, 0) == "rejected"
 
@@ -97,6 +197,7 @@ def test_completion_requires_current_run_all_peers_and_one_verified_component(
     peer = {**report, "robot_id": "r1", "component_id": "unrelated"}
     coordinator.receive_report(NS(data=json.dumps(peer)))
     assert coordinator.completion_state == "incomplete"
+
     peer.update(component_id="same", sequence=2)
     coordinator.receive_report(NS(data=json.dumps(peer)))
     assert coordinator.completion_state == "complete"
@@ -226,6 +327,10 @@ def test_reordered_authority_preserves_newer_reservation_and_freshness(monkeypat
     assert coordinator.token is None
     assert coordinator.received_at == 3.0
     assert len(sent) == messages + 1
+    assert coordinator.reserve(next_plan, 2) == "rejected"
+    assert coordinator.last_decision_reason == (
+        "reservation invalidated by material map correction"
+    )
 
     now[0] = 6.1
     coordinator.on_authority(NS(data=json.dumps(older)))
@@ -299,3 +404,117 @@ def test_stale_authority_and_report_do_not_create_fleet_completion(monkeypatch):
     assert coordinator.authority["component_id"] == "component:new"
     assert coordinator.report_heads["r1"] == 10
     assert coordinator.completion_state == "incomplete"
+
+
+def test_stale_lease_retains_and_validates_one_plan_authority_binding(monkeypatch):
+    sent = []
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=lambda **kw: NS(**kw)))
+    monkeypatch.setitem(
+        sys.modules,
+        "geometry_msgs.msg",
+        NS(
+            Pose=lambda: NS(position=NS(x=0, y=0, z=0), orientation=NS(w=1)),
+            PoseArray=lambda: NS(header=NS(frame_id=""), poses=[]),
+        ),
+    )
+    node = NS(
+        create_subscription=lambda *args: None,
+        create_publisher=lambda *args: NS(
+            publish=lambda msg: (
+                sent.append(json.loads(msg.data)) if hasattr(msg, "data") else None
+            )
+        ),
+    )
+    coordinator = PeerCoordinator(NS(node=node, id="r0", map_frame="map"), {})
+    now = [0.0]
+    coordinator.clock = lambda: now[0]
+    mission = str(uuid.uuid4())
+
+    def authority(order, *, component="component:a", x=0.0):
+        transform = np.eye(4)
+        transform[0, 3] = x
+        return {
+            "robot_id": "r0",
+            "mission_id": mission,
+            "participants": ["r0"],
+            "component_id": component,
+            "solution_order": [order, 0],
+            "correction_revision": order,
+            "navigation_frame": "map",
+            "T_component_navigation": transform.tolist(),
+        }
+
+    plan = PlannerPath(
+        "map",
+        100,
+        (
+            PlannerPose(0, 0, 0, 0, 0, 0, 1),
+            PlannerPose(5, 0, 0, 0, 0, 0, 1),
+        ),
+    )
+    coordinator.on_authority(NS(data=json.dumps(authority(1))))
+    assert coordinator.reserve(plan, 1) == "pending"
+    now[0] = 1.0
+    assert coordinator.reserve(plan, 1) == "granted"
+    bound_token = coordinator.token
+
+    now[0] = 4.1
+    assert coordinator.reserve(plan, 1) == "pending"
+    assert coordinator.token == bound_token
+    assert coordinator.arbiter.local is None
+    assert not sent[-1]["active"]
+
+    # The same authority may renew the withdrawn lease for the retained plan.
+    coordinator.on_authority(NS(data=json.dumps(authority(2))))
+    assert coordinator.reserve(plan, 1) == "pending"
+    assert coordinator.token == bound_token
+    assert coordinator.arbiter.local is not None
+    now[0] = 5.1
+    assert coordinator.reserve(plan, 1) == "granted"
+
+    # A component correction is compared with the retained binding even after
+    # another stale withdrawal, so the old plan cannot silently rebind.
+    now[0] = 8.2
+    assert coordinator.reserve(plan, 1) == "pending"
+    coordinator.on_authority(
+        NS(data=json.dumps(authority(3, component="component:b")))
+    )
+    assert coordinator.invalid_token == bound_token
+    assert coordinator.token is None
+    assert coordinator.reserve(plan, 1) == "rejected"
+
+    newer = PlannerPath("map", 101, plan.poses)
+    assert coordinator.reserve(newer, 2) == "pending"
+    new_token = coordinator.token
+    now[0] = 9.3
+    assert coordinator.reserve(newer, 2) == "granted"
+    now[0] = 12.4
+    assert coordinator.reserve(newer, 2) == "pending"
+    coordinator.on_authority(
+        NS(data=json.dumps(authority(4, component="component:b", x=0.11)))
+    )
+    assert coordinator.invalid_token == new_token
+    assert coordinator.token is None
+    assert coordinator.reserve(newer, 2) == "rejected"
+
+    final = PlannerPath("map", 102, plan.poses)
+    assert coordinator.reserve(final, 3) == "pending"
+    assert coordinator.reservation_signature == (mission, "component:b")
+    coordinator.release(3)  # Operator Stop/ordinary completion uses this path.
+    assert coordinator.token is None
+    assert coordinator.reservation_transform is None
+    assert coordinator.reservation_signature is None
+
+    # A new exploration generation cannot inherit an older plan binding while
+    # authority is stale.
+    coordinator.on_authority(
+        NS(data=json.dumps(authority(5, component="component:b", x=0.11)))
+    )
+    assert coordinator.reserve(final, 3) == "pending"
+    now[0] = 16.5
+    replacement = PlannerPath("map", 103, plan.poses)
+    assert coordinator.reserve(replacement, 4) == "pending"
+    assert coordinator.generation == 4
+    assert coordinator.token is None
+    assert coordinator.reservation_signature is None

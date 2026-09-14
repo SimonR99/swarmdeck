@@ -277,6 +277,7 @@ def test_cloud_upload_preserves_first_point_and_wire_order(sim_module, monkeypat
     )
     bridge._cloud_xyz = lambda _: points
     bridge._cfg_timeout = lambda _: 1.0
+    bridge._display_cloud_colors = MagicMock(return_value=None)
     upload = MagicMock()
     monkeypatch.setattr(sim_module.urllib.request, "urlopen", upload)
     bridge._upload_cloud_locked()
@@ -290,3 +291,28 @@ def test_cloud_upload_preserves_first_point_and_wire_order(sim_module, monkeypat
         decoded, np.round(points[keep] / sim_module.CLOUD_SCALE).astype(np.int16)
     )
     assert not bridge._cloud_dirty
+
+
+def test_cloud_upload_includes_projected_camera_colors(sim_module, monkeypatch):
+    import zlib
+
+    bridge = sim_module.RobotBridge.__new__(sim_module.RobotBridge)
+    bridge.id = "robot_0"
+    bridge.http_url = "http://unused"
+    bridge._cloud_dirty = True
+    bridge._cloud = object()
+    points = np.array([[1.0, 2.0, 3.0], [2.0, 3.0, 4.0]], dtype=np.float32)
+    colors = np.array([[240, 10, 20], [20, 30, 240]], dtype=np.uint8)
+    bridge._cloud_xyz = lambda _: points
+    bridge._display_cloud_colors = MagicMock(return_value=colors)
+    bridge._cfg_timeout = lambda _: 1.0
+    upload = MagicMock()
+    monkeypatch.setattr(sim_module.urllib.request, "urlopen", upload)
+
+    bridge._upload_cloud_locked()
+
+    request = upload.call_args.args[0]
+    assert "format=xyzrgb32" in request.full_url
+    raw = zlib.decompress(request.data)
+    np.testing.assert_array_equal(np.frombuffer(raw[:24], dtype="<f4").reshape(-1, 3), points)
+    np.testing.assert_array_equal(np.frombuffer(raw[24:], dtype=np.uint8).reshape(-1, 3), colors)

@@ -32,6 +32,8 @@ else
     fi
 fi
 
+bash "$SRC/install-dds-shm-cleanup.sh"
+
 sudo systemctl daemon-reload
 sudo systemctl enable swarmdeck-timesync-wait.service swarmdeck-late-timesync.path
 

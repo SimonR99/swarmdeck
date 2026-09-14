@@ -6,6 +6,7 @@ import { settings } from '$lib/stores/settings.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { MockFleet } from './mock';
+import { fetchJsonWithTimeout, resetRequestId } from './resetHttp';
 
 /**
  * Single connection to the backend. The local simulator is opt-in with
@@ -27,6 +28,125 @@ let retryTimer: number | null = null;
 let tickTimer: number | null = null;
 let localMapTimer: number | null = null;
 let started = false;
+let resetPoll: Promise<import('$lib/types/protocol').SimResetSupervisorStatus> | null = null;
+let resetPollRequestId: string | null = null;
+
+type ResetStatus = import('$lib/types/protocol').SimResetSupervisorStatus;
+const RESET_POLL_TIMEOUT_MS = 600_000;
+const RESET_FETCH_TIMEOUT_MS = 5_000;
+
+async function fetchResetStatus(): Promise<[Response, ResetStatus]> {
+  return fetchJsonWithTimeout<ResetStatus>(
+    '/api/sim/reset', { cache: 'no-store' }, RESET_FETCH_TIMEOUT_MS
+  );
+}
+
+function publishResetStatus(status: ResetStatus) {
+  const active = ['accepted', 'stopping', 'starting', 'verifying'].includes(status.phase);
+  session.applySimReset({
+    type: 'sim_reset', phase: active ? 'start' : 'done', skipped: [],
+    request_id: status.request_id,
+    ok: status.phase === 'done' && status.ok === true,
+    failed: status.phase === 'failed' ? ['supervisor'] : [],
+    error: status.error
+  });
+}
+
+function pollReset(
+  requestId: string,
+  deadline = Date.now() + RESET_POLL_TIMEOUT_MS
+): Promise<ResetStatus> {
+  if (resetPoll && resetPollRequestId === requestId) return resetPoll;
+  resetPollRequestId = requestId;
+  resetPoll = (async () => {
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      try {
+        const [response, status] = await fetchResetStatus();
+        if (!response.ok) continue;
+        if (status.request_id !== requestId) continue;
+        publishResetStatus(status);
+        if (status.phase === 'done' || status.phase === 'failed') return status;
+      } catch {
+        // The server is deliberately recreated. The loaded UI remains the
+        // lifecycle owner and resumes as soon as its proxy has an upstream.
+      }
+    }
+    const timedOut: ResetStatus = {
+      version: 1, phase: 'failed', ok: false, request_id: requestId,
+      error: 'simulation reset did not complete within 600 seconds'
+    };
+    publishResetStatus(timedOut);
+    throw new Error(timedOut.error);
+  })().finally(() => {
+    if (resetPollRequestId === requestId) {
+      resetPoll = null;
+      resetPollRequestId = null;
+    }
+  });
+  return resetPoll;
+}
+
+async function submitReset(requestId: string): Promise<[Response, ResetStatus]> {
+  return fetchJsonWithTimeout<ResetStatus>(
+    `/api/sim/reset?request_id=${encodeURIComponent(requestId)}`,
+    { method: 'POST' },
+    RESET_FETCH_TIMEOUT_MS
+  );
+}
+
+async function recoverLostResetResponse(
+  requestId: string,
+  deadline: number
+): Promise<ResetStatus> {
+  // The host may stop the backend after it durably accepts the request but
+  // before its HTTP response reaches this browser. Retry the same idempotency
+  // key after reconnect: a completed request is returned, never run again.
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    let response: Response;
+    let status: ResetStatus;
+    try {
+      [response, status] = await submitReset(requestId);
+    } catch {
+      // A transport failure is expected until the replacement server is live.
+      continue;
+    }
+    publishResetStatus(status);
+    if (!response.ok || status.phase === 'failed') {
+      throw new Error(status.error ?? `simulation reset ${response.status}`);
+    }
+    if (!status.request_id || status.phase === 'legacy' || status.phase === 'done') {
+      return status;
+    }
+    return pollReset(status.request_id, deadline);
+  }
+  const timedOut: ResetStatus = {
+    version: 1, phase: 'failed', ok: false, request_id: requestId,
+    error: 'simulation reset request could not be recovered within 600 seconds'
+  };
+  publishResetStatus(timedOut);
+  throw new Error(timedOut.error);
+}
+
+async function resumeReset() {
+  try {
+    const [response, status] = await fetchResetStatus();
+    if (!response.ok) return;
+    if (
+      status.request_id &&
+      ['accepted', 'stopping', 'starting', 'verifying'].includes(status.phase)
+    ) {
+      publishResetStatus(status);
+      void pollReset(status.request_id).catch((error) =>
+        console.warn('[swarmdeck] reset monitoring failed', error)
+      );
+    }
+  } catch {
+    // Startup during a server recreation is expected; websocket reconnect will
+    // invoke this again once the API is reachable.
+  }
+}
 
 function dispatch(msg: ServerMessage) {
   switch (msg.type) {
@@ -112,6 +232,7 @@ function connect() {
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
     session.setConnection('live');
+    void resumeReset();
     // Re-announce what this dashboard is showing.
     //
     // The backend keys camera interest by the websocket, so the old socket
@@ -241,8 +362,31 @@ export const actions = {
    * adapters confirm, so nothing is cleared optimistically here — a reset that
    * fails must leave the map it failed to clear on screen.
    */
-  resetSim() {
-    sendAction({ type: 'reset_sim' });
+  async resetSim() {
+    const requestId = resetRequestId();
+    const deadline = Date.now() + RESET_POLL_TIMEOUT_MS;
+    let response: Response;
+    let accepted: ResetStatus;
+    try {
+      [response, accepted] = await submitReset(requestId);
+    } catch {
+      accepted = { version: 1, request_id: requestId, phase: 'accepted', ok: null };
+      publishResetStatus(accepted);
+      return recoverLostResetResponse(requestId, deadline);
+    }
+    if (!response.ok || accepted.phase === 'failed') {
+      publishResetStatus(accepted);
+      throw new Error(accepted.error ?? `simulation reset ${response.status}`);
+    }
+    if (!accepted.request_id || accepted.phase === 'legacy') {
+      // Compatibility with a server that still performs the adapter reset and
+      // broadcasts progress over the fleet socket.
+      if (accepted.phase === 'legacy') sendAction({ type: 'reset_sim' });
+      return accepted;
+    }
+    publishResetStatus(accepted);
+    if (accepted.phase === 'done') return accepted;
+    return pollReset(accepted.request_id, deadline);
   },
 
   /**
@@ -292,6 +436,7 @@ export function startConnection() {
   // Static for the life of the backend, so it is fetched once rather than
   // pushed: the websocket carries what changes, not what a class is called.
   void detectionCatalog.load();
+  void resumeReset();
   connect();
   tickTimer = setInterval(() => session.tick(1), 1000) as unknown as number;
   // map_patch carries the merged map only, so the per-robot view has no push

@@ -618,6 +618,7 @@ class HardwareBridge(
         """
         if not msg.poses:
             self.planned_path = []
+            self._local_planned_path = []
             return
 
         frame = msg.header.frame_id.lstrip("/")
@@ -627,6 +628,10 @@ class HardwareBridge(
             self.planned_path = [
                 {"x": ps.pose.position.x, "y": ps.pose.position.y} for ps in msg.poses
             ]
+            if self.pub_nav_goal is not None:
+                self._local_planned_path = self.planned_path.copy()
+            else:
+                self._global_planned_path = self.planned_path.copy()
             return
 
         try:
@@ -656,6 +661,7 @@ class HardwareBridge(
                     f"this robot's TF tree does not connect to {self.map_frame}."
                 )
             self.planned_path = []
+            self._local_planned_path = []
             return
 
         points = np.array(
@@ -940,6 +946,10 @@ class HardwareBridge(
         self, goal: dict[str, float], path: list[dict[str, float]] | None = None
     ) -> None:
         self._nav_waypoints = [dict(pt) for pt in (path or [])]
+        self._nav_route_key = None
+        self._nav_route_blocked = bool(path) and self.pub_nav_joy is not None
+        self._global_planned_path = [dict(pt) for pt in (path or [])]
+        self._local_planned_path = []
         if self.pub_nav_goal is not None:
             self._navigate_to_topic(goal)
             return
@@ -1060,15 +1070,22 @@ class HardwareBridge(
             target_pt = self.goal
             waypoints = getattr(self, "_nav_waypoints", None)
             if waypoints:
-                while len(waypoints) > 1:
-                    d = math.hypot(
-                        waypoints[0]["x"] - pose["x"], waypoints[0]["y"] - pose["y"]
+                target_pt = self.navigation_route_target(waypoints, pose)
+                if target_pt is None:
+                    # Gate the native velocity relay too: pathFollower smooths
+                    # speed and may otherwise keep moving after zero joystick.
+                    self.pub_cmd.publish(Twist())
+                    msg.axes = [0.0, 0.0, 0.0]
+                    msg.buttons = [0] * 8
+                    self.pub_nav_joy.publish(msg)
+                    rospy.logwarn_throttle(
+                        2.0,
+                        f"[{self.id}] route hold: "
+                        f"{self._nav_route_tracker.blocked_reason}",
                     )
-                    if d < 0.6:
-                        waypoints.pop(0)
-                    else:
-                        break
-                target_pt = waypoints[0]
+                    return
+            else:
+                self._nav_route_blocked = False
 
             dx = target_pt["x"] - pose["x"]
             dy = target_pt["y"] - pose["y"]
@@ -1076,11 +1093,28 @@ class HardwareBridge(
             forward = dx * c + dy * s
             left = -dx * s + dy * c
             bearing = math.atan2(left, forward)
+            rospy.loginfo_throttle(
+                1.0,
+                f"[{self.id}] nav tracking pose=({pose['x']:.3f},{pose['y']:.3f},"
+                f"{pose['yaw']:.3f}) target=({target_pt['x']:.3f},{target_pt['y']:.3f}) "
+                f"bearing_deg={math.degrees(bearing):.1f} "
+                f"progress_m={self._nav_route_tracker.progress if waypoints else 0.0:.3f} "
+                f"target_m={self._nav_route_tracker.target_progress if waypoints else 0.0:.3f}",
+            )
             t = self._nav_joy_throttle
-            msg.axes = [0.0, math.cos(bearing) * t, math.sin(bearing) * t]
+            forward_axis = math.cos(bearing) * t
+            lateral_axis = math.sin(bearing) * t
+            # Scout's native localPlanner mirrors atan2 when reversing. Encode
+            # its joystick convention so the decoded path bearing stays in the
+            # intended quadrant, including when crossing +/-90 degrees.
+            if forward_axis < 0 and self.cfg.get("nav_joy_reverse_steering", False):
+                lateral_axis = -lateral_axis
+            msg.axes = [0.0, forward_axis, lateral_axis]
         else:
             msg.axes = [0.0, 0.0, 0.0]
-        msg.buttons = [0, 0, 0, 0]
+        # localPlanner reads buttons[4] and buttons[6] to toggle obstacle
+        # checking. Short messages cause unchecked native vector reads.
+        msg.buttons = [0] * 8
         self.pub_nav_joy.publish(msg)
 
     def cancel_goal(self) -> None:

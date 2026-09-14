@@ -32,6 +32,7 @@ from autonomy.mapping import (
     StaleSolutionError,
     SubmapStore,
     decode_xyz_f32,
+    decode_xyzrgba_f32_u8,
 )
 
 SESSION = str(uuid.UUID("fe721f0d-82b6-4678-bacb-a627ae5b51f4"))
@@ -106,6 +107,18 @@ def test_corrected_snapshot_reuses_immutable_geometry(tmp_path) -> None:
     assert (
         encoded.count(chunk.sha256) == 2
     )  # submap reference + flat manifest chunk table
+
+
+def test_colored_capture_preserves_measured_rgba_in_versioned_chunk(tmp_path) -> None:
+    m = mapper(tmp_path)
+    cloud = np.array([[0, 0, 0], [1, 0, 0]], dtype=float)
+    rgba = np.array([[240, 10, 20, 255], [148, 148, 148, 0]], dtype=np.uint8)
+    m.add_capture(capture(), calibration(), cloud, colors_rgba=rgba)
+    chunk = m.snapshot().manifests[0].chunks[0]
+    assert chunk.encoding.endswith("xyzrgba-f32-u8.v1")
+    points, colors = decode_xyzrgba_f32_u8(m.get_chunk(chunk.sha256))
+    np.testing.assert_allclose(points, cloud)
+    np.testing.assert_array_equal(colors, rgba)
 
 
 def test_capture_local_pose_is_visible_before_first_graph_solution(tmp_path) -> None:

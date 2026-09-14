@@ -69,14 +69,17 @@ std::vector<PointXYZ> readXyzChunk(
     throw std::runtime_error("short read from chunk: " + path.string());
   if (sha256(bytes) != digest) throw std::runtime_error("chunk checksum mismatch");
 
-  constexpr std::array<std::uint8_t, 8> magic{'S', 'D', 'X', 'Y', 'Z', '1', 0, 0};
-  if (bytes.size() < 16 || !std::equal(magic.begin(), magic.end(), bytes.begin()))
+  constexpr std::array<std::uint8_t, 8> xyz_magic{'S', 'D', 'X', 'Y', 'Z', '1', 0, 0};
+  constexpr std::array<std::uint8_t, 8> rgb_magic{'S', 'D', 'R', 'G', 'B', '1', 0, 0};
+  const bool colored = bytes.size() >= 16 && std::equal(rgb_magic.begin(), rgb_magic.end(), bytes.begin());
+  if (bytes.size() < 16 || (!colored && !std::equal(xyz_magic.begin(), xyz_magic.end(), bytes.begin())))
     throw std::runtime_error("invalid SwarmDeck XYZ-F32 chunk");
   std::uint64_t header_count = 0;
   for (std::size_t index = 0; index < 8; ++index)
     header_count |= static_cast<std::uint64_t>(bytes[8 + index]) << (8 * index);
   const auto payload_bytes = bytes.size() - 16;
-  if (payload_bytes % 12 != 0 || header_count != payload_bytes / 12 ||
+  const std::size_t stride = colored ? 16 : 12;
+  if (payload_bytes % stride != 0 || header_count != payload_bytes / stride ||
       header_count != declared_point_count)
     throw std::runtime_error("chunk point count does not match its length/declaration");
   if (header_count > std::vector<PointXYZ>().max_size())

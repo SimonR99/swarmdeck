@@ -130,5 +130,17 @@ async def stop_session() -> dict[str, Any]:
     return app.session_state()
 
 
-async def post_sim_reset() -> dict[str, Any]:
-    return await _app().reset_fleet()
+async def post_sim_reset(request_id: str | None = None) -> dict[str, Any]:
+    # reset_fleet owns both implementations: the legacy adapter handshake and
+    # the host-supervisor request plus its fleet-wide progress broadcast. Keep
+    # REST and websocket reset commands on that single observable path.
+    return await _app().reset_fleet(request_id)
+
+
+async def get_sim_reset() -> dict[str, Any]:
+    from .simulation_reset import reset_root, reset_status
+
+    root = reset_root()
+    if root is None:
+        return {"version": 1, "phase": "legacy", "ok": None}
+    return reset_status(root)

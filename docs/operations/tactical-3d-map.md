@@ -10,12 +10,16 @@ metres and Z is up. A local robot cloud is transformed into world coordinates
 for agreement with robot overlays and navigation goals.
 
 - **Voxels:** instanced occupied cells, automatically coarsened to fit the budget.
-- **Mesh:** triangle boundary of those occupied cells; internal faces are removed.
-  This is a block surface mesh, not a watertight TSDF or a photogrammetric mesh.
+- **Mesh:** surface triangles joining neighboring occupied samples in XY, XZ
+  and YZ projections. Both outer sides of each column are retained, with at most
+  two cells of depth variation per triangle. Missing neighbors leave gaps.
+  This bounded approximation preserves horizontal and vertical surfaces; it is
+  not a watertight TSDF or a photogrammetric mesh.
 - **Points:** the measured cloud, with elevation, team, or calibrated camera color.
 - **Gaussians:** a published reconstruction, rendered with projected anisotropic
-  covariance and alpha blending. Missing reconstructions show an explicit status.
-  The initial integration supports world-aligned global reconstructions only.
+  covariance and alpha blending, qualified for the selected component or legacy
+  world frame. Missing reconstructions show an explicitly labeled point-cloud
+  proxy. Selecting this mode does not train a model.
 
 Left drag orbits, right/middle drag pans, scroll zooms, and left click selects a
 robot. Shift-click adds to selection. Navigation mode sends ground-plane X/Y
@@ -76,6 +80,28 @@ replaces higher spherical-harmonic bands; a 384-pixel maximum ellipse radius
 bounds close-up overdraw. This reduces fidelity relative to UMAMI's CUDA viewer.
 
 ## Colorize LiDAR with camera images
+
+In peer mapping deployments, the mapper stores qualified camera color in
+`application/vnd.swarmdeck.xyzrgba-f32-u8.v1` chunks. The 16-byte header contains
+`SDRGB1\0\0` and a little-endian uint64 point count, followed by packed XYZ
+float32 values and then RGBA bytes in the same point order. Alpha zero means no
+qualified camera observation. The unchanged XYZ-only encoding remains valid;
+server and native MOLA consumers can use either geometry format. Mixed chunks
+use measured color where present and gray elsewhere.
+
+The bridge selects raw or frontend geometry before projecting colors, so pixel
+associations stay aligned with stored points. RGB/depth stamps must agree within
+50 ms, and RGB must be within 250 ms of the scan. CameraInfo and image frames
+must agree and TF is sampled at capture time. ARGoS explicitly uses its body-axis
+camera convention; hardware defaults to the optical convention. A missing or
+incompatible observation suppresses color without discarding geometry.
+
+For `docker-compose.robot-peer.yml`, set `SWARMDECK_COLOR_TOPIC`,
+`SWARMDECK_DEPTH_TOPIC`, and `SWARMDECK_COLOR_INFO_TOPIC` when the camera does
+not publish under `/<sensor namespace>/camera/`. Set `SWARMDECK_COLOR_FRAME`
+only when message headers omit the calibrated camera frame. Hardware camera
+frames use optical axes by default; set `SWARMDECK_COLOR_FRAME_CONVENTION=body`
+only for a forward/left/up camera frame with a corresponding calibrated TF.
 
 Both hardware adapters color registered LiDAR scans and accepted optimized
 keyframes. Botman, Aslan, and TARS enable this in their profiles:
@@ -145,6 +171,14 @@ be colored retroactively. Sparse LiDAR cannot guarantee occlusion rejection
 between its returns; the shared projector also accepts aligned metric depth
 for stronger visibility checking. In the 3D viewer, select **Camera** under
 coloring once RGB observations arrive.
+
+Onboard component replicas use an optional, versioned colored geometry chunk:
+`application/vnd.swarmdeck.xyzrgba-f32-u8.v1`. Its 16-byte header contains
+`SDRGB1\0\0` and a little-endian uint64 point count, followed by planar float32
+XYZ and uint8 RGBA arrays. Alpha records whether camera, depth, timestamps, and
+TF qualified that point. Existing `xyz-f32.v1` chunks remain valid and display
+without Camera coloring until a newly captured colored submap is published;
+colors are never inferred for historical geometry.
 
 Legacy XYZ uploads remain accepted. `POST /api/adapter/cloud?robot_id=...&format=xyzrgb32`
 accepts zlib-compressed planar data: N little-endian float32 XYZ triples followed

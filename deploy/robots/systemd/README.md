@@ -74,3 +74,38 @@ Writes the units, reloads systemd and enables them for the next boot. It never
 restarts Docker or any container, so it is safe to run on a robot in use.
 
 Tune the timeout in `/etc/default/swarmdeck-timesync`.
+
+## Fast DDS shared-memory cleanup at boot
+
+`swarmdeck-dds-shm-cleanup.service` runs once per boot before Docker and
+containerd. Docker requires it even when started through its socket. The helper
+removes recognized Fast DDS port, segment, and lock files from `/dev/shm`,
+including nonempty objects abandoned before initialization completed. It leaves
+unrelated shared memory, symlinks, directories, and diagnostic quarantines alone.
+
+Install just this guard with:
+
+```bash
+bash deploy/robots/systemd/install-dds-shm-cleanup.sh
+```
+
+The combined `install.sh` also installs it. Installation writes a volatile
+`/run/swarmdeck-dds-shm-cleaned` marker so an ordinary Docker restart during the
+current boot cannot trigger cleanup. It enables the service for the next boot;
+it does not restart anything. After reboot, inspect:
+
+```bash
+systemctl status swarmdeck-dds-shm-cleanup.service
+journalctl -b -u swarmdeck-dds-shm-cleanup.service
+```
+
+The helper refuses cleanup if Docker, container shims, or processes with mapped
+or open DDS files are present. Inspection or cleanup errors prevent Docker
+startup rather than deleting possibly live objects. Do not remove the marker
+and invoke cleanup on a running robot. This is a boot guard, not automatic
+recovery from a DDS process crash during operation.
+
+Aslan's `/dev/shm` is a tmpfs, which normally starts empty after an actual reboot.
+Old wall-clock timestamps alone do not establish that objects survived reboot,
+especially on Jetsons whose clock is corrected after startup. The guard ensures
+cleanup ordering but does not establish what interrupted a DDS initializer.

@@ -11,6 +11,7 @@ x-peer: &peer
     SWARMDECK_PEER_NAMES: '["robot_0","robot_1","robot_2","robot_3"]'
     SWARMDECK_USE_SIM_TIME: "true"
     SWARMDECK_CAPTURE_PROVIDER: "${SWARMDECK_CAPTURE_PROVIDER:-unknown}"
+    SWARMDECK_COLOR_FRAME_CONVENTION: body
     SWARMDECK_SERVER_URL: http://server:8080
   volumes:
     - ../../autonomy:/app/autonomy:ro

@@ -2,10 +2,39 @@
 
 from pathlib import Path
 import os
+import re
+import uuid
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+SIM_MAPPING_MAX_RANGE_M = 20.0
+
+
+def map_backend_parameters(robot):
+    """Select one map owner; MOLA never silently falls back to raw clouds."""
+    backend = os.environ.get("SWARMDECK_MGG_MAP_BACKEND", "cloud_octomap")
+    if backend not in {"cloud_octomap", "mola_snapshot"}:
+        raise ValueError("SWARMDECK_MGG_MAP_BACKEND must be cloud_octomap or mola_snapshot")
+    result = {"map.backend": backend}
+    if backend == "mola_snapshot":
+        if os.environ.get("SWARMDECK_PLANNER_MAP_PROVIDER", "indexed") != "mola":
+            raise ValueError("MOLA graph planning requires SWARMDECK_PLANNER_MAP_PROVIDER=mola")
+        mission = os.environ.get("SWARMDECK_MISSION_ID", "")
+        if str(uuid.UUID(mission)) != mission:
+            raise ValueError("MOLA graph planning requires a canonical mission UUID")
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", robot):
+            raise ValueError("MOLA graph planning requires a simple robot ID")
+        root = Path(os.environ.get("SWARMDECK_MAPS_ROOT", "/maps"))
+        if not root.is_absolute():
+            raise ValueError("SWARMDECK_MAPS_ROOT must be absolute")
+        result["map.mola.peer_root"] = str(root / mission / robot)
+        # Native PlannerGridLimits currently publishes 0.20 m cells. Override
+        # the legacy Bistro cloud map's 0.15 m setting; the loader verifies it.
+        result["map.resolution"] = 0.20
+    return result
 
 
 def robot_nodes(
@@ -26,6 +55,15 @@ def robot_nodes(
     depth_topic="",
     info_topic="",
 ):
+    # Map/UI coordinates can move when local SLAM updates map -> odom. The
+    # accumulated cloud and controller route must use the same stable frame.
+    template = os.environ.get("SWARMDECK_PLANNING_FRAME_TEMPLATE")
+    if template is not None:
+        if template.count("{robot}") != 1:
+            raise ValueError("Invalid SWARMDECK_PLANNING_FRAME_TEMPLATE")
+        frame = template.replace("{robot}", robot).lstrip("/")
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_/-]*", frame):
+            raise ValueError("Invalid SWARMDECK_PLANNING_FRAME_TEMPLATE")
     ns = f"{robot}/mgg"
     base_frame = base_frame or (f"{robot}/base_link" if sim_depth else "")
     base_frame_arg = base_frame or "''"
@@ -34,9 +72,28 @@ def robot_nodes(
     overrides = {
         "PlanningParams.global_frame_id": frame,
         "PlanningParams.robot_id": robot_index,
+        "mission_id": os.environ.get("SWARMDECK_MISSION_ID", ""),
     }
     overrides.update(planner_overrides or {})
-    if os.environ.get("SWARMDECK_INDEXED_MAP_QUERY", "0").lower() in (
+    overrides.update(map_backend_parameters(robot))
+    # Sparse simulated lidar plus a forward camera supplies terrain evidence,
+    # not complete free-air coverage around the chassis. Select that contract
+    # explicitly; hardware and MOLA keep the strict volumetric policy.
+    overrides["objective_body_evidence_policy"] = (
+        "observed_ground"
+        if sim_depth and overrides["map.backend"] == "cloud_octomap"
+        else "strict_volume"
+    )
+    overrides["objective_ground_evidence_policy"] = (
+        "provisional_unknown"
+        if sim_depth and overrides["map.backend"] == "cloud_octomap"
+        else "observed_ground"
+    )
+    if sim_depth:
+        # ARGoS depth uses a finite 40 m no-return sentinel. Keep native
+        # truncation below it so those samples never become occupied endpoints.
+        overrides["map.max_range"] = SIM_MAPPING_MAX_RANGE_M
+    if overrides["map.backend"] == "mola_snapshot" or os.environ.get("SWARMDECK_INDEXED_MAP_QUERY", "0").lower() in (
         "1",
         "true",
         "yes",
@@ -61,11 +118,15 @@ def robot_nodes(
                 "-p",
                 f"sim_depth:={str(sim_depth).lower()}",
                 "-p",
+                f"cloud_enabled:={str(overrides['map.backend'] == 'cloud_octomap').lower()}",
+                "-p",
                 f"depth_enabled:={str(sim_depth or bool(depth_topic and info_topic)).lower()}",
                 "-p",
                 f"camera_x:={camera_offset[0]}",
                 "-p",
                 f"camera_z:={camera_offset[1]}",
+                "-p",
+                f"mapping_max_range:={SIM_MAPPING_MAX_RANGE_M}",
                 "-p",
                 f"base_frame:={base_frame_arg}",
                 "-r",

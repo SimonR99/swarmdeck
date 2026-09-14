@@ -54,6 +54,7 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -90,6 +91,19 @@ try:
     from robot_localization.srv import SetPose
 except ImportError:  # pragma: no cover - only when robot_localization is absent
     SetPose = None
+
+try:
+    from swarmdeck_sim.scenario.spawn_fleet import robot_spec
+except ImportError:  # Direct source-tree execution and ament's installed layout.
+    _HERE = Path(__file__).resolve()
+    _SCENARIO = _HERE.parents[1] / "scenario"
+    if not _SCENARIO.is_dir():
+        # `ros2 run` installs the executable under lib/<package>, alongside a
+        # share/<package>/scenario copy of the canonical fleet module.
+        _SCENARIO = _HERE.parents[2] / "share/swarmdeck_sim/scenario"
+    if str(_SCENARIO) not in sys.path:
+        sys.path.insert(0, str(_SCENARIO))
+    from spawn_fleet import robot_spec
 
 # How long a cmd_vel stays valid, in SIMULATION seconds.
 #
@@ -146,29 +160,30 @@ INV_ANGLE_INC = 1.0 / SCAN_ANGLE_INC
 SCAN_RANGE_MIN = 0.45
 SCAN_TIME = 0.1
 
-PROX_MIN_HEIGHT = 0.15
 PROX_MAX_HEIGHT = 1.80
+PROX_HEIGHT_EPSILON = 1e-6
+PROX_GROUND_FILTER_CAP = 0.15
 
-ROBOT_SPECS = {
-    "bunker": {
-        "lidar_x": -0.07,
-        "lidar_z": 0.402,
-        "base_height": 0.138,
-        "prox_range_max": 8.0,
-    },
-    "scout_mini": {
-        "lidar_x": 0.0,
-        "lidar_z": 0.280,
-        "base_height": 0.100,
-        "prox_range_max": 8.0,
-    },
-    "spot": {
-        "lidar_x": -0.180,
-        "lidar_z": 0.470,
-        "base_height": 0.500,
-        "prox_range_max": 8.0,
-    },
-}
+
+def proximity_spec(platform: str) -> dict[str, float]:
+    """Canonical mount geometry used to flatten lidar hits for Nav2.
+
+    Height alone cannot prove that a low obstacle has a supported landing,
+    static contact, and overhead clearance.  Keep the ground-return filter no
+    higher than the fleet's established 0.15 m proximity slice so a platform
+    with a larger step capability still sees shorter robots and low hazards.
+    """
+    spec = robot_spec(platform)
+    return {
+        "lidar_x": spec.lidar_x,
+        "lidar_z": spec.lidar_z,
+        "base_height": spec.base_height,
+        "prox_min_height": min(
+            spec.max_step_height, PROX_GROUND_FILTER_CAP
+        )
+        + PROX_HEIGHT_EPSILON,
+        "prox_range_max": spec.prox_range_max,
+    }
 
 
 def project_laserscan_slice(
@@ -211,11 +226,15 @@ def project_laserscan_proximity(
     lidar_x: float,
     lidar_z: float,
     base_height: float,
+    *,
+    prox_min_height: float,
     prox_range_max: float = 8.0,
 ) -> np.ndarray:
     """Derive a 2.5D obstacle projection in base_link frame for Nav2 costmaps.
 
-    Projects obstacles in the physical height band [0.15, 1.80] m above ground.
+    Filters only the platform's conservatively capped ground-return band, then
+    projects higher obstacles through 1.80 m.  Traversability above that band
+    still requires terrain and clearance evidence from the planner.
     """
     ranges = np.full(SCAN_BEAMS, np.inf, dtype=np.float32)
     if hit_pts.size == 0:
@@ -229,7 +248,9 @@ def project_laserscan_proximity(
     py = hy
     pz_floor = hz + lidar_z + base_height
 
-    prox_mask = (pz_floor >= PROX_MIN_HEIGHT) & (pz_floor <= PROX_MAX_HEIGHT)
+    prox_mask = (pz_floor >= prox_min_height) & (
+        pz_floor <= PROX_MAX_HEIGHT + PROX_HEIGHT_EPSILON
+    )
     if not np.any(prox_mask):
         return ranges
 
@@ -314,11 +335,12 @@ class RobotInterface:
         )
 
         ns = robot_id
-        spec = node.robot_specs.get(robot_id, ROBOT_SPECS["bunker"])
-        self.lidar_x = float(spec.get("lidar_x", -0.07))
-        self.lidar_z = float(spec.get("lidar_z", 0.402))
-        self.base_height = float(spec.get("base_height", 0.138))
-        self.prox_range_max = float(spec.get("prox_range_max", 8.0))
+        spec = node.robot_specs.get(robot_id, proximity_spec("bunker"))
+        self.lidar_x = float(spec["lidar_x"])
+        self.lidar_z = float(spec["lidar_z"])
+        self.base_height = float(spec["base_height"])
+        self.prox_min_height = float(spec["prox_min_height"])
+        self.prox_range_max = float(spec["prox_range_max"])
 
         self.pub_points = node.create_publisher(
             PointCloud2, f"/{ns}/scan/points", reliable
@@ -419,8 +441,7 @@ class ArgosBridge(Node):
                 for i in range(count):
                     rid = f"{prefix}{i}"
                     ptype = overrides.get(rid, default_type)
-                    base_spec = ROBOT_SPECS.get(ptype, ROBOT_SPECS["bunker"]).copy()
-                    specs[rid] = base_spec
+                    specs[rid] = proximity_spec(ptype)
             except Exception:
                 pass
         return specs
@@ -635,7 +656,15 @@ class ArgosBridge(Node):
             raw = recv_exact(sock, readings * LIDAR_READING.size)
             # ARGoS's unrendered SScan starts with MaxRange=0. Publishing it
             # can make SLAM Toolbox cache an unusable laser model for this frame.
-            usable_scan = math.isfinite(_max_range) and _max_range > SCAN_RANGE_MIN
+            # TF2 treats zero as "latest", losing the capture pose during
+            # startup settling. Drain tick-zero scans without publishing; the
+            # exchange tick must also support a nonzero fallback timestamp.
+            usable_scan = (
+                tick > 0
+                and scan_tick > 0
+                and math.isfinite(_max_range)
+                and _max_range > SCAN_RANGE_MIN
+            )
             duplicate = robot.last_scan_tick == scan_tick
             if usable_scan:
                 robot.last_scan_tick = scan_tick
@@ -723,12 +752,13 @@ class ArgosBridge(Node):
                 scan_msg.ranges = scan_ranges.tolist()
                 robot.pub_scan.publish(scan_msg)
 
-                # 3. Proximity 2.5D LaserScan (Nav2: 0.15..1.80 m obstacle band in base_link)
+                # 3. Proximity 2.5D LaserScan (Nav2 obstacle band in base_link)
                 prox_ranges = project_laserscan_proximity(
                     hit_pts,
                     robot.lidar_x,
                     robot.lidar_z,
                     robot.base_height,
+                    prox_min_height=robot.prox_min_height,
                     prox_range_max=robot.prox_range_max,
                 )
                 prox_msg = LaserScan()
@@ -754,7 +784,16 @@ class ArgosBridge(Node):
             depth_data = recv_exact(sock, width * height * 4) if has_depth else None
             # Drain the complete frame before skipping it, keeping the next
             # robot aligned on the socket. Never relabel stale RGB-D as current.
-            if not robot.last_camera_tick < cam_tick <= tick or not width or not height:
+            # As for LiDAR, tick zero cannot name a capture-time TF in ROS.
+            # The complete RGB-D payload has already been drained, so skipping
+            # it is safe for packet framing and the next positive tick remains
+            # eligible.
+            if (
+                cam_tick == 0
+                or not robot.last_camera_tick < cam_tick <= tick
+                or not width
+                or not height
+            ):
                 return robot_id
             robot.last_camera_tick = cam_tick
             camera_stamp = _stamp_of(cam_tick, ticks_per_second)

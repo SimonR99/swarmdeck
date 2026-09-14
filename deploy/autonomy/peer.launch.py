@@ -29,7 +29,7 @@ def generate_launch_description():
         raise ValueError("Use a dedicated nonzero ROS_DOMAIN_ID for each mission")
     if not 0 <= sensor_domain <= 232:
         raise ValueError("SWARMDECK_SENSOR_DOMAIN_ID must be between 0 and 232")
-    ns = os.environ.get("SWARMDECK_SENSOR_NAMESPACE", robot).strip("/")
+    ns = (os.environ.get("SWARMDECK_SENSOR_NAMESPACE") or robot).strip("/")
     sim_time = os.environ.get("SWARMDECK_USE_SIM_TIME", "false").lower() == "true"
     capture_provider = os.environ.get(
         "SWARMDECK_CAPTURE_PROVIDER", "unknown"
@@ -80,6 +80,13 @@ def generate_launch_description():
                 ),
                 "capture_provider": capture_provider,
                 "capture_provenance_topic": capture_provenance_topic,
+                "color_topic": os.environ.get("SWARMDECK_COLOR_TOPIC") or f"/{ns}/camera/image",
+                "depth_topic": os.environ.get("SWARMDECK_DEPTH_TOPIC") or f"/{ns}/camera/depth_image",
+                "color_info_topic": os.environ.get("SWARMDECK_COLOR_INFO_TOPIC") or f"/{ns}/camera/camera_info",
+                "color_frame": os.environ.get("SWARMDECK_COLOR_FRAME", ""),
+                "color_frame_convention": os.environ.get(
+                    "SWARMDECK_COLOR_FRAME_CONVENTION"
+                ) or ("body" if capture_provider == "simulation" else "optical"),
                 "max_stored_raw_capture_points": int(
                     os.environ.get("SWARMDECK_MAX_STORED_RAW_CAPTURE_POINTS", "4096")
                 ),

@@ -2537,3 +2537,26 @@ def test_return_home_requires_valid_home():
     finally:
         app_registry.robots.clear()
         app_registry._sinks.clear()
+
+
+def test_unreachable_route_is_not_sent_to_robot(monkeypatch):
+    from swarmdeck_server.api import app as app_module
+    from swarmdeck_server.mapsvc.planner import PathPlanningError
+
+    sim, _ = _explore_fleet(app_module)
+
+    def no_route(*args):
+        raise PathPlanningError("No route with sufficient obstacle clearance")
+
+    monkeypatch.setattr(map_service, "plan_path", no_route)
+    try:
+        asyncio.run(
+            handle_gui_message(
+                {"type": "set_goal", "robot_id": "sim_0", "payload": {"x": 3, "y": 4}}
+            )
+        )
+        assert not any(m["type"] == "navigate_to" for m in sim.messages)
+        assert app_registry.robots["sim_0"].goal is None
+    finally:
+        app_registry.robots.clear()
+        app_registry._sinks.clear()

@@ -11,6 +11,8 @@ import {
 } from '../src/lib/components/map3d/replicaTactical.ts';
 
 const digest = 'a'.repeat(64);
+const XYZ_ENCODING = 'application/vnd.swarmdeck.xyz-f32.v1';
+const XYZRGBA_ENCODING = 'application/vnd.swarmdeck.xyzrgba-f32-u8.v1';
 const selection: ReplicaTacticalSelection = {
   robotId: 'robot_7',
   sessionId: 'session-a',
@@ -26,8 +28,18 @@ function xyz(points: number[][]) {
   return bytes;
 }
 
+function xyzrgba(points: number[][], rgba: number[][]) {
+  const bytes = new Uint8Array(16 + points.length * 16);
+  bytes.set(new TextEncoder().encode('SDRGB1\0\0'));
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(8, BigInt(points.length), true);
+  points.flat().forEach((value, index) => view.setFloat32(16 + index * 4, value, true));
+  bytes.set(rgba.flat(), 16 + points.length * 12);
+  return bytes;
+}
+
 function replicaView(revision: number, tx: number, frame = 'component_a', epoch = 2): ReplicaView {
-  const chunk = { sha256: digest, point_count: 2, size_bytes: 40 };
+  const chunk = { sha256: digest, point_count: 2, size_bytes: 40, encoding: XYZ_ENCODING };
   const selected = {
     component_id: selection.componentId,
     frame_id: frame,
@@ -51,6 +63,8 @@ function replicaView(revision: number, tx: number, frame = 'component_a', epoch 
     session_id: selection.sessionId,
     revision,
     snapshot_id: `snapshot-${revision}`,
+    solution_order: [epoch, revision],
+    solution_order_known: true,
     component_id: selection.componentId,
     components: [selected],
     selected,
@@ -152,6 +166,49 @@ test('loader requires the server to return the explicitly selected component', a
   }
 });
 
+test('legacy geometry with unknown solution order remains readable but noninteractive', async () => {
+  const oldFetch = globalThis.fetch;
+  const legacy = replicaView(1, 10);
+  delete legacy.solution_order;
+  legacy.solution_order_known = false;
+  globalThis.fetch = async (input) => String(input).includes('/chunks/')
+    ? new Response(xyz([[1, 2, 3], [4, 5, 6]]))
+    : Response.json(legacy);
+  try {
+    const cloud = await new ReplicaTacticalLoader(1024, 10)
+      .load(selection, new AbortController().signal);
+    assert.ok(cloud);
+    assert.equal(cloud.view.solution_order_known, false);
+    assert.equal(cloud.positions.length, 6);
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
+test('known frame provenance refreshes interactivity without geometry churn', async () => {
+  const oldFetch = globalThis.fetch;
+  const current = replicaView(1, 10);
+  delete current.solution_order;
+  current.solution_order_known = false;
+  globalThis.fetch = async (input) => String(input).includes('/chunks/')
+    ? new Response(xyz([[1, 2, 3], [4, 5, 6]]))
+    : Response.json(current);
+  try {
+    const loader = new ReplicaTacticalLoader(1024, 10);
+    const legacy = await loader.load(selection, new AbortController().signal);
+    assert.ok(legacy);
+    current.solution_order = [0, -1];
+    current.solution_order_known = true;
+    const qualified = await loader.load(
+      selection, new AbortController().signal, legacy
+    );
+    assert.ok(qualified);
+    assert.equal(replicaTransition(legacy, qualified), 'revision');
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
 test('fleet catalogue selections use the aggregate view and scope-specific cache key', async () => {
   const oldFetch = globalThis.fetch;
   const fleetSelection: ReplicaTacticalSelection = {
@@ -196,6 +253,67 @@ test('source assembly is capped before the existing render-quality budget', asyn
     assert.equal(cloud.positions.length, 3);
     assert.equal(cloud.owners.length, 1);
     assert.equal(cloud.partial, true);
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
+test('robot-scoped views exclude relayed peer submaps while fleet views retain them', async () => {
+  const oldFetch = globalThis.fetch;
+  const peerDigest = 'b'.repeat(64);
+  const localView = replicaView(1, 0);
+  localView.scope = 'robot';
+  localView.robot_id = selection.robotId;
+  localView.selected!.submaps.push({
+    submap_id: 'robot_8/session-a/submap/4',
+    geometry_revision: 1,
+    pose_revision: 1,
+    T_component_submap: [
+      [1, 0, 0, 100], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]
+    ],
+    chunks: [{ sha256: peerDigest, point_count: 1, size_bytes: 28, encoding: XYZ_ENCODING }]
+  });
+  localView.chunks = [
+    ...(localView.chunks ?? []),
+    { sha256: peerDigest, point_count: 1, size_bytes: 28, encoding: XYZ_ENCODING }
+  ];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes('/chunks/')) {
+      return new Response(url.includes(peerDigest) ? xyz([[9, 9, 9]]) : xyz([[1, 2, 3], [4, 5, 6]]));
+    }
+    return Response.json(localView);
+  };
+  try {
+    const loaded = await new ReplicaTacticalLoader(1024, 10)
+      .load({ ...selection, scope: 'robot' }, new AbortController().signal);
+    assert.ok(loaded);
+    assert.deepEqual([...loaded.positions], [-2, 21, 33, -5, 24, 36]);
+    assert.deepEqual(loaded.ownerIds, ['robot_7']);
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+});
+
+test('colored chunks validate their full wire size and preserve RGB alignment', async () => {
+  const oldFetch = globalThis.fetch;
+  const current = replicaView(1, 0);
+  const chunk = {
+    sha256: digest,
+    point_count: 2,
+    size_bytes: 48,
+    encoding: XYZRGBA_ENCODING
+  };
+  current.chunks = [chunk];
+  current.selected!.submaps[0].chunks = [chunk];
+  globalThis.fetch = async (input) => String(input).includes('/chunks/')
+    ? new Response(xyzrgba([[1, 2, 3], [4, 5, 6]], [[240, 10, 20, 255], [8, 9, 10, 0]]))
+    : Response.json(current);
+  try {
+    const loaded = await new ReplicaTacticalLoader(1024, 10)
+      .load(selection, new AbortController().signal);
+    assert.ok(loaded);
+    assert.deepEqual([...loaded.rgb!], [240, 10, 20, 148, 148, 148]);
   } finally {
     globalThis.fetch = oldFetch;
   }

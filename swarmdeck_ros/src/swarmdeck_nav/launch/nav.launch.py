@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
@@ -122,10 +123,22 @@ def generate_launch_description() -> LaunchDescription:
             ],
         },
     )
+    bounded_startup = LaunchConfiguration("bounded_startup")
+    managed_nodes = [
+        "controller_server", "planner_server", "behavior_server",
+        "bt_navigator", "velocity_smoother",
+    ]
+    startup = Node(
+        package="swarmdeck_nav", executable="lifecycle_startup",
+        name="navigation_startup", namespace=namespace, output="screen",
+        condition=IfCondition(bounded_startup),
+        parameters=[{"node_names": managed_nodes, "startup_timeout_s": 60.0}],
+    )
     lifecycle = Node(
         package="nav2_lifecycle_manager",
         executable="lifecycle_manager",
         name="lifecycle_manager_navigation",
+        condition=UnlessCondition(bounded_startup),
         namespace=namespace,
         output="screen",
         parameters=[
@@ -133,17 +146,7 @@ def generate_launch_description() -> LaunchDescription:
                 "use_sim_time": use_sim_time,
                 "autostart": True,
                 "bond_timeout": 0.0,
-                # Match SLAM bringup's bounded tolerance for a loaded four-
-                # robot host. The default 5 s can permanently abandon an
-                # otherwise healthy lifecycle node during initial discovery.
-                "service_timeout": 30.0,
-                "node_names": [
-                    "controller_server",
-                    "planner_server",
-                    "behavior_server",
-                    "bt_navigator",
-                    "velocity_smoother",
-                ],
+                "node_names": managed_nodes,
             }
         ],
     )
@@ -151,6 +154,9 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("namespace", default_value="robot_0"),
+            # Exactly one lifecycle owner: simulation uses bounded state-based
+            # startup; hardware retains its existing Nav2 lifecycle manager.
+            DeclareLaunchArgument("bounded_startup", default_value="false"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("params_file", default_value=default_params),
             # Circumscribed chassis radius, and the inflation built on it.
@@ -188,5 +194,6 @@ def generate_launch_description() -> LaunchDescription:
             navigator,
             velocity_smoother,
             lifecycle,
+            startup,
         ]
     )

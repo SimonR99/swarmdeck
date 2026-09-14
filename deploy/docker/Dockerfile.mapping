@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 COPY deploy/patches/mgg-objective-msgs.patch /tmp/mgg-objective-msgs.patch
 COPY deploy/patches/mgg-indexed-map-msgs.patch /tmp/mgg-indexed-map-msgs.patch
+COPY deploy/patches/mgg-partial-route-navigate.patch /tmp/mgg-partial-route-navigate.patch
+COPY deploy/patches/mgg-route-validation.patch /tmp/mgg-route-validation.patch
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
     && rm -rf /tmp/mgg-msgs-source
 
@@ -73,6 +75,15 @@ RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py
          /tmp/map-fixture/snapshot.json \
          /tmp/map-fixture/chunks /tmp/smoke.metricmap \
     && test -s /tmp/smoke.metricmap
+
+# The same native snapshot consumer must accept colored peer submaps while
+# retaining only their geometry for navigation.
+RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py /tmp/color-fixture --color \
+    && source /opt/ros/jazzy/setup.bash \
+    && /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import \
+         /tmp/color-fixture/snapshot.json \
+         /tmp/color-fixture/chunks /tmp/color.metricmap \
+    && test -s /tmp/color.metricmap
 
 # Drive ``swarmdeck-mola-import --serve`` through one persistent JSONL process.
 # The script has per-read deadlines and the outer timeout bounds image build

@@ -102,6 +102,7 @@ from adapters.runtime import (
     unique_row_index,
 )
 from adapters.session import run_adapter_session
+from adapters.navigation_result import navigation_failure_reason
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
@@ -253,6 +254,7 @@ class HardwareBridge(
         self._plan_frame_warned = False
         self.battery: float | None = None
         self.nav_status = "idle"
+        self._nav_failure_reason: str | None = None
         self.mode = "idle"
         self.goal: dict[str, float] | None = None
         self._goal_handle = None
@@ -1459,6 +1461,7 @@ class HardwareBridge(
             generation = self._goal_generation
             self._trajectory_target = None
             self._arm_goal({"x": final.x, "y": final.y}, relay_nav=True)
+            self.goal.update(z=final.z, frame_id=plan.frame_id)
             self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
             try:
                 future = self.path_client.send_goal_async(msg)
@@ -1474,6 +1477,7 @@ class HardwareBridge(
                     self.planned_path = []
                     self.nav_status, self.mode = "active", "idle"
                 return False
+            self._follow_path_display = (generation, plan)
             future.add_done_callback(
                 lambda f, g=generation: self._on_goal_response(f, g)
             )
@@ -1751,6 +1755,7 @@ class HardwareBridge(
     def _arm_goal(self, goal: dict[str, float], *, relay_nav=False) -> None:
         self.goal = {"x": float(goal["x"]), "y": float(goal["y"])}
         self.nav_status = "active"
+        self._nav_failure_reason = None
         self.mode = "nav"
         # Keep Nav2 output closed until this generation is accepted. The old
         # action can still publish while replacement acceptance is in flight.
@@ -1880,6 +1885,7 @@ class HardwareBridge(
             self._finish_goal("failed")
             return
         result = getattr(outcome, "result", None)
+        reason = navigation_failure_reason(result)
         reported_success = bool(getattr(result, "success", True))
         message = str(getattr(result, "message", "") or "")
         if status == GoalStatus.STATUS_SUCCEEDED and reported_success:
@@ -1912,7 +1918,7 @@ class HardwareBridge(
             + (f" step={self._trajectory_step}" if self._trajectory_step else "")
             + (f": {message}" if message else "")
         )
-        self._finish_goal("failed")
+        self._finish_goal("failed", reason=reason)
 
     def _diff_trajectory_made_progress(self) -> bool:
         """Accept a driver `not at goal` only when TF proves useful motion."""
@@ -1946,10 +1952,11 @@ class HardwareBridge(
         )
         return after <= tolerance or after <= before - minimum
 
-    def _finish_goal(self, status: str) -> None:
+    def _finish_goal(self, status: str, *, reason: str | None = None) -> None:
         self._nav_execution_enabled = False
         self._nav_enable_on_accept = False
         self.nav_status = status
+        self._nav_failure_reason = reason if status == "failed" else None
         self.mode = "idle"
         self.goal = None
         self.planned_path = []
@@ -1984,6 +1991,7 @@ class HardwareBridge(
             self._local_planned_path = []
             self._global_planned_path = []
             self.nav_status = "cancelled"
+            self._nav_failure_reason = None
             self.mode = "idle"
             self._trajectory_target = None
             self._trajectory_step = ""

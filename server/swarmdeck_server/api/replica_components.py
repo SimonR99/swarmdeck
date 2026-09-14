@@ -27,6 +27,7 @@ MAX_SUBMAPS = 16_384
 MAX_SOURCE_SUBMAPS = 65_536
 MAX_CHUNKS = 4_096
 XYZ_ENCODING = "application/vnd.swarmdeck.xyz-f32.v1"
+XYZRGBA_ENCODING = "application/vnd.swarmdeck.xyzrgba-f32-u8.v1"
 
 
 def digest(value: Any) -> str:
@@ -80,10 +81,11 @@ def _chunk(value: Any) -> ChunkRef:
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Invalid geometry chunk") from exc
     if (
-        chunk.encoding != XYZ_ENCODING
-        or chunk.size_bytes != 16 + 12 * chunk.point_count
+        chunk.encoding not in {XYZ_ENCODING, XYZRGBA_ENCODING}
+        or chunk.size_bytes
+        != 16 + (12 if chunk.encoding == XYZ_ENCODING else 16) * chunk.point_count
     ):
-        raise ValueError("Invalid XYZ-F32 geometry chunk")
+        raise ValueError("Invalid geometry chunk")
     return chunk
 
 
@@ -229,6 +231,9 @@ def _normalize_envelope(envelope: dict) -> dict:
     robot_id, session_id = envelope["robot_id"], envelope["session_id"]
     identity(robot_id, session_id)
     revision = uint(envelope["revision"], "replica revision")
+    order_known = (
+        "solution_order" in envelope and envelope["solution_order"] is not None
+    )
     order = solution_order(envelope)
     raw_declared = envelope.get("chunks")
     if not isinstance(raw_declared, list) or len(raw_declared) > MAX_CHUNKS:
@@ -332,6 +337,7 @@ def _normalize_envelope(envelope: dict) -> dict:
         "snapshot_id": snapshot.snapshot_id,
         "generated_at_ns": snapshot.generated_at_ns,
         "solution_order": order,
+        "solution_order_known": order_known,
         "components": components,
     }
 
@@ -388,7 +394,10 @@ class ComponentCatalogue:
         if len(frames) != 1:
             raise ValueError("Component publishers disagree on the coordinate frame")
         orders = {source["solution_order"] for source in sources}
-        if len(sources) > 1 and (None in orders or len(orders) != 1):
+        order_known = all(source["solution_order_known"] for source in sources)
+        if len(sources) > 1 and (
+            not order_known or None in orders or len(orders) != 1
+        ):
             raise LookupError("Waiting for a common accepted Swarm-SLAM solution")
         order = next(iter(orders))
         source_count = sum(
@@ -468,13 +477,14 @@ class ComponentCatalogue:
             "snapshot_id": digest([key, publications, order, component]),
             "generated_at_ns": max(source["generated_at_ns"] for source in sources),
             "solution_order": order,
+            "solution_order_known": order_known,
             "components": [component],
             "selected": component,
             "chunks": [chunks[name] for name in sorted(chunks)],
             "source_age_s": None,
             "age_clock": "unknown",
             "sources": publications,
-            "geometry_encoding": XYZ_ENCODING,
+            "geometry_encodings": [XYZ_ENCODING, XYZRGBA_ENCODING],
             "reconstruction": None,
         }
         self._views[key] = view
@@ -495,6 +505,7 @@ class ComponentCatalogue:
                 "status": "conflict",
                 "detail": "",
                 "solution_order": None,
+                "solution_order_known": False,
                 "sources": _publications(sources),
             }
             try:
@@ -504,6 +515,7 @@ class ComponentCatalogue:
                     status="ready",
                     sources=view["sources"],
                     solution_order=view["solution_order"],
+                    solution_order_known=view["solution_order_known"],
                     submap_count=len(view["selected"]["submaps"]),
                     point_count=sum(
                         chunk["point_count"]

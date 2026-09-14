@@ -39,6 +39,16 @@ export class VoxelTerrain {
     if (this.voxelMesh) this.voxelMesh.visible = mode === 'voxels';
     if (this.surfaceMesh) this.surfaceMesh.visible = mode === 'mesh';
   }
+  /** Show the cloud as an honest fallback while a Gaussian artifact is unavailable. */
+  public setGaussianProxy(visible: boolean) {
+    if (visible && !this.pointsMesh) {
+      const selected = this.renderMode;
+      this.renderMode = 'points';
+      this.ensureGeometry();
+      this.renderMode = selected;
+    }
+    if (this.pointsMesh) this.pointsMesh.visible = visible || this.renderMode === 'points';
+  }
   public setColorMode(mode: Map3DColorMode) {
     if (this.colorMode === mode) return;
     this.colorMode = mode;

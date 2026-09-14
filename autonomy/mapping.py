@@ -46,9 +46,12 @@ from .contracts import (
 )
 
 XYZ_F32_ENCODING = "application/vnd.swarmdeck.xyz-f32.v1"
+XYZRGBA_F32_U8_ENCODING = "application/vnd.swarmdeck.xyzrgba-f32-u8.v1"
 _XYZ_MAGIC = b"SDXYZ1\x00\x00"
+_XYZRGBA_MAGIC = b"SDRGB1\x00\x00"
 MAX_CHUNK_BYTES = 8 * 1024 * 1024
 _MAX_POINTS_PER_CHUNK = (MAX_CHUNK_BYTES - 16) // 12
+_MAX_COLORED_POINTS_PER_CHUNK = (MAX_CHUNK_BYTES - 16) // 16
 
 
 class StaleSolutionError(ValueError):
@@ -128,6 +131,15 @@ def _encode_points(points: np.ndarray) -> bytes:
     return _XYZ_MAGIC + struct.pack("<Q", cloud.shape[0]) + cloud.tobytes(order="C")
 
 
+def _encode_points_rgba(points: np.ndarray, colors: np.ndarray) -> bytes:
+    cloud = np.ascontiguousarray(points, dtype="<f4")
+    rgba = np.ascontiguousarray(colors, dtype=np.uint8)
+    if rgba.shape != (len(cloud), 4):
+        raise ValueError("point colors must have shape Nx4")
+    return (_XYZRGBA_MAGIC + struct.pack("<Q", len(cloud))
+            + cloud.tobytes(order="C") + rgba.tobytes(order="C"))
+
+
 def decode_xyz_f32(payload: bytes) -> np.ndarray:
     """Decode the stable little-endian chunk format used by the native bridge."""
 
@@ -137,6 +149,26 @@ def decode_xyz_f32(payload: bytes) -> np.ndarray:
     if len(payload) != 16 + count * 12:
         raise ValueError("XYZ-F32 chunk length does not match point count")
     return np.frombuffer(payload, dtype="<f4", offset=16).reshape((-1, 3)).copy()
+
+
+def decode_xyzrgba_f32_u8(payload: bytes) -> tuple[np.ndarray, np.ndarray]:
+    if len(payload) < 16 or payload[:8] != _XYZRGBA_MAGIC:
+        raise ValueError("not a SwarmDeck XYZRGBA chunk")
+    count = struct.unpack("<Q", payload[8:16])[0]
+    if len(payload) != 16 + count * 16:
+        raise ValueError("XYZRGBA chunk length does not match point count")
+    xyz_end = 16 + count * 12
+    points = np.frombuffer(payload, dtype="<f4", count=count * 3, offset=16).reshape((-1, 3)).copy()
+    colors = np.frombuffer(payload, dtype=np.uint8, count=count * 4, offset=xyz_end).reshape((-1, 4)).copy()
+    return points, colors
+
+
+def decode_chunk_points(payload: bytes, encoding: str) -> np.ndarray:
+    if encoding == XYZ_F32_ENCODING:
+        return decode_xyz_f32(payload)
+    if encoding == XYZRGBA_F32_U8_ENCODING:
+        return decode_xyzrgba_f32_u8(payload)[0]
+    raise ValueError("unsupported map chunk encoding")
 
 
 def _points(value: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
@@ -380,7 +412,8 @@ class SubmapStore:
         }
 
     def put_chunk(
-        self, payload: bytes, *, point_count: int, bounds: Bounds3
+        self, payload: bytes, *, point_count: int, bounds: Bounds3,
+        encoding: str = XYZ_F32_ENCODING,
     ) -> ChunkRef:
         if len(payload) > MAX_CHUNK_BYTES:
             raise ValueError(
@@ -393,14 +426,15 @@ class SubmapStore:
         ):
             raise ValueError("point_count must be a non-negative integer")
         if (
-            not payload.startswith(_XYZ_MAGIC)
+            encoding not in {XYZ_F32_ENCODING, XYZRGBA_F32_U8_ENCODING}
+            or not payload.startswith(_XYZ_MAGIC if encoding == XYZ_F32_ENCODING else _XYZRGBA_MAGIC)
             or len(payload) < 16
             or struct.unpack("<Q", payload[8:16])[0] != point_count
-            or len(payload) != 16 + 12 * point_count
+            or len(payload) != 16 + (12 if encoding == XYZ_F32_ENCODING else 16) * point_count
         ):
             raise ValueError("invalid XYZ-F32 chunk payload")
         digest = hashlib.sha256(payload).hexdigest()
-        result = ChunkRef(digest, XYZ_F32_ENCODING, len(payload), bounds, point_count)
+        result = ChunkRef(digest, encoding, len(payload), bounds, point_count)
         path = self.chunks_dir / digest
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
@@ -438,7 +472,7 @@ class SubmapStore:
                         "INSERT INTO chunks VALUES (?, ?, ?, ?, ?)",
                         (
                             digest,
-                            XYZ_F32_ENCODING,
+                            encoding,
                             len(payload),
                             point_count,
                             json.dumps(bounds),
@@ -494,10 +528,14 @@ class SubmapStore:
         replace: bool = False,
         initial_T_component_submap: Matrix4 = IDENTITY_SE3,
         ray_evidence: RayEvidence = RayEvidence(),
+        colors_rgba: np.ndarray | None = None,
     ) -> int:
         cloud = _points(points_local)
         if len(cloud) == 0:
             raise ValueError("point cloud must not be empty")
+        colors = None if colors_rgba is None else np.asarray(colors_rgba, dtype=np.uint8)
+        if colors is not None and colors.shape != (len(cloud), 4):
+            raise ValueError("point colors must have shape Nx4")
         if not math.isfinite(resolution_m) or resolution_m <= 0:
             raise ValueError("resolution_m must be finite and positive")
         if not keyframe_poses_local:
@@ -568,12 +606,16 @@ class SubmapStore:
         initial_pose = validate_se3(
             initial_T_component_submap, "initial_T_component_submap"
         )
+        chunk_points = _MAX_POINTS_PER_CHUNK if colors is None else _MAX_COLORED_POINTS_PER_CHUNK
         chunks = tuple(
             self.put_chunk(
-                _encode_points(part), point_count=len(part), bounds=_bounds(part)
+                _encode_points(part) if colors is None else _encode_points_rgba(part, colors[start:end]),
+                point_count=len(part), bounds=_bounds(part),
+                encoding=XYZ_F32_ENCODING if colors is None else XYZRGBA_F32_U8_ENCODING,
             )
-            for start in range(0, len(cloud), _MAX_POINTS_PER_CHUNK)
-            for part in (cloud[start : start + _MAX_POINTS_PER_CHUNK],)
+            for start in range(0, len(cloud), chunk_points)
+            for end in (min(len(cloud), start + chunk_points),)
+            for part in (cloud[start:end],)
         )
         # One origin applies to every chunk generated from this cloud. Multiple
         # origins have no point/ray association in this API and therefore stay
@@ -1010,6 +1052,7 @@ class CorrectionAwareMapper:
         points_sensor: Sequence[Sequence[float]] | np.ndarray,
         *,
         replace: bool = False,
+        colors_rgba: np.ndarray | None = None,
     ) -> int:
         if capture.calibration_version != calibration.version:
             raise ValueError(
@@ -1041,6 +1084,7 @@ class CorrectionAwareMapper:
                 in (DeskewStatus.DESKEWED, DeskewStatus.NOT_REQUIRED)
                 else RayEvidence()
             ),
+            colors_rgba=colors_rgba,
         )
 
     def replace_submap_geometry(
@@ -1108,7 +1152,8 @@ class CorrectionAwareMapper:
             )
             for chunk_index, chunk in enumerate(submap.chunks):
                 endpoints = _transform(
-                    pose, decode_xyz_f32(self.store.get_chunk(chunk.sha256))
+                    pose,
+                    decode_chunk_points(self.store.get_chunk(chunk.sha256), chunk.encoding),
                 )
                 if len(endpoints) and np.any(
                     np.linalg.norm(endpoints - query, axis=1)
@@ -1178,7 +1223,9 @@ class CorrectionAwareMapper:
         geometry_revision = _geometry_digest(submaps) if submaps else None
         for submap in submaps:
             for chunk in submap.chunks:
-                local = decode_xyz_f32(self.store.get_chunk(chunk.sha256))
+                local = decode_chunk_points(
+                    self.store.get_chunk(chunk.sha256), chunk.encoding
+                )
                 clouds.append(_transform(submap.T_component_submap, local))
         if not clouds:
             return TerrainQuery(

@@ -29,6 +29,8 @@ export interface ReplicaCatalogueEntry {
 
 export interface ReplicaCatalogue {
   version: 1;
+  /** Server-declared current mission; absent means the server cannot select safely. */
+  active_session_id: string | null;
   components: ReplicaCatalogueEntry[];
 }
 
@@ -95,7 +97,64 @@ export function parseReplicaCatalogue(value: unknown): ReplicaCatalogue {
   if (!value || typeof value !== 'object') invalid('response is not an object');
   const item = value as Record<string, unknown>;
   if (item.version !== 1 || !Array.isArray(item.components)) invalid('response envelope is invalid');
-  return { version: 1, components: item.components.map(entry) };
+  const activeSession = item.active_session_id;
+  if (activeSession !== undefined && activeSession !== null && typeof activeSession !== 'string') {
+    invalid('active_session_id is invalid');
+  }
+  return {
+    version: 1,
+    active_session_id: activeSession === undefined ? null : activeSession,
+    components: item.components.map(entry)
+  };
+}
+
+/**
+ * Pick a current component only when the server identified the mission. A
+ * preferred robot narrows the choice to a component that actually contains
+ * that robot; ties are deterministic and never combine disconnected frames.
+ */
+export function automaticCatalogueEntry(
+  catalogue: ReplicaCatalogue,
+  preferredRobotId?: string | null,
+  fallbackToSingle = false,
+  minimumRobotCount = 1
+): ReplicaCatalogueEntry | null {
+  if (!catalogue.active_session_id) return null;
+  let candidates = catalogue.components
+    .filter((item) => item.available && item.status === 'ready' && item.session_id === catalogue.active_session_id &&
+      item.robot_ids.length >= minimumRobotCount)
+  if (preferredRobotId) {
+    const matching = candidates.filter((item) => item.robot_ids.includes(preferredRobotId));
+    if (matching.length) candidates = matching;
+    else if (!fallbackToSingle || candidates.length !== 1) return null;
+  }
+  if (!candidates.length) return null;
+  return [...candidates].sort((a, b) =>
+    b.robot_ids.length - a.robot_ids.length || a.component_id.localeCompare(b.component_id)
+  )[0];
+}
+
+/**
+ * Keep an already rendered automatic view during a catalogue transition only
+ * when it still has the same mission and the same scope/robot ownership.
+ * Readiness is intentionally excluded: a transient syncing/conflict status
+ * must not relabel fleet geometry as a local view (or vice versa).
+ */
+export function automaticSelectionIsCoherent(
+  selection: ReplicaTacticalSelection | null | undefined,
+  entry: ReplicaCatalogueEntry | null | undefined,
+  activeSessionId: string | null,
+  local: boolean,
+  preferredRobotId?: string | null
+): boolean {
+  if (!selection || !entry || !activeSessionId || entry.session_id !== activeSessionId) return false;
+  if (local) {
+    return selection.scope === 'robot' &&
+      Boolean(preferredRobotId) &&
+      selection.robotId === preferredRobotId &&
+      entry.robot_ids.includes(preferredRobotId as string);
+  }
+  return selection.scope === 'fleet' && selection.robotId === 'fleet' && entry.robot_ids.length >= 2;
 }
 
 export async function fetchReplicaCatalogue(
@@ -122,11 +181,14 @@ export async function fetchReplicaCatalogue(
 }
 
 /** Catalogue entries always use the aggregate read-only view. */
-export function catalogueSelection(entry: ReplicaCatalogueEntry): ReplicaTacticalSelection {
-  const scope: ReplicaSelectionScope = 'fleet';
+export function catalogueSelection(
+  entry: ReplicaCatalogueEntry,
+  scope: ReplicaSelectionScope = 'fleet',
+  robotId = 'fleet'
+): ReplicaTacticalSelection {
   return {
     scope,
-    robotId: 'fleet',
+    robotId,
     sessionId: entry.session_id,
     componentId: entry.component_id
   };

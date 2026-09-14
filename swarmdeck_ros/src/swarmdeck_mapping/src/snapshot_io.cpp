@@ -167,12 +167,15 @@ void validateChunkObject(const json& value)
   const auto size = uintValue(value.at("size_bytes"), "chunk size");
   const auto count = uintValue(value.at("point_count"), "chunk point count");
   if (size > kMaxChunkBytes) throw std::invalid_argument("chunk exceeds byte limit");
-  if (count > (std::numeric_limits<std::uint64_t>::max() - 16) / 12 ||
-      size != 16 + count * 12)
-    throw std::invalid_argument("chunk size and point count disagree");
-  if (boundedString(value.at("encoding"), "chunk encoding", 128) !=
-      "application/vnd.swarmdeck.xyz-f32.v1")
+  const auto encoding = boundedString(value.at("encoding"), "chunk encoding", 128);
+  const auto stride = encoding == "application/vnd.swarmdeck.xyz-f32.v1"
+                          ? 12U
+                          : encoding == "application/vnd.swarmdeck.xyzrgba-f32-u8.v1" ? 16U : 0U;
+  if (stride == 0)
     throw std::invalid_argument("unsupported map chunk encoding");
+  if (count > (std::numeric_limits<std::uint64_t>::max() - 16) / stride ||
+      size != 16 + count * stride)
+    throw std::invalid_argument("chunk size and point count disagree");
   if (value.contains("bounds")) validateBounds(value.at("bounds"), "chunk bounds");
 }
 

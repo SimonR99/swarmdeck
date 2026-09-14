@@ -49,9 +49,30 @@ native MOLA map runtime, full-path MGG execution through Nav2, and resumable
 server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
 [integration and simulation guide](docs/operations/decentralized-autonomy.md)
 for build commands, component inspection, validation status, and rollout limits.
-This remains an opt-in development path; multi-host fault recovery, successful Bistro
-return-home execution, and Gaussian quality and resource scaling still have
-acceptance work. The [native CUDA smoke test](docs/operations/reconstruction-jobs.md)
+Navigate retains the selected destination and searches beyond the local
+exploration horizon. In the simulated cloud pipeline, the full route may cross
+unknown ground provisionally; known obstacles and terrain beyond the robot's
+step capability remain excluded. Unknown space is never written into the map
+as free. Hardware and MOLA retain their stricter evidence requirements.
+Nav2 follows the accepted route while handling local obstacles.
+For provisional Navigate and Return Home routes, a bounded check of the next
+3 m requests a new full route only when newly known terrain or obstacles make
+the current one unusable. Routine map updates do not replace the waypoint.
+The onboard simulation keeps MGG's accumulated map and controller paths in
+continuous odometry coordinates. SLAM corrections update the map display
+without repeatedly canceling a route; actual shared-map corrections still
+invalidate it. See the [navigation acceptance notes](docs/operations/navigation-live-map-acceptance.md)
+for sensor-coverage limits and tested scenarios.
+Simulation terrain checks retain measured surface heights within the coarse
+occupancy map and check known terrain across the robot footprint, including
+exploration candidates. Controller failures include their reason in Fleet.
+Physical no-progress failures allow three movement attempts total; planner
+rejections and transport errors do not consume that movement retry budget.
+Benchbot trials reached approximately 12 m destinations with R0 and R1, and R0
+completed Return Home. This remains an opt-in development path; fleet-wide
+exploration and return-home coverage, multi-host fault recovery, and Gaussian
+quality and resource scaling still have acceptance work. The
+[native CUDA smoke test](docs/operations/reconstruction-jobs.md)
 passes with fixed poses.
 The [MOLA runtime guide](docs/operations/mola-runtime.md) describes persistent
 geometry reuse, the loadable framework module, an optional native terrain-map
@@ -123,9 +144,9 @@ and display settings survive the switch. Use `?view=2d` to start in 2D.
 | View | Representation |
 | --- | --- |
 | **Voxels** | Instanced occupied cells, coarsened to a bounded rendering budget. |
-| **Mesh** | Exposed voxel faces, with internal faces removed. This is a block surface, not a watertight reconstruction. |
+| **Mesh** | Surface triangles connecting neighboring occupied samples across three orthogonal projections. Gaps and depth discontinuities limit connections; this is an approximate surface, not a watertight reconstruction. |
 | **Points** | Robot point clouds colored by elevation, robot source, or calibrated camera RGB. |
-| **Gaussians** | A separately trained, world-aligned reconstruction published to the server. |
+| **Gaussians** | A separately trained reconstruction in the selected component or legacy world frame. An explicit point-cloud proxy appears when no matching model is published. |
 
 Solid robot markers, outlined paths, and selection brackets remain visible over
 terrain. Costmaps follow their source robot's map transform. The **Ceiling**
@@ -149,16 +170,21 @@ For onboard maps, open **Onboard map replicas**, select a robot/session/componen
 and choose **Open component in tactical map**. The viewer assembles stored submaps
 using their verified component poses and reuses cached geometry across pose
 updates. Camera and ceiling settings persist while that component refreshes.
-This view is read-only: world-frame robot overlays and Gaussian models remain
-hidden until their alignment with the selected component is established.
-**Live map** returns to the normal fleet view.
+Explicit catalogue inspection is read-only. **Live map** automatically selects
+current-mission replicas and adds frame-qualified robot markers, paths and goal
+input. **Local** filters the selected robot's submaps; **Global** requires a
+verified shared component. Published Gaussian artifacts must match the selected
+component. Unaligned maps are never combined using assumed transforms.
 
 ### Camera colors and Gaussian reconstruction
 
 **Camera** becomes available when the cloud contains RGB. Simulator keyframes
 can project synchronized, calibrated RGB-D onto LiDAR samples using the pose at
 image capture time and depth for occlusion checks. Unobserved surfaces remain
-gray; old XYZ-only keyframes cannot be colored retroactively.
+gray; old XYZ-only keyframes cannot be colored retroactively. Peer submaps carry
+optional RGBA alongside immutable XYZ, so server caching and pose corrections
+preserve measured color. The native MOLA mapper reads geometry from either
+encoding. RGB availability still depends on qualified image timing and TF.
 
 Hardware adapters match delayed registered scans to buffered camera frames,
 apply RGB lens calibration and capture-time TF, and upload colors for both
@@ -172,9 +198,9 @@ export a COLMAP dataset, train externally, and publish a compact `.swgs` model.
 The optional UMAMI-SLAM integration requires access to the private repository
 via `git@github.com:lemonci/UMAMI-SLAM.git` and its CUDA build environment.
 UMAMI is not bundled and is not required for the dashboard or other map modes.
-The dashboard's Gaussian view consumes world-aligned models. The publication API
-also supports explicitly selected component artifacts; raw `odom` captures cannot
-be displayed as global maps. Durable jobs bind each artifact to its capture,
+The dashboard consumes a model qualified for its selected component or legacy
+world frame; raw `odom` captures cannot be displayed as global maps. Selecting
+Gaussians does not start a trainer. Durable jobs bind each artifact to its capture,
 calibration, and corrected pose revisions. See the
 [reconstruction job guide](docs/operations/reconstruction-jobs.md) for frame
 requirements, stale-result rejection, and the pending native CUDA validation.

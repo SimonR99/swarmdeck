@@ -411,6 +411,20 @@ def test_the_same_config_renders_the_same_bytes():
 BISTRO_CONFIG = REPO / "configs" / "4robot_bistro.yaml"
 
 
+def test_sim_progress_checker_has_a_bounded_translation_watchdog():
+    nav_params = yaml.safe_load(
+        (REPO / "swarmdeck_ros/src/swarmdeck_nav/config/nav2_params.yaml").read_text()
+    )
+    controller = nav_params["controller_server"]["ros__parameters"]
+    progress = controller["progress_checker"]
+    goal = controller["goal_checker"]
+
+    assert progress["plugin"] == "nav2_controller::SimpleProgressChecker"
+    assert 0.0 < progress["required_movement_radius"] < goal["xy_goal_tolerance"]
+    assert "required_movement_angle" not in progress
+    assert progress["movement_time_allowance"] == 20.0
+
+
 @pytest.fixture(scope="module")
 def bistro_tree():
     return ElementTree.fromstring(mas.generate_argos_xml(BISTRO_CONFIG))

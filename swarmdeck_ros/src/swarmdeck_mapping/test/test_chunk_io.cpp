@@ -91,6 +91,22 @@ int main()
   }
   require(rejected, "forged point count reached allocation");
 
+  // Colored chunks append planar RGBA after the ordinary packed XYZ array;
+  // native navigation consumers deliberately read only the geometry prefix.
+  const std::string colored_hash =
+      "1ee32be6ad21b79f325dde4a0c00e73857a13d8bc1383db8b29500d6fa3c4a44";
+  {
+    std::ofstream colored(root / colored_hash, std::ios::binary);
+    const std::uint8_t bytes[] = {
+        'S', 'D', 'R', 'G', 'B', '1', 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 255, 0, 0, 255};
+    colored.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
+  }
+  const auto colored = swarmdeck_mapping::readXyzChunk(root, colored_hash, 32, 1);
+  require(colored.size() == 1 && colored[0].x == 1.0F && colored[0].y == 2.0F &&
+              colored[0].z == 3.0F,
+          "colored chunk geometry was not decoded");
+
   std::filesystem::remove_all(root);
   return 0;
 }

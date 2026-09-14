@@ -31,6 +31,12 @@ from urllib.request import Request, urlopen
 
 XYZ_MAGIC = b"SDXYZ1\x00\x00"
 XYZ_ENCODING = "application/vnd.swarmdeck.xyz-f32.v1"
+XYZRGBA_MAGIC = b"SDRGB1\x00\x00"
+XYZRGBA_ENCODING = "application/vnd.swarmdeck.xyzrgba-f32-u8.v1"
+CHUNK_FORMATS = {
+    XYZ_ENCODING: (XYZ_MAGIC, 12),
+    XYZRGBA_ENCODING: (XYZRGBA_MAGIC, 16),
+}
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_COMPONENTS = 128
@@ -246,11 +252,12 @@ def validate_view(
             digest = text(ref.get("sha256"), "aggregate chunk sha256")
             if not SHA256.fullmatch(digest):
                 raise ObserverError("aggregate chunk sha256 is invalid")
-            if ref.get("encoding") != XYZ_ENCODING:
+            chunk_format = CHUNK_FORMATS.get(ref.get("encoding"))
+            if chunk_format is None:
                 raise ObserverError("aggregate chunk encoding is invalid")
             size = uint(ref.get("size_bytes"), "aggregate chunk size")
             count = uint(ref.get("point_count"), "aggregate chunk point count")
-            if size != 16 + count * 12 or size > MAX_CHUNK_BYTES:
+            if size != 16 + count * chunk_format[1] or size > MAX_CHUNK_BYTES:
                 raise ObserverError("aggregate chunk bounds are invalid")
             previous = refs.get(digest)
             if previous is not None and previous != ref:
@@ -281,10 +288,14 @@ def verify_chunk(
     )
     if len(body) != expected["size_bytes"] or hashlib.sha256(body).hexdigest() != digest:
         raise ObserverError(f"chunk {digest} failed size or SHA-256 validation")
-    if body[:8] != XYZ_MAGIC or len(body) < 16:
-        raise ObserverError(f"chunk {digest} has an invalid SDXYZ1 header")
+    chunk_format = CHUNK_FORMATS.get(expected.get("encoding"))
+    if chunk_format is None:
+        raise ObserverError(f"chunk {digest} has an unsupported encoding")
+    magic, stride = chunk_format
+    if body[:8] != magic or len(body) < 16:
+        raise ObserverError(f"chunk {digest} has an invalid format header")
     count = struct.unpack_from("<Q", body, 8)[0]
-    if count != expected["point_count"] or len(body) != 16 + count * 12:
+    if count != expected["point_count"] or len(body) != 16 + count * stride:
         raise ObserverError(f"chunk {digest} point header does not match descriptor")
     content_length = headers.get("Content-Length")
     if content_length is not None and int(content_length) != len(body):

@@ -1,6 +1,7 @@
 """MGG objective planning boundary without a ROS installation."""
 
 from concurrent.futures import Future
+from copy import deepcopy
 import math
 import sys
 import threading
@@ -35,6 +36,24 @@ class Service:
     Response = Response
 
 
+class ValidateRouteRequest:
+    def __init__(self):
+        self.mission_id = self.component_id = self.frame_id = ""
+        self.path = []
+        self.lookahead_m = 0.0
+
+
+class ValidateRouteResponse:
+    VALID = 0
+    INVALID = 1
+    UNAVAILABLE = 2
+
+
+class ValidateRouteService:
+    Request = ValidateRouteRequest
+    Response = ValidateRouteResponse
+
+
 def pose(x, y, z=0.4, yaw=0.0):
     return NS(
         position=NS(x=x, y=y, z=z),
@@ -48,11 +67,19 @@ def rig(monkeypatch, response):
     services.PlanObjective = Service
     monkeypatch.setitem(sys.modules, "mgg_msgs", package)
     monkeypatch.setitem(sys.modules, "mgg_msgs.srv", services)
-    future = Future()
-    future.set_result(response)
     client = Mock()
     client.wait_for_service.return_value = True
-    client.call_async.return_value = future
+
+    def full_response(request):
+        result = deepcopy(response)
+        if result.status == Response.SUCCEEDED and not result.partial and result.path:
+            result.path[-1].position.x = request.goal.position.x
+            result.path[-1].position.y = request.goal.position.y
+        future = Future()
+        future.set_result(result)
+        return future
+
+    client.call_async.side_effect = full_response
     bridge = Mock()
     bridge.id = "robot_1"
     bridge.map_frame = "robot_1/map_frame"
@@ -129,6 +156,8 @@ def success_path():
         geometry_revision="",
         map_source_stamp=NS(sec=0, nanosec=0),
         reason="",
+        partial=False,
+        indexed_map_validated=False,
         path=[pose(0, 0, 0.4), pose(1, 0.5, 0.41), pose(2, 1, 0.39)],
     )
 
@@ -149,6 +178,84 @@ def test_navigate_requests_snapshot_and_executes_complete_path(monkeypatch):
         (1, 0.5, 0.41),
         (2, 1, 0.39),
     ]
+
+
+def test_native_planner_rejection_reason_is_published_with_failed_state(monkeypatch):
+    response = success_path()
+    response.status = 7
+    response.reason = "current pose rejected: no mapped ground support at (0.01, 0.00, -0.00)"
+    bridge, planner, _ = rig(monkeypatch, response)
+
+    assert not planner.navigate({"x": 2, "y": 1})
+    state = planner.decorate_state({"nav_status": "failed"})
+    assert state["nav_failure_reason"] == response.reason
+
+
+def test_controller_failure_reason_is_preserved_when_planner_has_none(monkeypatch):
+    bridge, planner, _ = rig(monkeypatch, success_path())
+    state = planner.decorate_state(
+        {
+            "nav_status": "failed",
+            "nav_failure_reason": "FollowPath: Failed to make progress",
+        }
+    )
+    assert state["nav_failure_reason"] == "FollowPath: Failed to make progress"
+
+
+def test_planner_failure_reason_takes_precedence_over_controller_reason(monkeypatch):
+    response = success_path()
+    response.status = 7
+    response.reason = "planner rejected route"
+    bridge, planner, _ = rig(monkeypatch, response)
+
+    assert not planner.navigate({"x": 2, "y": 1})
+    state = planner.decorate_state(
+        {
+            "nav_status": "failed",
+            "nav_failure_reason": "FollowPath: Failed to make progress",
+        }
+    )
+    assert state["nav_failure_reason"] == response.reason
+
+
+def test_failure_reason_is_bounded_and_cleared_by_replacement(monkeypatch):
+    response = success_path()
+    response.status = 7
+    response.reason = "native rejection: " + ("x" * 1000)
+    bridge, planner, _ = rig(monkeypatch, response)
+
+    assert not planner.navigate({"x": 2, "y": 1})
+    state = planner.decorate_state({"nav_status": "failed"})
+    assert len(state["nav_failure_reason"]) == 512
+
+    planner.claim_objective("navigate", {"x": 3, "y": 4})
+    assert "nav_failure_reason" not in planner.decorate_state({"nav_status": "active"})
+
+
+def test_late_native_rejection_cannot_overwrite_a_stopped_generation(monkeypatch):
+    response = success_path()
+    response.status = 7
+    response.reason = "late native rejection"
+    bridge, planner, client = rig(monkeypatch, response)
+    pending = Future()
+    client.call_async.side_effect = None
+    client.call_async.return_value = pending
+
+    claim = planner.claim_objective("navigate", {"x": 1, "y": 2})
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(planner.execute_claimed(claim)), daemon=True
+    )
+    worker.start()
+    deadline = time.monotonic() + 1.0
+    while not client.call_async.called and time.monotonic() < deadline:
+        time.sleep(0.001)
+    bridge.cancel_goal()
+    pending.set_result(response)
+    worker.join(1.0)
+
+    assert result == [False]
+    assert "nav_failure_reason" not in planner.decorate_state({"nav_status": "cancelled"})
 
 
 def test_return_home_uses_configured_goal(monkeypatch):
@@ -198,6 +305,7 @@ def test_return_home_uses_corrected_authority_anchor(monkeypatch):
 
 def test_objective_binds_and_validates_indexed_map_snapshot(monkeypatch):
     response = success_path()
+    response.indexed_map_validated = True
     digest = "a" * 64
     response.map_epoch = 11
     response.mapping_graph_revision = 12
@@ -227,6 +335,48 @@ def test_objective_binds_and_validates_indexed_map_snapshot(monkeypatch):
     assert not planner.navigate({"x": 2, "y": 1})
 
 
+def test_native_only_route_does_not_claim_or_bind_to_indexed_snapshot(monkeypatch):
+    response = success_path()
+    response.geometry_revision = "b" * 64
+    bridge, planner, client = rig(monkeypatch, response)
+    authority = [correction_authority(geometry="a" * 64)]
+    planner.authority_reader = NS(current=lambda: authority[0])
+
+    class PublishingFuture:
+        published = False
+
+        def done(self):
+            if not self.published:
+                authority[0] = correction_authority(geometry="c" * 64)
+                self.published = True
+            return True
+
+        def result(self):
+            return response
+
+    client.call_async.side_effect = None
+    client.call_async.return_value = PublishingFuture()
+
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+    bridge.follow_path.assert_called_once()
+    request = client.call_async.call_args.args[0]
+    assert request.geometry_revision == "a" * 64
+    assert response.geometry_revision != request.geometry_revision
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("partial", 1), ("indexed_map_validated", "true")],
+)
+def test_response_evidence_flags_are_strict_booleans(monkeypatch, field, value):
+    response = success_path()
+    setattr(response, field, value)
+    bridge, planner, _ = rig(monkeypatch, response)
+
+    assert not planner.navigate({"x": 2.0, "y": 1.0})
+    bridge.follow_path.assert_not_called()
+
+
 def test_stop_generation_fences_late_service_result(monkeypatch):
     response = success_path()
     bridge, planner, client = rig(monkeypatch, response)
@@ -240,9 +390,73 @@ def test_stop_generation_fences_late_service_result(monkeypatch):
             self.cancelled = True
 
     pending = StoppingFuture()
+    client.call_async.side_effect = None
     client.call_async.return_value = pending
     assert not planner.navigate({"x": 1, "y": 2})
     assert pending.cancelled
+    bridge.follow_path.assert_not_called()
+
+
+def test_claimed_initial_plan_cannot_submit_after_stop(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    pending = Future()
+    client.call_async.side_effect = None
+    client.call_async.return_value = pending
+
+    claim = planner.claim_objective("navigate", {"x": 1, "y": 2})
+    assert claim.generation == bridge._goal_generation
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(planner.execute_claimed(claim)), daemon=True
+    )
+    worker.start()
+    deadline = time.monotonic() + 1.0
+    while not client.call_async.called and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert client.call_async.called
+
+    bridge.cancel_goal()
+    pending.set_result(success_path())
+    worker.join(1.0)
+
+    assert result == [False]
+    bridge.follow_path.assert_not_called()
+
+
+def test_claimed_initial_plan_retains_goal_until_planner_returns(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    pending = Future()
+    client.call_async.side_effect = None
+    client.call_async.return_value = pending
+    goal = {"x": 1, "y": 2, "yaw": 0.3}
+
+    claim = planner.claim_objective("navigate", goal)
+    worker = threading.Thread(
+        target=lambda: planner.execute_claimed(claim), daemon=True
+    )
+    worker.start()
+    deadline = time.monotonic() + 1.0
+    while not client.call_async.called and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert client.call_async.called
+
+    public = planner.decorate_state({"nav_status": "idle", "goal": None})
+    assert public["nav_status"] == "active"
+    assert public["goal"] == {
+        **goal,
+        "frame_id": "robot_1/map_frame",
+    }
+    assert public["objective_continuation"] == {
+        "objective": "navigate",
+        "evidence_source": "mgg_native",
+        "phase": "planning",
+    }
+
+    bridge.cancel_goal()
+    stopped = planner.decorate_state({"nav_status": "idle", "goal": None})
+    assert stopped == {"nav_status": "idle", "goal": None}
+    pending.set_result(success_path())
+    worker.join(1.0)
     bridge.follow_path.assert_not_called()
 
 
@@ -267,6 +481,7 @@ def test_manual_command_while_initial_home_plan_is_pending_wins(monkeypatch):
             self.cancelled = True
 
     pending = ManualCommandFuture()
+    client.call_async.side_effect = None
     client.call_async.return_value = pending
 
     assert not planner.return_home()
@@ -294,11 +509,15 @@ def correction_authority(
     landmark_id="kf-home",
     map_epoch=0,
     navigation_frame="robot_1/map_frame",
+    solution_order=(1, 0),
+    yaw=0.0,
+    home_yaw=0.0,
 ):
     return {
         "mission_id": mission_id,
         "component_id": "component-a",
         "navigation_frame": navigation_frame,
+        "solution_order": list(solution_order),
         "correction_revision": revision,
         "map_epoch": map_epoch,
         "mapping_graph_revision": mapping_graph_revision,
@@ -307,19 +526,31 @@ def correction_authority(
         "home": {
             "keyframe_id": landmark_id,
             "T_navigation_home": [
-                [1.0, 0.0, 0.0, home_x],
-                [0.0, 1.0, 0.0, 1.0],
+                [math.cos(home_yaw), -math.sin(home_yaw), 0.0, home_x],
+                [math.sin(home_yaw), math.cos(home_yaw), 0.0, 1.0],
                 [0.0, 0.0, 1.0, 0.4],
                 [0.0, 0.0, 0.0, 1.0],
             ],
         },
         "T_component_navigation": [
-            [1.0, 0.0, 0.0, x],
-            [0.0, 1.0, 0.0, 0.0],
+            [math.cos(yaw), -math.sin(yaw), 0.0, x],
+            [math.sin(yaw), math.cos(yaw), 0.0, 0.0],
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ],
     }
+
+
+def stable_planning_authority(*, map_x=0.0, planning_x=0.0, revision=1):
+    authority = correction_authority(revision=revision, x=map_x)
+    authority["planning_frame"] = "robot_1/odom"
+    authority["T_component_planning"] = [
+        [1.0, 0.0, 0.0, planning_x],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    return authority
 
 
 def wait_until(predicate, timeout=0.5):
@@ -329,6 +560,12 @@ def wait_until(predicate, timeout=0.5):
             return True
         time.sleep(0.005)
     return predicate()
+
+
+def completed(response):
+    future = Future()
+    future.set_result(response)
+    return future
 
 
 def return_home_rig(monkeypatch):
@@ -344,8 +581,9 @@ def return_home_rig(monkeypatch):
     return bridge, planner, client, authority
 
 
-def test_correction_while_planning_blocks_route_execution(monkeypatch):
+def test_correction_while_planning_retries_with_latest_authority(monkeypatch):
     response = success_path()
+    response.path[-1] = pose(1.0, 2.0)
     response.geometry_revision = "a" * 64
     bridge, planner, client = rig(monkeypatch, response)
     authority = [correction_authority()]
@@ -363,12 +601,16 @@ def test_correction_while_planning_blocks_route_execution(monkeypatch):
         def result(self):
             return response
 
+    client.call_async.side_effect = None
     client.call_async.return_value = CorrectingFuture()
-    assert not planner.navigate({"x": 1, "y": 2})
-    bridge.follow_path.assert_not_called()
+    assert planner.navigate({"x": 1, "y": 2})
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    assert wait_until(lambda: bridge.follow_path.call_count == 1)
 
 
-def test_active_objective_cancels_on_correction_or_authority_loss(monkeypatch):
+def test_active_objective_ignores_metadata_correction_but_fails_on_authority_loss(
+    monkeypatch,
+):
     response = success_path()
     response.geometry_revision = "a" * 64
     bridge, planner, _ = rig(monkeypatch, response)
@@ -378,12 +620,11 @@ def test_active_objective_cancels_on_correction_or_authority_loss(monkeypatch):
     assert planner.navigate({"x": 1, "y": 2})
     bridge.nav_status = "active"
 
-    # correction_revision is authoritative even when this robot's anchor did
-    # not move; another corrected submap can still invalidate the route.
+    # A correction revision alone is metadata; the bound transform did not move.
     authority[0] = correction_authority(revision=2, x=0.0)
     planner._check_active_authority()
-    bridge.cancel_goal_if_current.assert_called_once()
-    assert bridge.nav_status == "failed"
+    bridge.cancel_goal_if_current.assert_not_called()
+    assert bridge.nav_status == "active"
 
     # A second route also fails closed when the once-valid authority expires.
     bridge.nav_status = "idle"
@@ -392,7 +633,7 @@ def test_active_objective_cancels_on_correction_or_authority_loss(monkeypatch):
     bridge.nav_status = "active"
     authority[0] = None
     planner._check_active_authority()
-    assert bridge.cancel_goal_if_current.call_count == 2
+    assert bridge.cancel_goal_if_current.call_count == 1
 
 
 def test_active_objective_ignores_geometry_and_noop_correction_updates(monkeypatch):
@@ -453,7 +694,7 @@ def test_reused_correction_revision_still_enforces_transform_tolerance(monkeypat
     authority[0] = correction_authority(revision=1, x=0.01)
     planner._check_active_authority()
     assert bridge.cancel_goal.call_count == 1
-    authority[0] = correction_authority(revision=1, x=0.03)
+    authority[0] = correction_authority(revision=1, x=0.30)
     planner._check_active_authority()
     bridge.cancel_goal_if_current.assert_called_once()
 
@@ -462,6 +703,8 @@ def test_reused_correction_revision_still_enforces_transform_tolerance(monkeypat
     response.path[-1].position.y = 0.5
     response.path[-1].position.z = 1.0
     bridge, planner, _ = rig(monkeypatch, response)
+    planner.client.call_async.side_effect = None
+    planner.client.call_async.return_value = completed(response)
     assert not planner.navigate({"x": 1, "y": 2})
     bridge.follow_path.assert_not_called()
 
@@ -470,24 +713,46 @@ def test_return_home_replans_to_latest_authority_home_without_terminal_gap(
     monkeypatch,
 ):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
-    authority[0] = correction_authority(revision=2, x=0.03, home_x=-1.8)
+    authority[0] = correction_authority(revision=2, x=0.03, home_x=-1.7)
 
     planner._check_active_authority()
 
     assert wait_until(lambda: client.call_async.call_count == 2)
     assert wait_until(lambda: planner._active_route is not None)
     retry = client.call_async.call_args.args[0]
-    assert retry.goal.position.x == pytest.approx(-1.8)
+    assert retry.goal.position.x == pytest.approx(-1.7)
     assert retry.mission_id == "mission-1"
     assert retry.goal_landmark_id == "kf-home"
     assert bridge.nav_status == "active"
     assert bridge.cancel_goal_if_current.call_count == 1
 
 
+def test_return_home_uses_execution_budget_for_anchor_only_updates(monkeypatch):
+    bridge, planner, client, authority = return_home_rig(monkeypatch)
+
+    authority[0] = correction_authority(revision=2, x=0.0, home_x=-2.0)
+    planner._check_active_authority()
+    assert client.call_async.call_count == 1
+    bridge.cancel_goal_if_current.assert_not_called()
+
+    authority[0] = correction_authority(revision=3, x=0.0, home_x=-1.8)
+    planner._check_active_authority()
+    assert client.call_async.call_count == 1
+    bridge.cancel_goal_if_current.assert_not_called()
+
+    authority[0] = correction_authority(revision=4, x=0.0, home_x=-1.7)
+    planner._check_active_authority()
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    assert client.call_async.call_args.args[0].goal.position.x == pytest.approx(-1.7)
+    assert "home_anchor_shift=0.300m" in (
+        bridge.node.get_logger().warning.call_args.args[0]
+    )
+
+
 def test_return_home_coalesces_corrections_before_the_worker_plans(monkeypatch):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     planner.replan_backoff_s = 0.05
-    authority[0] = correction_authority(revision=2, x=0.03, home_x=-1.8)
+    authority[0] = correction_authority(revision=2, x=0.03, home_x=-1.7)
 
     planner._check_active_authority()
     worker = planner._recovery_thread
@@ -503,11 +768,27 @@ def test_return_home_coalesces_corrections_before_the_worker_plans(monkeypatch):
     bridge.cancel_goal()
 
 
+def test_return_home_heading_uses_explicit_execution_tolerance(monkeypatch):
+    bridge, planner, client, authority = return_home_rig(monkeypatch)
+    planner.execution_goal_yaw_tolerance_rad = 0.25
+
+    authority[0] = correction_authority(revision=2, home_yaw=0.20)
+    planner._check_active_authority()
+    bridge.cancel_goal_if_current.assert_not_called()
+
+    authority[0] = correction_authority(revision=3, home_yaw=0.30)
+    planner._check_active_authority()
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    assert "home_anchor_yaw_shift=0.300rad" in (
+        bridge.node.get_logger().warning.call_args.args[0]
+    )
+
+
 def test_return_home_recovery_retries_then_fails_with_a_bound(monkeypatch):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     planner.replan_max_attempts = 2
     client.wait_for_service.side_effect = [False, False]
-    authority[0] = correction_authority(revision=2, x=0.03)
+    authority[0] = correction_authority(revision=2, x=0.30)
 
     planner._check_active_authority()
 
@@ -521,11 +802,12 @@ def test_return_home_recovery_retries_then_fails_with_a_bound(monkeypatch):
 def test_return_home_recovery_retries_synchronous_service_submission(monkeypatch):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     retry_response = success_path()
+    retry_response.path[-1] = pose(-2.0, 1.0)
     retry_response.geometry_revision = "a" * 64
     ready = Future()
     ready.set_result(retry_response)
     client.call_async.side_effect = [RuntimeError("transport reset"), ready]
-    authority[0] = correction_authority(revision=2, x=0.03)
+    authority[0] = correction_authority(revision=2, x=0.30)
 
     planner._check_active_authority()
 
@@ -564,7 +846,7 @@ def test_stop_during_return_home_recovery_backoff_wins_without_status_write(
 ):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     planner.replan_backoff_s = 0.08
-    authority[0] = correction_authority(revision=2, x=0.03)
+    authority[0] = correction_authority(revision=2, x=0.30)
     planner._check_active_authority()
 
     bridge.cancel_goal()
@@ -578,7 +860,7 @@ def test_stop_during_return_home_recovery_backoff_wins_without_status_write(
 def test_manual_navigate_during_recovery_backoff_replaces_home_intent(monkeypatch):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     planner.replan_backoff_s = 0.08
-    authority[0] = correction_authority(revision=2, x=0.03)
+    authority[0] = correction_authority(revision=2, x=0.30)
     planner._check_active_authority()
 
     assert planner.navigate({"x": 4.0, "y": 5.0})
@@ -607,8 +889,9 @@ def test_stop_while_recovery_service_future_is_pending_wins(monkeypatch):
             self.cancelled = True
 
     pending = StoppingFuture()
+    client.call_async.side_effect = None
     client.call_async.return_value = pending
-    authority[0] = correction_authority(revision=2, x=0.03)
+    authority[0] = correction_authority(revision=2, x=0.30)
 
     planner._check_active_authority()
 
@@ -621,8 +904,12 @@ def test_stop_while_recovery_service_future_is_pending_wins(monkeypatch):
 def test_recovery_retries_when_indexed_snapshot_changes_during_planning(monkeypatch):
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     response_a = success_path()
+    response_a.path[-1] = pose(-2.0, 1.0)
+    response_a.indexed_map_validated = True
     response_a.geometry_revision = "a" * 64
     response_b = success_path()
+    response_b.path[-1] = pose(-2.0, 1.0)
+    response_b.indexed_map_validated = True
     response_b.geometry_revision = "b" * 64
 
     class SnapshotChangingFuture:
@@ -632,7 +919,7 @@ def test_recovery_retries_when_indexed_snapshot_changes_during_planning(monkeypa
             if not self.changed:
                 self.changed = True
                 authority[0] = correction_authority(
-                    revision=2, x=0.03, geometry="b" * 64
+                    revision=2, x=0.30, geometry="b" * 64
                 )
             return True
 
@@ -642,7 +929,7 @@ def test_recovery_retries_when_indexed_snapshot_changes_during_planning(monkeypa
     ready_b = Future()
     ready_b.set_result(response_b)
     client.call_async.side_effect = [SnapshotChangingFuture(), ready_b]
-    authority[0] = correction_authority(revision=2, x=0.03)
+    authority[0] = correction_authority(revision=2, x=0.30)
 
     planner._check_active_authority()
 
@@ -654,10 +941,12 @@ def test_recovery_retries_when_indexed_snapshot_changes_during_planning(monkeypa
 
 def test_pre_submit_authority_validation_blocks_snapshot_churn(monkeypatch):
     response = success_path()
+    response.indexed_map_validated = True
     response.geometry_revision = "a" * 64
-    bridge, planner, _ = rig(monkeypatch, response)
+    bridge, planner, client = rig(monkeypatch, response)
     authority = [correction_authority()]
     planner.authority_reader = NS(current=lambda: authority[0])
+    planner.replan_backoff_s = 0.0
     original_follow = bridge.follow_path.side_effect
 
     def churn_before_submit(plan, **kwargs):
@@ -666,6 +955,579 @@ def test_pre_submit_authority_validation_blocks_snapshot_churn(monkeypatch):
 
     bridge.follow_path.side_effect = churn_before_submit
 
-    assert not planner.navigate({"x": 1.0, "y": 2.0})
-    assert bridge._goal_generation == 5
-    assert bridge.nav_status == "failed"
+    assert planner.navigate({"x": 1.0, "y": 2.0})
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    # Continuous publication churn is bounded; an unchecked route is never sent.
+    assert bridge.follow_path.call_count == 1
+    assert client.call_async.call_count == 4
+
+
+@pytest.mark.parametrize("objective", ["navigate", "return_home"])
+def test_partial_route_is_rejected_before_dispatch(monkeypatch, objective):
+    response = success_path()
+    response.partial = True
+    bridge, planner, _ = rig(monkeypatch, response)
+    planner.home = {"x": 2.0, "y": 1.0}
+
+    accepted = planner.navigate({"x": 2.0, "y": 1.0}) if objective == "navigate" else planner.return_home()
+
+    assert not accepted
+    bridge.follow_path.assert_not_called()
+    assert "full route" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_malformed_full_route_is_rejected_before_dispatch(monkeypatch):
+    response = success_path()
+    response.path = []
+    bridge, planner, _ = rig(monkeypatch, response)
+
+    assert not planner.navigate({"x": 2.0, "y": 1.0})
+    bridge.follow_path.assert_not_called()
+    assert "path is empty" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_full_route_endpoint_must_match_requested_xy_but_may_project_height(monkeypatch):
+    response = success_path()
+    bridge, planner, client = rig(monkeypatch, response)
+    client.call_async.side_effect = None
+    ready = Future()
+    response.path[-1] = pose(3.0, 1.0, 0.5)
+    ready.set_result(response)
+    client.call_async.return_value = ready
+    assert not planner.navigate({"x": 2.0, "y": 1.0, "z": 0.0})
+    bridge.follow_path.assert_not_called()
+    assert "endpoint differs" in bridge.node.get_logger().warning.call_args.args[0]
+
+    response.path[-1] = pose(2.0, 1.0, 0.5)
+    bridge, planner, _ = rig(monkeypatch, response)
+    assert planner.navigate({"x": 2.0, "y": 1.0, "z": 0.0})
+
+
+@pytest.mark.parametrize("distance_m", [20.0, 50.0, 100.0])
+def test_distant_full_route_keeps_exact_fixed_frame_endpoint(monkeypatch, distance_m):
+    response = success_path()
+    response.path = [
+        pose(index * distance_m / 100.0, 0.0) for index in range(101)
+    ]
+    bridge, planner, client = rig(monkeypatch, response)
+    goal = {"x": distance_m, "y": 0.0, "yaw": 0.3}
+
+    assert planner.navigate(goal)
+
+    bridge.follow_path.assert_called_once()
+    dispatched = bridge.follow_path.call_args.args[0]
+    assert dispatched.frame_id == planner.frame
+    assert len(dispatched.poses) == 101
+    assert dispatched.poses[-1].x == pytest.approx(distance_m)
+    assert client.call_async.call_args.args[0].goal.position.x == pytest.approx(
+        distance_m
+    )
+    assert planner._active_route[3]["x"] == pytest.approx(distance_m)
+
+    public = planner.decorate_state({"nav_status": "active", "goal": None})
+    assert public["goal"]["x"] == pytest.approx(distance_m)
+    assert dispatched.poses[-1].x == pytest.approx(distance_m)
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert planner._active_route is None
+    assert client.call_async.call_count == 1
+
+
+def test_no_progress_replans_original_goal_twice_then_stops(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    planner.replan_backoff_s = 0.0
+    original = {"x": 2.0, "y": 1.0, "yaw": 0.3}
+    assert planner.navigate(original)
+
+    for expected_requests in (2, 3):
+        bridge.nav_status = "failed"
+        bridge._nav_failure_reason = "FollowPath: Failed to make progress"
+        planner._check_active_authority()
+        assert wait_until(lambda: client.call_async.call_count == expected_requests)
+        assert wait_until(lambda: planner._active_route is not None)
+        request = client.call_async.call_args.args[0]
+        assert (request.goal.position.x, request.goal.position.y) == (2.0, 1.0)
+        assert planner._objective_goal == original
+
+    bridge.nav_status = "failed"
+    bridge._nav_failure_reason = "FollowPath: Failed to make progress"
+    planner._check_active_authority()
+
+    assert client.call_async.call_count == 3  # initial route plus two retries
+    assert planner._blocked_retry_count == 3
+    assert planner._active_route is None
+    assert planner._objective_goal is None
+
+
+def test_current_map_invalid_route_cancels_and_replans_without_blockage_count(
+    monkeypatch,
+):
+    response = success_path()
+    response.geometry_revision = "a" * 64
+    bridge, planner, _ = rig(monkeypatch, response)
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    validation = Mock()
+    validation.service_is_ready.return_value = True
+    result = Future()
+    validation.call_async.return_value = result
+    planner.route_validation_service_type = ValidateRouteService
+    planner.route_validation_client = validation
+    planner.replan_backoff_s = 10.0
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+    active = planner._active_route
+
+    assert not planner._check_route_validation(active)
+    request = validation.call_async.call_args.args[0]
+    assert request.mission_id == "mission-1"
+    assert request.component_id == "component-a"
+    assert request.frame_id == planner.frame
+    assert request.lookahead_m == 3.0
+    assert len(request.path) == len(response.path)
+    result.set_result(NS(status=ValidateRouteResponse.INVALID, reason="known curb"))
+    assert planner._check_route_validation(active)
+
+    bridge.cancel_goal_if_current.assert_called_once()
+    assert planner._blocked_retry_count == 0
+    assert planner._objective_goal is not None
+    planner._check_active_authority()
+    assert planner._objective_goal is not None
+    bridge.cancel_goal()
+
+
+@pytest.mark.parametrize(
+    "status", [ValidateRouteResponse.VALID, ValidateRouteResponse.UNAVAILABLE]
+)
+def test_route_validation_nonhazard_status_never_cancels(monkeypatch, status):
+    response = success_path()
+    response.geometry_revision = "a" * 64
+    bridge, planner, _ = rig(monkeypatch, response)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    validation = Mock()
+    validation.service_is_ready.return_value = True
+    result = Future()
+    validation.call_async.return_value = result
+    planner.route_validation_service_type = ValidateRouteService
+    planner.route_validation_client = validation
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+    active = planner._active_route
+
+    planner._check_route_validation(active)
+    result.set_result(NS(status=status, reason="map unavailable"))
+    assert not planner._check_route_validation(active)
+
+    bridge.cancel_goal_if_current.assert_not_called()
+    assert planner._active_route == active
+
+
+def test_route_validation_timeout_retires_pending_request_without_canceling_route(
+    monkeypatch,
+):
+    response = success_path()
+    response.geometry_revision = "a" * 64
+    bridge, planner, _ = rig(monkeypatch, response)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    validation = Mock()
+    validation.service_is_ready.return_value = True
+    pending = Future()
+    validation.call_async.return_value = pending
+    planner.route_validation_service_type = ValidateRouteService
+    planner.route_validation_client = validation
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+    active = planner._active_route
+
+    planner._check_route_validation(active)
+    planner._validation_started_at = time.monotonic() - 1.0
+    assert not planner._check_route_validation(active)
+
+    assert pending.cancelled()
+    validation.remove_pending_request.assert_called_once_with(pending)
+    bridge.cancel_goal_if_current.assert_not_called()
+    assert planner._active_route == active
+
+
+def test_planner_rejection_does_not_consume_physical_blockage_budget(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    planner.replan_backoff_s = 0.0
+    rejected = NS(status=1, reason="destination is not observed")
+    client.call_async.side_effect = [
+        completed(success_path()),
+        completed(rejected),
+        completed(rejected),
+        completed(rejected),
+    ]
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+
+    bridge.nav_status = "failed"
+    bridge._nav_failure_reason = "Failed to make progress; error_code=4"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert wait_until(lambda: planner._recovery_thread is None)
+    assert client.call_async.call_count == 4
+    assert planner._blocked_retry_count == 1
+    assert "destination is not observed" in planner._nav_failure_reason
+
+
+def test_material_correction_replans_same_navigate_objective(monkeypatch):
+    first = success_path()
+    first.path[-1] = pose(4.0, 1.0)
+    first.geometry_revision = "a" * 64
+    second = success_path()
+    second.path[-1] = pose(4.0, 1.0)
+    second.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, first)
+    client.call_async.side_effect = [completed(first), completed(second)]
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    original = {
+        "x": 4.0,
+        "y": 1.0,
+        "mission_id": "mission-1",
+        "component_id": "component-a",
+    }
+    assert planner.navigate(original)
+    bridge.nav_status = "active"
+
+    authority[0] = correction_authority(revision=2, x=0.30)
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    request = client.call_async.call_args.args[0]
+    assert (request.goal.position.x, request.goal.position.y) == (4.0, 1.0)
+    assert bridge.nav_status == "active"
+
+
+def test_execution_correction_deadband_accumulates_from_accepted_route(monkeypatch):
+    first = success_path()
+    first.path[-1] = pose(4.0, 1.0)
+    first.geometry_revision = "a" * 64
+    second = success_path()
+    second.path[-1] = pose(4.0, 1.0)
+    second.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, first)
+    client.call_async.side_effect = [completed(first), completed(second)]
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    assert planner.navigate({"x": 4.0, "y": 1.0})
+    bridge.nav_status = "active"
+
+    for revision, shift in ((2, 0.10), (3, 0.20), (4, 0.25)):
+        authority[0] = correction_authority(revision=revision, x=shift)
+        planner._check_active_authority()
+        bridge.cancel_goal_if_current.assert_not_called()
+    authority[0] = correction_authority(revision=5, x=0.251)
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    warning = bridge.node.get_logger().warning.call_args.args[0]
+    assert "translation=0.251m" in warning
+    assert "max_route_shift=0.251m" in warning
+
+
+def test_execution_correction_accounts_for_rotation_at_far_endpoint(monkeypatch):
+    response = success_path()
+    response.path[-1] = pose(10.0, 0.0)
+    response.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, response)
+    client.call_async.side_effect = [completed(response), completed(response)]
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    assert planner.navigate({"x": 10.0, "y": 0.0})
+    bridge.nav_status = "active"
+
+    authority[0] = correction_authority(revision=2, yaw=0.03)
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    assert "max_route_shift=0.300m" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_execution_retains_frame_rotation_bound_for_short_route(monkeypatch):
+    response = success_path()
+    response.path = [pose(0.0, 0.0), pose(0.01, 0.0)]
+    response.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, response)
+    client.call_async.side_effect = [completed(response), completed(response)]
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    assert planner.navigate({"x": 0.01, "y": 0.0})
+    bridge.nav_status = "active"
+
+    authority[0] = correction_authority(revision=2, yaw=0.021)
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    warning = bridge.node.get_logger().warning.call_args.args[0]
+    assert "rotation=0.021rad" in warning
+    assert "max_route_shift=0.000m" in warning
+
+
+@pytest.mark.parametrize("objective", ["navigate", "return_home"])
+def test_stale_authority_stops_motion_then_recovers_same_objective(monkeypatch, objective):
+    response = success_path()
+    response.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, response)
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    assert planner.plan(objective, {"x": 2.0, "y": 1.0})
+    bridge.nav_status = "active"
+    original = deepcopy(client.call_async.call_args.args[0].goal)
+
+    authority[0] = None
+    planner._check_active_authority()
+
+    bridge.cancel_goal_if_current.assert_called_once()
+    assert bridge.nav_status == "active"  # Pending; the controller was canceled.
+    time.sleep(0.35)  # Several missed reads must not consume the planning budget.
+    assert client.call_async.call_count == 1
+    authority[0] = correction_authority()
+    assert wait_until(lambda: planner._active_route is not None)
+    assert client.call_async.call_count == 2
+    goal = client.call_async.call_args.args[0].goal
+    assert goal.position == original.position
+
+
+@pytest.mark.parametrize("resolution", ["timeout", "new_mission", "new_component", "new_frame", "stop"])
+def test_stale_authority_recovery_remains_bounded_and_identity_fenced(monkeypatch, resolution):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    planner.replan_deadline_s = 0.4
+    planner.replan_backoff_s = 0.05
+    assert planner.navigate({"x": 2.0, "y": 1.0})
+    authority[0] = None
+    planner._check_active_authority()
+    worker = planner._recovery_thread
+    if resolution == "new_mission":
+        authority[0] = correction_authority(mission_id="mission-2")
+    elif resolution == "new_component":
+        authority[0] = {**correction_authority(), "component_id": "component-b"}
+    elif resolution == "new_frame":
+        authority[0] = correction_authority(navigation_frame="robot_1/replacement_map")
+    elif resolution == "stop":
+        bridge.cancel_goal()
+        authority[0] = correction_authority()
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert client.call_async.call_count == 1
+    assert bridge.nav_status == ("cancelled" if resolution == "stop" else "failed")
+    if resolution == "timeout":
+        assert "no fresh map authority" in planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+
+
+def test_component_goal_is_reresolved_after_correction(monkeypatch):
+    first = success_path()
+    first.path[-1] = pose(4.0, 1.0)
+    first.geometry_revision = "a" * 64
+    second = success_path()
+    second.path[-1] = pose(3.0, 1.0)
+    second.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, first)
+    client.call_async.side_effect = [completed(first), completed(second)]
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority(x=1.0)]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    goal = {
+        # Server resolution can already be stale when the adapter receives it.
+        "x": 99.0,
+        "y": 1.0,
+        "z": 0.0,
+        "yaw": 0.0,
+        "frame_id": "robot_1/map_frame",
+        "mission_id": "mission-1",
+        "component_id": "component-a",
+        "solution_order": [1, 0],
+        "component_goal": {"x": 5.0, "y": 1.0, "z": 0.0, "yaw": 0.0},
+    }
+    assert planner.navigate(goal)
+    initial_request = client.call_async.call_args.args[0]
+    assert initial_request.goal.position.x == pytest.approx(4.0)
+    bridge.nav_status = "active"
+
+    authority[0] = correction_authority(revision=2, x=2.0)
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    request = client.call_async.call_args.args[0]
+    assert request.goal.position.x == pytest.approx(3.0)
+    assert request.goal.position.y == pytest.approx(1.0)
+    public = planner.decorate_state({"nav_status": "active", "goal": {"x": 3.0}})
+    assert public["goal"]["x"] == pytest.approx(3.0)
+    assert public["goal"]["component_goal"] == goal["component_goal"]
+    assert public["objective_continuation"]["phase"] == "following_final"
+
+
+def test_component_click_is_rejected_if_frame_changes_before_initial_admission(
+    monkeypatch,
+):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    authority = [correction_authority(solution_order=(1, 0))]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    goal = {
+        "x": 4.0,
+        "y": 1.0,
+        "frame_id": "robot_1/map_frame",
+        "mission_id": "mission-1",
+        "component_id": "component-a",
+        "solution_order": [1, 0],
+        "component_goal": {"x": 5.0, "y": 1.0, "z": 0.0, "yaw": 0.0},
+    }
+    claim = planner.claim_objective("navigate", goal)
+    authority[0] = correction_authority(revision=2, solution_order=(2, 0))
+
+    assert not planner.execute_claimed(claim)
+    client.call_async.assert_not_called()
+    bridge.follow_path.assert_not_called()
+    assert "stale frame revision" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_component_click_without_frame_revision_token_is_rejected(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, success_path())
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    goal = {
+        "x": 4.0,
+        "y": 1.0,
+        "frame_id": "robot_1/map_frame",
+        "mission_id": "mission-1",
+        "component_id": "component-a",
+        "component_goal": {"x": 5.0, "y": 1.0, "z": 0.0, "yaw": 0.0},
+    }
+
+    assert not planner.navigate(goal)
+    client.call_async.assert_not_called()
+    bridge.follow_path.assert_not_called()
+    assert "no frame revision token" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_component_goal_requires_matching_explicit_authority(monkeypatch):
+    bridge, planner, _ = rig(monkeypatch, success_path())
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    goal = {
+        "x": 1.0,
+        "y": 2.0,
+        "frame_id": "robot_1/map_frame",
+        "mission_id": "mission-other",
+        "component_id": "component-a",
+        "component_goal": {"x": 1.0, "y": 2.0},
+    }
+    assert not planner.navigate(goal)
+    bridge.follow_path.assert_not_called()
+    assert "mission differs" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_component_goal_inverse_resolves_position_and_heading(monkeypatch):
+    bridge, planner, _ = rig(monkeypatch, success_path())
+    authority = correction_authority()
+    authority["T_component_navigation"] = [
+        [0.0, -1.0, 0.0, 10.0],
+        [1.0, 0.0, 0.0, 20.0],
+        [0.0, 0.0, 1.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    goal = {
+        "component_goal": {"x": 8.0, "y": 23.0, "z": 5.0, "yaw": math.pi / 2}
+    }
+
+    resolved = planner._component_goal_in_navigation(goal, authority)
+
+    assert (resolved["x"], resolved["y"], resolved["z"]) == pytest.approx(
+        (3.0, 2.0, 4.0)
+    )
+    assert resolved["yaw"] == pytest.approx(0.0)
+
+
+def test_map_goal_is_resolved_once_into_stable_planning_frame(monkeypatch):
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    bridge, planner, client = rig(monkeypatch, success_path())
+    authority = stable_planning_authority(map_x=1.0)
+    # Rotate map coordinates into the component while planning odometry stays
+    # fixed. The direct UI goal has no frame field and therefore uses map_frame.
+    authority["T_component_navigation"] = [
+        [0.0, -1.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    planner.authority_reader = NS(current=lambda: authority)
+
+    assert planner.navigate({"x": 2.0, "y": 0.0, "z": 0.4, "yaw": 0.0})
+
+    request = client.call_async.call_args.args[0]
+    assert request.goal.position.x == pytest.approx(1.0)
+    assert request.goal.position.y == pytest.approx(2.0)
+    assert request.goal.position.z == pytest.approx(0.4)
+    assert request.goal.orientation.z == pytest.approx(math.sin(math.pi / 4))
+    plan = bridge.follow_path.call_args.args[0]
+    assert plan.frame_id == "robot_1/odom"
+    assert plan.poses[-1].x == pytest.approx(1.0)
+    assert plan.poses[-1].y == pytest.approx(2.0)
+
+
+def test_stable_route_ignores_map_gauge_but_replans_planning_correction(
+    monkeypatch,
+):
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    bridge, planner, client = rig(monkeypatch, success_path())
+    planner.replan_backoff_s = 0.0
+    authority = [stable_planning_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    goal = {
+        "x": 4.0,
+        "y": 1.0,
+        "z": 0.4,
+        "yaw": 0.0,
+        "frame_id": "robot_1/map_frame",
+        "mission_id": "mission-1",
+        "component_id": "component-a",
+        "solution_order": [1, 0],
+        "component_goal": {"x": 4.0, "y": 1.0, "z": 0.4, "yaw": 0.0},
+    }
+    assert planner.navigate(goal)
+    bridge.nav_status = "active"
+    bridge.cancel_goal_if_current.reset_mock()
+
+    # A 27 cm UI-map gauge correction leaves C<-planning unchanged, so the
+    # accepted controller path and its exact planner-frame endpoint remain.
+    map_only = stable_planning_authority(map_x=0.27, revision=2)
+    map_only["solution_order"] = [2, 0]
+    authority[0] = map_only
+    planner._check_active_authority()
+    assert client.call_async.call_count == 1
+    bridge.cancel_goal_if_current.assert_not_called()
+    public = planner.decorate_state({"nav_status": "active", "goal": None})
+    assert public["goal"]["frame_id"] == "robot_1/odom"
+    assert public["goal"]["x"] == pytest.approx(4.0)
+    assert public["goal"]["component_goal"] == goal["component_goal"]
+
+    # Moving C<-planning changes the physical route and retains the existing
+    # cancel/replan lifecycle. Component provenance produces the corrected
+    # exact endpoint in the same stable frame.
+    corrected = stable_planning_authority(
+        map_x=0.27, planning_x=0.27, revision=3
+    )
+    corrected["solution_order"] = [3, 0]
+    authority[0] = corrected
+    planner._check_active_authority()
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    bridge.cancel_goal_if_current.assert_called_once()
+    request = client.call_async.call_args.args[0]
+    assert request.goal.position.x == pytest.approx(3.73)
+    assert request.goal.position.y == pytest.approx(1.0)
+
+
+def test_stable_planning_frame_requires_qualified_authority(monkeypatch):
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    bridge, planner, client = rig(monkeypatch, success_path())
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    assert not planner.navigate({"x": 2.0, "y": 0.0})
+    client.call_async.assert_not_called()
+    assert "no qualified frame transform" in (
+        bridge.node.get_logger().warning.call_args.args[0]
+    )

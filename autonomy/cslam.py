@@ -82,6 +82,7 @@ class CslamMapper:
         T_base_sensor=IDENTITY_SE3,
         sensor_frame="base",
         provenance: CaptureProvenance | None = None,
+        colors_rgba: np.ndarray | None = None,
     ):
         key = self.key(seq)
         local = validate_se3(T_local_base)
@@ -114,13 +115,14 @@ class CslamMapper:
         ).encode()
         fingerprint = hashlib.sha256(
             np.asarray(points_base, dtype="<f4").tobytes() + b"\n" + identity
+            + (b"" if colors_rgba is None else np.asarray(colors_rgba, dtype=np.uint8).tobytes())
         ).digest()
         if key in self.local_poses:
             if fingerprint != self.capture_digests[key]:
                 raise ValueError("Keyframe identity reused with different capture data")
             return False
         points_sensor = (np.asarray(points_base) - mount[:3, 3]) @ mount[:3, :3]
-        self.mapper.add_capture(capture, calibration, points_sensor)
+        self.mapper.add_capture(capture, calibration, points_sensor, colors_rgba=colors_rgba)
         self.local_poses[key] = local
         self.capture_digests[key] = fingerprint
         self.poses[key] = validate_se3(self.T_component_local @ np.asarray(local))

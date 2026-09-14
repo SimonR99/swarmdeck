@@ -6,6 +6,7 @@
     catalogueLabel,
     catalogueSelection,
     fetchReplicaCatalogue,
+    type ReplicaCatalogue,
     type ReplicaCatalogueEntry
   } from './replicaCatalogue';
 
@@ -19,6 +20,7 @@
   }
 
   function currentValue() {
+    if (replicaTactical.preference === 'auto') return 'live';
     const selection = replicaTactical.selection;
     if (!selection) return 'live';
     if (selection.scope === 'fleet') return `${selection.sessionId}\u0000${selection.componentId}`;
@@ -47,12 +49,14 @@
 
   function choose(value: string) {
     if (value === 'live') {
-      replicaTactical.clear();
+      replicaTactical.useAutomatic();
       return;
     }
     if (value === 'robot-inspection') return;
     const entry = entries.find((candidate) => selectionValue(candidate) === value);
-    if (entry?.available) replicaTactical.show(catalogueSelection(entry));
+    if (entry?.available) {
+      replicaTactical.show(catalogueSelection(entry));
+    }
   }
 
   onMount(() => {

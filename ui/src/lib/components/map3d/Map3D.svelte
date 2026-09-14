@@ -35,6 +35,14 @@
     replicaSelectionKey,
     type ReplicaTacticalCloud
   } from './replicaTactical';
+  import {
+    fetchLiveReplicaFrame,
+    LIVE_REPLICA_FRESHNESS_BUDGET_S,
+    liveRobotToMapRobot,
+    liveReplicaMatchesSelection,
+    postLiveReplicaGoal,
+    type LiveReplicaSelection
+  } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
@@ -72,12 +80,15 @@
   let canvas = $state<HTMLCanvasElement | null>(null);
   let scene: Map3DScene | null = null;
   const tacticalReplica = $derived(replicaTactical.selection);
+  const liveTactical = $derived(
+    Boolean(tacticalReplica && replicaTactical.preference === 'auto')
+  );
 
   // Cloud & Terrain State
   let points = $state(0);
   let voxels = $state(0);
   let robotsOnCloud = $state<string[]>([]);
-  let replicaCloud = $state<Pick<ReplicaTacticalCloud, 'view' | 'partial'> | null>(null);
+  let replicaCloud = $state<Pick<ReplicaTacticalCloud, 'view' | 'partial' | 'frameKey'> | null>(null);
   let error = $state<string | null>(null);
 
   // Render & Color Modes
@@ -103,9 +114,27 @@
   let dragged = false;
   let cursor3D = $state<{ x: number; y: number; z: number } | null>(null);
   let detectionScreenPos = $state<{ sx: number; sy: number } | null>(null);
+  let liveReplica = $state<LiveReplicaSelection | null>(null);
+  let liveReplicaPending: AbortController | null = null;
+  let liveReplicaKey = '';
 
   function robotsOnMap(): MapRobot[] {
-    if (tacticalReplica) return [];
+    if (tacticalReplica) {
+      if (!liveTactical || !liveReplica) return [];
+      if (replicaCloud?.view.solution_order_known !== true) return [];
+      const age = (performance.now() - liveReplica.receivedAt) / 1000;
+      if (!liveReplicaMatchesSelection(
+        liveReplica,
+        tacticalReplica,
+        replicaCloud?.view.solution_order
+      )) return [];
+      if (replicaCloud?.view.selected?.frame_id !== liveReplica.frame.frame_id) return [];
+      return liveReplica.frame.robots
+        .filter((robot) => robot.freshness.pose_s + age <= LIVE_REPLICA_FRESHNESS_BUDGET_S)
+        .filter((robot) => fleet.isEnabled(robot.robot_id))
+        .filter((robot) => tacticalReplica.scope !== 'robot' || robot.robot_id === tacticalReplica.robotId)
+        .map((robot) => liveRobotToMapRobot(robot, fleet.get(robot.robot_id) ?? undefined, age));
+    }
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
       if (!fleet.isEnabled(mapStore.viewRobot)) return [];
       const robot = fleet.get(mapStore.viewRobot);
@@ -181,12 +210,17 @@
   }
 
   export function setRenderMode(mode: Map3DRenderMode) {
-    if (tacticalReplica && mode === 'gaussians') return;
     renderMode = mode;
     if (scene) {
       scene.terrain.setRenderMode(mode);
       scene.gaussians.group.visible = mode === 'gaussians';
-      if (mode === 'gaussians') void fetchGaussians();
+      scene.terrain.setGaussianProxy(mode === 'gaussians' && gaussianCount === 0);
+      if (mode === 'gaussians') {
+        gaussianStatus = gaussianCount
+          ? `${gaussianCount.toLocaleString()} Gaussian splats`
+          : 'Point-cloud proxy · checking for Gaussian reconstruction';
+        void fetchGaussians();
+      }
       scene.render();
     }
   }
@@ -227,14 +261,57 @@
       : '';
   }
 
+  function gaussianScope() {
+    if (tacticalReplica) {
+      return `?session_id=${encodeURIComponent(tacticalReplica.sessionId)}`
+        + `&component_id=${encodeURIComponent(tacticalReplica.componentId)}`;
+    }
+    return scope();
+  }
+
   function cloudScope() {
     const selection = scope();
     return `${selection}${selection ? '&' : '?'}source=${mapStore.mapSource}`;
   }
 
   function sourceScope() {
+    if (!tacticalReplica && replicaTactical.autoStatus === 'waiting-global') {
+      return 'blocked:global-waiting-for-component';
+    }
     return tacticalReplica ? `replica:${replicaSelectionKey(tacticalReplica)}` : `live:${cloudScope()}`;
   }
+
+  async function refreshLiveReplica() {
+    const selection = tacticalReplica;
+    if (!active || !liveTactical || !selection || liveReplicaPending) return;
+    const key = replicaSelectionKey(selection);
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const timeout = window.setTimeout(() => controller.abort(), 1500);
+    liveReplicaPending = controller;
+    try {
+      const frame = await fetchLiveReplicaFrame(selection, controller.signal);
+      if (key !== liveReplicaKey || !liveTactical || !replicaTactical.selection) return;
+      if (frame) liveReplica = { frame, receivedAt: startedAt };
+      // A 404/409 retains the last verified overlay until its three-second
+      // freshness budget expires; this avoids blinking during a frame swap.
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
+        // Keep the last coherent live telemetry through a transient response
+        // failure; the freshness budget hides it once it is no longer current.
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (liveReplicaPending === controller) liveReplicaPending = null;
+    }
+  }
+
+  const waitingForGlobalComponent = $derived(
+    !tacticalReplica &&
+    replicaTactical.preference === 'auto' &&
+    replicaTactical.autoStatus === 'waiting-global' &&
+    mapStore.viewMode === 'global'
+  );
 
   function replicaPublicationLabel(view: ReplicaTacticalCloud['view']) {
     return view.scope === 'fleet' ? 'fleet snapshot' : `replica r${view.revision}`;
@@ -295,6 +372,7 @@
 
   async function fetchCloud() {
     if (!scene || !worker || !active || document.hidden || pending) return;
+    if (waitingForGlobalComponent) return;
     const controller = new AbortController();
     pending = controller;
     const timeout = window.setTimeout(() => controller.abort(), 20000);
@@ -318,14 +396,18 @@
           loaded.sourceKey, tacticalReplica, id, generation
         )) return;
         const transition = replicaRevision.transition(loaded);
-        const data = await prepareCloud(id, controller, loaded.positions, loaded.owners);
+        const data = await prepareCloud(id, controller, loaded.positions, loaded.owners, loaded.rgb);
         if (!scene || !acceptsReplicaResult(
           loaded.sourceKey, tacticalReplica, id, generation
         )) return;
         const resetView = transition === 'selection' || transition === 'frame';
-        displayTerrain(data, loaded.ownerIds, false, resetView);
+        displayTerrain(data, loaded.ownerIds, Boolean(loaded.rgb), resetView);
         replicaRevision.commit(loaded);
-        replicaCloud = { view: loaded.view, partial: loaded.partial };
+        replicaCloud = {
+          view: loaded.view,
+          partial: loaded.partial,
+          frameKey: loaded.frameKey
+        };
         replicaNeedsRebuild = false;
         error = null;
         return;
@@ -396,38 +478,34 @@
   let gaussianPending: AbortController | null = null;
   async function fetchGaussians() {
     if (!scene || !active || document.hidden || gaussianPending) return;
-    if (tacticalReplica) {
-      scene.gaussians.clear();
-      gaussianBuffer = null;
-      gaussianCount = 0;
-      gaussianEtag = '';
-      gaussianStatus = 'No component-scoped reconstruction endpoint available';
-      return;
-    }
-    const currentScope = scope(),
+    const currentScope = gaussianScope(),
       controller = new AbortController();
     gaussianPending = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
     try {
       const response = await fetch(`/api/map/gaussians${currentScope}`, {
         signal: controller.signal,
         headers: gaussianEtag ? { 'If-None-Match': gaussianEtag } : {}
       });
+      if (!scene || currentScope !== gaussianScope() || controller.signal.aborted) return;
       if (response.status === 304) return;
       if (response.status === 404) {
         scene.gaussians.clear();
         gaussianCount = 0;
         gaussianBuffer = null;
         gaussianEtag = '';
-        gaussianStatus = 'No reconstruction available for this map';
+        scene.terrain.setGaussianProxy(renderMode === 'gaussians');
+        gaussianStatus = 'Point-cloud proxy · no Gaussian reconstruction available';
         return;
       }
       if (!response.ok) throw new Error(`Reconstruction unavailable (${response.status})`);
       if (Number(response.headers.get('Content-Length')) > 112000016)
         throw new Error('Reconstruction exceeds download limit');
       const buffer = await response.arrayBuffer();
-      if (!scene || currentScope !== scope() || controller.signal.aborted) return;
+      if (!scene || currentScope !== gaussianScope() || controller.signal.aborted) return;
       const firstModel = scene.gaussians.count === 0;
       scene.gaussians.load(buffer, QUALITY[quality].splats);
+      scene.terrain.setGaussianProxy(false);
       if (!points && firstModel && scene.gaussians.count) {
         ceilingMin = scene.gaussians.bounds.min.z;
         ceilingMax = Math.max(ceilingMin + 0.1, scene.gaussians.bounds.max.z);
@@ -438,10 +516,15 @@
       gaussianBuffer = buffer;
       gaussianEtag = response.headers.get('ETag') ?? '';
       gaussianCount = scene.gaussians.count;
-      gaussianStatus = `${gaussianCount.toLocaleString()} Gaussians`;
+      gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
     } catch (e) {
-      if (!controller.signal.aborted) gaussianStatus = String(e);
+      if (!controller.signal.aborted && currentScope === gaussianScope()) {
+        const cached = gaussianCount > 0;
+        scene?.terrain.setGaussianProxy(renderMode === 'gaussians' && !cached);
+        gaussianStatus = `${cached ? `${gaussianCount.toLocaleString()} cached Gaussian splats` : 'Point-cloud proxy'} · ${e instanceof Error ? e.message : String(e)}`;
+      }
     } finally {
+      window.clearTimeout(timeout);
       if (gaussianPending === controller) gaussianPending = null;
     }
   }
@@ -454,7 +537,7 @@
       if (gaussianBuffer) {
         scene.gaussians.load(gaussianBuffer, QUALITY[value].splats);
         gaussianCount = scene.gaussians.count;
-        gaussianStatus = `${gaussianCount.toLocaleString()} Gaussians`;
+        gaussianStatus = `${gaussianCount.toLocaleString()} Gaussian splats`;
       }
     }
     pending?.abort();
@@ -463,6 +546,20 @@
     if (tacticalReplica) replicaNeedsRebuild = true;
     void fetchCloud();
   }
+
+  $effect(() => {
+    const selection = tacticalReplica;
+    const key = liveTactical && selection ? replicaSelectionKey(selection) : '';
+    mounted;
+    active;
+    if (key !== liveReplicaKey) {
+      liveReplicaKey = key;
+      liveReplicaPending?.abort();
+      liveReplicaPending = null;
+      liveReplica = null;
+    }
+    if (key && mounted && active) void refreshLiveReplica();
+  });
 
   $effect(() => {
     const currentScope = sourceScope();
@@ -492,7 +589,6 @@
       gaussianPending = null;
       gaussianEtag = '';
       gaussianBuffer = null;
-      if (tacticalReplica && renderMode === 'gaussians') setRenderMode('voxels');
       scene?.terrain.clear();
       scene?.gaussians.clear();
       points = 0;
@@ -559,7 +655,7 @@
         onCursorChange?.(tacticalReplica ? null : { x: groundHit.x, y: groundHit.y });
 
         // Update 3D goal cursor reticle position
-        if (navigation.goalMode && !tacticalReplica) {
+        if (navigation.goalMode && (!tacticalReplica || liveTactical)) {
           scene.layers.cursorReticle.visible = true;
           scene.layers.cursorReticle.position.set(groundHit.x, groundHit.y, groundHit.z + 0.015);
         } else {
@@ -590,12 +686,45 @@
   async function handleClick(e: PointerEvent) {
     if (!scene || !canvas) return;
     const ndc = getNDC(e);
-    if (tacticalReplica) return;
+    const selection = tacticalReplica;
+    const liveSelection = liveTactical;
+    const displayedSolutionOrder = replicaCloud?.view.solution_order;
+    if (selection && !liveSelection) return;
 
     // 1. Goal Navigation Targeting (left click on ground)
     if (navigation.goalMode && e.button === 0) {
       const hit = scene.raycastGround(ndc);
       if (hit) {
+        if (liveSelection && selection) {
+          if (replicaCloud?.view.solution_order_known !== true ||
+              displayedSolutionOrder === undefined) {
+            navigation.cancelGoalMode();
+            return;
+          }
+          const liveIds = new Set(robotsOnMap().map((robot) => robot.robot_id));
+          const eligible = fleet.selected.filter((id) => liveIds.has(id) && fleet.can(id, 'navigate'));
+          if (!eligible.length) {
+            navigation.cancelGoalMode();
+            return;
+          }
+          try {
+            for (const id of eligible) {
+              await postLiveReplicaGoal(
+                selection,
+                id,
+                displayedSolutionOrder,
+                { x: hit.x, y: hit.y, z: hit.z, yaw: 0 }
+              );
+            }
+            navigation.finishGoal({ x: hit.x, y: hit.y });
+          } catch (reason) {
+            error = reason instanceof Error ? reason.message : String(reason);
+            navigation.cancelGoalMode();
+          }
+          scene.layers.cursorReticle.visible = false;
+          scene.render();
+          return;
+        }
         const eligible = fleet.selected.filter((id) => fleet.can(id, 'navigate'));
         for (const id of eligible) {
           actions.setGoal(id, { x: hit.x, y: hit.y });
@@ -658,9 +787,11 @@
     lastFrame = timestamp;
     const time = timestamp * 0.001;
 
-    // Center on fleet if follow mode is active
-    if (follow && !tacticalReplica) {
-      scene.centreRobots(robotsOnMap());
+    // Center on the currently displayed robots. Live component telemetry is
+    // already in the selected component frame, so it is safe to follow it.
+    if (follow && (!tacticalReplica || liveTactical)) {
+      const followRobots = robotsOnMap();
+      if (followRobots.length > 0) scene.centreRobots(followRobots);
     }
 
     const robots = robotsOnMap();
@@ -671,6 +802,9 @@
       showLabels,
       time,
       getGroundZ,
+      sourceIdentity: tacticalReplica
+        ? `${tacticalReplica.scope}\u0000${tacticalReplica.scope === 'robot' ? tacticalReplica.robotId : ''}\u0000${tacticalReplica.sessionId}\u0000${tacticalReplica.componentId}\u0000${replicaCloud?.frameKey ?? ''}`
+        : `live\u0000${mapStore.viewMode}\u0000${mapStore.viewRobot ?? 'world'}`,
       markerScale: (position, selected) => {
         const metresPerPixel = 2 * scene!.camera.position.distanceTo(position)
           * Math.tan(THREE.MathUtils.degToRad(scene!.camera.fov) / 2)
@@ -686,8 +820,8 @@
         trails,
         showGrid,
         showTrails: showTrails && !tacticalReplica,
-        showPlans: showPlans && !tacticalReplica,
-        showSensors: showSensors && !tacticalReplica,
+        showPlans: showPlans && (!tacticalReplica || liveTactical),
+        showSensors: showSensors && (!tacticalReplica || liveTactical),
         showCostmap: showCostmap && !tacticalReplica,
         showNetwork: showNetwork && !tacticalReplica,
         costmapKind,
@@ -772,7 +906,11 @@
       () => renderMode === 'gaussians' && void fetchGaussians(),
       5000
     );
-    const poll = window.setInterval(() => active && void fetchCloud(), 2000);
+    const poll = window.setInterval(() => {
+      if (!active) return;
+      void fetchCloud();
+      void refreshLiveReplica();
+    }, 1000);
 
     const ro = new ResizeObserver(() => {
       if (!active || document.hidden) return;
@@ -788,6 +926,7 @@
       mounted = false;
       generation++;
       pending?.abort();
+      liveReplicaPending?.abort();
       gaussianPending?.abort();
       worker?.terminate();
       worker = null;
@@ -831,7 +970,9 @@
       ></span>
       <span class="font-semibold uppercase tracking-wider text-fg"> 3D Tactical Map </span>
     </div>
-    {#if error}
+    {#if waitingForGlobalComponent}
+      <span class="text-warn">Global map is waiting for inter-robot alignment. Select Local to view a robot map.</span>
+    {:else if error}
       <span class="text-warn">{error}</span>
       {#if replicaCloud}
         <span title={replicaPublicationTitle(replicaCloud.view)}>
@@ -869,13 +1010,21 @@
     {#if tacticalReplica}
       <div class="panel-glow mr-auto flex min-w-0 items-center gap-2 rounded-[--radius-control] border border-accent/30 bg-surface/95 px-3 py-1.5 text-[10px] shadow-2xl backdrop-blur-xl">
         <div class="min-w-0">
-          <div class="font-semibold text-accent">{tacticalReplica.scope === 'fleet' ? 'Fleet component' : 'Onboard component'} · read-only</div>
+          <div class="font-semibold text-accent">
+            {#if liveTactical && replicaCloud?.view.solution_order_known}
+              Live {tacticalReplica.scope === 'fleet' ? 'fleet' : 'onboard'} map
+            {:else}
+              {tacticalReplica.scope === 'fleet' ? 'Fleet component' : 'Onboard component'} · read-only
+            {/if}
+          </div>
           <div class="max-w-72 truncate font-mono text-fg-dim" title={tacticalReplica.componentId}>{tacticalReplica.componentId}</div>
         </div>
-        <button
-          class="rounded bg-surface-2 px-2 py-1 font-semibold text-fg hover:bg-surface-3"
-          onclick={() => replicaTactical.clear()}
-        >Live map</button>
+        {#if !liveTactical}
+          <button
+            class="rounded bg-surface-2 px-2 py-1 font-semibold text-fg hover:bg-surface-3"
+            onclick={() => replicaTactical.useAutomatic()}
+          >Live map</button>
+        {/if}
       </div>
     {/if}
     <!-- Rendering budgets default to integrated graphics. -->
@@ -889,8 +1038,6 @@
           class="rounded px-2 py-0.5 {renderMode === mode.id
             ? 'bg-accent text-accent-fg'
             : 'text-fg-muted'} disabled:cursor-not-allowed disabled:opacity-40"
-          disabled={mode.id === 'gaussians' && !!tacticalReplica}
-          title={mode.id === 'gaussians' && tacticalReplica ? 'Component-scoped reconstruction is not available yet' : undefined}
           aria-pressed={renderMode === mode.id}
           onclick={() => setRenderMode(mode.id as Map3DRenderMode)}>{mode.label}</button
         >
@@ -959,11 +1106,13 @@
         <span>Ceiling</span>
       </div>
 
+      <!-- Keep the range step origin fixed as incoming map bounds change. -->
       <input
         type="range"
-        min={Math.min(ceilingMin, ceilingCutoff)}
-        max={Math.max(ceilingMax + 0.2, ceilingCutoff)}
+        min={Math.floor(Math.min(ceilingMin, ceilingCutoff) * 20) / 20}
+        max={Math.ceil(Math.max(ceilingMax + 0.2, ceilingCutoff) * 20) / 20}
         step="0.05"
+        aria-label="Ceiling cutoff in metres"
         bind:value={ceilingCutoff}
         class="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-surface-2 accent-accent"
         title="Slide to remove ceiling / roof and view interior"

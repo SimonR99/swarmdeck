@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Remove abandoned Fast DDS objects once per boot, before container startup."""
+
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+DDS_NAME = re.compile(r"(?:sem\.)?fastrtps_(?:port[0-9]+|[0-9a-f]{16})(?:_el)?$")
+
+
+def cleanup(
+    shm=Path("/dev/shm"),
+    proc=Path("/proc"),
+    marker=Path("/run/swarmdeck-dds-shm-cleaned"),
+):
+    if marker.exists():
+        print("DDS shared-memory cleanup already handled this boot")
+        return
+    candidates = [
+        p
+        for p in shm.iterdir()
+        if DDS_NAME.fullmatch(p.name) and stat.S_ISREG(p.lstat().st_mode)
+    ]
+    # Refuse manual invocation during a live stack, including Docker live-restore
+    # shims. A mapped DDS object may no longer have an open file descriptor.
+    for process in proc.iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            comm = (process / "comm").read_text().strip()
+            if comm == "dockerd" or comm.startswith("containerd-shim"):
+                raise RuntimeError("container runtime is active; refusing DDS cleanup")
+            maps = (process / "maps").read_text()
+            if any(str(p) in maps for p in candidates):
+                raise RuntimeError("DDS shared memory is mapped; refusing cleanup")
+            for fd in (process / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except FileNotFoundError:
+                    continue
+                if any(target == str(p) for p in candidates):
+                    raise RuntimeError("DDS shared memory is open; refusing cleanup")
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # A process exited during inspection.
+    for path in candidates:
+        path.unlink()
+    marker.touch()
+    print(f"Removed {len(candidates)} stale Fast DDS shared-memory objects")
+
+
+if __name__ == "__main__":
+    try:
+        cleanup()
+    except (OSError, RuntimeError) as exc:
+        print(f"DDS cleanup failed: {exc}", file=sys.stderr)
+        sys.exit(1)

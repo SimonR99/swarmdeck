@@ -344,9 +344,21 @@ def main() -> None:
                 np.allclose(stored_point, [2.0, 0.0, 0.5], atol=1e-6),
                 f"map stored SLAM centroid instead of raw endpoint: {stored_point}",
             )
+            published_authority = json.loads(local_authorities[-1].data)
             require(
-                json.loads(local_authorities[-1].data)["robot_id"] == robot,
+                published_authority["robot_id"] == robot,
                 "local authority payload is invalid",
+            )
+            require(
+                published_authority.get("planning_frame") == f"{robot}/odom",
+                "stable planning frame was not published atomically",
+            )
+            planning_transform = published_authority.get("T_component_planning")
+            require(
+                isinstance(planning_transform, list)
+                and len(planning_transform) == 4
+                and all(isinstance(row, list) and len(row) == 4 for row in planning_transform),
+                "stable planning transform is invalid",
             )
             for payload, received, label in (
                 (own_intention, peer_intentions, "outbound intention"),

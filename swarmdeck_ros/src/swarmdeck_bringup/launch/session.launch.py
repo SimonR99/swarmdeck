@@ -621,6 +621,7 @@ def setup(context, *args, **kwargs):
                         # wall the planner believed was clear. It also sets
                         # how far robots keep off EACH OTHER, since the
                         # bumper scan writes them into the local costmap.
+                        "bounded_startup": "true",
                         "robot_radius": f"{robot.footprint_radius:.3f}",
                         # The real chassis rectangle. Without it Nav2 models
                         # a 0.778 m wide Bunker as a 1.285 m disc and refuses

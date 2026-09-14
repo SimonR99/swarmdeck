@@ -38,3 +38,25 @@ projects the 3D cloud to 2D using returns from 15 cm above the floor through
 1.8 m (0.150–1.800 m), and forwards the accumulated cloud to
 the 3D viewer. The projection marks returned cells occupied; unobserved cells
 remain unknown rather than being treated as safe free space.
+
+## Native navigation joystick contract
+
+Scout's `localPlanner.joystickHandler` decodes `atan2(axes[2], axes[1])` and
+negates it when `axes[1] < 0`. The adapter therefore enables
+`nav_joy_reverse_steering` in `scout_mini.yaml`: it compensates the lateral axis
+when reversing so the searched path stays in the requested quadrant. Without
+this, a target crossing from 89 to 91 degrees jumps from left to right in the
+native planner. Generic ROS 1 profiles keep this compensation disabled.
+
+The adapter supplies eight zero-valued buttons, including indices 4 and 6,
+which the native planner reads without bounds checks to control obstacle
+checking. Do not shorten the message to four buttons. The 2026-09-09 correction
+was deployed with an adapter restart only; native clearance settings were
+unchanged. Adapter regression tests emulate the native reverse-bearing decoder;
+physical tight-space behavior still requires a driving check.
+
+The shared [route tracker](../operations/route-tracking.md) now replaces vertex
+capture with monotonic distance along the route and collision-checked lookahead.
+This supersedes the earlier 0.1/0.35 m waypoint-acceptance thresholds. Navigation
+logs report `progress_m` and `target_m`; a `route hold` means no checked forward
+connection is available, rather than a request to return to the old waypoint.

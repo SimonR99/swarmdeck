@@ -59,6 +59,7 @@ def rig(monkeypatch):
         lidar_x=0.0,
         lidar_z=0.4,
         base_height=0.1,
+        prox_min_height=0.10 + bridge.PROX_HEIGHT_EPSILON,
         prox_range_max=8.0,
     )
     for name in ("base", "odom", "lidar", "camera"):
@@ -160,11 +161,43 @@ def test_nonempty_cloud_and_scans_share_capture_time(rig):
     }
 
 
+def test_tick_zero_sensors_are_drained_but_withheld_until_capture_time_exists(rig):
+    node, robot = rig
+    sock = Socket(packet(sensor_tick=0, hits=1) + packet(sensor_tick=1, hits=1))
+
+    # Tick-zero odometry and its TF retain their existing startup behaviour,
+    # while sensor geometry is withheld because ROS TF interprets time zero as
+    # "latest" rather than as this capture instant.
+    assert read(node, sock, tick=0) == "r"
+    robot.pub_odom.publish.assert_called_once()
+    robot.pub_tf.publish.assert_called_once()
+    for name in ("points", "capture", "scan", "prox", "image", "info", "depth"):
+        getattr(robot, "pub_" + name).publish.assert_not_called()
+
+    # Draining the rejected packet preserves framing, and the first positive
+    # sensor tick is published normally with exact capture-time provenance.
+    assert read(node, sock, tick=1) == "r"
+    for name in ("points", "capture", "scan", "prox", "image", "info", "depth"):
+        getattr(robot, "pub_" + name).publish.assert_called_once()
+    assert sock.recv(1) == b""
+
+
 def test_fallback_scan_timestamp_never_claims_raw_capture_provenance(rig):
     node, robot = rig
     read(node, Socket(packet(sensor_tick=500, hits=1)))
     robot.pub_points.publish.assert_called_once()
     robot.pub_capture.publish.assert_not_called()
+
+
+def test_invalid_scan_tick_cannot_publish_zero_fallback_timestamp(rig):
+    node, robot = rig
+    sock = Socket(packet(sensor_tick=500, hits=1) + packet(sensor_tick=1, hits=1))
+    read(node, sock, tick=0)
+    for name in ("points", "capture", "scan", "prox"):
+        getattr(robot, "pub_" + name).publish.assert_not_called()
+    read(node, sock, tick=1)
+    robot.pub_points.publish.assert_called_once()
+    assert sock.recv(1) == b""
 
 
 def test_future_camera_and_odometry_not_relabelled_as_current(rig):
