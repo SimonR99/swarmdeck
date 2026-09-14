@@ -433,8 +433,18 @@ and received its original full path again. Nav2's bounded closest-pose search
 could no longer find the robot along that path and rejected the transformed
 path as empty. A cancelled executing path must therefore be used only to settle
 the pending reservation, then replaced by a fresh MGG plan from the current
-pose. It must never be replayed into a new FollowPath action. Fleet acceptance
-remains pending for this follow-up.
+pose. It must never be replayed into a new FollowPath action. The reviewed
+follow-up, `1806cab`, passes 73 exploration and peer-coordination tests,
+including newer-path delivery during the authority wait.
+
+In the subsequent fresh three-minute bench trial, R0, R2 and R3 completed
+exploration routes and reached maximum displacements of 33.48 m, 25.58 m and
+39.74 m respectively. R1 remained within 1.85 m of its start without completing
+a route: its first controller attempt reported no progress, and its replacement
+remained active until Stop All ended the trial. The cause of that remaining
+stall is not established. All four robots stopped successfully. This is a
+failed fleet acceptance result despite the R3 improvement; bounded progress
+recovery and routing around the deployment area still need investigation.
 
 Source deployment now uses the `planning-refactor` Git branch on benchbot:
 commit and push locally, then pull with `--ff-only` in the simulation workspace
