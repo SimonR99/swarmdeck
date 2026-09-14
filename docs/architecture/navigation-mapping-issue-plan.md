@@ -427,7 +427,21 @@ cancelled it. Recovery reused the earlier, expired planning deadline and
 immediately declared exploration blocked. A new authority interruption needs a
 fresh bounded wait, retained physical retry count, and atomically captured
 ownership of the cancelled goal. Stop or a newer command must win over resuming
-that path. Fleet acceptance remains pending for this correction.
+that path. The first trial after this correction kept R0, R1 and R2 progressing,
+but exposed a separate R3 failure: after moving 6.7 m, it lost authority briefly
+and received its original full path again. Nav2's bounded closest-pose search
+could no longer find the robot along that path and rejected the transformed
+path as empty. A cancelled executing path must therefore be used only to settle
+the pending reservation, then replaced by a fresh MGG plan from the current
+pose. It must never be replayed into a new FollowPath action. Fleet acceptance
+remains pending for this follow-up.
+
+Source deployment now uses the `planning-refactor` Git branch on benchbot:
+commit and push locally, then pull with `--ff-only` in the simulation workspace
+before rebuilding. Runtime deployment settings remain local. The initial Git
+rollout, `0e1704e`, produced colored chunks for all four robots and retained one
+server/simulation stack with the UI on port 15173. This verifies RGB data
+availability, not camera calibration or complete fleet exploration.
 
 Zero-stamp guards passed 29 focused bridge tests and the ROS input smoke. They
 remain useful protocol hardening because TF2 interprets zero as “latest,” but

@@ -90,6 +90,7 @@ def rig():
     explorer.started_ns = 0
     explorer.last_path_revision_ns = 0
     explorer.pending_plan = None
+    explorer.pending_authority_replan = None
     explorer.executing_plan = None
     explorer.executing_goal_generation = None
     explorer.completed_goal_generation = None
@@ -548,10 +549,66 @@ def test_lost_peer_reservation_cancels_active_path_and_waits():
     assert explorer.status == "waiting"
 
 
+def test_authority_return_replans_cancelled_path_before_executing():
+    bridge, explorer = rig()
+    fresh_request = Future()
+    explorer.replan_client.call_async.return_value = fresh_request
+    _start_with_path(explorer, stamp=2)
+    explorer.coordinator = Coordinator("pending", "granted")
+
+    explorer.tick()
+    assert explorer.pending_authority_replan is explorer.pending_plan
+    assert bridge.follow_path.call_count == 1
+
+    explorer.tick()
+    assert explorer.pending_plan is None
+    assert explorer.pending_authority_replan is None
+    assert explorer.pending is fresh_request
+    assert bridge.follow_path.call_count == 1
+
+    fresh_request.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=3))
+    assert explorer.executing_plan[0].revision_ns == 3_000_000_000
+    assert bridge.follow_path.call_count == 2
+
+
+@pytest.mark.parametrize("fresh_pending", [False, True])
+def test_new_path_supersedes_cancelled_authority_token_in_same_session(
+    fresh_pending,
+):
+    bridge, explorer = rig()
+    _start_with_path(explorer, stamp=2)
+    explorer.coordinator = Coordinator(
+        *("pending", "pending", "granted")
+        if fresh_pending
+        else ("pending", "granted")
+    )
+
+    explorer.tick()
+    old_token = explorer.pending_authority_replan
+    assert old_token is explorer.pending_plan
+
+    explorer.on_path(path(stamp=3))
+
+    assert explorer.pending_authority_replan is None
+    if fresh_pending:
+        assert explorer.pending_plan is not None
+        assert explorer.pending_plan[0].revision_ns == 3_000_000_000
+        assert bridge.follow_path.call_count == 1
+        explorer.tick()
+    assert explorer.pending_plan is None
+    assert explorer.executing_plan[0].revision_ns == 3_000_000_000
+    assert bridge.follow_path.call_count == 2
+    explorer.replan_client.call_async.assert_not_called()
+
+
 def test_recovery_authority_loss_gets_fresh_wait_without_new_attempt():
     bridge, explorer = rig()
-    replacement_request = Future()
-    explorer.replan_client.call_async.return_value = replacement_request
+    replacement_request, fresh_request = Future(), Future()
+    explorer.replan_client.call_async.side_effect = [
+        replacement_request,
+        fresh_request,
+    ]
     _start_with_path(explorer)
 
     bridge.nav_status = "failed"
@@ -578,11 +635,20 @@ def test_recovery_authority_loss_gets_fresh_wait_without_new_attempt():
     explorer.tick()
 
     assert explorer.active
+    assert explorer.status == "waiting"
+    assert explorer.executing_plan is None
+    assert explorer.pending is fresh_request
+    assert explorer.controller_replan_attempts == 1
+    assert bridge.follow_path.call_count == 2
+
+    fresh_request.set_result(NS(success=True, message=""))
+    explorer.on_path(path(stamp=4))
+
     assert explorer.status == "exploring"
     assert explorer.executing_plan is not None
-    assert explorer.controller_replan_attempts == 1
     assert explorer.executing_goal_generation == cancelled_generation
-    assert not explorer.awaiting_replan_path
+    assert bridge.follow_path.call_count == 3
+    assert explorer.executing_plan[0].revision_ns == 4_000_000_000
 
 
 def test_new_operator_goal_wins_authority_loss_without_cancellation():

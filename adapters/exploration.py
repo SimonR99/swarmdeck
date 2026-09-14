@@ -166,6 +166,7 @@ class MggExploration:
         self.started_ns = 0
         self.last_path_revision_ns = 0
         self.pending_plan = None
+        self.pending_authority_replan = None
         self.executing_plan = None
         self.executing_goal_generation = None
         self.completed_goal_generation = None
@@ -275,6 +276,7 @@ class MggExploration:
         self.started_ns = self.bridge.node.get_clock().now().nanoseconds
         self.last_path_revision_ns = 0
         self.pending_plan = None
+        self.pending_authority_replan = None
         self.executing_plan = None
         self.executing_goal_generation = None
         self.completed_goal_generation = None
@@ -354,6 +356,7 @@ class MggExploration:
         self.active = False
         self.generation += 1
         self.pending_plan = None
+        self.pending_authority_replan = None
         self.executing_plan = None
         self.executing_goal_generation = None
         self.completed_goal_generation = None
@@ -394,9 +397,25 @@ class MggExploration:
                 decision = self.coordinator.reserve(plan, generation)
                 if decision == "granted" and self.pending_plan == candidate:
                     self.pending_plan = None
-                    self._execute(plan, generation)
+                    if self.pending_authority_replan is candidate:
+                        # The robot may have advanced before this executing
+                        # path lost authority. Use the retained plan only to
+                        # finish the reservation decision, then replan from
+                        # the current pose so Nav2 never receives a stale,
+                        # fully-pruned path.
+                        self.pending_authority_replan = None
+                        self.coordinator.release(generation)
+                        self._request_replan(
+                            generation,
+                            recovery=(
+                                self.controller_replan_generation == generation
+                            ),
+                        )
+                    else:
+                        self._execute(plan, generation)
                 elif decision == "rejected" and self.pending_plan == candidate:
                     self.pending_plan = None
+                    self.pending_authority_replan = None
                     self.status = "waiting"
                     self.reason = getattr(self.coordinator, "last_decision_reason", "Waiting for another exploration route")
                     self.coordinator.release(generation)
@@ -449,6 +468,7 @@ class MggExploration:
                         self.awaiting_replan_path = True
                     if decision == "pending":
                         self.pending_plan = candidate
+                        self.pending_authority_replan = candidate
                     else:
                         self.coordinator.release(generation)
                         self._request_replan(generation, recovery=recovering)
@@ -682,6 +702,11 @@ class MggExploration:
             return
         self.last_path_revision_ns = plan.revision_ns
         generation = self.generation
+        # A newer planner route supersedes any cancelled path retained only as
+        # a peer-reservation token. Its same-session generation must not make
+        # the fresh route inherit the old route's mandatory-replan marker.
+        self.pending_plan = None
+        self.pending_authority_replan = None
         if (
             self.controller_replan_generation == generation
             and self.controller_goal_generation != self.bridge._goal_generation
@@ -716,6 +741,7 @@ class MggExploration:
     def _execute(self, plan, generation):
         if not self.active or generation != self.generation:
             return
+        self.pending_authority_replan = None
         try:
             self.status = "exploring"
             self.reason = None
