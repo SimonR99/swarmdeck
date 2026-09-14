@@ -54,8 +54,13 @@ def authority_home(
     if mission_id is not None and authority.get("mission_id") != mission_id:
         raise ValueError("authority mission_id does not match the requested mission")
     if authority.get("navigation_frame", "").lstrip("/") != f"{robot_id}/map_frame":
-        raise ValueError("authority navigation_frame does not match the robot map frame")
-    if not isinstance(authority.get("component_id"), str) or not authority["component_id"]:
+        raise ValueError(
+            "authority navigation_frame does not match the robot map frame"
+        )
+    if (
+        not isinstance(authority.get("component_id"), str)
+        or not authority["component_id"]
+    ):
         raise ValueError("authority component_id is missing")
     home = authority.get("home")
     if not isinstance(home, dict) or not isinstance(home.get("keyframe_id"), str):
@@ -94,7 +99,11 @@ def _robot(snapshot: dict[str, Any], robot_id: str) -> dict[str, Any] | None:
     if not fleet.get("ok"):
         return None
     return next(
-        (robot for robot in _robots(fleet.get("data")) if robot.get("robot_id") == robot_id),
+        (
+            robot
+            for robot in _robots(fleet.get("data"))
+            if robot.get("robot_id") == robot_id
+        ),
         None,
     )
 
@@ -113,7 +122,9 @@ def display_home(
     """Project a navigation-frame home into this sample's server display frame."""
 
     status = snapshot.get("map_status", {})
-    transforms = status.get("data", {}).get("transforms", []) if status.get("ok") else {}
+    transforms = (
+        status.get("data", {}).get("transforms", []) if status.get("ok") else {}
+    )
     transform = transforms.get(robot_id) if isinstance(transforms, dict) else None
     try:
         tx, ty, yaw = (
@@ -126,7 +137,9 @@ def display_home(
             f"{robot_id} has no valid navigation-to-display transform"
         ) from exc
     if not all(math.isfinite(value) for value in (tx, ty, yaw)):
-        raise ObservationError(f"{robot_id} navigation-to-display transform is nonfinite")
+        raise ObservationError(
+            f"{robot_id} navigation-to-display transform is nonfinite"
+        )
     c, s = math.cos(yaw), math.sin(yaw)
     x, y = float(home["x"]), float(home["y"])
     return {
@@ -241,10 +254,14 @@ def summarize_return_home(
 def _safe_baseline_robot(snapshot: dict[str, Any], robot_id: str) -> dict[str, Any]:
     robot = _robot(snapshot, robot_id)
     if robot is None or not robot.get("online"):
-        raise ObservationError(f"{robot_id} is not online in the initial fleet snapshot")
+        raise ObservationError(
+            f"{robot_id} is not online in the initial fleet snapshot"
+        )
     capabilities = set(robot.get("capabilities") or [])
     if not {"navigate", "plan_objective"}.issubset(capabilities):
-        raise ObservationError(f"{robot_id} does not advertise onboard objective planning")
+        raise ObservationError(
+            f"{robot_id} does not advertise onboard objective planning"
+        )
     if robot.get("exploration_status") != "stopped":
         raise ObservationError(f"{robot_id} is not initially stopped")
     if robot.get("nav_status") != "idle" or robot.get("goal"):

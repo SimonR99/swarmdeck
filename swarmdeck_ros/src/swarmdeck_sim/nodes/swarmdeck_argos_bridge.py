@@ -178,9 +178,7 @@ def proximity_spec(platform: str) -> dict[str, float]:
         "lidar_x": spec.lidar_x,
         "lidar_z": spec.lidar_z,
         "base_height": spec.base_height,
-        "prox_min_height": min(
-            spec.max_step_height, PROX_GROUND_FILTER_CAP
-        )
+        "prox_min_height": min(spec.max_step_height, PROX_GROUND_FILTER_CAP)
         + PROX_HEIGHT_EPSILON,
         "prox_range_max": spec.prox_range_max,
     }

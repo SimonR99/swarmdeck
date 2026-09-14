@@ -103,9 +103,11 @@ async def dispatch_command(
         planner = getattr(bridge, "objective_planner", None)
         claim = getattr(planner, "claim_objective", None)
         execute = getattr(planner, "execute_claimed", None)
-        if objective in ("navigate", "return_home") and callable(
-            claim
-        ) and callable(execute):
+        if (
+            objective in ("navigate", "return_home")
+            and callable(claim)
+            and callable(execute)
+        ):
             try:
                 owned = claim(
                     objective,

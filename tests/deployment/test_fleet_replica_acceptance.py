@@ -16,7 +16,9 @@ def _observer():
 def test_colored_chunk_acceptance_validates_planar_xyzrgba_wire_format(monkeypatch):
     observer = _observer()
     points = struct.pack("<fff", 1.0, 2.0, 3.0)
-    body = observer.XYZRGBA_MAGIC + struct.pack("<Q", 1) + points + bytes((9, 8, 7, 255))
+    body = (
+        observer.XYZRGBA_MAGIC + struct.pack("<Q", 1) + points + bytes((9, 8, 7, 255))
+    )
     digest = hashlib.sha256(body).hexdigest()
     monkeypatch.setattr(
         observer,
@@ -42,7 +44,9 @@ def test_colored_chunk_acceptance_validates_planar_xyzrgba_wire_format(monkeypat
 
 def test_colored_chunk_cannot_be_declared_as_plain_xyz(monkeypatch):
     observer = _observer()
-    body = observer.XYZRGBA_MAGIC + struct.pack("<QfffBBBB", 1, 1.0, 2.0, 3.0, 9, 8, 7, 255)
+    body = observer.XYZRGBA_MAGIC + struct.pack(
+        "<QfffBBBB", 1, 1.0, 2.0, 3.0, 9, 8, 7, 255
+    )
     digest = hashlib.sha256(body).hexdigest()
     monkeypatch.setattr(observer, "read_response", lambda *_args: (body, {}, 0.0))
 

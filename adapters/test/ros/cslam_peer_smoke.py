@@ -53,9 +53,16 @@ def _pose_matrix(pose):
 def _transform_matrix(transform):
     matrix = np.eye(4)
     matrix[:3, :3] = _rotation_matrix(
-        transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w
+        transform.rotation.x,
+        transform.rotation.y,
+        transform.rotation.z,
+        transform.rotation.w,
     )
-    matrix[:3, 3] = [transform.translation.x, transform.translation.y, transform.translation.z]
+    matrix[:3, 3] = [
+        transform.translation.x,
+        transform.translation.y,
+        transform.translation.z,
+    ]
     return matrix
 
 
@@ -71,11 +78,17 @@ def _yaw_transform(yaw, translation):
 
 
 def _relative_result_pose(result, recipient):
-    anchors = [value for value in result.anchor_estimates if value.key.robot_id == result.origin_robot_id]
+    anchors = [
+        value
+        for value in result.anchor_estimates
+        if value.key.robot_id == result.origin_robot_id
+    ]
     estimates = [value for value in result.estimates if value.key.robot_id == recipient]
     if not anchors or not estimates:
         raise AssertionError("optimization result omitted anchor or recipient estimate")
-    return np.linalg.inv(_pose_matrix(anchors[0].pose)) @ _pose_matrix(estimates[0].pose)
+    return np.linalg.inv(_pose_matrix(anchors[0].pose)) @ _pose_matrix(
+        estimates[0].pose
+    )
 
 
 def main():
@@ -111,8 +124,8 @@ def main():
             rng.normal([3, 2, 1], [1, 1, 1], (2000, 3)),
         ]
     ).astype(np.float32)
-    expected_relative = np.eye(4) if args.identity else _yaw_transform(
-        math.radians(6), [0.4, 0.0, 0.0]
+    expected_relative = (
+        np.eye(4) if args.identity else _yaw_transform(math.radians(6), [0.4, 0.0, 0.0])
     )
     # If robot 1 has world pose T, its local coordinates are T^-1 * p_world.
     # Registration(src=robot0, dst=robot1) estimates T_robot1_robot0.
@@ -120,7 +133,9 @@ def main():
     # measurement, whose expected relation is T_robot0_robot1.
     point_sets = [
         points,
-        ((points - expected_relative[:3, 3]) @ expected_relative[:3, :3]).astype(np.float32),
+        ((points - expected_relative[:3, 3]) @ expected_relative[:3, :3]).astype(
+            np.float32
+        ),
     ]
     closures, solution_groups = [], {}
     node.create_subscription(
@@ -203,7 +218,8 @@ def main():
                     tf_pubs[index].publish(TFMessage(transforms=[tf]))
                     cloud_pubs[index].publish(
                         create_cloud_xyz32(
-                            Header(stamp=stamp, frame_id=f"{robot}/base_link"), point_sets[index]
+                            Header(stamp=stamp, frame_id=f"{robot}/base_link"),
+                            point_sets[index],
                         )
                     )
                 published = now
@@ -215,7 +231,8 @@ def main():
                             "elapsed_s": round(now - start),
                             "verified_closures": len(closures),
                             "joint_solution_groups": sum(
-                                set(group) == {0, 1} for group in solution_groups.values()
+                                set(group) == {0, 1}
+                                for group in solution_groups.values()
                             ),
                         }
                     ),
@@ -238,14 +255,19 @@ def main():
                             "optimizer mixed recipient poses or used the wrong estimate stream"
                         )
                     anchors = [
-                        value for value in result.anchor_estimates
+                        value
+                        for value in result.anchor_estimates
                         if value.key.robot_id == result.origin_robot_id
                     ]
                     if not anchors:
-                        raise AssertionError("joint solution omitted its declared anchor")
+                        raise AssertionError(
+                            "joint solution omitted its declared anchor"
+                        )
                     anchor_poses.append(_pose_matrix(anchors[0].pose))
                 if not np.allclose(anchor_poses[0], anchor_poses[1], atol=0.2):
-                    raise AssertionError("joint solution recipients used different anchor poses")
+                    raise AssertionError(
+                        "joint solution recipients used different anchor poses"
+                    )
                 closure = closures[-1]
                 if (closure.robot0_id, closure.robot1_id) == (0, 1):
                     expected_closure = expected_relative

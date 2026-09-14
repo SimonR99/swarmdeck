@@ -36,9 +36,13 @@ def _display_navigation(bridge, state, authority):
         xyz = transform @ np.array([value["x"], value["y"], value.get("z", 0), 1.0])
         result = dict(value, **dict(zip(("x", "y", "z"), map(float, xyz[:3]))))
         if "yaw" in value:
-            heading = transform[:3, :3] @ np.array([
-                math.cos(value["yaw"]), math.sin(value["yaw"]), 0,
-            ])
+            heading = transform[:3, :3] @ np.array(
+                [
+                    math.cos(value["yaw"]),
+                    math.sin(value["yaw"]),
+                    0,
+                ]
+            )
             result["yaw"] = math.atan2(heading[1], heading[0])
         if "frame_id" in value:
             result["frame_id"] = target
@@ -50,25 +54,50 @@ def _display_navigation(bridge, state, authority):
             state["goal"] = point(goal, matrix(goal["frame_id"]))
         except (KeyError, ValueError, TypeError, np.linalg.LinAlgError):
             state["goal"] = None
+    planner = getattr(bridge, "objective_planner", None)
+    global_route = getattr(planner, "global_display_plan", None)
+    global_plan = global_route() if callable(global_route) else None
     retained = getattr(bridge, "_follow_path_display", None)
+    local_points = []
     if (
         retained is not None
         and retained[0] == getattr(bridge, "_goal_generation", None)
         and state.get("nav_status") == "active"
+        and not (
+            global_plan is not None
+            and (state.get("objective_continuation") or {}).get("phase") == "planning"
+        )
     ):
         plan = retained[1]
         try:
             transform = matrix(plan.frame_id)
             # Bound the display copy before transforming. Controller poses and
             # their exact endpoint remain untouched.
-            points = [
-                dict(x=p.x, y=p.y, z=p.z) for p in display_path(plan.poses)
-            ]
-            points = [point(p, transform) for p in points]
+            points = [dict(x=p.x, y=p.y, z=p.z) for p in display_path(plan.poses)]
+            local_points = [point(p, transform) for p in points]
         except (KeyError, ValueError, TypeError, np.linalg.LinAlgError):
-            points = []
-        state["planned_path"] = points
-        state["global_planned_path"] = points
+            local_points = []
+        state["planned_path"] = local_points
+    if global_plan is not None:
+        try:
+            transform = matrix(global_plan.frame_id)
+            points = [
+                dict(x=p.x, y=p.y, z=p.z) for p in display_path(global_plan.poses)
+            ]
+            global_points = [point(p, transform) for p in points]
+        except (KeyError, ValueError, TypeError, np.linalg.LinAlgError):
+            global_points = []
+        state["global_planned_path"] = global_points
+        state["local_planned_path"] = local_points
+        # Bridge state may still retain the controller's completed chunk while
+        # the next native refinement RPC is pending. Keep the compatibility
+        # path aligned with the executable local window instead of replaying
+        # that stale chunk beside the persistent global route.
+        state["planned_path"] = local_points
+    elif retained is not None:
+        # Legacy full FollowPath routes remain both the compatibility and
+        # global display path.
+        state["global_planned_path"] = local_points
     return state
 
 
@@ -92,6 +121,7 @@ def live_state(bridge):
         return state
     if authority.get("peer_slam") is not None:
         from autonomy.slam_status import peer_status
+
         try:
             state["peer_slam"] = peer_status(
                 authority["peer_slam"], bridge.id, authority["mission_id"]

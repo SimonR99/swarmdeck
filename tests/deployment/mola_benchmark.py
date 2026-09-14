@@ -21,8 +21,12 @@ import uuid
 import numpy as np
 
 from autonomy.contracts import (
-    IDENTITY_SE3, ZERO_COVARIANCE, Calibration, CalibratedCapture,
-    DeskewStatus, KeyframeId,
+    IDENTITY_SE3,
+    ZERO_COVARIANCE,
+    Calibration,
+    CalibratedCapture,
+    DeskewStatus,
+    KeyframeId,
 )
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from deploy.autonomy.mola_process import PersistentImporter
@@ -41,20 +45,33 @@ def main() -> None:
         root = Path(temporary)
         mapper = CorrectionAwareMapper(SubmapStore(root))
         calibration = Calibration(
-            "benchmark-v1", "benchmark/lidar", "x-forward/y-left/z-up", (),
-            "none", (), IDENTITY_SE3,
+            "benchmark-v1",
+            "benchmark/lidar",
+            "x-forward/y-left/z-up",
+            (),
+            "none",
+            (),
+            IDENTITY_SE3,
         )
         capture = CalibratedCapture(
-            KeyframeId("benchmark", str(uuid.UUID(int=1)), 0), 0, 1,
-            calibration.sensor_frame, calibration.version, IDENTITY_SE3,
-            ZERO_COVARIANCE, DeskewStatus.DESKEWED,
+            KeyframeId("benchmark", str(uuid.UUID(int=1)), 0),
+            0,
+            1,
+            calibration.sensor_frame,
+            calibration.version,
+            IDENTITY_SE3,
+            ZERO_COVARIANCE,
+            DeskewStatus.DESKEWED,
         )
         points = np.random.default_rng(1).uniform(-10, 10, (args.points, 3))
         mapper.add_capture(capture, calibration, points)
         snapshot = mapper.snapshot().to_dict()
         native = PersistentImporter(
-            args.binary, 30, max_points_per_map=2_000_000,
-            max_resident_points=8_000_000, max_maps=256,
+            args.binary,
+            30,
+            max_points_per_map=2_000_000,
+            max_resident_points=8_000_000,
+            max_maps=256,
             max_output_bytes=268_435_456,
         )
         persistent, oneshot, resident_kib = [], [], []
@@ -65,26 +82,36 @@ def main() -> None:
                 for submap in manifest["submaps"]:
                     submap["pose_revision"] = dict(manifest["graph_revision"])
                     submap["T_component_submap"][0][3] = revision / 10
-                raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+                raw = json.dumps(
+                    snapshot, sort_keys=True, separators=(",", ":")
+                ).encode()
                 snapshot["snapshot_id"] = hashlib.sha256(raw).hexdigest()
-                raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
+                raw = json.dumps(
+                    snapshot, sort_keys=True, separators=(",", ":")
+                ).encode()
                 source = root / "snapshot.json"
                 source.write_bytes(raw)
                 output = root / f"persistent-{revision}.metricmap"
                 start = time.perf_counter()
-                response = native.apply({
-                    "mode": "replace" if revision == 0 else "pose_only",
-                    "map_id": "benchmark", "snapshot_path": str(source),
-                    "snapshot_sha256": hashlib.sha256(raw).hexdigest(),
-                    "chunks_dir": str(root / "chunks"), "output_path": str(output),
-                })
+                response = native.apply(
+                    {
+                        "mode": "replace" if revision == 0 else "pose_only",
+                        "map_id": "benchmark",
+                        "snapshot_path": str(source),
+                        "snapshot_sha256": hashlib.sha256(raw).hexdigest(),
+                        "chunks_dir": str(root / "chunks"),
+                        "output_path": str(output),
+                    }
+                )
                 elapsed = time.perf_counter() - start
                 assert response["points"] == args.points
                 if revision:
                     persistent.append(elapsed)
                 # Test-only process inspection; Linux workstation/container.
                 assert native._process is not None
-                for line in Path(f"/proc/{native._process.pid}/status").read_text().splitlines():
+                for line in (
+                    Path(f"/proc/{native._process.pid}/status").read_text().splitlines()
+                ):
                     if line.startswith("VmRSS:"):
                         resident_kib.append(int(line.split()[1]))
                 output.unlink()
@@ -92,23 +119,36 @@ def main() -> None:
                     output = root / f"oneshot-{revision}.metricmap"
                     start = time.perf_counter()
                     subprocess.run(
-                        (str(args.binary), str(source), str(root / "chunks"), str(output)),
-                        check=True, timeout=30, stdout=subprocess.DEVNULL,
+                        (
+                            str(args.binary),
+                            str(source),
+                            str(root / "chunks"),
+                            str(output),
+                        ),
+                        check=True,
+                        timeout=30,
+                        stdout=subprocess.DEVNULL,
                     )
                     oneshot.append(time.perf_counter() - start)
                     output.unlink()
         finally:
             native.close()
-        print(json.dumps({
-            "points": args.points, "pose_revisions": len(persistent),
-            "persistent_median_ms": 1000 * statistics.median(persistent),
-            "persistent_max_ms": 1000 * max(persistent),
-            "oneshot_samples": len(oneshot),
-            "oneshot_median_ms": 1000 * statistics.median(oneshot),
-            "native_rss_first_kib": resident_kib[0],
-            "native_rss_last_kib": resident_kib[-1],
-            "native_rss_max_kib": max(resident_kib),
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "points": args.points,
+                    "pose_revisions": len(persistent),
+                    "persistent_median_ms": 1000 * statistics.median(persistent),
+                    "persistent_max_ms": 1000 * max(persistent),
+                    "oneshot_samples": len(oneshot),
+                    "oneshot_median_ms": 1000 * statistics.median(oneshot),
+                    "native_rss_first_kib": resident_kib[0],
+                    "native_rss_last_kib": resident_kib[-1],
+                    "native_rss_max_kib": max(resident_kib),
+                },
+                sort_keys=True,
+            )
+        )
 
 
 if __name__ == "__main__":

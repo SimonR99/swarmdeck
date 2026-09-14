@@ -18,7 +18,9 @@ def test_qualified_raw_capture_is_colored_in_its_actual_order():
     seen = []
 
     result = select_geometry_and_color(
-        frontend, ("frontend-mount", "base"), raw,
+        frontend,
+        ("frontend-mount", "base"),
+        raw,
         lambda points: seen.append(points) or np.full((len(points), 4), 255, np.uint8),
     )
 
@@ -31,7 +33,9 @@ def test_qualified_raw_capture_is_colored_in_its_actual_order():
 def test_frontend_geometry_is_colored_when_no_raw_capture_qualified():
     frontend = np.array([[1.0, 0.0, 0.0]])
     result = select_geometry_and_color(
-        frontend, ("mount", "base"), None,
+        frontend,
+        ("mount", "base"),
+        None,
         lambda points: np.zeros((len(points), 4), np.uint8),
     )
     assert result[0] is frontend
@@ -42,8 +46,12 @@ def test_rgbd_requires_matching_frames_and_capture_timestamps():
     args = (1_000_000_000, 1_010_000_000, 1_020_000_000)
     assert qualified_rgbd_frame(*args, "optical", "optical", "optical") == "optical"
     assert qualified_rgbd_frame(*args, "color", "depth", "color") is None
-    assert qualified_rgbd_frame(1_000_000_000, 1_300_000_000, 1_300_000_000,
-                                "optical", "optical", "optical") is None
+    assert (
+        qualified_rgbd_frame(
+            1_000_000_000, 1_300_000_000, 1_300_000_000, "optical", "optical", "optical"
+        )
+        is None
+    )
     assert qualified_rgbd_frame(*args, "optical", "optical", "optical", "other") is None
 
 
@@ -59,8 +67,9 @@ def _message(stamp_ns, frame="camera"):
     )
 
 
-def _image_message(stamp_ns=1, *, encoding="rgb8", width=2, height=2,
-                   step=6, data=b"\0" * 12):
+def _image_message(
+    stamp_ns=1, *, encoding="rgb8", width=2, height=2, step=6, data=b"\0" * 12
+):
     message = _message(stamp_ns)
     message.encoding = encoding
     message.width = width
@@ -76,14 +85,22 @@ def test_image_cache_input_validation_is_fail_closed_and_byte_bounded():
     assert validated_image_bytes(image, "color", 12) == 12
     assert validated_image_bytes(image, "color", 11) is None
     assert validated_image_bytes(_image_message(data=b"short"), "color", 12) is None
-    assert validated_image_bytes(
-        _image_message(encoding="unsupported"), "color", 12,
-    ) is None
-    assert validated_image_bytes(
-        _image_message(encoding="32FC1", step=8, data=b"\0" * 16),
-        "depth",
-        16,
-    ) == 16
+    assert (
+        validated_image_bytes(
+            _image_message(encoding="unsupported"),
+            "color",
+            12,
+        )
+        is None
+    )
+    assert (
+        validated_image_bytes(
+            _image_message(encoding="32FC1", step=8, data=b"\0" * 16),
+            "depth",
+            16,
+        )
+        == 16
+    )
     image.header.stamp.nanosec = 1_000_000_000
     try:
         message_stamp_ns(image)
@@ -105,7 +122,11 @@ def test_image_cache_bounds_bytes_count_and_refreshes_repeated_stamp():
     assert list(cache) == [4]
     before = dict(cache)
     assert not retain_bounded_image(
-        cache, _image_message(5, data=b"short"), "color", 2, 24,
+        cache,
+        _image_message(5, data=b"short"),
+        "color",
+        2,
+        24,
     )
     assert cache == before
 
@@ -115,7 +136,11 @@ def test_rolling_rgbd_caches_keep_a_pair_for_the_latest_scan():
     for tick in range(1, 6):
         stamp = tick * 100_000_000
         assert retain_bounded_image(
-            images, _image_message(stamp), "color", 3, 36,
+            images,
+            _image_message(stamp),
+            "color",
+            3,
+            36,
         )
         assert retain_bounded_image(
             depths,
@@ -132,7 +157,10 @@ def test_rolling_rgbd_caches_keep_a_pair_for_the_latest_scan():
     assert list(images) == [300_000_000, 400_000_000, 500_000_000]
     assert list(depths) == [300_000_000, 400_000_000, 500_000_000]
     selected = select_rgbd_observation(
-        500_000_000, images.values(), depths.values(), _message(0),
+        500_000_000,
+        images.values(),
+        depths.values(),
+        _message(0),
     )
     assert selected == (images[500_000_000], depths[500_000_000], "camera")
 
@@ -164,9 +192,12 @@ def test_rgbd_selection_prefers_tight_pair_and_keeps_quality_gates():
         [offset_depth, exact_depth],
         info,
     ) == (exact_image, exact_depth, "camera")
-    assert select_rgbd_observation(
-        1_000_000_000,
-        [_message(1_300_000_000)],
-        [_message(1_300_000_000)],
-        info,
-    ) is None
+    assert (
+        select_rgbd_observation(
+            1_000_000_000,
+            [_message(1_300_000_000)],
+            [_message(1_300_000_000)],
+            info,
+        )
+        is None
+    )

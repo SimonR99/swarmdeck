@@ -13,7 +13,6 @@ import time
 import uuid
 import numpy as np
 
-
 _CAPTURE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -44,7 +43,9 @@ def associate_preceding_keyframe(records, stamp_ns, max_age_s):
         raise ValueError("no preceding onboard keyframe metadata is available")
     associated = max(preceding, key=lambda item: int(item["stamp_ns"]))
     if int(stamp_ns) - int(associated["stamp_ns"]) > float(max_age_s) * 1e9:
-        raise ValueError("preceding onboard keyframe is older than the association limit")
+        raise ValueError(
+            "preceding onboard keyframe is older than the association limit"
+        )
     return associated
 
 
@@ -93,7 +94,9 @@ def main():
     parser.add_argument("--metadata-json", type=Path)
     args = parser.parse_args()
     if args.period <= 0 or args.max_frames <= 0 or args.keyframe_max_age_s <= 0:
-        parser.error("positive period, max-frames, and keyframe association window required")
+        parser.error(
+            "positive period, max-frames, and keyframe association window required"
+        )
     if args.keyframe_metadata_topic and (args.keyframe_id or args.keyframe_frame):
         parser.error(
             "keyframe-id/keyframe-frame cannot be combined with dynamic keyframe metadata"
@@ -158,9 +161,15 @@ def main():
                 raise ValueError("keyframe_id must be robot/session/seq")
             parsed_session = uuid.UUID(parts[1])
             if str(parsed_session) != parts[1]:
-                raise ValueError("session in keyframe_id must be canonical lowercase UUID")
+                raise ValueError(
+                    "session in keyframe_id must be canonical lowercase UUID"
+                )
             sequence = int(parts[2])
-            if sequence < 0 or not parts[2].isdigit() or not _CAPTURE_ID.fullmatch(parts[0]):
+            if (
+                sequence < 0
+                or not parts[2].isdigit()
+                or not _CAPTURE_ID.fullmatch(parts[0])
+            ):
                 raise ValueError("invalid keyframe identity")
             if "stamp_ns" in value:
                 stamp_ns = int(value["stamp_ns"])
@@ -174,7 +183,9 @@ def main():
                 or not np.isfinite(T_odom_keyframe).all()
                 or not np.allclose(T_odom_keyframe[3], [0, 0, 0, 1])
                 or not np.allclose(
-                    T_odom_keyframe[:3, :3].T @ T_odom_keyframe[:3, :3], np.eye(3), atol=1e-5
+                    T_odom_keyframe[:3, :3].T @ T_odom_keyframe[:3, :3],
+                    np.eye(3),
+                    atol=1e-5,
                 )
                 or not np.isclose(np.linalg.det(T_odom_keyframe[:3, :3]), 1)
             ):
@@ -193,7 +204,9 @@ def main():
             node.get_logger().warning(f"Ignoring malformed keyframe metadata: {exc}")
 
     if args.keyframe_metadata_topic:
-        node.create_subscription(String, args.keyframe_metadata_topic, keyframe_metadata, 20)
+        node.create_subscription(
+            String, args.keyframe_metadata_topic, keyframe_metadata, 20
+        )
     sync = message_filters.ApproximateTimeSynchronizer(
         [rgb_sub, depth_sub], queue_size=3, slop=0.03
     )
@@ -207,7 +220,11 @@ def main():
             [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
             [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
         ]
-        matrix[:3, 3] = [transform.translation.x, transform.translation.y, transform.translation.z]
+        matrix[:3, 3] = [
+            transform.translation.x,
+            transform.translation.y,
+            transform.translation.z,
+        ]
         return matrix
 
     def receive(rgb_msg, depth_msg):
@@ -273,9 +290,9 @@ def main():
                     stamp,
                     timeout=Duration(seconds=0.05),
                 ).transform
-                dynamic_keyframe_camera = (
-                    np.linalg.inv(associated["T_odom_keyframe"]) @ transform_matrix(odom_tf)
-                )
+                dynamic_keyframe_camera = np.linalg.inv(
+                    associated["T_odom_keyframe"]
+                ) @ transform_matrix(odom_tf)
             rgb = np.ndarray(
                 (rgb_msg.height, rgb_msg.width, 3),
                 dtype=np.uint8,

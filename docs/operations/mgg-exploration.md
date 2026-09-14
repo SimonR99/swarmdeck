@@ -142,8 +142,16 @@ docker build -f deploy/docker/Dockerfile.mgg -t swarmdeck-mgg:local .
 The Dockerfile checks out the pinned upstream revision, applies the complete
 patch series in order, and rebuilds `mgg_ros` and `mgg_pci`. For development
 outside the image, reproduce that exact patched source and build; do not launch
-an unpatched upstream workspace. Only the planner process needs `mgg_msgs`; the
-SwarmDeck adapter uses standard Trigger and Path messages.
+an unpatched upstream workspace. Exploration uses standard Trigger and Path
+messages in the adapter. The opt-in `planning.backend: mgg` objective interface
+also requires matching generated `mgg_msgs` in the adapter, including
+`PlanObjective` and `RefineObjectiveRoute`. Rebuild the simulation, mapping and
+ROS 2 adapter images together with MGG when that interface changes.
+
+The checked-in Spot and Aslan vendor-stack profiles enable exploration without
+enabling that objective interface. Before enabling MGG Navigate/Home on either,
+build and source a matching `mgg_msgs` overlay in its adapter runtime; the
+vendor image alone does not supply this contract.
 
 The supplied image launches `deploy/mgg/robot.launch.py`. Configure it with the
 real topic and frame names; the equivalent direct launch inside a patched and

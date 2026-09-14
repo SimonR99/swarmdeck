@@ -39,7 +39,9 @@ def main():
 
     subscriptions = [
         node.create_subscription(String, f"/{args.robot}/map_authority", authority, 10),
-        node.create_subscription(Odometry, f"/{args.robot}/mgg/map_odometry", odometry, 10),
+        node.create_subscription(
+            Odometry, f"/{args.robot}/mgg/map_odometry", odometry, 10
+        ),
     ]
     plan = node.create_client(PlanObjective, f"/{args.robot}/mgg/plan_objective")
     validate = node.create_client(
@@ -57,7 +59,9 @@ def main():
         return future.result(), round((time.monotonic() - start) * 1000, 1)
 
     try:
-        if not plan.wait_for_service(timeout_sec=10) or not validate.wait_for_service(timeout_sec=10):
+        if not plan.wait_for_service(timeout_sec=10) or not validate.wait_for_service(
+            timeout_sec=10
+        ):
             raise RuntimeError("native planning or validation service unavailable")
         deadline = time.monotonic() + 15
         while len(latest) < 2 and time.monotonic() < deadline:
@@ -71,10 +75,18 @@ def main():
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         request = PlanObjective.Request()
         request.objective = request.NAVIGATE
-        for field in ("mission_id", "component_id", "map_epoch", "mapping_graph_revision", "geometry_revision"):
+        for field in (
+            "mission_id",
+            "component_id",
+            "map_epoch",
+            "mapping_graph_revision",
+            "geometry_revision",
+        ):
             setattr(request, field, authority_value[field])
         request.map_source_stamp.sec = authority_value["map_source_stamp"]["sec"]
-        request.map_source_stamp.nanosec = authority_value["map_source_stamp"]["nanosec"]
+        request.map_source_stamp.nanosec = authority_value["map_source_stamp"][
+            "nanosec"
+        ]
         request.goal.position.x = pose.position.x + args.distance * math.cos(yaw)
         request.goal.position.y = pose.position.y + args.distance * math.sin(yaw)
         request.goal.position.z = pose.position.z
@@ -83,7 +95,13 @@ def main():
         if result.status != result.SUCCEEDED or len(result.path) < 2:
             raise RuntimeError(f"full route rejected: {result.reason}")
         endpoint = result.path[-1].position
-        if math.hypot(endpoint.x - request.goal.position.x, endpoint.y - request.goal.position.y) > 1e-5:
+        if (
+            math.hypot(
+                endpoint.x - request.goal.position.x,
+                endpoint.y - request.goal.position.y,
+            )
+            > 1e-5
+        ):
             raise RuntimeError("planner replaced the selected destination")
         validation_request = ValidateObjectiveRoute.Request()
         validation_request.mission_id = request.mission_id
@@ -92,12 +110,20 @@ def main():
         validation_request.path = result.path
         validation_request.lookahead_m = 3.0
         checked, validation_ms = call(validate, validation_request)
-        print(json.dumps({
-            "robot": args.robot, "distance_m": args.distance,
-            "path_poses": len(result.path), "planning_ms": planning_ms,
-            "validation_ms": validation_ms, "validation_status": checked.status,
-            "reason": checked.reason,
-        }), flush=True)
+        print(
+            json.dumps(
+                {
+                    "robot": args.robot,
+                    "distance_m": args.distance,
+                    "path_poses": len(result.path),
+                    "planning_ms": planning_ms,
+                    "validation_ms": validation_ms,
+                    "validation_status": checked.status,
+                    "reason": checked.reason,
+                }
+            ),
+            flush=True,
+        )
         if checked.status != checked.VALID:
             raise RuntimeError("accepted route did not pass live validation")
         validation_request.mission_id = "obsolete-mission-smoke-test"

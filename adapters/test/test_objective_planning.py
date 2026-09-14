@@ -54,6 +54,27 @@ class ValidateRouteService:
     Response = ValidateRouteResponse
 
 
+class RefineRouteRequest:
+    def __init__(self):
+        self.mission_id = self.route_id = self.component_id = ""
+        self.graph_revision = self.map_revision = 0
+        self.map_epoch = self.mapping_graph_revision = 0
+        self.geometry_revision = ""
+        self.map_source_stamp = NS(sec=0, nanosec=0)
+
+
+class RefineRouteResponse:
+    SUCCEEDED = 0
+    BLOCKED = 1
+    UNSUPPORTED = 2
+    STALE_REVISION = 3
+
+
+class RefineRouteService:
+    Request = RefineRouteRequest
+    Response = RefineRouteResponse
+
+
 def pose(x, y, z=0.4, yaw=0.0):
     return NS(
         position=NS(x=x, y=y, z=z),
@@ -61,10 +82,12 @@ def pose(x, y, z=0.4, yaw=0.0):
     )
 
 
-def rig(monkeypatch, response):
+def rig(monkeypatch, response, *, refine_responses=None):
     package = ModuleType("mgg_msgs")
     services = ModuleType("mgg_msgs.srv")
     services.PlanObjective = Service
+    if refine_responses is not None:
+        services.RefineObjectiveRoute = RefineRouteService
     monkeypatch.setitem(sys.modules, "mgg_msgs", package)
     monkeypatch.setitem(sys.modules, "mgg_msgs.srv", services)
     client = Mock()
@@ -80,6 +103,23 @@ def rig(monkeypatch, response):
         return future
 
     client.call_async.side_effect = full_response
+    refine_client = Mock()
+    refine_client.wait_for_service.return_value = True
+    if refine_responses is not None:
+        pending_refinements = list(refine_responses)
+
+        def refine_response(request):
+            result = deepcopy(pending_refinements.pop(0))
+            result.component_id = request.component_id
+            result.map_epoch = request.map_epoch
+            result.mapping_graph_revision = request.mapping_graph_revision
+            result.geometry_revision = request.geometry_revision
+            result.map_source_stamp = deepcopy(request.map_source_stamp)
+            future = Future()
+            future.set_result(result)
+            return future
+
+        refine_client.call_async.side_effect = refine_response
     bridge = Mock()
     bridge.id = "robot_1"
     bridge.map_frame = "robot_1/map_frame"
@@ -87,7 +127,9 @@ def rig(monkeypatch, response):
     bridge._mapping_authority = NS(current=lambda: None)
     bridge._goal_generation = 4
     bridge._goal_lock = threading.RLock()
-    bridge.node.create_client.return_value = client
+    bridge.node.create_client.side_effect = lambda service, _name: (
+        refine_client if service is RefineRouteService else client
+    )
     bridge.node.get_clock().now().to_msg.return_value = NS(sec=12, nanosec=34)
 
     def cancel():
@@ -162,6 +204,27 @@ def success_path():
     )
 
 
+def rolling_home_response(*, partial, path_x, global_path=None, indexed=True):
+    return NS(
+        status=RefineRouteResponse.SUCCEEDED,
+        component_id="component-a",
+        graph_revision=7,
+        map_revision=9,
+        map_epoch=0,
+        mapping_graph_revision=0,
+        geometry_revision="a" * 64,
+        map_source_stamp=NS(sec=0, nanosec=0),
+        reason="",
+        partial=partial,
+        indexed_map_validated=indexed,
+        route_id="route-instance-1",
+        path=[pose(x, 1.0, 0.4) for x in path_x],
+        global_path=(
+            [pose(x, 1.0, 0.4) for x in global_path] if global_path is not None else []
+        ),
+    )
+
+
 def test_navigate_requests_snapshot_and_executes_complete_path(monkeypatch):
     bridge, planner, client = rig(monkeypatch, success_path())
     assert planner.navigate({"x": 2, "y": 1, "yaw": 0.3})
@@ -183,7 +246,9 @@ def test_navigate_requests_snapshot_and_executes_complete_path(monkeypatch):
 def test_native_planner_rejection_reason_is_published_with_failed_state(monkeypatch):
     response = success_path()
     response.status = 7
-    response.reason = "current pose rejected: no mapped ground support at (0.01, 0.00, -0.00)"
+    response.reason = (
+        "current pose rejected: no mapped ground support at (0.01, 0.00, -0.00)"
+    )
     bridge, planner, _ = rig(monkeypatch, response)
 
     assert not planner.navigate({"x": 2, "y": 1})
@@ -255,7 +320,9 @@ def test_late_native_rejection_cannot_overwrite_a_stopped_generation(monkeypatch
     worker.join(1.0)
 
     assert result == [False]
-    assert "nav_failure_reason" not in planner.decorate_state({"nav_status": "cancelled"})
+    assert "nav_failure_reason" not in planner.decorate_state(
+        {"nav_status": "cancelled"}
+    )
 
 
 def test_return_home_uses_configured_goal(monkeypatch):
@@ -969,11 +1036,232 @@ def test_partial_route_is_rejected_before_dispatch(monkeypatch, objective):
     bridge, planner, _ = rig(monkeypatch, response)
     planner.home = {"x": 2.0, "y": 1.0}
 
-    accepted = planner.navigate({"x": 2.0, "y": 1.0}) if objective == "navigate" else planner.return_home()
+    accepted = (
+        planner.navigate({"x": 2.0, "y": 1.0})
+        if objective == "navigate"
+        else planner.return_home()
+    )
 
     assert not accepted
     bridge.follow_path.assert_not_called()
-    assert "full route" in bridge.node.get_logger().warning.call_args.args[0]
+    expected = "full route" if objective == "navigate" else "installed ABI"
+    assert expected in bridge.node.get_logger().warning.call_args.args[0]
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_partial_home_refines_each_success_without_moving_global_goal(
+    monkeypatch, indexed
+):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -1.5, -2.0],
+        indexed=indexed,
+    )
+    middle = rolling_home_response(partial=True, path_x=[-0.5, -1.2], indexed=indexed)
+    final = rolling_home_response(partial=False, path_x=[-1.2, -2.0], indexed=indexed)
+    bridge, planner, _ = rig(
+        monkeypatch,
+        initial,
+        refine_responses=[middle, final],
+    )
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    planner.replan_backoff_s = 0.0
+
+    assert planner.return_home()
+    first_global = planner.global_display_plan()
+    assert first_global.poses[-1].x == pytest.approx(-2.0)
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-0.5)
+    continuation = planner.decorate_state({"nav_status": "active"})[
+        "objective_continuation"
+    ]
+    assert continuation["phase"] == "following_local"
+    assert continuation["evidence_source"] == (
+        "mola_indexed" if indexed else "mgg_native"
+    )
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert planner.global_display_plan() is first_global
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-1.2)
+    assert planner._blocked_retry_count == 0
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.follow_path.call_count == 3)
+    assert planner.global_display_plan() is first_global
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
+    assert (
+        planner.decorate_state({"nav_status": "active"})["objective_continuation"][
+            "phase"
+        ]
+        == "following_final"
+    )
+
+    requests = planner.refine_client.call_async.call_args_list
+    assert len(requests) == 2
+    assert all(call.args[0].route_id == "route-instance-1" for call in requests)
+    assert all(call.args[0].graph_revision == 0 for call in requests)
+    assert all(call.args[0].geometry_revision == "a" * 64 for call in requests)
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert planner._active_route is None
+    assert planner.global_display_plan() is None
+
+
+def test_partial_home_success_is_hidden_while_refinement_is_pending(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -1.5, -2.0],
+    )
+    bridge, planner, _ = rig(
+        monkeypatch,
+        initial,
+        refine_responses=[rolling_home_response(partial=False, path_x=[-0.5, -2.0])],
+    )
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    pending = Future()
+    planner.refine_client.call_async.side_effect = None
+    planner.refine_client.call_async.return_value = pending
+
+    assert planner.return_home()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: planner.refine_client.call_async.called)
+
+    public = planner.decorate_state({"nav_status": "succeeded", "goal": None})
+    assert public["nav_status"] == "active"
+    assert public["goal"]["x"] == pytest.approx(-2.0)
+    assert public["objective_continuation"]["phase"] == "planning"
+
+    bridge.cancel_goal()
+    assert wait_until(pending.cancelled)
+    assert planner.global_display_plan() is None
+    assert (
+        planner.decorate_state({"nav_status": "cancelled"})["nav_status"] == "cancelled"
+    )
+
+
+def test_partial_home_starts_next_refinement_while_prior_worker_exits(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -1.5, -2.0],
+    )
+    final = rolling_home_response(partial=False, path_x=[-0.5, -2.0])
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=[final])
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    assert planner.return_home()
+    # A short controller chunk can finish before the worker which submitted it
+    # has cleared its thread identity in `finally`. That stale identity must
+    # not suppress the next local refinement.
+    prior_worker = object()
+    planner._continuation_thread = prior_worker
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert planner._continuation_thread is not prior_worker
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
+
+
+def test_blocked_home_refinement_replans_the_global_route(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -1.5, -2.0],
+    )
+    blocked = rolling_home_response(partial=False, path_x=[])
+    blocked.status = RefineRouteResponse.BLOCKED
+    blocked.reason = "retained corridor is locally blocked"
+    replacement = rolling_home_response(
+        partial=False,
+        path_x=[-0.5, -1.0, -2.0],
+        global_path=[-0.5, -1.0, -2.0],
+    )
+    bridge, planner, client = rig(
+        monkeypatch,
+        initial,
+        refine_responses=[blocked],
+    )
+    client.call_async.side_effect = [completed(initial), completed(replacement)]
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    planner.replan_backoff_s = 0.0
+
+    assert planner.return_home()
+    original_global = planner.global_display_plan()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert planner.global_display_plan() is not original_global
+    assert planner.global_display_plan().poses[-1].x == pytest.approx(-2.0)
+    assert planner._blocked_retry_count == 0
+
+
+def test_indexed_home_refinement_rejects_evidence_downgrade(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+        indexed=True,
+    )
+    downgraded = rolling_home_response(
+        partial=False, path_x=[-0.5, -2.0], indexed=False
+    )
+    bridge, planner, client = rig(
+        monkeypatch,
+        initial,
+        refine_responses=[downgraded],
+    )
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    assert planner.return_home()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert (
+        "evidence source"
+        in planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+    )
+    assert client.call_async.call_count == 1
+    assert bridge.follow_path.call_count == 1
+
+
+def test_indexed_home_refinement_replans_after_snapshot_mismatch(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+        indexed=True,
+    )
+    mismatched = rolling_home_response(partial=False, path_x=[-0.5, -2.0], indexed=True)
+    mismatched.geometry_revision = "b" * 64
+    bridge, planner, client = rig(
+        monkeypatch,
+        initial,
+        refine_responses=[mismatched],
+    )
+    planner.refine_client.call_async.side_effect = None
+    planner.refine_client.call_async.return_value = completed(mismatched)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    planner.replan_backoff_s = 0.0
+
+    assert planner.return_home()
+    original_global = planner.global_display_plan()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert planner.global_display_plan() is not original_global
+    assert bridge.nav_status == "active"
 
 
 def test_malformed_full_route_is_rejected_before_dispatch(monkeypatch):
@@ -986,7 +1274,9 @@ def test_malformed_full_route_is_rejected_before_dispatch(monkeypatch):
     assert "path is empty" in bridge.node.get_logger().warning.call_args.args[0]
 
 
-def test_full_route_endpoint_must_match_requested_xy_but_may_project_height(monkeypatch):
+def test_full_route_endpoint_must_match_requested_xy_but_may_project_height(
+    monkeypatch,
+):
     response = success_path()
     bridge, planner, client = rig(monkeypatch, response)
     client.call_async.side_effect = None
@@ -1006,9 +1296,7 @@ def test_full_route_endpoint_must_match_requested_xy_but_may_project_height(monk
 @pytest.mark.parametrize("distance_m", [20.0, 50.0, 100.0])
 def test_distant_full_route_keeps_exact_fixed_frame_endpoint(monkeypatch, distance_m):
     response = success_path()
-    response.path = [
-        pose(index * distance_m / 100.0, 0.0) for index in range(101)
-    ]
+    response.path = [pose(index * distance_m / 100.0, 0.0) for index in range(101)]
     bridge, planner, client = rig(monkeypatch, response)
     goal = {"x": distance_m, "y": 0.0, "yaw": 0.3}
 
@@ -1244,7 +1532,9 @@ def test_execution_correction_accounts_for_rotation_at_far_endpoint(monkeypatch)
     planner._check_active_authority()
 
     assert wait_until(lambda: client.call_async.call_count == 2)
-    assert "max_route_shift=0.300m" in bridge.node.get_logger().warning.call_args.args[0]
+    assert (
+        "max_route_shift=0.300m" in bridge.node.get_logger().warning.call_args.args[0]
+    )
 
 
 def test_execution_retains_frame_rotation_bound_for_short_route(monkeypatch):
@@ -1269,7 +1559,9 @@ def test_execution_retains_frame_rotation_bound_for_short_route(monkeypatch):
 
 
 @pytest.mark.parametrize("objective", ["navigate", "return_home"])
-def test_stale_authority_stops_motion_then_recovers_same_objective(monkeypatch, objective):
+def test_stale_authority_stops_motion_then_recovers_same_objective(
+    monkeypatch, objective
+):
     response = success_path()
     response.geometry_revision = "a" * 64
     bridge, planner, client = rig(monkeypatch, response)
@@ -1293,8 +1585,12 @@ def test_stale_authority_stops_motion_then_recovers_same_objective(monkeypatch, 
     assert goal.position == original.position
 
 
-@pytest.mark.parametrize("resolution", ["timeout", "new_mission", "new_component", "new_frame", "stop"])
-def test_stale_authority_recovery_remains_bounded_and_identity_fenced(monkeypatch, resolution):
+@pytest.mark.parametrize(
+    "resolution", ["timeout", "new_mission", "new_component", "new_frame", "stop"]
+)
+def test_stale_authority_recovery_remains_bounded_and_identity_fenced(
+    monkeypatch, resolution
+):
     bridge, planner, client = rig(monkeypatch, success_path())
     authority = [correction_authority()]
     planner.authority_reader = NS(current=lambda: authority[0])
@@ -1318,7 +1614,10 @@ def test_stale_authority_recovery_remains_bounded_and_identity_fenced(monkeypatc
     assert client.call_async.call_count == 1
     assert bridge.nav_status == ("cancelled" if resolution == "stop" else "failed")
     if resolution == "timeout":
-        assert "no fresh map authority" in planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+        assert (
+            "no fresh map authority"
+            in planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+        )
 
 
 def test_component_goal_is_reresolved_after_correction(monkeypatch):
@@ -1402,7 +1701,9 @@ def test_component_click_without_frame_revision_token_is_rejected(monkeypatch):
     assert not planner.navigate(goal)
     client.call_async.assert_not_called()
     bridge.follow_path.assert_not_called()
-    assert "no frame revision token" in bridge.node.get_logger().warning.call_args.args[0]
+    assert (
+        "no frame revision token" in bridge.node.get_logger().warning.call_args.args[0]
+    )
 
 
 def test_component_goal_requires_matching_explicit_authority(monkeypatch):
@@ -1430,9 +1731,7 @@ def test_component_goal_inverse_resolves_position_and_heading(monkeypatch):
         [0.0, 0.0, 1.0, 1.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
-    goal = {
-        "component_goal": {"x": 8.0, "y": 23.0, "z": 5.0, "yaw": math.pi / 2}
-    }
+    goal = {"component_goal": {"x": 8.0, "y": 23.0, "z": 5.0, "yaw": math.pi / 2}}
 
     resolved = planner._component_goal_in_navigation(goal, authority)
 
@@ -1508,9 +1807,7 @@ def test_stable_route_ignores_map_gauge_but_replans_planning_correction(
     # Moving C<-planning changes the physical route and retains the existing
     # cancel/replan lifecycle. Component provenance produces the corrected
     # exact endpoint in the same stable frame.
-    corrected = stable_planning_authority(
-        map_x=0.27, planning_x=0.27, revision=3
-    )
+    corrected = stable_planning_authority(map_x=0.27, planning_x=0.27, revision=3)
     corrected["solution_order"] = [3, 0]
     authority[0] = corrected
     planner._check_active_authority()

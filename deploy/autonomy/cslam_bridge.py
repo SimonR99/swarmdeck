@@ -53,7 +53,6 @@ from autonomy.cslam import CslamMapper, pose_matrix
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaClient
 
-
 DEFAULT_STORED_RAW_CAPTURE_POINTS = 4_096
 MAX_RAW_CAPTURE_CACHE_BYTES = 32 * 1024 * 1024
 MAX_RAW_CAPTURE_RECORDS = 32
@@ -234,9 +233,18 @@ class Bridge(Node):
             PointCloud2, p["cloud_topic"], self.raw_cloud, qos_profile_sensor_data
         )
         if p["color_topic"] and p["depth_topic"] and p["color_info_topic"]:
-            self.sensor_node.create_subscription(Image, p["color_topic"], self._color_image, qos_profile_sensor_data)
-            self.sensor_node.create_subscription(Image, p["depth_topic"], self._depth_image, qos_profile_sensor_data)
-            self.sensor_node.create_subscription(CameraInfo, p["color_info_topic"], self._color_info, qos_profile_sensor_data)
+            self.sensor_node.create_subscription(
+                Image, p["color_topic"], self._color_image, qos_profile_sensor_data
+            )
+            self.sensor_node.create_subscription(
+                Image, p["depth_topic"], self._depth_image, qos_profile_sensor_data
+            )
+            self.sensor_node.create_subscription(
+                CameraInfo,
+                p["color_info_topic"],
+                self._color_info,
+                qos_profile_sensor_data,
+            )
         if self.raw_capture_enabled:
             self.sensor_node.create_subscription(
                 String,
@@ -321,9 +329,8 @@ class Bridge(Node):
 
         self.color_capture_attempts += 1
         try:
-            cloud_ns = (
-                int(capture_header.stamp.sec) * 1_000_000_000
-                + int(capture_header.stamp.nanosec)
+            cloud_ns = int(capture_header.stamp.sec) * 1_000_000_000 + int(
+                capture_header.stamp.nanosec
             )
         except (AttributeError, TypeError, ValueError):
             self.color_pair_rejections += 1
@@ -333,7 +340,11 @@ class Bridge(Node):
             depths = tuple(self.depth_images.values())
             info = self.color_info
         selected = select_rgbd_observation(
-            cloud_ns, images, depths, info, self.color_frame,
+            cloud_ns,
+            images,
+            depths,
+            info,
+            self.color_frame,
         )
         if selected is None:
             self.color_pair_rejections += 1
@@ -359,13 +370,19 @@ class Bridge(Node):
             pose_matrix(transform_pose(transform.transform)), dtype=np.float64
         )
         if self.color_frame_convention == "body":
-            camera_from_base = np.asarray(
-                [[0, -1, 0, 0], [0, 0, -1, 0], [1, 0, 0, 0], [0, 0, 0, 1]],
-                dtype=np.float64,
-            ) @ camera_from_base
+            camera_from_base = (
+                np.asarray(
+                    [[0, -1, 0, 0], [0, 0, -1, 0], [1, 0, 0, 0], [0, 0, 0, 1]],
+                    dtype=np.float64,
+                )
+                @ camera_from_base
+            )
         try:
             rgba = colorize_ros_rgbd(
-                points_base, image, depth, info,
+                points_base,
+                image,
+                depth,
+                info,
                 camera_from_base,
             )
         except (BufferError, TypeError, ValueError):
@@ -505,10 +522,13 @@ class Bridge(Node):
             with self._shared_lock:
                 self.raw_capture_collisions[stamp_ns] = None
                 while len(self.raw_capture_collisions) > 2 * MAX_RAW_CAPTURE_RECORDS:
-                    self.raw_capture_collisions.pop(next(iter(self.raw_capture_collisions)))
+                    self.raw_capture_collisions.pop(
+                        next(iter(self.raw_capture_collisions))
+                    )
             return
         points = endpoint_preserving_sample(
-            np.asarray(points_base, dtype=np.float64), self.max_stored_raw_capture_points
+            np.asarray(points_base, dtype=np.float64),
+            self.max_stored_raw_capture_points,
         )
         points.setflags(write=False)
         record = (
@@ -679,7 +699,9 @@ class Bridge(Node):
                 return
             raw = self._take_raw_capture(stamp, self.core.key(seq))
             xyz, mount, sensor_frame, provenance, colors = select_geometry_and_color(
-                xyz, calibration, raw,
+                xyz,
+                calibration,
+                raw,
                 # Swarm-SLAM rebuilds the keyframe PointCloud2 with a default
                 # zero header. Its paired odometry retains the original
                 # normalized scan timestamp used by calibration/raw joins.

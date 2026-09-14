@@ -56,6 +56,7 @@ COPY deploy/patches/mgg-objective-msgs.patch /tmp/mgg-objective-msgs.patch
 COPY deploy/patches/mgg-indexed-map-msgs.patch /tmp/mgg-indexed-map-msgs.patch
 COPY deploy/patches/mgg-partial-route-navigate.patch /tmp/mgg-partial-route-navigate.patch
 COPY deploy/patches/mgg-route-validation.patch /tmp/mgg-route-validation.patch
+COPY deploy/patches/mgg-home-rolling-followup.patch /tmp/mgg-home-rolling-followup.patch
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV"
 ENV AMENT_PREFIX_PATH="/opt/swarmdeck-mgg-msgs:${AMENT_PREFIX_PATH}" \

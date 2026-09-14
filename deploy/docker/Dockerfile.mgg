@@ -51,6 +51,8 @@ COPY deploy/patches/mgg-footprint-failure-diagnostic.patch /tmp/mgg-footprint-fa
 COPY deploy/patches/mgg-home-objective-budget-followup.patch /tmp/mgg-home-objective-budget-followup.patch
 COPY deploy/patches/mgg-physical-current-start-followup.patch /tmp/mgg-physical-current-start-followup.patch
 COPY deploy/patches/mgg-footprint-grid-cells-followup.patch /tmp/mgg-footprint-grid-cells-followup.patch
+COPY deploy/patches/mgg-home-rolling-followup.patch /tmp/mgg-home-rolling-followup.patch
+COPY deploy/patches/mgg-exploration-waiting-reason.patch /tmp/mgg-exploration-waiting-reason.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -88,6 +90,8 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-home-objective-budget-followup.patch && \
     git apply /tmp/mgg-physical-current-start-followup.patch && \
     git apply /tmp/mgg-footprint-grid-cells-followup.patch && \
+    git apply /tmp/mgg-home-rolling-followup.patch && \
+    git apply /tmp/mgg-exploration-waiting-reason.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

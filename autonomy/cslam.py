@@ -100,7 +100,9 @@ class CslamMapper:
         )
         provenance = provenance or CaptureProvenance.unqualified(key, stamp_ns)
         if provenance.transform_timestamp_ns != stamp_ns:
-            raise ValueError("keyframe pose timestamp does not match capture provenance")
+            raise ValueError(
+                "keyframe pose timestamp does not match capture provenance"
+            )
         capture = self.capture_provider.capture(
             key,
             provenance,
@@ -114,15 +116,23 @@ class CslamMapper:
             separators=(",", ":"),
         ).encode()
         fingerprint = hashlib.sha256(
-            np.asarray(points_base, dtype="<f4").tobytes() + b"\n" + identity
-            + (b"" if colors_rgba is None else np.asarray(colors_rgba, dtype=np.uint8).tobytes())
+            np.asarray(points_base, dtype="<f4").tobytes()
+            + b"\n"
+            + identity
+            + (
+                b""
+                if colors_rgba is None
+                else np.asarray(colors_rgba, dtype=np.uint8).tobytes()
+            )
         ).digest()
         if key in self.local_poses:
             if fingerprint != self.capture_digests[key]:
                 raise ValueError("Keyframe identity reused with different capture data")
             return False
         points_sensor = (np.asarray(points_base) - mount[:3, 3]) @ mount[:3, :3]
-        self.mapper.add_capture(capture, calibration, points_sensor, colors_rgba=colors_rgba)
+        self.mapper.add_capture(
+            capture, calibration, points_sensor, colors_rgba=colors_rgba
+        )
         self.local_poses[key] = local
         self.capture_digests[key] = fingerprint
         self.poses[key] = validate_se3(self.T_component_local @ np.asarray(local))

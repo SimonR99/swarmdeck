@@ -4,13 +4,15 @@
 A lost transition response is resolved by observing the node's actual state.
 Never retry an assumed transition or reset an already active node.
 """
+
 from __future__ import annotations
 
 import time
 
 
-def bringup(nodes, query, change, *, deadline_s=60.0, clock=time.monotonic,
-            sleep=time.sleep):
+def bringup(
+    nodes, query, change, *, deadline_s=60.0, clock=time.monotonic, sleep=time.sleep
+):
     """Configure every node, then activate in dependency order; fail boundedly."""
     deadline = clock() + deadline_s
     detail = "no lifecycle state received"
@@ -24,24 +26,30 @@ def bringup(nodes, query, change, *, deadline_s=60.0, clock=time.monotonic,
                     if state == 3 or (target == 2 and state == 2):
                         break
                     if state == (1 if target == 2 else 2):
-                        accepted = change(name, transition, min(deadline, clock() + 10.0))
+                        accepted = change(
+                            name, transition, min(deadline, clock() + 10.0)
+                        )
                         detail = f"{name}: transition {transition} {'sent' if accepted else 'rejected'}"
                     else:
-                        detail = f"{name}: waiting for lifecycle state {state} to settle"
+                        detail = (
+                            f"{name}: waiting for lifecycle state {state} to settle"
+                        )
                 except (TimeoutError, RuntimeError) as exc:
                     detail = f"{name}: {exc}"
                 remaining = deadline - clock()
                 if remaining > 0:
-                    sleep(min(.25, remaining))
+                    sleep(min(0.25, remaining))
             else:
                 raise TimeoutError(detail)
             if clock() >= deadline:
                 raise TimeoutError(detail)
     # Activation can take time. Confirm the entire group before reporting ready.
     for name in nodes:
-        if (clock() >= deadline
-                or query(name, min(deadline, clock() + 2.0)) != 3
-                or clock() >= deadline):
+        if (
+            clock() >= deadline
+            or query(name, min(deadline, clock() + 2.0)) != 3
+            or clock() >= deadline
+        ):
             raise RuntimeError(f"{name}: active state not confirmed")
 
 
@@ -80,7 +88,9 @@ def main():
         return result
 
     def query(name, deadline):
-        return call(name + "/get_state", GetState, GetState.Request(), deadline).current_state.id
+        return call(
+            name + "/get_state", GetState, GetState.Request(), deadline
+        ).current_state.id
 
     def change(name, transition, deadline):
         request = ChangeState.Request()

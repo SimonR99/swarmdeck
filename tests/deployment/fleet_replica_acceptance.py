@@ -28,7 +28,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
-
 XYZ_MAGIC = b"SDXYZ1\x00\x00"
 XYZ_ENCODING = "application/vnd.swarmdeck.xyz-f32.v1"
 XYZRGBA_MAGIC = b"SDRGB1\x00\x00"
@@ -173,7 +172,9 @@ def validate_catalogue(value: dict[str, Any]) -> list[dict[str, Any]]:
     return components
 
 
-def committed_sources(components: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+def committed_sources(
+    components: list[dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
     sources: dict[tuple[str, str], dict[str, Any]] = {}
     for entry in components:
         if entry["status"] != "ready" or entry["available"] is not True:
@@ -207,8 +208,10 @@ def validate_view(
     for source in sources:
         if not isinstance(source, dict):
             raise ObserverError("aggregate source is invalid")
-        key = (text(source.get("robot_id"), "aggregate source robot_id"),
-               text(source.get("session_id"), "aggregate source session_id"))
+        key = (
+            text(source.get("robot_id"), "aggregate source robot_id"),
+            text(source.get("session_id"), "aggregate source session_id"),
+        )
         if key in source_keys:
             raise ObserverError("aggregate source is repeated")
         source_keys.add(key)
@@ -219,8 +222,10 @@ def validate_view(
         source_records.add((*key, revision, snapshot_id))
     expected_records = {
         (
-            source["robot_id"], source["session_id"],
-            source["revision"], source["snapshot_id"]
+            source["robot_id"],
+            source["session_id"],
+            source["revision"],
+            source["snapshot_id"],
         )
         for source in entry["sources"]
     }
@@ -286,7 +291,10 @@ def verify_chunk(
         MAX_CHUNK_BYTES,
         "application/octet-stream",
     )
-    if len(body) != expected["size_bytes"] or hashlib.sha256(body).hexdigest() != digest:
+    if (
+        len(body) != expected["size_bytes"]
+        or hashlib.sha256(body).hexdigest() != digest
+    ):
         raise ObserverError(f"chunk {digest} failed size or SHA-256 validation")
     chunk_format = CHUNK_FORMATS.get(expected.get("encoding"))
     if chunk_format is None:
@@ -306,7 +314,8 @@ def verify_chunk(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--base-url", default=os.environ.get("SWARMDECK_SERVER_URL", "http://127.0.0.1:8000")
+        "--base-url",
+        default=os.environ.get("SWARMDECK_SERVER_URL", "http://127.0.0.1:8000"),
     )
     parser.add_argument("--session-id", default=os.environ.get("SWARMDECK_MISSION_ID"))
     parser.add_argument("--deadline", type=float, default=60.0)
@@ -315,7 +324,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-robots", type=int, default=4)
     args = parser.parse_args()
     if args.deadline <= 0 or args.request_timeout <= 0 or args.poll < 0:
-        parser.error("deadline/request-timeout must be positive and poll must be non-negative")
+        parser.error(
+            "deadline/request-timeout must be positive and poll must be non-negative"
+        )
     if args.expected_robots <= 0:
         parser.error("expected-robots must be positive")
     args.base_url = args.base_url.rstrip("/")
@@ -355,7 +366,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ]
             sources = committed_sources(entries)
             components = [
-                entry for entry in entries
+                entry
+                for entry in entries
                 if entry["status"] == "ready" and entry["available"] is True
             ]
             if len(sources) >= args.expected_robots and components:
@@ -385,8 +397,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     source_rows = [
-        {"robot_id": robot, "session_id": session}
-        for robot, session in sources
+        {"robot_id": robot, "session_id": session} for robot, session in sources
     ]
     source_rows.sort(key=lambda row: (row["session_id"], row["robot_id"]))
     if len(sources) < args.expected_robots or not components:
@@ -396,8 +407,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
             "polls": poll_count,
             "catalogue_ms": {
-                "last": round(catalogue_latency_ms[-1], 3) if catalogue_latency_ms else None,
-                "max": round(max(catalogue_latency_ms), 3) if catalogue_latency_ms else None,
+                "last": (
+                    round(catalogue_latency_ms[-1], 3) if catalogue_latency_ms else None
+                ),
+                "max": (
+                    round(max(catalogue_latency_ms), 3)
+                    if catalogue_latency_ms
+                    else None
+                ),
             },
             "source_count": len(sources),
             "sources": source_rows,
@@ -465,8 +482,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "polls": poll_count,
         "source_count": len(sources),
         "catalogue_ms": {
-            "last": round(catalogue_latency_ms[-1], 3) if catalogue_latency_ms else None,
-            "max": round(max(catalogue_latency_ms), 3) if catalogue_latency_ms else None,
+            "last": (
+                round(catalogue_latency_ms[-1], 3) if catalogue_latency_ms else None
+            ),
+            "max": (
+                round(max(catalogue_latency_ms), 3) if catalogue_latency_ms else None
+            ),
         },
         "sources": source_rows,
         "ready_components": result_components,

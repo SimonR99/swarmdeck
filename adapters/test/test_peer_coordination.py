@@ -33,9 +33,7 @@ def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
         )
 
     node = NS(create_publisher=publisher, create_subscription=lambda *args: None)
-    coordinator = PeerCoordinator(
-        NS(node=node, id="r0", map_frame="r0/map_frame"), {}
-    )
+    coordinator = PeerCoordinator(NS(node=node, id="r0", map_frame="r0/map_frame"), {})
     now = [0.0]
     coordinator.clock = lambda: now[0]
     mission = str(uuid.uuid4())
@@ -50,13 +48,17 @@ def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
             "correction_revision": order,
             "navigation_frame": "r0/map_frame",
             "T_component_navigation": [
-                [1, 0, 0, map_x], [0, 1, 0, 0],
-                [0, 0, 1, 0], [0, 0, 0, 1],
+                [1, 0, 0, map_x],
+                [0, 1, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
             ],
             "planning_frame": "r0/odom",
             "T_component_planning": [
-                [1, 0, 0, planning_x], [0, 1, 0, 0],
-                [0, 0, 1, 0], [0, 0, 0, 1],
+                [1, 0, 0, planning_x],
+                [0, 1, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
             ],
         }
 
@@ -477,9 +479,7 @@ def test_stale_lease_retains_and_validates_one_plan_authority_binding(monkeypatc
     # another stale withdrawal, so the old plan cannot silently rebind.
     now[0] = 8.2
     assert coordinator.reserve(plan, 1) == "pending"
-    coordinator.on_authority(
-        NS(data=json.dumps(authority(3, component="component:b")))
-    )
+    coordinator.on_authority(NS(data=json.dumps(authority(3, component="component:b"))))
     assert coordinator.invalid_token == bound_token
     assert coordinator.token is None
     assert coordinator.reserve(plan, 1) == "rejected"

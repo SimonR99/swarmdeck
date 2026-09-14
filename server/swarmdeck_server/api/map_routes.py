@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from dataclasses import dataclass
 import math
 import threading
@@ -43,7 +44,10 @@ CLOUD_SCALE = 0.01
 # publishing are dropped by _prune_optimized_maps -- without that, a retired
 # component id would be served from here forever, because a scope only ever
 # arrives and nothing else could tell a live one from a dead one.
-_optimized: dict[str, tuple[GridMeta, np.ndarray, tuple[str, ...]]] = {}
+_optimized: dict[
+    str,
+    tuple[GridMeta, np.ndarray, tuple[str, ...], dict[str, dict[str, float]] | None],
+] = {}
 _optimized_lock = threading.Lock()
 
 
@@ -75,7 +79,35 @@ def _map_headers(info: dict[str, Any]) -> dict[str, str]:
         "X-Map-Origin-X": str(info["origin"]["x"]),
         "X-Map-Origin-Y": str(info["origin"]["y"]),
         **({"X-Map-Seq": str(info["seq"])} if "seq" in info else {}),
+        **(
+            {"X-Map-Transforms": json.dumps(info["transforms"], separators=(",", ":"))}
+            if "transforms" in info
+            else {}
+        ),
     }
+
+
+def _map_transforms(headers) -> dict[str, dict[str, float]] | None:
+    encoded = headers.get("x-map-transforms")
+    if encoded is None:
+        return None
+    if len(encoded) > 32768:
+        raise ValueError("transform metadata too large")
+    values = json.loads(encoded)
+    if not isinstance(values, dict) or len(values) > 256:
+        raise ValueError("invalid transform collection")
+    transforms = {}
+    for robot_id, value in values.items():
+        if not robot_id or len(robot_id) > 128 or not isinstance(value, dict):
+            raise ValueError("invalid robot transform")
+        pose = {}
+        for key in ("x", "y", "yaw"):
+            number = value[key]
+            if type(number) not in (int, float) or not math.isfinite(number):
+                raise ValueError("transform must be finite")
+            pose[key] = float(number)
+        transforms[robot_id] = pose
+    return transforms
 
 
 async def get_map() -> Response:
@@ -86,7 +118,15 @@ async def get_map() -> Response:
     return Response(
         content=content,
         media_type="image/png",
-        headers=_map_headers(snapshot.meta.as_dict(snapshot.seq)),
+        headers=_map_headers(
+            {
+                **snapshot.meta.as_dict(snapshot.seq),
+                "transforms": {
+                    robot: {"x": pose[0], "y": pose[1], "yaw": pose[2]}
+                    for robot, pose in snapshot.transforms.items()
+                },
+            }
+        ),
     )
 
 
@@ -426,7 +466,13 @@ async def post_global_map(request: Request) -> Any:
         return JSONResponse({"error": "malformed grid"}, status_code=400)
     if cells.size != meta.width * meta.height:
         return JSONResponse({"error": "size mismatch"}, status_code=400)
-    map_service.set_global_grid(meta, cells.reshape(meta.height, meta.width))
+    try:
+        transforms = _map_transforms(request.headers)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return JSONResponse({"error": "malformed map transforms"}, status_code=400)
+    map_service.set_global_grid(
+        meta, cells.reshape(meta.height, meta.width), transforms=transforms
+    )
     return {"ok": True, "cells": int(cells.size)}
 
 
@@ -770,6 +816,10 @@ async def post_optimized_map(request: Request) -> Any:
     if not scope:
         return JSONResponse({"error": "scope required"}, status_code=400)
     try:
+        transforms = _map_transforms(request.headers)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return JSONResponse({"error": "malformed map transforms"}, status_code=400)
+    try:
         meta = GridMeta(
             resolution=float(request.query_params.get("resolution", 0.05)),
             width=int(request.query_params.get("width", 0)),
@@ -791,8 +841,17 @@ async def post_optimized_map(request: Request) -> Any:
     if cells.size != meta.width * meta.height:
         return JSONResponse({"error": "size mismatch"}, status_code=400)
     robots = tuple(r for r in request.query_params.get("robots", "").split(",") if r)
+    if transforms is not None and not set(transforms).issubset(robots):
+        return JSONResponse(
+            {"error": "transform robot outside map scope"}, status_code=400
+        )
     with _optimized_lock:
-        _optimized[scope] = (meta, cells.reshape(meta.height, meta.width), robots)
+        _optimized[scope] = (
+            meta,
+            cells.reshape(meta.height, meta.width),
+            robots,
+            transforms,
+        )
     return {"ok": True, "scope": scope, "cells": int(cells.size)}
 
 
@@ -808,7 +867,7 @@ async def get_optimized_index() -> dict[str, Any]:
                 "height": meta.height,
                 "origin": {"x": meta.origin_x, "y": meta.origin_y},
             }
-            for scope, (meta, _cells, robots) in sorted(_optimized.items())
+            for scope, (meta, _cells, robots, _transforms) in sorted(_optimized.items())
         ]
     return {"type": "optimized_maps", "maps": items}
 
@@ -820,13 +879,18 @@ async def get_optimized_map(scope: str) -> Response:
         return JSONResponse(
             {"error": f"no optimized map for {scope!r}"}, status_code=404
         )
-    meta, cells, _robots = entry
+    meta, cells, _robots, transforms = entry
     from ..mapsvc.output import grid_png
 
     return Response(
         content=grid_png(meta, cells),
         media_type="image/png",
-        headers=_map_headers(meta.as_dict()),
+        headers=_map_headers(
+            {
+                **meta.as_dict(),
+                **({"transforms": transforms} if transforms is not None else {}),
+            }
+        ),
     )
 
 

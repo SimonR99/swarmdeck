@@ -125,12 +125,18 @@ def generate_launch_description() -> LaunchDescription:
     )
     bounded_startup = LaunchConfiguration("bounded_startup")
     managed_nodes = [
-        "controller_server", "planner_server", "behavior_server",
-        "bt_navigator", "velocity_smoother",
+        "controller_server",
+        "planner_server",
+        "behavior_server",
+        "bt_navigator",
+        "velocity_smoother",
     ]
     startup = Node(
-        package="swarmdeck_nav", executable="lifecycle_startup",
-        name="navigation_startup", namespace=namespace, output="screen",
+        package="swarmdeck_nav",
+        executable="lifecycle_startup",
+        name="navigation_startup",
+        namespace=namespace,
+        output="screen",
         condition=IfCondition(bounded_startup),
         parameters=[{"node_names": managed_nodes, "startup_timeout_s": 60.0}],
     )

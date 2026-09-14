@@ -65,6 +65,11 @@ export interface RobotState extends Stamps {
   navigation_ready?: boolean | null;
   /** Bounded native planner rejection, when the latest goal failed. */
   nav_failure_reason?: string | null;
+  objective_continuation?: {
+    objective: 'navigate' | 'return_home';
+    phase: 'planning' | 'following_local' | 'following_final';
+    evidence_source: string;
+  } | null;
   goal: Point | null;
   exploration_status?: "idle" | "starting" | "exploring" | "waiting" | "locally_exhausted" | "complete" | "blocked" | "stopped";
   exploration_reason?: string | null;
@@ -83,6 +88,7 @@ export interface RobotState extends Stamps {
   global_planned_path?: Point[];
   /** Local controller trajectory currently selected for execution. */
   local_planned_path?: Point[];
+  navigation_transform?: Pose;
   capabilities: Capability[];
   unattended_s: number;
   online: boolean;
@@ -193,6 +199,7 @@ export interface MapInfo {
   height: number;
   origin: Point;
   seq: number;
+  transforms?: Record<string, Pose>;
 }
 
 export interface MapPatch {
@@ -208,6 +215,7 @@ export interface MapPatch {
   h: number;
   /** base64(zlib(int8[])) row-major, -1 unknown / 0 free / 100 occupied */
   data: string;
+  transforms?: Record<string, Pose>;
 }
 
 /** Incremental robot-local Wi-Fi quality grid; 255 means no sample. */
@@ -474,7 +482,7 @@ export type ServerMessage =
 /* ---------- GUI → server ---------- */
 
 export type ClientMessage =
-  | { type: 'set_goal'; robot_id: string; payload: Point }
+  | { type: 'set_goal'; robot_id: string; payload: Point & { map_transform?: Pose } }
   | { type: 'cancel_goal'; robot_id: string }
   | { type: 'return_home'; robot_id: string }
   | { type: 'drive'; robot_id: string; payload: { linear: number; angular: number } }

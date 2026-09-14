@@ -53,10 +53,7 @@ async def component(session_id, component_id):
         )
         if not isinstance(view.get("snapshot_id"), str) or not view["snapshot_id"]:
             raise ValueError("component view has no publication identity")
-        if (
-            view.get("solution_order_known") is not True
-            or "solution_order" not in view
-        ):
+        if view.get("solution_order_known") is not True or "solution_order" not in view:
             raise ValueError("component view has no frame revision")
         if view.get("selected") is None:
             raise ValueError("component view has no selected component")
@@ -67,8 +64,10 @@ async def component(session_id, component_id):
 
 def view_solution_order(view):
     """Catalogue uses None for the valid pre-optimizer (0, -1) sentinel."""
-    return (0, -1) if view["solution_order"] is None else tuple(
-        solution_order(view["solution_order"])
+    return (
+        (0, -1)
+        if view["solution_order"] is None
+        else tuple(solution_order(view["solution_order"]))
     )
 
 
@@ -119,11 +118,8 @@ async def live_component(session_id: str, component_id: str):
     robots = [
         value
         for robot in registry.robots.values()
-        if (
-            value := live_robot(
-                robot, session_id, component_id, frame_revision, now
-            )
-        ) is not None
+        if (value := live_robot(robot, session_id, component_id, frame_revision, now))
+        is not None
     ]
     if not robots:
         raise HTTPException(404, "No fresh robot telemetry for this component")

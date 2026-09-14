@@ -407,9 +407,7 @@ class MggExploration:
                         self.coordinator.release(generation)
                         self._request_replan(
                             generation,
-                            recovery=(
-                                self.controller_replan_generation == generation
-                            ),
+                            recovery=(self.controller_replan_generation == generation),
                         )
                     else:
                         self._execute(plan, generation)
@@ -417,16 +415,18 @@ class MggExploration:
                     self.pending_plan = None
                     self.pending_authority_replan = None
                     self.status = "waiting"
-                    self.reason = getattr(self.coordinator, "last_decision_reason", "Waiting for another exploration route")
+                    self.reason = getattr(
+                        self.coordinator,
+                        "last_decision_reason",
+                        "Waiting for another exploration route",
+                    )
                     self.coordinator.release(generation)
                     self._request_replan(
                         generation,
                         recovery=self.controller_replan_generation == generation,
                     )
                 elif decision != "granted" and self.executing_plan == candidate:
-                    reason = getattr(
-                        self.coordinator, "last_decision_reason", decision
-                    )
+                    reason = getattr(self.coordinator, "last_decision_reason", decision)
                     self.warn(f"peer reservation lost ({reason}); stopping path")
                     owner = self.executing_goal_generation
                     cancel_if_current = getattr(
@@ -482,9 +482,8 @@ class MggExploration:
                     "blocked" if request_kind == "replan" or recovery else "stopped"
                 )
                 if (
-                    (request_kind == "replan" or recovery)
-                    and self.executing_plan is None
-                ):
+                    request_kind == "replan" or recovery
+                ) and self.executing_plan is None:
                     self._stop_without_motion(status=timeout_status)
                 else:
                     self.stop(status=timeout_status)
@@ -651,9 +650,11 @@ class MggExploration:
             self.reason = (
                 detail.strip()[:512]
                 if isinstance(detail, str) and detail.strip()
-                else "MGG is searching for a traversable exploration route"
-                if state == "waiting"
-                else None
+                else (
+                    "MGG is searching for a traversable exploration route"
+                    if state == "waiting"
+                    else None
+                )
             )
 
     def on_path(self, path):
@@ -727,7 +728,11 @@ class MggExploration:
             if decision == "pending":
                 self.pending_plan = (plan, generation)
                 self.status = "waiting"
-                self.reason = getattr(self.coordinator, "last_decision_reason", "Waiting for peer coordination")
+                self.reason = getattr(
+                    self.coordinator,
+                    "last_decision_reason",
+                    "Waiting for peer coordination",
+                )
                 return
             if decision == "rejected":
                 # Any previous executing path was cancelled above. Cancelling

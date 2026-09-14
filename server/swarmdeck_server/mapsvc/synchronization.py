@@ -41,12 +41,16 @@ class SnapshotStore:
         with self._lock:
             return self._snapshot
 
-    def publish(self, meta: GridMeta, merged: np.ndarray) -> MapSnapshot:
+    def publish(
+        self, meta: GridMeta, merged: np.ndarray, transforms=None
+    ) -> MapSnapshot:
         """Copy one working-map generation and preserve the patch baseline."""
         with self._lock:
             previous = self._snapshot
             baseline = expand_patch_baseline(previous.patch_prev, previous.meta, meta)
-            self._snapshot = make_snapshot(meta, merged, baseline, previous.seq)
+            self._snapshot = make_snapshot(
+                meta, merged, baseline, previous.seq, transforms
+            )
             return self._snapshot
 
     def capture_patch(self) -> PatchCapture | None:
@@ -66,5 +70,6 @@ class SnapshotStore:
                 snapshot.merged,
                 snapshot.merged,
                 seq,
+                snapshot.transforms,
             )
             return PatchCapture(snapshot, x0, y0, x1, y1, cells, seq)

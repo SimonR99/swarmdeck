@@ -82,7 +82,9 @@ def make_fixture(root: Path) -> tuple[Path, Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", type=Path, help="new directory for fixture, dataset, and config")
+    parser.add_argument(
+        "root", type=Path, help="new directory for fixture, dataset, and config"
+    )
     args = parser.parse_args()
     dataset, config = make_fixture(args.root)
     print(json.dumps({"dataset": str(dataset), "config": str(config)}))

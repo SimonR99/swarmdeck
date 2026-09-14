@@ -20,7 +20,6 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField, Image, CameraInfo
 from organized_depth import rasterize_flat_depth_quads
 
-
 SIM_DEPTH_FAR_PLANE_M = 40.0
 # A 3-pixel grid leaves holes in a Bunker body-volume query at 12 m. Two is
 # the coarsest sensor-faithful grid that covers that bounded regression model.
@@ -83,7 +82,10 @@ class Inputs(Node):
             transform.transform.rotation.w = 1.0
             self.camera_tf.sendTransform(transform)
         cloud_enabled = self.declare_parameter("cloud_enabled", True).value
-        if self.declare_parameter("depth_enabled", self.sim_depth).value and cloud_enabled:
+        if (
+            self.declare_parameter("depth_enabled", self.sim_depth).value
+            and cloud_enabled
+        ):
             self.create_subscription(
                 Image, "depth", self.on_depth, qos_profile_sensor_data
             )
@@ -192,12 +194,17 @@ class Inputs(Node):
             try:
                 surface = rasterize_flat_depth_quads(
                     depth_values.astype(np.float32) * (0.001 if is_mm else 1.0),
-                    fx=fx, fy=fy, cx=cx, cy=cy,
+                    fx=fx,
+                    fy=fy,
+                    cx=cx,
+                    cy=cy,
                     max_range_m=min(self.mapping_max_range, 20.0),
                 )
             except ValueError as exc:
                 if not self.surface_budget_warning:
-                    self.get_logger().warning(f"Depth surface reconstruction skipped: {exc}")
+                    self.get_logger().warning(
+                        f"Depth surface reconstruction skipped: {exc}"
+                    )
                     self.surface_budget_warning = True
             else:
                 if len(surface):

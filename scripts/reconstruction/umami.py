@@ -30,7 +30,9 @@ def _keyframe_id(value: str) -> KeyframeId:
     try:
         sequence = int(parts[2])
     except ValueError as exc:
-        raise ValueError(f"frame keyframe_id has an invalid sequence: {value!r}") from exc
+        raise ValueError(
+            f"frame keyframe_id has an invalid sequence: {value!r}"
+        ) from exc
     return KeyframeId(parts[0], parts[1], sequence)
 
 
@@ -137,19 +139,33 @@ def export_colmap(
                 frame_stamp = float(frame["stamp"]) if "stamp" in frame.files else None
                 pose_source = "capture"
                 if solution is not None:
-                    if "keyframe_id" not in frame.files or "T_keyframe_camera" not in frame.files:
+                    if (
+                        "keyframe_id" not in frame.files
+                        or "T_keyframe_camera" not in frame.files
+                    ):
                         raise ValueError(
                             f"{path}: pose snapshot export requires dynamic keyframe_id and T_keyframe_camera"
                         )
                     keyframe = _keyframe_id(str(frame["keyframe_id"].item()))
                     if capture_session and keyframe.session_id != capture_session:
-                        raise ValueError(f"{path}: keyframe session does not match capture metadata")
+                        raise ValueError(
+                            f"{path}: keyframe session does not match capture metadata"
+                        )
                     if capture_robot and keyframe.robot_id != capture_robot:
-                        raise ValueError(f"{path}: keyframe robot does not match capture metadata")
-                    if "component_id" in frame.files and str(frame["component_id"].item()) != solution.component_id:
-                        raise ValueError(f"{path}: frame component does not match pose snapshot")
+                        raise ValueError(
+                            f"{path}: keyframe robot does not match capture metadata"
+                        )
+                    if (
+                        "component_id" in frame.files
+                        and str(frame["component_id"].item()) != solution.component_id
+                    ):
+                        raise ValueError(
+                            f"{path}: frame component does not match pose snapshot"
+                        )
                     twc = np.asarray(
-                        _compose_se3(solution.pose_for(keyframe), frame["T_keyframe_camera"]),
+                        _compose_se3(
+                            solution.pose_for(keyframe), frame["T_keyframe_camera"]
+                        ),
                         dtype=np.float64,
                     )
                     pose_source = f"graph-solution:{solution.component_id}:{solution.solution.revision.revision}"
@@ -241,7 +257,11 @@ def export_colmap(
         json.dumps(
             {
                 "schema_version": 2,
-                "frame": "world" if solution is None else f"component:{solution.component_id}",
+                "frame": (
+                    "world"
+                    if solution is None
+                    else f"component:{solution.component_id}"
+                ),
                 "pose_frame": "world" if solution is None else solution.component_id,
                 "units": "metres",
                 "up": "z",
@@ -427,7 +447,9 @@ def main():
         if not candidates:
             raise RuntimeError("UMAMI produced no Gaussian PLY")
         final = max(candidates, key=lambda p: p.stat().st_mtime_ns)
-        print(f"Published {convert_ply(final,a.publish,a.budget)} Gaussians from {final}")
+        print(
+            f"Published {convert_ply(final,a.publish,a.budget)} Gaussians from {final}"
+        )
 
 
 if __name__ == "__main__":

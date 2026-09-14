@@ -31,6 +31,7 @@ COPY deploy/patches/mgg-objective-msgs.patch /tmp/mgg-objective-msgs.patch
 COPY deploy/patches/mgg-indexed-map-msgs.patch /tmp/mgg-indexed-map-msgs.patch
 COPY deploy/patches/mgg-partial-route-navigate.patch /tmp/mgg-partial-route-navigate.patch
 COPY deploy/patches/mgg-route-validation.patch /tmp/mgg-route-validation.patch
+COPY deploy/patches/mgg-home-rolling-followup.patch /tmp/mgg-home-rolling-followup.patch
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
     && rm -rf /tmp/mgg-msgs-source
 

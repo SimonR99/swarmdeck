@@ -66,7 +66,9 @@ def common_pose(service: Any, robot_id: str) -> dict[str, float] | None:
     }
 
 
-def set_global_grid(service: Any, meta: GridMeta, cells: np.ndarray) -> None:
+def set_global_grid(
+    service: Any, meta: GridMeta, cells: np.ndarray, transforms=None
+) -> None:
     """Adopt a collaborative backend's already-merged common-frame grid."""
     with service._state_lock:
         if not is_pose_graph_mode(service.merge_mode):
@@ -82,6 +84,14 @@ def set_global_grid(service: Any, meta: GridMeta, cells: np.ndarray) -> None:
         if stored_cells.shape != (stored_meta.height, stored_meta.width):
             raise ValueError("grid cells shape does not match metadata")
         service.global_grid = (stored_meta, stored_cells)
+        service.global_grid_transforms = (
+            None
+            if transforms is None
+            else {
+                robot: (float(pose["x"]), float(pose["y"]), float(pose["yaw"]))
+                for robot, pose in transforms.items()
+            }
+        )
         service.global_map_seq = int(getattr(service, "global_map_seq", 0)) + 1
     service._remerge()
 

@@ -787,6 +787,7 @@ export const mapStore = {
     state.globalSeq = Math.max(state.globalSeq, patch.seq);
     if (state.viewMode !== 'global' || state.showingOptimizedGrid) return;
     if (!state.info) return;
+    if (patch.transforms) state.info = { ...state.info, transforms: patch.transforms };
 
     const patchWidth = patch.width ?? state.info.width;
     const patchHeight = patch.height ?? state.info.height;
@@ -1186,7 +1187,7 @@ export const mapStore = {
   /** Global world metres → currently displayed grid pixel. */
   worldToGrid(x: number, y: number): { gx: number; gy: number } | null {
     if (this.overlayUsesRobotSlamFrame()) {
-      const tf = state.status?.transforms[state.viewRobot!];
+      const tf = state.info?.transforms?.[state.viewRobot!];
       if (tf) {
         const c = Math.cos(tf.yaw);
         const s = Math.sin(tf.yaw);
@@ -1204,7 +1205,7 @@ export const mapStore = {
     const point = this.gridToView(gx, gy);
     if (!point) return null;
     if (this.overlayUsesRobotSlamFrame()) {
-      const tf = state.status?.transforms[state.viewRobot!];
+      const tf = state.info?.transforms?.[state.viewRobot!];
       if (tf) {
         const c = Math.cos(tf.yaw);
         const s = Math.sin(tf.yaw);
@@ -1219,7 +1220,7 @@ export const mapStore = {
 
   worldYawToView(yaw: number): number {
     if (this.overlayUsesRobotSlamFrame()) {
-      yaw -= state.status?.transforms[state.viewRobot!]?.yaw ?? 0;
+      yaw -= state.info?.transforms?.[state.viewRobot!]?.yaw ?? 0;
     }
     return yaw;
   },

@@ -24,6 +24,7 @@ class MapSnapshot:
     merged: np.ndarray
     patch_prev: np.ndarray
     seq: int
+    transforms: dict[str, tuple[float, float, float]]
 
 
 def copy_meta(meta: GridMeta) -> GridMeta:
@@ -67,10 +68,13 @@ def make_snapshot(
     merged: np.ndarray,
     patch_prev: np.ndarray,
     seq: int,
+    transforms: dict[str, tuple[float, float, float]] | None = None,
 ) -> MapSnapshot:
     """Copy and freeze one coherent map/meta/baseline/sequence value."""
     frozen_merged = np.array(merged, dtype=np.int8, copy=True)
     frozen_prev = np.array(patch_prev, dtype=np.int8, copy=True)
     frozen_merged.setflags(write=False)
     frozen_prev.setflags(write=False)
-    return MapSnapshot(copy_meta(meta), frozen_merged, frozen_prev, seq)
+    return MapSnapshot(
+        copy_meta(meta), frozen_merged, frozen_prev, seq, dict(transforms or {})
+    )

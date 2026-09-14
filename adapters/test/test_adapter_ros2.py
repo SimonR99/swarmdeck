@@ -845,7 +845,9 @@ def test_alignment_abort_fails_when_spot_made_no_progress(mod, monkeypatch):
 
 
 @pytest.mark.parametrize("code, message", [(4, "Failed to make progress"), (105, "")])
-def test_follow_path_result_exposes_nav2_failure_reason(mod, monkeypatch, code, message):
+def test_follow_path_result_exposes_nav2_failure_reason(
+    mod, monkeypatch, code, message
+):
     bridge = _bridge(mod)
     bridge._goal_generation = 11
     goal_status = type("GoalStatus", (), {"STATUS_SUCCEEDED": 4, "STATUS_CANCELED": 5})
@@ -859,8 +861,12 @@ def test_follow_path_result_exposes_nav2_failure_reason(mod, monkeypatch, code, 
             "result": type(
                 "Result",
                 (),
-                {"success": False, "error_msg": message, "error_code": code,
-                 "FAILED_TO_MAKE_PROGRESS": 105},
+                {
+                    "success": False,
+                    "error_msg": message,
+                    "error_code": code,
+                    "FAILED_TO_MAKE_PROGRESS": 105,
+                },
             )(),
         },
     )()
@@ -871,7 +877,9 @@ def test_follow_path_result_exposes_nav2_failure_reason(mod, monkeypatch, code, 
     assert bridge._nav_failure_reason == f"Failed to make progress; error_code={code}"
 
 
-def test_stale_follow_path_result_cannot_replace_current_failure_reason(mod, monkeypatch):
+def test_stale_follow_path_result_cannot_replace_current_failure_reason(
+    mod, monkeypatch
+):
     bridge = _bridge(mod)
     bridge._goal_generation = 12
     bridge._nav_failure_reason = "current goal failure"

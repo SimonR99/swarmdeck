@@ -1,0 +1,264 @@
+diff --git a/ros2/src/mgg_pci/CMakeLists.txt b/ros2/src/mgg_pci/CMakeLists.txt
+index d39dd3e..87c26e3 100644
+--- a/ros2/src/mgg_pci/CMakeLists.txt
++++ b/ros2/src/mgg_pci/CMakeLists.txt
+@@ -17,6 +17,7 @@ find_package(ament_cmake REQUIRED)
+ find_package(mgg_msgs REQUIRED)
+ find_package(rclcpp REQUIRED)
+ find_package(nav_msgs REQUIRED)
++find_package(nlohmann_json REQUIRED)
+ find_package(geometry_msgs REQUIRED)
+ find_package(std_srvs REQUIRED)
+ find_package(std_msgs REQUIRED)
+@@ -27,6 +28,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
+   $<INSTALL_INTERFACE:include>)
+ ament_target_dependencies(${PROJECT_NAME}
+   rclcpp nav_msgs geometry_msgs std_srvs std_msgs mgg_msgs)
++target_link_libraries(${PROJECT_NAME} nlohmann_json::nlohmann_json)
+ 
+ add_executable(mgg_pci_node src/pci_main.cpp)
+ target_link_libraries(mgg_pci_node ${PROJECT_NAME})
+@@ -38,14 +40,17 @@ install(TARGETS ${PROJECT_NAME} EXPORT export_${PROJECT_NAME}
+   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
+ 
+ ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+-ament_export_dependencies(mgg_msgs rclcpp nav_msgs geometry_msgs std_srvs std_msgs)
++ament_export_dependencies(
++  mgg_msgs rclcpp nav_msgs geometry_msgs std_srvs std_msgs nlohmann_json)
+ ament_export_include_directories(include)
+ 
+ if(BUILD_TESTING)
+   find_package(ament_cmake_gtest REQUIRED)
+   ament_add_gtest(test_pci_deadlock test/test_pci_deadlock.cpp TIMEOUT 120)
+   target_link_libraries(test_pci_deadlock ${PROJECT_NAME})
+-  ament_target_dependencies(test_pci_deadlock rclcpp std_srvs nav_msgs mgg_msgs)
++  ament_target_dependencies(test_pci_deadlock
++    rclcpp std_srvs std_msgs nav_msgs mgg_msgs)
++  target_link_libraries(test_pci_deadlock nlohmann_json::nlohmann_json)
+ endif()
+ 
+ ament_package()
+diff --git a/ros2/src/mgg_pci/include/mgg_pci/pci_node.h b/ros2/src/mgg_pci/include/mgg_pci/pci_node.h
+index 5f2856a..f543a0f 100644
+--- a/ros2/src/mgg_pci/include/mgg_pci/pci_node.h
++++ b/ros2/src/mgg_pci/include/mgg_pci/pci_node.h
+@@ -19,6 +19,7 @@
+ #define MGG_PCI_PCI_NODE_H_
+ 
+ #include <algorithm>
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ 
+@@ -33,6 +34,9 @@
+ namespace mgg_pci {
+ 
+ double boundedRetryDelaySeconds(int attempt, double initial, double maximum);
++std::string retryStatusReason(const std::string& reason, double delay_seconds);
++std::string statusJson(const std::string& state, std::int64_t stamp_ns,
++                       const std::string& reason = "");
+ 
+ class StallBudget {
+  public:
+@@ -65,7 +69,8 @@ class PciNode : public rclcpp::Node {
+   bool requestPlan(std::vector<geometry_msgs::msg::Pose>& path,
+                    std::string& error);
+ 
+-  void publishStatus(const std::string& state);
++  void publishStatus(const std::string& state,
++                     const std::string& reason = "");
+   void publishPath(const std::vector<geometry_msgs::msg::Pose>& path);
+   bool pathEndpointMakesExternalProgress(
+       const std::vector<geometry_msgs::msg::Pose>& path) const;
+diff --git a/ros2/src/mgg_pci/package.xml b/ros2/src/mgg_pci/package.xml
+index f50e404..4a39f85 100644
+--- a/ros2/src/mgg_pci/package.xml
++++ b/ros2/src/mgg_pci/package.xml
+@@ -19,6 +19,7 @@
+   <depend>mgg_msgs</depend>
+   <depend>rclcpp</depend>
+   <depend>nav_msgs</depend>
++  <depend>nlohmann_json</depend>
+   <depend>geometry_msgs</depend>
+   <depend>std_srvs</depend>
+   <depend>std_msgs</depend>
+diff --git a/ros2/src/mgg_pci/src/pci_node.cpp b/ros2/src/mgg_pci/src/pci_node.cpp
+index 7fea6ca..59501b0 100644
+--- a/ros2/src/mgg_pci/src/pci_node.cpp
++++ b/ros2/src/mgg_pci/src/pci_node.cpp
+@@ -1,7 +1,11 @@
+ #include "mgg_pci/pci_node.h"
+ 
+ #include <chrono>
++#include <iomanip>
+ #include <limits>
++#include <sstream>
++
++#include <nlohmann/json.hpp>
+ 
+ namespace mgg_pci {
+ 
+@@ -13,6 +17,27 @@ double boundedRetryDelaySeconds(int attempt, double initial, double maximum) {
+   return delay;
+ }
+ 
++std::string retryStatusReason(const std::string& reason, double delay_seconds) {
++  // Leave room for the operationally important retry suffix. Any partial
++  // trailing UTF-8 code point is replaced safely when the status is encoded.
++  std::ostringstream detail;
++  detail << reason.substr(0, 192) << "; retrying automatically in " << std::fixed
++         << std::setprecision(1) << delay_seconds << " s";
++  return detail.str();
++}
++
++std::string statusJson(const std::string& state, std::int64_t stamp_ns,
++                       const std::string& reason) {
++  nlohmann::json result = {
++      {"state", state.substr(0, 32)},
++      {"stamp_ns", stamp_ns},
++  };
++  if (!reason.empty()) {
++    result["reason"] = reason.substr(0, 256);
++  }
++  return result.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
++}
++
+ PciNode::PciNode(const rclcpp::NodeOptions& options)
+     : rclcpp::Node("mgg_pci", options),
+       last_progress_time_(0, 0, RCL_ROS_TIME),
+@@ -197,10 +222,10 @@ bool PciNode::requestPlan(std::vector<geometry_msgs::msg::Pose>& path,
+   return true;
+ }
+ 
+-void PciNode::publishStatus(const std::string& state) {
++void PciNode::publishStatus(const std::string& state,
++                            const std::string& reason) {
+   std_msgs::msg::String msg;
+-  msg.data = "{\"state\":\"" + state + "\",\"stamp_ns\":" +
+-             std::to_string(now().nanoseconds()) + "}";
++  msg.data = statusJson(state, now().nanoseconds(), reason);
+   status_pub_->publish(msg);
+ }
+ 
+@@ -235,7 +260,7 @@ void PciNode::deferExternalRetry(const std::string& reason) {
+   path_in_progress_ = false;
+   waiting_for_plan_ = true;
+   retry_not_before_ = now() + rclcpp::Duration::from_seconds(delay);
+-  publishStatus("waiting");
++  publishStatus("waiting", retryStatusReason(reason, delay));
+   RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                        "%s; retrying in %.1f s", reason.c_str(), delay);
+ }
+diff --git a/ros2/src/mgg_pci/test/test_pci_deadlock.cpp b/ros2/src/mgg_pci/test/test_pci_deadlock.cpp
+index fd783c7..cc47d25 100644
+--- a/ros2/src/mgg_pci/test/test_pci_deadlock.cpp
++++ b/ros2/src/mgg_pci/test/test_pci_deadlock.cpp
+@@ -6,9 +6,11 @@
+ // exercises the shape directly rather than asserting it in a comment: the same
+ // code deadlocks on one executor and succeeds on the other.
+ 
+-#include <chrono>
+ #include <atomic>
++#include <chrono>
+ #include <memory>
++#include <mutex>
++#include <string>
+ #include <thread>
+ #include <utility>
+ #include <vector>
+@@ -16,7 +18,9 @@
+ #include <gtest/gtest.h>
+ #include <mgg_msgs/srv/planner_srv.hpp>
+ #include <nav_msgs/msg/odometry.hpp>
++#include <nlohmann/json.hpp>
+ #include <rclcpp/rclcpp.hpp>
++#include <std_msgs/msg/string.hpp>
+ #include <std_srvs/srv/trigger.hpp>
+ 
+ #include "mgg_pci/pci_node.h"
+@@ -136,6 +140,24 @@ TEST(PciRetry, EmptyPlanDelayUsesBoundedExponentialBackoff) {
+   EXPECT_DOUBLE_EQ(mgg_pci::boundedRetryDelaySeconds(40, 1.0, 10.0), 10.0);
+ }
+ 
++TEST(PciStatus, ReasonIsBoundedAndJsonEscaped) {
++  const auto controls = nlohmann::json::parse(
++      mgg_pci::statusJson("waiting", 42, "bad \"reason\"\n"));
++  EXPECT_EQ(controls["state"], "waiting");
++  EXPECT_EQ(controls["stamp_ns"], 42);
++  EXPECT_EQ(controls["reason"], "bad \"reason\"\n");
++
++  // The first byte of this two-byte UTF-8 code point lands exactly at the
++  // reason limit. The replacement policy must still produce valid JSON text.
++  const auto bounded = mgg_pci::statusJson(
++      "waiting", 42, std::string(255, 'x') + "\xc3\xa9" + std::string(1024, 'x'));
++  EXPECT_TRUE(nlohmann::json::accept(bounded));
++  EXPECT_LT(bounded.size(), 350u);
++
++  const auto retry = mgg_pci::retryStatusReason(std::string(1024, 'x'), 10.0);
++  EXPECT_EQ(retry.find("retrying automatically in 10.0 s"), 194u);
++}
++
+ class FakePlanner : public rclcpp::Node {
+  public:
+   FakePlanner(const std::string& ns,
+@@ -186,12 +208,30 @@ struct ExternalExecutionRig {
+             "pci_test_caller",
+             rclcpp::NodeOptions().arguments(
+                 {"--ros-args", "-r", "__ns:=" + ns}))) {
++    status_subscription = caller->create_subscription<std_msgs::msg::String>(
++        "status", rclcpp::QoS(1).transient_local(),
++        [this](std_msgs::msg::String::ConstSharedPtr message) {
++          std::lock_guard<std::mutex> lock(status_mutex);
++          last_status = message->data;
++        });
+     executor.add_node(planner);
+     executor.add_node(pci);
+     executor.add_node(caller);
+     spinner = std::thread([this]() { executor.spin(); });
+   }
+ 
++  bool waitForStatus(const std::string& fragment) {
++    const auto deadline = std::chrono::steady_clock::now() + 2s;
++    while (std::chrono::steady_clock::now() < deadline) {
++      {
++        std::lock_guard<std::mutex> lock(status_mutex);
++        if (last_status.find(fragment) != std::string::npos) return true;
++      }
++      std::this_thread::sleep_for(10ms);
++    }
++    return false;
++  }
++
+   ~ExternalExecutionRig() {
+     executor.cancel();
+     if (spinner.joinable()) spinner.join();
+@@ -222,6 +262,9 @@ struct ExternalExecutionRig {
+   std::shared_ptr<FakePlanner> planner;
+   std::shared_ptr<mgg_pci::PciNode> pci;
+   std::shared_ptr<rclcpp::Node> caller;
++  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr status_subscription;
++  std::mutex status_mutex;
++  std::string last_status;
+   rclcpp::executors::MultiThreadedExecutor executor;
+   std::thread spinner;
+ };
+@@ -234,6 +277,9 @@ TEST(PciExternalExecution, NearEndpointWaitsForExplicitReplan) {
+   ASSERT_NE(started, nullptr);
+   EXPECT_TRUE(started->success);
+   EXPECT_NE(started->message.find("waiting for a path"), std::string::npos);
++  EXPECT_TRUE(rig.waitForStatus(
++      "\"reason\":\"planner path makes no progress beyond the controller "
++      "goal tolerance; retrying automatically in 1.0 s\""));
+   EXPECT_EQ(rig.planner->calls(), 1);
+ 
+   std::this_thread::sleep_for(150ms);
+@@ -278,6 +324,9 @@ TEST(PciExternalExecution, RepeatedEmptyPlansRemainWaitingUntilManualStop) {
+     EXPECT_NE(response->message.find("waiting for a path"), std::string::npos);
+   }
+   EXPECT_EQ(rig.planner->calls(), 4);
++  EXPECT_TRUE(rig.waitForStatus(
++      "\"reason\":\"planner returned no path; retrying automatically in "
++      "8.0 s\""));
+ 
+   const auto stopped = rig.call("pci_stop");
+   ASSERT_NE(stopped, nullptr);

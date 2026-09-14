@@ -9,7 +9,6 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-
 SIM_MAPPING_MAX_RANGE_M = 20.0
 
 
@@ -17,11 +16,15 @@ def map_backend_parameters(robot):
     """Select one map owner; MOLA never silently falls back to raw clouds."""
     backend = os.environ.get("SWARMDECK_MGG_MAP_BACKEND", "cloud_octomap")
     if backend not in {"cloud_octomap", "mola_snapshot"}:
-        raise ValueError("SWARMDECK_MGG_MAP_BACKEND must be cloud_octomap or mola_snapshot")
+        raise ValueError(
+            "SWARMDECK_MGG_MAP_BACKEND must be cloud_octomap or mola_snapshot"
+        )
     result = {"map.backend": backend}
     if backend == "mola_snapshot":
         if os.environ.get("SWARMDECK_PLANNER_MAP_PROVIDER", "indexed") != "mola":
-            raise ValueError("MOLA graph planning requires SWARMDECK_PLANNER_MAP_PROVIDER=mola")
+            raise ValueError(
+                "MOLA graph planning requires SWARMDECK_PLANNER_MAP_PROVIDER=mola"
+            )
         mission = os.environ.get("SWARMDECK_MISSION_ID", "")
         if str(uuid.UUID(mission)) != mission:
             raise ValueError("MOLA graph planning requires a canonical mission UUID")
@@ -93,14 +96,14 @@ def robot_nodes(
         # ARGoS depth uses a finite 40 m no-return sentinel. Keep native
         # truncation below it so those samples never become occupied endpoints.
         overrides["map.max_range"] = SIM_MAPPING_MAX_RANGE_M
-    if overrides["map.backend"] == "mola_snapshot" or os.environ.get("SWARMDECK_INDEXED_MAP_QUERY", "0").lower() in (
+    if overrides["map.backend"] == "mola_snapshot" or os.environ.get(
+        "SWARMDECK_INDEXED_MAP_QUERY", "0"
+    ).lower() in (
         "1",
         "true",
         "yes",
     ):
-        overrides["indexed_map_query_service"] = (
-            f"/{robot}/mapping/query_batch"
-        )
+        overrides["indexed_map_query_service"] = f"/{robot}/mapping/query_batch"
     if size:
         overrides["RobotParams.size"] = size
     return [

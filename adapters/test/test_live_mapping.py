@@ -92,16 +92,25 @@ def test_long_route_display_retains_destination_without_changing_controller_path
 
 def stable_route_robot():
     from adapters.exploration import PlannerPath, PlannerPose
+
     robot = bridge()
     authority = robot._mapping_authority.current()
     authority.update(planning_frame="r0/odom", T_component_planning=IDENTITY_SE3)
     authority["T_component_navigation"] = [
-        [0, -1, 0, 10], [1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1],
+        [0, -1, 0, 10],
+        [1, 0, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
     ]
     robot._goal_generation = 7
-    robot._follow_path_display = (7, PlannerPath("r0/odom", 1, tuple(
-        PlannerPose(10, i / 100, 0, 0, 0, 0, 1) for i in range(1201)
-    )))
+    robot._follow_path_display = (
+        7,
+        PlannerPath(
+            "r0/odom",
+            1,
+            tuple(PlannerPose(10, i / 100, 0, 0, 0, 0, 1) for i in range(1201)),
+        ),
+    )
     state = robot.state()
     state.update(nav_status="active", goal=dict(x=10, y=12, yaw=0, frame_id="r0/odom"))
     return robot
@@ -126,6 +135,63 @@ def test_stable_route_display_tracks_map_gauge_without_mutating_controller():
     assert robot.state()["goal"]["frame_id"] == "r0/odom"
 
 
+def test_rolling_home_keeps_global_route_while_local_chunk_advances():
+    from adapters.exploration import PlannerPath, PlannerPose
+
+    robot = stable_route_robot()
+    global_plan = robot._follow_path_display[1]
+    robot.objective_planner = SimpleNamespace(
+        decorate_state=lambda state: state,
+        global_display_plan=lambda: global_plan,
+    )
+    first_local = PlannerPath(
+        "r0/odom",
+        2,
+        tuple(PlannerPose(10, y, 0, 0, 0, 0, 1) for y in (0.0, 2.0, 4.0)),
+    )
+    robot._follow_path_display = (7, first_local)
+
+    first = live_state(robot)
+    assert first["global_planned_path"][-1] == dict(x=12, y=0, z=0)
+    assert first["local_planned_path"][-1] == dict(x=4, y=0, z=0)
+    assert first["planned_path"] == first["local_planned_path"]
+
+    second_local = PlannerPath(
+        "r0/odom",
+        3,
+        tuple(PlannerPose(10, y, 0, 0, 0, 0, 1) for y in (4.0, 6.0, 8.0)),
+    )
+    robot._follow_path_display = (7, second_local)
+    second = live_state(robot)
+
+    assert second["global_planned_path"] == first["global_planned_path"]
+    assert second["local_planned_path"][-1] == dict(x=8, y=0, z=0)
+    assert second["planned_path"] == second["local_planned_path"]
+
+
+def test_rolling_home_hides_completed_local_chunk_while_refining():
+    robot = stable_route_robot()
+    global_plan = robot._follow_path_display[1]
+    robot.objective_planner = SimpleNamespace(
+        decorate_state=lambda state: {
+            **state,
+            "nav_status": "active",
+            "objective_continuation": {
+                "objective": "return_home",
+                "phase": "planning",
+            },
+        },
+        global_display_plan=lambda: global_plan,
+    )
+    robot.planned_path = [{"x": 99, "y": 99}]
+
+    result = live_state(robot)
+
+    assert result["planned_path"] == []
+    assert result["local_planned_path"] == []
+    assert result["global_planned_path"][-1] == dict(x=12, y=0, z=0)
+
+
 def test_stable_route_has_fixed_component_geometry_across_rotating_map_gauge():
     robot = stable_route_robot()
 
@@ -142,7 +208,10 @@ def test_stable_route_has_fixed_component_geometry_across_rotating_map_gauge():
     # controller route remains in odom; both 2D map coordinates and their 3D
     # component projection must still describe the same physical endpoint.
     robot._mapping_authority.current()["T_component_navigation"] = [
-        [0, 1, 0, -4], [-1, 0, 0, 7], [0, 0, 1, 0], [0, 0, 0, 1],
+        [0, 1, 0, -4],
+        [-1, 0, 0, 7],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
     ]
     after = live_state(robot)
     assert after["planned_path"][-1] != before["planned_path"][-1]

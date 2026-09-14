@@ -50,7 +50,9 @@ def test_blank_compose_camera_values_use_namespace_defaults(monkeypatch):
         monkeypatch.setenv(key, "")
 
     nodes = _load(monkeypatch).generate_launch_description()
-    bridge = next(node for node in nodes if getattr(node, "name", "") == "onboard_mapper")
+    bridge = next(
+        node for node in nodes if getattr(node, "name", "") == "onboard_mapper"
+    )
     params = bridge.parameters[0]
 
     assert params["color_topic"] == "/alpha/camera/image"

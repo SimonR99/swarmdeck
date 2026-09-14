@@ -12,7 +12,6 @@ from adapters.test.ros.onboard_return_home_observer import (
     summarize_return_home,
 )
 
-
 MISSION = "88492d31-5c28-4de9-bbbd-8bfb1a74014d"
 
 
@@ -67,9 +66,7 @@ def fleet_sample(
         "map_status": {
             "ok": True,
             "data": {
-                "transforms": {
-                    "robot_3": transform or {"x": 0.0, "y": 0.0, "yaw": 0.0}
-                }
+                "transforms": {"robot_3": transform or {"x": 0.0, "y": 0.0, "yaw": 0.0}}
             },
         },
     }

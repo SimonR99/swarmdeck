@@ -101,10 +101,9 @@ def request_reset(root: Path, client_request_id: str | None = None) -> dict:
             _atomic_json(root / "status.json", failed)
             return failed
 
-        if (
-            isinstance(pending.get("request_id"), str)
-            and pending.get("request_id") != status.get("request_id")
-        ):
+        if isinstance(pending.get("request_id"), str) and pending.get(
+            "request_id"
+        ) != status.get("request_id"):
             return {**pending, "phase": "accepted", "ok": None}
         request = {
             "version": 1,
@@ -112,7 +111,9 @@ def request_reset(root: Path, client_request_id: str | None = None) -> dict:
             "requested_at_ns": time.time_ns(),
         }
         accepted = {
-            **request, "phase": "accepted", "ok": None,
+            **request,
+            "phase": "accepted",
+            "ok": None,
             "updated_at_ns": time.time_ns(),
         }
         # Publish the durable work item first. The supervisor takes the same

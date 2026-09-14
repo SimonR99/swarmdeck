@@ -22,9 +22,15 @@ from deploy.simulation_reset import (
 
 def mark_supervisor_live(root):
     root.mkdir(parents=True, exist_ok=True)
-    (root / "supervisor.json").write_text(json.dumps({
-        "version": 1, "pid": 123, "updated_at_ns": time.time_ns(),
-    }))
+    (root / "supervisor.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pid": 123,
+                "updated_at_ns": time.time_ns(),
+            }
+        )
+    )
 
 
 def test_post_route_delegates_to_the_shared_broadcasting_reset_path():
@@ -55,7 +61,9 @@ def test_lost_post_response_retry_returns_completion_without_second_reset(tmp_pa
     (tmp_path / "status.json").write_text(json.dumps(completed))
 
     assert request_reset(tmp_path, request_id) == completed
-    assert json.loads((tmp_path / "request.json").read_text())["request_id"] == request_id
+    assert (
+        json.loads((tmp_path / "request.json").read_text())["request_id"] == request_id
+    )
 
 
 def test_client_request_id_must_be_a_canonical_uuid(tmp_path):
@@ -101,8 +109,13 @@ def test_missing_status_is_idle(tmp_path):
 
 
 def test_stale_accepted_request_fails_instead_of_queueing_forever(tmp_path):
-    stale = {"version": 1, "request_id": "old", "phase": "accepted", "ok": None,
-             "updated_at_ns": time.time_ns() - 20_000_000_000}
+    stale = {
+        "version": 1,
+        "request_id": "old",
+        "phase": "accepted",
+        "ok": None,
+        "updated_at_ns": time.time_ns() - 20_000_000_000,
+    }
     (tmp_path / "status.json").write_text(json.dumps(stale))
     (tmp_path / "request.json").write_text(json.dumps(stale))
     result = request_reset(tmp_path)
@@ -117,7 +130,9 @@ def test_supervisor_stops_before_new_epoch_and_recreates(tmp_path):
     request = {"version": 1, "request_id": "request-1", "requested_at_ns": 1}
     (root / "request.json").parent.mkdir()
     (root / "request.json").write_text(json.dumps(request))
-    supervisor = Supervisor(root, env, ["docker", "compose", "-p", "test"], ["sim", "peer0"])
+    supervisor = Supervisor(
+        root, env, ["docker", "compose", "-p", "test"], ["sim", "peer0"]
+    )
     with patch(
         "deploy.simulation_reset.subprocess.run",
         return_value=types.SimpleNamespace(stdout="sim\npeer0\n"),
@@ -126,8 +141,13 @@ def test_supervisor_stops_before_new_epoch_and_recreates(tmp_path):
     assert run.call_args_list[0].args[0][-3:] == ["stop", "sim", "peer0"]
     start = run.call_args_list[1].args[0]
     assert start[-2:] == ["sim", "peer0"]
-    assert start[start.index("up"):start.index("sim")] == [
-        "up", "-d", "--force-recreate", "--wait", "--wait-timeout", "120"
+    assert start[start.index("up") : start.index("sim")] == [
+        "up",
+        "-d",
+        "--force-recreate",
+        "--wait",
+        "--wait-timeout",
+        "120",
     ]
     values = dict(line.split("=", 1) for line in env.read_text().splitlines())
     assert values["SWARMDECK_MISSION_ID"] != "old"
@@ -242,9 +262,16 @@ def test_restarted_supervisor_recovers_claimed_request(tmp_path):
     env.write_text("SWARMDECK_MISSION_ID=old\nSWARMDECK_TEST_DOMAIN=201\n")
     request = {"version": 1, "request_id": "interrupted", "requested_at_ns": 1}
     (root / "request.json").write_text(json.dumps(request))
-    (root / "status.json").write_text(json.dumps({
-        **request, "phase": "starting", "ok": None, "updated_at_ns": time.time_ns(),
-    }))
+    (root / "status.json").write_text(
+        json.dumps(
+            {
+                **request,
+                "phase": "starting",
+                "ok": None,
+                "updated_at_ns": time.time_ns(),
+            }
+        )
+    )
     supervisor = Supervisor(root, env, ["docker", "compose"], ["sim"])
     with patch.object(supervisor, "run") as run:
         assert supervisor.poll_once(recover_active=True)
@@ -257,18 +284,40 @@ def test_verification_waits_for_navigation_not_just_online_adapter(tmp_path):
     env.write_text("SWARMDECK_MISSION_ID=old\nSWARMDECK_TEST_DOMAIN=201\n")
     request = {"version": 1, "request_id": "ready-check", "requested_at_ns": 1}
     supervisor = Supervisor(
-        root, env, ["docker", "compose"], ["sim"],
-        server_url="http://server", expected_robots=1,
+        root,
+        env,
+        ["docker", "compose"],
+        ["sim"],
+        server_url="http://server",
+        expected_robots=1,
     )
     bodies = [
-        {"robots": [
-            {"robot_id": "hardware", "online": True, "navigation_ready": True,
-             "capabilities": ["navigate"]},
-            {"robot_id": "r0", "online": True, "navigation_ready": False,
-             "capabilities": ["navigate", "reset"]},
-        ]},
-        {"robots": [{"robot_id": "r0", "online": True, "navigation_ready": True,
-                     "capabilities": ["navigate", "reset"]}]},
+        {
+            "robots": [
+                {
+                    "robot_id": "hardware",
+                    "online": True,
+                    "navigation_ready": True,
+                    "capabilities": ["navigate"],
+                },
+                {
+                    "robot_id": "r0",
+                    "online": True,
+                    "navigation_ready": False,
+                    "capabilities": ["navigate", "reset"],
+                },
+            ]
+        },
+        {
+            "robots": [
+                {
+                    "robot_id": "r0",
+                    "online": True,
+                    "navigation_ready": True,
+                    "capabilities": ["navigate", "reset"],
+                }
+            ]
+        },
     ]
 
     class Response:
@@ -305,8 +354,12 @@ def test_verification_fails_if_a_requested_service_exited(tmp_path):
     env.write_text("SWARMDECK_MISSION_ID=old\nSWARMDECK_TEST_DOMAIN=201\n")
     request = {"version": 1, "request_id": "exit-check", "requested_at_ns": 1}
     supervisor = Supervisor(
-        root, env, ["docker", "compose"], ["sim", "argos"],
-        server_url="http://server", expected_robots=1,
+        root,
+        env,
+        ["docker", "compose"],
+        ["sim", "argos"],
+        server_url="http://server",
+        expected_robots=1,
     )
 
     class Response:
@@ -317,10 +370,18 @@ def test_verification_fails_if_a_requested_service_exited(tmp_path):
             return False
 
         def read(self):
-            return json.dumps({"robots": [{
-                "robot_id": "r0", "online": True, "navigation_ready": True,
-                "capabilities": ["navigate", "reset"],
-            }]}).encode()
+            return json.dumps(
+                {
+                    "robots": [
+                        {
+                            "robot_id": "r0",
+                            "online": True,
+                            "navigation_ready": True,
+                            "capabilities": ["navigate", "reset"],
+                        }
+                    ]
+                }
+            ).encode()
 
     commands = [
         types.SimpleNamespace(stdout=""),
@@ -329,7 +390,9 @@ def test_verification_fails_if_a_requested_service_exited(tmp_path):
     ]
     with (
         patch("deploy.simulation_reset.subprocess.run", side_effect=commands),
-        patch("deploy.simulation_reset.urllib.request.urlopen", return_value=Response()),
+        patch(
+            "deploy.simulation_reset.urllib.request.urlopen", return_value=Response()
+        ),
     ):
         supervisor.run(request)
     status = json.loads((root / "status.json").read_text())
@@ -343,8 +406,10 @@ def test_rendered_onboard_compose_uses_one_resettable_ros_domain():
     repo = Path(__file__).resolve().parents[2]
     compose = repo / "deploy" / "compose"
     files = [
-        "docker-compose.yml", "docker-compose.mgg.yml",
-        "docker-compose.peers.yml", "docker-compose.mapping.yml",
+        "docker-compose.yml",
+        "docker-compose.mgg.yml",
+        "docker-compose.peers.yml",
+        "docker-compose.mapping.yml",
         "docker-compose.onboard-planning.yml",
     ]
     command = ["docker", "compose", "-p", "reset-contract"]
@@ -357,8 +422,13 @@ def test_rendered_onboard_compose_uses_one_resettable_ros_domain():
         SWARMDECK_TEST_DOMAIN="201",
     )
     rendered = subprocess.run(
-        command, check=True, capture_output=True, text=True,
-        cwd=repo, env=environment, timeout=30,
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=environment,
+        timeout=30,
     )
     services = json.loads(rendered.stdout)["services"]
     assert {

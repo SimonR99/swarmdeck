@@ -233,9 +233,7 @@ def raw_metadata(**changes):
     value = {
         "schema": "swarmdeck.raw-capture.v1",
         "provider": "simulation",
-        "source_contract": (
-            "argos.photorealistic_lidar.hit_endpoints.single_tick.v1"
-        ),
+        "source_contract": ("argos.photorealistic_lidar.hit_endpoints.single_tick.v1"),
         "geometry": "raw_ray_capture",
         "stamp_ns": 123,
         "frame_id": "robot_0/base_link/lidar",

@@ -21,7 +21,9 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _request(request_id: str, mode: str, snapshot: Path, root: Path, output: Path) -> dict[str, object]:
+def _request(
+    request_id: str, mode: str, snapshot: Path, root: Path, output: Path
+) -> dict[str, object]:
     return {
         "protocol": 1,
         "type": "request",
@@ -77,7 +79,9 @@ class JsonLines:
             self.buffer.extend(block)
 
     def send(self, value: dict[str, object]) -> dict[str, object]:
-        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        payload = (
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
         if len(payload) > MAX_LINE_BYTES:
             raise RuntimeError("native request exceeded 64 KiB")
         view = memoryview(payload)
@@ -92,7 +96,9 @@ class JsonLines:
             try:
                 written = os.write(fd, view)
             except BrokenPipeError as error:
-                raise RuntimeError("native importer exited while receiving request") from error
+                raise RuntimeError(
+                    "native importer exited while receiving request"
+                ) from error
             view = view[written:]
         return self.receive()
 
@@ -139,7 +145,9 @@ def main() -> None:
             raise RuntimeError("native importer returned an invalid ready event")
 
         first_response = client.send(
-            _request("replace-1", "replace", first_path, root, root / "mola-v1.metricmap")
+            _request(
+                "replace-1", "replace", first_path, root, root / "mola-v1.metricmap"
+            )
         )
         if not first_response.get("ok") or first_response.get("result") != "replaced":
             raise RuntimeError(f"replace request failed: {first_response}")
@@ -147,15 +155,22 @@ def main() -> None:
         (root / "chunks").rename(hidden_chunks)
         try:
             second_response = client.send(
-                _request("pose-1", "pose_only", second_path, root, root / "mola-v2.metricmap")
+                _request(
+                    "pose-1", "pose_only", second_path, root, root / "mola-v2.metricmap"
+                )
             )
         finally:
             hidden_chunks.rename(root / "chunks")
-        if not second_response.get("ok") or second_response.get("result") != "corrected":
+        if (
+            not second_response.get("ok")
+            or second_response.get("result") != "corrected"
+        ):
             raise RuntimeError(f"pose-only request failed: {second_response}")
         if second_response.get("mode") != "pose_only":
             raise RuntimeError("native response did not preserve pose-only mode")
-        if first_response.get("geometry_revision") != second_response.get("geometry_revision"):
+        if first_response.get("geometry_revision") != second_response.get(
+            "geometry_revision"
+        ):
             raise RuntimeError("pose-only request changed geometry revision")
         if first_response.get("points") != second_response.get("points"):
             raise RuntimeError("pose-only request changed point count")

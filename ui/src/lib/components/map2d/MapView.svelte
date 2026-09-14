@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { rebaseViewport } from './mapViewport';
+  import { hasQualifiedRasterFrame, RasterRobotProjectionCache } from './mapFrames';
   import {
     Box,
     Compass,
@@ -90,6 +91,7 @@
   let resetError = $state<string | null>(null);
 
   const trails = new Map<string, { x: number; y: number }[]>();
+  const overlayCache = new RasterRobotProjectionCache();
   const pointers = new Map<number, { x: number; y: number }>();
   let dragged = false;
   let lastRenderedInfo: MapInfo | null = null;
@@ -123,14 +125,21 @@
   }
 
   function robotsOnMap() {
+    const project = (robot: (typeof fleet.robots)[number]) => {
+      return overlayCache.project(robot, mapStore.info?.transforms);
+    };
     if (mapStore.viewMode === 'local' && mapStore.viewRobot) {
       if (!fleet.isEnabled(mapStore.viewRobot)) return [];
       const robot = fleet.get(mapStore.viewRobot);
-      return robot ? [robot] : [];
+      const shown = robot ? project(robot) : null;
+      return shown ? [shown] : [];
     }
     const members = mapStore.status?.global_members;
     if (members && members.length > 0) {
-      return fleet.robots.filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id));
+      return fleet.robots
+        .filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id))
+        .map(project)
+        .filter((robot): robot is (typeof fleet.robots)[number] => robot !== null);
     }
     return [];
   }
@@ -158,7 +167,7 @@
   function centreOnSelected() {
     const info = mapStore.info;
     if (!info || !canvas) return;
-    const selected = fleet.selected.map((id) => fleet.get(id)).filter((r) => r !== undefined);
+    const selected = robotsOnMap().filter((robot) => fleet.selected.includes(robot.robot_id));
     if (!selected.length) return;
     let gx = 0;
     let gy = 0;
@@ -431,6 +440,14 @@
     }
   }
 
+  function qualifiedNavigateTargets() {
+    return fleet.selected.filter((id) => {
+      if (!fleet.can(id, 'navigate')) return false;
+      const robot = fleet.get(id);
+      return !robot || hasQualifiedRasterFrame(robot, mapStore.info?.transforms);
+    });
+  }
+
   function onPointerMove(e: PointerEvent) {
     const prev = pointers.get(e.pointerId);
     if (!prev) {
@@ -558,8 +575,8 @@
     const g = gridOf(clickX, clickY);
     const world = mapStore.gridToWorld(g.gx, g.gy);
     if (!world) return;
-    const targets = fleet.selected.filter((id) => fleet.can(id, 'navigate'));
-    for (const id of targets) actions.setGoal(id, world);
+    const targets = qualifiedNavigateTargets();
+    for (const id of targets) actions.setGoal(id, world, mapStore.info?.transforms?.[id]);
     if (targets.length) navigation.finishGoal(world);
   }
 
@@ -570,7 +587,7 @@
     zoomBy(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX - rect.left, e.clientY - rect.top);
   }
 
-  const canGoal = $derived(fleet.selected.filter((id) => fleet.can(id, 'navigate')).length);
+  const canGoal = $derived(qualifiedNavigateTargets().length);
   const registrationEntries = $derived(Object.entries(mapStore.status?.registrations ?? {}));
   const resetRobotId = $derived(fleet.selected.length === 1 ? fleet.selected[0] : null);
   const resetRobot = $derived(resetRobotId ? fleet.get(resetRobotId) : undefined);

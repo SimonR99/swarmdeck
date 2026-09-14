@@ -158,7 +158,8 @@ function dispatch(msg: ServerMessage) {
       break;
     case 'map_info':
       mapStore.setGlobalInfo(msg.info);
-      void mapStore.loadFullPng(msg.info);
+      if (mapStore.viewMode === 'local') void mapStore.reloadCurrentView();
+      else void mapStore.loadFullPng(msg.info);
       break;
     case 'map_patch':
       mapStore.applyGlobalPatch(msg);
@@ -296,9 +297,12 @@ export const actions = {
       sendAction({ type: enabled ? 'start_explore' : 'stop_explore', robot_id: robot.robot_id });
     }
   },
-  setGoal(robotId: string, p: Point) {
+  setGoal(robotId: string, p: Point, mapTransform?: { x: number; y: number; yaw: number }) {
     if (!fleet.isEnabled(robotId)) return;
-    sendAction({ type: 'set_goal', robot_id: robotId, payload: p });
+    sendAction({
+      type: 'set_goal', robot_id: robotId,
+      payload: mapTransform ? { ...p, map_transform: mapTransform } : p
+    });
   },
   cancelGoal(robotId: string) {
     sendAction({ type: 'cancel_goal', robot_id: robotId });

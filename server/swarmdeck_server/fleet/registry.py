@@ -172,7 +172,8 @@ class Registry:
         r.last_seen = time.monotonic()
         try:
             r.peer_slam = peer_status(
-                msg.get("peer_slam"), r.robot_id,
+                msg.get("peer_slam"),
+                r.robot_id,
                 os.environ.get("SWARMDECK_MISSION_ID") or None,
             )
         except (KeyError, TypeError, ValueError, OverflowError):
@@ -188,7 +189,7 @@ class Registry:
             isinstance(continuation, dict)
             and continuation.get("objective") in {"navigate", "return_home"}
             and continuation.get("phase")
-            in {"following_final", "planning"}
+            in {"following_final", "following_local", "planning"}
             and continuation.get("evidence_source") in {"mgg_native", "mola_indexed"}
         ):
             r.objective_continuation = {
@@ -252,9 +253,13 @@ class Registry:
         split_paths = "global_planned_path" in msg or "local_planned_path" in msg
         if is_nav_active:
             if "global_planned_path" in msg:
-                r.global_planned_path = display_path(list(msg["global_planned_path"] or []))
+                r.global_planned_path = display_path(
+                    list(msg["global_planned_path"] or [])
+                )
             if "local_planned_path" in msg:
-                r.local_planned_path = display_path(list(msg["local_planned_path"] or []))
+                r.local_planned_path = display_path(
+                    list(msg["local_planned_path"] or [])
+                )
             if not split_paths and "planned_path" in msg:
                 r.global_planned_path = display_path(list(msg["planned_path"] or []))
                 r.local_planned_path = []

@@ -38,11 +38,17 @@ def test_summary_reports_motion_status_and_revision_without_inferring_verificati
                             "robot_id": "robot_0",
                             "pose": {"x": x, "y": 0.0},
                             "online": True,
-                            "mode": "explore" if status in {"exploring", "waiting"} else "idle",
+                            "mode": (
+                                "explore"
+                                if status in {"exploring", "waiting"}
+                                else "idle"
+                            ),
                             "exploration_status": status,
                             "fleet_exploration_status": "incomplete",
                             "nav_status": (
-                                "active" if status in {"exploring", "waiting"} else "idle"
+                                "active"
+                                if status in {"exploring", "waiting"}
+                                else "idle"
                             ),
                             "global_planned_path": [{"x": 1, "y": 0}] * revision,
                             "local_planned_path": [],
@@ -104,9 +110,7 @@ def test_summary_reports_motion_status_and_revision_without_inferring_verificati
     assert robot["ever_reported_executing"]
     assert robot["ever_reported_blocked"]
     assert robot["max_global_path_points"] == 3
-    replica = result["replicas"][
-        "robot_0/12345678-1234-4234-8234-123456789abc"
-    ]
+    replica = result["replicas"]["robot_0/12345678-1234-4234-8234-123456789abc"]
     assert replica["first_observed_revision"] == 0
     assert replica["last_observed_revision"] == 1
     assert replica["observed_revision_delta"] == 1
@@ -177,9 +181,7 @@ def test_final_manifest_fetch_is_mission_filtered_and_count_bounded(monkeypatch)
     }
 
     result = asyncio.run(
-        observer.final_manifests(
-            "http://127.0.0.1:18080", index, 0.2, "mission-a", 6
-        )
+        observer.final_manifests("http://127.0.0.1:18080", index, 0.2, "mission-a", 6)
     )
 
     assert len(result) == len(fetched) == 6
@@ -219,9 +221,7 @@ def test_command_frame_written_survives_close_timeout(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
     result = asyncio.run(
-        observer.send_gui_command(
-            "http://127.0.0.1:18080", {"type": "stop_all"}, 0.01
-        )
+        observer.send_gui_command("http://127.0.0.1:18080", {"type": "stop_all"}, 0.01)
     )
 
     assert result["sent"] is True
@@ -260,8 +260,7 @@ def test_post_stop_summary_requires_every_eligible_robot_stopped_and_pathless():
     assert result["protocol_acknowledgement"] is False
     assert result["all_eligible_reported_stopped_and_inactive"] is True
     assert all(
-        state["no_active_paths"]
-        for state in result["eligible_robot_states"].values()
+        state["no_active_paths"] for state in result["eligible_robot_states"].values()
     )
 
     snapshot["fleet"]["data"]["robots"][1]["global_planned_path"] = [{"x": 1}]

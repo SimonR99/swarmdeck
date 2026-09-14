@@ -542,14 +542,25 @@ def robot_state(robot: Any) -> dict[str, Any]:
     state = robot.to_state()
     if robot.coordinate_frame == "merged":
         return state
-    state["pose"] = map_service.robot_to_world(robot.robot_id, state["pose"])
+    with map_service._state_lock:
+        transform = map_service.transforms.get(robot.robot_id, (0.0, 0.0, 0.0))
+    tx, ty, yaw = transform
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def to_world(point: dict[str, float]) -> dict[str, float]:
+        value = dict(point)
+        x, y = float(point["x"]), float(point["y"])
+        value["x"], value["y"] = tx + x * c - y * s, ty + x * s + y * c
+        if "yaw" in point:
+            value["yaw"] = map_service._wrap_yaw(float(point["yaw"]) + yaw)
+        return value
+
+    state["navigation_transform"] = {"x": tx, "y": ty, "yaw": yaw}
+    state["pose"] = to_world(state["pose"])
     if state["goal"]:
-        state["goal"] = map_service.robot_to_world(robot.robot_id, state["goal"])
+        state["goal"] = to_world(state["goal"])
     for path_name in ("planned_path", "global_planned_path", "local_planned_path"):
-        state[path_name] = [
-            map_service.robot_to_world(robot.robot_id, point)
-            for point in state.get(path_name, [])
-        ]
+        state[path_name] = [to_world(point) for point in state.get(path_name, [])]
     return state
 
 
@@ -603,7 +614,12 @@ async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
         await broadcast(
             {
                 "type": "sim_reset",
-                "phase": "start" if result.get("phase") in {"accepted", "stopping", "starting", "verifying"} else "done",
+                "phase": (
+                    "start"
+                    if result.get("phase")
+                    in {"accepted", "stopping", "starting", "verifying"}
+                    else "done"
+                ),
                 "request_id": result.get("request_id"),
                 "ok": result.get("ok"),
                 "error": result.get("error"),
@@ -1266,6 +1282,49 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 if robot.coordinate_frame == "merged"
                 else map_service.robot_to_world(rid, robot.home_pose)
             )
+        expected_transform = goal.get("map_transform") if kind == "set_goal" else None
+        fenced_local_goal = None
+        if expected_transform is not None:
+            try:
+                expected = tuple(
+                    float(expected_transform[name]) for name in ("x", "y", "yaw")
+                )
+            except (KeyError, TypeError, ValueError):
+                return
+            if not all(math.isfinite(value) for value in expected):
+                return
+            with map_service._state_lock:
+                current = map_service.transforms.get(rid, (0.0, 0.0, 0.0))
+                matches = all(
+                    math.isfinite(value) and abs(a - value) <= 1e-9
+                    for a, value in zip(expected, current)
+                )
+                if matches:
+                    tx, ty, yaw = current
+                    c, s = math.cos(yaw), math.sin(yaw)
+                    dx, dy = float(goal["x"]) - tx, float(goal["y"]) - ty
+                    fenced_local_goal = {
+                        key: value
+                        for key, value in goal.items()
+                        if key != "map_transform"
+                    }
+                    fenced_local_goal["x"] = dx * c + dy * s
+                    fenced_local_goal["y"] = -dx * s + dy * c
+                    if "yaw" in goal:
+                        fenced_local_goal["yaw"] = map_service._wrap_yaw(
+                            float(goal["yaw"]) - yaw
+                        )
+            if not matches:
+                await raise_alert(
+                    f"stale_map_goal_{rid}",
+                    "warn",
+                    "fault",
+                    "Map alignment changed; choose the destination again",
+                    rid,
+                )
+                await broadcast({"type": "map_info", "info": map_service.map_info()})
+                return
+            goal = {key: value for key, value in goal.items() if key != "map_transform"}
         if not registry.can(rid, "navigate"):
             return
         taken_by = goal_taken(goal, exclude=rid)
@@ -1282,7 +1341,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         local_goal = (
             goal
             if robot.coordinate_frame == "merged"
-            else map_service.world_to_robot(rid, goal)
+            else fenced_local_goal or map_service.world_to_robot(rid, goal)
         )
         if onboard_planner:
             from .objective_commands import send_objective

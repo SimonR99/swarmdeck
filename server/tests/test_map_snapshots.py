@@ -12,6 +12,47 @@ from swarmdeck_server.mapsvc import output
 from swarmdeck_server.mapsvc.service import GridMeta, MapService
 
 
+def test_map_publications_capture_transform_provenance():
+    service = MapService()
+    meta = GridMeta(0.1, 4, 3, -2.0, -1.0)
+    cells = np.zeros((meta.height, meta.width), dtype=np.int8)
+    service.ingest("r", meta, cells)
+    service.transforms["r"] = (2.0, 3.0, 0.4)
+    service._snapshots.publish(meta, cells, dict(service.transforms))
+    global_snapshot = service.map_snapshot()
+    local = output.local_png_snapshot(service, "r")
+    service.transforms["r"] = (20.0, 30.0, 1.4)
+    assert global_snapshot.transforms["r"] == pytest.approx((2.0, 3.0, 0.4))
+    assert local is not None
+    assert local[1]["transforms"]["r"] == pytest.approx(
+        {"x": 2.0, "y": 3.0, "yaw": 0.4}
+    )
+
+
+def test_global_grid_transform_snapshot_is_atomic_and_composed_into_world(monkeypatch):
+    service = MapService(resolution=0.1, size_m=4.0)
+    meta = GridMeta(0.1, 2, 2, 0.0, 0.0)
+    cells = np.zeros((2, 2), dtype=np.int8)
+    service.merge_mode = "cslam"
+    service.reference = "reference"
+    service.transform_priors["reference"] = (10.0, -2.0, np.pi / 2)
+    service.global_grid = (meta, cells)
+    service.global_grid_transforms = {"r": (2.0, 1.0, 0.25)}
+    original_warp = service._warp
+
+    def update_during_warp(*args, **kwargs):
+        # A second upload arriving while this raster is rendered belongs to the
+        # next publication and must not relabel the first raster.
+        service.global_grid_transforms = {"r": (99.0, 99.0, 1.5)}
+        return original_warp(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_warp", update_during_warp)
+    service._remerge()
+
+    pose = service.map_snapshot().transforms["r"]
+    assert pose == pytest.approx((9.0, 0.0, np.pi / 2 + 0.25))
+
+
 @pytest.mark.parametrize("kind", ["local", "optimized", "global"])
 def test_png_headers_describe_captured_grid_not_newer_map(monkeypatch, kind):
     service = MapService()
@@ -21,14 +62,16 @@ def test_png_headers_describe_captured_grid_not_newer_map(monkeypatch, kind):
     new_cells = np.zeros((new.height, new.width), dtype=np.int8)
     service.ingest("r", old, old_cells)
     monkeypatch.setattr(map_routes, "map_service", service)
-    monkeypatch.setattr(map_routes, "_optimized", {"robot:r": (old, old_cells, ("r",))})
+    monkeypatch.setattr(
+        map_routes, "_optimized", {"robot:r": (old, old_cells, ("r",), None)}
+    )
     captured = []
     encode = output.grid_png
 
     def update_during_encoding(meta, cells):
         captured.append(meta)
         service.ingest("r", new, new_cells)
-        map_routes._optimized["robot:r"] = (new, new_cells, ("r",))
+        map_routes._optimized["robot:r"] = (new, new_cells, ("r",), None)
         return encode(meta, cells)
 
     monkeypatch.setattr(output, "grid_png", update_during_encoding)

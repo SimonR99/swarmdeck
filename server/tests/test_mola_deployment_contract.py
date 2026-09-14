@@ -4,7 +4,6 @@ from pathlib import Path
 
 import yaml
 
-
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE_DIR = REPO / "deploy" / "compose"
 IMPORTER = "/mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import"
@@ -33,11 +32,20 @@ def test_mapping_image_builds_and_smokes_the_persistent_runtime():
     dockerfile = (REPO / "deploy/docker/Dockerfile.mapping").read_text()
     assert "swarmdeck-mola-import" in dockerfile
     assert "swarmdeck-mola-import --serve" in dockerfile
-    assert "COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py" in dockerfile
+    assert (
+        "COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py"
+        in dockerfile
+    )
     assert "COPY swarmdeck_ros/src/swarmdeck_mola src/swarmdeck_mola" in dockerfile
     assert "--packages-select swarmdeck_mapping swarmdeck_mola" in dockerfile
-    assert "COPY tests/deployment/mola_jsonl_smoke.py /usr/local/bin/mola-jsonl-smoke.py" in dockerfile
-    assert "COPY tests/deployment/mola_launcher_smoke.py /usr/local/bin/mola-launcher-smoke.py" in dockerfile
+    assert (
+        "COPY tests/deployment/mola_jsonl_smoke.py /usr/local/bin/mola-jsonl-smoke.py"
+        in dockerfile
+    )
+    assert (
+        "COPY tests/deployment/mola_launcher_smoke.py /usr/local/bin/mola-launcher-smoke.py"
+        in dockerfile
+    )
     assert "timeout 45s python3 /usr/local/bin/mola-jsonl-smoke.py" in dockerfile
     assert "MOLA_MODULES_LIB_PATH=/mapping_ws/install/swarmdeck_mola/lib" in dockerfile
     assert "make_fixture.py /tmp/module-fixture" in dockerfile
@@ -133,7 +141,7 @@ def test_remote_acceptance_requires_explicit_source_for_builds():
 
 def test_launcher_smoke_uses_real_config_and_bounded_shutdown():
     script = (REPO / "tests/deployment/mola_launcher_smoke.py").read_text()
-    assert "shutil.which(\"mola-cli\")" in script
+    assert 'shutil.which("mola-cli")' in script
     assert "external-map.yaml" not in script
     assert "SWARMDECK_MOLA_SNAPSHOT" in script
     assert "SWARMDECK_MOLA_CHUNKS" in script

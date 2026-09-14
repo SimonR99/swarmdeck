@@ -337,9 +337,17 @@ def main() -> None:
             )
             chunk = submap["chunks"][0]
             payload = (
-                root / "maps" / mission / robot / "geometry" / "chunks" / chunk["sha256"]
+                root
+                / "maps"
+                / mission
+                / robot
+                / "geometry"
+                / "chunks"
+                / chunk["sha256"]
             ).read_bytes()
-            stored_point = np.frombuffer(payload, dtype="<f4", offset=16).reshape(-1, 3)[0]
+            stored_point = np.frombuffer(payload, dtype="<f4", offset=16).reshape(
+                -1, 3
+            )[0]
             require(
                 np.allclose(stored_point, [2.0, 0.0, 0.5], atol=1e-6),
                 f"map stored SLAM centroid instead of raw endpoint: {stored_point}",
@@ -357,7 +365,10 @@ def main() -> None:
             require(
                 isinstance(planning_transform, list)
                 and len(planning_transform) == 4
-                and all(isinstance(row, list) and len(row) == 4 for row in planning_transform),
+                and all(
+                    isinstance(row, list) and len(row) == 4
+                    for row in planning_transform
+                ),
                 "stable planning transform is invalid",
             )
             for payload, received, label in (

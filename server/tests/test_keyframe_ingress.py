@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import zlib
 
 import numpy as np
@@ -112,7 +113,11 @@ def test_graph_mode_adopts_a_slam_update_and_rendered_grid():
             },
         )
         assert update.status_code == 200
-        map_service.set_global_grid(meta, cells)
+        captured = {
+            "botman_0": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+            "tars_0": {"x": 1.5, "y": 0.2, "yaw": 0.1},
+        }
+        map_service.set_global_grid(meta, cells, transforms=captured)
         status = c.get("/api/map/status").json()
         assert status["mode"] == "graph"
         assert "botman_0" in status["global_members"]
@@ -120,6 +125,10 @@ def test_graph_mode_adopts_a_slam_update_and_rendered_grid():
         png = c.get("/api/map")
         assert png.status_code == 200
         assert png.headers["content-type"] == "image/png"
+        published = json.loads(png.headers["X-Map-Transforms"])
+        assert published.keys() == captured.keys()
+        for robot_id, pose in captured.items():
+            assert published[robot_id] == pytest.approx(pose)
 
 
 def test_graph_mode_does_not_overlay_unmerged_robots():

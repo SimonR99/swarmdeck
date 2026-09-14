@@ -500,3 +500,57 @@ and a new click must refer to a coherent accepted map correction. A correction
 arriving between geometry and telemetry updates must reject stale clicks, rather
 than silently reinterpret their coordinates. This fence is independent of the
 adapter's tolerance for metadata-only updates during an already active goal.
+
+## Graph-based Home and raster alignment follow-up
+
+Long Home routes now retain the persistent graph corridor and refine only a
+metric window ahead, rather than allocating a grid for the whole return trip.
+`PlanObjective` returns the full `global_path`, a local executable `path`, and
+an opaque `route_id` when more sections remain. `RefineObjectiveRoute` uses
+current odometry and current mapping evidence to refine the next section of
+that same corridor. Sparse graph edges are split at the distance horizon;
+the cursor advances along the route and cannot jump to a nearby crossing.
+The default horizon is 8 m (`objective_route_horizon_m`). A direct physical
+Home fallback is limited to that distance when graph connectivity is missing.
+
+The adapter keeps the same Home objective through local controller successes.
+Telemetry distinguishes `following_local`, `planning`, and `following_final`;
+only the final section can finish Home. Completing a section does not consume
+the three-attempt physical-stall budget. Stop and newer commands retire the
+continuation. Additive graph and map revisions do not discard the global
+route; changed authority or a newly blocked corridor requests replanning.
+All message-only images must rebuild alongside MGG because `PlanObjective`
+and the new refinement service change the ROS interface.
+
+The 2D overlay correction binds each raster to the transforms used to create
+its pixels. Robot telemetry captures one transform for the pose, goal and all
+path vertices; the UI re-expresses that packet in the displayed raster's
+frame. Global, local and optimized rasters carry the same provenance contract.
+A fused-grid upload supplies its captured transforms instead of borrowing a
+newer registration from server state. A goal click carries its raster transform
+and is rejected with a refresh when that alignment has changed. This resolves
+an independently demonstrated frame race; it does not establish that every
+previously reported navigation failure had the same cause.
+
+Explore waiting now includes MGG's planner reason and automatic retry delay.
+The change exposes the existing bounded backoff; it does not turn an empty
+plan into an exploration-complete result or change coordination timeouts.
+
+Other robots can still contribute transient occupied returns to the native
+cloud map. Later free-space rays clear occupancy, but there is no peer-specific
+filter or time-only expiry in that input path. This is a plausible contributor
+to crowded-start failures, not a demonstrated explanation of the remaining
+R1 stall. Removing occupied evidence indiscriminately would also hide real
+obstacles from planning. Dynamic-obstacle qualification remains acceptance work.
+
+Local validation for this follow-up covers 47 native objective-service cases,
+three focused native PCI status cases, 166 adapter/exploration/coordination
+cases, 134 server map/ingress/telemetry cases, and 24 SLAM publisher cases. The
+seven UI map test files, Svelte checks and production build pass. Black was
+applied after behavioral testing; its repository check passes. The independent
+combined review included the native-cloud deployment, shared components that
+differ from the node's local frame, and metadata arriving during rendering.
+Benchbot's Cloudflare SSH endpoint returned `websocket: bad handshake` during
+this follow-up, so these changes still require the Git pull, matching image
+rebuilds and a fresh mission on the single port-15173 stack before live Home
+or fleet-exploration acceptance can be claimed.

@@ -35,7 +35,9 @@ def main() -> None:
     if not isinstance(manifests, list) or len(manifests) != 1:
         raise RuntimeError("launcher fixture must contain one manifest")
     revision = manifests[0].get("graph_revision")
-    if not isinstance(revision, dict) or not isinstance(revision.get("component_id"), str):
+    if not isinstance(revision, dict) or not isinstance(
+        revision.get("component_id"), str
+    ):
         raise RuntimeError("launcher fixture has no component identity")
 
     artifact = (args.artifact or args.fixture / "launcher.metricmap").resolve()
@@ -46,7 +48,9 @@ def main() -> None:
     if "artifact_file:" not in config:
         if marker not in config:
             raise RuntimeError("launcher config has no artifact insertion point")
-        config = config.replace(marker, "      artifact_file: ${SWARMDECK_MOLA_ARTIFACT}\n" + marker)
+        config = config.replace(
+            marker, "      artifact_file: ${SWARMDECK_MOLA_ARTIFACT}\n" + marker
+        )
     generated_config = args.fixture / "launcher-smoke.yaml"
     generated_config.write_text(config)
 
@@ -72,13 +76,19 @@ def main() -> None:
         while time.monotonic() < deadline:
             if artifact.is_file() and artifact.stat().st_size > 0:
                 if process.poll() is not None:
-                    raise RuntimeError(f"mola-cli exited before smoke completed: {process.returncode}")
+                    raise RuntimeError(
+                        f"mola-cli exited before smoke completed: {process.returncode}"
+                    )
                 break
             if process.poll() is not None:
-                raise RuntimeError(f"mola-cli exited before publishing: {process.returncode}")
+                raise RuntimeError(
+                    f"mola-cli exited before publishing: {process.returncode}"
+                )
             time.sleep(0.05)
         else:
-            raise TimeoutError("mola-cli did not publish a nonempty artifact within the smoke deadline")
+            raise TimeoutError(
+                "mola-cli did not publish a nonempty artifact within the smoke deadline"
+            )
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGINT)

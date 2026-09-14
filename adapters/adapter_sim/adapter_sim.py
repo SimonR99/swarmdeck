@@ -1056,7 +1056,10 @@ class RobotBridge(
             ]
         )
         rgba = colorize_ros_rgbd(
-            points_map, image, depth, info,
+            points_map,
+            image,
+            depth,
+            info,
             optical_from_base @ np.linalg.inv(t_map_camera_base),
         )
         return rgba[:, :3].copy() if rgba is not None and np.any(rgba[:, 3]) else None
@@ -1263,8 +1266,11 @@ class RobotBridge(
             self._goal_request_future = future
             self._goal_request_generation = generation
             self.goal = {
-                "x": final.x, "y": final.y, "z": final.z,
-                "yaw": yaw, "frame_id": plan.frame_id,
+                "x": final.x,
+                "y": final.y,
+                "z": final.z,
+                "yaw": yaw,
+                "frame_id": plan.frame_id,
             }
             self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
             self._follow_path_display = (generation, plan)
@@ -1395,8 +1401,7 @@ class RobotBridge(
     def navigation_ready(self) -> bool:
         """Whether the action servers and configured objective planner are live."""
         actions_ready = bool(
-            self.nav_client.server_is_ready()
-            and self.path_client.server_is_ready()
+            self.nav_client.server_is_ready() and self.path_client.server_is_ready()
         )
         planner = getattr(self, "objective_planner", None)
         planner_client = getattr(planner, "client", None)

@@ -41,7 +41,8 @@ def generate(output: Path, binary: Path) -> dict:
     def save_case(name, points):
         snapshot = json.loads((peer / "snapshot.json").read_text())
         manifest = next(
-            m for m in snapshot["manifests"]
+            m
+            for m in snapshot["manifests"]
             if m["graph_revision"]["component_id"] == component
         )
         revision = manifest["graph_revision"]
@@ -61,7 +62,9 @@ def generate(output: Path, binary: Path) -> dict:
         cases.append(name)
 
     try:
-        fixture._publish_and_refresh(worker, mapper, peer, source, view, component, deadline)
+        fixture._publish_and_refresh(
+            worker, mapper, peer, source, view, component, deadline
+        )
         # Sample inside a known occupied cell; arange's nominal y=0 is slightly
         # negative, so its wall return belongs to the adjacent negative cell.
         points = ((2.0, 0.0, 0.6), (3.1, 0.3, 0.7), (4.0, 0.0, 0.6))
@@ -70,7 +73,9 @@ def generate(output: Path, binary: Path) -> dict:
 
         # A new snapshot heartbeat must reuse the unchanged immutable grid.
         # Its original source-byte digest differs from the new index digest.
-        fixture._publish_and_refresh(worker, mapper, peer, source, view, component, deadline)
+        fixture._publish_and_refresh(
+            worker, mapper, peer, source, view, component, deadline
+        )
         second = json.loads((peer / "mola/index.json").read_text())
         assert first["source_sha256"] != second["source_sha256"]
         assert first["artifacts"][0]["planner"] == second["artifacts"][0]["planner"]
@@ -85,7 +90,9 @@ def generate(output: Path, binary: Path) -> dict:
                 {key: corrected for key in members},
             )
         )
-        fixture._publish_and_refresh(worker, mapper, peer, source, view, component, deadline)
+        fixture._publish_and_refresh(
+            worker, mapper, peer, source, view, component, deadline
+        )
         save_case("corrected", ((1.0, 3.5, 0.6), (1.0, 5.0, 0.6), (3.0, 0.0, 0.6)))
         return {"cases": cases, "component": component}
     finally:
@@ -96,8 +103,10 @@ def generate(output: Path, binary: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, default=Path(
-        "/mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import"
-    ))
+    parser.add_argument(
+        "--binary",
+        type=Path,
+        default=Path("/mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import"),
+    )
     args = parser.parse_args()
     print(json.dumps(generate(args.output, args.binary)))

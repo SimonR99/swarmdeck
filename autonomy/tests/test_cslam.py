@@ -108,9 +108,7 @@ def test_identical_new_solver_result_advances_replica_and_graph_revision(tmp_pat
     )
     revision = core.revision
     initial = core.envelope()
-    geometry_revision = initial["snapshot"]["manifests"][0][
-        "geometry_revision"
-    ]
+    geometry_revision = initial["snapshot"]["manifests"][0]["geometry_revision"]
     replica = ReplicaStore(tmp_path / "replica")
     for chunk in initial["chunks"]:
         replica.put_chunk(chunk["sha256"], core.mapper.get_chunk(chunk["sha256"]))
@@ -123,8 +121,7 @@ def test_identical_new_solver_result_advances_replica_and_graph_revision(tmp_pat
     assert envelope["solution_order"] == [1, 0]
     assert envelope["revision"] == revision + 1
     assert (
-        envelope["snapshot"]["manifests"][0]["geometry_revision"]
-        == geometry_revision
+        envelope["snapshot"]["manifests"][0]["geometry_revision"] == geometry_revision
     )
     assert replica.publish(envelope)
     msg.solution_clock = 2

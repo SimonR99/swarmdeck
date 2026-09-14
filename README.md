@@ -45,7 +45,7 @@ video through LAN connections, HTTPS proxies, and SSH tunnels.
 ## Decentralized autonomy development
 
 The opt-in onboard pipeline combines peer Swarm-SLAM, persistent submaps, a
-native MOLA map runtime, full-path MGG execution through Nav2, and resumable
+native MOLA map runtime, graph and grid planning through MGG and Nav2, and resumable
 server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
 [integration and simulation guide](docs/operations/decentralized-autonomy.md)
 for build commands, component inspection, validation status, and rollout limits.
@@ -55,9 +55,17 @@ unknown ground provisionally; known obstacles and terrain beyond the robot's
 step capability remain excluded. Unknown space is never written into the map
 as free. Hardware and MOLA retain their stricter evidence requirements.
 Nav2 follows the accepted route while handling local obstacles.
-For provisional Navigate and Return Home routes, a bounded check of the next
-3 m requests a new full route only when newly known terrain or obstacles make
-the current one unusable. Routine map updates do not replace the waypoint.
+Long Return Home journeys follow MGG's persistent global graph. Grid planning
+refines a bounded section ahead (8 m by default), and Nav2 follows that section
+before requesting the next. The dashboard retains the full graph route and
+the exact Home destination throughout the journey. A nearby Home can use a
+bounded direct connector when the graph is unavailable; a long return needs
+graph connectivity.
+For provisional routes, a bounded check of the next 3 m requests a replacement
+only when newly known terrain or obstacles make the current route unusable.
+Routine map updates do not replace the waypoint. Map images carry their own
+alignment metadata so path and goal overlays remain aligned with the displayed
+pixels while newer robot telemetry arrives.
 The onboard simulation keeps MGG's accumulated map and controller paths in
 continuous odometry coordinates. SLAM corrections update the map display
 without repeatedly canceling a route; actual shared-map corrections still

@@ -153,9 +153,7 @@ class PeerCoordinator:
     def reserve(self, plan, generation):
         token = (generation, plan.revision_ns)
         if token == self.invalid_token:
-            self.last_decision_reason = (
-                f"reservation invalidated by {self.invalid_token_reason or 'map correction'}"
-            )
+            self.last_decision_reason = f"reservation invalidated by {self.invalid_token_reason or 'map correction'}"
             return "rejected"
         if generation < self.generation:
             self.last_decision_reason = "stale exploration generation"

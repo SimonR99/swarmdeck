@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import time
+import copy
+import json
+from types import SimpleNamespace
 
 import pytest
 import synthetic
@@ -11,6 +14,62 @@ from fastapi.testclient import TestClient
 from swarmdeck_protocol import decode_keyframe, encode_keyframe
 from swarmdeck_slam.types import quat_xyz_from_se3
 import swarmdeck_slam.service as svc
+
+
+def test_scoped_rasters_publish_their_own_transform_snapshot(monkeypatch):
+    import numpy as np
+
+    origins = {
+        "r0": {"x": 2.0, "y": -3.0, "yaw": 0.5, "frame": "component-0"},
+        "r1": {"x": 50.0, "y": 30.0, "yaw": 1.5, "frame": "component-1"},
+    }
+    grid = SimpleNamespace(
+        cells=np.zeros((2, 2), dtype=np.int8),
+        robots={"r0", "r1"},
+        component_id=0,
+        resolution=0.1,
+        width=2,
+        height=2,
+        origin_x=0,
+        origin_y=0,
+    )
+    received = []
+    merged = []
+
+    def post(request, **_kwargs):
+        if "/optimized_map?" in request.full_url:
+            received.append(json.loads(request.get_header("X-map-transforms")))
+            # A later graph result must not change the remaining publications
+            # from the already captured snapshot.
+            origins["r0"]["x"] = 99.0
+        elif "/global_map?" in request.full_url:
+            merged.append(json.loads(request.get_header("X-map-transforms")))
+        return SimpleNamespace(read=lambda: b"{}")
+
+    monkeypatch.setattr(svc, "SERVER_URL", "http://unused")
+    monkeypatch.setattr(svc, "_update_cloud_cache", lambda _snapshot: None)
+    monkeypatch.setattr(
+        svc, "snapshot_update", lambda _snapshot: {"origins": copy.deepcopy(origins)}
+    )
+    robot_grid = SimpleNamespace(**{**vars(grid), "robots": {"r0"}})
+    monkeypatch.setattr(
+        svc,
+        "scoped_grids",
+        lambda _snapshot: [
+            ("component:0", grid),
+            ("robot:r0", robot_grid),
+            ("trajectory:r0/old", grid),
+        ],
+    )
+    monkeypatch.setattr(svc, "majority_component", lambda _snapshot: grid)
+    monkeypatch.setattr(svc.urllib.request, "urlopen", post)
+    monkeypatch.setattr(svc, "_last_snapshot", None)
+    svc._publish_snapshot(SimpleNamespace())
+
+    assert received[0] == {"r0": {"x": 2.0, "y": -3.0, "yaw": 0.5}}
+    assert received[1]["r0"]["x"] == 2.0
+    assert received[2] == {}
+    assert merged == [received[0]]
 
 
 @pytest.fixture

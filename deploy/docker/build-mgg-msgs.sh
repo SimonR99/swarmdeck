@@ -20,6 +20,14 @@ git -C /tmp/mgg-msgs-source apply \
   --include=ros2/src/mgg_msgs/CMakeLists.txt \
   --include=ros2/src/mgg_msgs/srv/ValidateObjectiveRoute.srv \
   /tmp/mgg-route-validation.patch
+# Generate the rolling Home continuation contract in every image which hosts
+# an adapter or indexed-map service. The planner implementation remains in the
+# native MGG image; these filtered hunks keep the ROS service type hashes equal.
+git -C /tmp/mgg-msgs-source apply \
+  --include=ros2/src/mgg_msgs/CMakeLists.txt \
+  --include=ros2/src/mgg_msgs/srv/PlanObjective.srv \
+  --include=ros2/src/mgg_msgs/srv/RefineObjectiveRoute.srv \
+  /tmp/mgg-home-rolling-followup.patch
 cd /tmp/mgg-msgs-source/ros2
 colcon build --packages-select mgg_msgs --merge-install \
   --executor sequential \

@@ -189,9 +189,7 @@ def test_proximity_keeps_max_height_and_filters_observed_floor():
             prox_range_max=projection["prox_range_max"],
         )
 
-    ahead = int(
-        np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC)
-    )
+    ahead = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
     assert np.all(np.isinf(scan_at(0.0)))
     assert scan_at(bridge.PROX_MAX_HEIGHT)[ahead] == pytest.approx(2.0, abs=0.01)
     assert np.all(np.isinf(scan_at(bridge.PROX_MAX_HEIGHT + 0.01)))
@@ -243,9 +241,7 @@ def test_proximity_uses_canonical_mount_and_bounded_ground_filter(
         "lidar_x": physical.lidar_x,
         "lidar_z": physical.lidar_z,
         "base_height": physical.base_height,
-        "prox_min_height": min(
-            physical.max_step_height, bridge.PROX_GROUND_FILTER_CAP
-        )
+        "prox_min_height": min(physical.max_step_height, bridge.PROX_GROUND_FILTER_CAP)
         + bridge.PROX_HEIGHT_EPSILON,
         "prox_range_max": physical.prox_range_max,
     }
@@ -275,9 +271,7 @@ def test_proximity_uses_canonical_mount_and_bounded_ground_filter(
         prox_min_height=projection["prox_min_height"],
         prox_range_max=projection["prox_range_max"],
     )
-    ahead = int(
-        np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC)
-    )
+    ahead = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
     assert blocking[ahead] == pytest.approx(2.0, abs=0.01)
     assert np.all(np.isinf(climbable))
 
@@ -304,9 +298,7 @@ def test_spot_proximity_keeps_low_robots_and_uncertified_steps_visible():
             prox_range_max=projection["prox_range_max"],
         )
 
-    ahead = int(
-        np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC)
-    )
+    ahead = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
     assert np.all(np.isinf(scan_at(0.15)))
     for height in (0.20, 0.245, 0.30, 0.31):
         assert scan_at(height)[ahead] == pytest.approx(2.0, abs=0.01)
@@ -314,16 +306,14 @@ def test_spot_proximity_keeps_low_robots_and_uncertified_steps_visible():
 
 def test_bridge_loads_each_fleet_platform_from_canonical_profiles(tmp_path):
     config = tmp_path / "fleet.yaml"
-    config.write_text(
-        """fleet:
+    config.write_text("""fleet:
   robot_count: 3
   robot_prefix: robot_
   robot_type: bunker
   robot_types:
     robot_1: scout_mini
     robot_2: spot
-"""
-    )
+""")
 
     loaded = bridge.ArgosBridge._load_robot_specs(str(config))
     assert loaded == {

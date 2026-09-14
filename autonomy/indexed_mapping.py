@@ -34,8 +34,11 @@ from .contracts import (
     validate_se3,
 )
 from .mapping import (
-    MAX_CHUNK_BYTES, XYZ_F32_ENCODING, XYZRGBA_F32_U8_ENCODING,
-    decode_xyz_f32, decode_xyzrgba_f32_u8,
+    MAX_CHUNK_BYTES,
+    XYZ_F32_ENCODING,
+    XYZRGBA_F32_U8_ENCODING,
+    decode_xyz_f32,
+    decode_xyzrgba_f32_u8,
 )
 
 
@@ -729,7 +732,10 @@ class IndexedMapView:
                 else None
             )
             for digest, size, declared_count, encoding in submap.chunks:
-                if encoding not in {XYZ_F32_ENCODING, XYZRGBA_F32_U8_ENCODING} or size > MAX_CHUNK_BYTES:
+                if (
+                    encoding not in {XYZ_F32_ENCODING, XYZRGBA_F32_U8_ENCODING}
+                    or size > MAX_CHUNK_BYTES
+                ):
                     raise ValueError("unsupported or oversized map chunk")
                 with self._lock:
                     local = self._chunk_cache.get(digest)
@@ -741,7 +747,8 @@ class IndexedMapView:
                     ):
                         raise ValueError(f"chunk integrity failed: {digest}")
                     local = (
-                        decode_xyz_f32(payload) if encoding == XYZ_F32_ENCODING
+                        decode_xyz_f32(payload)
+                        if encoding == XYZ_F32_ENCODING
                         else decode_xyzrgba_f32_u8(payload)[0]
                     )
                     if len(local) != declared_count or not np.isfinite(local).all():

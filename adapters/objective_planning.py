@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from adapters.exploration import is_physical_no_progress_failure, planner_path
 from autonomy.live_mapping import navigation_goal, solution_order
 
-
 MAX_NAV_FAILURE_REASON_LENGTH = 512
 FULL_ROUTE_ENDPOINT_TOLERANCE_M = 0.001
 
@@ -39,6 +38,18 @@ class MggObjectivePlanning:
         namespace = str(config.get("namespace") or f"/{bridge.id}/mgg").rstrip("/")
         self.client = bridge.node.create_client(
             PlanObjective, f"{namespace}/plan_objective"
+        )
+        try:
+            from mgg_msgs.srv import RefineObjectiveRoute
+        except ImportError:
+            RefineObjectiveRoute = None
+        self.refine_service_type = RefineObjectiveRoute
+        self.refine_client = (
+            bridge.node.create_client(
+                RefineObjectiveRoute, f"{namespace}/refine_objective_route"
+            )
+            if RefineObjectiveRoute is not None
+            else None
         )
         try:
             from mgg_msgs.srv import ValidateObjectiveRoute
@@ -111,6 +122,13 @@ class MggObjectivePlanning:
         self._validation_started_at = 0.0
         self._validation_next_at = 0.0
         self._home_intent = None
+        self._rolling_route_id = None
+        self._rolling_partial = False
+        self._rolling_global_plan = None
+        self._rolling_authority_binding = None
+        self._continuation_generation = None
+        self._continuation_deadline = None
+        self._continuation_thread = None
         self._recovery_generation = None
         self._recovery_binding = None
         self._recovery_deadline = None
@@ -200,6 +218,7 @@ class MggObjectivePlanning:
             self._objective_goal = deepcopy(copied_goal)
             self._indexed_map_validated = False
             self._home_intent = None
+            self._clear_rolling_locked()
             self._recovery_generation = None
             self._recovery_binding = None
             self._recovery_deadline = None
@@ -253,6 +272,25 @@ class MggObjectivePlanning:
             return default
         return min(upper, max(lower, parsed))
 
+    def _clear_rolling_locked(self) -> None:
+        """Retire one native cached-route binding without joining its worker."""
+
+        self._rolling_route_id = None
+        self._rolling_partial = False
+        self._rolling_global_plan = None
+        self._rolling_authority_binding = None
+        self._continuation_generation = None
+        self._continuation_deadline = None
+
+    def global_display_plan(self):
+        """Return the immutable full graph route owned by the current command."""
+
+        with self._active_lock:
+            retained = self._rolling_global_plan
+            if retained is None or retained[0] != self.bridge._goal_generation:
+                return None
+            return retained[1]
+
     def _authority(self):
         authority = self._raw_authority()
         if isinstance(authority, dict):
@@ -268,9 +306,7 @@ class MggObjectivePlanning:
             # Legacy default-frame authorities can still bind an indexed map
             # or Home landmark without a correction transform. Alternate
             # planning frames always require their explicit qualified pair.
-            raw_frame = str(authority.get("navigation_frame", self.frame)).lstrip(
-                "/"
-            )
+            raw_frame = str(authority.get("navigation_frame", self.frame)).lstrip("/")
             if raw_frame == self.frame and "planning_frame" not in authority:
                 return deepcopy(authority)
             return None
@@ -523,20 +559,17 @@ class MggObjectivePlanning:
         try:
             shift = math.sqrt(
                 sum(
-                    (float(before.get(axis, 0.0)) - float(after.get(axis, 0.0)))
-                    ** 2
+                    (float(before.get(axis, 0.0)) - float(after.get(axis, 0.0))) ** 2
                     for axis in ("x", "y", "z")
                 )
             )
             yaw_delta = abs(
                 math.atan2(
                     math.sin(
-                        float(after.get("yaw", 0.0))
-                        - float(before.get("yaw", 0.0))
+                        float(after.get("yaw", 0.0)) - float(before.get("yaw", 0.0))
                     ),
                     math.cos(
-                        float(after.get("yaw", 0.0))
-                        - float(before.get("yaw", 0.0))
+                        float(after.get("yaw", 0.0)) - float(before.get("yaw", 0.0))
                     ),
                 )
             )
@@ -558,6 +591,19 @@ class MggObjectivePlanning:
             if self._nav_failure_generation != self.bridge._goal_generation:
                 self._nav_failure_reason = None
                 self._nav_failure_generation = None
+            if (
+                self._continuation_generation is not None
+                and self._continuation_generation != self.bridge._goal_generation
+            ):
+                self._clear_rolling_locked()
+                if (
+                    self._initial_claim_generation is None
+                    and self._recovery_generation is None
+                ):
+                    self._objective_kind = None
+                    self._objective_goal = None
+                    self._home_intent = None
+                    self._indexed_map_validated = False
             active = self._active_route
         if active is None:
             return
@@ -578,12 +624,23 @@ class MggObjectivePlanning:
                     self._objective_kind = None
                     self._objective_goal = None
                     self._indexed_map_validated = False
+                    self._clear_rolling_locked()
                 if self._nav_failure_generation != self.bridge._goal_generation:
                     self._nav_failure_reason = None
                     self._nav_failure_generation = None
             return
         if self.bridge.nav_status == "succeeded":
             self._retire_route_validation()
+            with self._active_lock:
+                continue_home = bool(
+                    self._active_route == active
+                    and self._objective_kind == "return_home"
+                    and self._rolling_partial
+                    and self._rolling_route_id
+                )
+            if continue_home:
+                self._start_home_continuation(active)
+                return
             with self._active_lock:
                 if self._active_route == active:
                     self._active_route = None
@@ -595,6 +652,7 @@ class MggObjectivePlanning:
                     self._nav_failure_reason = None
                     self._nav_failure_generation = None
                     self._blocked_retry_count = 0
+                    self._clear_rolling_locked()
             return
         if self.bridge.nav_status == "failed":
             self._retire_route_validation()
@@ -613,6 +671,7 @@ class MggObjectivePlanning:
                         self._objective_kind = None
                         self._objective_goal = None
                         self._indexed_map_validated = False
+                        self._clear_rolling_locked()
                         return
                     self._active_route = None
                 if self._start_recovery(
@@ -632,6 +691,7 @@ class MggObjectivePlanning:
                     self._objective_kind = None
                     self._objective_goal = None
                     self._indexed_map_validated = False
+                    self._clear_rolling_locked()
             return
         if self._check_route_validation(active):
             return
@@ -672,19 +732,24 @@ class MggObjectivePlanning:
         # A missed authority heartbeat requires stopping motion, but does not
         # prove that the retained destination became invalid. Wait for fresh
         # authority under the recovery deadline and preserve its identity.
-        if raw_authority is None or (identity_preserved and (
-            home_intent is None
-            or self._authority_matches_home(authority, home_intent)
-        )):
+        if raw_authority is None or (
+            identity_preserved
+            and (
+                home_intent is None
+                or self._authority_matches_home(authority, home_intent)
+            )
+        ):
             if self._start_recovery(
                 generation, home_intent, cancel_route=True, binding=binding
             ):
                 cancel_reason = (
                     authority_reason
                     if authority_changed
-                    else "home landmark identity changed"
-                    if home_identity_changed
-                    else home_reason
+                    else (
+                        "home landmark identity changed"
+                        if home_identity_changed
+                        else home_reason
+                    )
                 )
                 self.bridge.node.get_logger().warning(
                     f"[{self.bridge.id}] MGG objective route canceled after "
@@ -702,6 +767,346 @@ class MggObjectivePlanning:
     def plan(self, objective: str, goal: dict) -> bool:
         claim = self.claim_objective(objective, goal)
         return self.execute_claimed(claim)
+
+    def _start_home_continuation(self, active) -> bool:
+        """Move a completed local Home chunk into bounded native refinement."""
+
+        generation, binding, home_intent, _, _, _ = active
+        if not self.bridge.set_goal_pending_if_current(generation):
+            return False
+        with self._active_lock:
+            if (
+                self._active_route != active
+                or generation != self.bridge._goal_generation
+                or self._objective_kind != "return_home"
+                or not self._rolling_partial
+                or not self._rolling_route_id
+            ):
+                return False
+            self._active_route = None
+            self._continuation_generation = generation
+            self._continuation_deadline = time.monotonic() + self.replan_deadline_s
+            worker = threading.Thread(
+                target=self._continuation_worker,
+                name=f"{self.bridge.id}-return-home-refine",
+                daemon=True,
+            )
+            self._continuation_thread = worker
+            try:
+                worker.start()
+            except Exception:
+                self._continuation_thread = None
+                self._continuation_generation = None
+                self._continuation_deadline = None
+                raise
+        return True
+
+    def _owns_continuation(self, generation, route_id, home_intent) -> bool:
+        with self._active_lock:
+            return self._owns_continuation_locked(generation, route_id, home_intent)
+
+    def _continuation_worker(self) -> None:
+        worker = threading.current_thread()
+        try:
+            while True:
+                with self._active_lock:
+                    generation = self._continuation_generation
+                    route_id = self._rolling_route_id
+                    home_intent = self._home_intent
+                    deadline = self._continuation_deadline
+                    global_retained = self._rolling_global_plan
+                if (
+                    generation is None
+                    or not route_id
+                    or deadline is None
+                    or global_retained is None
+                ):
+                    return
+                # The completed chunk was removed from _active_route before
+                # this worker started. The global route retains its original
+                # authority binding in a separate field below.
+                with self._active_lock:
+                    binding = self._rolling_authority_binding
+                try:
+                    outcome, message = self._refine_home_once(
+                        generation,
+                        route_id,
+                        home_intent,
+                        binding,
+                        global_retained[1],
+                        deadline,
+                    )
+                except Exception as exc:
+                    outcome = "failed"
+                    message = f"MGG Home refinement failed: {exc}"
+                if outcome == "submitted":
+                    return
+                if outcome == "superseded":
+                    with self._active_lock:
+                        if self._continuation_generation == generation:
+                            self._clear_rolling_locked()
+                            self._objective_kind = None
+                            self._objective_goal = None
+                            self._home_intent = None
+                            self._indexed_map_validated = False
+                    return
+                if outcome == "retry" and self._remaining(deadline) > 0.0:
+                    if not self._wait_for_continuation(
+                        generation, route_id, home_intent, deadline
+                    ):
+                        return
+                    continue
+                if outcome == "replan":
+                    with self._active_lock:
+                        if not self._owns_continuation_locked(
+                            generation, route_id, home_intent
+                        ):
+                            return
+                        self._clear_rolling_locked()
+                    if self._start_recovery(
+                        generation,
+                        home_intent,
+                        cancel_route=False,
+                        binding=binding,
+                    ):
+                        self.bridge.node.get_logger().warning(
+                            f"[{self.bridge.id}] MGG Home local route replaced: {message}"
+                        )
+                    return
+                if outcome == "retry":
+                    message = "MGG Home refinement deadline expired"
+                self._fail_if_current(message, generation)
+                return
+        finally:
+            with self._active_lock:
+                if self._continuation_thread is worker:
+                    self._continuation_thread = None
+
+    def _owns_continuation_locked(self, generation, route_id, home_intent) -> bool:
+        return (
+            generation == self.bridge._goal_generation
+            and self._continuation_generation == generation
+            and self._rolling_route_id == route_id
+            and self._home_intent == home_intent
+            and self._objective_kind == "return_home"
+        )
+
+    def _wait_for_continuation(
+        self, generation, route_id, home_intent, deadline
+    ) -> bool:
+        wake_at = min(deadline, time.monotonic() + self.replan_backoff_s)
+        while True:
+            if not self._owns_continuation(generation, route_id, home_intent):
+                return False
+            remaining = wake_at - time.monotonic()
+            if remaining <= 0.0:
+                break
+            time.sleep(min(0.02, remaining))
+        return self._owns_continuation(generation, route_id, home_intent)
+
+    def _refine_home_once(
+        self,
+        generation,
+        route_id,
+        home_intent,
+        binding,
+        global_plan,
+        deadline,
+    ) -> tuple[str, str]:
+        service, client = self.refine_service_type, self.refine_client
+        if service is None or client is None:
+            return "failed", "installed mgg_msgs lacks rolling Home refinement"
+        if not self._owns_continuation(generation, route_id, home_intent):
+            return "superseded", ""
+        remaining = self._remaining(deadline)
+        if remaining <= 0.0:
+            return "retry", "MGG Home refinement deadline expired"
+        if not client.wait_for_service(timeout_sec=min(3.0, remaining)):
+            return "retry", "MGG Home refinement service is unavailable"
+        raw_authority = self._raw_authority()
+        authority = (
+            self._authority_from_raw(raw_authority)
+            if isinstance(raw_authority, dict)
+            else None
+        )
+        if authority is None:
+            return "retry", "no fresh map authority was available"
+        if (
+            not self._authority_identity_matches(binding, authority)
+            or (
+                home_intent is not None
+                and not self._authority_matches_home(authority, home_intent)
+            )
+            or self._route_authority_changed(binding, authority)
+        ):
+            return "replan", "map authority or Home landmark changed"
+        try:
+            mapping_snapshot = self._mapping_snapshot(authority)
+        except ValueError as exc:
+            return "replan", str(exc)
+        with self._active_lock:
+            indexed_required = self._indexed_map_validated
+        if indexed_required and mapping_snapshot is None:
+            return "failed", "rolling Home requires indexed map authority"
+
+        request = service.Request()
+        request.mission_id = str(authority["mission_id"])
+        request.route_id = route_id
+        request.component_id = str(authority["component_id"])
+        # Zero asks native MGG to bind its current additive graph/map revision.
+        request.graph_revision = 0
+        request.map_revision = 0
+        if mapping_snapshot is not None:
+            (
+                request.map_epoch,
+                request.mapping_graph_revision,
+                request.geometry_revision,
+                request.map_source_stamp.sec,
+                request.map_source_stamp.nanosec,
+            ) = mapping_snapshot
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            return "retry", f"MGG Home refinement request failed: {exc}"
+        while not future.done() and time.monotonic() < deadline:
+            if not self._owns_continuation(generation, route_id, home_intent):
+                future.cancel()
+                return "superseded", ""
+            time.sleep(0.02)
+        if not future.done():
+            future.cancel()
+            return "retry", "MGG Home refinement request timed out"
+        if not self._owns_continuation(generation, route_id, home_intent):
+            return "superseded", ""
+        try:
+            response = future.result()
+        except Exception as exc:
+            return "retry", f"MGG Home refinement request failed: {exc}"
+        if response.status != service.Response.SUCCEEDED:
+            reason = response.reason or f"MGG refinement status {response.status}"
+            if response.status in {
+                getattr(service.Response, "BLOCKED", object()),
+                getattr(service.Response, "STALE_REVISION", object()),
+            }:
+                return "replan", reason
+            return "failed", reason
+        if response.component_id != request.component_id:
+            return "failed", "MGG refined a route from another map component"
+        indexed_map_validated = getattr(response, "indexed_map_validated", False)
+        if type(indexed_map_validated) is not bool:
+            return "failed", "MGG refinement returned invalid indexed-map evidence"
+        if indexed_map_validated != indexed_required:
+            return "failed", "MGG refinement changed its map evidence source"
+        if mapping_snapshot is not None and (
+            response.map_epoch != request.map_epoch
+            or response.mapping_graph_revision != request.mapping_graph_revision
+            or response.geometry_revision.lower() != request.geometry_revision
+            or response.map_source_stamp.sec != request.map_source_stamp.sec
+            or response.map_source_stamp.nanosec != request.map_source_stamp.nanosec
+        ):
+            return "replan", "MGG refined against a different indexed map snapshot"
+        current_authority = self._authority()
+        try:
+            current_snapshot = self._mapping_snapshot(current_authority or {})
+        except ValueError:
+            current_snapshot = None
+        if (
+            self._route_authority_changed(binding, current_authority)
+            or (
+                home_intent is not None
+                and self._authority_home_identity(current_authority) != home_intent
+            )
+            or (mapping_snapshot is not None and current_snapshot != mapping_snapshot)
+        ):
+            return "replan", "map authority changed while MGG refined Home"
+
+        stamp = self.bridge.node.get_clock().now().to_msg()
+        local_path = SimpleNamespace(
+            header=SimpleNamespace(frame_id=self.frame, stamp=stamp),
+            poses=[
+                SimpleNamespace(header=SimpleNamespace(frame_id=self.frame), pose=pose)
+                for pose in response.path
+            ],
+        )
+        try:
+            plan = planner_path(
+                local_path,
+                self.frame,
+                self.planar_tolerance_m,
+                self.max_inclination_rad,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            return "failed", f"MGG returned an unsupported refined path: {exc}"
+        partial = getattr(response, "partial", False)
+        if type(partial) is not bool:
+            return "failed", "MGG returned an invalid partial-route flag"
+        with self._active_lock:
+            goal = deepcopy(self._objective_goal)
+        latest_home = self._authority_home_from(current_authority)
+        if latest_home is not None:
+            goal = latest_home
+        if not isinstance(goal, dict):
+            return "failed", "retained Home goal is unavailable"
+        if not partial:
+            endpoint = plan.poses[-1]
+            endpoint_error = math.hypot(
+                endpoint.x - float(goal["x"]), endpoint.y - float(goal["y"])
+            )
+            if endpoint_error > FULL_ROUTE_ENDPOINT_TOLERANCE_M:
+                return (
+                    "failed",
+                    "MGG final Home chunk endpoint differs from Home by "
+                    f"{endpoint_error:.3f}m",
+                )
+        pre_submit_rejected = [False]
+
+        def validate_authority_for_dispatch():
+            valid = self._authority_matches_plan(
+                binding, mapping_snapshot, home_intent, indexed_map_validated
+            )
+            if not valid:
+                pre_submit_rejected[0] = True
+            return valid
+
+        submitted_generation = self.bridge.follow_path(
+            plan,
+            expected_generation=generation,
+            not_after=deadline,
+            pre_submit=validate_authority_for_dispatch,
+        )
+        if type(submitted_generation) is not int:
+            if pre_submit_rejected[0]:
+                return "replan", "map authority changed before refined route dispatch"
+            if not self._owns_continuation(generation, route_id, home_intent):
+                return "superseded", ""
+            return "failed", "MGG refined Home route could not be submitted"
+        with self._active_lock:
+            if (
+                submitted_generation != self.bridge._goal_generation
+                or self._continuation_generation != generation
+                or self._rolling_route_id != route_id
+                or self._home_intent != home_intent
+                or self._objective_kind != "return_home"
+            ):
+                return "superseded", ""
+            self._continuation_generation = None
+            self._continuation_deadline = None
+            self._rolling_partial = partial
+            self._rolling_global_plan = (submitted_generation, global_plan)
+            self._indexed_map_validated = indexed_map_validated
+            route_points = tuple((pose.x, pose.y, pose.z) for pose in global_plan.poses)
+            self._active_route = (
+                submitted_generation,
+                binding,
+                home_intent,
+                deepcopy(goal),
+                indexed_map_validated,
+                route_points,
+            )
+            self._validation_path = tuple(deepcopy(response.path))
+            self._validation_token += 1
+            self._validation_next_at = 0.0
+        return "submitted", ""
 
     def _plan_once(
         self,
@@ -730,6 +1135,7 @@ class MggObjectivePlanning:
                 self._objective_goal = deepcopy(goal)
                 self._indexed_map_validated = False
                 self._home_intent = home_intent
+                self._clear_rolling_locked()
                 self._recovery_generation = None
                 self._recovery_deadline = None
             generation = self.bridge.cancel_goal()
@@ -888,9 +1294,8 @@ class MggObjectivePlanning:
             current_snapshot = self._mapping_snapshot(current_authority or {})
         except ValueError:
             current_snapshot = object()
-        if (
-            self._route_authority_changed(authority_binding, current_authority)
-            or (indexed_map_validated and current_snapshot != mapping_snapshot)
+        if self._route_authority_changed(authority_binding, current_authority) or (
+            indexed_map_validated and current_snapshot != mapping_snapshot
         ):
             return (
                 "authority_changed",
@@ -918,19 +1323,56 @@ class MggObjectivePlanning:
         partial = getattr(response, "partial", False)
         if type(partial) is not bool:
             return "terminal", "MGG returned an invalid partial-route flag", generation
-        if partial:
+        if partial and objective != "return_home":
             return (
                 "terminal",
                 "MGG returned a partial route; a full route to the requested "
                 "objective is required",
                 generation,
             )
-        endpoint = plan.poses[-1]
-        endpoint_error = math.hypot(endpoint.x - x, endpoint.y - y)
-        if endpoint_error > FULL_ROUTE_ENDPOINT_TOLERANCE_M:
+        route_id = getattr(response, "route_id", "")
+        if not isinstance(route_id, str) or len(route_id) > 512:
+            return "terminal", "MGG returned an invalid route token", generation
+        if partial and (
+            not route_id
+            or self.refine_service_type is None
+            or self.refine_client is None
+        ):
             return (
                 "terminal",
-                "MGG full route endpoint differs from the requested objective "
+                "MGG partial Home route cannot continue with the installed ABI",
+                generation,
+            )
+        global_poses = getattr(response, "global_path", None)
+        if not global_poses:
+            global_poses = response.path if not partial else None
+        if global_poses is None:
+            return "terminal", "MGG partial Home route has no global route", generation
+        global_path = SimpleNamespace(
+            header=SimpleNamespace(frame_id=self.frame, stamp=stamp),
+            poses=[
+                SimpleNamespace(header=SimpleNamespace(frame_id=self.frame), pose=pose)
+                for pose in global_poses
+            ],
+        )
+        try:
+            # The graph route is display and continuation topology. Only the
+            # controller-local path above must already satisfy every refined
+            # ground segment.
+            global_plan = planner_path(global_path, self.frame, math.inf, math.pi)
+        except (AttributeError, TypeError, ValueError) as exc:
+            return (
+                "failed",
+                f"MGG returned an unsupported global route: {exc}",
+                generation,
+            )
+        endpoint = global_plan.poses[-1] if partial else plan.poses[-1]
+        endpoint_error = math.hypot(endpoint.x - x, endpoint.y - y)
+        if endpoint_error > FULL_ROUTE_ENDPOINT_TOLERANCE_M:
+            route_kind = "global" if partial else "full"
+            return (
+                "terminal",
+                f"MGG {route_kind} route endpoint differs from the requested objective "
                 f"by {endpoint_error:.3f}m "
                 f"(limit {FULL_ROUTE_ENDPOINT_TOLERANCE_M:.3f}m)",
                 generation,
@@ -992,13 +1434,19 @@ class MggObjectivePlanning:
             self._recovery_deadline = None
             self._home_intent = home_intent
             self._indexed_map_validated = indexed_map_validated
+            self._rolling_route_id = route_id if partial else None
+            self._rolling_partial = partial
+            self._rolling_global_plan = (submitted_generation, global_plan)
+            self._rolling_authority_binding = authority_binding
+            self._continuation_generation = None
+            self._continuation_deadline = None
             self._active_route = (
                 submitted_generation,
                 authority_binding,
                 home_intent,
                 deepcopy(goal),
                 indexed_map_validated,
-                tuple((pose.x, pose.y, pose.z) for pose in plan.poses)
+                tuple((pose.x, pose.y, pose.z) for pose in global_plan.poses)
                 + ((x, y, z),),
             )
             self._validation_path = tuple(deepcopy(response.path))
@@ -1056,9 +1504,9 @@ class MggObjectivePlanning:
                     return False
                 self._active_route = None
                 self._validation_token += 1
-            reason = str(
-                getattr(response, "reason", "") or "known route hazard"
-            )[:MAX_NAV_FAILURE_REASON_LENGTH]
+            reason = str(getattr(response, "reason", "") or "known route hazard")[
+                :MAX_NAV_FAILURE_REASON_LENGTH
+            ]
             if self._start_recovery(
                 generation, home_intent, cancel_route=True, binding=binding
             ):
@@ -1146,6 +1594,7 @@ class MggObjectivePlanning:
                 self._objective_goal = None
                 self._home_intent = None
                 self._indexed_map_validated = False
+                self._clear_rolling_locked()
 
     def _owns_recovery(self, generation, home_intent) -> bool:
         with self._active_lock:
@@ -1182,8 +1631,7 @@ class MggObjectivePlanning:
         try:
             translation = math.sqrt(
                 sum(
-                    (float(before.get(axis, 0.0)) - float(after.get(axis, 0.0)))
-                    ** 2
+                    (float(before.get(axis, 0.0)) - float(after.get(axis, 0.0))) ** 2
                     for axis in ("x", "y", "z")
                 )
             )
@@ -1205,12 +1653,9 @@ class MggObjectivePlanning:
 
         component_goal = goal.get("component_goal")
         source_frame = str(
-            goal.get("frame_id")
-            or getattr(self.bridge, "map_frame", self.frame)
+            goal.get("frame_id") or getattr(self.bridge, "map_frame", self.frame)
         ).lstrip("/")
-        raw_frame = str(
-            (raw_authority or {}).get("navigation_frame", "")
-        ).lstrip("/")
+        raw_frame = str((raw_authority or {}).get("navigation_frame", "")).lstrip("/")
         if not raw_frame and raw_authority is None:
             raw_frame = str(authority.get("navigation_frame", "")).lstrip("/")
         if component_goal is not None:
@@ -1280,9 +1725,7 @@ class MggObjectivePlanning:
             raise ValueError("component-frame objective has no navigation transform")
         resolved = deepcopy(goal)
         resolved.update(navigation_goal(component_goal, transform))
-        resolved["frame_id"] = str(authority.get("navigation_frame", "")).lstrip(
-            "/"
-        )
+        resolved["frame_id"] = str(authority.get("navigation_frame", "")).lstrip("/")
         return resolved
 
     def _goal_in_planning(self, goal, authority, raw_authority=None):
@@ -1291,8 +1734,7 @@ class MggObjectivePlanning:
         if isinstance(goal.get("component_goal"), dict):
             return self._component_goal_in_navigation(goal, authority)
         source_frame = str(
-            goal.get("frame_id")
-            or getattr(self.bridge, "map_frame", self.frame)
+            goal.get("frame_id") or getattr(self.bridge, "map_frame", self.frame)
         ).lstrip("/")
         resolved = deepcopy(goal)
         if source_frame != self.frame:
@@ -1330,12 +1772,14 @@ class MggObjectivePlanning:
         with self._active_lock:
             active = self._active_route
             recovery_generation = self._recovery_generation
+            continuation_generation = self._continuation_generation
             objective = self._objective_kind
             goal = deepcopy(self._objective_goal)
             home_intent = self._home_intent
             indexed_map_validated = self._indexed_map_validated
             generation = self.bridge._goal_generation
             initial_claim_generation = self._initial_claim_generation
+            rolling_partial = self._rolling_partial
             if self._nav_failure_generation != generation:
                 self._nav_failure_reason = None
                 self._nav_failure_generation = None
@@ -1345,6 +1789,7 @@ class MggObjectivePlanning:
                 and (
                     (active is not None and active[0] == generation)
                     or recovery_generation == generation
+                    or continuation_generation == generation
                     or initial_claim_generation == generation
                 )
             )
@@ -1357,9 +1802,10 @@ class MggObjectivePlanning:
             )
             if active is not None:
                 goal = {**active[3], "frame_id": self.frame}
-            elif objective == "return_home" and self._authority_home_identity(
-                authority
-            ) == home_intent:
+            elif (
+                objective == "return_home"
+                and self._authority_home_identity(authority) == home_intent
+            ):
                 goal = self._authority_home_from(authority)
             elif isinstance(goal, dict):
                 if not self._goal_authority_error(
@@ -1384,6 +1830,7 @@ class MggObjectivePlanning:
         final_success = bool(
             active is not None
             and decorated.get("nav_status") == "succeeded"
+            and not rolling_partial
         )
         if owned_sequence and not terminal_failure and not final_success:
             decorated["nav_status"] = "active"
@@ -1392,11 +1839,13 @@ class MggObjectivePlanning:
             decorated["objective_continuation"] = {
                 "objective": objective,
                 "evidence_source": (
-                    "mola_indexed"
-                    if indexed_map_validated
-                    else "mgg_native"
+                    "mola_indexed" if indexed_map_validated else "mgg_native"
                 ),
-                "phase": "following_final" if active is not None else "planning",
+                "phase": (
+                    "following_local"
+                    if active is not None and rolling_partial
+                    else "following_final" if active is not None else "planning"
+                ),
             }
         if decorated.get("nav_status") == "failed":
             # Native planner failures are retained by the planner, while
@@ -1404,7 +1853,9 @@ class MggObjectivePlanning:
             # Keep the planner's bounded reason authoritative when both exist.
             reason = failure_reason or decorated.get("nav_failure_reason")
             if reason:
-                decorated["nav_failure_reason"] = str(reason)[:MAX_NAV_FAILURE_REASON_LENGTH]
+                decorated["nav_failure_reason"] = str(reason)[
+                    :MAX_NAV_FAILURE_REASON_LENGTH
+                ]
         else:
             decorated.pop("nav_failure_reason", None)
         return decorated
@@ -1428,7 +1879,9 @@ class MggObjectivePlanning:
         except ValueError:
             return False
 
-    def _start_recovery(self, generation, home_intent, *, cancel_route, binding=None) -> bool:
+    def _start_recovery(
+        self, generation, home_intent, *, cancel_route, binding=None
+    ) -> bool:
         if cancel_route:
             generation = self.bridge.cancel_goal_if_current(generation, pending=True)
             if generation is None:
@@ -1441,6 +1894,7 @@ class MggObjectivePlanning:
                 return False
             self._initial_claim_generation = None
             self._home_intent = home_intent
+            self._clear_rolling_locked()
             self._recovery_generation = generation
             self._recovery_binding = binding
             self._recovery_deadline = deadline
@@ -1506,7 +1960,9 @@ class MggObjectivePlanning:
                 if isinstance(raw_authority, dict)
                 else None
             )
-            if raw_authority is None and (binding is not None or home_intent is not None):
+            if raw_authority is None and (
+                binding is not None or home_intent is not None
+            ):
                 # Unavailable input is not a failed planning attempt. Keep
                 # motion stopped and wait, bounded by the original deadline.
                 last_error = "no fresh map authority was available"
@@ -1516,7 +1972,8 @@ class MggObjectivePlanning:
                 binding, authority
             ):
                 self._finish_recovery_failure(
-                    generation, "map authority mission or component changed during recovery"
+                    generation,
+                    "map authority mission or component changed during recovery",
                 )
                 return
             try:
@@ -1532,9 +1989,7 @@ class MggObjectivePlanning:
                         return
                     target = self._authority_home_from(authority)
                     if target is None:
-                        raise ValueError(
-                            "no fresh return-home authority was available"
-                        )
+                        raise ValueError("no fresh return-home authority was available")
                 else:
                     with self._active_lock:
                         original = deepcopy(self._objective_goal)
@@ -1598,6 +2053,7 @@ class MggObjectivePlanning:
             self._objective_kind = None
             self._objective_goal = None
             self._indexed_map_validated = False
+            self._clear_rolling_locked()
         self._fail_if_current(message, generation)
 
     def _clear_recovery(self, generation, home_intent) -> None:
@@ -1613,6 +2069,7 @@ class MggObjectivePlanning:
                 self._objective_kind = None
                 self._objective_goal = None
                 self._indexed_map_validated = False
+                self._clear_rolling_locked()
 
     def _fail_if_current(self, message: str, generation: int) -> None:
         if self.bridge.set_nav_status_if_current(generation, "failed"):
@@ -1629,6 +2086,7 @@ class MggObjectivePlanning:
                     self._objective_kind = None
                     self._objective_goal = None
                     self._indexed_map_validated = False
+                    self._clear_rolling_locked()
             self.bridge.node.get_logger().warning(f"[{self.bridge.id}] {message}")
 
 

@@ -51,9 +51,7 @@ def test_onboard_map_callback_requires_the_navigation_frame(bridge_cls):
     bridge._onboard_map_warned_at = 0.0
     bridge.map_frame = "robot_0/map_frame"
     bridge.pub_global_map = MagicMock()
-    wrong = types.SimpleNamespace(
-        header=types.SimpleNamespace(frame_id="map")
-    )
+    wrong = types.SimpleNamespace(header=types.SimpleNamespace(frame_id="map"))
     aligned = types.SimpleNamespace(
         header=types.SimpleNamespace(frame_id="robot_0/map_frame")
     )

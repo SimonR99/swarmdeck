@@ -16,7 +16,6 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
-
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "adapters" / "adapter_sim"))
@@ -42,12 +41,8 @@ def main() -> None:
     bridge.pub_global_map = node.create_publisher(
         OccupancyGrid, "/probe/global_map", qos
     )
-    node.create_subscription(
-        OccupancyGrid, "/probe/map", bridge._on_map, qos
-    )
-    node.create_subscription(
-        OccupancyGrid, "/probe/global_map", received.append, qos
-    )
+    node.create_subscription(OccupancyGrid, "/probe/map", bridge._on_map, qos)
+    node.create_subscription(OccupancyGrid, "/probe/global_map", received.append, qos)
     source = node.create_publisher(OccupancyGrid, "/probe/map", qos)
     executor = SingleThreadedExecutor()
     executor.add_node(node)

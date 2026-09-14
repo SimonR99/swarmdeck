@@ -91,10 +91,28 @@ def test_sim_far_plane_is_a_free_ray_candidate_but_hardware_stays_unknown():
     )
 
     assert valid(depths, True).tolist() == [
-        False, False, False, False, True, True, True, True, True, False
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
     ]
     assert valid(depths, False).tolist() == [
-        False, False, False, False, True, True, False, False, False, False
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
     ]
     # An incompatible native range must not turn the 40 m no-return sentinel
     # into an occupied endpoint.

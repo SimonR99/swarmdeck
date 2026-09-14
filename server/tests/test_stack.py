@@ -768,7 +768,7 @@ def test_robot_world_transform_roundtrip():
     assert restored == pytest.approx(local)
 
 
-def test_goal_routing_converts_shared_coordinates_to_robot_frame():
+def test_goal_routing_converts_shared_coordinates_to_robot_frame(monkeypatch):
     class Sink:
         def __init__(self):
             self.messages = []
@@ -793,6 +793,54 @@ def test_goal_routing_converts_shared_coordinates_to_robot_frame():
         assert sink.messages[0]["type"] == "navigate_to"
         assert sink.messages[0]["goal"] == pytest.approx({"x": 2.0, "y": 1.0})
 
+        sink.messages.clear()
+        broadcasts = []
+
+        async def capture_broadcast(message):
+            broadcasts.append(message)
+
+        monkeypatch.setitem(
+            handle_gui_message.__globals__, "broadcast", capture_broadcast
+        )
+        map_service.set_transform("r0", 5.0, -2.0, math.pi / 2)
+        asyncio.run(
+            handle_gui_message(
+                {
+                    "type": "set_goal",
+                    "robot_id": "r0",
+                    "payload": {
+                        "x": 3.0,
+                        "y": 0.0,
+                        "map_transform": {"x": 4.0, "y": -2.0, "yaw": math.pi / 2},
+                    },
+                }
+            )
+        )
+        assert sink.messages == []
+        assert broadcasts[-1]["type"] == "map_info"
+        map_service.set_transform("r0", 4.0, -2.0, math.pi / 2)
+        monkeypatch.setattr(
+            map_service,
+            "world_to_robot",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("fenced goal reread its transform")
+            ),
+        )
+        asyncio.run(
+            handle_gui_message(
+                {
+                    "type": "set_goal",
+                    "robot_id": "r0",
+                    "payload": {
+                        "x": 3.0,
+                        "y": 0.0,
+                        "map_transform": {"x": 4.0, "y": -2.0, "yaw": math.pi / 2},
+                    },
+                }
+            )
+        )
+        assert sink.messages[0]["goal"] == pytest.approx({"x": 2.0, "y": 1.0})
+
         robot.pose = {"x": 2.0, "y": 1.0, "yaw": 0.0}
         assert robot_state(robot)["pose"] == pytest.approx(
             {"x": 3.0, "y": 0.0, "yaw": math.pi / 2}
@@ -808,6 +856,9 @@ def test_goal_routing_converts_shared_coordinates_to_robot_frame():
         robot.global_planned_path = [{"x": 2.0, "y": 1.0}, {"x": 2.0, "y": 2.0}]
         robot.local_planned_path = [{"x": 2.0, "y": 1.0}, {"x": 3.0, "y": 1.0}]
         split_state = robot_state(robot)
+        assert split_state["navigation_transform"] == pytest.approx(
+            {"x": 4.0, "y": -2.0, "yaw": math.pi / 2}
+        )
         assert split_state["global_planned_path"][0] == pytest.approx(
             {"x": 3.0, "y": 0.0}
         )

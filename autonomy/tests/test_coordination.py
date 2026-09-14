@@ -49,14 +49,10 @@ def test_decision_winner_uses_one_clock_sample_and_verified_component():
     arbiter = LeaseArbiter("a", session, {"a", "b", "c"}, clock=lambda: now[0])
     arbiter.set_component("verified")
     arbiter.propose((0, 0, 0), cost=2.0)
-    arbiter.receive(
-        Intention("b", session, 1, "verified", (0, 0, 0), 2.0, 1.0, 3.0)
-    )
+    arbiter.receive(Intention("b", session, 1, "verified", (0, 0, 0), 2.0, 1.0, 3.0))
     # Defend the evaluation even if a lease from another component is present
     # because of corrupted legacy state or an implementation regression.
-    unrelated = Intention(
-        "c", session, 1, "other", (0, 0, 0), 2.0, 0.0, 3.0
-    )
+    unrelated = Intention("c", session, 1, "other", (0, 0, 0), 2.0, 0.0, 3.0)
     arbiter.leases["c"] = (unrelated, 3.0)
 
     calls = []

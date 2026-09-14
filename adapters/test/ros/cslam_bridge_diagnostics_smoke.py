@@ -151,7 +151,8 @@ def verify_consume_uses_paired_odom_capture_stamp() -> None:
     )
     original = cslam_bridge.point_cloud2.read_points_numpy
     cslam_bridge.point_cloud2.read_points_numpy = lambda *args, **kwargs: np.asarray(
-        [[1.0, 0.0, 0.0]], dtype=np.float32,
+        [[1.0, 0.0, 0.0]],
+        dtype=np.float32,
     )
     try:
         Bridge.consume(bridge, 7)
@@ -186,20 +187,12 @@ def main() -> None:
             closures_by_peer={},
         )
 
-        Bridge.inter_robot_closure(
-            bridge, NS(robot0_id=0, robot1_id=1, success=False)
-        )
+        Bridge.inter_robot_closure(bridge, NS(robot0_id=0, robot1_id=1, success=False))
         assert bridge.closure_candidates == 0  # this single-peer bridge is uninvolved
         core.robot_names[1] = "r1"
-        Bridge.inter_robot_closure(
-            bridge, NS(robot0_id=0, robot1_id=1, success=False)
-        )
-        Bridge.inter_robot_closure(
-            bridge, NS(robot0_id=1, robot1_id=0, success=True)
-        )
-        Bridge.inter_robot_closure(
-            bridge, NS(robot0_id=1, robot1_id=2, success=True)
-        )
+        Bridge.inter_robot_closure(bridge, NS(robot0_id=0, robot1_id=1, success=False))
+        Bridge.inter_robot_closure(bridge, NS(robot0_id=1, robot1_id=0, success=True))
+        Bridge.inter_robot_closure(bridge, NS(robot0_id=1, robot1_id=2, success=True))
         assert bridge.closure_candidates == 2
         assert bridge.rejected_closures == 1
         assert bridge.verified_closures == 1

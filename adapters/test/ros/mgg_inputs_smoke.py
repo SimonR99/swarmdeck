@@ -77,10 +77,14 @@ info.header.frame_id = "robot_0/base_link/camera"
 focal = 240 / (2 * np.tan(np.pi / 6))
 info.k = [focal, 0.0, 160.0, 0.0, focal, 120.0, 0.0, 0.0, 1.0]
 rows = np.arange(240)[:, None]
-road = np.broadcast_to(
-    np.where(rows > 120, 0.3 * focal / np.maximum(rows - 120, 1), 40.0),
-    (240, 320),
-).astype("<f4").copy()
+road = (
+    np.broadcast_to(
+        np.where(rows > 120, 0.3 * focal / np.maximum(rows - 120, 1), 40.0),
+        (240, 320),
+    )
+    .astype("<f4")
+    .copy()
+)
 road = np.minimum(road, 40.0)
 depth = Image(width=320, height=240, step=1280, encoding="32FC1")
 depth.header.frame_id = info.header.frame_id
@@ -93,14 +97,19 @@ points = np.frombuffer(cloud.data, dtype="<f4").reshape(-1, 3)
 assert cloud.width > 19200
 assert np.count_nonzero(points[:, 0] == 40.0) > 0
 # The pixel grid lacks this exact forward floor interval; surface samples fill it.
-assert np.any((np.abs(points[:, 0] - 12.0) < 0.1)
-              & (np.abs(points[:, 1]) < 0.1)
-              & (np.abs(points[:, 2] + 0.3) < 0.001))
+assert np.any(
+    (np.abs(points[:, 0] - 12.0) < 0.1)
+    & (np.abs(points[:, 1]) < 0.1)
+    & (np.abs(points[:, 2] + 0.3) < 0.001)
+)
 assert cloud.header == depth.header
 from unittest.mock import patch
+
 node.depth = depth
 node.get_logger = Mock()
-with patch.object(module, "rasterize_flat_depth_quads", side_effect=ValueError("budget")):
+with patch.object(
+    module, "rasterize_flat_depth_quads", side_effect=ValueError("budget")
+):
     node.publish_cloud()
 fallback = node.cloud.publish.call_args.args[0]
 assert fallback.width == 19200
@@ -174,7 +183,9 @@ assert node.odom.publish.call_args.args[0].child_frame_id == "chassis"
 print("MGG hardware depth and chassis-frame smoke passed")
 
 # MOLA still needs odometry/TF, but must not receive or convert duplicate clouds.
-module.rclpy.init(args=["--ros-args", "-p", "cloud_enabled:=false", "-p", "depth_enabled:=true"])
+module.rclpy.init(
+    args=["--ros-args", "-p", "cloud_enabled:=false", "-p", "depth_enabled:=true"]
+)
 relay = module.Inputs()
 try:
     subscriptions = {subscription.topic_name for subscription in relay.subscriptions}

@@ -208,6 +208,7 @@ class MapService:
         # optimised poses, and re-deriving it here could only reintroduce the
         # frame mismatch this exists to remove.
         self.global_grid: tuple[GridMeta, np.ndarray] | None = None
+        self.global_grid_transforms: dict[str, tuple[float, float, float]] | None = None
         self.global_map_seq = 0
         # Each robot's pose as the collaborative back end reports it, already in
         # the common frame the merged map uses.
@@ -258,9 +259,9 @@ class MapService:
             self.meta.origin_y + (np.arange(n, dtype=np.float32) + 0.5) * resolution
         ).astype(np.float32)
 
-    def _publish_map(self) -> None:
+    def _publish_map(self, transforms=None) -> None:
         """Publish the current working map without exposing mixed generations."""
-        snapshot = self._snapshots.publish(self.meta, self.merged)
+        snapshot = self._snapshots.publish(self.meta, self.merged, transforms)
         # Keep these legacy/public attributes coherent for callers that use
         # them directly; API readers use `map_snapshot()` below.
         self.seq = snapshot.seq
@@ -272,7 +273,13 @@ class MapService:
 
     def map_info(self) -> dict[str, Any]:
         snapshot = self.map_snapshot()
-        return snapshot.meta.as_dict(snapshot.seq)
+        return {
+            **snapshot.meta.as_dict(snapshot.seq),
+            "transforms": {
+                robot: {"x": pose[0], "y": pose[1], "yaw": pose[2]}
+                for robot, pose in snapshot.transforms.items()
+            },
+        }
 
     def _state_set(self, mapping: dict[Any, Any], key: Any, value: Any) -> None:
         with self._state_lock:
@@ -343,6 +350,7 @@ class MapService:
                 self._network_prev.clear()
                 self._network_seq.clear()
                 self.global_grid = None
+                self.global_grid_transforms = None
                 self.global_map_seq = 0
                 self.common_poses.clear()
                 self.cslam_frames.clear()
@@ -504,6 +512,7 @@ class MapService:
             self.common_poses.clear()
             self.cslam_frames.clear()
             self.global_grid = None
+            self.global_grid_transforms = None
             self.global_map_seq = 0
             self._nav_cache.clear()
             self.transforms = dict(self.transform_priors)
@@ -525,7 +534,7 @@ class MapService:
             self.registration_sources.clear()
             self.registered.clear()
             self.registration_misses.clear()
-        self._publish_map()
+        self._publish_map({})
 
     def cloud_targets(self, robot_id: str) -> list[str]:
         """Which robots a new cloud from `robot_id` invalidates the pairing of.
@@ -632,10 +641,12 @@ class MapService:
 
         return common_pose(self, robot_id)
 
-    def set_global_grid(self, meta: GridMeta, cells: np.ndarray) -> None:
+    def set_global_grid(
+        self, meta: GridMeta, cells: np.ndarray, transforms=None
+    ) -> None:
         from .cslam import set_global_grid
 
-        set_global_grid(self, meta, cells)
+        set_global_grid(self, meta, cells, transforms=transforms)
 
     def set_cslam_origin(
         self,
@@ -1616,6 +1627,12 @@ class MapService:
         with self._state_lock:
             merge_mode = self.merge_mode
             global_grid = self.global_grid
+            global_grid_transforms = (
+                None
+                if self.global_grid_transforms is None
+                else dict(self.global_grid_transforms)
+            )
+            common_to_world = self._common_to_world()
             robot_grids = dict(self.robot_grids)
             transforms = dict(self.transforms)
 
@@ -1623,9 +1640,21 @@ class MapService:
             # Same offset as the poses: the back end's grid is in its common
             # frame, anchored at the reference robot's start pose.
             meta, cells = global_grid
-            self._ensure_extent_for_members([(meta, cells, self._common_to_world())])
-            self.merged = self._warp(meta, cells, self._common_to_world())
-            self._publish_map()
+            self._ensure_extent_for_members([(meta, cells, common_to_world)])
+            self.merged = self._warp(meta, cells, common_to_world)
+            published_transforms = None
+            if global_grid_transforms is not None:
+                wx, wy, wyaw = common_to_world
+                c, s = math.cos(wyaw), math.sin(wyaw)
+                published_transforms = {
+                    robot: (
+                        wx + x * c - y * s,
+                        wy + x * s + y * c,
+                        self._wrap_yaw(yaw + wyaw),
+                    )
+                    for robot, (x, y, yaw) in global_grid_transforms.items()
+                }
+            self._publish_map(published_transforms)
             return
 
         members = self.global_members()
@@ -1636,7 +1665,7 @@ class MapService:
         ]
         if not items:
             self.merged = np.full_like(self.merged, UNKNOWN)
-            self._publish_map()
+            self._publish_map(transforms)
             return
 
         self._ensure_extent_for_members(items)
@@ -1648,7 +1677,7 @@ class MapService:
                 known = warped != UNKNOWN
                 out[known] = np.maximum(out[known], warped[known])
             self.merged = out
-            self._publish_map()
+            self._publish_map(transforms)
             return
 
         occupied_votes = np.zeros(self.merged.shape, dtype=np.int16)
@@ -1664,7 +1693,7 @@ class MapService:
             occupied_votes[observed] >= free_votes[observed], OCCUPIED, FREE
         )
         self.merged = out
-        self._publish_map()
+        self._publish_map(transforms)
 
     # --------------------------------------------------------------- output
 
@@ -1692,6 +1721,10 @@ class MapService:
             "w": capture.x1 - capture.x0,
             "h": capture.y1 - capture.y0,
             "data": base64.b64encode(zlib.compress(capture.cells.tobytes())).decode(),
+            "transforms": {
+                robot: {"x": pose[0], "y": pose[1], "yaw": pose[2]}
+                for robot, pose in snapshot.transforms.items()
+            },
         }
 
     def network_robot_ids(self) -> list[str]:

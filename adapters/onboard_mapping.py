@@ -16,7 +16,6 @@ from autonomy.capture_providers import (
     capture_provider,
 )
 
-
 MAPPING_AUTHORITY_ENV = "SWARMDECK_MAPPING_AUTHORITY"
 MAPPING_AUTHORITY_MODES = frozenset({"central", "onboard"})
 CAPTURE_PROVIDER_ENV = "SWARMDECK_CAPTURE_PROVIDER"

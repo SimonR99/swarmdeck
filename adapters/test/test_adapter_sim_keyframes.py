@@ -314,5 +314,9 @@ def test_cloud_upload_includes_projected_camera_colors(sim_module, monkeypatch):
     request = upload.call_args.args[0]
     assert "format=xyzrgb32" in request.full_url
     raw = zlib.decompress(request.data)
-    np.testing.assert_array_equal(np.frombuffer(raw[:24], dtype="<f4").reshape(-1, 3), points)
-    np.testing.assert_array_equal(np.frombuffer(raw[24:], dtype=np.uint8).reshape(-1, 3), colors)
+    np.testing.assert_array_equal(
+        np.frombuffer(raw[:24], dtype="<f4").reshape(-1, 3), points
+    )
+    np.testing.assert_array_equal(
+        np.frombuffer(raw[24:], dtype=np.uint8).reshape(-1, 3), colors
+    )

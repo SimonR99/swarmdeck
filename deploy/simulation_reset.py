@@ -16,10 +16,10 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from uuid import uuid4
 
-
 SUPERVISOR_STALE_NS = 15_000_000_000
 MIN_DOMAIN_ID = 1
 MAX_DOMAIN_ID = 232
+
 
 def atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,8 +117,7 @@ def ensure_deployment_env(path: Path) -> dict[str, str]:
     """Make --env-file usable before either the stack or supervisor is started."""
     current = read_deployment_env(path)
     complete = all(
-        key in current
-        for key in ("SWARMDECK_MISSION_ID", "SWARMDECK_TEST_DOMAIN")
+        key in current for key in ("SWARMDECK_MISSION_ID", "SWARMDECK_TEST_DOMAIN")
     )
     if complete:
         validate_domain(current["SWARMDECK_TEST_DOMAIN"])
@@ -126,16 +125,25 @@ def ensure_deployment_env(path: Path) -> dict[str, str]:
     mission = current.get(
         "SWARMDECK_MISSION_ID", os.environ.get("SWARMDECK_MISSION_ID", "")
     ) or str(uuid4())
-    domain = validate_domain(current.get(
-        "SWARMDECK_TEST_DOMAIN", os.environ.get("SWARMDECK_TEST_DOMAIN", "173")
-    ))
+    domain = validate_domain(
+        current.get(
+            "SWARMDECK_TEST_DOMAIN", os.environ.get("SWARMDECK_TEST_DOMAIN", "173")
+        )
+    )
     write_deployment_env(path, mission, domain)
     return read_deployment_env(path)
 
 
 class Supervisor:
-    def __init__(self, root: Path, env_file: Path, command: list[str], services: list[str],
-                 server_url: str = "", expected_robots: int = 0):
+    def __init__(
+        self,
+        root: Path,
+        env_file: Path,
+        command: list[str],
+        services: list[str],
+        server_url: str = "",
+        expected_robots: int = 0,
+    ):
         self.root, self.env_file = root, env_file
         self.compose_command, self.services = command, services
         self.server_url, self.expected_robots = server_url.rstrip("/"), expected_robots
@@ -145,8 +153,13 @@ class Supervisor:
         with self._status_lock:
             atomic_json(
                 self.root / "status.json",
-                {"version": 1, "request_id": request["request_id"], "phase": phase,
-                 "updated_at_ns": time.time_ns(), **fields},
+                {
+                    "version": 1,
+                    "request_id": request["request_id"],
+                    "phase": phase,
+                    "updated_at_ns": time.time_ns(),
+                    **fields,
+                },
             )
 
     def supervisor_heartbeat(self) -> None:
@@ -155,8 +168,13 @@ class Supervisor:
             {"version": 1, "pid": os.getpid(), "updated_at_ns": time.time_ns()},
         )
 
-    def run_command(self, request: dict, phase: str, arguments: list[str],
-                    environment: dict[str, str]) -> None:
+    def run_command(
+        self,
+        request: dict,
+        phase: str,
+        arguments: list[str],
+        environment: dict[str, str],
+    ) -> None:
         stopped = Event()
 
         def heartbeat() -> None:
@@ -173,17 +191,26 @@ class Supervisor:
 
     def require_services_running(self, environment: dict[str, str]) -> None:
         result = subprocess.run(
-            [*self.compose_command, "--env-file", str(self.env_file),
-             "ps", "--status", "running", "--services", *self.services],
-            check=True, capture_output=True, text=True, timeout=10,
+            [
+                *self.compose_command,
+                "--env-file",
+                str(self.env_file),
+                "ps",
+                "--status",
+                "running",
+                "--services",
+                *self.services,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
             env=environment,
         )
         running = set(result.stdout.splitlines())
         missing = sorted(set(self.services) - running)
         if missing:
-            raise RuntimeError(
-                f"services exited during reset: {', '.join(missing)}"
-            )
+            raise RuntimeError(f"services exited during reset: {', '.join(missing)}")
 
     def run(self, request: dict) -> None:
         try:
@@ -199,8 +226,16 @@ class Supervisor:
                 if key in current:
                     stop_environment[key] = current[key]
             self.status(request, "stopping", ok=None)
-            self.run_command(request, "stopping",
-                [*self.compose_command, "--env-file", str(self.env_file), "stop", *self.services],
+            self.run_command(
+                request,
+                "stopping",
+                [
+                    *self.compose_command,
+                    "--env-file",
+                    str(self.env_file),
+                    "stop",
+                    *self.services,
+                ],
                 stop_environment,
             )
             write_deployment_env(self.env_file, mission, domain)
@@ -212,10 +247,24 @@ class Supervisor:
                 SWARMDECK_MISSION_ID=mission,
                 SWARMDECK_TEST_DOMAIN=str(domain),
             )
-            self.status(request, "starting", ok=None, mission_id=mission, domain_id=domain)
-            self.run_command(request, "starting",
-                [*self.compose_command, "--env-file", str(self.env_file), "up", "-d",
-                 "--force-recreate", "--wait", "--wait-timeout", "120", *self.services],
+            self.status(
+                request, "starting", ok=None, mission_id=mission, domain_id=domain
+            )
+            self.run_command(
+                request,
+                "starting",
+                [
+                    *self.compose_command,
+                    "--env-file",
+                    str(self.env_file),
+                    "up",
+                    "-d",
+                    "--force-recreate",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    *self.services,
+                ],
                 start_environment,
             )
             # `--wait` returns when services without a healthcheck are merely
@@ -223,16 +272,31 @@ class Supervisor:
             # startup transition even when fleet readiness checking is disabled.
             self.require_services_running(start_environment)
             if self.expected_robots:
-                self.status(request, "verifying", ok=None, mission_id=mission, domain_id=domain)
+                self.status(
+                    request, "verifying", ok=None, mission_id=mission, domain_id=domain
+                )
                 deadline = time.monotonic() + 120
                 while time.monotonic() < deadline:
-                    self.status(request, "verifying", ok=None, mission_id=mission, domain_id=domain)
+                    self.status(
+                        request,
+                        "verifying",
+                        ok=None,
+                        mission_id=mission,
+                        domain_id=domain,
+                    )
                     try:
-                        with urllib.request.urlopen(f"{self.server_url}/api/fleet", timeout=2) as response:
+                        with urllib.request.urlopen(
+                            f"{self.server_url}/api/fleet", timeout=2
+                        ) as response:
                             body = json.loads(response.read())
-                        online = [robot for robot in body.get("robots", []) if robot.get("online") is True]
+                        online = [
+                            robot
+                            for robot in body.get("robots", [])
+                            if robot.get("online") is True
+                        ]
                         ready = [
-                            robot for robot in online
+                            robot
+                            for robot in online
                             if robot.get("navigation_ready") is True
                             and "reset" in (robot.get("capabilities") or [])
                         ]
@@ -252,7 +316,9 @@ class Supervisor:
                 self.require_services_running(start_environment)
             self.status(request, "done", ok=True, mission_id=mission, domain_id=domain)
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-            self.status(request, "failed", ok=False, error=f"{type(exc).__name__}: {exc}")
+            self.status(
+                request, "failed", ok=False, error=f"{type(exc).__name__}: {exc}"
+            )
 
     def poll_once(self, *, recover_active: bool = False) -> bool:
         request_path = self.root / "request.json"
@@ -261,7 +327,11 @@ class Supervisor:
                 request = json.loads(request_path.read_text())
             except (FileNotFoundError, OSError, json.JSONDecodeError):
                 return False
-            if not isinstance(request, dict) or request.get("version") != 1 or not isinstance(request.get("request_id"), str):
+            if (
+                not isinstance(request, dict)
+                or request.get("version") != 1
+                or not isinstance(request.get("request_id"), str)
+            ):
                 return False
             status = {}
             try:
@@ -270,7 +340,10 @@ class Supervisor:
                 pass
             if status.get("request_id") == request["request_id"]:
                 active = status.get("phase") in {
-                    "accepted", "stopping", "starting", "verifying"
+                    "accepted",
+                    "stopping",
+                    "starting",
+                    "verifying",
                 }
                 updated = status.get("updated_at_ns", status.get("requested_at_ns"))
                 stale = not isinstance(updated, int) or (
@@ -298,7 +371,9 @@ def main() -> None:
     args = parser.parse_args()
     service_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
     if any(service_pattern.fullmatch(service) is None for service in args.service):
-        parser.error("service names may contain only letters, digits, dot, underscore and dash")
+        parser.error(
+            "service names may contain only letters, digits, dot, underscore and dash"
+        )
     compose_files = []
     for value in args.compose_file:
         path = Path(value)
@@ -315,15 +390,17 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         parser.error(f"cannot initialize deployment env: {exc}")
     supervisor = Supervisor(
-        args.root, args.env_file, command, args.service,
-        args.server_url, args.expected_robots,
+        args.root,
+        args.env_file,
+        command,
+        args.service,
+        args.server_url,
+        args.expected_robots,
     )
     args.root.mkdir(parents=True, exist_ok=True)
     # A second supervisor could otherwise claim a request after a stale timeout
     # while the first one is still changing the same Compose project.
-    descriptor = os.open(
-        args.root / "supervisor.lock", os.O_RDONLY | os.O_CREAT, 0o666
-    )
+    descriptor = os.open(args.root / "supervisor.lock", os.O_RDONLY | os.O_CREAT, 0o666)
     with os.fdopen(descriptor) as supervisor_lock:
         try:
             fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

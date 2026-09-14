@@ -395,9 +395,7 @@ class ComponentCatalogue:
             raise ValueError("Component publishers disagree on the coordinate frame")
         orders = {source["solution_order"] for source in sources}
         order_known = all(source["solution_order_known"] for source in sources)
-        if len(sources) > 1 and (
-            not order_known or None in orders or len(orders) != 1
-        ):
+        if len(sources) > 1 and (not order_known or None in orders or len(orders) != 1):
             raise LookupError("Waiting for a common accepted Swarm-SLAM solution")
         order = next(iter(orders))
         source_count = sum(

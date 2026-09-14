@@ -543,10 +543,12 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
     # unable to see a robot that merged with nobody -- exactly the case worth
     # looking at. These scoped grids fill that gap without weakening the rule:
     # each is a separate, separately-labelled map, never overlaid.
+    body = snapshot_update(snapshot)
     for scope, grid in scoped_grids(snapshot):
         if generation is not None and generation != _current_generation():
             return
-        _publish_grid(scope, grid)
+        transforms = _raster_transforms(body["origins"], scope, grid)
+        _publish_grid(scope, grid, transforms)
 
     # ORDER MATTERS: poses before pixels.
     #
@@ -557,7 +559,6 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
     # lands the optimised map shows scans projected through stale odometry:
     # walls rotated, and the same wall ghosted behind itself at two poses.
     # PUBLISH_TIMEOUT_S is 15 s, so that window is not brief.
-    body = snapshot_update(snapshot)
     try:
         req = urllib.request.Request(
             f"{SERVER_URL}/api/slam/update",
@@ -586,7 +587,14 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
                 urllib.request.Request(
                     url,
                     data=payload,
-                    headers={"Content-Type": "application/octet-stream"},
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Map-Transforms": json.dumps(
+                            _raster_transforms(body["origins"], "component", grid),
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ),
+                    },
                     method="POST",
                 ),
                 timeout=PUBLISH_TIMEOUT_S,
@@ -595,7 +603,21 @@ def _publish_snapshot(snapshot: BackendSnapshot, generation: int | None = None) 
             _last_error = f"global map publish failed: {exc}"
 
 
-def _publish_grid(scope: str, grid: Any) -> None:
+def _raster_transforms(origins: dict, scope: str, grid: Any) -> dict:
+    """Only qualify current robot frames belonging to this rendered component."""
+    return {
+        robot_id: {key: origin[key] for key in ("x", "y", "yaw")}
+        for robot_id, origin in origins.items()
+        if robot_id in grid.robots
+        and not scope.startswith("trajectory:")
+        and (
+            scope.startswith("robot:")
+            or origin["frame"] == f"component-{grid.component_id}"
+        )
+    }
+
+
+def _publish_grid(scope: str, grid: Any, transforms: dict | None = None) -> None:
     """POST one scoped optimized grid. Failure is logged, never raised.
 
     A scoped grid is a view, not the map Nav2 drives on, so losing one must not
@@ -617,12 +639,23 @@ def _publish_grid(scope: str, grid: Any) -> None:
             urllib.request.Request(
                 url,
                 data=payload,
-                headers={"Content-Type": "application/octet-stream"},
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    **(
+                        {
+                            "X-Map-Transforms": json.dumps(
+                                transforms, separators=(",", ":"), allow_nan=False
+                            )
+                        }
+                        if transforms is not None
+                        else {}
+                    ),
+                },
                 method="POST",
             ),
             timeout=PUBLISH_TIMEOUT_S,
         ).read()
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         _last_error = f"optimized grid publish failed ({scope}): {exc}"
 
 

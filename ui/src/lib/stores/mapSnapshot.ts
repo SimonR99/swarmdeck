@@ -10,5 +10,15 @@ export function mapSnapshotInfo(headers: Headers, fallback: MapInfo): MapInfo {
   if (!Number.isFinite(resolution) || resolution <= 0
     || !Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0
     || !Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Invalid map snapshot geometry');
-  return { ...fallback, resolution, width, height, origin: { x, y } };
+  let transforms: MapInfo['transforms'] = undefined;
+  const encoded = headers.get('X-Map-Transforms');
+  if (encoded !== null) {
+    const parsed = JSON.parse(encoded) as Record<string, { x: number; y: number; yaw: number }>;
+    if (!parsed || typeof parsed !== 'object' || Object.values(parsed).some((pose) =>
+      !pose || ![pose.x, pose.y, pose.yaw].every(Number.isFinite))) {
+      throw new Error('Invalid map snapshot transforms');
+    }
+    transforms = parsed;
+  }
+  return { ...fallback, resolution, width, height, origin: { x, y }, transforms };
 }

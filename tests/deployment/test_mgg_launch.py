@@ -27,7 +27,14 @@ def launch_module(monkeypatch):
         module = ModuleType(name)
         module.__dict__.update(attributes)
         monkeypatch.setitem(sys.modules, name, module)
-    for key in ("SWARMDECK_MGG_MAP_BACKEND", "SWARMDECK_MISSION_ID", "SWARMDECK_MAPS_ROOT", "SWARMDECK_PLANNER_MAP_PROVIDER", "SWARMDECK_INDEXED_MAP_QUERY", "SWARMDECK_PLANNING_FRAME_TEMPLATE"):
+    for key in (
+        "SWARMDECK_MGG_MAP_BACKEND",
+        "SWARMDECK_MISSION_ID",
+        "SWARMDECK_MAPS_ROOT",
+        "SWARMDECK_PLANNER_MAP_PROVIDER",
+        "SWARMDECK_INDEXED_MAP_QUERY",
+        "SWARMDECK_PLANNING_FRAME_TEMPLATE",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("SWARMDECK_PLANNER_MAP_PROVIDER", "mola")
     path = Path(__file__).parents[2] / "deploy/mgg/robot.launch.py"
@@ -49,7 +56,14 @@ def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
     monkeypatch.setenv("SWARMDECK_MISSION_ID", mission)
     monkeypatch.setenv("SWARMDECK_MAPS_ROOT", "/custom/maps")
     nodes = launch_module.robot_nodes(
-        "robot_2", "robot_2/map", "/odom", "/cloud", "/tf", "/tf_static", "params.yaml", True
+        "robot_2",
+        "robot_2/map",
+        "/odom",
+        "/cloud",
+        "/tf",
+        "/tf_static",
+        "params.yaml",
+        True,
     )
     planner = next(node for node in nodes if getattr(node, "package", "") == "mgg_ros")
     overrides = planner.parameters[-1]
@@ -62,7 +76,9 @@ def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
     assert "cloud_enabled:=false" in relay.cmd
 
 
-@pytest.mark.parametrize("mission", ["", "../old-mission", "6F6AFC5C-9A34-4EB4-8243-731629872D25"])
+@pytest.mark.parametrize(
+    "mission", ["", "../old-mission", "6F6AFC5C-9A34-4EB4-8243-731629872D25"]
+)
 def test_mola_rejects_ambiguous_mission(launch_module, monkeypatch, mission):
     monkeypatch.setenv("SWARMDECK_MGG_MAP_BACKEND", "mola_snapshot")
     monkeypatch.setenv("SWARMDECK_MISSION_ID", mission)
@@ -70,8 +86,12 @@ def test_mola_rejects_ambiguous_mission(launch_module, monkeypatch, mission):
         launch_module.map_backend_parameters("robot_0")
 
 
-@pytest.mark.parametrize("robot,root", [("../robot_0", "/maps"), ("robot/0", "/maps"), ("robot_0", "maps")])
-def test_mola_rejects_paths_outside_robot_scope(launch_module, monkeypatch, robot, root):
+@pytest.mark.parametrize(
+    "robot,root", [("../robot_0", "/maps"), ("robot/0", "/maps"), ("robot_0", "maps")]
+)
+def test_mola_rejects_paths_outside_robot_scope(
+    launch_module, monkeypatch, robot, root
+):
     monkeypatch.setenv("SWARMDECK_MGG_MAP_BACKEND", "mola_snapshot")
     monkeypatch.setenv("SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25")
     monkeypatch.setenv("SWARMDECK_MAPS_ROOT", root)
@@ -97,8 +117,7 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
     monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
     monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
     config = tmp_path / "fleet.yaml"
-    config.write_text(
-        """fleet:
+    config.write_text("""fleet:
   robot_count: 3
   robot_type: bunker
   robot_types:
@@ -106,8 +125,7 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
     robot_2: spot
   lidar:
     profile: vlp16
-"""
-    )
+""")
     monkeypatch.setenv("SWARMDECK_CONFIG", str(config))
     path = repo / "deploy/mgg/fleet.launch.py"
     spec = importlib.util.spec_from_file_location("mgg_fleet_launch_under_test", path)
@@ -138,14 +156,12 @@ def test_sim_mgg_rejects_planar_lidar_gain_models(
     monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
     monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
     config = tmp_path / "fleet.yaml"
-    config.write_text(
-        f"""fleet:
+    config.write_text(f"""fleet:
   robot_count: 1
   robot_type: bunker
   lidar:
     profile: {profile}
-"""
-    )
+""")
     monkeypatch.setenv("SWARMDECK_CONFIG", str(config))
     path = repo / "deploy/mgg/fleet.launch.py"
     spec = importlib.util.spec_from_file_location(
@@ -163,14 +179,23 @@ def test_stable_frame_is_shared_by_cloud_odometry_planner_and_controller(
 ):
     monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
     nodes = launch_module.robot_nodes(
-        "robot_2", "robot_2/map", "/odom", "/cloud", "/tf", "/tf_static",
-        "params.yaml", True, sim_depth=True,
+        "robot_2",
+        "robot_2/map",
+        "/odom",
+        "/cloud",
+        "/tf",
+        "/tf_static",
+        "params.yaml",
+        True,
+        sim_depth=True,
     )
     relay = next(node for node in nodes if hasattr(node, "cmd"))
     assert "map_frame:=robot_2/odom" in relay.cmd
     assert "input_cloud:=/cloud" in relay.cmd
     planner = next(node for node in nodes if getattr(node, "package", "") == "mgg_ros")
-    controller = next(node for node in nodes if getattr(node, "package", "") == "mgg_pci")
+    controller = next(
+        node for node in nodes if getattr(node, "package", "") == "mgg_pci"
+    )
     assert planner.parameters[-1]["PlanningParams.global_frame_id"] == "robot_2/odom"
     assert controller.parameters[-1]["world_frame"] == "robot_2/odom"
     assert planner.parameters[-1]["map.max_range"] == 20.0
@@ -182,16 +207,25 @@ def test_invalid_planning_frame_fails_at_launch(launch_module, monkeypatch, temp
     monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", template)
     with pytest.raises(ValueError, match="PLANNING_FRAME_TEMPLATE"):
         launch_module.robot_nodes(
-            "robot_2", "robot_2/map", "/odom", "/cloud", "/tf", "/tf_static", "params", True,
+            "robot_2",
+            "robot_2/map",
+            "/odom",
+            "/cloud",
+            "/tf",
+            "/tf_static",
+            "params",
+            True,
         )
 
 
 @pytest.mark.parametrize(
     "sim_depth,backend,expected",
-    [(True, "cloud_octomap", "observed_ground"),
-     (False, "cloud_octomap", "strict_volume"),
-     (True, "mola_snapshot", "strict_volume"),
-     (False, "mola_snapshot", "strict_volume")],
+    [
+        (True, "cloud_octomap", "observed_ground"),
+        (False, "cloud_octomap", "strict_volume"),
+        (True, "mola_snapshot", "strict_volume"),
+        (False, "mola_snapshot", "strict_volume"),
+    ],
 )
 def test_ground_evidence_policy_requires_simulation_cloud_map(
     launch_module, monkeypatch, sim_depth, backend, expected
@@ -199,8 +233,15 @@ def test_ground_evidence_policy_requires_simulation_cloud_map(
     monkeypatch.setenv("SWARMDECK_MGG_MAP_BACKEND", backend)
     monkeypatch.setenv("SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25")
     nodes = launch_module.robot_nodes(
-        "robot_2", "robot_2/map", "/odom", "/cloud", "/tf", "/tf_static",
-        "params.yaml", True, sim_depth=sim_depth,
+        "robot_2",
+        "robot_2/map",
+        "/odom",
+        "/cloud",
+        "/tf",
+        "/tf_static",
+        "params.yaml",
+        True,
+        sim_depth=sim_depth,
         planner_overrides={"objective_body_evidence_policy": "observed_ground"},
     )
     planner = next(node for node in nodes if getattr(node, "package", "") == "mgg_ros")

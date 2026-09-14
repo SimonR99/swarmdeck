@@ -13,7 +13,9 @@ def validated_image_bytes(message, kind, max_bytes):
     """Return a ROS Image payload size, or ``None`` when unsafe to retain."""
     try:
         width, height, step = (
-            int(message.width), int(message.height), int(message.step)
+            int(message.width),
+            int(message.height),
+            int(message.step),
         )
         encoding = str(message.encoding).lower()
         size = memoryview(message.data).nbytes
@@ -22,9 +24,11 @@ def validated_image_bytes(message, kind, max_bytes):
     bytes_per_pixel = (
         {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4}.get(encoding)
         if kind == "color"
-        else {"16uc1": 2, "mono16": 2, "32fc1": 4}.get(encoding)
-        if kind == "depth"
-        else None
+        else (
+            {"16uc1": 2, "mono16": 2, "32fc1": 4}.get(encoding)
+            if kind == "depth"
+            else None
+        )
     )
     if (
         bytes_per_pixel is None
@@ -39,15 +43,25 @@ def validated_image_bytes(message, kind, max_bytes):
 
 
 def retain_bounded_image(
-    cache, message, kind, max_records, max_bytes, max_message_bytes=None,
+    cache,
+    message,
+    kind,
+    max_records,
+    max_bytes,
+    max_message_bytes=None,
 ):
     """Validate and retain a frame in an insertion-ordered bounded mapping."""
     try:
         stamp = message_stamp_ns(message)
     except (AttributeError, TypeError, ValueError):
         return False
-    message_limit = max_bytes if max_message_bytes is None else min(
-        max_bytes, max_message_bytes,
+    message_limit = (
+        max_bytes
+        if max_message_bytes is None
+        else min(
+            max_bytes,
+            max_message_bytes,
+        )
     )
     size = validated_image_bytes(message, kind, message_limit)
     if size is None:
@@ -76,7 +90,12 @@ def select_geometry_and_color(frontend_xyz, calibration, raw, colorize):
 
 
 def qualified_rgbd_frame(
-    cloud_ns, image_ns, depth_ns, image_frame, depth_frame, info_frame,
+    cloud_ns,
+    image_ns,
+    depth_ns,
+    image_frame,
+    depth_frame,
+    info_frame,
     configured_frame="",
 ):
     if abs(image_ns - depth_ns) > 50_000_000 or abs(image_ns - cloud_ns) > 250_000_000:
@@ -91,7 +110,11 @@ def qualified_rgbd_frame(
 
 
 def select_rgbd_observation(
-    cloud_ns, images, depths, info, configured_frame="",
+    cloud_ns,
+    images,
+    depths,
+    info,
+    configured_frame="",
 ):
     """Select a timestamp-qualified pair despite cross-topic callback ordering.
 

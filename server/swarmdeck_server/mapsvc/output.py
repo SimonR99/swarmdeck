@@ -225,10 +225,16 @@ def local_info(service: Any, robot_id: str) -> dict[str, Any] | None:
             return None
         meta, _ = grid
         revision = service.robot_revisions.get(robot_id, 0)
+        transform = service.transforms.get(robot_id, (0.0, 0.0, 0.0))
         meta = GridMeta(
             meta.resolution, meta.width, meta.height, meta.origin_x, meta.origin_y
         )
-    return meta.as_dict(revision)
+    return {
+        **meta.as_dict(revision),
+        "transforms": {
+            robot_id: {"x": transform[0], "y": transform[1], "yaw": transform[2]}
+        },
+    }
 
 
 def local_png(service: Any, robot_id: str) -> bytes | None:
@@ -250,4 +256,10 @@ def local_png_snapshot(
         )
         cells = np.array(cells, dtype=np.int8, copy=True)
         seq = service.robot_revisions.get(robot_id, 0)
-    return grid_png(meta, cells), meta.as_dict(seq)
+        transform = service.transforms.get(robot_id, (0.0, 0.0, 0.0))
+    return grid_png(meta, cells), {
+        **meta.as_dict(seq),
+        "transforms": {
+            robot_id: {"x": transform[0], "y": transform[1], "yaw": transform[2]}
+        },
+    }

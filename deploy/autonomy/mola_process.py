@@ -193,7 +193,9 @@ class PersistentImporter:
                 or not isinstance(limits, dict)
                 or limits.get("max_line_bytes") != MAX_PROTOCOL_REQUEST_BYTES
                 or limits.get("max_response_bytes") != MAX_PROTOCOL_LINE_BYTES
-                or any(limits.get(name) != value for name, value in self._limits.items())
+                or any(
+                    limits.get(name) != value for name, value in self._limits.items()
+                )
             ):
                 raise MolaProcessError(
                     "native runtime returned an incompatible ready event"

@@ -45,10 +45,13 @@ def test_fleet_start_shares_run_and_participants(monkeypatch):
 def test_registry_bounds_exploration_reason_and_clears_it_on_progress():
     registry = Registry()
     robot = registry.hello({"robot_id": "r0"}, None)
-    registry.update_state({
-        "robot_id": "r0", "exploration_status": "waiting",
-        "exploration_reason": "x" * 800,
-    })
+    registry.update_state(
+        {
+            "robot_id": "r0",
+            "exploration_status": "waiting",
+            "exploration_reason": "x" * 800,
+        }
+    )
     assert robot.to_state()["exploration_reason"] == "x" * 512
     registry.update_state({"robot_id": "r0", "exploration_status": "exploring"})
     assert robot.to_state()["exploration_reason"] is None

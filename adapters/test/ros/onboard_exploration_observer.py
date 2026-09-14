@@ -20,7 +20,6 @@ import time
 from typing import Any
 from urllib import error, parse, request
 
-
 DEFAULT_BASE_URL = "http://127.0.0.1:18080"
 MAX_JSON_BYTES = 8 * 1024 * 1024
 
@@ -70,7 +69,9 @@ def get_json(base_url: str, path: str, timeout_s: float) -> Any:
             body = response.read(MAX_JSON_BYTES + 1)
     except error.HTTPError as exc:
         detail = exc.read(4097).decode("utf-8", "replace")
-        raise ObservationError(f"GET {path} returned {exc.code}: {detail[:4096]}") from exc
+        raise ObservationError(
+            f"GET {path} returned {exc.code}: {detail[:4096]}"
+        ) from exc
     except (error.URLError, TimeoutError, OSError) as exc:
         raise ObservationError(f"GET {path} failed: {exc}") from exc
     if len(body) > MAX_JSON_BYTES:
@@ -213,7 +214,8 @@ def summarize_post_stop(
     fleet = snapshot.get("fleet", {})
     by_id = {
         robot["robot_id"]: robot
-        for robot in _robots(fleet.get("data")) if fleet.get("ok")
+        for robot in _robots(fleet.get("data"))
+        if fleet.get("ok")
         if isinstance(robot.get("robot_id"), str)
     }
     states = {}
@@ -282,16 +284,14 @@ def summarize(
         displacement = None
         if len(poses) >= 2:
             displacement = round(math.dist(poses[0], poses[-1]), 3)
-        exploration = [str(robot.get("exploration_status", "unknown")) for robot in history]
+        exploration = [
+            str(robot.get("exploration_status", "unknown")) for robot in history
+        ]
         navigation = [str(robot.get("nav_status", "unknown")) for robot in history]
         modes = [str(robot.get("mode", "unknown")) for robot in history]
         robot_summary[robot_id] = {
-            "first_pose": (
-                {"x": poses[0][0], "y": poses[0][1]} if poses else None
-            ),
-            "last_pose": (
-                {"x": poses[-1][0], "y": poses[-1][1]} if poses else None
-            ),
+            "first_pose": ({"x": poses[0][0], "y": poses[0][1]} if poses else None),
+            "last_pose": ({"x": poses[-1][0], "y": poses[-1][1]} if poses else None),
             "server_frame_displacement_m": displacement,
             "exploration_status_counts": dict(sorted(Counter(exploration).items())),
             "navigation_status_counts": dict(sorted(Counter(navigation).items())),
@@ -394,7 +394,9 @@ def summarize(
         "robots": robot_summary,
         "replicas": dict(sorted(replicas.items())),
         "reported_components": components,
-        "verified_components": [item for item in components if item["verified"] is True],
+        "verified_components": [
+            item for item in components if item["verified"] is True
+        ],
         "interpretation_limits": [
             "displacement is measured in the server display frame and does not prove coverage",
             "a shared component identifier does not by itself prove a verified inter-robot closure",
@@ -403,7 +405,9 @@ def summarize(
     }
 
 
-async def collect_sample(base_url: str, timeout_s: float, elapsed_s: float) -> dict[str, Any]:
+async def collect_sample(
+    base_url: str, timeout_s: float, elapsed_s: float
+) -> dict[str, Any]:
     fleet, map_status, replicas = await asyncio.gather(
         endpoint(base_url, "/api/fleet", timeout_s),
         endpoint(base_url, "/api/map/status", timeout_s),

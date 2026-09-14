@@ -42,14 +42,28 @@ def rasterize_flat_depth_quads(
     values = np.asarray(depth)
     if values.ndim != 2 or values.size == 0 or values.size > max_pixels:
         raise ValueError("organized depth image exceeds its pixel budget")
-    scalars = (fx, fy, cx, cy, max_range_m, max_vertical_span_m,
-               max_surface_tilt_rad, max_edge_m, spacing_m)
+    scalars = (
+        fx,
+        fy,
+        cx,
+        cy,
+        max_range_m,
+        max_vertical_span_m,
+        max_surface_tilt_rad,
+        max_edge_m,
+        spacing_m,
+    )
     if not all(math.isfinite(float(value)) for value in scalars):
         raise ValueError("organized depth parameters must be finite")
     if (
-        fx <= 0 or fy <= 0 or max_range_m <= 0 or max_vertical_span_m < 0
+        fx <= 0
+        or fy <= 0
+        or max_range_m <= 0
+        or max_vertical_span_m < 0
         or not 0 <= max_surface_tilt_rad < math.pi / 2
-        or max_edge_m <= 0 or spacing_m <= 0 or max_candidate_quads <= 0
+        or max_edge_m <= 0
+        or spacing_m <= 0
+        or max_candidate_quads <= 0
         or max_output_points <= 0
         or max_subdivisions < 1
     ):
@@ -69,22 +83,25 @@ def rasterize_flat_depth_quads(
     p01 = points[:-1, 1:]
     p10 = points[1:, :-1]
     p11 = points[1:, 1:]
-    candidates = (
-        finite[:-1, :-1] & finite[:-1, 1:]
-        & finite[1:, :-1] & finite[1:, 1:]
-    )
+    candidates = finite[:-1, :-1] & finite[:-1, 1:] & finite[1:, :-1] & finite[1:, 1:]
     vertical = np.stack((p00[..., 2], p01[..., 2], p10[..., 2], p11[..., 2]))
     candidates &= np.ptp(vertical, axis=0) <= max_vertical_span_m
     # Include both diagonals: a thin image-space quad must not connect surfaces
     # separated by a depth discontinuity. Small quads need no added samples;
     # their original endpoints already occupy the native cloud.
-    edge_lengths = np.stack(tuple(
-        np.linalg.norm(a - b, axis=2)
-        for a, b in (
-            (p00, p01), (p01, p11), (p11, p10),
-            (p10, p00), (p00, p11), (p01, p10),
+    edge_lengths = np.stack(
+        tuple(
+            np.linalg.norm(a - b, axis=2)
+            for a, b in (
+                (p00, p01),
+                (p01, p11),
+                (p11, p10),
+                (p10, p00),
+                (p00, p11),
+                (p01, p10),
+            )
         )
-    ))
+    )
     longest = np.max(edge_lengths, axis=0)
     candidates &= (longest <= max_edge_m) & (longest > spacing_m)
 
@@ -94,7 +111,8 @@ def rasterize_flat_depth_quads(
     norm_b = np.linalg.norm(normals_b, axis=2)
     minimum_up = math.cos(max_surface_tilt_rad)
     candidates &= (
-        (norm_a > 1e-9) & (norm_b > 1e-9)
+        (norm_a > 1e-9)
+        & (norm_b > 1e-9)
         & (np.abs(normals_a[..., 2]) >= minimum_up * norm_a)
         & (np.abs(normals_b[..., 2]) >= minimum_up * norm_b)
     )
@@ -109,12 +127,18 @@ def rasterize_flat_depth_quads(
     if not len(indices):
         return np.empty((0, 3), dtype=np.float32)
     row, column = indices[:, 0], indices[:, 1]
-    corners = (points[row, column], points[row, column + 1],
-               points[row + 1, column + 1], points[row + 1, column])
-    starts = np.concatenate((corners[0], corners[1], corners[2], corners[3],
-                             corners[0], corners[1]))
-    ends = np.concatenate((corners[1], corners[2], corners[3], corners[0],
-                           corners[2], corners[3]))
+    corners = (
+        points[row, column],
+        points[row, column + 1],
+        points[row + 1, column + 1],
+        points[row + 1, column],
+    )
+    starts = np.concatenate(
+        (corners[0], corners[1], corners[2], corners[3], corners[0], corners[1])
+    )
+    ends = np.concatenate(
+        (corners[1], corners[2], corners[3], corners[0], corners[2], corners[3])
+    )
     segment_lengths = np.linalg.norm(ends - starts, axis=1)
     subdivisions = np.maximum(1, np.ceil(segment_lengths / spacing_m).astype(int))
     if subdivisions.max(initial=0) > max_subdivisions:
@@ -126,10 +150,12 @@ def rasterize_flat_depth_quads(
     for count in np.unique(subdivisions):
         selected = subdivisions == count
         weights = np.linspace(0.0, 1.0, count + 1)[None, :, None]
-        output.append((
-            starts[selected, None, :]
-            + (ends[selected] - starts[selected])[:, None, :] * weights
-        ).reshape(-1, 3))
+        output.append(
+            (
+                starts[selected, None, :]
+                + (ends[selected] - starts[selected])[:, None, :] * weights
+            ).reshape(-1, 3)
+        )
     # Edge sampling is sufficient for long, sub-spacing camera strips. For a
     # genuinely wide triangle, add a world-aligned XY lattice in its interior.
     interiors = []
@@ -140,22 +166,30 @@ def rasterize_flat_depth_quads(
     triangle_area = np.linalg.norm(
         np.cross(triangle_b - triangle_a, triangle_c - triangle_a), axis=1
     )
-    triangle_longest = np.max(np.stack(tuple(
-        np.linalg.norm(a - b, axis=1)
-        for a, b in (
-            (triangle_a, triangle_b), (triangle_b, triangle_c),
-            (triangle_c, triangle_a),
-        )
-    )), axis=0)
+    triangle_longest = np.max(
+        np.stack(
+            tuple(
+                np.linalg.norm(a - b, axis=1)
+                for a, b in (
+                    (triangle_a, triangle_b),
+                    (triangle_b, triangle_c),
+                    (triangle_c, triangle_a),
+                )
+            )
+        ),
+        axis=0,
+    )
     wide = triangle_area / triangle_longest > spacing_m
     for a, b, c in zip(triangle_a[wide], triangle_b[wide], triangle_c[wide]):
         x_values = np.arange(
             math.ceil(min(a[0], b[0], c[0]) / spacing_m) * spacing_m,
-            max(a[0], b[0], c[0]), spacing_m,
+            max(a[0], b[0], c[0]),
+            spacing_m,
         )
         y_values = np.arange(
             math.ceil(min(a[1], b[1], c[1]) / spacing_m) * spacing_m,
-            max(a[1], b[1], c[1]), spacing_m,
+            max(a[1], b[1], c[1]),
+            spacing_m,
         )
         interior_estimate += len(x_values) * len(y_values)
         if estimated + interior_estimate > max_output_points:
@@ -170,14 +204,11 @@ def rasterize_flat_depth_quads(
             continue
         weights = np.linalg.solve(basis, (q - a[:2]).T).T
         inside = (
-            (weights[:, 0] >= 0) & (weights[:, 1] >= 0)
-            & (weights.sum(axis=1) <= 1)
+            (weights[:, 0] >= 0) & (weights[:, 1] >= 0) & (weights.sum(axis=1) <= 1)
         )
         weights = weights[inside]
         if len(weights):
-            interiors.append(
-                a + weights[:, :1] * (b - a) + weights[:, 1:] * (c - a)
-            )
+            interiors.append(a + weights[:, :1] * (b - a) + weights[:, 1:] * (c - a))
     output.extend(interiors)
 
     if not output:

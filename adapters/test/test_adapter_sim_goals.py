@@ -110,8 +110,9 @@ def test_follow_path_result_exposes_nav2_failure_reason(sim_module, code, messag
     bridge._goal_generation = 3
     outcome = SimpleNamespace(
         status=sim_module.GoalStatus.STATUS_ABORTED,
-        result=SimpleNamespace(error_msg=message, error_code=code,
-                               FAILED_TO_MAKE_PROGRESS=105),
+        result=SimpleNamespace(
+            error_msg=message, error_code=code, FAILED_TO_MAKE_PROGRESS=105
+        ),
     )
 
     bridge._goal_result(_ImmediateFuture(outcome), 3)
@@ -307,7 +308,9 @@ def test_follow_path_returns_the_accepted_owned_generation(sim_module, frame):
     bridge = _bridge(sim_module)
     plan = _plan(frame)
 
-    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()) as convert:
+    with patch(
+        "adapters.exploration.follow_path_goal", return_value=MagicMock()
+    ) as convert:
         generation = bridge.follow_path(plan)
         convert.assert_called_once_with(plan)
 

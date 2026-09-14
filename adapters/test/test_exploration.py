@@ -143,10 +143,17 @@ def test_unavailable_planner_is_blocked_with_a_reason():
 def test_waiting_reason_is_retired_when_the_controller_starts():
     bridge, explorer = rig()
     explorer.start()
-    explorer.on_status(NS(data=json.dumps({
-        "stamp_ns": 2_000_000_000, "state": "waiting",
-        "reason": "No traversable frontier; retrying",
-    })))
+    explorer.on_status(
+        NS(
+            data=json.dumps(
+                {
+                    "stamp_ns": 2_000_000_000,
+                    "state": "waiting",
+                    "reason": "No traversable frontier; retrying",
+                }
+            )
+        )
+    )
     assert explorer.status == "waiting"
     assert explorer.reason == "No traversable frontier; retrying"
     explorer.on_path(path())
@@ -155,16 +162,56 @@ def test_waiting_reason_is_retired_when_the_controller_starts():
     bridge.follow_path.assert_called_once()
 
 
+def test_native_waiting_reason_survives_successful_trigger_reply():
+    _, explorer = rig()
+    explorer.start()
+    request = explorer.pending
+    explorer.on_status(
+        NS(
+            data=json.dumps(
+                {
+                    "stamp_ns": 2_000_000_000,
+                    "state": "waiting",
+                    "reason": "planner returned no path; retrying automatically in 1.0 s",
+                }
+            )
+        )
+    )
+
+    request.set_result(NS(success=True, message="exploration active"))
+
+    assert explorer.active
+    assert explorer.status == "waiting"
+    assert explorer.reason == (
+        "planner returned no path; retrying automatically in 1.0 s"
+    )
+
+
 def test_old_planner_status_cannot_replace_current_waiting_reason():
     _, explorer = rig()
     explorer.start()
-    explorer.on_status(NS(data=json.dumps({
-        "stamp_ns": 2_000_000_000, "state": "waiting",
-    })))
+    explorer.on_status(
+        NS(
+            data=json.dumps(
+                {
+                    "stamp_ns": 2_000_000_000,
+                    "state": "waiting",
+                }
+            )
+        )
+    )
     reason = explorer.reason
-    explorer.on_status(NS(data=json.dumps({
-        "stamp_ns": 1, "state": "waiting", "reason": "old session",
-    })))
+    explorer.on_status(
+        NS(
+            data=json.dumps(
+                {
+                    "stamp_ns": 1,
+                    "state": "waiting",
+                    "reason": "old session",
+                }
+            )
+        )
+    )
     assert reason == explorer.reason
 
 
@@ -268,9 +315,7 @@ def test_planner_terminal_status_cannot_complete_active_controller_goal(state):
     explorer.start()
     explorer.on_path(path(stamp=2))
 
-    explorer.on_status(
-        NS(data=json.dumps({"state": state, "stamp_ns": 3_000_000_000}))
-    )
+    explorer.on_status(NS(data=json.dumps({"state": state, "stamp_ns": 3_000_000_000})))
 
     assert explorer.active
     assert explorer.executing_plan is not None
@@ -579,9 +624,7 @@ def test_new_path_supersedes_cancelled_authority_token_in_same_session(
     bridge, explorer = rig()
     _start_with_path(explorer, stamp=2)
     explorer.coordinator = Coordinator(
-        *("pending", "pending", "granted")
-        if fresh_pending
-        else ("pending", "granted")
+        *("pending", "pending", "granted") if fresh_pending else ("pending", "granted")
     )
 
     explorer.tick()
@@ -888,9 +931,7 @@ def test_generic_controller_failure_does_not_enter_movement_retry(reason):
 
 
 def test_no_progress_classifier_matches_adapter_diagnostic_only():
-    assert is_physical_no_progress_failure(
-        "Failed to make progress; error_code=4"
-    )
+    assert is_physical_no_progress_failure("Failed to make progress; error_code=4")
     assert not is_physical_no_progress_failure("NO_VALID_CONTROL; error_code=7")
 
 

@@ -20,7 +20,11 @@ def _envelope(session: str, *, revision: int = 1, pose_x: float = 2.0):
         return {
             "submap_id": identity,
             "geometry_revision": 1,
-            "pose_revision": {"component_id": component, "epoch": 0, "revision": revision},
+            "pose_revision": {
+                "component_id": component,
+                "epoch": 0,
+                "revision": revision,
+            },
             "T_component_submap": [
                 [1, 0, 0, pose_x],
                 [0, 1, 0, 0],
@@ -48,25 +52,33 @@ def _envelope(session: str, *, revision: int = 1, pose_x: float = 2.0):
         manifests.append(
             {
                 "frame_id": component.replace(":", "_"),
-                "graph_revision": {"component_id": component, "epoch": 0, "revision": revision},
+                "graph_revision": {
+                    "component_id": component,
+                    "epoch": 0,
+                    "revision": revision,
+                },
                 "geometry_revision": f"geometry-{component}",
                 "submaps": [current],
                 "chunks": current["chunks"],
                 "tombstones": [],
             }
         )
-    return {
-        "version": 1,
-        "robot_id": "robot_0",
-        "session_id": session,
-        "revision": revision,
-        "snapshot": {
-            "snapshot_id": f"snapshot-{revision}",
-            "generated_at_ns": 1,
-            "manifests": manifests,
+    return (
+        {
+            "version": 1,
+            "robot_id": "robot_0",
+            "session_id": session,
+            "revision": revision,
+            "snapshot": {
+                "snapshot_id": f"snapshot-{revision}",
+                "generated_at_ns": 1,
+                "manifests": manifests,
+            },
+            "chunks": [{"sha256": digest, "size": len(payload)}],
         },
-        "chunks": [{"sha256": digest, "size": len(payload)}],
-    }, digest, payload
+        digest,
+        payload,
+    )
 
 
 def test_replica_view_keeps_disconnected_components_separate(monkeypatch, tmp_path):

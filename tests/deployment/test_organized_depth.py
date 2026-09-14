@@ -29,8 +29,13 @@ def test_flat_adjacent_returns_fill_only_the_observed_quad():
     # With fy=10 and cy=-1 these two ranges both lie on z=-1m.
     depth = np.array([[10.0, 10.0], [5.0, 5.0]], dtype=np.float32)
     points = raster(
-        depth, fx=10.0, fy=10.0, cx=0.5, cy=-1.0,
-        spacing_m=0.25, max_edge_m=6.0,
+        depth,
+        fx=10.0,
+        fy=10.0,
+        cx=0.5,
+        cy=-1.0,
+        spacing_m=0.25,
+        max_edge_m=6.0,
     )
     assert len(points) > 4
     assert np.allclose(points[:, 2], -1.0)
@@ -54,13 +59,15 @@ def test_realistic_floor_supplies_continuous_twelve_metre_support():
         np.isclose(points[:, 1], 0.0, atol=1e-6)
         & np.isclose(points[:, 2], -camera_height, atol=1e-6)
     ]
-    around_goal = np.sort(centreline[(centreline[:, 0] >= 10.0)
-                                     & (centreline[:, 0] <= 13.0), 0])
+    around_goal = np.sort(
+        centreline[(centreline[:, 0] >= 10.0) & (centreline[:, 0] <= 13.0), 0]
+    )
     assert around_goal[0] <= 10.5 and around_goal[-1] >= 12.0
     assert np.diff(around_goal).max() <= 0.15 + 1e-6
-    assert np.linalg.norm(
-        points - np.array([12.0, 0.0, -camera_height]), axis=1
-    ).min() <= 0.15
+    assert (
+        np.linalg.norm(points - np.array([12.0, 0.0, -camera_height]), axis=1).min()
+        <= 0.15
+    )
 
 
 def test_realistic_full_frame_stays_finite_and_within_default_budgets():
@@ -69,9 +76,7 @@ def test_realistic_full_frame_stays_finite_and_within_default_budgets():
     focal = height / (2.0 * math.tan(math.radians(30.0)))
     depth = _level_floor_depth(height, width, 0.60, focal, height / 2.0)
 
-    points = raster(
-        depth, fx=focal, fy=focal, cx=width / 2.0, cy=height / 2.0
-    )
+    points = raster(depth, fx=focal, fy=focal, cx=width / 2.0, cy=height / 2.0)
 
     assert points.dtype == np.float32
     assert 1_000 < len(points) < 1_000_000
@@ -89,8 +94,14 @@ def test_surface_normal_guard_at_five_degrees(tilt_degrees, accepted):
     # Plane z = -1 + slope*x intersected by each axial camera ray.
     depth = np.broadcast_to(1.0 / ((rows - cy) / fy + slope), (2, 2)).copy()
     points = raster(
-        depth, fx=fx, fy=fy, cx=0.5, cy=cy,
-        max_vertical_span_m=10.0, max_edge_m=10.0, spacing_m=0.25,
+        depth,
+        fx=fx,
+        fy=fy,
+        cx=0.5,
+        cy=cy,
+        max_vertical_span_m=10.0,
+        max_edge_m=10.0,
+        spacing_m=0.25,
     )
     assert bool(len(points)) is accepted
 
@@ -128,8 +139,13 @@ def test_step_discontinuity_far_plane_and_invalid_gaps_stay_unknown(
     depth, vertical_span, max_edge
 ):
     points = _module().rasterize_flat_depth_quads(
-        depth, fx=10.0, fy=10.0, cx=0.5, cy=-1.0,
-        max_vertical_span_m=vertical_span, max_edge_m=max_edge,
+        depth,
+        fx=10.0,
+        fy=10.0,
+        cx=0.5,
+        cy=-1.0,
+        max_vertical_span_m=vertical_span,
+        max_edge_m=max_edge,
         spacing_m=0.25,
     )
     assert points.shape == (0, 3)
@@ -137,9 +153,7 @@ def test_step_discontinuity_far_plane_and_invalid_gaps_stay_unknown(
 
 def test_nonfinite_pixels_do_not_emit_geometry_warnings():
     raster = _module().rasterize_flat_depth_quads
-    depth = np.array(
-        [[np.inf, np.inf, 5.0], [np.inf, np.nan, 5.0]], dtype=np.float32
-    )
+    depth = np.array([[np.inf, np.inf, 5.0], [np.inf, np.nan, 5.0]], dtype=np.float32)
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         points = raster(depth, fx=10.0, fy=10.0, cx=1.0, cy=-1.0)
@@ -153,11 +167,23 @@ def test_work_budgets_fail_without_a_partial_raster():
         raster(depth, fx=10, fy=10, cx=0.5, cy=0, max_pixels=3)
     with pytest.raises(ValueError, match="output budget"):
         raster(
-            depth, fx=10, fy=10, cx=0.5, cy=-1, spacing_m=0.25,
-            max_edge_m=6, max_output_points=2,
+            depth,
+            fx=10,
+            fy=10,
+            cx=0.5,
+            cy=-1,
+            spacing_m=0.25,
+            max_edge_m=6,
+            max_output_points=2,
         )
     with pytest.raises(ValueError, match="quad budget"):
         raster(
-            np.tile(depth, (1, 2)), fx=10, fy=10, cx=0.5, cy=-1,
-            spacing_m=0.25, max_edge_m=6, max_candidate_quads=1,
+            np.tile(depth, (1, 2)),
+            fx=10,
+            fy=10,
+            cx=0.5,
+            cy=-1,
+            spacing_m=0.25,
+            max_edge_m=6,
+            max_candidate_quads=1,
         )

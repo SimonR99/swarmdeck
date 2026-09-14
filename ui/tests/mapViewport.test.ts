@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rebaseViewport } from '../src/lib/components/map2d/mapViewport.ts';
+import { mapSnapshotInfo } from '../src/lib/stores/mapSnapshot.ts';
 
 function screen(view, map, x, y) {
   const gx = (x - map.origin.x) / map.resolution;
@@ -10,6 +11,23 @@ function screen(view, map, x, y) {
     view.ty + view.scale * (gx * Math.sin(view.rotation) + gy * Math.cos(view.rotation))
   ];
 }
+
+test('raster response carries the transform used to place robot overlays', () => {
+  const headers = new Headers({
+    'X-Map-Resolution': '0.1', 'X-Map-Width': '10', 'X-Map-Height': '20',
+    'X-Map-Origin-X': '-1', 'X-Map-Origin-Y': '-2',
+    'X-Map-Transforms': '{"r0":{"x":4,"y":-3,"yaw":0.5}}'
+  });
+  const parsed = mapSnapshotInfo(headers, {
+    resolution: 1, width: 1, height: 1, origin: { x: 0, y: 0 }, seq: 1
+  });
+  assert.deepEqual(parsed.transforms, { r0: { x: 4, y: -3, yaw: 0.5 } });
+  const absent = mapSnapshotInfo(new Headers({
+    'X-Map-Resolution': '0.1', 'X-Map-Width': '10', 'X-Map-Height': '20',
+    'X-Map-Origin-X': '-1', 'X-Map-Origin-Y': '-2'
+  }), parsed);
+  assert.equal(absent.transforms, undefined);
+});
 
 for (const rotation of [0, Math.PI / 2, -0.73]) {
   test(`map growth and resolution updates keep world points fixed at rotation ${rotation}`, () => {
