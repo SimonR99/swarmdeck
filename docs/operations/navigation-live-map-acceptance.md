@@ -1,14 +1,11 @@
 # Navigation and live-map deployment acceptance
 
-The running deployment uses MGG `road-home-b511457`, UI `road-home-29afed0` and
-Fast-LIVO2 `road-home-f97cdbf` in one benchbot stack on UI port 15173. All 228
-native MGG tests pass. The preceding drift-odometry mission completed R2's
-side-corridor Navigate/Home trial and R0 Home; R3 Home timed out. R0's raised-road
-recovery also fails with sensor-based odometry, so fleet navigation remains
-unqualified. See the [estimator comparison](#sensor-based-odometry-comparison)
-and [arrival results](#road-search-candidate-arrival-results) for measured
-errors and exact image evidence. Earlier runs below are retained for comparison;
-their mission IDs, image tags and limits describe those runs only.
+The running Benchbot deployment uses the `step15-6e7ffd2` ARGoS, simulation and
+MGG images, UI `road-home-29afed0`, and Fast-LIVO2 `road-home-f97cdbf`, with one
+interface on port 15173. Bunker/Scout now use a 15 cm simulation step limit;
+Spot retains 30 cm. See the [15 cm deployment](#15-cm-simulation-step-limit)
+for current validation. Earlier runs below retain their original mission IDs,
+image tags and 10 cm limits; those settings describe those runs only.
 
 Endpoint errors in the historical arrival logs through `b511457` describe the
 last observed nonempty path in XY, not the maximum error throughout a trial or
@@ -1146,3 +1143,47 @@ overlay explicitly selects drift and excludes the optional estimator image.
 The normal supported public command remains `make up-argos-bistro-gpu`.
 Evidence is preserved under `.deploy/nav-timeout/road-home-f97cdbf-lio*`, with
 the margin probe in `road-home-lio-r0-fixed-margin12-shadow.log`.
+
+### 15 cm simulation step limit
+
+Commit `6e7ffd2` raises the shared simulated Bunker/Scout step setting to 0.15 m,
+including the ARGoS contact helper, MGG terrain checks and Nav2 proximity input.
+Spot retains its 0.30 m MGG/physics capability and conservative 0.15 m proximity
+filter. Hardware configuration is unchanged. Reapplying the ARGoS source patch
+now updates a previously generated limit rather than silently keeping 0.10 m.
+
+All 115 focused Python tests pass. Black passes on all 349 tracked Python files.
+The native Jolt suite passes ten cases both locally and in the rebuilt ARGoS
+build image: 14/15 cm crossings, rejection at 17 cm, Spot's 29/30/32 cm boundaries,
+and clearance, dynamic-body and missing-support guards. The existing small
+numerical contact tolerance is retained.
+
+Fresh mission `0a97e2a6-b1c9-4efe-8bf4-f88a5d8cd278`, domain 220, uses
+`swarmdeck-{argos,sim,mgg}:step15-6e7ffd2`. Live MGG parameter queries confirmed
+`max_step_height` values of 0.15/0.15/0.15/0.30 m for R0–R3. Image identities:
+
+| Image | SHA-256 |
+| --- | --- |
+| ARGoS | `18173bd041bfd6ae1dbf1298d6404d9e28896848e666777f5f8987ae40b3480b` |
+| Simulation | `cd16ee5e50eeb585ad25d616360f2ce643311f78043d5b50fb3a9c5beeb14269` |
+| MGG | `53197dab90661532c0ab8feeaea7f44d00f2b2ba1c5ba006ef483078d1cd3e49` |
+
+The restart exposed an unrelated catalogue bootstrap limit: accumulated history
+exceeded 128 robot/mission sources, so the unfiltered component request returned
+413 while the active-mission request still returned four ready components. The
+server now retries an overflowing default catalogue against its configured active
+mission. Explicit mission requests and per-mission budgets retain their limits;
+historical manifests are preserved. The complete history is still returned when
+it fits the aggregate budget. All 61 replica-catalogue and live-map tests pass;
+Black was rerun after these tests.
+
+The R0 20 m / -2 m lateral-offset trial failed after 82.9 seconds and 11.18 m
+reported displacement. Recovery exhausted its reachable search after 2,405
+expansions in 2,441 ms; its first reported footprint rejection was a 0.164 m drop
+against the new 0.150 m limit. This first rejection does not identify the full
+barrier to every possible detour. Maximum local and global endpoint XY errors
+were both 0.002 m, with no invalid endpoint samples. Stop All verified cleanup.
+The new setting is deployed, but this road crossing remains unqualified.
+
+Build and trial evidence is retained under `.deploy/nav-timeout/step15-6e7ffd2*`
+on Benchbot. The selected mission is pinned explicitly for the R0 road trial.

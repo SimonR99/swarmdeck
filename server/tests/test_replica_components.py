@@ -330,6 +330,95 @@ def test_catalogue_routes_use_real_committed_metadata_without_chunk_reads(
         )
 
 
+def test_unscoped_catalogue_overflow_falls_back_to_active_mission(monkeypatch):
+    active = str(uuid4())
+    catalogue = Mock()
+    catalogue.index.return_value = {"components": [{"session_id": active}]}
+
+    def current(session_id):
+        if session_id is None:
+            raise OverflowError("Replica catalogue exceeds its source budget")
+        assert session_id == active
+        return catalogue
+
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", active)
+    monkeypatch.setattr(replica_views, "current_catalogue", Mock(side_effect=current))
+    app = FastAPI()
+    app.include_router(replica_views.router)
+    with TestClient(app) as client:
+        response = client.get("/api/autonomy/replicas/components")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "components": [{"session_id": active}],
+        "active_session_id": active,
+    }
+    assert replica_views.current_catalogue.call_args_list == [
+        ((None,),),
+        ((active,),),
+    ]
+
+
+@pytest.mark.parametrize("configured_active", [False, True])
+def test_unscoped_catalogue_overflow_stays_bounded_without_readable_active_mission(
+    monkeypatch, configured_active
+):
+    active = str(uuid4())
+    if configured_active:
+        monkeypatch.setenv("SWARMDECK_MISSION_ID", active)
+    else:
+        monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    current = Mock(side_effect=OverflowError("source budget"))
+    monkeypatch.setattr(replica_views, "current_catalogue", current)
+    app = FastAPI()
+    app.include_router(replica_views.router)
+    with TestClient(app) as client:
+        response = client.get("/api/autonomy/replicas/components")
+
+    assert response.status_code == 413
+    expected = [((None,),)]
+    if configured_active:
+        expected.append(((active,),))
+    assert current.call_args_list == expected
+
+
+def test_explicit_catalogue_overflow_does_not_fall_back(monkeypatch):
+    requested = str(uuid4())
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", str(uuid4()))
+    current = Mock(side_effect=OverflowError("source budget"))
+    monkeypatch.setattr(replica_views, "current_catalogue", current)
+    app = FastAPI()
+    app.include_router(replica_views.router)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/autonomy/replicas/components", params={"session_id": requested}
+        )
+
+    assert response.status_code == 413
+    assert current.call_args_list == [((requested,),)]
+
+
+def test_unscoped_catalogue_keeps_complete_history_below_budget(monkeypatch):
+    active = str(uuid4())
+    historical = str(uuid4())
+    catalogue = Mock()
+    catalogue.index.return_value = {"components": [{"session_id": historical}]}
+    current = Mock(return_value=catalogue)
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", active)
+    monkeypatch.setattr(replica_views, "current_catalogue", current)
+    app = FastAPI()
+    app.include_router(replica_views.router)
+    with TestClient(app) as client:
+        response = client.get("/api/autonomy/replicas/components")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "components": [{"session_id": historical}],
+        "active_session_id": active,
+    }
+    assert current.call_args_list == [((None,),)]
+
+
 def test_replica_snapshot_read_has_metadata_budget(tmp_path):
     store = ReplicaStore(tmp_path / "replicas")
     session = str(uuid4())

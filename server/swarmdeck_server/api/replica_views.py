@@ -95,11 +95,22 @@ async def component_catalogue(session_id: str | None = None):
     try:
 
         def read():
+            active_session_id = os.environ.get("SWARMDECK_MISSION_ID") or None
+            try:
+                catalogue = current_catalogue(session_id)
+            except OverflowError:
+                # Preserve the complete historical catalogue while it fits its
+                # input budget. Once it does not, the unscoped UI bootstrap can
+                # still inspect the configured live mission without retiring
+                # any historical replica manifests.
+                if session_id is not None or active_session_id is None:
+                    raise
+                catalogue = current_catalogue(active_session_id)
             return {
-                **current_catalogue(session_id).index(),
+                **catalogue.index(),
                 # Deployment identity selects live data explicitly; UUID order
                 # and independent per-robot revisions do not imply recency.
-                "active_session_id": os.environ.get("SWARMDECK_MISSION_ID") or None,
+                "active_session_id": active_session_id,
             }
 
         return await asyncio.to_thread(read)
