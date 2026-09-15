@@ -345,7 +345,7 @@ def _normalize_envelope(envelope: dict) -> dict:
 class ComponentCatalogue:
     """One immutable database snapshot, with lazy component view assembly."""
 
-    def __init__(self, envelopes: list[dict]):
+    def __init__(self, envelopes: list[dict], *, normalizer=_normalize_envelope):
         if not isinstance(envelopes, list) or len(envelopes) > MAX_ENVELOPES:
             raise ValueError("Replica source budget exceeded")
         self.groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
@@ -368,7 +368,7 @@ class ComponentCatalogue:
                 raise ValueError("Repeated replica owner")
             self.owners.add(owner)
             try:
-                source = _normalize_envelope(envelope)
+                source = normalizer(envelope)
             except (KeyError, TypeError, ValueError) as exc:
                 self.invalid_owners.add(owner)
                 self.source_errors.append(

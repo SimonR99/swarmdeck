@@ -700,3 +700,21 @@ with the original 500 ms budget, and an R1 12-metre route passed with both
 profiles. Some endpoints were rejected for excessive known height within the
 footprint; one repeat met a transient stale-authority check. Increasing a
 deadline does not resolve an occupied endpoint or authorize stale map data.
+
+The first motion harness aborted on a live-view HTTP timeout and verified
+Stop All; the repeat failed during observation setup before dispatching a new
+goal. Neither run qualifies as an arrival trial. Profiling isolated the slow
+request: the unfiltered catalogue contained 104 robot publications across
+100 components, mostly historical missions. Reading their JSON took 212 ms,
+normalizing them took 3811 ms, and assembling the index took 307 ms. The active
+mission alone contained four publications and took 11 ms to read, 16 ms to
+normalize, and 3 ms to index. Version lookup remained below 1 ms in both cases.
+The native planner is separate from this server catalogue path.
+
+The server now shares normalization of unchanged publications by exact
+mission, robot and revision, and serializes concurrent catalogue builds for
+one store. Changed or invalid publications still undergo validation. Cached
+sources are limited to exact revisions referenced by the last two coherent
+catalogues and at most 128 owners. The harness discovers the active mission
+once and scopes later catalogue reads to it; a mission change invalidates the
+trial. All 58 replica/component/live-view and deployment regressions passed.

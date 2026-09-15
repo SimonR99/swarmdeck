@@ -155,11 +155,18 @@ def simulation_fleet(args):
 def current_live(args, deadline, observation_errors=None):
     last_error = "qualified live component is unavailable"
     while time.monotonic() < deadline:
+        active_session = getattr(args, "active_session", None)
+        catalogue_path = "/api/autonomy/replicas/components"
+        if active_session:
+            catalogue_path += "?" + urlencode({"session_id": active_session})
         try:
             catalogue = json_request(
                 args.base_url,
-                "/api/autonomy/replicas/components",
-                timeout=max(0.2, min(1.0, deadline - time.monotonic())),
+                catalogue_path,
+                timeout=max(
+                    0.2,
+                    min(1.0 if active_session else 8.0, deadline - time.monotonic()),
+                ),
             )
         except (HTTPError, URLError, TimeoutError, OSError) as error:
             if observation_errors is not None:
@@ -168,6 +175,10 @@ def current_live(args, deadline, observation_errors=None):
             time.sleep(0.2)
             continue
         mission = catalogue.get("active_session_id")
+        if active_session is not None and mission != active_session:
+            raise RuntimeError("active simulation mission changed during the trial")
+        if mission:
+            args.active_session = mission
         for component in catalogue.get("components", []):
             if (
                 component.get("session_id") != mission

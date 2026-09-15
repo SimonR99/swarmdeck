@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+from threading import Event
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -398,6 +400,100 @@ def test_filtered_catalogue_cache_tracks_only_its_coherent_source_versions(
     assert snapshots.call_count == 2
     assert replica_views.current_catalogue(session) is replacement
     assert snapshots.call_count == 2
+    replica.close()
+
+
+def test_catalogue_renormalizes_only_the_owner_whose_revision_advanced(
+    tmp_path, monkeypatch
+):
+    session = str(uuid4())
+    replica = ReplicaStore(tmp_path / "incremental-cache")
+    sources = []
+    for index in range(2):
+        source, chunks = peer(tmp_path, f"robot_{index}", session, order=[3, 0])
+        for name, payload in chunks.items():
+            replica.put_chunk(name, payload)
+        replica.publish(source)
+        sources.append(source)
+    normalize = Mock(wraps=replica_views._normalize_envelope)
+    monkeypatch.setattr(replica_views, "_normalize_envelope", normalize)
+    monkeypatch.setattr(replica_views, "store", lambda: replica)
+
+    replica_views.current_catalogue(session)
+    assert normalize.call_count == 2
+    sources[0]["revision"] = 2
+    selected(sources[0])["submaps"][0]["T_component_submap"][0][3] = 2.0
+    reseal(sources[0])
+    replica.publish(sources[0])
+
+    replica_views.current_catalogue(session)
+    assert normalize.call_count == 3
+    replica.close()
+
+
+def test_catalogue_invalid_replacement_does_not_reuse_normalized_owner(
+    tmp_path, monkeypatch
+):
+    session = str(uuid4())
+    source, chunks = peer(tmp_path, "robot_0", session, order=[3, 0])
+    replica = ReplicaStore(tmp_path / "invalid-cache")
+    for name, payload in chunks.items():
+        replica.put_chunk(name, payload)
+    replica.publish(source)
+    monkeypatch.setattr(replica_views, "store", lambda: replica)
+    first = replica_views.current_catalogue(session)
+    assert first.index()["source_errors"] == []
+
+    source["revision"] = 2
+    selected(source)["submaps"][0]["T_component_submap"] = [[1.0]]
+    reseal(source)
+    assert replica.publish(source)
+    replacement = replica_views.current_catalogue(session)
+
+    assert replacement is not first
+    assert replacement.index()["components"] == []
+    assert replacement.index()["source_errors"][0]["robot_id"] == "robot_0"
+    owner = (session, "robot_0")
+    assert owner not in replica_views._state(replica).normalized
+    for index in range(2):
+        other_session = str(uuid4())
+        other, other_chunks = peer(
+            tmp_path, f"other_{index}", other_session, order=[3, 0]
+        )
+        for name, payload in other_chunks.items():
+            replica.put_chunk(name, payload)
+        replica.publish(other)
+        replica_views.current_catalogue(other_session)
+    assert owner not in replica_views._state(replica).normalized
+    replica.close()
+
+
+def test_concurrent_catalogue_miss_builds_one_snapshot(tmp_path, monkeypatch):
+    session = str(uuid4())
+    source, chunks = peer(tmp_path, "robot_0", session, order=[3, 0])
+    replica = ReplicaStore(tmp_path / "single-flight")
+    for name, payload in chunks.items():
+        replica.put_chunk(name, payload)
+    replica.publish(source)
+    snapshots = Mock(wraps=replica.snapshots)
+    entered, release = Event(), Event()
+    normalize_source = replica_views._normalize_envelope
+
+    def normalize(envelope):
+        entered.set()
+        assert release.wait(2.0)
+        return normalize_source(envelope)
+
+    monkeypatch.setattr(replica, "snapshots", snapshots)
+    monkeypatch.setattr(replica_views, "_normalize_envelope", normalize)
+    monkeypatch.setattr(replica_views, "store", lambda: replica)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(replica_views.current_catalogue, session)
+        assert entered.wait(2.0)
+        second = executor.submit(replica_views.current_catalogue, session)
+        release.set()
+        assert first.result() is second.result()
+    assert snapshots.call_count == 1
     replica.close()
 
 

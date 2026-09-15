@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from autonomy.contracts import validate_se3
 from .autonomy_routes import store
-from .replica_components import ComponentCatalogue
+from .replica_components import ComponentCatalogue, MAX_ENVELOPES, _normalize_envelope
 from .replica_live import router as live_router
 
 router = APIRouter(prefix="/api/autonomy/replicas", tags=["autonomy replica views"])
@@ -29,26 +29,65 @@ _catalogues = WeakKeyDictionary()
 _catalogue_lock = Lock()
 
 
+class _CatalogueState:
+    def __init__(self):
+        self.lock = Lock()
+        self.catalogues = OrderedDict()
+        self.normalized = OrderedDict()
+
+
+def _state(replica_store):
+    with _catalogue_lock:
+        return _catalogues.setdefault(replica_store, _CatalogueState())
+
+
 def current_catalogue(session_id: str | None):
     replica_store = store()
-    versions = replica_store.snapshot_versions(session_id)
-    with _catalogue_lock:
-        cache = _catalogues.setdefault(replica_store, OrderedDict())
-        previous = cache.get(session_id)
+    state = _state(replica_store)
+    # Serialize misses for one store. Without this recheck, simultaneous UI and
+    # live-overlay reads normalize and hash the same immutable manifests twice.
+    with state.lock:
+        versions = replica_store.snapshot_versions(session_id)
+        previous = state.catalogues.get(session_id)
         if previous is not None and previous[0] == versions:
-            cache.move_to_end(session_id)
+            state.catalogues.move_to_end(session_id)
             return previous[1]
-    snapshots = replica_store.snapshots(session_id)
-    # A publication may have advanced during the first version read. Associate
-    # the cache with the actual coherent snapshot used to construct the view.
-    versions = tuple((e["robot_id"], e["session_id"], e["revision"]) for e in snapshots)
-    catalogue = ComponentCatalogue(snapshots)
-    with _catalogue_lock:
-        cache[session_id] = (versions, catalogue)
-        cache.move_to_end(session_id)
-        while len(cache) > 2:
-            cache.popitem(last=False)
-    return catalogue
+
+        snapshots = replica_store.snapshots(session_id)
+        # A publication may have advanced during the first version read. Associate
+        # the cache with the actual coherent snapshot used to construct the view.
+        versions = tuple(
+            (e["robot_id"], e["session_id"], e["revision"]) for e in snapshots
+        )
+
+        def normalize(envelope):
+            owner = (envelope["session_id"], envelope["robot_id"])
+            revision = envelope["revision"]
+            cached = state.normalized.get(owner)
+            if cached is not None and cached[0] == revision:
+                state.normalized.move_to_end(owner)
+                return cached[1]
+            source = _normalize_envelope(envelope)
+            state.normalized[owner] = (revision, source)
+            state.normalized.move_to_end(owner)
+            while len(state.normalized) > MAX_ENVELOPES:
+                state.normalized.popitem(last=False)
+            return source
+
+        catalogue = ComponentCatalogue(snapshots, normalizer=normalize)
+        state.catalogues[session_id] = (versions, catalogue)
+        state.catalogues.move_to_end(session_id)
+        while len(state.catalogues) > 2:
+            state.catalogues.popitem(last=False)
+        retained_revisions = {
+            ((source_session, robot_id), revision)
+            for cached_versions, _ in state.catalogues.values()
+            for robot_id, source_session, revision in cached_versions
+        }
+        for owner, cached in tuple(state.normalized.items()):
+            if (owner, cached[0]) not in retained_revisions:
+                del state.normalized[owner]
+        return catalogue
 
 
 @router.get("/components")
