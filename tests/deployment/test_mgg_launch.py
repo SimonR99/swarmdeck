@@ -1,11 +1,30 @@
 """Exercise deployment map selection without requiring a ROS installation."""
 
 import importlib.util
+import re
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+
+
+def test_mgg_docker_patches_are_well_formed(tmp_path):
+    """Catch malformed patch artifacts before the expensive native image build."""
+    root = Path(__file__).parents[2]
+    dockerfile = (root / "deploy/docker/Dockerfile.mgg").read_text()
+    patches = re.findall(r"git apply /tmp/([^\s/]+\.patch)", dockerfile)
+    assert patches
+    for name in patches:
+        result = subprocess.run(
+            ["git", "apply", "--numstat", str(root / "deploy/patches" / name)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, f"{name}: {result.stderr}"
 
 
 @pytest.fixture

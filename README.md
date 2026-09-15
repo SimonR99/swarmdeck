@@ -60,7 +60,8 @@ refines a bounded section ahead (8 m by default), and Nav2 follows that section
 before requesting the next. The dashboard retains the full graph route and
 the exact Home destination throughout the journey. A nearby Home can use a
 bounded direct connector when the graph is unavailable; a long return needs
-graph connectivity.
+graph connectivity. An obstructed intermediate graph waypoint can trigger a
+local detour to the same section endpoint within the remaining planning budget.
 For provisional routes, a bounded check of the next 3 m requests a replacement
 only when newly known terrain or obstacles make the current route unusable.
 Routine map updates do not replace the waypoint. Map images carry their own
@@ -73,7 +74,9 @@ invalidate it. See the [navigation acceptance notes](docs/operations/navigation-
 for sensor-coverage limits and tested scenarios.
 Simulation terrain checks retain measured surface heights within the coarse
 occupancy map and check known terrain across the robot footprint, including
-exploration candidates. Controller failures include their reason in Fleet.
+exploration candidates. Connected measured supports allow successive climbable
+steps across a long footprint; missing observations cannot bridge a known
+height discontinuity. Controller failures include their reason in Fleet.
 Physical no-progress failures allow three movement attempts total; planner
 rejections and transport errors do not consume that movement retry budget.
 Benchbot trials reached approximately 12 m destinations with R0 and R1, and R0
@@ -185,9 +188,9 @@ verified shared component. Published Gaussian artifacts must match the selected
 component. Unaligned maps are never combined using assumed transforms.
 
 The **Global** control reports how many robots are merged in that verified
-component. **0 merged** means no shared component is available in the active
-mission; **— merged** means membership is unavailable. Robots that are merely
-online and maps from previous missions do not increase the count.
+component. **0 merged** means no verified shared component can be selected for
+the current Global view; **— merged** means membership is unavailable. Robots
+that are merely online and maps from previous missions do not increase the count.
 
 ### Camera colors and Gaussian reconstruction
 

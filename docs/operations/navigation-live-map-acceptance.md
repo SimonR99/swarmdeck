@@ -2,8 +2,8 @@
 
 ## September 13 navigation follow-up
 
-The current benchbot project is `planning-next` on UI port 15173, with one
-server and one ARGoS simulation. Mission
+The September 13 run used benchbot project `planning-next` on UI port 15173,
+with one server and one ARGoS simulation. Mission
 `bacca582-d826-4581-a825-e992956f8a98` uses ROS domain 201. Native MOLA mapping
 is active, while MGG uses `cloud_octomap`; indexed corridor validation remains
 disabled. This run qualifies the simulated cloud planner, not the MOLA planner
@@ -33,7 +33,7 @@ point 12 m south of R0's deployment, world `(-12, -8)`, sits on a roughly
 instead reaches road at `(-10, -8)`. The current generic ground-support failure
 message can describe incompatible known terrain as well as missing evidence.
 
-Final deployed images:
+Images used for this run:
 
 - MGG: `swarmdeck-mgg:terrain-cache-final-review`,
   `sha256:55b5c6170824e166028a4863e71452fe079bc16ec5fc91d2fb37234f16773f2f`.
@@ -854,3 +854,63 @@ that fit the remaining cell budget, check coordinate arithmetic before integer
 conversion/addition, and share the cooperative deadline. The production body
 evidence policy gate is preserved. Exact-image native testing is required after
 this correction; the earlier isolated test results do not qualify that image.
+
+### Exact-image validation and fresh mission
+
+`swarmdeck-mgg:nav-window-a17d2a9` built successfully from the corrected patch
+sequence. In an isolated container, all 15 core and three ROS test targets
+passed: 219 cases, including 35 grid-refinement and 53 objective-service cases.
+The container was removed after testing. The authoritative XML and build log
+are under the bench review checkout's `.deploy/nav-timeout/`, with prefix
+`test-parent-native-20260915T044103Z`.
+
+The subsequent fresh mission uses ROS domain 216 and retains the single UI
+on port 15173. R0's 30-metre left-offset route and the 12-metre R2/R3 routes
+passed native planning and live validation. R0's 20-metre right-offset goal
+still exhausted three two-second planning attempts before meaningful motion;
+the final attempt made 6,464 projections. This route is not qualified.
+
+R3 reached its 12-metre Navigate goal in 23.4 seconds, with a qualified arrival
+error of 0.219 metres and zero local/global endpoint error relative to the
+requested component-frame goal. Its subsequent Home trial used rolling graph
+continuation but failed about 3.55 metres from home. An occupied intermediate
+corridor pose was rejected before any traversal or grid expansion, so the
+local planner did not attempt a detour. Stop All verified the fleet idle after
+both trials.
+
+The mesh investigation distinguishes an abrupt 16–17 cm direct curb from an
+eastern passage with successive 6.8 cm and 7.5 cm rises. The former exceeds
+the Bunker's 10 cm capability. A static full-route search can use the latter
+when the footprint accepts known, connected supports with individually
+traversable transitions; the old centre-relative height test seals it. This
+is geometry evidence, not yet a successful native or physical crossing.
+
+### Connected terrain and intermediate Home obstacles
+
+The follow-up footprint rule retains the existing centre-height fast path.
+When measured terrain spans more than one step, every outlying hit must have
+a four-neighbour chain of known supports back to centre-compatible terrain.
+Adjacent transitions obey the existing step/inclination limits. Missing hits
+cannot connect those supports; unavailable or non-finite queries still fail.
+The fallback completes the bounded footprint scan and reuses its ray results,
+with at most 4096 samples and four neighbour checks per hit; it does not resample
+terrain during the connectivity search.
+
+Home can now bypass an obstructed intermediate graph hint during initial
+planning or rolling refinement. The local grid keeps the exact section endpoint,
+and the global route, final Home pose and continuation token remain unchanged.
+Only physical waypoint-precheck failures qualify; malformed geometry, blocked
+section endpoints, search failures and exhausted deadlines do not trigger an
+extra search. The fallback uses the original request's remaining time budget.
+
+Known ground projections also memoize repeated exact incoming-height keys within
+one immutable planning snapshot. The additional memo is capped at the cell
+limit and safely falls back to projection when full. A synthetic ramp fixture
+identified 441 redundant exact-key calls among 1075 projections; this predicts
+less map work, rather than establishing a live speedup. Distinct inherited
+heights remain separate states.
+
+The complete 46-patch Docker sequence applies to pinned MGG revision `902e868`.
+The combined Python suite passed 195 tests, and Black accepted all 348 tracked
+Python files after testing. Exact-image native and physical arrival checks are
+the remaining gates for this candidate.

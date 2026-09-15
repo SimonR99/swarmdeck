@@ -58,6 +58,9 @@ COPY deploy/patches/mgg-navigate-graph-first-followup.patch /tmp/mgg-navigate-gr
 COPY deploy/patches/mgg-navigate-endpoint-height-followup.patch /tmp/mgg-navigate-endpoint-height-followup.patch
 COPY deploy/patches/mgg-objective-wide-window-followup.patch /tmp/mgg-objective-wide-window-followup.patch
 COPY deploy/patches/mgg-provisional-parent-height-followup.patch /tmp/mgg-provisional-parent-height-followup.patch
+COPY deploy/patches/mgg-known-height-memo-followup.patch /tmp/mgg-known-height-memo-followup.patch
+COPY deploy/patches/mgg-connected-footprint-support-followup.patch /tmp/mgg-connected-footprint-support-followup.patch
+COPY deploy/patches/mgg-home-obstacle-detour-followup.patch /tmp/mgg-home-obstacle-detour-followup.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -102,6 +105,9 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-navigate-endpoint-height-followup.patch && \
     git apply /tmp/mgg-objective-wide-window-followup.patch && \
     git apply /tmp/mgg-provisional-parent-height-followup.patch && \
+    git apply /tmp/mgg-known-height-memo-followup.patch && \
+    git apply /tmp/mgg-connected-footprint-support-followup.patch && \
+    git apply /tmp/mgg-home-obstacle-detour-followup.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

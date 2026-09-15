@@ -1,0 +1,245 @@
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index 945461e..d440fb8 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -1503,6 +1503,17 @@ mgg::GridProjectionStatus PlannerNode::objectiveFootprintTerrainStatus(
+   int samples = 0;
+   const double nominal_ground_z =
+       driving_pose.z() - planning_params_.max_ground_height;
++  struct FootprintGroundHit {
++    double z;
++    int grid_index;
++    bool connected;
++  };
++  const int grid_width = intervals + 1;
++  std::vector<FootprintGroundHit> ground_hits;
++  ground_hits.reserve(std::min(kMaxFootprintSamples,
++                               grid_width * grid_width));
++  bool needs_connected_support = false;
++  double first_unsupported_delta = 0.0;
+ 
+   // getRayStatus(..., false) deliberately treats unobserved cells as
+   // traversable and its legacy API also returns Free when ray setup fails.
+@@ -1549,31 +1560,89 @@ mgg::GridProjectionStatus PlannerNode::objectiveFootprintTerrainStatus(
+       // support for ordinary poses, while sparse simulated sensors cannot
+       // certify every footprint column. Known terrain is a veto when it rises
+       // or drops beyond the conservative platform step envelope.
+-      if (ray == mgg::VoxelStatus::kUnknown ||
+-          (ray == mgg::VoxelStatus::kOccupied &&
+-           (!hit.allFinite() ||
+-            std::abs(hit.z() - nominal_ground_z) >
+-                planning_params_.max_step_height + 1e-6))) {
+-        if (objective_footprint_failure_.empty()) {
+-          if (ray == mgg::VoxelStatus::kUnknown) {
+-            record_failure("footprint ray unavailable");
+-          } else if (!hit.allFinite()) {
+-            record_failure("non-finite footprint ground hit");
+-          } else {
+-            const double delta = hit.z() - nominal_ground_z;
+-            char detail[160];
+-            std::snprintf(detail, sizeof(detail),
+-                          "known %s %.3f m exceeds step limit %.3f m",
+-                          delta > 0.0 ? "rise" : "drop", std::abs(delta),
+-                          planning_params_.max_step_height);
+-            record_failure(detail);
+-          }
++      if (ray == mgg::VoxelStatus::kUnknown) {
++        record_failure("footprint ray unavailable");
++        return mgg::GridProjectionStatus::kBodyUnknown;
++      }
++      if (ray != mgg::VoxelStatus::kOccupied) continue;
++      if (!hit.allFinite()) {
++        record_failure("non-finite footprint ground hit");
++        return mgg::GridProjectionStatus::kBodyUnknown;
++      }
++      const double delta = hit.z() - nominal_ground_z;
++      const bool center_compatible =
++          std::abs(delta) <= planning_params_.max_step_height + 1e-6;
++      if (!center_compatible && !needs_connected_support) {
++        first_unsupported_delta = delta;
++        needs_connected_support = true;
++      }
++      const int grid_index = ix * grid_width + iy;
++      ground_hits.push_back({hit.z(), grid_index, center_compatible});
++    }
++  }
++  // Preserve the original all-to-centre check as the common fast path.  If a
++  // footprint spans more than one individually traversable rise, accept it
++  // only when every measured outlier has a chain of measured four-neighbour
++  // support back to terrain within the centre's step envelope.  Missing rays
++  // never create support or bridge a gap.
++  if (needs_connected_support) {
++    if (!std::isfinite(planning_params_.max_inclination) ||
++        planning_params_.max_inclination < 0.0) {
++      record_failure("invalid footprint query configuration");
++      return mgg::GridProjectionStatus::kBodyUnknown;
++    }
++    std::vector<int> ground_hit_at(grid_width * grid_width, -1);
++    for (std::size_t i = 0; i < ground_hits.size(); ++i) {
++      ground_hit_at[ground_hits[i].grid_index] = static_cast<int>(i);
++    }
++    std::vector<std::size_t> pending;
++    pending.reserve(ground_hits.size());
++    for (std::size_t i = 0; i < ground_hits.size(); ++i) {
++      if (ground_hits[i].connected) pending.push_back(i);
++    }
++    constexpr int kDx[] = {-1, 1, 0, 0};
++    constexpr int kDy[] = {0, 0, -1, 1};
++    for (std::size_t head = 0; head < pending.size(); ++head) {
++      const FootprintGroundHit& current = ground_hits[pending[head]];
++      const int ix = current.grid_index / grid_width;
++      const int iy = current.grid_index % grid_width;
++      for (int direction = 0; direction < 4; ++direction) {
++        const int nx = ix + kDx[direction];
++        const int ny = iy + kDy[direction];
++        if (nx < 0 || nx >= grid_width || ny < 0 || ny >= grid_width) {
++          continue;
+         }
+-        return ray == mgg::VoxelStatus::kUnknown || !hit.allFinite()
+-                   ? mgg::GridProjectionStatus::kBodyUnknown
+-                   : mgg::GridProjectionStatus::kNoGround;
++        const int neighbour_index = ground_hit_at[nx * grid_width + ny];
++        if (neighbour_index < 0 ||
++            ground_hits[neighbour_index].connected) {
++          continue;
++        }
++        const double dz =
++            std::abs(ground_hits[neighbour_index].z - current.z);
++        const double inclination = std::atan2(dz, resolution);
++        if (dz > planning_params_.max_step_height + 1e-6 &&
++            inclination > planning_params_.max_inclination + 1e-6) {
++          continue;
++        }
++        ground_hits[neighbour_index].connected = true;
++        pending.push_back(static_cast<std::size_t>(neighbour_index));
+       }
+     }
++    if (std::any_of(ground_hits.begin(), ground_hits.end(),
++                    [nominal_ground_z, this](const FootprintGroundHit& hit) {
++                      return !hit.connected &&
++                             std::abs(hit.z - nominal_ground_z) >
++                                 planning_params_.max_step_height + 1e-6;
++                    })) {
++      char detail[160];
++      std::snprintf(detail, sizeof(detail),
++                    "known %s %.3f m exceeds step limit %.3f m",
++                    first_unsupported_delta > 0.0 ? "rise" : "drop",
++                    std::abs(first_unsupported_delta),
++                    planning_params_.max_step_height);
++      record_failure(detail);
++      return mgg::GridProjectionStatus::kNoGround;
++    }
+   }
+   return samples > 0 ? mgg::GridProjectionStatus::kSupported
+                      : mgg::GridProjectionStatus::kBodyUnknown;
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index 5f9c3c9..8992a07 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -72,6 +72,10 @@ class PlannerNodeTestPeer {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     node.planning_params_.max_step_height = height;
+   }
++  static void setMaxInclination(PlannerNode& node, double inclination) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.planning_params_.max_inclination = inclination;
++  }
+   static void setMaxGroundHeight(PlannerNode& node, double height) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     node.planning_params_.max_ground_height = height;
+@@ -1770,6 +1774,95 @@ TEST(PlannerObjective, ObservedGroundVetoesKnownFootprintTerrainHazards) {
+       *shallow, driving_pose, Eigen::Vector3d(10.0, 10.0, 0.15)));
+ }
+ 
++TEST(PlannerObjective, ConnectedMeasuredSupportAllowsStagedFootprintTerrain) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  const Eigen::Vector3d body(0.90, 0.15, 0.15);
++  const Eigen::Vector3d low_pose(0.0, 0.0, 0.30);
++  const auto make = [&body] {
++    rclcpp::NodeOptions options;
++    options.parameter_overrides(
++        {rclcpp::Parameter("use_sim_time", true),
++         rclcpp::Parameter("map.resolution", 0.15),
++         rclcpp::Parameter("objective_body_evidence_policy", "observed_ground")});
++    auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++    Peer::configureBackboneTest(*node);
++    Peer::setPlanningBody(*node, body);
++    return node;
++  };
++  const auto add_column = [](mgg_ros::PlannerNode& node, double x,
++                             double z) {
++    // Samples lie in both map-cell rows touched by y=0.  The 15 cm phase
++    // matches the measured-surface cells used by the Bistro simulation.
++    Peer::addMeasuredSurface(node, x, -0.075, z);
++    Peer::addMeasuredSurface(node, x, 0.075, z);
++  };
++
++  auto staged = make();
++  for (const double x : {-0.525, -0.375, -0.225}) {
++    add_column(*staged, x, 0.0);
++  }
++  add_column(*staged, -0.075, 0.068);
++  for (const double x : {0.075, 0.225, 0.375, 0.525}) {
++    add_column(*staged, x, 0.143);
++  }
++  // The complete footprint spans 14.3 cm relative to the low centre, but
++  // each measured transition is inside the 10 cm step budget.
++  EXPECT_TRUE(Peer::footprintTerrainSupported(*staged, low_pose, body));
++  EXPECT_TRUE(Peer::terrainPathSupported(
++      *staged, {Eigen::Vector3d(-0.30, 0.0, 0.30),
++                Eigen::Vector3d(0.0, 0.0, 0.368),
++                Eigen::Vector3d(0.30, 0.0, 0.443)}));
++
++  auto invalid_inclination = make();
++  for (const double x : {-0.525, -0.375, -0.225}) {
++    add_column(*invalid_inclination, x, 0.0);
++  }
++  add_column(*invalid_inclination, -0.075, 0.068);
++  for (const double x : {0.075, 0.225, 0.375, 0.525}) {
++    add_column(*invalid_inclination, x, 0.143);
++  }
++  Peer::setMaxInclination(*invalid_inclination,
++                          std::numeric_limits<double>::quiet_NaN());
++  EXPECT_FALSE(Peer::footprintTerrainSupported(*invalid_inclination,
++                                               low_pose, body));
++
++  auto grade = make();
++  const std::vector<double> grade_x = {
++      -0.525, -0.375, -0.225, -0.075, 0.075, 0.225, 0.375, 0.525};
++  for (std::size_t i = 0; i < grade_x.size(); ++i) {
++    add_column(*grade, grade_x[i], 0.025 * static_cast<double>(i));
++  }
++  // A continuous measured grade may exceed one centre-to-edge step while
++  // each adjacent cell remains below both the step and inclination limits.
++  EXPECT_TRUE(Peer::footprintTerrainSupported(*grade, low_pose, body));
++
++  auto curb = make();
++  for (const double x : {-0.525, -0.375, -0.225, -0.075}) {
++    add_column(*curb, x, 0.0);
++  }
++  for (const double x : {0.075, 0.225, 0.375, 0.525}) {
++    add_column(*curb, x, 0.16);
++  }
++  // A fully measured single 16 cm curb has no admissible support edge and
++  // retains the known-terrain veto.
++  EXPECT_FALSE(Peer::footprintTerrainSupported(*curb, low_pose, body));
++  EXPECT_FALSE(Peer::terrainPathSupported(
++      *curb, {Eigen::Vector3d(-0.30, 0.0, 0.30),
++              Eigen::Vector3d(0.30, 0.0, 0.46)}));
++
++  auto missing_middle = make();
++  for (const double x : {-0.525, -0.375}) {
++    add_column(*missing_middle, x, 0.0);
++  }
++  for (const double x : {0.375, 0.525}) {
++    add_column(*missing_middle, x, 0.143);
++  }
++  // Absent ground observations remain neutral for the footprint query, but
++  // they cannot bridge known support to an otherwise unsupported outlier.
++  EXPECT_FALSE(
++      Peer::footprintTerrainSupported(*missing_middle, low_pose, body));
++}
++
+ TEST(PlannerObjective, FootprintQueriesEachIntersectingMapCellExactlyOnce) {
+   using Peer = mgg_ros::PlannerNodeTestPeer;
+   const auto make = [] {

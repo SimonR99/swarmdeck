@@ -1,0 +1,385 @@
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index 945461e..b52fbdb 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -40,6 +40,70 @@ std::string boundedObjectiveFailure(const std::string& reason) {
+          compact.substr(compact.size() - kTail);
+ }
+ 
++bool hasSkippableHomeWaypointRejection(
++    const mgg::RouteCorridor& corridor, const std::string& reason) {
++  constexpr char kPrefix[] = "route corridor waypoint[";
++  constexpr char kSuffix[] = "] rejected:";
++  if (corridor.request.objective != mgg::ObjectiveKind::kReturnHome ||
++      corridor.poses.empty() ||
++      reason.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0) {
++    return false;
++  }
++  if (!corridor.request.goal.pose.allFinite() ||
++      std::any_of(corridor.poses.begin(), corridor.poses.end(),
++                  [](const mgg::StateVec& pose) { return !pose.allFinite(); })) {
++    return false;
++  }
++  std::size_t cursor = sizeof(kPrefix) - 1;
++  std::size_t index = 0;
++  const std::size_t digits_begin = cursor;
++  while (cursor < reason.size() && reason[cursor] >= '0' &&
++         reason[cursor] <= '9') {
++    const std::size_t digit = static_cast<std::size_t>(reason[cursor] - '0');
++    if (index > (std::numeric_limits<std::size_t>::max() - digit) / 10u) {
++      return false;
++    }
++    index = index * 10u + digit;
++    ++cursor;
++  }
++  if (cursor == digits_begin ||
++      reason.compare(cursor, sizeof(kSuffix) - 1, kSuffix) != 0 ||
++      index >= corridor.poses.size()) {
++    return false;
++  }
++  cursor += sizeof(kSuffix) - 1;
++  while (cursor < reason.size() && reason[cursor] == ' ') ++cursor;
++  const auto has_projection_class = [&reason, cursor](const char* value) {
++    return reason.compare(cursor, std::char_traits<char>::length(value), value) ==
++           0;
++  };
++  if (!has_projection_class("no mapped ground support") &&
++      !has_projection_class("body intersects occupied space") &&
++      !has_projection_class("body includes unknown space") &&
++      !has_projection_class("geofence violation")) {
++    return false;
++  }
++  // A partial corridor stores its exact local proxy as the last pose. It is a
++  // mandatory endpoint, while all earlier graph poses are refinement hints.
++  return !corridor.partial || index + 1u < corridor.poses.size();
++}
++
++mgg::RouteCorridor homeLocalEndpointCorridor(
++    const mgg::RouteCorridor& corridor) {
++  mgg::RouteCorridor endpoint = corridor;
++  if (endpoint.partial && !endpoint.poses.empty()) {
++    const mgg::StateVec local_proxy = endpoint.poses.back();
++    endpoint.poses.clear();
++    endpoint.poses.push_back(local_proxy);
++  } else {
++    // A full corridor's endpoint remains request-owned. Clearing a matching
++    // final graph pose makes the grid planner project and validate that exact
++    // Home goal again before searching.
++    endpoint.poses.clear();
++  }
++  return endpoint;
++}
++
+ bool objectiveGridWindowFits(const mgg::RouteCorridor& corridor,
+                              const mgg::StateVec& current,
+                              double resolution, double margin,
+@@ -3213,6 +3277,25 @@ void PlannerNode::onObjectiveRequest(
+       path = std::move(fallback);
+     }
+   }
++  if (path.status != mgg::PlanningStatus::kSucceeded &&
++      hasSkippableHomeWaypointRejection(primary, path.reason)) {
++    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now() - objective_refinement_started);
++    if (elapsed < objective_grid_limits_.timeout) {
++      mgg::RouteCorridor endpoint = homeLocalEndpointCorridor(primary);
++      mgg::GridRefinementLimits remaining = objective_grid_limits_;
++      remaining.timeout -= elapsed;
++      mgg::FeasiblePath fallback = refineCorridor(endpoint, &remaining);
++      if (fallback.status != mgg::PlanningStatus::kSucceeded) {
++        fallback.reason =
++            "Home graph corridor: " +
++            boundedObjectiveFailure(primary_failure_reason) +
++            " [local endpoint fallback: " +
++            boundedObjectiveFailure(fallback.reason) + "]";
++      }
++      path = std::move(fallback);
++    }
++  }
+   const IndexedQueryContext query_context = indexedQueryContext();
+   map_read = mgg::MolaMap::ReadLease{};
+   lock.unlock();
+@@ -3395,7 +3478,28 @@ void PlannerNode::onRefineObjectiveRoute(
+                                     local_poses.back(), ""}
+                               : cached_home_route_->exact_goal;
+   corridor.poses = std::move(local_poses);
++  const auto objective_refinement_started = std::chrono::steady_clock::now();
+   mgg::FeasiblePath path = refineCorridor(corridor, &objective_grid_limits_);
++  const std::string primary_failure_reason = path.reason;
++  if (path.status != mgg::PlanningStatus::kSucceeded &&
++      hasSkippableHomeWaypointRejection(corridor, path.reason)) {
++    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now() - objective_refinement_started);
++    if (elapsed < objective_grid_limits_.timeout) {
++      mgg::RouteCorridor endpoint = homeLocalEndpointCorridor(corridor);
++      mgg::GridRefinementLimits remaining = objective_grid_limits_;
++      remaining.timeout -= elapsed;
++      mgg::FeasiblePath fallback = refineCorridor(endpoint, &remaining);
++      if (fallback.status != mgg::PlanningStatus::kSucceeded) {
++        fallback.reason =
++            "Home graph corridor: " +
++            boundedObjectiveFailure(primary_failure_reason) +
++            " [local endpoint fallback: " +
++            boundedObjectiveFailure(fallback.reason) + "]";
++      }
++      path = std::move(fallback);
++    }
++  }
+   const IndexedQueryContext query_context = indexedQueryContext();
+   map_read = mgg::MolaMap::ReadLease{};
+   lock.unlock();
+diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
+index 5f9c3c9..9715be0 100644
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -145,6 +145,13 @@ class PlannerNodeTestPeer {
+     node.onOdometry(msg);
+   }
+ 
++  static void setCurrentStateWithoutExtendingBackbone(
++      PlannerNode& node, double x, double y, double z) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.current_state_ = mgg::StateVec(x, y, z, 0.0);
++    node.have_odometry_ = true;
++  }
++
+   static void observeGroundSupport(PlannerNode& node) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     // Vertical rays supply ground for every projection probe but leave parts
+@@ -789,6 +796,11 @@ class PlannerNodeTestPeer {
+   static mgg::StateVec globalVertexState(const PlannerNode& node, int id) {
+     return node.global_graph_->getVertex(id)->state;
+   }
++  static void makeGlobalVertexNonFinite(PlannerNode& node, int id) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    node.global_graph_->getVertex(id)->state.x() =
++        std::numeric_limits<double>::quiet_NaN();
++  }
+   static void addBadHomeCorridor(PlannerNode& node) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+     auto* bad = new mgg::Vertex(
+@@ -1327,6 +1339,184 @@ TEST(PlannerObjective, LongHomeKeepsGlobalRouteAndRefinesBoundedWindows) {
+             mgg_msgs::srv::RefineObjectiveRoute::Response::BLOCKED);
+ }
+ 
++TEST(PlannerObjective, PartialHomeDetoursAroundOccupiedGraphWaypoint) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_route_horizon_m", 1.4),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy", "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*node);
++  Peer::addLinearHomeCorridor(*node, 3);
++  Peer::setCurrentStateWithoutExtendingBackbone(*node, 3.0, 0.0, 0.075);
++  Peer::addGridObstacle(*node, 0.325, false, 2.0);
++
++  const auto response = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kReturnHome,
++      mgg::StateVec(0.0, 0.0, 0.075, 0.4), "kf-home");
++
++  ASSERT_EQ(response->status,
++            mgg_msgs::srv::PlanObjective::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_TRUE(response->partial);
++  ASSERT_FALSE(response->route_id.empty());
++  ASSERT_EQ(response->global_path.size(), 4u);
++  EXPECT_NEAR(response->global_path.back().position.x, 0.0, 1e-9);
++  EXPECT_NEAR(response->global_path.back().orientation.z, std::sin(0.2), 1e-9);
++  ASSERT_FALSE(response->path.empty());
++  EXPECT_NEAR(response->path.back().position.x, 1.6, 1e-6);
++  EXPECT_TRUE(std::any_of(response->path.begin(), response->path.end(),
++                          [](const geometry_msgs::msg::Pose& pose) {
++                            return std::abs(pose.position.y) > 0.1;
++                          }));
++}
++
++TEST(PlannerObjective, RollingHomeDetourPreservesRouteTokenAndProgress) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_route_horizon_m", 1.4),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy", "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*node);
++  Peer::addLinearHomeCorridor(*node, 3);
++  Peer::setCurrentStateWithoutExtendingBackbone(*node, 3.0, 0.0, 0.075);
++  auto initial = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kReturnHome,
++      mgg::StateVec(0.0, 0.0, 0.075, 0.4), "kf-home");
++  ASSERT_EQ(initial->status,
++            mgg_msgs::srv::PlanObjective::Response::SUCCEEDED)
++      << initial->reason;
++  ASSERT_TRUE(initial->partial);
++  ASSERT_FALSE(initial->route_id.empty());
++  const std::string route_id = initial->route_id;
++  const auto fixed_global = initial->global_path;
++  ASSERT_FALSE(initial->path.empty());
++  const auto& first_endpoint = initial->path.back().position;
++  Peer::setCurrentStateWithoutExtendingBackbone(
++      *node, first_endpoint.x, first_endpoint.y, first_endpoint.z);
++  Peer::addGridObstacle(*node, 0.325, false, 1.0);
++
++  auto request =
++      std::make_shared<mgg_msgs::srv::RefineObjectiveRoute::Request>();
++  request->route_id = route_id;
++  request->component_id = initial->component_id;
++  auto detour = Peer::refineObjectiveRoute(*node, request);
++  ASSERT_EQ(detour->status,
++            mgg_msgs::srv::RefineObjectiveRoute::Response::SUCCEEDED)
++      << detour->reason;
++  ASSERT_TRUE(detour->partial);
++  ASSERT_FALSE(detour->path.empty());
++  EXPECT_TRUE(std::any_of(detour->path.begin(), detour->path.end(),
++                          [](const geometry_msgs::msg::Pose& pose) {
++                            return std::abs(pose.position.y) > 0.1;
++                          }));
++
++  const auto& second_endpoint = detour->path.back().position;
++  Peer::setCurrentStateWithoutExtendingBackbone(
++      *node, second_endpoint.x, second_endpoint.y, second_endpoint.z);
++  const auto final = Peer::refineObjectiveRoute(*node, request);
++  ASSERT_EQ(final->status,
++            mgg_msgs::srv::RefineObjectiveRoute::Response::SUCCEEDED)
++      << final->reason;
++  EXPECT_FALSE(final->partial);
++  ASSERT_FALSE(final->path.empty());
++  EXPECT_NEAR(final->path.back().position.x, 0.0, 1e-9);
++  ASSERT_FALSE(fixed_global.empty());
++  EXPECT_NEAR(fixed_global.back().position.x, 0.0, 1e-9);
++
++  const auto expired = Peer::refineObjectiveRoute(*node, request);
++  EXPECT_EQ(expired->status,
++            mgg_msgs::srv::RefineObjectiveRoute::Response::BLOCKED);
++}
++
++TEST(PlannerObjective, PartialHomeNeverSkipsAnOccupiedLocalEndpoint) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_route_horizon_m", 1.4),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy", "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*node);
++  Peer::addLinearHomeCorridor(*node, 3);
++  Peer::setCurrentStateWithoutExtendingBackbone(*node, 3.0, 0.0, 0.075);
++  Peer::addGridObstacle(*node, 0.325, false, 1.6);
++
++  const auto response = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kReturnHome,
++      mgg::StateVec(0.0, 0.0, 0.075, 0.0), "kf-home");
++
++  EXPECT_EQ(response->status,
++            mgg_msgs::srv::PlanObjective::Response::BLOCKED);
++  EXPECT_TRUE(response->path.empty());
++  EXPECT_TRUE(response->route_id.empty());
++  EXPECT_NE(response->reason.find("route corridor waypoint["),
++            std::string::npos);
++  EXPECT_EQ(response->reason.find("local endpoint fallback"),
++            std::string::npos);
++}
++
++TEST(PlannerObjective, OccupiedFinalHomeRemainsBlockedAfterGraphHintFallback) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy", "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*node);
++  Peer::addLinearHomeCorridor(*node, 1);
++  Peer::setCurrentStateWithoutExtendingBackbone(*node, 1.0, 0.0, 0.075);
++  Peer::addGridObstacle(*node, 0.325, false, 0.0);
++
++  const auto response = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kReturnHome,
++      mgg::StateVec(0.0, 0.0, 0.075, 0.0), "kf-home");
++
++  EXPECT_EQ(response->status,
++            mgg_msgs::srv::PlanObjective::Response::BLOCKED);
++  EXPECT_TRUE(response->path.empty());
++  EXPECT_NE(response->reason.find("exact goal rejected"), std::string::npos);
++  EXPECT_NE(response->reason.find("local endpoint fallback"),
++            std::string::npos);
++}
++
++TEST(PlannerObjective, HomeNeverSkipsMalformedGraphGeometry) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy", "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*node);
++  Peer::addLinearHomeCorridor(*node, 3);
++  Peer::setCurrentStateWithoutExtendingBackbone(*node, 3.0, 0.0, 0.075);
++  Peer::makeGlobalVertexNonFinite(*node, 2);
++
++  const auto response = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kReturnHome,
++      mgg::StateVec(0.0, 0.0, 0.075, 0.0), "kf-home");
++
++  EXPECT_EQ(response->status,
++            mgg_msgs::srv::PlanObjective::Response::BLOCKED);
++  EXPECT_TRUE(response->path.empty());
++  EXPECT_NE(response->reason.find("state is non-finite"), std::string::npos);
++  EXPECT_EQ(response->reason.find("local endpoint fallback"),
++            std::string::npos);
++}
++
+ TEST(PlannerExplore, FullSizeGroundRobotsExpandAtProjectedDrivingHeight) {
+   using Peer = mgg_ros::PlannerNodeTestPeer;
+   for (const auto& body : {
+@@ -2733,7 +2923,7 @@ TEST_F(ObjectiveService,
+   EXPECT_GT(pinned->path.back().position.z, -0.05);
+ }
+ 
+-TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
++TEST_F(ObjectiveService, NewObstacleAtHomeWaypointUsesLocalEndpointDetour) {
+   mgg_ros::PlannerNodeTestPeer::configureExploreServiceScene(
+       *planner, /*support_root=*/true);
+   mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 0.0, 0.0, 0.075);
+@@ -2765,12 +2955,14 @@ TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
+   mgg_ros::PlannerNodeTestPeer::addCorridorObstacle(*planner, 0.60);
+   response = call(home);
+   ASSERT_NE(response, nullptr);
+-  EXPECT_EQ(response->status, Service::Response::BLOCKED);
+-  EXPECT_TRUE(response->path.empty());
+-  EXPECT_NE(response->reason.find("route corridor waypoint["),
+-            std::string::npos);
+-  EXPECT_NE(response->reason.find("body intersects occupied space at"),
+-            std::string::npos);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_FALSE(response->path.empty());
++  EXPECT_TRUE(std::any_of(response->path.begin(), response->path.end(),
++                          [](const geometry_msgs::msg::Pose& pose) {
++                            return std::abs(pose.position.y) > 0.1;
++                          }));
++  EXPECT_NEAR(response->path.back().position.x, 0.0, 1e-9);
+ }
+ 
+ TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
+@@ -2822,6 +3014,9 @@ TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
+   EXPECT_TRUE(response->path.empty());
+   EXPECT_EQ(response->reason.find("primary direct:"), std::string::npos)
+       << response->reason;
++  EXPECT_EQ(response->reason.find("local endpoint fallback"),
++            std::string::npos)
++      << response->reason;
+ 
+ }
+ 
