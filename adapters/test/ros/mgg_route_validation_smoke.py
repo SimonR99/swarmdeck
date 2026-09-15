@@ -3,12 +3,16 @@
 
 Run inside the simulation's ROS environment after all robots are online:
     python3 adapters/test/ros/mgg_route_validation_smoke.py robot_0 --distance 3
+To query an isolated candidate planner while retaining the robot's live inputs:
+    python3 adapters/test/ros/mgg_route_validation_smoke.py robot_0 \
+        --distance 3 --planner-namespace /swarmdeck_validation/robot_0/mgg
 The native planner and adapter must use the same ValidateObjectiveRoute type.
 """
 
 import argparse
 import json
 import math
+import re
 import time
 
 import rclpy
@@ -22,6 +26,13 @@ def main():
     parser.add_argument("robot", nargs="?", default="robot_0")
     parser.add_argument("--distance", type=float, default=3.0)
     parser.add_argument(
+        "--planner-namespace",
+        help=(
+            "Namespace containing plan_objective and validate_objective_route; "
+            "defaults to /<robot>/mgg"
+        ),
+    )
+    parser.add_argument(
         "--lateral-offset",
         type=float,
         default=0.0,
@@ -32,6 +43,13 @@ def main():
         parser.error("distance must be between 0.5 and 200 meters")
     if not math.isfinite(args.lateral_offset) or abs(args.lateral_offset) > 20:
         parser.error("lateral offset must be between -20 and 20 meters")
+    planner_namespace = args.planner_namespace or f"/{args.robot}/mgg"
+    planner_namespace = "/" + planner_namespace.strip("/")
+    if len(planner_namespace) > 512 or not re.fullmatch(
+        r"/(?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*",
+        planner_namespace,
+    ):
+        parser.error("planner namespace must be an absolute ROS namespace")
     rclpy.init()
     node = rclpy.create_node("mgg_route_validation_smoke")
     latest = {}
@@ -51,9 +69,9 @@ def main():
             Odometry, f"/{args.robot}/mgg/map_odometry", odometry, 10
         ),
     ]
-    plan = node.create_client(PlanObjective, f"/{args.robot}/mgg/plan_objective")
+    plan = node.create_client(PlanObjective, f"{planner_namespace}/plan_objective")
     validate = node.create_client(
-        ValidateObjectiveRoute, f"/{args.robot}/mgg/validate_objective_route"
+        ValidateObjectiveRoute, f"{planner_namespace}/validate_objective_route"
     )
 
     def call(client, request):
@@ -130,6 +148,7 @@ def main():
             json.dumps(
                 {
                     "robot": args.robot,
+                    "planner_namespace": planner_namespace,
                     "distance_m": args.distance,
                     "lateral_offset_m": args.lateral_offset,
                     "path_poses": len(result.path),

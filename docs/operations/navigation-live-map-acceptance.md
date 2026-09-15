@@ -775,3 +775,70 @@ enclosing robot and mission. The Home continuation regression now waits for
 the completed public phase transition rather than a mock call made before
 the asynchronous state handoff. The expanded combined suite passed 193 tests,
 and Black accepted all 348 tracked Python files.
+
+### Deployed wider-window checks and remaining road case
+
+The fresh four-robot benchbot mission uses
+`swarmdeck-mgg:nav-window-8384392`. Exact native routes passed for R0 at
+20 metres forward/two metres right and 30 metres forward/two metres left,
+and for R2 and R3 at 12 metres forward. Planning took 966, 270, 545 and
+210 milliseconds respectively; every returned route retained its requested
+XY and passed live validation. These probes did not command motion.
+
+The 20-metre R0 motion trial subsequently travelled about 10.8 metres of
+reported displacement before recovery exhausted three attempts near the
+raised road section. Its local and global endpoints stayed fixed relative
+to the qualified destination. The final search used 1394 milliseconds and
+reported no detour within its window, with a known 11.5 cm rise exceeding
+the Bunker's 10 cm limit. This remains a failed arrival trial.
+
+A follow-up static check used the Bunker's extended 1.073 by 0.828 metre
+planning footprint, comparing each footprint sample against the centre's
+ground height and checking height changes on neighbouring edges. For the
+nominal spawn and requested road destination, known-pavement connectivity
+remained disconnected with 8, 12 and 24 metre margins. This does not rule
+out a side passage outside that sampled pavement or through currently
+unknown terrain, and it does not justify increasing the robot's step limit.
+The earlier four-metre-window diagnosis explains one bounded-search limit;
+it does not fully explain the remaining Bistro road case.
+
+The qualified Home harness also exposed an intermediate-controller-success
+handling error: it stopped a rolling Home trial before observing the final
+segment. That trial is inconclusive. The harness now waits for the final
+Home phase and requires a fresh qualified success sample before evaluating
+arrival. Later route probes must record their current starting state; they
+cannot be compared directly with the earlier stationary cold-start probes.
+
+The UI-only deployment `swarmdeck-ui:merged-count-97214af` fixes the Global
+control's membership source. At verification, the legacy map service reported
+zero merged members while the active replica catalogue contained a verified
+three-robot component and one separate robot. The control now follows the
+same component-selection rules as Global, uses existing catalogue polling,
+and excludes historical or unverified components. All 33 named replica UI
+tests passed, together with Svelte checks and the production build. The
+server and simulation were not restarted for this UI change.
+
+### Unknown terrain after a gradual climb
+
+A separate native regression reproduced a false step when a gently rising
+observed road ended at an unknown region. Every unknown sample was reset to
+the robot's starting height, discarding the height reached on the ramp.
+Navigate now carries the adjacent checked driving height into unknown terrain.
+Known surfaces still use measured heights, and footprint, step, occupancy and
+geofence checks still apply. Exact goal XY and heading are preserved.
+
+Grid states distinguish different inherited heights at the same XY cell, with
+stable parent indices and the existing cell, expansion and time limits. Known
+surface states reuse their measured-height identity; lookup keys remain bounded
+by twice the cell limit. Only complete Navigate goals can reconnect at a
+provisional inherited height. Home and partial-route endpoint rules are retained.
+Live route validation preserves those provisional heights while checking new
+observations for hazards.
+
+The reviewed patch passed 15 core test targets and all 53 native ROS objective
+cases, including the ramp-to-unknown route, distinct-height approaches, exact
+endpoints, known curbs, ceiling guards and Home. This establishes the synthetic
+bug and its fix; it does not yet establish that this was the cause of the
+remaining Bistro road failure. The route smoke script accepts an optional
+`--planner-namespace` for querying an isolated native candidate without changing
+the robot's live inputs or commanding motion.
