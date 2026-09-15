@@ -104,12 +104,21 @@ These settings apply to simulation; hardware needs its own qualified profile.
 Sparse LiDAR rays do not observe the whole body volume or the floor underneath
 a stationary robot. The simulation's explicit `observed_ground` body policy
 preserves unknown occupancy and vetoes known obstacles. Its separately enabled
-`provisional_unknown` ground policy permits a bounded leading connector from the
-physical starting pose to measured floor. The final indexed query checks that
-connector too: occupied cells, known insufficient clearance, steps and drops
-remain vetoes; after the first measured support, missing ground rejects the
-route. A route with no measured support is rejected. Hardware retains strict
-observed-volume and terrain requirements.
+`provisional_unknown` ground policy permits a bounded connector from the
+physical starting pose to measured floor. One return beneath the robot does not
+prove that the floor ahead is observed, so the local graph's root retains this
+connector even when its own ground height is known. Its reach remains bounded
+independently of the ordinary graph-edge limit.
+
+The final indexed query also checks paths already accepted by native terrain
+projection. Its surface fit needs several nearby columns, so sparse LiDAR rings
+can leave gaps between measured supports. Under the simulation's provisional
+policy, each such gap must close on measured ground within the same connector
+limit, including the distance to that closing sample. A height change across a
+gap cannot exceed the platform step limit. Occupied cells, known insufficient
+clearance, excessive roughness, steps and drops remain vetoes throughout. A
+route cannot finish in a gap or use missing ground without reaching measured
+support. Hardware retains strict observed-volume and terrain requirements.
 
 MOLA mode sizes the graph's maximum edge and initial connector from the selected
 LiDAR's first ground-return ring, with one map-cell margin and grid rounding.

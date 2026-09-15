@@ -139,6 +139,13 @@ grid in its corrected frame. Geometry replacement and retraction remove previous
 contributions. The deadlines and point/voxel limits bound work; they are not
 measured worst-case latency promises.
 
+On September 15, 2026, an isolated Benchbot replay of 147 Bistro keyframes
+(602,112 endpoints) published the metric map and planner grid in 1.97 seconds,
+including process startup and serialization. It retained all endpoints and
+surface samples, used 3,999,967 ray steps, and reached 180.3 MiB peak native RSS.
+The container had a four-core CPU allowance. This checks publication beyond the
+previous cumulative-ray failure on that map; it is not a worst-case bound.
+
 The separate one-million-point limit is still a hard publication limit. A map
 whose captures each retain the configured maximum of 4,096 endpoints reaches it
 at 245 captures (the 245th exceeds the limit); turns and accepted keyframes can
