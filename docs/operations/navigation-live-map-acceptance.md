@@ -1,11 +1,17 @@
 # Navigation and live-map deployment acceptance
 
-The latest validated deployment is `road-home-29afed0`, using one benchbot stack
-on UI port 15173. All 227 native tests pass, and R3 completed a 12 m Navigate/Home
-round trip. R0's raised-road search and R2's rejected endpoint remain open.
-See the [latest arrival results](#reviewed-image-and-arrival-results) for measured
+The running deployment is `road-home-b511457`, using one benchbot stack on UI
+port 15173. All 228 native tests pass, and R2 completed a Navigate/Home round
+trip through the side corridor. R0's raised-road recovery, R3's latest Home
+timeout and the source of R2's earlier endpoint terrain rejection remain open.
+See the [latest arrival results](#road-search-candidate-arrival-results) for measured
 errors and exact image evidence. Earlier runs below are retained for comparison;
 their mission IDs, image tags and limits describe those runs only.
+
+Endpoint errors in the historical arrival logs through `b511457` describe the
+last observed nonempty path in XY, not the maximum error throughout a trial or
+full XYZ/yaw identity. The current harness retains maximum qualified XY errors
+and rejects malformed or non-finite endpoint evidence.
 
 ## September 13 navigation follow-up
 
@@ -948,8 +954,8 @@ stack and UI port 15173. After startup authority became ready:
 | R3 rolling graph Home | Arrived | 24.0 s | 0.162 m |
 | R2 Navigate, 12 m | Endpoint terrain rejection | 1.0 s | No motion |
 
-R3 retained zero local/global endpoint error relative to the requested component
-goal throughout both trials. Home progressed through local and final phases;
+R3's last observed local/global endpoints had zero XY error relative to the
+requested component goal in both trials. Home used local and final phases;
 the passive simulator observer measured a 0.168 m physical return error. Stop All
 verified the fleet idle after each trial. These results qualify this R3 round
 trip, not fleet-wide navigation.
@@ -1002,3 +1008,72 @@ unknown queries, edge projection, sweeps and all later samples remain strict.
 A native regression plans and validates at one map revision, then verifies that
 a newly observed footprint hazard farther along the route still invalidates it.
 This does not explain the separately observed R2 projected-edge rejection.
+
+### Road-search candidate arrival results
+
+The exact `b511457` image passed all 228 native cases across 18 targets,
+including the immediate Plan/Validate regression. The launch and acceptance
+suite passed 26 Python tests, followed by Black on all 348 tracked Python files.
+Independent review found no static production blocker; the stationary branch lacks
+its own direct regression, while the moving-start and later-hazard branches
+are covered.
+
+The active mission is `17e628f4-1df1-4e6c-9537-ff150a711593`, ROS domain 218,
+with MGG `swarmdeck-mgg:road-home-b511457` and the previously tested UI image
+`swarmdeck-ui:road-home-29afed0`. The MGG image ID is
+`sha256:6d25ce4de50e8db52cedde5b404e39d5180ae8845b4ad30ae9256f08070f8093`.
+
+| Trial | Result | Time | Qualified arrival error |
+| --- | --- | --- | --- |
+| R0 Navigate, 20 m / 2 m right | Recovery failed after 10.56 m displacement | 31.3 s | 9.78 m remaining |
+| R2 Navigate, 12 m / 4 m left | Arrived | 22.3 s | 0.218 m |
+| R2 rolling graph Home | Arrived | 22.7 s | 0.236 m |
+| R3 Navigate, 12 m | Arrived | 42.1 s | 0.211 m |
+| R3 rolling graph Home | Timed out after 3.10 m displacement | 301.0 s | 9.24 m remaining |
+
+The final observed Navigate endpoints and global Home endpoints had zero XY
+error relative to their qualified component-frame destination. R3's unfinished
+local Home section correctly ended before the final Home destination. Stop All
+verified the fleet idle after each trial. R2 Home used local and final phases;
+R3 remained in the local phase. Rounded local pose updates are recorded for
+diagnosis and are not counts of replanning events. The final quality pass found
+that this harness version overwrote earlier endpoint errors; the corrected
+harness retains their maximum and keeps invalid evidence sticky.
+
+The passive observer measured R2 within about 0.18 m of its initial position
+after Home. It subsequently moved while parked when R3 traversed its position:
+R2's physical displacement rose to about 10.45 m during R3's Navigate trial.
+This is consistent with contact between robots and needs separate inspection;
+an idle control state does not establish physical immobility. R3's Home trial
+then travelled substantial distance while making little net progress, and
+recorded a live swept-occupancy rejection followed by controller replacement.
+The trial timed out and Stop All cancelled it; this run does not qualify R3 Home.
+
+R0's runtime settings were confirmed as 0.5 m resolution, four-second deadline,
+8 m margin, 16,384 expansion limit and 32,768 cell limit. Its first route was
+cancelled by live validation (`remaining route footprint intersects known
+terrain`). The final recovery rejected the bounded search after 1,622 expansions
+and 2,008 ms, with a first reported 11.5 cm footprint rise. This was not deadline
+exhaustion, and the first rejected footprint does not establish which boundary
+cut every possible route. The crossing remains unqualified.
+
+The R2 side corridor was selected from the static collision mesh before the
+trial. For the nominal 12 m / 4 m left destination near world `(-10, -8)`, the
+Scout footprint spans about 1.84 cm in height; the sampled straight approach
+spans at most 4.46 cm. Direct and smaller-offset approaches encounter the
+diagonal curb's roughly 17–19 cm discontinuity.
+
+The old rejected R2 endpoint is a separate unresolved mapping question. Its
+approximate world coordinate lies on flat static pavement, but a later rigid
+transform from synthetic drift odometry cannot precisely register that earlier
+query. Planner inputs combine unclassified lidar and reconstructed-depth hits;
+occupied columns retain their maximum measured height until free observations
+clear them. A retained non-ground return can therefore cause a footprint veto
+without proving a pavement step. No captured evidence identifies that return's
+source. The captured odometry had yaw only, and R2 uses its own sensed cloud,
+so these checks do not establish pitch/roll accumulation or pollution from a
+merged peer map. Keep the known-hazard veto; attributing the old return requires
+capture-time registration and observation provenance that were not recorded.
+
+Build, native XML, arrival logs and passive distance observations are preserved
+under `.deploy/nav-timeout/road-home-b511457*` on benchbot.

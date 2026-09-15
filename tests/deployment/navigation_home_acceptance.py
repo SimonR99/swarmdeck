@@ -87,6 +87,34 @@ def path_endpoint_error(robot, target, field):
     )
 
 
+def track_path_endpoint_error(summary, robot, target, field, output):
+    """Retain the worst qualified XY endpoint error observed for one path."""
+    path = robot.get(field) or []
+    if not path:
+        return
+    try:
+        error = path_endpoint_error(robot, target, field)
+    except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+        summary[f"{output}_invalid"] = True
+        return
+    if error is None or not math.isfinite(error):
+        summary[f"{output}_invalid"] = True
+        return
+    previous = summary.get(output)
+    if previous is None or error > previous:
+        summary[output] = error
+
+
+def endpoint_error_is_acceptable(summary, output, tolerance=0.05):
+    error = summary.get(output)
+    return (
+        not summary.get(f"{output}_invalid", False)
+        and error is not None
+        and math.isfinite(error)
+        and error <= tolerance
+    )
+
+
 def home_target(robot):
     home = (robot.get("home") or {}).get("T_navigation_home")
     if (
@@ -275,6 +303,8 @@ async def run(args):
         "observed_phases": [],
         "local_endpoint_error_m": None,
         "global_endpoint_error_m": None,
+        "local_endpoint_error_m_invalid": False,
+        "global_endpoint_error_m_invalid": False,
         "remaining_error_m": None,
         "observation_errors": 0,
         "qualified_samples": 0,
@@ -417,11 +447,9 @@ async def run(args):
                             ("local_planned_path", "local_endpoint_error_m"),
                             ("global_planned_path", "global_endpoint_error_m"),
                         ):
-                            endpoint_error = path_endpoint_error(
-                                robot_now, target, field
+                            track_path_endpoint_error(
+                                summary, robot_now, target, field, output
                             )
-                            if endpoint_error is not None:
-                                summary[output] = endpoint_error
                         local_path = robot_now.get("local_planned_path") or []
                         if local_path:
                             latest_endpoint = (
@@ -532,11 +560,9 @@ async def run(args):
                             ("local_planned_path", "local_endpoint_error_m"),
                             ("global_planned_path", "global_endpoint_error_m"),
                         ):
-                            endpoint_error = path_endpoint_error(
-                                final_robot, target, field
+                            track_path_endpoint_error(
+                                summary, final_robot, target, field, output
                             )
-                            if endpoint_error is not None:
-                                summary[output] = endpoint_error
                         summary["qualified_samples"] += 1
                         summary["final_qualified_sample"] = True
                 summary["observation_errors"] = observation_errors[0]
@@ -564,10 +590,8 @@ async def run(args):
             or summary["remaining_error_m"] > args.arrival_tolerance
         ):
             evidence_error = "final pose is outside the arrival tolerance"
-        elif args.mode == "navigate" and (
-            summary["local_endpoint_error_m"] is None
-            or not math.isfinite(summary["local_endpoint_error_m"])
-            or summary["local_endpoint_error_m"] > 0.05
+        elif args.mode == "navigate" and not endpoint_error_is_acceptable(
+            summary, "local_endpoint_error_m"
         ):
             evidence_error = "no exact local Navigate endpoint was observed"
         elif args.require_rolling_home and (
@@ -575,9 +599,7 @@ async def run(args):
                 summary["observed_phases"]
             )
             or summary["local_endpoint_changes"] < 1
-            or summary["global_endpoint_error_m"] is None
-            or not math.isfinite(summary["global_endpoint_error_m"])
-            or summary["global_endpoint_error_m"] > 0.05
+            or not endpoint_error_is_acceptable(summary, "global_endpoint_error_m")
         ):
             evidence_error = "rolling Home phase or endpoint evidence is incomplete"
         if evidence_error is not None:
