@@ -75,6 +75,10 @@ def generate_launch_description():
                 # Keep the short exploration graph budget unchanged; the
                 # objective planner owns this separate bounded deadline.
                 "objective_grid_timeout_ms": 2000,
+                # A real diagonal Bistro kerb seals the old +/-4 m objective
+                # window. Permit the native planner to use a wider window
+                # when its existing cell budget can represent it.
+                "objective_grid_max_margin_m": 8.0,
                 "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
                 "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
                 "PlanningParams.max_inclination": math.radians(30),

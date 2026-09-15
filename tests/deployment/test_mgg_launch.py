@@ -142,6 +142,7 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
         )
         assert params["SensorParams.VLP16.rotations"] == [0.0, 0.0, 0.0]
         assert params["objective_grid_timeout_ms"] == 2000
+        assert params["objective_grid_max_margin_m"] == 8.0
     assert [params["PlanningParams.max_step_height"] for params in overrides] == [
         0.10,
         0.10,

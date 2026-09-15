@@ -718,3 +718,54 @@ sources are limited to exact revisions referenced by the last two coherent
 catalogues and at most 128 owners. The harness discovers the active mission
 once and scopes later catalogue reads to it; a mission change invalidates the
 trial. All 58 replica/component/live-view and deployment regressions passed.
+
+### Road detours, endpoint height and physical Home trial
+
+Static Bistro pavement checks found a diagonal curb approximately 17 cm high
+across R0's original four-metre detour window. R0's ten-centimetre step limit
+correctly rejects crossing it, but the opening around the curb lies outside
+that window. A failed bounded search therefore does not establish that the
+destination is unreachable. Simulation now permits explicit Navigate/Home
+search margins up to eight metres, choosing a single window that fits the
+existing cell budget. Exploration limits are unchanged. The native regression
+requires failure with the four-metre window and an exact-destination route
+around the same wall with the wider window; a smaller cell budget prevents
+unbounded widening.
+
+The complete native objective suite passed all 52 cases with the final patch
+sequence, including exact final heading and the cell-budget negative control.
+
+A separate endpoint-height fix allows a distant ground goal to resolve to
+observed terrain above the starting height. This is a bounded surface lookup,
+not permission to exceed the robot's step or footprint limits. A shallow-ramp
+regression fails without the fix and passes with it. Same-position requests
+retain the physical driving surface, including stale requested heights, so
+they cannot bypass traversal by projecting onto a ceiling. All 51 objective
+cases passed before the additional search-window regression.
+
+After the catalogue cache update, the unfiltered live catalogue took 615 ms
+in a bounded repeat measurement, compared with roughly five seconds before
+the update. The active-mission live view took seven milliseconds. These are
+individual observations, not latency percentiles or a cold-start guarantee.
+
+R0 then followed a 12-metre relative Navigate request for approximately
+10.9 metres of reported displacement. New observations rejected its endpoint
+for a 53 cm height difference and exhausted bounded recovery. This trial
+demonstrates continued motion and obstacle discovery, not successful arrival.
+
+From that location, Return Home succeeded in 139.8 seconds. The retained graph
+contained up to 18 poses and execution progressed through `following_local`
+and `following_final`. Independent simulator truth measured 14.458 metres
+from spawn before the action and 0.248 metres at completion. Stop All then
+verified all four robots idle. The final approach included substantial
+manoeuvring; this is a successful arrival trial, not a controller-efficiency
+qualification. The deployment used the synthetic drift odometry test profile;
+ground truth supplied only scalar acceptance measurements and was never sent
+to the planner or controller.
+
+Qualified live telemetry now optionally includes the Home keyframe and its
+navigation transform within the same mission/component authority snapshot.
+The acceptance harness uses that field, rejects malformed provenance and
+does not substitute an unqualified fleet pose. Missing Home data remains
+backward compatible. The combined navigation, Home telemetry, replica and
+launch regression suite passed all 188 tests.
