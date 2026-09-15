@@ -8,8 +8,10 @@ const state = $state<{
   selection: ReplicaTacticalSelection | null;
   preference: ReplicaTacticalPreference;
   autoStatus: ReplicaTacticalAutoStatus;
+  mergedRobotIds: string[] | null;
+  activeMissionPresent: boolean | null;
   explicitShowRevision: number;
-}>({ selection: null, preference: 'auto', autoStatus: 'idle', explicitShowRevision: 0 });
+}>({ selection: null, preference: 'auto', autoStatus: 'idle', mergedRobotIds: null, activeMissionPresent: null, explicitShowRevision: 0 });
 
 export const replicaTactical = {
   get selection() {
@@ -23,6 +25,18 @@ export const replicaTactical = {
   },
   setAutoStatus(status: ReplicaTacticalAutoStatus) {
     state.autoStatus = status;
+  },
+  get mergedRobotIds() {
+    return state.mergedRobotIds;
+  },
+  setMergedRobotIds(robotIds: string[] | null) {
+    state.mergedRobotIds = robotIds ? [...robotIds] : null;
+  },
+  get activeMissionPresent() {
+    return state.activeMissionPresent;
+  },
+  setActiveMissionPresent(present: boolean) {
+    state.activeMissionPresent = present;
   },
   get explicitShowRevision() {
     return state.explicitShowRevision;

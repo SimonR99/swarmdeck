@@ -184,6 +184,11 @@ input. **Local** filters the selected robot's submaps; **Global** requires a
 verified shared component. Published Gaussian artifacts must match the selected
 component. Unaligned maps are never combined using assumed transforms.
 
+The **Global** control reports how many robots are merged in that verified
+component. **0 merged** means no shared component is available in the active
+mission; **— merged** means membership is unavailable. Robots that are merely
+online and maps from previous missions do not increase the count.
+
 ### Camera colors and Gaussian reconstruction
 
 **Camera** becomes available when the cloud contains RGB. Simulator keyframes

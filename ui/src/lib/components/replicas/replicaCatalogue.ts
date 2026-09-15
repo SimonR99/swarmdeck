@@ -134,6 +134,42 @@ export function automaticCatalogueEntry(
   )[0];
 }
 
+/** Members of the active component selected by the Global view's rules. */
+export function activeMergedRobotIds(
+  catalogue: ReplicaCatalogue,
+  preferredRobotId?: string | null,
+  explicitSelection?: ReplicaTacticalSelection | null
+): string[] | null {
+  if (!catalogue.active_session_id) return null;
+  let candidates = catalogue.components
+    .filter((entry) =>
+      entry.session_id === catalogue.active_session_id &&
+      entry.available &&
+      entry.status === 'ready'
+    )
+    .map((entry) => ({
+      componentId: entry.component_id,
+      robotIds: [...new Set(entry.robot_ids)].sort()
+    }))
+    .filter((entry) => entry.robotIds.length >= 2);
+  if (explicitSelection?.scope === 'fleet' &&
+      explicitSelection.sessionId === catalogue.active_session_id) {
+    const selected = candidates.find(
+      (entry) => entry.componentId === explicitSelection.componentId
+    );
+    if (selected) return selected.robotIds;
+  }
+  if (preferredRobotId) {
+    const matching = candidates.filter((entry) => entry.robotIds.includes(preferredRobotId));
+    if (matching.length) candidates = matching;
+    else if (candidates.length !== 1) return [];
+  }
+  candidates.sort((a, b) =>
+    b.robotIds.length - a.robotIds.length || a.componentId.localeCompare(b.componentId)
+  );
+  return candidates[0]?.robotIds ?? [];
+}
+
 /**
  * Keep an already rendered automatic view during a catalogue transition only
  * when it still has the same mission and the same scope/robot ownership.

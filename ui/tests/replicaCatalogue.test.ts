@@ -4,6 +4,7 @@ import {
   catalogueLabel,
   catalogueSelection,
   fetchReplicaCatalogue,
+  activeMergedRobotIds,
   automaticCatalogueEntry,
   automaticSelectionIsCoherent,
   parseReplicaCatalogue
@@ -81,6 +82,64 @@ test('automatic selection stays within the server-declared mission and preferred
   });
   assert.equal(automaticCatalogueEntry(single, 'robot-z', true)?.component_id, 'component:single');
   assert.equal(automaticCatalogueEntry(single, 'robot-a', true, 2), null);
+});
+
+test('merged count uses the verified active component rather than legacy or historical robots', () => {
+  const catalogue = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      {
+        ...body().components[0],
+        robot_ids: ['robot-b', 'robot-a', 'robot-a']
+      },
+      {
+        ...body().components[0],
+        session_id: '99999999-9999-4999-8999-999999999999',
+        component_id: 'component:historical',
+        robot_ids: ['old-a', 'old-b', 'old-c']
+      },
+      {
+        ...body().components[0],
+        component_id: 'component:unverified',
+        robot_ids: ['waiting-a', 'waiting-b', 'waiting-c'],
+        available: false,
+        status: 'syncing'
+      }
+    ]
+  });
+
+  assert.deepEqual(activeMergedRobotIds(catalogue), ['robot-a', 'robot-b']);
+  assert.equal(activeMergedRobotIds({ ...catalogue, active_session_id: null }), null);
+});
+
+test('merged count follows the preferred active Global component', () => {
+  const catalogue = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      { ...body().components[0], component_id: 'component:small', robot_ids: ['robot-a', 'robot-b'] },
+      { ...body().components[0], component_id: 'component:large', robot_ids: ['robot-c', 'robot-d', 'robot-e'] }
+    ]
+  });
+
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a'), ['robot-a', 'robot-b']);
+  const explicit = {
+    scope: 'fleet' as const, robotId: 'fleet', sessionId: session, componentId: 'component:large'
+  };
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', explicit), ['robot-c', 'robot-d', 'robot-e']);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', {
+    ...explicit, sessionId: '99999999-9999-4999-8999-999999999999'
+  }), ['robot-a', 'robot-b']);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'missing'), []);
+  assert.deepEqual(activeMergedRobotIds(parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      { ...body().components[0], component_id: 'component:a', robot_ids: ['robot-a'] },
+      { ...body().components[0], component_id: 'component:b', robot_ids: ['robot-b'] }
+    ]
+  }), 'robot-a'), []);
 });
 
 test('automatic retention cannot relabel a fleet view as local during a transient catalogue state', () => {

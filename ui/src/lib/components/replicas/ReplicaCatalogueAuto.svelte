@@ -6,6 +6,7 @@
   import {
     automaticCatalogueEntry,
     automaticSelectionIsCoherent,
+    activeMergedRobotIds,
     catalogueSelection,
     fetchReplicaCatalogue,
     type ReplicaCatalogue
@@ -30,6 +31,13 @@
 
   function apply() {
     const current = replicaTactical.selection;
+    if (catalogue) {
+      replicaTactical.setMergedRobotIds(activeMergedRobotIds(
+        catalogue,
+        preferredRobotId(),
+        replicaTactical.preference === 'component' ? current : null
+      ));
+    }
     if (replicaTactical.preference !== 'auto') {
       replicaTactical.setAutoStatus('idle');
       return;
@@ -73,6 +81,7 @@
     refreshController = controller;
     try {
       catalogue = await fetchReplicaCatalogue(undefined, controller.signal);
+      replicaTactical.setActiveMissionPresent(Boolean(catalogue.active_session_id));
       apply();
     } catch (reason) {
       if (!(reason instanceof DOMException && reason.name === 'AbortError')) {

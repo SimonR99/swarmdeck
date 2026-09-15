@@ -21,6 +21,7 @@
   import { cortexStore } from '$lib/stores/agent.svelte';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import { actions } from '$lib/api/connection';
+  import { replicaTactical } from '$lib/stores/replicaTactical.svelte';
 
   let {
     onsettings = () => {},
@@ -96,15 +97,25 @@
   // show both options and which one is active.
   const selected = $derived(fleet.selected[0] ?? null);
   const isLocal = $derived(mapStore.viewMode === 'local');
-  const members = $derived(mapStore.status?.global_members?.length ?? 0);
+  const legacyMembers = $derived(mapStore.status?.global_members?.length ?? 0);
+  const useLegacyMembers = $derived(
+    replicaTactical.preference === 'live' ||
+      (replicaTactical.preference === 'auto' && replicaTactical.activeMissionPresent === false)
+  );
+  const members = $derived(
+    useLegacyMembers
+      ? legacyMembers
+      : replicaTactical.mergedRobotIds?.length ?? null
+  );
+  const mergedLabel = $derived(`${members ?? '—'} merged`);
+  const mergedDescription = $derived(
+    members === null
+      ? 'Verified current shared map membership is unavailable.'
+      : `${members} robot${members === 1 ? '' : 's'} in the ${useLegacyMembers ? 'current merged map' : 'verified current onboard component'}. Online robots that have not been aligned are not counted.`
+  );
   const swarmGraphCount = $derived(
     Object.keys(mapStore.slamGraphs).filter((id) => fleet.isEnabled(id)).length
   );
-  // A robot the merge has not accepted has no place on the shared map, so its
-  // own map is the only honest thing to draw. Say so rather than letting the
-  // operator wonder why Global looks empty for it.
-  const inGlobal = $derived(!selected || (mapStore.status?.global_members ?? []).includes(selected));
-
   function showGlobal() {
     void mapStore.setViewPreference('global', selected);
   }
@@ -174,12 +185,13 @@
         ? 'bg-accent text-white shadow-[0_2px_6px_-4px_rgb(47_99_199/0.8)]'
         : 'text-fg-dim hover:text-fg-muted'}"
       aria-pressed={!isLocal}
-      title="The merged fleet map"
+      aria-label={`Global map, ${mergedDescription}`}
+      title={mergedDescription}
       onclick={showGlobal}
     >
       <Globe class="h-3 w-3" />
       Global
-      <span class="tabular opacity-60">{members}/{fleet.count}</span>
+      <span class="tabular opacity-70">{mergedLabel}</span>
     </button>
     <button
       class="flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold
