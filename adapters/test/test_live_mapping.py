@@ -37,6 +37,34 @@ def test_navigation_state_is_qualified_without_mutating_original():
     assert "live_mapping" not in robot.state()
 
 
+def test_qualified_home_survives_live_mapping_validation():
+    robot = bridge()
+    robot._mapping_authority.current()["home"] = {
+        "keyframe_id": "r0/mission/0",
+        "T_navigation_home": [
+            [1, 0, 0, 4],
+            [0, 1, 0, -2],
+            [0, 0, 1, 0.3],
+            [0, 0, 0, 1],
+        ],
+    }
+
+    home = live_state(robot)["live_mapping"]["home"]
+
+    assert home["keyframe_id"] == "r0/mission/0"
+    assert home["T_navigation_home"][0][3] == 4
+
+
+def test_malformed_home_rejects_the_live_authority():
+    robot = bridge()
+    robot._mapping_authority.current()["home"] = {
+        "keyframe_id": "r0/mission/0",
+        "T_navigation_home": [[1]],
+    }
+
+    assert live_state(robot)["live_mapping"] is None
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

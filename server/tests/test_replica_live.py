@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from autonomy.contracts import IDENTITY_SE3
+from autonomy.live_mapping import validate_live_mapping
 from swarmdeck_server.api import replica_live, replica_views
 from swarmdeck_server.fleet.registry import Registry
 
@@ -81,6 +82,41 @@ def test_live_overlay_uses_raw_navigation_pose_and_authority_age(setup):
     assert robot["pose"]["x"] == 2
     assert 0.7 <= robot["freshness"]["pose_s"] < 1.5
     assert robot["freshness"]["goal_s"] is None
+
+
+def test_live_api_exposes_qualified_home_schema(setup):
+    client, registry, _, _ = setup
+    value = payload()
+    value["home"] = {
+        "keyframe_id": "r0/mission/0",
+        "T_navigation_home": [
+            [1, 0, 0, 4],
+            [0, 1, 0, -2],
+            [0, 0, 1, 0.3],
+            [0, 0, 0, 1],
+        ],
+    }
+    registry.robots["r0"].live_mapping = validate_live_mapping(value, "r0")
+
+    response = client.get(BASE, params={"component_id": "component"})
+
+    assert response.status_code == 200
+    home = response.json()["robots"][0]["home"]
+    assert home["keyframe_id"] == "r0/mission/0"
+    assert [row[3] for row in home["T_navigation_home"][:3]] == [4, -2, 0.3]
+
+
+def test_wrong_component_home_authority_is_not_exposed(setup):
+    client, registry, _, _ = setup
+    value = payload()
+    value["component_id"] = "other"
+    value["home"] = {
+        "keyframe_id": "r0/mission/0",
+        "T_navigation_home": IDENTITY_SE3,
+    }
+    registry.robots["r0"].live_mapping = validate_live_mapping(value, "r0")
+
+    assert client.get(BASE, params={"component_id": "component"}).status_code == 404
 
 
 @pytest.mark.parametrize(

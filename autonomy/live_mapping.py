@@ -76,6 +76,21 @@ def validate_live_mapping(value, robot_id):
         result[field] = item
     result["solution_order"] = solution_order(value["solution_order"])
     result["T_component_navigation"] = validate_se3(value["T_component_navigation"])
+    home = value.get("home")
+    if home is not None:
+        if not isinstance(home, Mapping):
+            raise ValueError("invalid Home authority")
+        keyframe_id = home.get("keyframe_id")
+        if (
+            not isinstance(keyframe_id, str)
+            or not keyframe_id
+            or len(keyframe_id) > 512
+        ):
+            raise ValueError("invalid Home keyframe identity")
+        result["home"] = {
+            "keyframe_id": keyframe_id,
+            "T_navigation_home": validate_se3(home.get("T_navigation_home")),
+        }
     age = float(value["authority_age_s"])
     if not math.isfinite(age) or not 0 <= age <= LIVE_MAPPING_MAX_AGE_S:
         raise ValueError("stale mapping authority")

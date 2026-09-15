@@ -90,9 +90,9 @@ def path_endpoint_error(robot, target, field):
 def home_target(robot):
     home = (robot.get("home") or {}).get("T_navigation_home")
     if (
-        not isinstance(home, list)
+        not isinstance(home, (list, tuple))
         or len(home) != 4
-        or any(not isinstance(row, list) or len(row) != 4 for row in home)
+        or any(not isinstance(row, (list, tuple)) or len(row) != 4 for row in home)
         or not all(math.isfinite(float(value)) for row in home for value in row)
     ):
         raise RuntimeError("qualified live authority has no Home transform")
