@@ -85,6 +85,8 @@ class QueryRequest:
     source_stamp_ns: int | None = None
     now_monotonic_ns: int | None = None
     max_snapshot_age_ns: int | None = None
+    max_step_m: float | None = None
+    max_drop_m: float | None = None
 
     def __post_init__(self) -> None:
         points = tuple(tuple(float(v) for v in p) for p in self.samples)
@@ -103,6 +105,15 @@ class QueryRequest:
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
             ):
                 raise ValueError(f"{name} must be a non-negative integer or None")
+        for name in ("max_step_m", "max_drop_m"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive or None")
         object.__setattr__(self, "samples", points)
         object.__setattr__(self, "body_size_xyz", body)
 
@@ -531,6 +542,12 @@ class IndexedMapView:
         step: list[bool] = []
         drop: list[bool] = []
         prior_ground: float | None = None
+        max_step_m = (
+            self.max_step_m if request.max_step_m is None else float(request.max_step_m)
+        )
+        max_drop_m = (
+            self.max_drop_m if request.max_drop_m is None else float(request.max_drop_m)
+        )
         work = 0
         half_xyz = tuple(v / 2.0 for v in request.body_size_xyz)
         half = np.asarray(half_xyz, dtype=np.float64)
@@ -626,12 +643,8 @@ class IndexedMapView:
                 ground.append(height)
                 roughness.append(surface_roughness)
                 clearance.append(overhead)
-                rise = (
-                    prior_ground is not None and height - prior_ground > self.max_step_m
-                )
-                fall = (
-                    prior_ground is not None and prior_ground - height > self.max_drop_m
-                )
+                rise = prior_ground is not None and height - prior_ground > max_step_m
+                fall = prior_ground is not None and prior_ground - height > max_drop_m
                 step.append(rise or surface_roughness > self.max_roughness_m)
                 drop.append(fall)
                 prior_ground = height

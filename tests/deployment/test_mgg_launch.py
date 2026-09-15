@@ -84,6 +84,7 @@ def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
         "/tf_static",
         "params.yaml",
         True,
+        sim_depth=True,
     )
     planner = next(node for node in nodes if getattr(node, "package", "") == "mgg_ros")
     overrides = planner.parameters[-1]
@@ -94,6 +95,10 @@ def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
     assert overrides["indexed_map_query_service"] == "/robot_2/mapping/query_batch"
     relay = next(node for node in nodes if hasattr(node, "cmd"))
     assert "cloud_enabled:=false" in relay.cmd
+    assert "depth_enabled:=false" in relay.cmd
+    # The lightweight static camera transform remains available to peer
+    # capture; cloud/depth subscriptions and their processing stay disabled.
+    assert "sim_depth:=true" in relay.cmd
 
 
 @pytest.mark.parametrize(
@@ -278,11 +283,11 @@ def test_invalid_planning_frame_fails_at_launch(launch_module, monkeypatch, temp
     [
         (True, "cloud_octomap", "observed_ground"),
         (False, "cloud_octomap", "strict_volume"),
-        (True, "mola_snapshot", "strict_volume"),
+        (True, "mola_snapshot", "observed_ground"),
         (False, "mola_snapshot", "strict_volume"),
     ],
 )
-def test_ground_evidence_policy_requires_simulation_cloud_map(
+def test_ground_evidence_policy_requires_simulation_map(
     launch_module, monkeypatch, sim_depth, backend, expected
 ):
     monkeypatch.setenv("SWARMDECK_MGG_MAP_BACKEND", backend)
@@ -302,7 +307,5 @@ def test_ground_evidence_policy_requires_simulation_cloud_map(
     planner = next(node for node in nodes if getattr(node, "package", "") == "mgg_ros")
     assert planner.parameters[-1]["objective_body_evidence_policy"] == expected
     assert planner.parameters[-1]["objective_ground_evidence_policy"] == (
-        "provisional_unknown"
-        if sim_depth and backend == "cloud_octomap"
-        else "observed_ground"
+        "provisional_unknown" if sim_depth else "observed_ground"
     )

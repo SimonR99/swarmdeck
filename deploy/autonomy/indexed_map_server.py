@@ -354,6 +354,8 @@ def main() -> None:
                         source_stamp_ns=_stamp_ns(request.source_stamp),
                         now_monotonic_ns=time.monotonic_ns(),
                         max_snapshot_age_ns=registry.max_snapshot_age_ns,
+                        max_step_m=request.max_step_m,
+                        max_drop_m=request.max_drop_m,
                     ),
                 )
             except (AttributeError, TypeError, ValueError) as exc:

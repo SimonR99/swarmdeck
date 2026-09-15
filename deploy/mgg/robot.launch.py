@@ -79,18 +79,14 @@ def robot_nodes(
     }
     overrides.update(planner_overrides or {})
     overrides.update(map_backend_parameters(robot))
-    # Sparse simulated lidar plus a forward camera supplies terrain evidence,
-    # not complete free-air coverage around the chassis. Select that contract
-    # explicitly; hardware and MOLA keep the strict volumetric policy.
+    # Simulation may retain a Navigate goal through unknown terrain while the
+    # native map still keeps those voxels unknown. Known occupied cells,
+    # measured footprint terrain and the exact final query remain vetoes.
     overrides["objective_body_evidence_policy"] = (
-        "observed_ground"
-        if sim_depth and overrides["map.backend"] == "cloud_octomap"
-        else "strict_volume"
+        "observed_ground" if sim_depth else "strict_volume"
     )
     overrides["objective_ground_evidence_policy"] = (
-        "provisional_unknown"
-        if sim_depth and overrides["map.backend"] == "cloud_octomap"
-        else "observed_ground"
+        "provisional_unknown" if sim_depth else "observed_ground"
     )
     if sim_depth:
         # ARGoS depth uses a finite 40 m no-return sentinel. Keep native
@@ -106,6 +102,10 @@ def robot_nodes(
         overrides["indexed_map_query_service"] = f"/{robot}/mapping/query_batch"
     if size:
         overrides["RobotParams.size"] = size
+    cloud_mapping_enabled = overrides["map.backend"] == "cloud_octomap"
+    depth_mapping_enabled = cloud_mapping_enabled and (
+        sim_depth or bool(depth_topic and info_topic)
+    )
     return [
         ExecuteProcess(
             cmd=[
@@ -121,9 +121,9 @@ def robot_nodes(
                 "-p",
                 f"sim_depth:={str(sim_depth).lower()}",
                 "-p",
-                f"cloud_enabled:={str(overrides['map.backend'] == 'cloud_octomap').lower()}",
+                f"cloud_enabled:={str(cloud_mapping_enabled).lower()}",
                 "-p",
-                f"depth_enabled:={str(sim_depth or bool(depth_topic and info_topic)).lower()}",
+                f"depth_enabled:={str(depth_mapping_enabled).lower()}",
                 "-p",
                 f"camera_x:={camera_offset[0]}",
                 "-p",

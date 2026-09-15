@@ -62,6 +62,7 @@ COPY deploy/patches/mgg-known-height-memo-followup.patch /tmp/mgg-known-height-m
 COPY deploy/patches/mgg-connected-footprint-support-followup.patch /tmp/mgg-connected-footprint-support-followup.patch
 COPY deploy/patches/mgg-home-obstacle-detour-followup.patch /tmp/mgg-home-obstacle-detour-followup.patch
 COPY deploy/patches/mgg-validator-physical-start-followup.patch /tmp/mgg-validator-physical-start-followup.patch
+COPY deploy/patches/mgg-platform-terrain-query.patch /tmp/mgg-platform-terrain-query.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -110,6 +111,7 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-connected-footprint-support-followup.patch && \
     git apply /tmp/mgg-home-obstacle-detour-followup.patch && \
     git apply /tmp/mgg-validator-physical-start-followup.patch && \
+    git apply /tmp/mgg-platform-terrain-query.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

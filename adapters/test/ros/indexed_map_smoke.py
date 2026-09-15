@@ -53,6 +53,8 @@ def make_request(manifest, component_id: str, *, stamp_ns: int, revision=None):
     request.body_size.x = 0.1
     request.body_size.y = 0.1
     request.body_size.z = 0.1
+    request.max_step_m = 0.15
+    request.max_drop_m = 0.15
     request.stop_at_unknown = False
     return request
 

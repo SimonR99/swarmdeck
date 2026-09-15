@@ -77,6 +77,8 @@ def make_request(
     request.body_size.x = 0.1
     request.body_size.y = 0.1
     request.body_size.z = 0.1
+    request.max_step_m = 0.15
+    request.max_drop_m = 0.15
     request.stop_at_unknown = False
     return request
 
@@ -242,6 +244,15 @@ def run(args: argparse.Namespace) -> None:
             for name in ("ground_z", "roughness", "clearance", "step", "drop"):
                 require(len(getattr(response, name)) == 3, f"{name} array is malformed")
 
+            invalid_limits = make_request(manifest, source_stamp_ns=stamp_ns)
+            invalid_limits.max_step_m = 0.0
+            invalid = call(node, client, invalid_limits, deadline)
+            require(
+                invalid.status == QueryMapBatch.Response.UNAVAILABLE
+                and "max_step_m" in invalid.detail,
+                "invalid platform terrain limits did not fail closed",
+            )
+
             graph = manifest["graph_revision"]
             assert isinstance(graph, dict)
             stale = call(
@@ -274,7 +285,8 @@ def run(args: argparse.Namespace) -> None:
             )
             print(
                 "PASS: native MOLA worker -> immutable grid -> ROS QueryMapBatch; "
-                "FREE/OCCUPIED/UNKNOWN, stale revision, corrupt-index fail-closed",
+                "FREE/OCCUPIED/UNKNOWN, platform limits, stale revision, "
+                "corrupt-index fail-closed",
                 flush=True,
             )
         except BaseException:

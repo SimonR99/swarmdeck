@@ -1,5 +1,5 @@
-# Opt in after adding peers.yml and mapping.yml. Removing this overlay restores
-# the legacy central navigation map and optimizer uplink on adapter restart.
+# Onboard planning overlay used with peers.yml and mapping.yml. Select the
+# legacy cloud stack explicitly when native MOLA products are unavailable.
 services:
   server:
     environment:
@@ -21,12 +21,10 @@ services:
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
-      SWARMDECK_MGG_MAP_BACKEND: "${SWARMDECK_MGG_MAP_BACKEND:-cloud_octomap}"
-      SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-indexed}"
+      SWARMDECK_MGG_MAP_BACKEND: "${SWARMDECK_MGG_MAP_BACKEND:-mola_snapshot}"
+      SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-mola}"
       SWARMDECK_MAPS_ROOT: /maps
-      # Legacy cloud mode only; mola_snapshot always needs exact terrain queries.
-      # Full body-volume evidence needs prior coverage; a sparse cold-start
-      # LiDAR scan cannot certify it. Enable after validating sensor coverage.
+      # Legacy cloud mode only; mola_snapshot always uses exact terrain queries.
       SWARMDECK_INDEXED_MAP_QUERY: "${SWARMDECK_INDEXED_MAP_QUERY:-0}"
     volumes:
       - peer_maps:/maps:ro

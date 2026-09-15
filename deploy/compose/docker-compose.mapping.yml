@@ -18,9 +18,9 @@ services:
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_MOLA_IMPORTER: /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
       SWARMDECK_MOLA_MODE: persistent
-      # Native occupancy/terrain products are opt-in until capture provenance
-      # and the planner path are qualified for the selected robots.
-      SWARMDECK_MOLA_PLANNER_MAPS: "${SWARMDECK_MOLA_PLANNER_MAPS:-false}"
+      # The onboard simulation planner consumes this native product directly.
+      # Real captures without qualified ray provenance remain occupied-only.
+      SWARMDECK_MOLA_PLANNER_MAPS: "${SWARMDECK_MOLA_PLANNER_MAPS:-true}"
       SWARMDECK_MOLA_TIMEOUT_S: "${SWARMDECK_MOLA_TIMEOUT_S:-30}"
       SWARMDECK_MOLA_POLL_S: "${SWARMDECK_MOLA_POLL_S:-1}"
       SWARMDECK_MOLA_RETRY_S: "${SWARMDECK_MOLA_RETRY_S:-5}"
@@ -55,10 +55,19 @@ services:
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
       FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
-      SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-indexed}"
+      SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-mola}"
+      SWARMDECK_MAP_QUERY_POLL_S: "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
+      SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S: "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-3}"
     volumes:
       - peer_maps:/maps
-    command: ["swarmdeck-indexed-map-server", "--maps-root", "/maps"]
+    command:
+      - swarmdeck-indexed-map-server
+      - --maps-root
+      - /maps
+      - --poll-s
+      - "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
+      - --max-snapshot-age-s
+      - "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-3}"
     depends_on:
       sim:
         condition: service_started

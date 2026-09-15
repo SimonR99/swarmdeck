@@ -402,6 +402,65 @@ def test_gentle_ramp_passes_and_step_is_flagged(tmp_path) -> None:
     assert any(step_result.step)
 
 
+def test_query_uses_platform_step_and_drop_limits() -> None:
+    key = SnapshotKey("platform", 0, 0, "a" * 64)
+    columns = {
+        (x, y): (0.0 if x < 3 else 0.2,)
+        for x in (-1, 0, 1, 4, 5, 6)
+        for y in (-1, 0, 1)
+    }
+    view = IndexedMapView(max_step_m=0.2, max_drop_m=0.2)
+    view.publish(IndexedGrid(key, "b" * 64, 1, 1, set(), set(), columns, 0.2, 18))
+
+    samples = ((0.1, 0.1, 0.5), (1.1, 0.1, 0.7))
+    tracked = view.query(
+        QueryRequest(
+            key,
+            samples,
+            (0.1, 0.1, 0.1),
+            stop_at_unknown=False,
+            max_step_m=0.15,
+            max_drop_m=0.15,
+        )
+    )
+    spot = view.query(
+        QueryRequest(
+            key,
+            samples,
+            (0.1, 0.1, 0.1),
+            stop_at_unknown=False,
+            max_step_m=0.30,
+            max_drop_m=0.30,
+        )
+    )
+    tracked_reverse = view.query(
+        QueryRequest(
+            key,
+            tuple(reversed(samples)),
+            (0.1, 0.1, 0.1),
+            stop_at_unknown=False,
+            max_step_m=0.15,
+            max_drop_m=0.15,
+        )
+    )
+
+    assert tracked.step == (False, True)
+    assert spot.step == (False, False)
+    assert tracked_reverse.drop == (False, True)
+
+
+@pytest.mark.parametrize("value", (0.0, -0.1, math.inf, math.nan, True))
+def test_query_rejects_invalid_platform_terrain_limits(value) -> None:
+    key = SnapshotKey("platform", 0, 0, "a" * 64)
+    with pytest.raises(ValueError, match="max_step_m"):
+        QueryRequest(
+            key,
+            ((0.0, 0.0, 0.0),),
+            (0.1, 0.1, 0.1),
+            max_step_m=value,
+        )
+
+
 def test_stacked_surfaces_select_support_beneath_each_robot(tmp_path):
     levels = [
         [x, y, z]
