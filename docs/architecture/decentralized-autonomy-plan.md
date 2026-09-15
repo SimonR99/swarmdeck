@@ -210,7 +210,7 @@ clearance fields, and UI tiles; publish coherent manifests atomically.
 Terrain queries return ground height/normal, step/drop estimates, roughness,
 clearance, support confidence, and observation age. Profiles define robot body
 geometry, slope limits, step ascent/descent limits, turning constraints, and
-speed. The simulated 10 cm / 30 cm step limits are scenario settings, not proof
+speed. The simulated 15 cm / 30 cm step limits are scenario settings, not proof
 of hardware performance. Spot's legged locomotion remains the responsibility of
 its onboard controller; MGG must respect its supported commands and constraints.
 

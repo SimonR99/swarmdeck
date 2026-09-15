@@ -312,8 +312,9 @@ launcher in this mode.
 MOLA mode always configures `/<robot>/mapping/query_batch` for final corridor
 validation, even when `SWARMDECK_INDEXED_MAP_QUERY=0`. That switch controls only
 the legacy cloud backend. MGG's voxel index is useful for graph construction,
-but its 20 cm voxel centers cannot resolve a platform's 10 cm step limit. The
-final query uses MOLA's exact surface heights and checks the entire route.
+but its 20 cm voxel centers cannot resolve the simulation fleet's 15 cm step
+limit. The final query uses MOLA's exact surface heights and checks the entire
+route.
 A missing or rejecting query service prevents path dispatch; the direct backend
 must not silently fall back to quantized terrain checks.
 

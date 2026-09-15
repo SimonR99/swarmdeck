@@ -35,7 +35,10 @@ requires a C++ compiler; the optional mesh fixture also requires NumPy.
 
 ## Maintenance
 
-`apply_steps.py` owns the per-platform limits and idempotent source edits;
+`apply_steps.py` owns the per-platform limits (Bunker/Scout: 15 cm; Spot: 30 cm)
+and idempotent source edits. Reapplying it updates an existing generated call
+to the current limit, and rejects an unrecognized call instead of leaving a
+stale setting.
 `swarmdeck_step.h` owns the clearance algorithm. The build fails if upstream
 insertion anchors change, including under Python's optimized mode. When updating
 the ARGoS pin, review the generated model sources and rerun both suites. Match

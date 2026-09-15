@@ -1,10 +1,12 @@
 # Navigation and live-map deployment acceptance
 
-The running deployment is `road-home-b511457`, using one benchbot stack on UI
-port 15173. All 228 native tests pass, and R2 completed a Navigate/Home round
-trip through the side corridor. R0's raised-road recovery, R3's latest Home
-timeout and the source of R2's earlier endpoint terrain rejection remain open.
-See the [latest arrival results](#road-search-candidate-arrival-results) for measured
+The running deployment uses MGG `road-home-b511457`, UI `road-home-29afed0` and
+Fast-LIVO2 `road-home-f97cdbf` in one benchbot stack on UI port 15173. All 228
+native MGG tests pass. The preceding drift-odometry mission completed R2's
+side-corridor Navigate/Home trial and R0 Home; R3 Home timed out. R0's raised-road
+recovery also fails with sensor-based odometry, so fleet navigation remains
+unqualified. See the [estimator comparison](#sensor-based-odometry-comparison)
+and [arrival results](#road-search-candidate-arrival-results) for measured
 errors and exact image evidence. Earlier runs below are retained for comparison;
 their mission IDs, image tags and limits describe those runs only.
 
@@ -1018,7 +1020,7 @@ Independent review found no static production blocker; the stationary branch lac
 its own direct regression, while the moving-start and later-hazard branches
 are covered.
 
-The active mission is `17e628f4-1df1-4e6c-9537-ff150a711593`, ROS domain 218,
+The drift mission was `17e628f4-1df1-4e6c-9537-ff150a711593`, ROS domain 218,
 with MGG `swarmdeck-mgg:road-home-b511457` and the previously tested UI image
 `swarmdeck-ui:road-home-29afed0`. The MGG image ID is
 `sha256:6d25ce4de50e8db52cedde5b404e39d5180ae8845b4ad30ae9256f08070f8093`.
@@ -1030,6 +1032,7 @@ with MGG `swarmdeck-mgg:road-home-b511457` and the previously tested UI image
 | R2 rolling graph Home | Arrived | 22.7 s | 0.236 m |
 | R3 Navigate, 12 m | Arrived | 42.1 s | 0.211 m |
 | R3 rolling graph Home | Timed out after 3.10 m displacement | 301.0 s | 9.24 m remaining |
+| R0 rolling graph Home, corrected harness | Arrived | 70.8 s | 0.221 m |
 
 The final observed Navigate endpoints and global Home endpoints had zero XY
 error relative to their qualified component-frame destination. R3's unfinished
@@ -1049,6 +1052,15 @@ then travelled substantial distance while making little net progress, and
 recorded a live swept-occupancy rejection followed by controller replacement.
 The trial timed out and Stop All cancelled it; this run does not qualify R3 Home.
 
+R0 subsequently completed Home with the corrected `f97cdbf` harness. Its maximum
+observed global Home endpoint XY error was 0.042 m, within the 0.05 m acceptance
+limit, with no invalid endpoint samples. The route used local, planning and
+final phases. An independent simulator sample measured 0.321 m from nominal
+spawn after arrival. Seven optimization-order changes occurred during this
+trial; its 31.75 m maximum component-frame displacement is not a direct physical
+travel measurement. The local Home endpoint differs from final Home during
+rolling sections and is not subject to the final global endpoint tolerance.
+
 R0's runtime settings were confirmed as 0.5 m resolution, four-second deadline,
 8 m margin, 16,384 expansion limit and 32,768 cell limit. Its first route was
 cancelled by live validation (`remaining route footprint intersects known
@@ -1056,6 +1068,15 @@ terrain`). The final recovery rejected the bounded search after 1,622 expansions
 and 2,008 ms, with a first reported 11.5 cm footprint rise. This was not deadline
 exhaustion, and the first rejected footprint does not establish which boundary
 cut every possible route. The crossing remains unqualified.
+
+Fixed-goal planner-only shadows at both 0.25 m and 0.5 m resolution exhausted
+their four-second deadlines. Goal and mapping authority were held fixed, but
+the shadows integrated separate live cloud histories, so their map revisions
+were different. The static side passage is inside the stopped robot's 8 m
+window; part of the original route near the spawn lies about 3 m beyond its
+rear boundary. A retreat through that region remains a plausible missing
+detour. The planned 12 m-margin RPC did not execute after automatic permission
+review timed out; it is inconclusive, and its shadow containers were removed.
 
 The R2 side corridor was selected from the static collision mesh before the
 trial. For the nominal 12 m / 4 m left destination near world `(-10, -8)`, the
@@ -1077,3 +1098,51 @@ capture-time registration and observation provenance that were not recorded.
 
 Build, native XML, arrival logs and passive distance observations are preserved
 under `.deploy/nav-timeout/road-home-b511457*` on benchbot.
+
+### Sensor-based odometry comparison
+
+Mission `02e391e6-9fc5-4643-9219-8c500360814b`, ROS domain 219, retains MGG
+`road-home-b511457` and UI `road-home-29afed0`, adding
+`swarmdeck-fast-livo2:road-home-f97cdbf`. Its image ID is
+`sha256:fbb8021f71f0643ef093d17aaaf3fdfa1e9da6abc17325aec2c01fddc0a440a1`.
+The estimator image was built from the committed vendored source. Four profile
+tests pass, in addition to the 29 launch/acceptance tests and Black on all 348
+tracked Python files after the harness correction.
+
+All four Fast-LIVO2 nodes initialized gravity and converged on live LiDAR/IMU
+data. Generated extrinsics matched Bunker, Scout Mini and Spot. A bounded sample
+found finite, normalized, advancing odometry on all four mission topics, with
+latest sample ages of 0.05–0.18 simulated seconds. Average estimator compute was
+about 23–26 ms per robot. Wall-clock odometry rates were about 2.4–2.7 Hz at the
+observed roughly 0.3 real-time factor. Domain 43 is the estimator container's
+intentional internal ROS domain: estimates return over the lockstep socket and
+ARGoS republishes them on mission domain 219. No estimator/protocol error was
+found. This profile uses LiDAR and IMU for odometry; RGB-D cameras remain active
+for mapping and the interface.
+
+R0's 20 m/right-offset Navigate trial failed after 73.7 wall-clock seconds and
+10.98 m reported displacement. The corrected harness measured maximum local and
+global endpoint XY errors of 0.001 m, with no invalid endpoint samples. Recovery
+exhausted its reachable search after 1,096 expansions in 1,018 ms; the first
+reported rejected footprint rise was 0.123 m. Stop All verified cleanup. This
+reproduces the road failure with sensor-based odometry and does not support
+attributing it solely to synthetic drift or an insufficient planning deadline.
+
+R0 Home then failed immediately, before route following, on a reported 0.205 m
+footprint drop against the 0.100 m step limit. Stop All verified cleanup. This
+result does not establish whether the veto represents a central ground drop or
+a rejected part of the current footprint.
+
+A single planner-only shadow with a 12 m margin, 0.5 m lattice and four-second
+deadline also failed, exhausting the deadline after 2,883 expansions. Its goal
+was fixed, but its separately accumulated live map differed from the active
+planner's map. No route or validation result was produced. The default margin
+therefore remains 8 m; larger windows still need an arrival qualification.
+
+The live deployment appends `.deploy/nav-timeout/road-home-lio-override.yml` to
+the saved Compose command, selecting `SWARMDECK_ODOMETRY=fast_livo2` and enabling
+the estimator's `argos` profile. This is necessary because the planning-test
+overlay explicitly selects drift and excludes the optional estimator image.
+The normal supported public command remains `make up-argos-bistro-gpu`.
+Evidence is preserved under `.deploy/nav-timeout/road-home-f97cdbf-lio*`, with
+the margin probe in `road-home-lio-r0-fixed-margin12-shadow.log`.

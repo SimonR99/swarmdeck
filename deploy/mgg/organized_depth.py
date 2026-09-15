@@ -34,7 +34,7 @@ def rasterize_flat_depth_quads(
     Camera coordinates are forward/left/up, matching ``inputs.py`` simulation
     clouds. The near-horizontal test assumes the level camera mount used by the
     simulator; pitched cameras and general slopes are intentionally unsupported.
-    The 8 cm span bound stays below the fleet's smallest 10 cm step rating.
+    The 8 cm span bound stays below the simulation fleet's smallest 15 cm step setting.
     Together with the normal and edge bounds it admits small road undulations;
     it does not establish the absence of a hidden pit between sensor pixels.
     A budget violation raises instead of publishing partial evidence.

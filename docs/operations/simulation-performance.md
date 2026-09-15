@@ -145,9 +145,10 @@ Keep these geometry contracts when changing scenario generation:
 - Blocks, spools, disc cones, and foam noodles are nonblocking perception
   targets. RGB-D and LiDAR still see them; large ducks remain collidable.
 
-Robot bodies support steps up to 10 cm (Spot: 30 cm) with full-body clearance
-and static-support checks. Navigation may still avoid low obstacles seen by its
-conservative proximity scan. Internal-edge correction prevents false Jolt
+The simulation step limit is 15 cm for Bunker/Scout and 30 cm for Spot, shared
+by MGG and the ARGoS contact helper. These are simulation settings, not hardware
+ratings. Traversal requires full-body clearance and static-support checks.
+Navigation may still avoid low obstacles seen by its conservative proximity scan. Internal-edge correction prevents false Jolt
 contacts at road/manhole seams. See the [physics patch guide](../../deploy/patches/argos/README.md)
 for implementation and native regression commands.
 

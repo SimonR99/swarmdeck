@@ -29,9 +29,9 @@ void check(float height, float limit, bool expected, bool ceiling=false, bool dy
 }
 int main() {
   RegisterDefaultAllocator(); Factory::sInstance=new Factory(); RegisterTypes();
-  check(.09f,.10f,true); check(.10f,.10f,true); check(.12f,.10f,false);
+  check(.14f,.15f,true); check(.15f,.15f,true); check(.17f,.15f,false);
   check(.29f,.30f,true); check(.30f,.30f,true); check(.32f,.30f,false);
-  check(.09f,.10f,false,true); check(.09f,.10f,false,false,true);
-  check(.09f,.10f,false,false,false,false); check(1.f,.30f,false);
+  check(.14f,.15f,false,true); check(.14f,.15f,false,false,true);
+  check(.14f,.15f,false,false,false,false); check(1.f,.30f,false);
   UnregisterTypes(); delete Factory::sInstance;
 }

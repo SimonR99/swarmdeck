@@ -2,6 +2,7 @@
 
 import importlib.util
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -164,9 +165,15 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
         assert params["objective_grid_timeout_ms"] == 4000
         assert params["objective_grid_max_margin_m"] == 8.0
     assert [params["PlanningParams.max_step_height"] for params in overrides] == [
-        0.10,
-        0.10,
+        0.15,
+        0.15,
         0.30,
+    ]
+    physics = runpy.run_path(str(repo / "deploy/patches/argos/apply_steps.py"))[
+        "STEP_LIMITS"
+    ]
+    assert [params["PlanningParams.max_step_height"] for params in overrides] == [
+        physics[platform] for platform in ("bunker", "scout-mini", "spot")
     ]
 
 

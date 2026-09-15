@@ -221,8 +221,8 @@ def test_every_mapping_lidar_height_is_measured_from_the_ground(platform):
 
 
 def test_step_capability_matches_the_simulated_platforms():
-    assert robot_spec("bunker").max_step_height == pytest.approx(0.10)
-    assert robot_spec("scout_mini").max_step_height == pytest.approx(0.10)
+    assert robot_spec("bunker").max_step_height == pytest.approx(0.15)
+    assert robot_spec("scout_mini").max_step_height == pytest.approx(0.15)
     assert robot_spec("spot").max_step_height == pytest.approx(0.30)
 
 

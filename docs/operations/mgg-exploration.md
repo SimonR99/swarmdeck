@@ -227,7 +227,7 @@ tests do not establish that a particular hardware deployment is ready to move.
 ## Simulation steps and return home
 
 The ARGoS Jolt stand-ins are upright rigid bodies. SwarmDeck adds collision-checked
-step assistance for 0.10 m steps on Bunker/Scout and 0.30 m steps on Spot. It
+step assistance for 0.15 m steps on Bunker/Scout and 0.30 m steps on Spot. It
 sweeps the complete body upward, forward, and down to supported static ground;
 ceilings, taller walls, other dynamic robots, and unsupported climbs are refused.
 This approximates step traversal, not wheel suspension or articulated leg dynamics.

@@ -198,7 +198,7 @@ are retained in the workspace's `.deploy/fleet-regression-f03e68f6ee1c` director
 - Build/reuse persistent traversable connectivity over the accumulated qualified
   MOLA map instead of expanding the expensive local graph to whole-map scale.
 - Make exploration and objective route refinement use the same terrain decisions.
-  Test platform step caps (Bunker/Scout 0.10 m, Spot 0.30 m), walls, drops, slopes,
+  Test platform step caps (Bunker/Scout 0.15 m, Spot 0.30 m), walls, drops, slopes,
   thin obstacles, and swept-body clearance after smoothing/resampling.
 - Record concise rejection categories for low graph acceptance, not per-sample
   debug logs. Feed repeated controller failures back to corridor selection.

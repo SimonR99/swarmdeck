@@ -2,9 +2,23 @@
 
 import argparse
 from pathlib import Path
+import re
 import shutil
 
-STEP_LIMITS = {"bunker": 0.10, "bunker-mini": 0.10, "scout-mini": 0.10, "spot": 0.30}
+STEP_LIMITS = {"bunker": 0.15, "bunker-mini": 0.15, "scout-mini": 0.15, "spot": 0.30}
+
+_STEP_HELPER_INCLUDE = '#include "swarmdeck_step.h"'
+_STEP_CALL = re.compile(
+    r"""
+    SwarmDeckStep\(
+        \s*GetJoltEngine\(\)\.GetSystem\(\),\s*
+        cId,\s*cPosition,\s*cRotation,\s*
+        cForward\s*\*\s*\(fLinear\s*<\s*0\s*\?\s*-distance\s*:\s*distance\),\s*
+        (?P<limit>\d+\.\d{2})f\s*
+    \);
+    """,
+    re.VERBOSE,
+)
 
 
 def require_anchor(source: str, anchor: str) -> None:
@@ -28,9 +42,24 @@ def patch_model(s: str, limit: float) -> str:
 """
             + contact_anchor,
         )
-    if "SwarmDeckStep(" in s:
-        return s
-    s = '#include "swarmdeck_step.h"\n' + s
+    if "SwarmDeckStep" in s:
+        matches = list(_STEP_CALL.finditer(s))
+        if len(matches) != 1 or s.count("SwarmDeckStep") != 1:
+            raise ValueError(
+                "Expected exactly one existing generated SwarmDeckStep call"
+            )
+        if s.count(_STEP_HELPER_INCLUDE) != 1:
+            raise ValueError(
+                "Existing SwarmDeckStep call requires exactly one helper include"
+            )
+        match = matches[0]
+        start, end = match.span("limit")
+        return s[:start] + f"{limit:.2f}" + s[end:]
+    if _STEP_HELPER_INCLUDE in s:
+        raise ValueError(
+            "Found SwarmDeck step helper include without its generated call"
+        )
+    s = _STEP_HELPER_INCLUDE + "\n" + s
     s = s.replace(
         anchor,
         f"""      // Probe only one small commanded advance, never jump across a gap.

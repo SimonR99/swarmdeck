@@ -114,7 +114,7 @@ def test_proximity_ground_filter():
 
 
 def test_proximity_detects_low_and_high_obstacles():
-    """Obstacles above the Bunker's 0.10 m limit through 1.80 m are detected."""
+    """Obstacles above an explicit 0.10 m filter through 1.80 m are detected."""
     lidar_x, lidar_z, base_height = -0.07, 0.402, 0.138
     angle_0_bin = int(np.floor((0.0 - bridge.SCAN_ANGLE_MIN) * bridge.INV_ANGLE_INC))
 
@@ -227,8 +227,8 @@ def test_proximity_minimum_distance_aggregation():
 @pytest.mark.parametrize(
     ("platform", "climbable_height", "blocking_height"),
     [
-        ("bunker", 0.10, 0.11),
-        ("scout_mini", 0.10, 0.11),
+        ("bunker", 0.15, 0.16),
+        ("scout_mini", 0.15, 0.16),
     ],
 )
 def test_proximity_uses_canonical_mount_and_bounded_ground_filter(
