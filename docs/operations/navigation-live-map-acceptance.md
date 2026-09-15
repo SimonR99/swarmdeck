@@ -842,3 +842,15 @@ bug and its fix; it does not yet establish that this was the cause of the
 remaining Bistro road failure. The route smoke script accepts an optional
 `--planner-namespace` for querying an isolated native candidate without changing
 the robot's live inputs or commanding motion.
+
+The corresponding Python navigation, Home, replica and deployment checks
+passed all 194 tests. Black accepted all 348 tracked Python files after testing.
+
+The complete Docker patch-chain check exposed an incomplete baseline in the
+initial patch packaging. The corrected patch includes the sparse state store
+needed for multiple heights per XY, instead of allocating every cell in the
+bounding rectangle. Nearby start connectors retain only the nearest candidates
+that fit the remaining cell budget, check coordinate arithmetic before integer
+conversion/addition, and share the cooperative deadline. The production body
+evidence policy gate is preserved. Exact-image native testing is required after
+this correction; the earlier isolated test results do not qualify that image.
