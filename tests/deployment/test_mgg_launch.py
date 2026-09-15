@@ -141,11 +141,37 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
             [2.0 * 3.141592653589793, 2.0 * 0.2618]
         )
         assert params["SensorParams.VLP16.rotations"] == [0.0, 0.0, 0.0]
+        assert params["objective_grid_timeout_ms"] == 2000
     assert [params["PlanningParams.max_step_height"] for params in overrides] == [
         0.10,
         0.10,
         0.30,
     ]
+
+
+def test_sim_objective_budget_does_not_change_hardware_defaults(
+    launch_module, monkeypatch
+):
+    repo = Path(__file__).parents[2]
+    path = repo / "deploy/mgg/hardware.launch.py"
+    spec = importlib.util.spec_from_file_location(
+        "mgg_hardware_launch_under_test", path
+    )
+    hardware = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hardware)
+    settings = hardware.hardware_settings(
+        {
+            "footprint": [[-0.4, -0.3], [0.4, 0.3]],
+            "exploration": {
+                "planner": {
+                    "body_height_m": 0.5,
+                    "bounds_min": [-10.0, -10.0, -2.0],
+                    "bounds_max": [10.0, 10.0, 2.0],
+                }
+            },
+        }
+    )
+    assert "objective_grid_timeout_ms" not in settings
 
 
 @pytest.mark.parametrize("profile", ["generic_2d", "legacy_360"])

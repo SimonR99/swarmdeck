@@ -240,7 +240,12 @@ synthetic ground. Missing support retains the existing graph height instead of
 turning the `-1` sentinel into an artificial upward jump. The root uses the same
 collision-box offset as projected vertices even inside the sensor blind spot;
 Spot’s edge cap reaches 2.5 m so its graph can reach camera-observed floor. The
-pinned patch series includes `deploy/patches/mgg-traversal-lifecycle.patch` and
+simulation fleet gives explicit Navigate/Home grid refinement 2000 ms: a
+20-metre Bistro route required 858 ms on the GPU test host, exceeding the
+previous 500 ms limit. This remains a deadline, not a promised route. Exploration
+keeps its shorter graph-search budget, and hardware retains its configured MGG
+default unless a site profile overrides it. The pinned patch series includes
+`deploy/patches/mgg-traversal-lifecycle.patch` and
 `deploy/patches/mgg-external-path-execution.patch`; rebuild the MGG image when
 any MGG patch changes. External execution leaves movement failure and its
 bounded replacement budget to the robot controller boundary. Empty or

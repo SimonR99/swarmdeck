@@ -71,6 +71,10 @@ def generate_launch_description():
                 # Spot’s elevated camera first sees floor beyond the default
                 # 1.2 m edge cap; allow the initial graph to reach it.
                 "PlanningParams.edge_length_max": 2.5 if platform == "spot" else 1.2,
+                # Explicit Navigate/Home may search a long known-road corridor.
+                # Keep the short exploration graph budget unchanged; the
+                # objective planner owns this separate bounded deadline.
+                "objective_grid_timeout_ms": 2000,
                 "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
                 "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
                 "PlanningParams.max_inclination": math.radians(30),
