@@ -41,3 +41,22 @@ def test_harness_reads_the_validated_live_home_contract():
     qualified = validate_live_mapping(value, "robot_0")
 
     assert acceptance_module().home_target(qualified) == (4.0, -2.0, 0.3)
+
+
+def test_rolling_home_ignores_local_controller_success():
+    completed = acceptance_module().objective_completed
+
+    assert not completed("home", "succeeded", 4, ["following_local"], "following_local")
+    assert not completed("home", "succeeded", 4, ["following_local"], None, True)
+    assert completed(
+        "home",
+        "succeeded",
+        4,
+        ["following_local", "following_final"],
+        None,
+        True,
+    )
+    assert completed("navigate", "succeeded", 1, [])
+    assert not completed("home", "succeeded", 0, ["following_final"])
+    assert completed("home", "succeeded", 1, [])
+    assert not completed("home", "succeeded", 1, [], "planning")

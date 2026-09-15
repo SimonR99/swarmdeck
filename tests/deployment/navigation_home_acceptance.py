@@ -99,6 +99,26 @@ def home_target(robot):
     return (float(home[0][3]), float(home[1][3]), float(home[2][3]))
 
 
+def objective_completed(
+    mode,
+    status,
+    active_samples,
+    observed_phases,
+    current_phase=None,
+    require_rolling_home=False,
+):
+    """Reject a rolling Home chunk's transient controller success."""
+    if status != "succeeded" or active_samples <= 0:
+        return False
+    if mode != "home":
+        return True
+    if current_phase in {"planning", "following_local"}:
+        return False
+    if require_rolling_home or "following_local" in observed_phases:
+        return "following_final" in observed_phases
+    return True
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--simulation", action="store_true", required=True)
@@ -448,7 +468,14 @@ async def run(args):
                     or (status, status_robot.get("nav_failure_reason"))
                     != baseline_status
                 )
-                if status == "succeeded" and summary["active_samples"] > 0:
+                if objective_completed(
+                    args.mode,
+                    status,
+                    summary["active_samples"],
+                    summary["observed_phases"],
+                    phase,
+                    args.require_rolling_home,
+                ):
                     summary["outcome"] = "succeeded"
                     break
                 if failure:
@@ -481,6 +508,11 @@ async def run(args):
                     )
                     if final_identity != initial_identity:
                         summary["authority_changed"] = True
+                    elif final_robot.get("nav_status") != "succeeded":
+                        summary["outcome"] = "inconclusive"
+                        summary["failure_reason"] = (
+                            "qualified live objective was not finally succeeded"
+                        )
                     else:
                         if args.mode == "navigate":
                             target = navigation_from_component(
