@@ -1286,15 +1286,17 @@ def test_partial_home_refines_each_success_without_moving_global_goal(
 
     bridge.nav_status = "succeeded"
     planner._check_active_authority()
-    assert wait_until(lambda: bridge.follow_path.call_count == 3)
+    assert wait_until(
+        lambda: (
+            planner.decorate_state({"nav_status": "active"})
+            .get("objective_continuation", {})
+            .get("phase")
+            == "following_final"
+        )
+    )
+    assert bridge.follow_path.call_count == 3
     assert planner.global_display_plan() is first_global
     assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
-    assert (
-        planner.decorate_state({"nav_status": "active"})["objective_continuation"][
-            "phase"
-        ]
-        == "following_final"
-    )
 
     requests = planner.refine_client.call_async.call_args_list
     assert len(requests) == 2

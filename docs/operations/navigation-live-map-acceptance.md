@@ -769,3 +769,9 @@ The acceptance harness uses that field, rejects malformed provenance and
 does not substitute an unqualified fleet pose. Missing Home data remains
 backward compatible. The combined navigation, Home telemetry, replica and
 launch regression suite passed all 188 tests.
+
+A final provenance check additionally binds Home keyframe identities to the
+enclosing robot and mission. The Home continuation regression now waits for
+the completed public phase transition rather than a mock call made before
+the asynchronous state handoff. The expanded combined suite passed 193 tests,
+and Black accepted all 348 tracked Python files.
