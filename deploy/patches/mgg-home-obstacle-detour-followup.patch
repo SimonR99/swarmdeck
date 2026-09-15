@@ -1,8 +1,8 @@
 diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
-index 945461e..b52fbdb 100644
+index 945461e..c1d5f3e 100644
 --- a/ros2/src/mgg_ros/src/planner_node.cpp
 +++ b/ros2/src/mgg_ros/src/planner_node.cpp
-@@ -40,6 +40,70 @@ std::string boundedObjectiveFailure(const std::string& reason) {
+@@ -40,6 +40,71 @@ std::string boundedObjectiveFailure(const std::string& reason) {
           compact.substr(compact.size() - kTail);
  }
  
@@ -10,7 +10,8 @@ index 945461e..b52fbdb 100644
 +    const mgg::RouteCorridor& corridor, const std::string& reason) {
 +  constexpr char kPrefix[] = "route corridor waypoint[";
 +  constexpr char kSuffix[] = "] rejected:";
-+  if (corridor.request.objective != mgg::ObjectiveKind::kReturnHome ||
++  if (corridor.status != mgg::PlanningStatus::kSucceeded ||
++      corridor.request.objective != mgg::ObjectiveKind::kReturnHome ||
 +      corridor.poses.empty() ||
 +      reason.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0) {
 +    return false;
@@ -73,7 +74,7 @@ index 945461e..b52fbdb 100644
  bool objectiveGridWindowFits(const mgg::RouteCorridor& corridor,
                               const mgg::StateVec& current,
                               double resolution, double margin,
-@@ -3213,6 +3277,25 @@ void PlannerNode::onObjectiveRequest(
+@@ -3213,6 +3278,25 @@ void PlannerNode::onObjectiveRequest(
        path = std::move(fallback);
      }
    }
@@ -99,7 +100,7 @@ index 945461e..b52fbdb 100644
    const IndexedQueryContext query_context = indexedQueryContext();
    map_read = mgg::MolaMap::ReadLease{};
    lock.unlock();
-@@ -3395,7 +3478,28 @@ void PlannerNode::onRefineObjectiveRoute(
+@@ -3395,7 +3479,28 @@ void PlannerNode::onRefineObjectiveRoute(
                                      local_poses.back(), ""}
                                : cached_home_route_->exact_goal;
    corridor.poses = std::move(local_poses);
