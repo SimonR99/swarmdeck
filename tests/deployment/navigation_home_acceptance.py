@@ -317,6 +317,9 @@ async def run(args):
                     args.lateral_offset,
                     live_robot["T_component_navigation"],
                 )
+                summary["requested_component_goal"] = component_goal
+                summary["requested_navigation_goal"] = target
+                summary["navigation_frame"] = live_robot["navigation_frame"]
                 await asyncio.to_thread(
                     json_request,
                     args.base_url,

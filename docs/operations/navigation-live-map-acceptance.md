@@ -1,5 +1,12 @@
 # Navigation and live-map deployment acceptance
 
+The latest validated deployment is `road-home-29afed0`, using one benchbot stack
+on UI port 15173. All 227 native tests pass, and R3 completed a 12 m Navigate/Home
+round trip. R0's raised-road search and R2's rejected endpoint remain open.
+See the [latest arrival results](#reviewed-image-and-arrival-results) for measured
+errors and exact image evidence. Earlier runs below are retained for comparison;
+their mission IDs, image tags and limits describe those runs only.
+
 ## September 13 navigation follow-up
 
 The September 13 run used benchbot project `planning-next` on UI port 15173,
@@ -914,3 +921,84 @@ The complete 46-patch Docker sequence applies to pinned MGG revision `902e868`.
 The combined Python suite passed 195 tests, and Black accepted all 348 tracked
 Python files after testing. Exact-image native and physical arrival checks are
 the remaining gates for this candidate.
+
+### Reviewed image and arrival results
+
+The final image `swarmdeck-mgg:road-home-29afed0` passed all 227 native cases
+across 18 test targets, including 37 grid-refinement and 59 objective-service
+cases, with no failures or disabled tests. The first image exposed three
+service-fixture assumptions: one positive detour lacked observed lateral ground,
+and two nominally zero-margin negative tests configured only the generic planner
+instead of Home's objective envelope. Correcting those fixtures preserved their
+safety assertions and changed no planner runtime source.
+
+The independent quality pass also found a merged-count ownership edge case:
+an unavailable explicitly selected component must not display a different
+component's membership. That fix passed the 38-case replica UI suite, Svelte
+checks and the production build. Obsolete tool diagnostics were removed from
+an older patch preamble without changing the resulting MGG source.
+
+Both reviewed images are deployed in mission
+`59456af8-66aa-4eae-b5cb-4c294bfeee8a`, ROS domain 217, on the single `planning-next`
+stack and UI port 15173. After startup authority became ready:
+
+| Trial | Result | Time | Qualified arrival error |
+| --- | --- | --- | --- |
+| R3 Navigate, 12 m | Arrived | 22.8 s | 0.245 m |
+| R3 rolling graph Home | Arrived | 24.0 s | 0.162 m |
+| R2 Navigate, 12 m | Endpoint terrain rejection | 1.0 s | No motion |
+
+R3 retained zero local/global endpoint error relative to the requested component
+goal throughout both trials. Home progressed through local and final phases;
+the passive simulator observer measured a 0.168 m physical return error. Stop All
+verified the fleet idle after each trial. These results qualify this R3 round
+trip, not fleet-wide navigation.
+
+The R0 20 m/right-offset probe still exhausted its two-second planning deadline
+after 4455 projections and 1939 expansions. The 30 m/left-offset R0 probe and
+12 m R2/R3 probes passed, including exact XY and live lookahead validation. R2's
+later commanded trial rejected a known 0.397 m footprint rise at its endpoint.
+Rechecking that coordinate `(11.99, 0.15, -0.17)` at map revision 3565 still
+rejected a 0.394 m rise. The later successful 12 m target was about 0.8 m away:
+each invocation derives its destination from the current odometry and heading.
+API and native-smoke goal transforms agreed within 4.2 mm vertically and exactly
+in XY/yaw at a shared snapshot. This does not establish a collision mesh defect
+at the rejected endpoint. Neither the R0 road crossing nor this R2 commanded
+destination is qualified.
+
+Native XML, probe results and arrival logs are under benchbot's review checkout
+`.deploy/nav-timeout/`, prefixed `road-home-29afed0`. The isolated native test
+container was removed after the run.
+
+### Road-search tuning candidate
+
+Planner-only shadows on the same live R0 mapping topics tested these bounded
+Navigate/Home settings without commanding motion:
+
+| Search lattice / deadline | Observed planning results |
+| --- | --- |
+| 0.25 m / 2 s | Deadline exhausted |
+| 0.25 m / 4 s | Deadline exhausted |
+| 0.5 m / 2 s | One route accepted; one deadline exhausted |
+| 0.5 m / 4 s | Three routes accepted and live lookahead validation passed |
+
+These were changing maps and relative destinations, not a controlled same-goal
+benchmark. New probe logs record exact goal XYZ, frame and planning/validation
+map revisions; arrival logs record both component and navigation goals. A fresh
+motion trial remains the acceptance gate.
+
+The simulation candidate uses 0.5 m search nodes and a four-second objective
+deadline. This changes Navigate and Home refinement only; Explore's graph
+search, measured terrain, body sweeps, step limits, Nav2 resolution and hardware
+defaults retain their existing settings. A coarser lattice can miss a narrow
+valid passage, and the existing overall recovery deadline still bounds retries.
+
+The final review also found a separate planner/validator inconsistency. Planning
+can accept its odometry-proven current pose despite a footprint ground-support
+veto, allowing escape, while validation previously rejected that same first
+sample. The candidate mirrors the planner's position predicate and waives only
+that first sample's footprint `kNoGround` result. Occupied body volume, geofence,
+unknown queries, edge projection, sweeps and all later samples remain strict.
+A native regression plans and validates at one map revision, then verifies that
+a newly observed footprint hazard farther along the route still invalidates it.
+This does not explain the separately observed R2 projected-edge rejection.

@@ -160,7 +160,8 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
             [2.0 * 3.141592653589793, 2.0 * 0.2618]
         )
         assert params["SensorParams.VLP16.rotations"] == [0.0, 0.0, 0.0]
-        assert params["objective_grid_timeout_ms"] == 2000
+        assert params["grid_refinement_resolution_m"] == 0.5
+        assert params["objective_grid_timeout_ms"] == 4000
         assert params["objective_grid_max_margin_m"] == 8.0
     assert [params["PlanningParams.max_step_height"] for params in overrides] == [
         0.10,
@@ -192,6 +193,7 @@ def test_sim_objective_budget_does_not_change_hardware_defaults(
         }
     )
     assert "objective_grid_timeout_ms" not in settings
+    assert "grid_refinement_resolution_m" not in settings
 
 
 @pytest.mark.parametrize("profile", ["generic_2d", "legacy_360"])

@@ -76,7 +76,9 @@ Simulation terrain checks retain measured surface heights within the coarse
 occupancy map and check known terrain across the robot footprint, including
 exploration candidates. Connected measured supports allow successive climbable
 steps across a long footprint; missing observations cannot bridge a known
-height discontinuity. Controller failures include their reason in Fleet.
+height discontinuity. Simulated Navigate/Home searches use 0.5 m grid nodes and
+a four-second budget; terrain checks and Nav2's controller grid keep their own
+resolution. Controller failures include their reason in Fleet.
 Physical no-progress failures allow three movement attempts total; planner
 rejections and transport errors do not consume that movement retry budget.
 Benchbot trials reached approximately 12 m destinations with R0 and R1, and R0

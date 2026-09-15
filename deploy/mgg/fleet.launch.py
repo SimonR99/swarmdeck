@@ -71,10 +71,13 @@ def generate_launch_description():
                 # Spot’s elevated camera first sees floor beyond the default
                 # 1.2 m edge cap; allow the initial graph to reach it.
                 "PlanningParams.edge_length_max": 2.5 if platform == "spot" else 1.2,
-                # Explicit Navigate/Home may search a long known-road corridor.
-                # Keep the short exploration graph budget unchanged; the
-                # objective planner owns this separate bounded deadline.
-                "objective_grid_timeout_ms": 2000,
+                # Half-metre search nodes keep long road detours tractable.
+                # Terrain projection/sweeps and Nav2 retain their own finer
+                # resolution; this does not relax obstacle or step checks.
+                "grid_refinement_resolution_m": 0.5,
+                # Navigate/Home have a separate deadline from exploration.
+                # Leave headroom for live map queries on long Bistro detours.
+                "objective_grid_timeout_ms": 4000,
                 # A real diagonal Bistro kerb seals the old +/-4 m objective
                 # window. Permit the native planner to use a wider window
                 # when its existing cell budget can represent it.

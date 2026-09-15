@@ -127,7 +127,12 @@ def main():
         request.goal.orientation = q
         result, planning_ms = call(plan, request)
         if result.status != result.SUCCEEDED or len(result.path) < 2:
-            raise RuntimeError(f"full route rejected: {result.reason}")
+            raise RuntimeError(
+                f"full route rejected: {result.reason}; "
+                f"requested goal=({request.goal.position.x}, "
+                f"{request.goal.position.y}, {request.goal.position.z}), "
+                f"map_revision={result.map_revision}"
+            )
         endpoint = result.path[-1].position
         if (
             math.hypot(
@@ -151,6 +156,14 @@ def main():
                     "planner_namespace": planner_namespace,
                     "distance_m": args.distance,
                     "lateral_offset_m": args.lateral_offset,
+                    "goal": {
+                        "x": request.goal.position.x,
+                        "y": request.goal.position.y,
+                        "z": request.goal.position.z,
+                    },
+                    "frame_id": odom.header.frame_id,
+                    "plan_map_revision": result.map_revision,
+                    "validation_map_revision": checked.map_revision,
                     "path_poses": len(result.path),
                     "planning_ms": planning_ms,
                     "validation_ms": validation_ms,
