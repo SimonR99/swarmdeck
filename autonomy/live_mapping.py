@@ -87,6 +87,14 @@ def validate_live_mapping(value, robot_id):
             or len(keyframe_id) > 512
         ):
             raise ValueError("invalid Home keyframe identity")
+        prefix = f"{robot_id}/{result['mission_id']}/"
+        sequence = keyframe_id.removeprefix(prefix)
+        if (
+            not keyframe_id.startswith(prefix)
+            or not sequence.isdecimal()
+            or str(int(sequence)) != sequence
+        ):
+            raise ValueError("Home keyframe identity differs from live authority")
         result["home"] = {
             "keyframe_id": keyframe_id,
             "T_navigation_home": validate_se3(home.get("T_navigation_home")),

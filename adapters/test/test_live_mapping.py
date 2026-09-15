@@ -66,6 +66,26 @@ def test_malformed_home_rejects_the_live_authority():
 
 
 @pytest.mark.parametrize(
+    "keyframe_id",
+    (
+        "other/mission/0",
+        "r0/other-mission/0",
+        "r0/mission/-1",
+        "r0/mission/01",
+        "r0/mission/not-a-sequence",
+    ),
+)
+def test_home_keyframe_must_match_live_robot_and_mission(keyframe_id):
+    robot = bridge()
+    robot._mapping_authority.current()["home"] = {
+        "keyframe_id": keyframe_id,
+        "T_navigation_home": IDENTITY_SE3,
+    }
+
+    assert live_state(robot)["live_mapping"] is None
+
+
+@pytest.mark.parametrize(
     "field,value",
     [
         ("robot_id", "other"),
