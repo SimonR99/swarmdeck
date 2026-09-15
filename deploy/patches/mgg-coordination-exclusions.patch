@@ -1,6 +1,3 @@
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
-Failed to create stream fd: Operation not permitted
 diff --git a/ros2/src/mgg_core/include/mgg_core/path_selection.h b/ros2/src/mgg_core/include/mgg_core/path_selection.h
 index b2ef3a4..2aa00cc 100644
 --- a/ros2/src/mgg_core/include/mgg_core/path_selection.h

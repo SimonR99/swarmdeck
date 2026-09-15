@@ -142,6 +142,49 @@ test('merged count follows the preferred active Global component', () => {
   }), 'robot-a'), []);
 });
 
+test('explicit active Global component does not fall through when missing or unready', () => {
+  const ready = {
+    ...body().components[0],
+    component_id: 'component:ready',
+    robot_ids: ['robot-a', 'robot-b']
+  };
+  const catalogue = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      ready,
+      {
+        ...ready,
+        component_id: 'component:syncing',
+        robot_ids: ['robot-c', 'robot-d'],
+        status: 'syncing'
+      },
+      {
+        ...ready,
+        component_id: 'component:singleton',
+        robot_ids: ['robot-e']
+      }
+    ]
+  });
+
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', {
+    scope: 'fleet', robotId: 'fleet', sessionId: session, componentId: 'component:missing'
+  }), []);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', {
+    scope: 'fleet', robotId: 'fleet', sessionId: session, componentId: 'component:syncing'
+  }), []);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', {
+    scope: 'fleet', robotId: 'fleet', sessionId: session, componentId: 'component:singleton'
+  }), []);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a'), ['robot-a', 'robot-b']);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', {
+    scope: 'fleet',
+    robotId: 'fleet',
+    sessionId: '99999999-9999-4999-8999-999999999999',
+    componentId: 'component:missing'
+  }), ['robot-a', 'robot-b']);
+});
+
 test('automatic retention cannot relabel a fleet view as local during a transient catalogue state', () => {
   const catalogue = parseReplicaCatalogue(body());
   const entry = catalogue.components[0];

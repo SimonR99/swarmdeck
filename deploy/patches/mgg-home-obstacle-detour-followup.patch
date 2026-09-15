@@ -130,7 +130,7 @@ index 945461e..c1d5f3e 100644
    map_read = mgg::MolaMap::ReadLease{};
    lock.unlock();
 diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
-index 5f9c3c9..9715be0 100644
+index 5f9c3c9..eb15e27 100644
 --- a/ros2/src/mgg_ros/test/test_objective_service.cpp
 +++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
 @@ -145,6 +145,13 @@ class PlannerNodeTestPeer {
@@ -344,16 +344,19 @@ index 5f9c3c9..9715be0 100644
  TEST(PlannerExplore, FullSizeGroundRobotsExpandAtProjectedDrivingHeight) {
    using Peer = mgg_ros::PlannerNodeTestPeer;
    for (const auto& body : {
-@@ -2733,7 +2923,7 @@ TEST_F(ObjectiveService,
+@@ -2733,9 +2923,8 @@ TEST_F(ObjectiveService,
    EXPECT_GT(pinned->path.back().position.z, -0.05);
  }
  
 -TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
+-  mgg_ros::PlannerNodeTestPeer::configureExploreServiceScene(
+-      *planner, /*support_root=*/true);
 +TEST_F(ObjectiveService, NewObstacleAtHomeWaypointUsesLocalEndpointDetour) {
-   mgg_ros::PlannerNodeTestPeer::configureExploreServiceScene(
-       *planner, /*support_root=*/true);
++  mgg_ros::PlannerNodeTestPeer::configureGridServiceScene(*planner);
    mgg_ros::PlannerNodeTestPeer::acceptOdometry(*planner, 0.0, 0.0, 0.075);
-@@ -2765,12 +2955,14 @@ TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
+   mgg::StateVec home_state = mgg::StateVec::Zero();
+   home_state.z() = 0.075;
+@@ -2765,12 +2954,14 @@ TEST_F(ObjectiveService, NewObstacleBlocksExplicitHomeThroughActualService) {
    mgg_ros::PlannerNodeTestPeer::addCorridorObstacle(*planner, 0.60);
    response = call(home);
    ASSERT_NE(response, nullptr);
@@ -374,7 +377,7 @@ index 5f9c3c9..9715be0 100644
  }
  
  TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
-@@ -2822,6 +3014,9 @@ TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
+@@ -2822,12 +3013,16 @@ TEST_F(ObjectiveService, GridHomeDetoursOnObservedGroundAndBlocksWall) {
    EXPECT_TRUE(response->path.empty());
    EXPECT_EQ(response->reason.find("primary direct:"), std::string::npos)
        << response->reason;
@@ -384,3 +387,18 @@ index 5f9c3c9..9715be0 100644
  
  }
  
+ TEST_F(ObjectiveService, GridBodyOffsetPreservesHeightAndChecksRaisedObstacle) {
+   using Peer = mgg_ros::PlannerNodeTestPeer;
+   Peer::configureGridServiceScene(*planner, 0.30, 0.0);
++  Peer::setObjectiveGridWindow(*planner, 0.0, 0.0);
+   for (const double x : {0.0, 0.6, 1.2}) {
+     Peer::acceptOdometry(*planner, x, 0.0, 0.075);
+   }
+@@ -2854,6 +3049,7 @@ TEST_F(ObjectiveService, GridBodyOffsetPreservesHeightAndChecksRaisedObstacle) {
+ TEST_F(ObjectiveService, GridRejectsSingleUnknownBodyVoxelWithZeroOffset) {
+   using Peer = mgg_ros::PlannerNodeTestPeer;
+   Peer::configureGridServiceScene(*planner, 0.0, 0.0);
++  Peer::setObjectiveGridWindow(*planner, 0.0, 0.0);
+   for (const double x : {0.0, 0.6, 1.2}) {
+     Peer::acceptOdometry(*planner, x, 0.0, 0.075);
+   }

@@ -157,7 +157,7 @@ export function activeMergedRobotIds(
     const selected = candidates.find(
       (entry) => entry.componentId === explicitSelection.componentId
     );
-    if (selected) return selected.robotIds;
+    return selected?.robotIds ?? [];
   }
   if (preferredRobotId) {
     const matching = candidates.filter((entry) => entry.robotIds.includes(preferredRobotId));
