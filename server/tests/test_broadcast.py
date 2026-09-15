@@ -125,7 +125,7 @@ def test_snapshot_has_one_total_deadline_and_releases_queued_publication(monkeyp
         )
         await entered.wait()
         publication = asyncio.create_task(publisher.publish({"seq": 10}))
-        with pytest.raises(TimeoutError):
+        with pytest.raises(asyncio.TimeoutError):
             await subscribe
         await asyncio.wait_for(publication, 0.5)
         assert len(slow.frames) < 10

@@ -1,6 +1,10 @@
-# Onboard Swarm-SLAM participants, initially in shadow mapping mode.
-# Server replication is optional. DDS discovery and graph exchange are direct.
+# Onboard Swarm-SLAM participants feeding the native MOLA mapping products.
+# Server replication is optional. DDS discovery and graph exchange are direct;
+# omit this overlay only for the explicit legacy central-cloud simulation path.
 x-peer: &peer
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile.cslam
   image: swarmdeck-cslam:planning
   network_mode: service:sim
   environment: &peer-env
@@ -8,7 +12,7 @@ x-peer: &peer
     ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
     FASTDDS_BUILTIN_TRANSPORTS: UDPv4
     SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
-    SWARMDECK_PEER_NAMES: '["robot_0","robot_1","robot_2","robot_3"]'
+    SWARMDECK_PEER_NAMES: '${SWARMDECK_PEER_NAMES:-["robot_0","robot_1","robot_2","robot_3"]}'
     SWARMDECK_USE_SIM_TIME: "true"
     SWARMDECK_CAPTURE_PROVIDER: "${SWARMDECK_CAPTURE_PROVIDER:-unknown}"
     SWARMDECK_COLOR_FRAME_CONVENTION: body

@@ -31,10 +31,13 @@ class JsonBroadcaster:
                 json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
                 for frame in snapshot()
             ]
+
+            async def send_snapshot():
+                for frame in frames:
+                    await client.send_text(frame)
+
             try:
-                async with asyncio.timeout(SEND_TIMEOUT_S):
-                    for frame in frames:
-                        await client.send_text(frame)
+                await asyncio.wait_for(send_snapshot(), SEND_TIMEOUT_S)
             except Exception:
                 await self._retire(client)
                 raise

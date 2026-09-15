@@ -3,6 +3,7 @@
 import importlib.util
 import math
 import os
+import re
 import sys
 from pathlib import Path
 import yaml
@@ -24,6 +25,19 @@ def simulation_sensor_overrides(lidar):
     }
 
 
+def simulation_robot_prefix(fleet):
+    prefix = fleet.get("robot_prefix", "robot_")
+    if (
+        not isinstance(prefix, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", prefix) is None
+    ):
+        raise ValueError(
+            "fleet.robot_prefix must contain only ROS namespace letters, digits "
+            "and underscores, and may not start with a digit"
+        )
+    return prefix
+
+
 def generate_launch_description():
     here = Path(__file__).parent
     module_spec = importlib.util.spec_from_file_location(
@@ -38,13 +52,14 @@ def generate_launch_description():
     with open(os.environ.get("SWARMDECK_CONFIG", "/app/configs/4robot.yaml")) as stream:
         fleet = yaml.safe_load(stream)["fleet"]
     count = int(os.environ.get("SWARMDECK_ROBOT_COUNT") or fleet.get("robot_count", 4))
-    platforms = robot_types(fleet, count, "robot_")
+    prefix = simulation_robot_prefix(fleet)
+    platforms = robot_types(fleet, count, prefix)
     lidar = lidar_spec(fleet)
     sensor_overrides = simulation_sensor_overrides(lidar)
     nodes = []
     params = "/opt/mgg/ros2/src/mgg_argos/config/bistro.yaml"
     for i, platform in enumerate(platforms):
-        robot = f"robot_{i}"
+        robot = f"{prefix}{i}"
         spec = robot_spec(platform)
         step_height = spec.max_step_height
         nodes += module.robot_nodes(

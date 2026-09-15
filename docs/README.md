@@ -4,12 +4,15 @@ Start with the root [README](../README.md) for setup and package structure.
 
 | Topic | Document |
 |---|---|
-| Components, data flow, and frames | [Architecture](architecture/overview.md) |
+| Current components, data flow, and frames | [Current stack](architecture/current-stack.md) |
+| Full component and frame reference | [Architecture](architecture/overview.md) |
 | ARGoS rendering, sensors, and Fast-LIVO2 odometry | [Simulation](architecture/simulation.md) |
 | Autonomous exploration for simulation and ROS 2 hardware | [MGG exploration](operations/mgg-exploration.md) |
 | Simulation timestamps, adapter costs, and tuning | [Simulation performance](operations/simulation-performance.md) |
 | Decentralized MOLA, Swarm-SLAM, MGG and SwarmDeck design | [Integration plan](architecture/decentralized-autonomy-plan.md) |
-| Onboard pipeline builds, replicas, and validation | [Decentralized autonomy](operations/decentralized-autonomy.md) |
+| Onboard pipeline operation and current defaults | [Current stack operations](operations/current-stack.md) |
+| Native MOLA runtime, products, and query contract | [MOLA runtime](operations/mola-runtime.md) |
+| Onboard pipeline builds, replicas, and historical validation | [Decentralized autonomy](operations/decentralized-autonomy.md) |
 | Bounded fixed-pose Gaussian training | [Reconstruction jobs](operations/reconstruction-jobs.md) |
 | Pose-graph collaborative SLAM design | [Collaborative mapping plan](architecture/collaborative-mapping-plan.md) |
 | Low-odometry reconstruction and measured accuracy | [Odometry-free reconstruction](architecture/odometry-free-keyframe-reconstruction.md) |
@@ -28,3 +31,8 @@ Start with the root [README](../README.md) for setup and package structure.
 
 Robot-specific prerequisites and shutdown commands: [Scout](robots/scout.md),
 [Botman](robots/botman.md), [Aslan](robots/aslan.md), and [Spot](robots/spot.md).
+
+The shortest complete local run is `./scripts/sim-up --drift`; it selects the
+peer Swarm-SLAM → MOLA → MGG path and starts the matching reset supervisor.
+Use [Current stack operations](operations/current-stack.md) when changing the
+scenario, estimator, renderer, or mapping backend.

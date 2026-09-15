@@ -182,6 +182,78 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
     ]
 
 
+def test_sim_fleet_uses_configured_robot_prefix_for_every_mgg_boundary(
+    launch_module, monkeypatch, tmp_path
+):
+    repo = Path(__file__).parents[2]
+    monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
+    monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
+    config = tmp_path / "fleet.yaml"
+    config.write_text("""fleet:
+  robot_count: 2
+  robot_prefix: rover_
+  robot_type: bunker
+  robot_types:
+    rover_1: spot
+  lidar:
+    profile: vlp16
+""")
+    monkeypatch.setenv("SWARMDECK_CONFIG", str(config))
+    path = repo / "deploy/mgg/fleet.launch.py"
+    spec = importlib.util.spec_from_file_location("mgg_custom_prefix_launch", path)
+    fleet_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fleet_module)
+
+    nodes = fleet_module.generate_launch_description()
+    planners = [node for node in nodes if getattr(node, "package", "") == "mgg_ros"]
+    controllers = [node for node in nodes if getattr(node, "package", "") == "mgg_pci"]
+    relays = [node for node in nodes if hasattr(node, "cmd")]
+
+    assert [node.namespace for node in planners] == ["rover_0/mgg", "rover_1/mgg"]
+    assert [node.namespace for node in controllers] == [
+        "rover_0/mgg",
+        "rover_1/mgg",
+    ]
+    assert [
+        node.parameters[-1]["PlanningParams.global_frame_id"] for node in planners
+    ] == [
+        "rover_0/map_frame",
+        "rover_1/map_frame",
+    ]
+    assert planners[1].parameters[-1]["PlanningParams.max_step_height"] == 0.30
+    assert "__ns:=/rover_0/mgg" in relays[0].cmd
+    assert "input_odometry:=/rover_0/odom" in relays[0].cmd
+    assert "input_cloud:=/rover_0/scan/points" in relays[0].cmd
+    assert "__ns:=/rover_1/mgg" in relays[1].cmd
+    assert "input_odometry:=/rover_1/odom" in relays[1].cmd
+    assert "input_cloud:=/rover_1/scan/points" in relays[1].cmd
+    assert "robot_" not in " ".join(str(item) for relay in relays for item in relay.cmd)
+
+
+def test_sim_fleet_rejects_robot_prefix_that_is_not_a_ros_namespace(
+    launch_module, monkeypatch, tmp_path
+):
+    repo = Path(__file__).parents[2]
+    monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
+    monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
+    config = tmp_path / "fleet.yaml"
+    config.write_text("""fleet:
+  robot_count: 1
+  robot_prefix: bad-name-
+  robot_type: bunker
+  lidar:
+    profile: vlp16
+""")
+    monkeypatch.setenv("SWARMDECK_CONFIG", str(config))
+    path = repo / "deploy/mgg/fleet.launch.py"
+    spec = importlib.util.spec_from_file_location("mgg_invalid_prefix_launch", path)
+    fleet_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fleet_module)
+
+    with pytest.raises(ValueError, match="fleet.robot_prefix"):
+        fleet_module.generate_launch_description()
+
+
 def test_sim_objective_budget_does_not_change_hardware_defaults(
     launch_module, monkeypatch
 ):

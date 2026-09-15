@@ -1,330 +1,212 @@
 # SwarmDeck
 
-**One dashboard for a heterogeneous robot fleet.**
+SwarmDeck is a browser dashboard for supervising a heterogeneous robot fleet.
+It combines robot adapters, collaborative mapping, navigation, video, and
+operator review behind one ROS-free server. ARGoS simulation and physical
+robot adapters use the same protocol, so a fleet can be inspected and
+commanded from the same UI.
 
-Supervise robots, inspect their maps, send navigation goals, and review camera
-feeds and detections from a browser. SwarmDeck connects ROS 1, ROS 2, simulated,
-and custom robots through a common adapter protocol; the central server runs
-without ROS.
+[Quick start](#quick-start) · [Architecture](#architecture) ·
+[3D map](#3d-map) · [Physical robots](#physical-robots) ·
+[Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
-[Quick start](#quick-start) · [3D mapping](#tactical-3d-mapping) ·
-[Physical robots](#physical-robots) · [Documentation](docs/README.md) ·
-[Contributing](CONTRIBUTING.md)
-
-![SwarmDeck dashboard showing four simulated robots on their reconstructed 3D map, with camera video and navigation controls](docs/images/tactical-map.png)
-
-*An ARGoS fleet in the tactical view. Geometry comes from robot observations;
-camera colors appear where calibrated image observations are available.*
-
-## What you can do
-
-| Capability | What it provides |
-| --- | --- |
-| Fleet supervision | Live state, capability-aware controls, manual drive, navigation goals, cancel, and stop-all. |
-| Collaborative mapping | Local robot maps, shared occupancy grids, pose-graph alignment, and loop-closure verification. |
-| Tactical 3D | Voxels, surface mesh, points, and published Gaussian reconstructions, with a ceiling cut and readable robot/path overlays. |
-| Video and perception | H.264 camera feeds over WebRTC with an HLS fallback, RGB-D detection projection, and operator review. |
-| Simulation and hardware | ARGoS with RGB-D and LiDAR, a lightweight mock fleet, and deployment profiles for physical robots. |
-| Session records | Session manifests, timestamped operator events, and optional keyframe capture for offline analysis. |
-| Optional Cortex assistant | An integrated agent service with configurable providers and fleet tools. See [Cortex](agent/README.md). |
-
-A single **Explore** button at the bottom of **Fleet** starts exploration for
-all connected, enabled robots with MGG configured. It changes to **Stop exploration**
-while any robot is exploring, and **Stop All** also
-stops exploration. The ARGoS startup script includes MGG automatically. The ROS 2 hardware
-deployment profiles run a separate MGG planner onboard each robot.
-Each robot card also has **Return home**, which navigates to its first valid
-simulation map pose. It cancels that robot’s exploration; **Stop All** cancels
-the return journey. Home is retained through dashboard reconnects.
-
-See [MGG exploration setup](docs/operations/mgg-exploration.md)
-for simulation and ROS 2 hardware wiring.
-See [camera stream transport](docs/operations/camera-streams.md) for viewing
-video through LAN connections, HTTPS proxies, and SSH tunnels.
-
-## Decentralized autonomy development
-
-The opt-in onboard pipeline combines peer Swarm-SLAM, persistent submaps, a
-native MOLA map runtime, graph and grid planning through MGG and Nav2, and resumable
-server replicas. Optional Gaussian jobs consume fixed corrected poses. See the
-[integration and simulation guide](docs/operations/decentralized-autonomy.md)
-for build commands, component inspection, validation status, and rollout limits.
-Navigate retains the selected destination and searches beyond the local
-exploration horizon. In the simulated cloud pipeline, the full route may cross
-unknown ground provisionally; known obstacles and terrain beyond the robot's
-step capability remain excluded. Unknown space is never written into the map
-as free. Hardware and MOLA retain their stricter evidence requirements.
-Nav2 follows the accepted route while handling local obstacles.
-Long Return Home journeys follow MGG's persistent global graph. Grid planning
-refines a bounded section ahead (8 m by default), and Nav2 follows that section
-before requesting the next. The dashboard retains the full graph route and
-the exact Home destination throughout the journey. A nearby Home can use a
-bounded direct connector when the graph is unavailable; a long return needs
-graph connectivity. An obstructed intermediate graph waypoint can trigger a
-local detour to the same section endpoint within the remaining planning budget.
-For provisional routes, a bounded check of the next 3 m requests a replacement
-only when newly known terrain or obstacles make the current route unusable.
-Routine map updates do not replace the waypoint. Map images carry their own
-alignment metadata so path and goal overlays remain aligned with the displayed
-pixels while newer robot telemetry arrives.
-The onboard simulation keeps MGG's accumulated map and controller paths in
-continuous odometry coordinates. SLAM corrections update the map display
-without repeatedly canceling a route; actual shared-map corrections still
-invalidate it. See the [navigation acceptance notes](docs/operations/navigation-live-map-acceptance.md)
-for sensor-coverage limits and tested scenarios.
-Simulation terrain checks retain measured surface heights within the coarse
-occupancy map and check known terrain across the robot footprint, including
-exploration candidates. Connected measured supports allow successive climbable
-steps across a long footprint; missing observations cannot bridge a known
-height discontinuity. Simulated Navigate/Home searches use 0.5 m grid nodes and
-a four-second budget; terrain checks and Nav2's controller grid keep their own
-resolution. Controller failures include their reason in Fleet.
-Physical no-progress failures allow three movement attempts total; planner
-rejections and transport errors do not consume that movement retry budget.
-Benchbot trials reached approximately 12 m destinations with R0 and R1, and R0
-completed Return Home. This remains an opt-in development path; fleet-wide
-exploration and return-home coverage, multi-host fault recovery, and Gaussian
-quality and resource scaling still have acceptance work. The
-[native CUDA smoke test](docs/operations/reconstruction-jobs.md)
-passes with fixed poses.
-The [MOLA runtime guide](docs/operations/mola-runtime.md) describes persistent
-geometry reuse, the loadable framework module, an optional native terrain-map
-provider, and resource limits. The
-[remaining integration plan](docs/architecture/planning-refactor-remaining.md)
-prioritizes MOLA map products and odometry providers before broader rollout.
+![SwarmDeck tactical map with simulated robots, camera video, and navigation controls](docs/images/tactical-map.png)
 
 ## Quick start
 
-### Try the dashboard without robots
+The commands below run from the repository root. Docker with Compose v2 and
+Python 3.10+ are required for the launcher and container workflows; `make
+install` also requires Node.js for the host development workflow.
 
-Install Docker with Compose v2, then run from the repository root:
+### Dashboard with a mock fleet
+
+This is the smallest way to try the UI. It runs the server, UI, SLAM service,
+MediaMTX, and a synthetic fleet without ROS or a simulator.
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml --profile mock up --build -d
 ```
 
-Open **[localhost:5173](http://localhost:5173)**. This starts a synthetic fleet
-without ROS or a simulator. The backend API is at
-[localhost:8080](http://localhost:8080). The mock fleet is useful for learning
-the controls; real 3D geometry and RGB capture require sensor data.
+Open <http://localhost:5173>. The API is at <http://localhost:8080> and SLAM
+diagnostics are at <http://localhost:8090/status>.
 
 ```bash
-make docker-ps       # service status
-make docker-logs     # follow logs
-make docker-down     # stop the stack
+make docker-ps
+make docker-logs
+make docker-down
 ```
 
-### Run a sensor-equipped simulation
+### ARGoS simulation
 
-Docker, Compose v2, and `make` are required. The first build downloads and builds
-the simulator and ROS dependencies and can take considerably longer than startup.
-Choose a rendering and odometry configuration:
+The supported launcher starts the peer Swarm-SLAM, native MOLA, indexed-query,
+MGG, and ARGoS services as one mission. Synthetic drift is the fastest way to
+exercise the complete data path; it does not test a sensor-driven odometry
+estimator.
 
 ```bash
-# Portable simulation: software Vulkan and synthetic odometry drift
-make up-sim RENDER=software ODOMETRY=drift
-
-# NVIDIA rendering with the Fast-LIVO2 odometry front end
-make up-argos-gpu
-
-# Intel/AMD rendering with Fast-LIVO2 (requires /dev/dri)
-make up-argos-dri
+./scripts/sim-up --drift
 ```
 
-The NVIDIA option requires the NVIDIA Container Toolkit. `make up-argos` uses
-software rendering with Fast-LIVO2. Synthetic drift is a lighter development
-option; it does not reproduce an estimator's sensor-driven failures.
-
-ARGoS supplies Jolt physics and Filament camera/LiDAR rendering. The ROS side
-runs the bridge, onboard SLAM, Nav2, and adapters. Allow roughly a minute after
-startup for robots to register. Robots start stationary by default; send a goal
-or enable exploration in the UI. `EXPLORE=120` on `make up-sim` requests a
-120-second autonomous bootstrap.
-
-See [simulation setup](docs/architecture/simulation.md) for scenarios, sensor
-configuration, external assets, and the legacy Gazebo Compose profile.
-The [simulation performance guide](docs/operations/simulation-performance.md)
-covers sensor timestamps, odometry, tuning, measured CPU costs, and regression checks.
-Bistro deploys the fleet together on mesh-based terrain; the
-[robot visuals](argos/assets/robots/README.md) include lightweight Bunker, Scout Mini, and Spot models.
-
-## Tactical 3D mapping
-
-The dashboard opens in 3D. Use **Layers → 3D cloud** to switch between the
-2D map and tactical view—no `view=3d` URL parameter is needed. Camera position
-and display settings survive the switch. Use `?view=2d` to start in 2D.
-
-| View | Representation |
-| --- | --- |
-| **Voxels** | Instanced occupied cells, coarsened to a bounded rendering budget. |
-| **Mesh** | Surface triangles connecting neighboring occupied samples across three orthogonal projections. Gaps and depth discontinuities limit connections; this is an approximate surface, not a watertight reconstruction. |
-| **Points** | Robot point clouds colored by elevation, robot source, or calibrated camera RGB. |
-| **Gaussians** | A separately trained reconstruction in the selected component or legacy world frame. An explicit point-cloud proxy appears when no matching model is published. |
-
-Solid robot markers, outlined paths, and selection brackets remain visible over
-terrain. Costmaps follow their source robot's map transform. The **Ceiling**
-slider clips all four representations to reveal interiors; it changes only the
-view, not navigation data. Live map refreshes retain the last valid map while
-loading and preserve the 3D camera and ceiling height through registration
-updates.
-
-**Low power** is the default: up to 60,000 points, 8,000 voxels, or 30,000
-Gaussians, with a 30 FPS cap and device pixel ratio capped at 1. Geometry and
-sorting run in workers; representations and color buffers are reused. Rendering
-and map requests pause when the view is hidden. These are workload limits,
-not guaranteed frame rates. Balanced and High detail profiles raise the limits.
-
-For a fleet component, open **Layers → Map source** and select the mission and
-component. Only maps with compatible accepted Swarm-SLAM results are displayed
-together; unmerged components stay separate. See the
-[fleet replica guide](docs/operations/replica-components.md).
-
-For onboard maps, open **Onboard map replicas**, select a robot/session/component,
-and choose **Open component in tactical map**. The viewer assembles stored submaps
-using their verified component poses and reuses cached geometry across pose
-updates. Camera and ceiling settings persist while that component refreshes.
-Explicit catalogue inspection is read-only. **Live map** automatically selects
-current-mission replicas and adds frame-qualified robot markers, paths and goal
-input. **Local** filters the selected robot's submaps; **Global** requires a
-verified shared component. Published Gaussian artifacts must match the selected
-component. Unaligned maps are never combined using assumed transforms.
-
-The **Global** control reports how many robots are merged in that verified
-component. **0 merged** means no verified shared component can be selected for
-the current Global view; **— merged** means membership is unavailable. Robots
-that are merely online and maps from previous missions do not increase the count.
-
-### Camera colors and Gaussian reconstruction
-
-**Camera** becomes available when the cloud contains RGB. Simulator keyframes
-can project synchronized, calibrated RGB-D onto LiDAR samples using the pose at
-image capture time and depth for occlusion checks. Unobserved surfaces remain
-gray; old XYZ-only keyframes cannot be colored retroactively. Peer submaps carry
-optional RGBA alongside immutable XYZ, so server caching and pose corrections
-preserve measured color. The native MOLA mapper reads geometry from either
-encoding. RGB availability still depends on qualified image timing and TF.
-
-Hardware adapters match delayed registered scans to buffered camera frames,
-apply RGB lens calibration and capture-time TF, and upload colors for both
-live maps and new optimized keyframes. Botman, Aslan, and TARS enable this via
-`map_color.enabled`; camera images stay on the robot. See the
-[hardware colorization guide](docs/operations/tactical-3d-map.md#colorize-lidar-with-camera-images)
-for topics, TF conventions, calibration limits, and the passive checker.
-
-Dense Gaussian reconstruction is an **offline workflow**: capture posed RGB-D,
-export a COLMAP dataset, train externally, and publish a compact `.swgs` model.
-The optional UMAMI-SLAM integration requires access to the private repository
-via `git@github.com:lemonci/UMAMI-SLAM.git` and its CUDA build environment.
-UMAMI is not bundled and is not required for the dashboard or other map modes.
-The dashboard consumes a model qualified for its selected component or legacy
-world frame; raw `odom` captures cannot be displayed as global maps. Selecting
-Gaussians does not start a trainer. Durable jobs bind each artifact to its capture,
-calibration, and corrected pose revisions. See the
-[reconstruction job guide](docs/operations/reconstruction-jobs.md) for frame
-requirements, stale-result rejection, and the pending native CUDA validation.
-
-Follow the [3D mapping and reconstruction guide](docs/operations/tactical-3d-map.md)
-for controls, quality budgets, calibration, capture, and publishing commands.
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    Robots["Robots / ARGoS / mock fleet"] --> Adapters["Robot adapters"]
-    Adapters <-->|"State, commands, maps & keyframes"| Server["FastAPI server · 8080"]
-    Server <-->|"Keyframes, alignments & grids"| SLAM["Collaborative SLAM · 8090"]
-    Server <-->|"REST / WebSocket"| UI["Svelte dashboard · 5173"]
-    Adapters -->|RTSP| Media["MediaMTX"]
-    Media -->|"WebRTC / WHEP"| UI
-    RGBD["Posed RGB-D captures"] --> Trainer["Offline reconstruction"]
-    Trainer -->|"Published Gaussian model"| Server
-```
-
-Adapters report data in each robot's local navigation-map frame. The server
-aligns that data for the shared view. The tactical scene uses world coordinates
-even when displaying one robot; cloud frame metadata prevents double transforms.
-
-The default **graph** mode combines Scan Context candidates, GICP geometric
-verification, PCM outlier rejection, and GTSAM pose-graph optimization. By
-default, rendering preserves onboard trajectories under their shared alignment
-(`odometry_as_pose=true`). A loop closure therefore does not necessarily repair
-a bad individual capture. **Static**, legacy **auto** grid registration, and
-external **cslam** modes remain available for other deployments and comparisons.
-
-Captures reject duplicate/nonfinite timestamps, excessive turn rates, and
-missing historical poses. Bounded TF interpolation pairs scans with capture-time
-yaw rather than the latest pose. These checks run before expensive work where
-possible; ordinary rejections do not produce recurring debug logs. See
-[capture timing and rotated duplicates](docs/operations/keyframe-yaw.md).
-
-## Physical robots
-
-Deployment profiles cover Scout, Botman, Aslan, Spot, and Asimov. Configure the
-operator address in [`deploy/fleet.env`](deploy/fleet.env) and each robot's
-connection, workspace, and calibration in `deploy/robots/`.
+Other simulation configurations are available when validating mapping,
+rendering, or sensor timing:
 
 ```bash
-make up-deploy
-make deploy ROBOT=botman DEPLOY_ARGS='--dry-run'  # inspect the deployment
-make deploy ROBOT=botman                         # deploy over SSH
+./scripts/sim-up --scenario bistro --drift
+./scripts/sim-up --dev                 # 3 robots, DRI rendering, drift
+./scripts/sim-up --gpu --fast-livo2    # estimator-backed NVIDIA run
+./scripts/sim-up --legacy-cloud --drift # explicit legacy central-cloud path
+./scripts/sim-up --status
+./scripts/sim-up --down
 ```
 
-Start with the [hardware procedure](docs/operations/hardware-bringup.md),
-[fleet matrix](docs/robots/fleet.md), and
-[deployment profiles](deploy/robots/README.md). Deployment changes remote
-containers and services. The UI's simulation reset capability is not advertised
-by physical robot adapters.
+`make up-sim` remains a compatibility wrapper; its `SCENARIO`, `RENDER`,
+`ODOMETRY`, `TARGETS`, and `EXPLORE` variables are passed to the same launcher.
+A fresh mission UUID and ROS domain are selected for each MOLA run, and the
+reset supervisor keeps the stack lifecycle consistent. The normal launcher
+uses MOLA; the old cloud/OctoMap path is available only through
+`--legacy-cloud`. See [simulation](docs/architecture/simulation.md) and
+[simulation performance](docs/operations/simulation-performance.md) for
+sensor, rendering, and timing tradeoffs.
 
-To add a robot, implement the [adapter protocol](adapters/protocol/README.md):
-register identity and capabilities, publish state, and handle the commands you
-advertise. The [mock adapter](adapters/adapter_mock/mock_adapter.py) is a
-ROS-free reference.
-
-## Development
-
-Use Python 3.10+ for the server, Node.js 22.12+ with npm for the UI, and `make`.
-The optional SLAM environment requires **Python 3.12 and NumPy < 2**;
-`make install-slam` uses `uv` to create it. Keep server and SLAM environments
-separate because the pinned GTSAM binding is incompatible with NumPy 2.
+### Host development
 
 ```bash
 make install
-make demo             # local server + mock adapter + UI
+make demo                         # server + mock adapter + UI
+make test-ui
+make test
+```
 
-# Optional collaborative SLAM, in another terminal
+The optional collaborative SLAM environment is separate because its pinned
+GTSAM binding requires Python 3.12 and NumPy < 2:
+
+```bash
 make install-slam
 make slam
 ```
 
-For separate processes: `make server`, `make mock N=4`, and `make ui`.
-The UI-only mock is available at `http://localhost:5173/?mock=1&robots=4`.
+## Architecture
 
-```bash
-make test-ui          # Svelte checks and 3D map regression tests
-make test             # Python suites, SLAM tests, and UI checks/tests
-make ui-build         # production frontend build
+The normal stack keeps ROS at the adapter and simulation boundaries. In the
+simulation and onboard planning path, each robot participates in peer
+Swarm-SLAM; coherent products are consumed by native MOLA and queried by MGG.
+The server owns fleet state, sessions, replicas, and operator APIs; the browser
+receives REST and WebSocket state and obtains camera media from MediaMTX.
+
+```mermaid
+flowchart LR
+    Sensors["ARGoS or robot sensors"] --> Adapters["Robot adapters<br/>ROS 1 · ROS 2 · simulation · mock"]
+    Adapters <-->|"state · commands · replicas · keyframes"| Server["SwarmDeck server<br/>FastAPI :8080 · no ROS"]
+    Server <-->|"diagnostics · verified graph"| SLAM["Central SLAM service<br/>:8090"]
+    Server <-->|"REST · WebSocket"| UI["Svelte dashboard<br/>:5173"]
+    Adapters -->|RTSP| Media["MediaMTX"]
+    Media -->|WHEP / WebRTC| UI
+    Server -->|"replicas · events · map catalogue"| UI
 ```
 
-See [Contributing](CONTRIBUTING.md) for focused tests and change guidelines.
+The central server path remains available for diagnostics, historical maps, and
+the explicit legacy mode. The normal simulation launcher selects the following
+onboard authority chain:
+
+```mermaid
+flowchart LR
+    A["ARGoS or physical sensors"] --> B["Capture-time<br/>sensor/keyframe normalization"]
+    B --> C["Peer Swarm-SLAM<br/>corrected poses + component"]
+    C --> D["Native MOLA<br/>persistent geometry / terrain"]
+    D --> E["Indexed map query<br/>coherent snapshot"]
+    E --> F["MGG<br/>graph + bounded grid"]
+    F --> G["Local controller / Nav2"]
+    G --> H["Robot adapter<br/>cmd_vel / action"]
+    C --> R["Server replica"]
+    R --> UI["Dashboard inspector"]
+```
+
+Every keyframe carries its capture-time sensor pose and source frame. Peer
+Swarm-SLAM may publish a component correction, but consumers accept only a
+fresh, coherent authority for the same mission and revision. MOLA products,
+indexed queries, and MGG use that same snapshot; an unverified identity
+transform is never substituted. Nav2 remains responsible for local obstacle
+avoidance and executes in the robot's configured navigation frame.
+
+The MOLA worker is native and persistent. It owns the coherent geometry product
+for the selected mission; MGG queries a read-only OctoMap spatial index built
+from that MOLA output. Independent raw-cloud/depth mapping is disabled in MOLA
+mode. MOLA does not optimize poses or publish competing TF edges. See [current
+stack operations](docs/operations/current-stack.md)
+for commands and [decentralized autonomy](docs/operations/decentralized-autonomy.md)
+for the design and acceptance history.
+
+## 3D map
+
+Open **Layers → 3D cloud** in the dashboard. The viewer supports bounded voxel,
+mesh, point, and published Gaussian representations, plus robot and path
+overlays. Camera colors require synchronized images together with camera/lidar
+calibration and capture-time poses; RGB-D depth can improve correspondence and
+occlusion handling, but is not required for every colorized capture. Old
+XYZ-only captures cannot be colored retroactively. Gaussian reconstruction is
+an optional offline workflow consuming fixed, qualified poses and a model
+published for the selected component or legacy world frame. Selecting the
+Gaussian layer does not start a trainer.
+
+Maps from separate robots are combined only when their shared component and
+transforms are verified. Local or unmerged components remain separate. The
+viewer reuses geometry across pose-only revisions and preserves the current
+camera while a live map refreshes. Route geometry is rendered in metric XYZ
+with bounded sampling and both endpoints retained. The top-down 2D view keeps
+the selected map-frame transform and uses XY for display, so a path does not
+slide or acquire visually exaggerated Z jumps when a new revision arrives.
+
+## Physical robots
+
+Deployment profiles cover the Scout/TARS, Botman, Aslan, Spot, and Asimov
+platforms. The operator stack runs on the workstation and robot services run on
+the robots; sensor drivers, localization, calibration, and Nav2 therefore stay
+platform-specific.
+
+```bash
+make up-deploy
+make deploy ROBOT=botman DEPLOY_ARGS='--dry-run'
+make deploy ROBOT=botman
+```
+
+Set `BACKEND_HOST` in [`deploy/fleet.env`](deploy/fleet.env) and review the
+profile under [`deploy/robots/`](deploy/robots/). Start with [hardware
+bring-up](docs/operations/hardware-bringup.md) and the [fleet
+matrix](docs/robots/fleet.md). Deployment changes remote containers and
+services; use an authenticating proxy before exposing operator controls beyond
+the trusted network.
+
+## Repository map
 
 | Directory | Responsibility |
 | --- | --- |
-| [`ui/`](ui/) | Svelte 5 UI, 2D canvas, Three.js tactical view, and rendering workers. |
-| [`server/`](server/) | ROS-free API, fleet state, maps, detections, and sessions. |
-| [`slam/`](slam/) | Collaborative pose graph, registration, and map rendering. |
-| [`adapters/`](adapters/) | Shared protocol, robot bridges, media, and perception. |
-| [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, SLAM, navigation, and bring-up packages. |
-| [`agent/`](agent/) | Optional Cortex assistant service. |
-| [`configs/`](configs/) · [`deploy/`](deploy/) | Session configuration, containers, and hardware profiles. |
-| [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools and detailed documentation. |
+| [`ui/`](ui/) | Svelte dashboard, 2D map, WebGL2 tactical view, and workers |
+| [`server/`](server/) | ROS-free API, fleet state, sessions, maps, and replicas |
+| [`slam/`](slam/) | Collaborative pose graph, registration, and map rendering |
+| [`adapters/`](adapters/) | Wire protocol, robot bridges, media, and perception |
+| [`autonomy/`](autonomy/) | Capture, peer coordination, mapping products, and replication contracts |
+| [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, mapping, navigation, and bring-up packages |
+| [`configs/`](configs/) · [`deploy/`](deploy/) | Session configs, Compose files, and robot profiles |
+| [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools and detailed guides |
 
-## Project status
+## Current validation and limits
 
-SwarmDeck is a research and development system. Authentication, production high
-availability, MCAP capture, and complete session replay are not implemented.
-Use a trusted network or an authenticating proxy; do not expose robot controls
-directly to the public Internet. See [known issues](docs/operations/known-issues.md)
-and the [roadmap](docs/architecture/roadmap.md).
+SwarmDeck is a research and development system. The mock fleet and ARGoS
+integration paths are useful for development, while physical robot behavior
+still depends on each platform's sensors, localization, network, and safety
+checks. The current onboard mapping trials validate contracts, native MOLA
+serialization, bounded indexed queries, and selected simulation scenarios;
+they do not qualify every robot, terrain, failure mode, or resource budget.
+The Bistro curb and long-range navigation behavior remain under investigation,
+and fleet-wide exploration is not yet a qualified acceptance result.
 
-The repository does not currently declare a project-wide license. Bundled
-third-party components retain their own licenses.
+The simulation terrain-step limits are 0.15 m for Bunker and Scout and 0.30 m
+for Spot. These are simulation settings, not hardware guarantees. Gaussian
+quality and resource scaling, multi-host recovery, and fleet-wide autonomy
+remain acceptance work. Historical run details, exact old settings, and
+debugging chronology stay in the linked acceptance documents.
+
+Authentication, production high availability, MCAP capture, and complete
+session replay are not implemented. Do not expose robot controls directly to
+the public Internet. The repository does not currently declare a project-wide
+license; bundled third-party components retain their own licenses.

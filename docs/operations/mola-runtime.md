@@ -19,14 +19,15 @@ flowchart LR
   Module --> Consumers["MOLA MapSource subscribers"]
 ```
 
-The optional native planner product adds occupied/free voxels and terrain samples
-to the point-geometry layer. Both the MOLA provider and the existing indexed
-provider use the same terrain-query implementation. MGG still uses its OctoMap
-for exploration; replacing that map and qualifying real capture provenance remain
-work in the [integration plan](../architecture/planning-refactor-remaining.md).
-The read-only fleet component catalogue and aggregate display path are described
-in the [replica component guide](replica-components.md).
-
+The native planner product adds occupied/free voxels and terrain samples to the
+point-geometry layer. Both the MOLA provider and the existing indexed provider
+use the same terrain-query implementation. In the simulation MOLA path, MGG
+consumes this product and uses a read-only OctoMap spatial index internally for
+graph/grid work; the independent raw-cloud/depth mapper is disabled. The robot
+peer overlay remains hardware opt-in and keeps its planner-product defaults
+disabled until capture provenance is qualified. The read-only fleet component
+catalogue and aggregate display path are described in the [replica component
+guide](replica-components.md).
 ## Worker deployment
 
 Build `deploy/docker/Dockerfile.mapping` and use either the simulation
@@ -77,11 +78,12 @@ export SWARMDECK_MOLA_PLANNER_MAPS=true
 export SWARMDECK_PLANNER_MAP_PROVIDER=mola
 ```
 
-Both the simulation mapping overlay and robot peer overlay pass these settings.
-Recreate their mapping worker and query services after changing them. Defaults
-remain `false` and `indexed`; selecting `mola` without a valid product returns
-unavailable, with no fallback. The standalone options are worker `--planner-maps`
-and query server `--map-provider mola`.
+The simulation launcher and mapping overlay pass these settings by default.
+Recreate the mapping worker and query services after changing them. Simulation
+defaults are `true` and `mola`; the physical robot peer overlay remains
+`false` and `indexed` until its capture contract is qualified. Selecting `mola`
+without a valid product returns unavailable, with no fallback. The standalone
+options are worker `--planner-maps` and query server `--map-provider mola`.
 
 The native builder reads corrected MOLA keyframe poses and the same immutable
 MRPT point buffers held by the map. It exports a bounded binary `SDMGRID1` file
@@ -254,11 +256,13 @@ provider memory and is not a continuous peak measurement.
 | `robot_2` | 71,213 | 88 ms | 97 ms | 3.2 ms | 1.1 ms |
 | `robot_3` | 676,226 | 810 ms | 562 ms | 23.7 ms | 0.9 ms |
 
-Warm refreshes reuse immutable decoded grids but still verify artifact hashes and
-coherent source/index bytes. These measurements do not justify dropping those
-checks. Queries read the published grid without filesystem access. The replay
-uses stopped maps with unqualified rays, so it does not measure heavy free-space
-carving or motion safety.
+At the time of this historical measurement, warm refreshes reused immutable
+decoded grids but still verified artifact hashes and coherent source/index
+bytes. The current provider reuses a decoded grid when its full filesystem
+identity and publication record are unchanged; replacement or mutation triggers
+the bounded read and hash again. Queries read the published grid without
+filesystem access. The replay uses stopped maps with unqualified rays, so it
+does not measure heavy free-space carving or motion safety.
 
 The image build runs the synthetic gate automatically. It also starts the actual
 ROS query server and calls MGG's generated `QueryMapBatch` service, checking
@@ -283,8 +287,11 @@ It passed all image acceptance gates on the workstation. That earlier run retain
 products and the MOLA query provider in a separate simulation; MGG motion still
 uses its existing exploration map.
 
-The direct MGG snapshot backend is a separate opt-in integration. The normal
-backend remains the live cloud-fed OctoMap:
+The normal simulation launcher selects the direct MGG snapshot backend and the
+MOLA query provider. The former live cloud-fed OctoMap path remains available
+only through the explicit `--legacy-cloud` launcher mode. Physical robot
+profiles still require an explicit peer-mapping/MOLA overlay after their
+capture, calibration, and frame contracts are qualified:
 
 ```bash
 export SWARMDECK_MGG_MAP_BACKEND=mola_snapshot
@@ -292,10 +299,13 @@ export SWARMDECK_PLANNER_MAP_PROVIDER=mola
 export SWARMDECK_MOLA_PLANNER_MAPS=true
 export SWARMDECK_MISSION_ID='replace-with-canonical-mission-uuid'
 export SWARMDECK_MAPS_ROOT=/maps
+export SWARMDECK_MAP_QUERY_POLL_S=0.5
+export SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S=3
 ```
 
-`SWARMDECK_MGG_MAP_BACKEND=cloud_octomap` is the default. The MGG launch rejects
-any other value. With `mola_snapshot`, each planner instance reads exactly one
+`SWARMDECK_MGG_MAP_BACKEND=mola_snapshot` is the simulation default. The MGG
+launch accepts `mola_snapshot` and `cloud_octomap`. With `mola_snapshot`, each
+planner instance reads exactly one
 peer root, `${SWARMDECK_MAPS_ROOT}/${SWARMDECK_MISSION_ID}/${ROBOT_ID}`. The
 mission must be a canonical UUID, the robot ID must match the launcher's simple
 identifier grammar, and the maps root must be absolute. There is no search for
@@ -307,7 +317,9 @@ shared `peer_maps` volume read-only in the MGG service. The mapping worker owns
 the writable side and must publish native planner products first, with
 `SWARMDECK_MOLA_PLANNER_MAPS=true`. The `SWARMDECK_PLANNER_MAP_PROVIDER=mola`
 setting selects the separate mapping query service and is required by the MGG
-launcher in this mode.
+launcher in this mode. The query service polls every 0.5 seconds and rejects
+snapshots older than 3 seconds by default (`SWARMDECK_MAP_QUERY_POLL_S` and
+`SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S`).
 
 MOLA mode always configures `/<robot>/mapping/query_batch` for final corridor
 validation, even when `SWARMDECK_INDEXED_MAP_QUERY=0`. That switch controls only
@@ -352,6 +364,12 @@ The provider bounds both work and input size. Defaults are a 3 s snapshot TTL,
 malformed or over-limit metadata is rejected. A resident tree expires when its
 TTL elapses even if the authority heartbeat is unchanged, so a stale map cannot
 remain usable indefinitely.
+
+`QueryMapBatch` accepts per-request `max_step_m` and `max_drop_m` bounds so the
+planner uses the platform's actual terrain capability. Current simulation
+profiles provide 0.15 m for Bunker and Scout and 0.30 m for Spot. The exact
+final query remains the safety gate; a coarse voxel index does not turn unknown
+space or an unsupported step into free terrain.
 
 The native test target also builds `mola_map_probe`, which accepts
 `mola_map_probe PEER_ROOT REQUEST.json` and reports `free`, `occupied`, or

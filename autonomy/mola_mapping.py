@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import struct
 import time
 from pathlib import Path
@@ -103,27 +104,44 @@ def _json(raw: bytes, field: str) -> dict[str, object]:
     return _object(value, field)
 
 
-def _bounded_stable_read(path: Path, maximum: int, field: str) -> bytes:
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Identity fields that change for replacement and in-place mutation."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _bounded_stable_read_with_identity(
+    path: Path, maximum: int, field: str
+) -> tuple[bytes, tuple[int, int, int, int, int]]:
     before = path.stat()
-    if before.st_size <= 0 or before.st_size > maximum:
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
         raise ValueError(f"{field} has invalid size")
     with path.open("rb") as stream:
         opened = os.fstat(stream.fileno())
         raw = stream.read(maximum + 1)
         after = os.fstat(stream.fileno())
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_opened = (
-        opened.st_dev,
-        opened.st_ino,
-        opened.st_size,
-        opened.st_mtime_ns,
-    )
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    identity_before = _stat_identity(before)
+    identity_opened = _stat_identity(opened)
+    identity_after = _stat_identity(after)
     if identity_before != identity_opened or identity_opened != identity_after:
         raise ValueError(f"{field} changed while reading")
     if len(raw) != before.st_size:
         raise ValueError(f"{field} changed while reading")
-    return raw
+    return raw, identity_after
+
+
+def _bounded_stable_read(path: Path, maximum: int, field: str) -> bytes:
+    return _bounded_stable_read_with_identity(path, maximum, field)[0]
 
 
 def _worker_manifest_digest(manifest: Mapping[str, object]) -> str:
@@ -218,14 +236,16 @@ class MolaDirectorySource:
     ) -> tuple[
         bytes,
         bytes,
+        tuple[int, int, int, int, int],
+        tuple[int, int, int, int, int],
         dict[str, object],
         dict[str, dict[str, object]],
         dict[str, dict[str, object]],
     ]:
-        source_raw = _bounded_stable_read(
+        source_raw, source_identity = _bounded_stable_read_with_identity(
             self.snapshot_path, MAX_INDEX_BYTES, "snapshot"
         )
-        index_raw = _bounded_stable_read(
+        index_raw, index_identity = _bounded_stable_read_with_identity(
             self.publication_path, self.max_index_bytes, "MOLA index"
         )
         snapshot, manifests = _snapshot(source_raw)
@@ -269,10 +289,18 @@ class MolaDirectorySource:
             raise ValueError("MOLA index does not cover the current components")
         for component in set(self._cache) - set(manifests):
             self._cache.pop(component, None)
-        return source_raw, index_raw, snapshot, manifests, by_component
+        return (
+            source_raw,
+            index_raw,
+            source_identity,
+            index_identity,
+            snapshot,
+            manifests,
+            by_component,
+        )
 
     def component_ids(self) -> tuple[str, ...]:
-        _, _, _, manifests, _ = self._publication()
+        _, _, _, _, _, manifests, _ = self._publication()
         return tuple(sorted(manifests))
 
     def signature(self) -> tuple[int, ...]:
@@ -284,20 +312,30 @@ class MolaDirectorySource:
 
     def refresh(self, view: IndexedMapView, component_id: str) -> SnapshotKey:
         try:
-            source_raw, index_raw, _, manifests, artifacts = self._publication()
+            (
+                source_raw,
+                index_raw,
+                source_identity,
+                index_identity,
+                _,
+                manifests,
+                artifacts,
+            ) = self._publication()
             manifest = manifests.get(component_id)
             item = artifacts.get(component_id)
             if manifest is None or item is None:
                 raise ValueError("component is absent from MOLA publication")
             planner = _object(item.get("planner"), "planner grid record")
-            raw, digest = self._planner_bytes(planner)
+            path, expected_size, digest = self._planner_descriptor(planner)
+            artifact_identity = self._artifact_identity(path, expected_size)
             cache_identity = (
-                planner.get("path"),
-                planner.get("size_bytes"),
+                str(path),
+                expected_size,
                 digest,
                 planner.get("source_snapshot_id"),
                 planner.get("source_sha256"),
                 _worker_manifest_digest(manifest),
+                artifact_identity,
             )
             cached = self._cache.get(component_id)
             grid = (
@@ -306,15 +344,17 @@ class MolaDirectorySource:
                 else None
             )
             if grid is None:
+                raw = self._planner_bytes(path, expected_size, digest)
                 grid = self._decode_grid(raw, planner, manifest)
                 self._cache[component_id] = (cache_identity, grid)
             if (
-                _bounded_stable_read(self.snapshot_path, MAX_INDEX_BYTES, "snapshot")
-                != source_raw
-                or _bounded_stable_read(
-                    self.publication_path, self.max_index_bytes, "MOLA index"
+                not self._publication_unchanged(
+                    source_raw,
+                    index_raw,
+                    source_identity,
+                    index_identity,
                 )
-                != index_raw
+                or self._artifact_identity(path, expected_size) != artifact_identity
             ):
                 raise ValueError("MOLA publication changed while reading")
             return view.publish(
@@ -327,7 +367,35 @@ class MolaDirectorySource:
             view.invalidate(str(exc))
             raise
 
-    def _planner_bytes(self, planner: Mapping[str, object]) -> tuple[bytes, str]:
+    def _publication_unchanged(
+        self,
+        source_raw: bytes,
+        index_raw: bytes,
+        source_identity: tuple[int, int, int, int, int],
+        index_identity: tuple[int, int, int, int, int],
+    ) -> bool:
+        current_source, current_source_identity = _bounded_stable_read_with_identity(
+            self.snapshot_path, MAX_INDEX_BYTES, "snapshot"
+        )
+        current_index, current_index_identity = _bounded_stable_read_with_identity(
+            self.publication_path, self.max_index_bytes, "MOLA index"
+        )
+        # Re-stat both after the pair has been read. This closes the window in
+        # which snapshot.json could be replaced while index.json was checked.
+        final_source_identity = _stat_identity(self.snapshot_path.stat())
+        final_index_identity = _stat_identity(self.publication_path.stat())
+        return (
+            current_source == source_raw
+            and current_index == index_raw
+            and current_source_identity == source_identity
+            and current_index_identity == index_identity
+            and final_source_identity == source_identity
+            and final_index_identity == index_identity
+        )
+
+    def _planner_descriptor(
+        self, planner: Mapping[str, object]
+    ) -> tuple[Path, int, str]:
         relative = planner.get("path")
         if not isinstance(relative, str) or not relative:
             raise ValueError("planner grid path is invalid")
@@ -337,11 +405,26 @@ class MolaDirectorySource:
         expected_size = _uint(
             planner.get("size_bytes"), "planner size_bytes", maximum=self.max_grid_bytes
         )
+        if expected_size == 0:
+            raise ValueError("planner size_bytes must be positive")
         expected_sha = _sha(planner.get("sha256"), "planner sha256")
+        return path, expected_size, expected_sha
+
+    def _artifact_identity(
+        self, path: Path, expected_size: int
+    ) -> tuple[int, int, int, int, int]:
+        value = path.stat()
+        if not stat.S_ISREG(value.st_mode) or value.st_size != expected_size:
+            raise ValueError("planner grid has invalid size")
+        return _stat_identity(value)
+
+    def _planner_bytes(
+        self, path: Path, expected_size: int, expected_sha: str
+    ) -> bytes:
         raw = _bounded_stable_read(path, self.max_grid_bytes, "planner grid")
         if len(raw) != expected_size or _sha256(raw) != expected_sha:
             raise ValueError("planner grid integrity check failed")
-        return raw, expected_sha
+        return raw
 
     def _decode_grid(
         self,

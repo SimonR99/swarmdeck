@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import struct
+import time
 import uuid
 
 import pytest
 
+import autonomy.mola_mapping as mola_mapping
 from autonomy.contracts import (
     IDENTITY_SE3,
     KeyframeId,
@@ -146,6 +149,118 @@ def test_mola_provider_imports_once_and_refreshes_liveness(tmp_path) -> None:
     result = view.query(QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1)))
     assert result.status is QueryStatus.OK
     assert result.occupancy == (VoxelOccupancy.OCCUPIED,)
+
+
+def test_mola_provider_does_not_reread_an_unchanged_planner_grid(
+    tmp_path, monkeypatch
+) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    reads = 0
+    stable_read = mola_mapping._bounded_stable_read
+
+    def count_reads(path, maximum, field):
+        nonlocal reads
+        if field == "planner grid":
+            reads += 1
+        return stable_read(path, maximum, field)
+
+    monkeypatch.setattr(mola_mapping, "_bounded_stable_read", count_reads)
+    provider = MolaDirectorySource(peer, clock_ns=iter((10, 20)).__next__)
+    view = IndexedMapView()
+
+    provider.refresh(view, component)
+    first_grid = provider._cache[component][1]
+    provider.refresh(view, component)
+
+    assert reads == 1
+    assert provider._cache[component][1] is first_grid
+    assert view._index.received_monotonic_ns == 20
+
+
+def test_mola_cache_rehashes_same_size_corruption_with_retained_mtime(
+    tmp_path,
+) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    provider = MolaDirectorySource(peer)
+    view = IndexedMapView()
+    provider.refresh(view, component)
+    grid_path = peer / "mola" / "components" / "component.sdpg"
+    before = grid_path.stat()
+    raw = bytearray(grid_path.read_bytes())
+
+    time.sleep(0.01)
+    raw[-1] ^= 1
+    grid_path.write_bytes(raw)
+    os.utime(grid_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = grid_path.stat()
+
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ctime_ns != before.st_ctime_ns
+    with pytest.raises(ValueError, match="integrity check failed"):
+        provider.refresh(view, component)
+    assert view._index is not None
+    assert view._unavailable_key == view._index.key
+
+
+def test_mola_cache_reloads_an_atomically_replaced_artifact(
+    tmp_path, monkeypatch
+) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    reads = 0
+    stable_read = mola_mapping._bounded_stable_read
+
+    def count_reads(path, maximum, field):
+        nonlocal reads
+        if field == "planner grid":
+            reads += 1
+        return stable_read(path, maximum, field)
+
+    monkeypatch.setattr(mola_mapping, "_bounded_stable_read", count_reads)
+    provider = MolaDirectorySource(peer)
+    view = IndexedMapView()
+    provider.refresh(view, component)
+    first_grid = provider._cache[component][1]
+    grid_path = peer / "mola" / "components" / "component.sdpg"
+    replacement = grid_path.with_suffix(".replacement")
+    replacement.write_bytes(grid_path.read_bytes())
+    replacement.replace(grid_path)
+
+    provider.refresh(view, component)
+
+    assert reads == 2
+    assert provider._cache[component][1] is not first_grid
+
+
+def test_mola_refresh_detects_snapshot_replacement_during_final_pair_check(
+    tmp_path, monkeypatch
+) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    snapshot_path = peer / "snapshot.json"
+    stable_read = mola_mapping._bounded_stable_read_with_identity
+    snapshot_reads = 0
+
+    def replace_after_read(path, maximum, field):
+        nonlocal snapshot_reads
+        result = stable_read(path, maximum, field)
+        if field == "snapshot":
+            snapshot_reads += 1
+            if snapshot_reads == 2:
+                path.write_bytes(result[0] + b"\n")
+        return result
+
+    monkeypatch.setattr(
+        mola_mapping, "_bounded_stable_read_with_identity", replace_after_read
+    )
+    provider = MolaDirectorySource(peer)
+    view = IndexedMapView()
+
+    with pytest.raises(ValueError, match="publication changed while reading"):
+        provider.refresh(view, component)
+
+    assert snapshot_path.read_bytes().endswith(b"\n")
+    assert view._index is None
+    assert view._unavailable_detail == "MOLA publication changed while reading"
 
 
 def test_mola_provider_rejects_free_space_without_qualified_rays(tmp_path) -> None:

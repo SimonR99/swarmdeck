@@ -142,10 +142,11 @@ def test_planning_overlay_uses_an_isolated_reachable_webrtc_candidate():
     base = (COMPOSE_DIR / "docker-compose.yml").read_text()
     planning = (COMPOSE_DIR / "docker-compose.planning-test.yml").read_text()
 
-    assert 'MTX_WEBRTCLOCALUDPADDRESS: ":8190"' in planning
-    assert 'MTX_WEBRTCLOCALTCPADDRESS: ":8190"' in planning
-    assert '"8190:8190/udp"' in planning
-    assert '"8190:8190/tcp"' in planning
+    port = "${SWARMDECK_TEST_MEDIA_PORT:-8190}"
+    assert f'MTX_WEBRTCLOCALUDPADDRESS: ":{port}"' in planning
+    assert f'MTX_WEBRTCLOCALTCPADDRESS: ":{port}"' in planning
+    assert f'"{port}:{port}/udp"' in planning
+    assert f'"{port}:{port}/tcp"' in planning
     assert "MEDIAMTX_TEST_WEBRTC_HOST" in planning
     assert "MEDIAMTX_WEBRTC_HOST:-192.168.1.161" in planning
     assert "benchbot.yannbouteiller.com" not in planning

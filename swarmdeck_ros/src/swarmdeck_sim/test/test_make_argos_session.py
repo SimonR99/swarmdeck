@@ -363,6 +363,31 @@ def test_heterogeneous_odometry_per_robot(tmp_path):
     assert set(ext.get("robots").split(",")) == {"robot_0", "robot_2"}
 
 
+def test_custom_prefix_is_registered_with_external_estimator(tmp_path):
+    """Fast-LIVO2 discovers IDs from this generated experiment at cold start."""
+    cfg = yaml.safe_load(CONFIG.read_text())
+    fleet = cfg["fleet"]
+    fleet["robot_count"] = 2
+    fleet["robot_prefix"] = "rover_"
+    fleet["robot_types"] = {
+        key.replace("robot_", "rover_"): value
+        for key, value in (fleet.get("robot_types") or {}).items()
+        if key in {"robot_0", "robot_1"}
+    }
+    cfg["map"]["start_poses"] = {
+        key.replace("robot_", "rover_"): value
+        for key, value in cfg["map"]["start_poses"].items()
+        if key in {"robot_0", "robot_1"}
+    }
+    path = tmp_path / "custom_prefix_fast_livo.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+
+    tree = ElementTree.fromstring(mas.generate_argos_xml(path))
+
+    assert set(controllers(tree)) == {"rover_0_ctrl", "rover_1_ctrl"}
+    assert tree.find("./media/external_estimator").get("robots") == "rover_0,rover_1"
+
+
 # ------------------------------------------------------------------- refusals
 
 
