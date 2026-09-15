@@ -648,7 +648,55 @@ Its reported displacement was 11.702 m. Stop All was verified after both actions
 and both bounded command harnesses exited successfully. These are action and
 odometry observations, not an independent simulation-ground-truth error bound.
 
-The local deployment remains one server, one simulation and one UI at port
-15173, with the single robot stopped. Four-robot Bistro motion, independent
+At the end of that trial the local deployment had one server, one simulation
+and one UI at port 15173, with the single robot stopped. Four-robot Bistro motion, independent
 truth-based arrival measurements, inter-robot closures, dynamic obstacles and
 full-resolution rendering still require their separate acceptance trials.
+
+## Distant-goal budget investigation on benchbot (2026-09-14)
+
+Subsequent arbitrary-goal trials exposed a separate failure: the native grid
+search used its entire 500 ms cooperative deadline and returned `BLOCKED`.
+That result establishes budget exhaustion, not the absence of a route. Local
+failure evidence contained only 46–106 expansions despite hundreds of terrain
+queries. Exact-goal terrain rejections are a different failure and must retain
+their own diagnostic and safety checks.
+
+The directed traversal cache now reuses completed terrain checks within one
+request and map snapshot. Its key includes both full endpoint states in order;
+reverse edges remain distinct. It preserves the checked polyline, never caches
+an interrupted query, and has an explicit entry limit. The native core CTest
+targets passed, including the repeated-edge regression that fails without the
+cache.
+
+Navigate now refines a useful connected graph corridor first, extending its
+checked route to the exact operator destination. Missing topology permits a
+direct grid search. A rejected graph corridor may fall back to direct search
+only within the same remaining deadline. Home retains its persistent graph and
+rolling local refinement. The native ROS CTest targets passed, including a
+helpful graph prefix with an unknown exact suffix and a blocked graph with a
+valid direct alternative.
+
+The adapter treats this specific native deadline result as temporary, retaining
+the original goal and authority binding during bounded recovery. Mission or
+component changes invalidate that binding; a delayed response cannot silently
+adopt a new authority. Recovery is limited to the existing three attempts and
+15-second window. Exhaustion reports the planning-budget failure rather than
+claiming the goal is unreachable. Actual terrain rejection remains terminal.
+
+Benchbot runs the four-robot GPU Bistro scenario with full camera resolution.
+The source is pulled from `planning-refactor` into the existing review checkout;
+the unrelated modified `main` checkout is preserved. A read-only R0 request
+20 metres forward and 2 metres right exhausted the 500 ms budget. With a
+2000 ms explicit-objective budget, the same relative request returned all
+104 route poses in 857.5 ms and passed live validation in 15.7 ms. These are
+odometry-relative test offsets, not general declarations that every point at
+those offsets is clear road. The fleet launch now uses this bounded 2000 ms
+budget for Navigate/Home; exploration and hardware defaults are unchanged.
+The combined adapter, live-mapping and launch regressions passed (125 tests).
+
+Other probes illustrate the limits of this evidence: a 30-metre R0 route passed
+with the original 500 ms budget, and an R1 12-metre route passed with both
+profiles. Some endpoints were rejected for excessive known height within the
+footprint; one repeat met a transient stale-authority check. Increasing a
+deadline does not resolve an occupied endpoint or authorize stale map data.
