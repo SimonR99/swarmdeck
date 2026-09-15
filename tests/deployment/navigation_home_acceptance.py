@@ -8,7 +8,7 @@ import asyncio
 import json
 import math
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -109,6 +109,8 @@ def parse_args():
     parser.add_argument("--mode", choices=("navigate", "home"), required=True)
     parser.add_argument("--duration", type=float, default=180.0)
     parser.add_argument("--poll", type=float, default=1.0)
+    parser.add_argument("--arrival-tolerance", type=float, default=0.5)
+    parser.add_argument("--require-rolling-home", action="store_true")
     args = parser.parse_args()
     if not args.robot.startswith("robot_"):
         parser.error("--robot must use the simulation robot_ prefix")
@@ -118,13 +120,27 @@ def parse_args():
         parser.error("--lateral-offset must be finite and at most 100 metres")
     if not 5.0 <= args.duration <= 600.0 or not 0.1 <= args.poll <= 5.0:
         parser.error("duration must be 5..600 seconds and poll 0.1..5 seconds")
+    if not math.isfinite(args.arrival_tolerance) or not (
+        0.05 <= args.arrival_tolerance <= 2.0
+    ):
+        parser.error("arrival tolerance must be finite and between 0.05 and 2 metres")
+    if args.require_rolling_home and args.mode != "home":
+        parser.error("--require-rolling-home requires --mode home")
     args.base_url = args.base_url.rstrip("/")
     return args
 
 
 def simulation_fleet(args):
     reset = json_request(args.base_url, "/api/sim/reset")
-    if reset.get("version") != 1 or reset.get("phase") in {None, "legacy", "failed"}:
+    if reset.get("version") != 1 or reset.get("phase") in {
+        None,
+        "legacy",
+        "failed",
+        "accepted",
+        "stopping",
+        "starting",
+        "verifying",
+    }:
         raise RuntimeError("simulation reset supervisor is unavailable")
     fleet = json_request(args.base_url, "/api/fleet").get("robots", [])
     if not fleet or any(
@@ -136,10 +152,21 @@ def simulation_fleet(args):
     return fleet
 
 
-def current_live(args, deadline):
+def current_live(args, deadline, observation_errors=None):
     last_error = "qualified live component is unavailable"
     while time.monotonic() < deadline:
-        catalogue = json_request(args.base_url, "/api/autonomy/replicas/components")
+        try:
+            catalogue = json_request(
+                args.base_url,
+                "/api/autonomy/replicas/components",
+                timeout=max(0.2, min(1.0, deadline - time.monotonic())),
+            )
+        except (HTTPError, URLError, TimeoutError, OSError) as error:
+            if observation_errors is not None:
+                observation_errors[0] += 1
+            last_error = type(error).__name__
+            time.sleep(0.2)
+            continue
         mission = catalogue.get("active_session_id")
         for component in catalogue.get("components", []):
             if (
@@ -153,12 +180,16 @@ def current_live(args, deadline):
                 live = json_request(
                     args.base_url,
                     f"/api/autonomy/replicas/components/live/{mission}?{query}",
+                    timeout=max(0.2, min(1.0, deadline - time.monotonic())),
                 )
-            except HTTPError as error:
-                if error.code == 404:
+            except (HTTPError, URLError, TimeoutError, OSError) as error:
+                if observation_errors is not None:
+                    observation_errors[0] += 1
+                if isinstance(error, HTTPError) and error.code == 404:
                     last_error = "component has no fresh robot telemetry"
                     continue
-                raise
+                last_error = type(error).__name__
+                continue
             robot = next(
                 (
                     item
@@ -176,9 +207,14 @@ def current_live(args, deadline):
 async def verify_stopped(args, robot_ids):
     for _ in range(20):
         await asyncio.sleep(0.5)
-        fleet = (
-            await asyncio.to_thread(json_request, args.base_url, "/api/fleet")
-        ).get("robots", [])
+        try:
+            fleet = (
+                await asyncio.to_thread(
+                    json_request, args.base_url, "/api/fleet", None, 1.0
+                )
+            ).get("robots", [])
+        except (HTTPError, URLError, TimeoutError, OSError):
+            continue
         if {robot["robot_id"] for robot in fleet} == robot_ids and all(
             robot.get("online") is True
             and robot.get("nav_status") not in {"active", "nav"}
@@ -209,6 +245,9 @@ async def run(args):
         "local_endpoint_error_m": None,
         "global_endpoint_error_m": None,
         "remaining_error_m": None,
+        "observation_errors": 0,
+        "qualified_samples": 0,
+        "final_qualified_sample": False,
     }
     async with websockets.connect(ws_url, max_size=16 * 1024 * 1024) as socket:
         reader = asyncio.create_task(_drain(socket))
@@ -219,8 +258,9 @@ async def run(args):
             fleet = (
                 await asyncio.to_thread(json_request, args.base_url, "/api/fleet")
             ).get("robots", [])
+            observation_errors = [0]
             mission, component, order, live_robot = await asyncio.to_thread(
-                current_live, args, time.monotonic() + 10.0
+                current_live, args, time.monotonic() + 10.0, observation_errors
             )
             initial_identity = authority_identity(
                 mission,
@@ -270,29 +310,38 @@ async def run(args):
             )
             started = time.monotonic()
             trial_deadline = started + args.duration
+            next_progress = started + 10.0
             status_robot = baseline
             while time.monotonic() < trial_deadline:
                 await asyncio.sleep(args.poll)
-                fleet_now = (
-                    await asyncio.to_thread(json_request, args.base_url, "/api/fleet")
-                ).get("robots", [])
-                status_robot = next(
-                    (
-                        robot
-                        for robot in fleet_now
-                        if robot.get("robot_id") == args.robot
-                    ),
-                    {},
-                )
+                try:
+                    fleet_now = (
+                        await asyncio.to_thread(
+                            json_request, args.base_url, "/api/fleet", None, 1.0
+                        )
+                    ).get("robots", [])
+                    observed_status = next(
+                        (
+                            robot
+                            for robot in fleet_now
+                            if robot.get("robot_id") == args.robot
+                        ),
+                        None,
+                    )
+                    if observed_status is not None:
+                        status_robot = observed_status
+                except (HTTPError, URLError, TimeoutError, OSError):
+                    observation_errors[0] += 1
                 try:
                     mission_now, component_now, order_now, robot_now = (
                         await asyncio.to_thread(
                             current_live,
                             args,
                             min(trial_deadline, time.monotonic() + 1.0),
+                            observation_errors,
                         )
                     )
-                except (HTTPError, RuntimeError):
+                except RuntimeError:
                     robot_now = None
                 if robot_now is not None:
                     identity = authority_identity(
@@ -304,6 +353,7 @@ async def run(args):
                     if identity != initial_identity:
                         summary["authority_changed"] = True
                     else:
+                        summary["qualified_samples"] += 1
                         current_order = tuple(order_now)
                         if current_order != last_order:
                             summary["solution_order_changes"] += 1
@@ -360,6 +410,28 @@ async def run(args):
                     if phase not in summary["observed_phases"]:
                         summary["observed_phases"].append(phase)
                 summary["active_samples"] += int(status == "active")
+                summary["observation_errors"] = observation_errors[0]
+                if time.monotonic() >= next_progress:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "progress",
+                                "elapsed_s": round(time.monotonic() - started, 1),
+                                "status": status,
+                                "active_samples": summary["active_samples"],
+                                "max_displacement_m": round(
+                                    summary["max_displacement_m"], 3
+                                ),
+                                "local_endpoint_changes": summary[
+                                    "local_endpoint_changes"
+                                ],
+                                "observation_errors": observation_errors[0],
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                    next_progress += 10.0
                 failure = status == "failed" and (
                     summary["active_samples"] > 0
                     or (status, status_robot.get("nav_failure_reason"))
@@ -376,11 +448,95 @@ async def run(args):
                     break
             summary["final_status"] = status_robot.get("nav_status")
             summary["elapsed_s"] = round(time.monotonic() - started, 1)
+            if summary["outcome"] == "succeeded":
+                try:
+                    final_mission, final_component, _, final_robot = (
+                        await asyncio.to_thread(
+                            current_live,
+                            args,
+                            time.monotonic() + 5.0,
+                            observation_errors,
+                        )
+                    )
+                except RuntimeError:
+                    summary["outcome"] = "inconclusive"
+                    summary["failure_reason"] = "no final qualified live observation"
+                else:
+                    final_identity = authority_identity(
+                        final_mission,
+                        final_component,
+                        final_robot,
+                        include_home=args.mode == "home",
+                    )
+                    if final_identity != initial_identity:
+                        summary["authority_changed"] = True
+                    else:
+                        if args.mode == "navigate":
+                            target = navigation_from_component(
+                                component_goal,
+                                final_robot["T_component_navigation"],
+                            )
+                        else:
+                            target = home_target(final_robot)
+                        summary["remaining_error_m"] = math.hypot(
+                            float(final_robot["pose"]["x"]) - target[0],
+                            float(final_robot["pose"]["y"]) - target[1],
+                        )
+                        for field, output in (
+                            ("local_planned_path", "local_endpoint_error_m"),
+                            ("global_planned_path", "global_endpoint_error_m"),
+                        ):
+                            endpoint_error = path_endpoint_error(
+                                final_robot, target, field
+                            )
+                            if endpoint_error is not None:
+                                summary[output] = endpoint_error
+                        summary["qualified_samples"] += 1
+                        summary["final_qualified_sample"] = True
+                summary["observation_errors"] = observation_errors[0]
+        except Exception as error:
+            summary["outcome"] = "error"
+            summary["failure_reason"] = f"{type(error).__name__}: {error}"[:512]
         finally:
-            await socket.send(json.dumps({"type": "stop_all"}))
-            summary["stop_all_verified"] = await verify_stopped(args, robot_ids)
+            try:
+                await socket.send(json.dumps({"type": "stop_all"}))
+                summary["stop_all_verified"] = await verify_stopped(args, robot_ids)
+            except Exception as error:
+                summary["stop_all_verified"] = False
+                summary.setdefault(
+                    "failure_reason", f"Stop All verification: {error}"[:512]
+                )
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
+    if summary["outcome"] == "succeeded":
+        evidence_error = None
+        if not summary["final_qualified_sample"] or not summary["qualified_samples"]:
+            evidence_error = "qualified post-command observations are missing"
+        elif (
+            summary["remaining_error_m"] is None
+            or not math.isfinite(summary["remaining_error_m"])
+            or summary["remaining_error_m"] > args.arrival_tolerance
+        ):
+            evidence_error = "final pose is outside the arrival tolerance"
+        elif args.mode == "navigate" and (
+            summary["local_endpoint_error_m"] is None
+            or not math.isfinite(summary["local_endpoint_error_m"])
+            or summary["local_endpoint_error_m"] > 0.05
+        ):
+            evidence_error = "no exact local Navigate endpoint was observed"
+        elif args.require_rolling_home and (
+            not {"following_local", "following_final"}.issubset(
+                summary["observed_phases"]
+            )
+            or summary["local_endpoint_changes"] < 1
+            or summary["global_endpoint_error_m"] is None
+            or not math.isfinite(summary["global_endpoint_error_m"])
+            or summary["global_endpoint_error_m"] > 0.05
+        ):
+            evidence_error = "rolling Home phase or endpoint evidence is incomplete"
+        if evidence_error is not None:
+            summary["outcome"] = "inconclusive"
+            summary["failure_reason"] = evidence_error
     for key in (
         "max_displacement_m",
         "local_endpoint_error_m",
@@ -390,9 +546,11 @@ async def run(args):
         if summary.get(key) is not None:
             summary[key] = round(float(summary[key]), 3)
     print(json.dumps(summary, sort_keys=True))
-    if not summary["stop_all_verified"]:
-        raise RuntimeError("Stop All did not settle the simulation fleet")
-    return summary["outcome"] == "succeeded" and not summary["authority_changed"]
+    return (
+        summary["outcome"] == "succeeded"
+        and not summary["authority_changed"]
+        and summary["stop_all_verified"]
+    )
 
 
 async def _drain(socket):
@@ -400,5 +558,26 @@ async def _drain(socket):
         pass
 
 
+def main():
+    args = parse_args()
+    try:
+        passed = asyncio.run(run(args))
+    except Exception as error:
+        print(
+            json.dumps(
+                {
+                    "mode": args.mode,
+                    "robot": args.robot,
+                    "outcome": "error",
+                    "failure_reason": f"{type(error).__name__}: {error}"[:512],
+                    "stop_all_verified": False,
+                },
+                sort_keys=True,
+            )
+        )
+        passed = False
+    raise SystemExit(0 if passed else 1)
+
+
 if __name__ == "__main__":
-    raise SystemExit(0 if asyncio.run(run(parse_args())) else 1)
+    main()
