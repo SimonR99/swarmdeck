@@ -21,9 +21,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("robot", nargs="?", default="robot_0")
     parser.add_argument("--distance", type=float, default=3.0)
+    parser.add_argument(
+        "--lateral-offset",
+        type=float,
+        default=0.0,
+        help="Goal offset to the robot's left, in meters; no motion is commanded",
+    )
     args = parser.parse_args()
-    if not math.isfinite(args.distance) or not 0.5 <= args.distance <= 50:
-        parser.error("distance must be between 0.5 and 50 meters")
+    if not math.isfinite(args.distance) or not 0.5 <= args.distance <= 200:
+        parser.error("distance must be between 0.5 and 200 meters")
+    if not math.isfinite(args.lateral_offset) or abs(args.lateral_offset) > 20:
+        parser.error("lateral offset must be between -20 and 20 meters")
     rclpy.init()
     node = rclpy.create_node("mgg_route_validation_smoke")
     latest = {}
@@ -87,8 +95,16 @@ def main():
         request.map_source_stamp.nanosec = authority_value["map_source_stamp"][
             "nanosec"
         ]
-        request.goal.position.x = pose.position.x + args.distance * math.cos(yaw)
-        request.goal.position.y = pose.position.y + args.distance * math.sin(yaw)
+        request.goal.position.x = (
+            pose.position.x
+            + args.distance * math.cos(yaw)
+            - args.lateral_offset * math.sin(yaw)
+        )
+        request.goal.position.y = (
+            pose.position.y
+            + args.distance * math.sin(yaw)
+            + args.lateral_offset * math.cos(yaw)
+        )
         request.goal.position.z = pose.position.z
         request.goal.orientation = q
         result, planning_ms = call(plan, request)
@@ -115,6 +131,7 @@ def main():
                 {
                     "robot": args.robot,
                     "distance_m": args.distance,
+                    "lateral_offset_m": args.lateral_offset,
                     "path_poses": len(result.path),
                     "planning_ms": planning_ms,
                     "validation_ms": validation_ms,
