@@ -45,7 +45,7 @@ def _protocol_lock(root: Path):
 
 def _fresh(value: dict) -> bool:
     updated = value.get("updated_at_ns", value.get("requested_at_ns"))
-    return isinstance(updated, int) and time.time_ns() - updated <= SUPERVISOR_STALE_NS
+    return type(updated) is int and 0 <= time.time_ns() - updated <= SUPERVISOR_STALE_NS
 
 
 def _unavailable(status: dict | None = None) -> dict:
@@ -129,9 +129,9 @@ def reset_status(root: Path) -> dict:
     status = _read(root / "status.json")
     if status.get("phase") in {"accepted", "stopping", "starting", "verifying"}:
         if not _fresh(status):
-            return _unavailable(status)
-    return status or {
-        "version": 1,
-        "phase": "idle",
-        "ok": None,
+            status = _unavailable(status)
+    return {
+        **(status or {"version": 1, "phase": "idle", "ok": None}),
+        # A completed reset describes history, not a live simulation lease.
+        "supervisor_available": _fresh(_read(root / "supervisor.json")),
     }

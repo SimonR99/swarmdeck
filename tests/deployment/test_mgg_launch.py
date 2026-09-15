@@ -174,12 +174,62 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
         0.15,
         0.30,
     ]
+    assert [params["PlanningParams.edge_length_max"] for params in overrides] == [
+        1.2,
+        1.2,
+        2.5,
+    ]
+    assert all(
+        "objective_start_support_max_distance_m" not in params for params in overrides
+    )
     physics = runpy.run_path(str(repo / "deploy/patches/argos/apply_steps.py"))[
         "STEP_LIMITS"
     ]
     assert [params["PlanningParams.max_step_height"] for params in overrides] == [
         physics[platform] for platform in ("bunker", "scout-mini", "spot")
     ]
+
+
+def test_mola_initial_edges_reach_the_selected_lidars_first_ground_ring(
+    launch_module, monkeypatch, tmp_path
+):
+    repo = Path(__file__).parents[2]
+    monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
+    monkeypatch.syspath_prepend(str(repo / "swarmdeck_ros/src"))
+    config = tmp_path / "fleet.yaml"
+    config.write_text("""fleet:
+  robot_count: 3
+  robot_type: bunker
+  robot_types:
+    robot_1: scout_mini
+    robot_2: spot
+  lidar:
+    profile: vlp16
+""")
+    monkeypatch.setenv("SWARMDECK_CONFIG", str(config))
+    monkeypatch.setenv("SWARMDECK_MGG_MAP_BACKEND", "mola_snapshot")
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25")
+    path = repo / "deploy/mgg/fleet.launch.py"
+    spec = importlib.util.spec_from_file_location("mgg_mola_reach_launch", path)
+    fleet_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fleet_module)
+
+    nodes = fleet_module.generate_launch_description()
+    planners = [node for node in nodes if getattr(node, "package", "") == "mgg_ros"]
+    overrides = [planner.parameters[-1] for planner in planners]
+    expected = [3.0, 2.0, 4.0]
+    assert [
+        params["PlanningParams.edge_length_max"] for params in overrides
+    ] == expected
+    assert [
+        params["objective_start_support_max_distance_m"] for params in overrides
+    ] == expected
+
+    pathological_robot = SimpleNamespace(base_height=2.0, lidar_x=0.0, lidar_z=2.0)
+    with pytest.raises(ValueError, match="exceeds the bounded initial reach"):
+        fleet_module.mola_initial_ground_reach(
+            pathological_robot, SimpleNamespace(vfov=0.1)
+        )
 
 
 def test_sim_fleet_uses_configured_robot_prefix_for_every_mgg_boundary(

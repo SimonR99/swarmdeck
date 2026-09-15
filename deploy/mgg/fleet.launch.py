@@ -9,6 +9,10 @@ from pathlib import Path
 import yaml
 from launch import LaunchDescription
 
+MOLA_MAP_RESOLUTION_M = 0.2
+GRID_REFINEMENT_RESOLUTION_M = 0.5
+MAX_INITIAL_GROUND_REACH_M = 5.0
+
 
 def simulation_sensor_overrides(lidar):
     """MGG gain model geometry for the selected simulated lidar profile."""
@@ -23,6 +27,41 @@ def simulation_sensor_overrides(lidar):
         "SensorParams.VLP16.fov": [2.0 * math.pi, 2.0 * lidar.vfov],
         "SensorParams.VLP16.rotations": [0.0, 0.0, 0.0],
     }
+
+
+def mola_initial_ground_reach(robot, lidar):
+    """Bound the first graph edge so it can reach a measured lidar floor."""
+
+    values = (
+        robot.base_height,
+        robot.lidar_x,
+        robot.lidar_z,
+        lidar.vfov,
+        MOLA_MAP_RESOLUTION_M,
+        GRID_REFINEMENT_RESOLUTION_M,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("MOLA initial ground reach requires finite sensor geometry")
+    sensor_height = robot.base_height + robot.lidar_z
+    if sensor_height <= 0.0 or not 0.0 < lidar.vfov < math.pi / 2.0:
+        raise ValueError("MOLA initial ground reach requires a downward 3D lidar")
+
+    horizontal_floor_range = sensor_height / math.tan(lidar.vfov)
+    nearest_floor_radius = abs(horizontal_floor_range - abs(robot.lidar_x))
+    required = nearest_floor_radius + MOLA_MAP_RESOLUTION_M
+    if not math.isfinite(required) or required > MAX_INITIAL_GROUND_REACH_M:
+        raise ValueError(
+            "MOLA lidar ground blind radius exceeds the bounded initial reach"
+        )
+    reach = (
+        math.ceil(required / GRID_REFINEMENT_RESOLUTION_M)
+        * GRID_REFINEMENT_RESOLUTION_M
+    )
+    if reach > MAX_INITIAL_GROUND_REACH_M:
+        raise ValueError(
+            "MOLA lidar ground blind radius exceeds the bounded initial reach"
+        )
+    return reach
 
 
 def simulation_robot_prefix(fleet):
@@ -56,12 +95,26 @@ def generate_launch_description():
     platforms = robot_types(fleet, count, prefix)
     lidar = lidar_spec(fleet)
     sensor_overrides = simulation_sensor_overrides(lidar)
+    mola_snapshot = (
+        os.environ.get("SWARMDECK_MGG_MAP_BACKEND", "cloud_octomap") == "mola_snapshot"
+    )
     nodes = []
     params = "/opt/mgg/ros2/src/mgg_argos/config/bistro.yaml"
     for i, platform in enumerate(platforms):
         robot = f"{prefix}{i}"
         spec = robot_spec(platform)
         step_height = spec.max_step_height
+        legacy_edge_length_max = 2.5 if platform == "spot" else 1.2
+        initial_ground_reach = (
+            mola_initial_ground_reach(spec, lidar)
+            if mola_snapshot
+            else legacy_edge_length_max
+        )
+        initial_ground_overrides = (
+            {"objective_start_support_max_distance_m": initial_ground_reach}
+            if mola_snapshot
+            else {}
+        )
         nodes += module.robot_nodes(
             robot,
             f"{robot}/map_frame",
@@ -83,13 +136,15 @@ def generate_launch_description():
                 + 0.15
                 + 0.025,
                 "PlanningParams.max_step_height": step_height,
-                # Spot’s elevated camera first sees floor beyond the default
-                # 1.2 m edge cap; allow the initial graph to reach it.
-                "PlanningParams.edge_length_max": 2.5 if platform == "spot" else 1.2,
+                # MOLA has only qualified lidar geometry. Its initial edge must
+                # cross the sensor's ground blind radius to measured support.
+                # Cloud mode retains the camera-aware legacy reach.
+                "PlanningParams.edge_length_max": initial_ground_reach,
+                **initial_ground_overrides,
                 # Half-metre search nodes keep long road detours tractable.
                 # Terrain projection/sweeps and Nav2 retain their own finer
                 # resolution; this does not relax obstacle or step checks.
-                "grid_refinement_resolution_m": 0.5,
+                "grid_refinement_resolution_m": GRID_REFINEMENT_RESOLUTION_M,
                 # Navigate/Home have a separate deadline from exploration.
                 # Leave headroom for live map queries on long Bistro detours.
                 "objective_grid_timeout_ms": 4000,

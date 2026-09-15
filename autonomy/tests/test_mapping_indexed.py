@@ -5,10 +5,12 @@ import hashlib
 import json
 import math
 import uuid
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from autonomy.capture_providers import endpoint_preserving_sample
 from autonomy.contracts import (
     IDENTITY_SE3,
     Calibration,
@@ -531,6 +533,88 @@ def test_query_work_is_bounded_before_allocating_body_cells(tmp_path, body, samp
     result = view.query(QueryRequest(key, (sample,), body))
     assert result.status == QueryStatus.UNAVAILABLE
     assert not result.occupancy
+
+
+@pytest.mark.parametrize("platform", ("bunker", "scout_mini", "spot"))
+def test_production_vlp16_preserves_unobserved_ground_at_the_physical_root(
+    tmp_path, monkeypatch, platform
+) -> None:
+    """A real flat floor must stay unknown where neither sensor can observe it."""
+
+    repository = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(repository / "adapters" / "protocol"))
+    monkeypatch.syspath_prepend(
+        str(repository / "swarmdeck_ros/src/swarmdeck_sim/scenario")
+    )
+    from make_argos_session import CAMERA_FOV_DEG
+    from spawn_fleet import LIDAR_PROFILES, ROBOT_PROFILES
+
+    robot = ROBOT_PROFILES[platform]
+    lidar = LIDAR_PROFILES["vlp16"]
+    sensor_origin = np.asarray((robot.lidar_x, 0.0, robot.lidar_z))
+    sensor_height = robot.base_height + robot.lidar_z
+    returns = []
+    for elevation in np.linspace(-lidar.vfov, lidar.vfov, lidar.rings):
+        if elevation >= 0.0:
+            continue
+        azimuths = np.linspace(-math.pi, math.pi, lidar.h_samples)
+        directions = np.column_stack(
+            (
+                math.cos(elevation) * np.cos(azimuths),
+                math.cos(elevation) * np.sin(azimuths),
+                np.full_like(azimuths, math.sin(elevation)),
+            )
+        )
+        ranges = sensor_height / -directions[:, 2]
+        # The MOLA peer filters the production VLP-16 at 30 m before applying
+        # its 4096-endpoint storage cap.
+        in_range = ranges <= min(lidar.range_max, 30.0)
+        returns.append(sensor_origin + ranges[in_range, None] * directions[in_range])
+    points = endpoint_preserving_sample(np.concatenate(returns), 4096)
+    assert len(points) == 4096
+
+    store = SubmapStore(tmp_path)
+    keyframe = KeyframeId(platform, SESSION, 0)
+    record_qualified_capture(store, keyframe, sensor_origin, observed_at_ns=100)
+    T_component_base = np.eye(4)
+    T_component_base[2, 3] = robot.base_height
+    store.add_submap(
+        SubmapId.from_keyframe(keyframe),
+        points,
+        keyframe_poses_local={keyframe: IDENTITY_SE3},
+        sensor_origins_local=(tuple(sensor_origin),),
+        resolution_m=0.2,
+        observed_at_ns=100,
+        initial_T_component_submap=T_component_base,
+        ray_evidence=QUALIFIED_RAYS,
+    )
+
+    view = IndexedMapView(max_build_s=5.0)
+    component = component_id_for_anchor(keyframe)
+    snapshot_key = view.refresh(store.snapshot(), component, store.get_chunk)
+    body = (robot.length, robot.width, 2.0 * robot.base_height)
+    graph_z = robot.base_height + robot.max_step_height + 0.175
+    lidar_floor_x = robot.lidar_x + sensor_height / math.tan(lidar.vfov)
+    result = view.query(
+        QueryRequest(
+            snapshot_key,
+            ((0.0, 0.0, graph_z), (lidar_floor_x, 0.0, graph_z)),
+            body,
+            stop_at_unknown=False,
+        )
+    )
+
+    support_radius = max(0.35, robot.length / 2.0, robot.width / 2.0)
+    camera_floor_x = robot.camera_x + (
+        (robot.base_height + robot.camera_z)
+        / math.tan(math.radians(CAMERA_FOV_DEG) / 2.0)
+    )
+    assert min(camera_floor_x, lidar_floor_x) > support_radius
+    assert result.status is QueryStatus.OK
+    assert math.isnan(result.ground_z[0])
+    assert math.isnan(result.roughness[0])
+    assert math.isclose(result.ground_z[1], 0.0, abs_tol=0.11)
+    assert math.isfinite(result.roughness[1])
 
 
 def test_vlp16_history_accepts_body_corridor_and_rejects_wall_and_unknown(

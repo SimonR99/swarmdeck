@@ -80,13 +80,66 @@ No independent path follower should also consume
 
 ## ARGoS simulation
 
-`scripts/sim-up` (and the `make up-argos*` targets) starts MGG automatically.
-For example, `./scripts/sim-up --dri --drift` starts the default scene with
-exploration available; MGG remains idle until you press Explore.
+`scripts/sim-up` starts the peer Swarm-SLAM, MOLA, indexed query, MGG and ARGoS
+services together. MGG remains idle until you press Explore. For Bistro:
 
-For direct Compose invocations, add the MGG overlay to the same files and
-environment used for the simulation. For Bistro with NVIDIA rendering and synthetic drift, from the
-repository root:
+```bash
+./scripts/sim-up --scenario bistro --drift
+```
+
+The default planner backend is `mola_snapshot`, with the `mola` indexed query
+provider. MGG builds a read-only spatial index from each robot's coherent MOLA
+product; it does not accumulate a second map from raw clouds or depth images.
+Capture-time sensor transforms and qualified rays in the peer map supply the
+geometry and observed free space. The relay still supplies odometry and camera
+extrinsics. See [current stack operations](current-stack.md) for lifecycle and
+port options.
+
+The MOLA grid resolution is 0.20 m. Ground checks use measured surface heights;
+the terrain-step limits are 0.15 m for Bunker and Scout and 0.30 m for Spot, with
+a 30-degree slope limit. Robot dimensions and sensor offsets come from the
+simulation platform table. The supplied planning bounds are ±60 m horizontally.
+These settings apply to simulation; hardware needs its own qualified profile.
+
+Sparse LiDAR rays do not observe the whole body volume or the floor underneath
+a stationary robot. The simulation's explicit `observed_ground` body policy
+preserves unknown occupancy and vetoes known obstacles. Its separately enabled
+`provisional_unknown` ground policy permits a bounded leading connector from the
+physical starting pose to measured floor. The final indexed query checks that
+connector too: occupied cells, known insufficient clearance, steps and drops
+remain vetoes; after the first measured support, missing ground rejects the
+route. A route with no measured support is rejected. Hardware retains strict
+observed-volume and terrain requirements.
+
+MOLA mode sizes the graph's maximum edge and initial connector from the selected
+LiDAR's first ground-return ring, with one map-cell margin and grid rounding.
+For the Bistro VLP16 this gives 3 m for Bunker, 2 m for Scout and 4 m for Spot;
+the maximum supported configuration is 5 m. These are reach limits, not unchecked
+forward-motion commands. A path still needs a measured endpoint and the same
+terrain and collision validation.
+
+Unchanged optimizer poses advance the replica publication and causal solution
+order without replacing the map snapshot. Captures and actual pose corrections
+advance the mapping graph revision. This avoids rebuilding identical MOLA
+products and repeatedly interrupting an idle robot's planner.
+
+To test actual fleet startup against a running four-robot simulation:
+
+```bash
+server/.venv/bin/python tests/deployment/exploration_acceptance.py \
+  --simulation --base-url http://localhost:8080 --duration 120
+```
+
+The test starts from a verified idle fleet, presses Explore through the GUI
+protocol, and requires path observations, an executing state and navigation-frame
+movement from every robot. It supports separate local components and always
+sends Stop All at the end. Passing this startup test does not establish full
+scene coverage or exploration completion.
+
+The independent cloud/OctoMap path remains available through
+`./scripts/sim-up --legacy-cloud --drift`. For a direct legacy Compose invocation
+with NVIDIA rendering, add the MGG overlay to the same files and environment
+used for the simulation:
 
 ```bash
 SWARMDECK_CONFIG=/app/configs/4robot_bistro.yaml \
@@ -103,28 +156,25 @@ loads the adapter's exploration support. The overlay enables
 `SWARMDECK_MGG_ENABLED=1`, builds a pinned MGG image, and starts one planner/PCI per
 configured robot. MGG stays idle until Explore is pressed.
 
-The sidecar shares the simulator's network namespace and ROS domain 42.
-It uses Fast DDS UDP transport to avoid stale shared-memory ports after sidecar
-restarts; the simulator keeps its default transport for internal communication.
-It uses the existing ARGoS sensor bridge, not MGG's separate demo simulator.
-An input relay resolves `map_frame <- base_link` at each odometry stamp and caps
-LiDAR publication at 2 Hz. In ARGoS it also projects the depth camera at
+The sidecar shares the simulator's network namespace. The peer launcher selects
+a fresh mission and ROS domain; the direct legacy overlay uses domain 42. The
+isolated test overlays use UDP between separate container IPC namespaces; this
+does not require disabling shared memory for colocated production ROS processes.
+Both paths use the existing ARGoS sensor bridge. In legacy cloud mode, the input
+relay resolves `map_frame <- base_link` at each odometry stamp and caps LiDAR
+publication at 2 Hz. It also projects the depth camera at
 2 Hz, sampling every fourth pixel, to observe ground inside the elevated
 LiDAR’s blind region. Camera extrinsics come from the same platform table
 as the simulated sensor. No synthetic floor is inserted. Missing historical TF
 suppresses the observation. Odometry waits in a bounded ten-message queue
 for up to one simulated second for its matching TF, avoiding callback-order
 races without substituting a newer pose.
-Planner and PCI use simulation time. The simulation uses 0.15 m OctoMap voxels
-and a platform-specific collision-box clearance;
-the simulation slope limit is 30 degrees. Robot dimensions and sensor offsets come
-from SwarmDeck's platform table. The supplied simulation planning bounds are
-±60 m horizontally; adjust `fleet.launch.py` for another site. Hardware requires
-its own site and robot parameter file.
+Planner and PCI use simulation time. Legacy cloud mode uses 0.15 m OctoMap
+voxels and the same platform-specific collision and terrain limits.
 
 PCI's forward bootstrap is disabled (`bootstrap_distance=0`);
 exploration waits for actual mapped geometry. Each planner maintains its own
-OctoMap and graph. Graph exchange is deliberately not connected across local
+graph. Graph exchange is deliberately not connected across local
 map frames: enable it only with verified inter-robot transforms, not assumed
 identity transforms.
 

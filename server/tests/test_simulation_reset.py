@@ -105,7 +105,29 @@ def test_request_fails_immediately_when_no_supervisor_is_watching(tmp_path):
 
 
 def test_missing_status_is_idle(tmp_path):
-    assert reset_status(tmp_path) == {"version": 1, "phase": "idle", "ok": None}
+    assert reset_status(tmp_path) == {
+        "version": 1,
+        "phase": "idle",
+        "ok": None,
+        "supervisor_available": False,
+    }
+
+
+def test_completed_reset_does_not_prove_a_live_supervisor(tmp_path):
+    completed = {"version": 1, "phase": "succeeded", "ok": True}
+    (tmp_path / "status.json").write_text(json.dumps(completed))
+    assert reset_status(tmp_path) == {**completed, "supervisor_available": False}
+    mark_supervisor_live(tmp_path)
+    assert reset_status(tmp_path) == {**completed, "supervisor_available": True}
+    for timestamp in (
+        time.time_ns() - 20_000_000_000,
+        time.time_ns() + 20_000_000_000,
+        True,
+    ):
+        (tmp_path / "supervisor.json").write_text(
+            json.dumps({"updated_at_ns": timestamp})
+        )
+        assert reset_status(tmp_path) == {**completed, "supervisor_available": False}
 
 
 def test_stale_accepted_request_fails_instead_of_queueing_forever(tmp_path):
