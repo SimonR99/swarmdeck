@@ -4,11 +4,13 @@
 from pathlib import Path
 from types import SimpleNamespace as NS
 import tempfile
-from threading import Lock
+from threading import Event, Lock
+import time
 import uuid
 
 from builtin_interfaces.msg import Time as TimeMsg
 import numpy as np
+import rclpy
 
 from adapters import reconstruction
 from autonomy.contracts import IDENTITY_SE3
@@ -16,6 +18,11 @@ from autonomy.cslam import CslamMapper
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from deploy.autonomy import cslam_bridge
 from deploy.autonomy.cslam_bridge import Bridge
+from rclpy.clock import ClockType
+from rclpy.context import Context
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.parameter import Parameter
 
 
 def value(robot: int, seq: int, x: float):
@@ -162,7 +169,51 @@ def verify_consume_uses_paired_odom_capture_stamp() -> None:
     assert observed["header"] is not zero_header
 
 
+def verify_authority_heartbeat_uses_steady_time() -> None:
+    context = Context()
+    rclpy.init(context=context)
+    node = Node(
+        "cslam_authority_steady_timer_smoke",
+        context=context,
+        # Keep this clock frozen even if a simulator shares the test's domain.
+        use_global_arguments=False,
+        cli_args=[
+            "--ros-args",
+            "-r",
+            f"/clock:=/cslam_timer_smoke_{uuid.uuid4().hex}/clock",
+        ],
+        parameter_overrides=[
+            Parameter("use_sim_time", Parameter.Type.BOOL, True),
+        ],
+        automatically_declare_parameters_from_overrides=True,
+    )
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
+    fired = Event()
+    clock, timer = cslam_bridge.create_steady_timer(node, 0.02, fired.set)
+    try:
+        assert node.get_clock().clock_type == ClockType.ROS_TIME
+        assert node.get_clock().now().nanoseconds == 0
+        assert clock.clock_type == ClockType.STEADY_TIME
+        deadline = time.monotonic() + 1.0
+        while not fired.is_set() and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.05)
+        assert fired.is_set(), "steady timer did not fire with frozen simulated time"
+        assert node.get_clock().now().nanoseconds == 0
+    finally:
+        node.destroy_timer(timer)
+        executor.remove_node(node)
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown(context=context)
+
+    assert cslam_bridge.sensor_input_is_fresh(98.0, now=100.0)
+    assert not cslam_bridge.sensor_input_is_fresh(97.0, now=100.0)
+    assert not cslam_bridge.sensor_input_is_fresh(0.0, now=1.0)
+
+
 def main() -> None:
+    verify_authority_heartbeat_uses_steady_time()
     verify_capture_time_color_transform()
     verify_consume_uses_paired_odom_capture_stamp()
     mission = str(uuid.uuid4())

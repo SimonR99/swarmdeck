@@ -559,3 +559,96 @@ Controller errors now pass through adapter telemetry and objective decoration
 to `nav_failure_reason`, with a 512-character display bound. Planner rejection
 reasons take precedence, and generation changes prevent old action results from
 overwriting a replacement goal's status.
+
+
+## Local regression and rolling Home checks (2026-09-14)
+
+The local checks used `ec84488` plus the authority-heartbeat and Home-handoff
+corrections and ROS contract smoke described below. The native MGG workspace was rebuilt from the
+committed patch set, including the matching `RefineObjectiveRoute` message ABI.
+
+| Check | Result |
+| --- | --- |
+| Native MGG build and tests | Six packages built; 21 CTest targets, containing 242 GTest cases, passed |
+| Server, map, replica, navigation and adapter regressions | 255 passed |
+| UI regression scripts | 14 test files passed |
+| Svelte/TypeScript and production bundle | Zero check errors/warnings; build passed with the existing chunk-size advisory |
+| Native MOLA bridge and framework module | Five CTests and persistent JSONL smoke passed |
+| Final objective/authority/peer-launch regressions | 92 passed after both corrections |
+| Rolling Home ROS service contract | PlanObjective and two RefineObjectiveRoute handoffs passed with generated messages |
+| Authority heartbeat with frozen simulated time | Actual rclpy executor smoke passed |
+| Black | Repository formatting check passed |
+
+The rolling Home smoke is
+`adapters/test/ros/mgg_rolling_home_smoke.py`. Run it with the rebuilt MGG ROS
+message overlay sourced, the repository on `PYTHONPATH`, and an isolated DDS
+domain. It uses real rclpy services and generated messages with an inert path
+sink. It verifies native-evidence provenance, a shared component, an immutable
+global Home route, two local-section handoffs, and final cleanup. It does not
+substitute for a native-planner or physical-motion trial.
+
+The initial four-robot Bistro run used software Vulkan because no usable GPU
+was available. A bounded sample measured a real-time factor of 0.036; odometry
+arrived, but no authority heartbeat arrived during the 15-second probe. This
+exposed mixed clocks: the bridge scheduled authority publication every simulated
+second, while consumers expired it after three wall-clock seconds. At that
+speed, the nominal publication interval was about 28 wall-clock seconds.
+
+The snapshot/authority timer now uses steady wall time. Sensor freshness and
+consumer expiry remain on monotonic wall time with the existing three-second
+limit; paused or disconnected sensors therefore still lose authority. TF and
+capture timestamps retain their original clock semantics. Snapshot files and
+envelopes remain revision-gated, so unchanged geometry is not rebuilt every
+wall-clock tick. The actual ROS smoke freezes `/clock` and verifies that the
+steady timer fires while ROS time remains zero.
+
+The reduced live trial retained the Bistro collision world, Bunker footprint,
+full VLP16 lidar, MGG cloud backend and Nav2 controller, with one robot, drift
+odometry and a 160×120 camera. Its measured real-time factor was 0.368; all 13
+authority messages received during a 15-second probe passed validation. A native
+three-metre route request took 20.1 ms, and its route validation took 12.2 ms.
+Camera reduction changes depth sampling, so this trial cannot qualify thin
+depth-only obstacles, production camera fidelity, or multi-robot coordination.
+
+R0 reached the first 12-metre destination and reported success after 128.6 wall
+seconds, with 11.905 m of reported displacement. A post-arrival component query
+returned HTTP 404, so that first harness did not pass its final map-query check.
+Stop All did pass. Return Home then followed the first approximately eight-metre
+graph section before failing the final-chunk endpoint check by 0.018 m.
+
+The native route retained its original goal, while the adapter replaced its
+comparison target with the latest slightly corrected Home landmark. Corrections
+inside the existing execution deadband intentionally preserve a route; they must
+also preserve its bound endpoint. Final refinement now checks the retained Home
+goal. Material corrections and identity changes still require replanning, and
+the strict one-millimetre returned-endpoint check is unchanged. All 77 objective
+planning tests passed, including the observed 18 mm correction case.
+
+Headless Chromium connected to the actual local backend, loaded live 3D geometry
+and both rendering workers, and switched successfully to a correctly sized 2D
+canvas without JavaScript exceptions. These are activation and loading checks,
+not a pixel-alignment or graphics-performance qualification. Video was disabled
+for the navigation trial; its unavailable-stream response was expected. Optional
+agent endpoints also returned 502 without preventing map/navigation UI loading.
+
+The intermittent live-component 404 is separate from the fixed heartbeat issue.
+Authority can advance to a new optimizer solution before the replica worker
+publishes the matching component. Live overlays require exact solution-order
+agreement and deliberately reject that interval. A later bounded metadata read
+recovered with HTTP 200 and 0.654-second telemetry freshness. Read-only acceptance
+probes should retry briefly; the frame-consistency check must remain strict.
+
+### Fresh-mission round-trip result
+
+The repeat trial with both fixes passed: Navigate reported success after 86.3
+wall-clock seconds, with 11.988 m of reported displacement. Return Home followed
+the initial local section of its retained global graph route, refined the next
+section, entered `following_final`, and reported success after 100.3 seconds.
+Its reported displacement was 11.702 m. Stop All was verified after both actions,
+and both bounded command harnesses exited successfully. These are action and
+odometry observations, not an independent simulation-ground-truth error bound.
+
+The local deployment remains one server, one simulation and one UI at port
+15173, with the single robot stopped. Four-robot Bistro motion, independent
+truth-based arrival measurements, inter-robot closures, dynamic obstacles and
+full-resolution rendering still require their separate acceptance trials.

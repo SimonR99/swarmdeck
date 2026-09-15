@@ -1111,6 +1111,30 @@ def test_partial_home_refines_each_success_without_moving_global_goal(
     assert planner.global_display_plan() is None
 
 
+def test_final_home_chunk_matches_route_goal_across_small_anchor_correction(
+    monkeypatch,
+):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+    )
+    final = rolling_home_response(partial=False, path_x=[-0.5, -2.0])
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=[final])
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+
+    assert planner.return_home()
+    authority["home"]["T_navigation_home"][0][3] = -1.982
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert bridge.nav_status == "active"
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
+    assert planner._objective_goal["x"] == pytest.approx(-2.0)
+
+
 def test_partial_home_success_is_hidden_while_refinement_is_pending(monkeypatch):
     initial = rolling_home_response(
         partial=True,

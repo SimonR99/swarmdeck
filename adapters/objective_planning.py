@@ -1040,11 +1040,10 @@ class MggObjectivePlanning:
         partial = getattr(response, "partial", False)
         if type(partial) is not bool:
             return "failed", "MGG returned an invalid partial-route flag"
+        # Small accepted corrections do not move the cached graph route's goal.
+        # Material corrections are fenced above and require a new route.
         with self._active_lock:
             goal = deepcopy(self._objective_goal)
-        latest_home = self._authority_home_from(current_authority)
-        if latest_home is not None:
-            goal = latest_home
         if not isinstance(goal, dict):
             return "failed", "retained Home goal is unavailable"
         if not partial:

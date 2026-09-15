@@ -11,6 +11,7 @@ from threading import Event, Lock, Thread
 import numpy as np
 import rclpy
 from rclpy.context import Context
+from rclpy.clock import Clock, ClockType
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -62,6 +63,22 @@ MAX_RGBD_RECORDS = 8
 MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
 MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
+AUTHORITY_SENSOR_TTL_S = 3.0
+
+
+def create_steady_timer(node, period_s, callback):
+    """Create a wall-time timer which remains live under slow simulated time."""
+
+    clock = Clock(clock_type=ClockType.STEADY_TIME)
+    return clock, node.create_timer(period_s, callback, clock=clock)
+
+
+def sensor_input_is_fresh(last_sensor_at, now=None):
+    """Keep authority liveness tied to real sensor delivery, not ROS time."""
+
+    current = time.monotonic() if now is None else float(now)
+    age = current - float(last_sensor_at)
+    return last_sensor_at > 0.0 and 0.0 <= age < AUTHORITY_SENSOR_TTL_S
 
 
 def transform_pose(transform):
@@ -284,7 +301,9 @@ class Bridge(Node):
             )
             self.sensor_thread.start()
         self.latest_envelope = None
-        self.create_timer(1.0, self.snapshot)
+        self.snapshot_clock, self.snapshot_timer = create_steady_timer(
+            self, 1.0, self.snapshot
+        )
         self.replica_error, self.acked_revision = "", -1
         self.worker = None
         if p["server_url"]:
@@ -812,7 +831,7 @@ class Bridge(Node):
                 json.dumps(self.latest_envelope["snapshot"], allow_nan=False)
             )
             os.replace(temporary, self.snapshot_file)
-        if self.core.revision and time.monotonic() - last_sensor_at < 3.0:
+        if self.core.revision and sensor_input_is_fresh(last_sensor_at):
             try:
                 transform = self.tf.lookup_transform(
                     self.odom_frame, self.navigation_frame, Time()
