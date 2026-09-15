@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -67,6 +68,18 @@ std::vector<double> heightsAt(const NativePlannerGrid& grid, const std::int64_t 
   return result;
 }
 
+bool sameSurfaces(
+    const std::vector<swarmdeck_mapping::PlannerSurfaceSample>& lhs,
+    const std::vector<swarmdeck_mapping::PlannerSurfaceSample>& rhs)
+{
+  return lhs.size() == rhs.size() &&
+         std::equal(
+             lhs.begin(), lhs.end(), rhs.begin(),
+             [](const auto& left, const auto& right) {
+               return left.x == right.x && left.y == right.y && left.z == right.z;
+             });
+}
+
 std::uint32_t readU32(const std::string& bytes, const std::size_t offset)
 {
   std::uint32_t result = 0;
@@ -101,6 +114,61 @@ int main()
   require(!contains(corrected->occupied, {10, 0, 2}), "old corrected wall remained");
   require(contains(corrected->occupied, {20, 0, 2}), "corrected wall is absent");
   require(contains(grid0->occupied, {10, 0, 2}), "held planner grid was mutated");
+
+  // A full ray history must remain publishable at its work limit. Retain the
+  // nearest measured ray from old, middle and new keyframes before spending
+  // work on any keyframe's farther, individually admissible ray. Every
+  // endpoint remains occupied, and input submap order cannot change the
+  // selected free-space product.
+  const SubmapInput old_rays{
+      "old", {{0.42F, 0.01F, 0.5F}, {0.01F, 0.62F, 0.5F}}, pose(),
+      {{0.01F, 0.01F, 0.5F}}, 100, true};
+  const SubmapInput middle_rays{
+      "middle", {{5.42F, 0.01F, 0.5F}, {5.01F, 0.62F, 0.5F}}, pose(),
+      {{5.01F, 0.01F, 0.5F}}, 150, true};
+  const SubmapInput new_rays{
+      "new", {{10.42F, 0.01F, 0.5F}, {10.01F, 0.62F, 0.5F}}, pose(),
+      {{10.01F, 0.01F, 0.5F}}, 200, true};
+  const SubmapInput blocker{
+      "blocker", {{0.31F, 0.01F, 0.5F}}, pose(), {}, 150, false};
+  PlannerGridLimits selected_limits;
+  selected_limits.max_ray_steps = 6;
+  MolaSubmapBridge selected_bridge;
+  selected_bridge.replaceGeometrySnapshot(
+      {old_rays, new_rays, blocker, middle_rays}, version(0, '4'), "{}",
+      identity('4'));
+  const auto selected = buildNativePlannerGrid(
+      *selected_bridge.currentSnapshot(), selected_limits);
+  require(selected->ray_steps == 6, "selected rays did not consume the exact budget");
+  require(
+      selected->qualified_ray_keyframes == 3,
+      "bounded selection lost qualified-keyframe accounting");
+  require(
+      contains(selected->free, {0, 0, 2}) &&
+          contains(selected->free, {25, 0, 2}) &&
+          contains(selected->free, {50, 0, 2}),
+      "bounded selection starved an old, middle or new keyframe");
+  require(
+      !contains(selected->free, {0, 1, 2}) &&
+          !contains(selected->free, {25, 1, 2}) &&
+          !contains(selected->free, {50, 1, 2}),
+      "bounded selection admitted a farther ray before near-field evidence");
+  require(
+      contains(selected->occupied, {1, 0, 2}) &&
+          !contains(selected->free, {1, 0, 2}),
+      "occupied evidence did not override a selected free ray");
+  MolaSubmapBridge shuffled_bridge;
+  shuffled_bridge.replaceGeometrySnapshot(
+      {blocker, new_rays, middle_rays, old_rays}, version(0, '4'), "{}",
+      identity('4'));
+  const auto shuffled = buildNativePlannerGrid(
+      *shuffled_bridge.currentSnapshot(), selected_limits);
+  require(
+      shuffled->ray_steps == selected->ray_steps &&
+          shuffled->occupied == selected->occupied &&
+          shuffled->free == selected->free &&
+          sameSurfaces(shuffled->surfaces, selected->surfaces),
+      "bounded ray selection depends on input submap order");
 
   MolaSubmapBridge unknown_bridge;
   unknown_bridge.replaceGeometrySnapshot(
@@ -156,22 +224,48 @@ int main()
   require(!lower_heights.empty() && std::abs(lower_heights.front() + 0.35) < 1e-6,
           "down-step surface height was lost");
 
-  bool rejected = false;
-  try
-  {
-    PlannerGridLimits bounded;
-    bounded.max_ray_steps = 1;
-    (void)buildNativePlannerGrid(*snapshot0, bounded);
-  }
-  catch (const std::runtime_error& error)
-  {
-    rejected = std::string(error.what()).find("ray budget") != std::string::npos;
-  }
-  require(rejected, "ray work exceeded its bound without rejection");
+  PlannerGridLimits tiny_ray_budget;
+  tiny_ray_budget.max_ray_steps = 1;
+  const auto bounded = buildNativePlannerGrid(*snapshot0, tiny_ray_budget);
+  require(
+      bounded->ray_steps <= tiny_ray_budget.max_ray_steps &&
+          bounded->occupied == grid0->occupied &&
+          sameSurfaces(bounded->surfaces, grid0->surfaces),
+      "small ray budget rejected or discarded endpoint geometry");
+
+  const auto selection_snapshot = selected_bridge.currentSnapshot();
+  const auto rejects_with = [&selection_snapshot](
+                                const PlannerGridLimits& limits,
+                                const std::string& detail) {
+    try
+    {
+      (void)buildNativePlannerGrid(*selection_snapshot, limits);
+      return false;
+    }
+    catch (const std::runtime_error& error)
+    {
+      return std::string(error.what()).find(detail) != std::string::npos;
+    }
+  };
+  PlannerGridLimits point_bounded;
+  point_bounded.max_points = 1;
+  require(
+      rejects_with(point_bounded, "point budget"),
+      "ray selection weakened the planner point bound");
+  PlannerGridLimits voxel_bounded;
+  voxel_bounded.max_voxels = 1;
+  require(
+      rejects_with(voxel_bounded, "occupied voxel budget"),
+      "ray selection weakened the planner voxel bound");
+  PlannerGridLimits time_bounded;
+  time_bounded.max_build_s = std::numeric_limits<double>::min();
+  require(
+      rejects_with(time_bounded, "time budget"),
+      "ray selection weakened the planner build deadline");
 
   // A product export failure is a before-commit failure: the corrected MOLA
   // pose and revision must remain unmodified.
-  rejected = false;
+  bool rejected = false;
   try
   {
     unknown_bridge.applyPoseSolution(

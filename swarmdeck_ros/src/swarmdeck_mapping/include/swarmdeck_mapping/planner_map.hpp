@@ -54,6 +54,7 @@ struct PlannerGridLimits
   double resolution_m{0.2};
   std::size_t max_points{1'000'000};
   std::size_t max_voxels{2'000'000};
+  // Maximum work admitted from a deterministic, conservative subset of rays.
   std::size_t max_ray_steps{4'000'000};
   double max_build_s{8.0};
   double ray_angular_resolution_rad{0.08726646259971647};  // 5 degrees

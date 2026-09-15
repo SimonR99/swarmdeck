@@ -123,15 +123,28 @@ Turning on MOLA does not make unqualified Bistro unknown cells traversable.
 | --- | --- |
 | Voxel resolution | 0.2 m |
 | Points / combined occupied and free voxels | 1,000,000 / 2,000,000 |
-| Ray steps / angular bins | 4,000,000 / 5° |
+| Selected ray steps / initial angular bins | 4,000,000 / 5° |
 | Ray sample spacing | 0.75 × voxel resolution |
 | Build deadline | 8 s |
 | Artifact / metadata bytes | 256 MiB / 64 KiB |
 
-Ray carving and export run only when requested. Pose corrections reuse local
-point buffers but rebuild the planner grid in its corrected frame. Geometry
-replacement and retraction remove previous contributions. The deadlines and
-point/voxel limits bound work; they are not measured worst-case latency promises.
+Ray carving and export run only when requested. The builder keeps every occupied
+endpoint and exact surface sample. It orders each qualified keyframe's measured
+5-degree ray representatives by range, then admits them round-robin across
+keyframes within the ray-step budget. This preserves near-field evidence from
+old and new captures without turning cumulative, overlapping ray work into a
+publication failure. Omitted rays remain unknown; they never become inferred
+free space. Pose corrections reuse local point buffers but rebuild the planner
+grid in its corrected frame. Geometry replacement and retraction remove previous
+contributions. The deadlines and point/voxel limits bound work; they are not
+measured worst-case latency promises.
+
+The separate one-million-point limit is still a hard publication limit. A map
+whose captures each retain the configured maximum of 4,096 endpoints reaches it
+at 245 captures (the 245th exceeds the limit); turns and accepted keyframes can
+reach that count before distance alone suggests it. Long-duration qualification
+must measure this next capacity boundary rather than treating bounded ray
+selection as unbounded map growth.
 
 ## MOLA framework module
 

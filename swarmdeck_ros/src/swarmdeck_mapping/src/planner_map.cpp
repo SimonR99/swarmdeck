@@ -15,6 +15,7 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <unistd.h>
@@ -76,6 +77,20 @@ struct RayEndpoint
 {
   double distance{};
   Point3d endpoint;
+};
+
+struct RayCandidate
+{
+  AngularBin bin;
+  double distance{};
+  Point3d endpoint;
+  std::size_t additions{};
+};
+
+struct RayFrame
+{
+  Point3d origin;
+  std::vector<RayCandidate> candidates;
 };
 
 void validateLimits(const PlannerGridLimits& limits)
@@ -243,6 +258,7 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
   std::unordered_set<PlannerVoxel, VoxelHash> occupied;
   std::unordered_set<PlannerVoxel, VoxelHash> free;
   std::vector<PlannerSurfaceSample> surfaces;
+  std::vector<RayFrame> ray_frames;
   std::unordered_set<mola::KeyframePointCloudMap::KeyFrameID> seen_ids;
   std::size_t point_count = 0;
   std::size_t ray_steps = 0;
@@ -300,52 +316,109 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
               cellCoordinate(azimuth, limits.ray_angular_resolution_rad),
               cellCoordinate(elevation, limits.ray_angular_resolution_rad)};
           const auto existing = representatives.find(bin);
-          if (existing == representatives.end() || distance > existing->second.distance)
+          const auto point_order = [](const Point3d& lhs, const Point3d& rhs) {
+            return std::tie(lhs.x, lhs.y, lhs.z) < std::tie(rhs.x, rhs.y, rhs.z);
+          };
+          if (existing == representatives.end() ||
+              distance > existing->second.distance ||
+              (distance == existing->second.distance &&
+               point_order(point, existing->second.endpoint)))
             representatives[bin] = {distance, point};
         }
       }
       if ((index & 4095U) == 0) checkTime(started, limits);
     }
 
+    RayFrame frame{origin, {}};
+    frame.candidates.reserve(representatives.size());
     for (const auto& item : representatives)
     {
-      const auto& endpoint = item.second.endpoint;
       const auto steps_value = std::ceil(
           item.second.distance /
           (limits.resolution_m * limits.ray_step_fraction));
       if (!std::isfinite(steps_value))
         throw std::runtime_error("planner free-space ray exceeds step range");
-      const auto remaining_ray_steps = limits.max_ray_steps - ray_steps;
-      if (steps_value > static_cast<double>(remaining_ray_steps) + 1.0)
-        throw std::runtime_error("planner free-space ray budget exceeded");
-      const auto steps = std::max<std::size_t>(1, static_cast<std::size_t>(steps_value));
+      // A ray that cannot fit even an otherwise empty product contributes no
+      // free cells. Its measured endpoint remains occupied in the product.
+      if (steps_value > static_cast<double>(limits.max_ray_steps) + 1.0)
+        continue;
+      const auto steps =
+          std::max<std::size_t>(1, static_cast<std::size_t>(steps_value));
       const auto additions = steps - 1;
-      ray_steps += additions;
-      for (std::size_t ordinal = 1; ordinal < steps; ++ordinal)
-      {
-        const auto scale = static_cast<double>(ordinal) / static_cast<double>(steps);
-        free.emplace(voxelFor(
-            {origin.x + (endpoint.x - origin.x) * scale,
-             origin.y + (endpoint.y - origin.y) * scale,
-             origin.z + (endpoint.z - origin.z) * scale},
-            limits.resolution_m));
-        if (free.size() >
-            limits.max_voxels - std::min(limits.max_voxels, occupied.size()))
-          throw std::runtime_error("planner total voxel budget exceeded");
-        if ((ordinal & 4095U) == 0) checkTime(started, limits);
-      }
-      checkTime(started, limits);
+      frame.candidates.push_back(
+          {item.first, item.second.distance, item.second.endpoint, additions});
     }
+    std::sort(
+        frame.candidates.begin(), frame.candidates.end(),
+        [](const RayCandidate& lhs, const RayCandidate& rhs) {
+          return std::tie(
+                     lhs.additions, lhs.bin.azimuth, lhs.bin.elevation,
+                     lhs.distance, lhs.endpoint.x, lhs.endpoint.y, lhs.endpoint.z) <
+                 std::tie(
+                     rhs.additions, rhs.bin.azimuth, rhs.bin.elevation,
+                     rhs.distance, rhs.endpoint.x, rhs.endpoint.y, rhs.endpoint.z);
+        });
+    if (!frame.candidates.empty()) ray_frames.push_back(std::move(frame));
+    checkTime(started, limits);
+  }
+
+  // Every admitted ray remains original measured evidence. Fairly take the
+  // nearest remaining ray from each keyframe before taking a second one from
+  // any keyframe. Once the work allowance is full, omitted rays simply leave
+  // their cells unknown; all endpoints and exact surface heights remain in the
+  // product. This avoids making a growing but otherwise bounded map
+  // permanently unpublishable because old rays repeatedly cross the same
+  // voxels.
+  std::vector<std::size_t> active_frames(ray_frames.size());
+  for (std::size_t index = 0; index < active_frames.size(); ++index)
+    active_frames[index] = index;
+  std::vector<std::size_t> cursors(ray_frames.size(), 0);
+  std::size_t considered = 0;
+  while (!active_frames.empty() && ray_steps < limits.max_ray_steps)
+  {
+    std::vector<std::size_t> next_frames;
+    next_frames.reserve(active_frames.size());
+    for (const auto frame_index : active_frames)
+    {
+      const auto& frame = ray_frames[frame_index];
+      const auto cursor = cursors[frame_index];
+      const auto& candidate = frame.candidates[cursor];
+      const auto remaining = limits.max_ray_steps - ray_steps;
+      if (candidate.additions <= remaining)
+      {
+        ray_steps += candidate.additions;
+        const auto steps = candidate.additions + 1;
+        const auto& endpoint = candidate.endpoint;
+        const auto& origin = frame.origin;
+        for (std::size_t ordinal = 1; ordinal < steps; ++ordinal)
+        {
+          const auto scale = static_cast<double>(ordinal) / static_cast<double>(steps);
+          const auto voxel = voxelFor(
+              {origin.x + (endpoint.x - origin.x) * scale,
+               origin.y + (endpoint.y - origin.y) * scale,
+               origin.z + (endpoint.z - origin.z) * scale},
+              limits.resolution_m);
+          if (occupied.find(voxel) == occupied.end()) free.emplace(voxel);
+          if (free.size() >
+              limits.max_voxels - std::min(limits.max_voxels, occupied.size()))
+            throw std::runtime_error("planner total voxel budget exceeded");
+          if ((ordinal & 4095U) == 0) checkTime(started, limits);
+        }
+      }
+      // Candidates are ordered by cost. If this one does not fit the global
+      // remainder, no later candidate from the same frame can fit either.
+      if (candidate.additions <= remaining &&
+          ++cursors[frame_index] < frame.candidates.size())
+        next_frames.push_back(frame_index);
+      if ((++considered & 4095U) == 0) checkTime(started, limits);
+    }
+    active_frames = std::move(next_frames);
+    checkTime(started, limits);
   }
   if (point_count != snapshot.geometry_map->point_count())
     throw std::invalid_argument("MOLA keyframe provenance point count mismatch");
 
-  std::size_t erased = 0;
-  for (const auto& voxel : occupied)
-  {
-    free.erase(voxel);
-    if ((++erased & 4095U) == 0) checkTime(started, limits);
-  }
+  checkTime(started, limits);
   auto result = std::make_shared<NativePlannerGrid>();
   result->graph_version = snapshot.graph_version;
   result->identity = snapshot.identity;

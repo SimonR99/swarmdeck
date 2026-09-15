@@ -420,6 +420,8 @@ async def run(args):
         deadline = started + args.duration
         while time.monotonic() < deadline:
             await asyncio.sleep(min(args.poll, max(0.0, deadline - time.monotonic())))
+            if time.monotonic() >= deadline:
+                break
             try:
                 fleet_now = await asyncio.to_thread(
                     json_request, args.base_url, "/api/fleet", None, 1.0
