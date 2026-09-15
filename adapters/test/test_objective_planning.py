@@ -29,6 +29,10 @@ class Request:
 
 class Response:
     SUCCEEDED = 0
+    UNREACHABLE = 1
+    STALE_REVISION = 2
+    UNSUPPORTED = 3
+    BLOCKED = 4
 
 
 class Service:
@@ -204,6 +208,17 @@ def success_path():
     )
 
 
+def planning_budget_exhausted():
+    result = success_path()
+    result.status = Response.BLOCKED
+    result.reason = (
+        "primary direct: grid refinement exceeded its cooperative deadline "
+        "[grid evidence: expansions=46]"
+    )
+    result.path = []
+    return result
+
+
 def rolling_home_response(*, partial, path_x, global_path=None, indexed=True):
     return NS(
         status=RefineRouteResponse.SUCCEEDED,
@@ -254,6 +269,188 @@ def test_native_planner_rejection_reason_is_published_with_failed_state(monkeypa
     assert not planner.navigate({"x": 2, "y": 1})
     state = planner.decorate_state({"nav_status": "failed"})
     assert state["nav_failure_reason"] == response.reason
+
+
+@pytest.mark.parametrize("objective", ["navigate", "return_home"])
+def test_temporary_grid_budget_retries_without_reporting_unreachable(
+    monkeypatch, objective
+):
+    bridge, planner, client = rig(monkeypatch, planning_budget_exhausted())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 0.5
+    planner.replan_max_attempts = 2
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    successful = success_path()
+    if objective == "return_home":
+        successful.path[-1] = pose(-2, 1)
+    client.call_async.side_effect = [
+        completed(planning_budget_exhausted()),
+        completed(successful),
+    ]
+
+    target = {"x": 2, "y": 1}
+    started = (
+        planner.navigate(target)
+        if objective == "navigate"
+        else planner.return_home(target)
+    )
+    assert started
+    assert wait_until(lambda: bridge.follow_path.call_count == 1)
+    assert client.call_async.call_count == 2
+    assert bridge.nav_status == "active"
+    assert planner._blocked_retry_count == 0
+
+
+def test_repeated_grid_budget_exhaustion_is_bounded_and_reported_honestly(
+    monkeypatch,
+):
+    bridge, planner, client = rig(monkeypatch, planning_budget_exhausted())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 0.5
+    planner.replan_max_attempts = 2
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    client.call_async.side_effect = [
+        completed(planning_budget_exhausted()) for _ in range(3)
+    ]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert client.call_async.call_count == 3  # Initial request plus two retries.
+    assert bridge.follow_path.call_count == 0
+    assert planner._blocked_retry_count == 0
+    state = planner.decorate_state({"nav_status": "failed"})
+    assert (
+        "planning budget remained exhausted after 2 retries"
+        in state["nav_failure_reason"]
+    )
+    assert "unreachable" not in state["nav_failure_reason"].lower()
+
+
+def test_grid_budget_retry_stops_on_a_real_planner_rejection(monkeypatch):
+    rejected = success_path()
+    rejected.status = Response.BLOCKED
+    rejected.reason = "goal footprint has known rise 0.143m above limit 0.100m"
+    rejected.path = []
+    bridge, planner, client = rig(monkeypatch, planning_budget_exhausted())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 0.5
+    planner.replan_max_attempts = 3
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    client.call_async.side_effect = [
+        completed(planning_budget_exhausted()),
+        completed(rejected),
+    ]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert client.call_async.call_count == 2
+    assert (
+        planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+        == rejected.reason
+    )
+
+
+def test_grid_budget_retry_cannot_adopt_authority_changed_during_initial_rpc(
+    monkeypatch,
+):
+    bridge, planner, client = rig(monkeypatch, planning_budget_exhausted())
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+
+    class SwitchingFuture:
+        def done(self):
+            return True
+
+        def result(self):
+            authority[0] = correction_authority(mission_id="replacement-mission")
+            return planning_budget_exhausted()
+
+    client.call_async.side_effect = lambda _request: SwitchingFuture()
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert wait_until(lambda: planner._recovery_thread is None)
+    assert client.call_async.call_count == 1
+    bridge.follow_path.assert_not_called()
+    assert (
+        "mission or component changed"
+        in planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+    )
+
+
+def test_grid_budget_retry_accepts_same_component_authority_refresh(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, planning_budget_exhausted())
+    planner.replan_backoff_s = 0.0
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+
+    class CorrectingFuture:
+        def done(self):
+            return True
+
+        def result(self):
+            authority[0] = correction_authority(revision=2, x=0.1)
+            return success_path()
+
+    client.call_async.side_effect = [
+        completed(planning_budget_exhausted()),
+        CorrectingFuture(),
+        completed(success_path()),
+    ]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.follow_path.call_count == 1)
+    assert client.call_async.call_count == 3
+    assert bridge.nav_status == "active"
+    assert planner._blocked_retry_count == 0
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        (Response.UNREACHABLE, "grid refinement exceeded its cooperative deadline"),
+        (Response.BLOCKED, "grid refinement exceeded a time budget"),
+    ],
+)
+def test_planning_budget_retry_requires_blocked_status_and_exact_native_reason(
+    monkeypatch, status, reason
+):
+    response = success_path()
+    response.status = status
+    response.reason = reason
+    response.path = []
+    bridge, planner, client = rig(monkeypatch, response)
+
+    assert not planner.navigate({"x": 2, "y": 1})
+    assert bridge.nav_status == "failed"
+    assert client.call_async.call_count == 1
+
+
+def test_stop_wins_while_grid_budget_retry_is_in_flight(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, planning_budget_exhausted())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 0.5
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    pending = Future()
+    client.call_async.side_effect = [
+        completed(planning_budget_exhausted()),
+        pending,
+    ]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: client.call_async.call_count == 2)
+    bridge.cancel_goal()
+    pending.set_result(success_path())
+
+    assert wait_until(lambda: planner._recovery_thread is None)
+    assert bridge.nav_status == "cancelled"
+    bridge.follow_path.assert_not_called()
+    assert planner._blocked_retry_count == 0
 
 
 def test_controller_failure_reason_is_preserved_when_planner_has_none(monkeypatch):

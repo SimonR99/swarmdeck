@@ -15,6 +15,7 @@ from autonomy.live_mapping import navigation_goal, solution_order
 
 MAX_NAV_FAILURE_REASON_LENGTH = 512
 FULL_ROUTE_ENDPOINT_TOLERANCE_M = 0.001
+GRID_REFINEMENT_DEADLINE_REASON = "grid refinement exceeded its cooperative deadline"
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class MggObjectivePlanning:
         self._recovery_generation = None
         self._recovery_binding = None
         self._recovery_deadline = None
+        self._recovery_mode = None
         self._recovery_thread = None
         self._authority_timer = bridge.node.create_timer(
             max(0.05, float(config.get("authority_check_period_s", 0.1))),
@@ -184,6 +186,19 @@ class MggObjectivePlanning:
         )
         if outcome == "submitted":
             return True
+        if outcome == "temporary":
+            try:
+                binding = self._authority_binding(authority)
+            except ValueError:
+                binding = None
+            if binding is not None and self._start_recovery(
+                generation,
+                intent,
+                cancel_route=False,
+                binding=binding,
+                mode="planning_budget",
+            ):
+                return True
         if outcome == "authority_changed" and intent is not None:
             if self._start_recovery(generation, intent, cancel_route=False):
                 return True
@@ -222,6 +237,7 @@ class MggObjectivePlanning:
             self._recovery_generation = None
             self._recovery_binding = None
             self._recovery_deadline = None
+            self._recovery_mode = None
         if not self.bridge.set_goal_pending_if_current(generation):
             self._retire_initial_claim(generation)
             return ObjectivePlanClaim(objective, copied_goal, generation)
@@ -241,12 +257,37 @@ class MggObjectivePlanning:
                 self._retire_initial_claim(claim.generation)
             return result
         goal = claim.goal if isinstance(claim.goal, dict) else {}
+        raw_authority = self._raw_authority()
+        authority = (
+            self._authority_from_raw(raw_authority)
+            if isinstance(raw_authority, dict)
+            else None
+        )
+        try:
+            binding = self._authority_binding(authority)
+        except ValueError:
+            binding = None
+        planning_authority = (
+            {"authority": authority, "raw_authority": raw_authority}
+            if isinstance(authority, dict)
+            else {}
+        )
         outcome, message, generation = self._plan_once(
             claim.objective,
             goal,
             expected_generation=claim.generation,
             enforce_goal_solution_order=True,
+            **planning_authority,
         )
+        if outcome == "temporary":
+            if binding is not None and self._start_recovery(
+                generation,
+                None,
+                cancel_route=False,
+                binding=binding,
+                mode="planning_budget",
+            ):
+                return True
         if outcome == "authority_changed":
             if self._start_recovery(generation, None, cancel_route=False):
                 return True
@@ -1113,6 +1154,7 @@ class MggObjectivePlanning:
         goal: dict,
         *,
         authority=None,
+        raw_authority=None,
         expected_generation: int | None = None,
         home_intent=None,
         overall_deadline: float | None = None,
@@ -1137,6 +1179,7 @@ class MggObjectivePlanning:
                 self._clear_rolling_locked()
                 self._recovery_generation = None
                 self._recovery_deadline = None
+                self._recovery_mode = None
             generation = self.bridge.cancel_goal()
             if not self.bridge.set_goal_pending_if_current(generation):
                 return "superseded", "", generation
@@ -1169,7 +1212,6 @@ class MggObjectivePlanning:
             return "superseded", "", generation
 
         request = self.service_type.Request()
-        raw_authority = None
         if not isinstance(authority, dict):
             raw_authority = self._raw_authority()
             if isinstance(raw_authority, dict):
@@ -1255,9 +1297,17 @@ class MggObjectivePlanning:
         except Exception as exc:
             return "failed", f"MGG objective request failed: {exc}", generation
         if response.status != self.service_type.Response.SUCCEEDED:
+            reason = response.reason or f"MGG planning status {response.status}"
+            blocked = getattr(self.service_type.Response, "BLOCKED", None)
+            if (
+                blocked is not None
+                and response.status == blocked
+                and GRID_REFINEMENT_DEADLINE_REASON in reason
+            ):
+                return "temporary", reason, generation
             return (
                 "failed",
-                response.reason or f"MGG planning status {response.status}",
+                reason,
                 generation,
             )
         if response.component_id != request.component_id:
@@ -1431,6 +1481,7 @@ class MggObjectivePlanning:
             self._initial_claim_generation = None
             self._recovery_generation = None
             self._recovery_deadline = None
+            self._recovery_mode = None
             self._home_intent = home_intent
             self._indexed_map_validated = indexed_map_validated
             self._rolling_route_id = route_id if partial else None
@@ -1879,7 +1930,13 @@ class MggObjectivePlanning:
             return False
 
     def _start_recovery(
-        self, generation, home_intent, *, cancel_route, binding=None
+        self,
+        generation,
+        home_intent,
+        *,
+        cancel_route,
+        binding=None,
+        mode="general",
     ) -> bool:
         if cancel_route:
             generation = self.bridge.cancel_goal_if_current(generation, pending=True)
@@ -1897,6 +1954,7 @@ class MggObjectivePlanning:
             self._recovery_generation = generation
             self._recovery_binding = binding
             self._recovery_deadline = deadline
+            self._recovery_mode = mode
             if self._recovery_thread is not None:
                 return True
             worker = threading.Thread(
@@ -1911,6 +1969,7 @@ class MggObjectivePlanning:
                 self._recovery_thread = None
                 self._recovery_generation = None
                 self._recovery_deadline = None
+                self._recovery_mode = None
                 self._home_intent = None
                 raise
         return True
@@ -1923,12 +1982,13 @@ class MggObjectivePlanning:
                 objective = self._objective_kind
                 deadline = self._recovery_deadline
                 binding = self._recovery_binding
+                mode = self._recovery_mode
                 if generation is None or objective is None or deadline is None:
                     self._recovery_thread = None
                     return
             try:
                 self._recover_objective(
-                    generation, objective, home_intent, deadline, binding
+                    generation, objective, home_intent, deadline, binding, mode
                 )
             except Exception as exc:
                 self._finish_recovery_failure(
@@ -1936,9 +1996,16 @@ class MggObjectivePlanning:
                 )
 
     def _recover_objective(
-        self, generation, objective, home_intent, deadline, binding=None
+        self,
+        generation,
+        objective,
+        home_intent,
+        deadline,
+        binding=None,
+        mode="general",
     ) -> None:
         last_error = "no fresh map authority was available"
+        last_outcome = None
         attempts = 0
         if not self.bridge.wait_goal_quiet(generation, deadline):
             if self._owns_recovery(generation, home_intent):
@@ -2017,6 +2084,7 @@ class MggObjectivePlanning:
                 home_intent=home_intent,
                 overall_deadline=deadline,
             )
+            last_outcome = outcome
             if outcome == "submitted":
                 return
             if outcome == "superseded":
@@ -2025,13 +2093,26 @@ class MggObjectivePlanning:
             if outcome == "terminal":
                 self._finish_recovery_failure(generation, last_error)
                 return
+            if mode == "planning_budget" and outcome not in {
+                "temporary",
+                "authority_changed",
+            }:
+                self._finish_recovery_failure(generation, last_error)
+                return
             if not self.bridge.set_goal_pending_if_current(generation):
                 self._clear_recovery(generation, home_intent)
                 return
-        self._finish_recovery_failure(
-            generation,
-            f"MGG objective recovery exhausted after {attempts} attempts: {last_error}",
-        )
+        if last_outcome == "temporary":
+            message = (
+                f"MGG planning budget remained exhausted after {attempts} retries: "
+                f"{last_error}"
+            )
+        else:
+            message = (
+                f"MGG objective recovery exhausted after {attempts} attempts: "
+                f"{last_error}"
+            )
+        self._finish_recovery_failure(generation, message)
 
     def _wait_for_recovery(self, generation, home_intent, deadline) -> bool:
         wake_at = min(deadline, time.monotonic() + self.replan_backoff_s)
@@ -2047,6 +2128,7 @@ class MggObjectivePlanning:
                 return
             self._recovery_generation = None
             self._recovery_deadline = None
+            self._recovery_mode = None
             self._initial_claim_generation = None
             self._home_intent = None
             self._objective_kind = None
@@ -2063,6 +2145,7 @@ class MggObjectivePlanning:
             ):
                 self._recovery_generation = None
                 self._recovery_deadline = None
+                self._recovery_mode = None
                 self._initial_claim_generation = None
                 self._home_intent = None
                 self._objective_kind = None
@@ -2081,6 +2164,7 @@ class MggObjectivePlanning:
                     self._initial_claim_generation = None
                     self._recovery_generation = None
                     self._recovery_deadline = None
+                    self._recovery_mode = None
                     self._home_intent = None
                     self._objective_kind = None
                     self._objective_goal = None
