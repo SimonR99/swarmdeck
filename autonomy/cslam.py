@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import os
+from pathlib import Path
 import numpy as np
 
 from .capture_providers import CaptureProvenance, CaptureProvider, capture_provider
@@ -43,6 +45,22 @@ def pose_matrix(pose):
     return validate_se3(T)
 
 
+def publish_snapshot_if_new(
+    path: Path,
+    snapshot: dict,
+    graph_revision: int,
+    published_graph_revision: int,
+) -> int:
+    """Atomically publish a snapshot only when its map graph has advanced."""
+
+    if graph_revision == published_graph_revision:
+        return published_graph_revision
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(snapshot, allow_nan=False))
+    os.replace(temporary, path)
+    return graph_revision
+
+
 class CslamMapper:
     """Apply own captures and causally ordered, anchored optimizer results."""
 
@@ -64,9 +82,11 @@ class CslamMapper:
         self.T_component_local = np.eye(4)
         self.solution_order = (0, -1)
         self.revision = 0
+        self.replica_revision = 0
         self.correction_revision = 0
         self.epoch = 0
         self._envelope = None
+        self._envelope_map_revision = -1
 
     def key(self, seq):
         return KeyframeId(self.robot_id, self.mission_id, seq)
@@ -182,9 +202,10 @@ class CslamMapper:
         self.solution_order = order
         if not changed:
             # Accepted solver clocks are causal map state even when the poses
-            # are numerically unchanged. Publish a new graph revision so the
-            # replica envelope can advance without conflicting at one revision.
-            self._apply()
+            # are numerically unchanged. Advance the replica publication
+            # without manufacturing a new graph revision and forcing MOLA to
+            # rebuild an identical pose product.
+            self.replica_revision += 1
             return False
         if anchor != self.anchor:
             self.epoch += 1
@@ -196,6 +217,7 @@ class CslamMapper:
 
     def _apply(self):
         self.revision += 1
+        self.replica_revision += 1
         revision = ComponentRevision(
             component_id_for_anchor(self.anchor), self.epoch, self.revision
         )
@@ -204,22 +226,28 @@ class CslamMapper:
         )
 
     def envelope(self):
-        if self._envelope and self._envelope["revision"] == self.revision:
+        if self._envelope and self._envelope["revision"] == self.replica_revision:
             return self._envelope
-        snapshot = self.mapper.snapshot_dict()
-        chunks = {
-            c["sha256"]: {"sha256": c["sha256"], "size": c["size_bytes"]}
-            for m in snapshot["manifests"]
-            for c in m["chunks"]
-        }
+        if self._envelope is not None and self._envelope_map_revision == self.revision:
+            snapshot = self._envelope["snapshot"]
+            chunk_declarations = self._envelope["chunks"]
+        else:
+            snapshot = self.mapper.snapshot_dict()
+            chunks = {
+                c["sha256"]: {"sha256": c["sha256"], "size": c["size_bytes"]}
+                for m in snapshot["manifests"]
+                for c in m["chunks"]
+            }
+            chunk_declarations = list(chunks.values())
         self._envelope = {
             "version": 1,
             "robot_id": self.robot_id,
             "session_id": self.mission_id,
-            "revision": self.revision,
+            "revision": self.replica_revision,
             "solution_order": list(self.solution_order),
             "component_id": component_id_for_anchor(self.anchor),
-            "chunks": list(chunks.values()),
+            "chunks": chunk_declarations,
             "snapshot": snapshot,
         }
+        self._envelope_map_revision = self.revision
         return self._envelope

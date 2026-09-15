@@ -1,10 +1,11 @@
 from types import SimpleNamespace as NS
+import json
 import uuid
 import numpy as np
 import pytest
 from autonomy.capture_providers import CaptureClock, CaptureGeometry, CaptureProvenance
 from autonomy.contracts import DeskewStatus, IDENTITY_SE3, RayReturnSemantics
-from autonomy.cslam import CslamMapper
+from autonomy.cslam import CslamMapper, publish_snapshot_if_new
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaStore, canonical
 
@@ -88,7 +89,7 @@ def test_normalized_points_keep_physical_lidar_origin(tmp_path):
     assert submap.sensor_origins == ((0, 0, 1.2),)
 
 
-def test_identical_new_solver_result_advances_replica_and_graph_revision(tmp_path):
+def test_identical_new_solver_result_advances_replica_without_map_revision(tmp_path):
     core = CslamMapper(
         CorrectionAwareMapper(SubmapStore(tmp_path)),
         "r0",
@@ -108,6 +109,8 @@ def test_identical_new_solver_result_advances_replica_and_graph_revision(tmp_pat
     )
     revision = core.revision
     initial = core.envelope()
+    replica_revision = initial["revision"]
+    snapshot_id = initial["snapshot"]["snapshot_id"]
     geometry_revision = initial["snapshot"]["manifests"][0]["geometry_revision"]
     replica = ReplicaStore(tmp_path / "replica")
     for chunk in initial["chunks"]:
@@ -115,21 +118,57 @@ def test_identical_new_solver_result_advances_replica_and_graph_revision(tmp_pat
     assert replica.publish(initial)
     assert not core.solution(msg)
     assert core.solution_order == (1, 0)
-    assert core.revision == revision + 1
+    assert core.revision == revision
     assert core.correction_revision == 0
     envelope = core.envelope()
     assert envelope["solution_order"] == [1, 0]
-    assert envelope["revision"] == revision + 1
+    assert envelope["revision"] == replica_revision + 1
+    assert envelope["snapshot"] == initial["snapshot"]
+    assert envelope["snapshot"]["snapshot_id"] == snapshot_id
+    assert (
+        envelope["snapshot"]["manifests"][0]["graph_revision"]["revision"] == revision
+    )
     assert (
         envelope["snapshot"]["manifests"][0]["geometry_revision"] == geometry_revision
     )
     assert replica.publish(envelope)
+
     msg.solution_clock = 2
+    assert not core.solution(msg)
+    second_noop = core.envelope()
+    assert core.revision == revision
+    assert second_noop["revision"] == replica_revision + 2
+    assert second_noop["snapshot"] == initial["snapshot"]
+    assert replica.publish(second_noop)
+
+    msg.solution_clock = 3
     msg.estimates = [value(0, 0, 1)]
     msg.anchor_estimates = [value(0, 0, 1)]
     assert core.solution(msg)
+    assert core.revision == revision + 1
+    assert core.envelope()["revision"] == replica_revision + 3
     assert core.correction_revision == 1
     replica.close()
+
+
+def test_snapshot_publication_ignores_replica_only_updates(tmp_path):
+    path = tmp_path / "snapshot.json"
+    first = {"snapshot_id": "first", "manifests": [{"revision": 1}]}
+    published = publish_snapshot_if_new(path, first, 1, -1)
+    identity = path.stat().st_ino
+
+    replica_only = {"snapshot_id": "replica-only", "manifests": []}
+    published = publish_snapshot_if_new(path, replica_only, 1, published)
+
+    assert published == 1
+    assert path.stat().st_ino == identity
+    assert json.loads(path.read_text()) == first
+
+    second = {"snapshot_id": "second", "manifests": [{"revision": 2}]}
+    published = publish_snapshot_if_new(path, second, 2, published)
+    assert published == 2
+    assert path.stat().st_ino != identity
+    assert json.loads(path.read_text()) == second
 
 
 def test_selected_provider_does_not_bless_a_cslam_keyframe_cloud(tmp_path):

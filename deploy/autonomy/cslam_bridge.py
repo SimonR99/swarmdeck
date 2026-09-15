@@ -50,7 +50,7 @@ from autonomy.capture_color import (
     select_geometry_and_color,
     select_rgbd_observation,
 )
-from autonomy.cslam import CslamMapper, pose_matrix
+from autonomy.cslam import CslamMapper, pose_matrix, publish_snapshot_if_new
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaClient
 
@@ -314,6 +314,7 @@ class Bridge(Node):
         self.snapshot_file = root / "snapshot.json"
         self.graph_solution_file = root / "graph_solution.json"
         self.graph_solution_revision = -1
+        self.snapshot_file_revision = -1
 
     def _color_image(self, message):
         accepted = self._remember_color_frame(self.color_images, message, "color")
@@ -823,14 +824,16 @@ class Bridge(Node):
             self.graph_solution_revision = self.core.revision
         if self.core.revision and (
             self.latest_envelope is None
-            or self.latest_envelope["revision"] != self.core.revision
+            or self.latest_envelope["revision"] != self.core.replica_revision
         ):
             self.latest_envelope = self.core.envelope()
-            temporary = self.snapshot_file.with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps(self.latest_envelope["snapshot"], allow_nan=False)
+        if self.core.revision:
+            self.snapshot_file_revision = publish_snapshot_if_new(
+                self.snapshot_file,
+                self.latest_envelope["snapshot"],
+                self.core.revision,
+                self.snapshot_file_revision,
             )
-            os.replace(temporary, self.snapshot_file)
         if self.core.revision and sensor_input_is_fresh(last_sensor_at):
             try:
                 transform = self.tf.lookup_transform(
@@ -942,7 +945,11 @@ class Bridge(Node):
             "inter_robot_closures_by_peer": dict(sorted(self.closures_by_peer.items())),
             "corrections_applied": self.solution_count,
             "last_solution_order": list(self.core.solution_order),
-            "revision": self.core.revision,
+            # `revision` remains the replica publication sequence so it stays
+            # comparable with `replicated_revision`. Map consumers use the
+            # independent graph revision carried by the snapshot authority.
+            "revision": self.core.replica_revision,
+            "mapping_graph_revision": self.core.revision,
             "replicated_revision": self.acked_revision,
             "replication_error": self.replica_error,
             "dropped_pairs": self.dropped,
