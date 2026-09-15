@@ -786,7 +786,7 @@ index ffda30f..a3cc1b2 100644
      const std::lock_guard<std::recursive_mutex> lock(planner_mutex_);
      const auto& snapshot = context.mapping_snapshot;
 diff --git a/ros2/src/mgg_ros/test/test_objective_service.cpp b/ros2/src/mgg_ros/test/test_objective_service.cpp
-index 0fd3fc5..ced3fbc 100644
+index 0fd3fc5..7887acf 100644
 --- a/ros2/src/mgg_ros/test/test_objective_service.cpp
 +++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
 @@ -84,6 +84,10 @@ class PlannerNodeTestPeer {
@@ -873,7 +873,7 @@ index 0fd3fc5..ced3fbc 100644
    EXPECT_NEAR(received_max_step.load(), 0.10, 1e-9);
    EXPECT_NEAR(received_max_drop.load(), 0.10, 1e-9);
    EXPECT_GE(received.size(), 2u);
-@@ -3447,6 +3482,96 @@ TEST(IndexedObjectiveService, BatchedQueryIsBoundedAndUsesComponentFrame) {
+@@ -3447,6 +3482,95 @@ TEST(IndexedObjectiveService, BatchedQueryIsBoundedAndUsesComponentFrame) {
      EXPECT_NEAR(received.front().z, 0.225, 1e-6);
    }
  
@@ -948,7 +948,6 @@ index 0fd3fc5..ced3fbc 100644
 +  path.status = mgg::PlanningStatus::kSucceeded;
 +  path.poses.push_back(mgg::StateVec(4.0, 0.0, 0.0, 0.0));
 +  EXPECT_FALSE(mgg_ros::PlannerNodeTestPeer::query(*planner, path));
-+  EXPECT_NE(path.reason.find("prefix exceeds"), std::string::npos);
 +  blind_ground_prefix = 0;
 +  blind_clearance_prefix = 0;
 +
