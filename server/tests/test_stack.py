@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import math
 import zlib
 
@@ -2383,15 +2384,7 @@ def test_clearing_proposals_and_deleting_all_via_websocket(tmp_path, monkeypatch
 
 
 def test_broadcast_survives_a_dashboard_closing_mid_send():
-    """A GUI socket closing during a broadcast must not break the fleet.
-
-    `broadcast` yields on every send. Iterating the live `_gui_clients` set
-    meant a dashboard connecting or closing in that window raised RuntimeError
-    out of broadcast() into its caller — and one of those callers is the
-    adapter `hello` handler, which broadcasts `fleet_change`. The result was
-    "dropped a malformed hello" and robots unable to register at all, observed
-    fleet-wide on 2026-08-13 with the network perfectly healthy.
-    """
+    """A GUI socket closing during fan-out must not interrupt fleet updates."""
     from swarmdeck_server.api.app import _gui_clients, broadcast
 
     class Client:
@@ -2399,8 +2392,8 @@ def test_broadcast_survives_a_dashboard_closing_mid_send():
             self.sent = []
             self._on_send = on_send
 
-        async def send_json(self, msg):
-            self.sent.append(msg)
+        async def send_text(self, text):
+            self.sent.append(json.loads(text))
             if self._on_send:
                 self._on_send()
 

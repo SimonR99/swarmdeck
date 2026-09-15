@@ -45,9 +45,9 @@ function payload() {
 test('live telemetry validates frame identity and transforms navigation data into component coordinates', () => {
   const frame = parseLiveReplicaFrame(payload());
   const robot = liveRobotToMapRobot(frame.robots[0], undefined);
-  assert.deepEqual(robot.pose, { x: 8, y: 21, yaw: Math.PI / 2 });
-  assert.deepEqual(robot.goal, { x: 8, y: 22 });
-  assert.deepEqual(robot.global_planned_path, [{ x: 8, y: 21 }, { x: 8, y: 23 }]);
+  assert.deepEqual(robot.pose, { x: 8, y: 21, z: 1, yaw: Math.PI / 2 });
+  assert.deepEqual(robot.goal, { x: 8, y: 22, z: 1 });
+  assert.deepEqual(robot.global_planned_path, [{ x: 8, y: 21, z: 1 }, { x: 8, y: 23, z: 1 }]);
   assert.equal(robot.nav_status, 'active');
 });
 
@@ -58,7 +58,7 @@ test('stale goal and paths are suppressed while pose freshness remains independe
   const robot = liveRobotToMapRobot(frame.robots[0], undefined, 0.01);
   assert.equal(robot.goal, null);
   assert.deepEqual(robot.planned_path, []);
-  assert.deepEqual(robot.pose, { x: 8, y: 21, yaw: Math.PI / 2 });
+  assert.deepEqual(robot.pose, { x: 8, y: 21, z: 1, yaw: Math.PI / 2 });
 });
 
 test('reuses projected geometry while freshness changes independently', () => {

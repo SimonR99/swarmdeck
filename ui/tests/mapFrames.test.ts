@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloudToWorld, decalPose } from '../src/lib/components/map3d/mapFrames.ts';
+import {
+  cloudToWorld,
+  decalPose,
+  routePositions
+} from '../src/lib/components/map3d/mapFrames.ts';
 import {
   hasQualifiedRasterFrame,
   projectRobotToRaster,
@@ -23,6 +27,28 @@ test('local robot cloud and costmap land in the same rotated world frame', () =>
   assert.equal(pose.x, points[0]); assert.equal(pose.y, points[1]);
   assert.equal(pose.yaw, Math.PI / 2);
   assert.equal(pose.width, 2); assert.equal(pose.height, 4);
+});
+
+test('3D routes preserve map-frame height and only infer absent legacy Z', () => {
+  const calls: [number, number][] = [];
+  const positions = routePositions([
+    { x: 1, y: 2, z: -0.4 },
+    { x: 3, y: 4 },
+    { x: 5, y: 6, z: 1.75 }
+  ], (x, y) => {
+    calls.push([x, y]);
+    return 0.25;
+  });
+  assert.deepEqual(positions, [1, 2, -0.4, 3, 4, 0.25, 5, 6, 1.75]);
+  assert.deepEqual(calls, [[3, 4]]);
+});
+
+test('3D route display sampling remains bounded and retains both endpoints', () => {
+  const path = Array.from({ length: 5000 }, (_, x) => ({ x, y: x * 2, z: x / 10 }));
+  const positions = routePositions(path);
+  assert.equal(positions.length, 1024 * 3);
+  assert.deepEqual(positions.slice(0, 3), [0, 0, 0]);
+  assert.deepEqual(positions.slice(-3), [4999, 9998, 499.9]);
 });
 
 function packet(source: Pose, rawPose: Pose): RobotState {

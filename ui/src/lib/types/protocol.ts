@@ -31,12 +31,16 @@ export type AlertLevel = 'info' | 'warn' | 'critical';
 export interface Pose {
   x: number;
   y: number;
+  /** Metres in the declared map frame when the producer has 3D authority. */
+  z?: number;
   yaw: number;
 }
 
 export interface Point {
   x: number;
   y: number;
+  /** Metres in the declared map frame; omitted by planar/legacy producers. */
+  z?: number;
 }
 
 /** Chassis polygon in the robot's base frame, x forward / y left. */

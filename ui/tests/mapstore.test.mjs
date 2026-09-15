@@ -4,6 +4,7 @@ import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { deflateSync } from 'node:zlib';
 import { build, transform } from 'esbuild';
 import { compileModule } from 'svelte/compiler';
 
@@ -31,14 +32,96 @@ try {
 } finally {
   await rm(directory, { recursive: true });
 }
-const context = {
-  clearRect() {}, drawImage() {}, fillRect() {},
-  getImageData: () => ({ data: new Uint8ClampedArray(16) })
-};
-globalThis.document = { createElement: () => ({ width: 2, height: 2, getContext: () => context }) };
+class TestCanvasContext {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.fillStyle = 'rgb(0,0,0)';
+  }
+
+  clearRect(x, y, width, height) {
+    this.#paint(x, y, width, height, [0, 0, 0, 0]);
+  }
+
+  fillRect(x, y, width, height) {
+    const values = this.fillStyle.match(/\d+/g)?.map(Number) ?? [0, 0, 0];
+    this.#paint(x, y, width, height, [...values.slice(0, 3), 255]);
+  }
+
+  putImageData(image, dx, dy) {
+    this.#copy(image.data, image.width, image.height, dx, dy);
+  }
+
+  drawImage(source, dx, dy) {
+    if (source instanceof TestCanvas) {
+      this.#copy(source.pixels, source.width, source.height, dx, dy);
+    }
+  }
+
+  getImageData(x, y, width, height) {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let row = 0; row < height; row++) {
+      for (let column = 0; column < width; column++) {
+        const sx = x + column;
+        const sy = y + row;
+        if (sx < 0 || sy < 0 || sx >= this.canvas.width || sy >= this.canvas.height) continue;
+        const source = (sy * this.canvas.width + sx) * 4;
+        data.set(this.canvas.pixels.subarray(source, source + 4), (row * width + column) * 4);
+      }
+    }
+    return { data };
+  }
+
+  #paint(x, y, width, height, rgba) {
+    const data = new Uint8ClampedArray(width * height * 4);
+    for (let index = 0; index < width * height; index++) data.set(rgba, index * 4);
+    this.#copy(data, width, height, x, y);
+  }
+
+  #copy(source, width, height, dx, dy) {
+    for (let row = 0; row < height; row++) {
+      for (let column = 0; column < width; column++) {
+        const tx = dx + column;
+        const ty = dy + row;
+        if (tx < 0 || ty < 0 || tx >= this.canvas.width || ty >= this.canvas.height) continue;
+        const input = (row * width + column) * 4;
+        const output = (ty * this.canvas.width + tx) * 4;
+        this.canvas.pixels.set(source.subarray(input, input + 4), output);
+      }
+    }
+  }
+}
+
+class TestCanvas {
+  constructor() {
+    this._width = 2;
+    this._height = 2;
+    this.pixels = new Uint8ClampedArray(2 * 2 * 4);
+    this.context = new TestCanvasContext(this);
+  }
+
+  get width() { return this._width; }
+  set width(value) { this._width = value; this.#resize(); }
+  get height() { return this._height; }
+  set height(value) { this._height = value; this.#resize(); }
+  getContext() { return this.context; }
+  #resize() { this.pixels = new Uint8ClampedArray(this._width * this._height * 4); }
+}
+
+globalThis.document = { createElement: () => new TestCanvas() };
 globalThis.createImageBitmap = async () => ({ close() {} });
+globalThis.ImageData = class {
+  constructor(width, height) {
+    this.width = width;
+    this.height = height;
+    this.data = new Uint8ClampedArray(width * height * 4);
+  }
+};
 const info = { width: 2, height: 2, resolution: 0.1, origin: { x: 0, y: 0 }, seq: 1 };
 const scope = { ...info, scope: 'robot:r1', robots: ['r1'] };
+const UNKNOWN = [214, 218, 224, 255];
+const FREE = [255, 255, 255, 255];
+const OCCUPIED = [52, 58, 68, 255];
+const pixel = (canvas, x, y) => Array.from(canvas.getContext('2d').getImageData(x, y, 1, 1).data);
 const deferred = () => {
   let resolve;
   const promise = new Promise(r => { resolve = r; });
@@ -146,3 +229,90 @@ for (const local of [true, false]) {
     assert.equal(mapStore.canvas.height, latest.height);
   });
 }
+
+test('an expanding live patch keeps the transform captured with its pixels', () => {
+  mapStore.reset();
+  mapStore.setFull({
+    ...info,
+    transforms: { r1: { x: 1, y: 2, yaw: 0 } }
+  }, new Int8Array([100, 0, -1, 100]));
+  const transforms = { r1: { x: 8, y: -3, yaw: 0.5 } };
+  const data = deflateSync(new Int8Array([0])).toString('base64');
+  mapStore.applyGlobalPatch({
+    type: 'map_patch', seq: 2, resolution: 0.1,
+    origin: { x: -0.1, y: -0.1 }, width: 3, height: 3,
+    x0: 0, y0: 0, w: 1, h: 1, data, transforms
+  });
+  assert.deepEqual(mapStore.info.transforms, transforms);
+  assert.equal(mapStore.info.seq, 2);
+  assert.deepEqual(pixel(mapStore.canvas, 0, 2), FREE);
+  assert.deepEqual(pixel(mapStore.canvas, 1, 0), UNKNOWN);
+  assert.deepEqual(pixel(mapStore.canvas, 2, 0), OCCUPIED);
+  assert.deepEqual(pixel(mapStore.canvas, 1, 1), OCCUPIED);
+  assert.deepEqual(pixel(mapStore.canvas, 2, 1), FREE);
+});
+
+test('an older patch cannot regress pixels or their transform, while a duplicate can repaint', () => {
+  mapStore.reset();
+  mapStore.setFull({ ...info, seq: 5 }, new Int8Array(4));
+  const currentTransforms = { r1: { x: 5, y: 6, yaw: 0.2 } };
+  mapStore.applyGlobalPatch({
+    type: 'map_patch', seq: 6, resolution: 0.1, origin: info.origin,
+    width: 2, height: 2, x0: 0, y0: 0, w: 1, h: 1,
+    data: deflateSync(new Int8Array([100])).toString('base64'),
+    transforms: currentTransforms
+  });
+  const revision = mapStore.revision;
+  assert.deepEqual(pixel(mapStore.canvas, 0, 1), OCCUPIED);
+
+  mapStore.applyGlobalPatch({
+    type: 'map_patch', seq: 5, resolution: 0.1, origin: info.origin,
+    width: 2, height: 2, x0: 0, y0: 0, w: 1, h: 1,
+    data: deflateSync(new Int8Array([0])).toString('base64'),
+    transforms: { r1: { x: -8, y: -9, yaw: -0.5 } }
+  });
+  assert.equal(mapStore.revision, revision);
+  assert.equal(mapStore.seq, 6);
+  assert.equal(mapStore.info.seq, 6);
+  assert.deepEqual(mapStore.info.transforms, currentTransforms);
+  assert.deepEqual(pixel(mapStore.canvas, 0, 1), OCCUPIED);
+
+  mapStore.applyGlobalPatch({
+    type: 'map_patch', seq: 6, resolution: 0.1, origin: info.origin,
+    width: 2, height: 2, x0: 0, y0: 0, w: 1, h: 1,
+    data: deflateSync(new Int8Array([0])).toString('base64'),
+    transforms: currentTransforms
+  });
+  assert.deepEqual(pixel(mapStore.canvas, 0, 1), FREE);
+});
+
+test('malformed patches leave sequence, metadata, dimensions, and pixels unchanged', (t) => {
+  mapStore.reset();
+  const transforms = { r1: { x: 1, y: 2, yaw: 0 } };
+  mapStore.setFull({ ...info, seq: 3, transforms }, new Int8Array([100, 0, -1, 100]));
+  t.mock.method(console, 'warn', () => {});
+  const canvas = mapStore.canvas;
+  const before = Array.from(canvas.pixels);
+  const revision = mapStore.revision;
+
+  for (const data of [
+    'not-valid-zlib',
+    deflateSync(new Int8Array([0])).toString('base64')
+  ]) {
+    mapStore.applyGlobalPatch({
+      type: 'map_patch', seq: 4, resolution: 0.1,
+      origin: { x: -0.1, y: -0.1 }, width: 3, height: 3,
+      x0: 0, y0: 0, w: 2, h: 2, data,
+      transforms: { r1: { x: 9, y: 9, yaw: 1 } }
+    });
+  }
+
+  assert.equal(mapStore.canvas, canvas);
+  assert.equal(canvas.width, 2);
+  assert.equal(canvas.height, 2);
+  assert.equal(mapStore.seq, 3);
+  assert.equal(mapStore.info.seq, 3);
+  assert.equal(mapStore.revision, revision);
+  assert.deepEqual(mapStore.info.transforms, transforms);
+  assert.deepEqual(Array.from(canvas.pixels), before);
+});

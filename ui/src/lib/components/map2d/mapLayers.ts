@@ -27,13 +27,13 @@ export type ScreenOf = (gx: number, gy: number) => ScreenPoint;
 export interface MapRobot {
   robot_id: string;
   robot_type?: string;
-  pose: { x: number; y: number; yaw: number };
-  planned_path?: { x: number; y: number }[];
-  global_planned_path?: { x: number; y: number }[];
-  local_planned_path?: { x: number; y: number }[];
+  pose: { x: number; y: number; z?: number; yaw: number };
+  planned_path?: { x: number; y: number; z?: number }[];
+  global_planned_path?: { x: number; y: number; z?: number }[];
+  local_planned_path?: { x: number; y: number; z?: number }[];
   footprint_radius?: number;
   footprint?: Footprint | null;
-  goal?: { x: number; y: number } | null;
+  goal?: { x: number; y: number; z?: number } | null;
   nav_status?: RobotState['nav_status'];
   mode?: RobotState['mode'];
 }

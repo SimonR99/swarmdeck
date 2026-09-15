@@ -258,10 +258,10 @@ interface ProjectedLiveRobotGeometry {
   transform: number[][];
   pose: LiveReplicaPoint;
   poseYaw: number;
-  goal: { x: number; y: number } | null;
-  plannedPath: { x: number; y: number }[];
-  globalPlannedPath: { x: number; y: number }[];
-  localPlannedPath: { x: number; y: number }[];
+  goal: LiveReplicaPoint | null;
+  plannedPath: LiveReplicaPoint[];
+  globalPlannedPath: LiveReplicaPoint[];
+  localPlannedPath: LiveReplicaPoint[];
   poseSource: LiveReplicaPose;
   goalSource: LiveReplicaRobot['goal'];
   plannedPathSource: LiveReplicaPoint[];
@@ -270,13 +270,12 @@ interface ProjectedLiveRobotGeometry {
 }
 
 const projectedRobotGeometry = new WeakMap<LiveReplicaRobot, ProjectedLiveRobotGeometry>();
-const emptyPath = Object.freeze([]) as unknown as { x: number; y: number }[];
+const emptyPath = Object.freeze([]) as unknown as LiveReplicaPoint[];
 
-function projectedPath(values: LiveReplicaPoint[], transform: number[][]): { x: number; y: number }[] {
-  return Object.freeze(values.map((value) => {
-    const mapped = transformPoint(value, transform);
-    return Object.freeze({ x: mapped.x, y: mapped.y });
-  })) as unknown as { x: number; y: number }[];
+function projectedPath(values: LiveReplicaPoint[], transform: number[][]): LiveReplicaPoint[] {
+  return Object.freeze(
+    values.map((value) => Object.freeze(transformPoint(value, transform)))
+  ) as unknown as LiveReplicaPoint[];
 }
 
 function projectedGeometry(robot: LiveReplicaRobot): ProjectedLiveRobotGeometry {
@@ -294,7 +293,7 @@ function projectedGeometry(robot: LiveReplicaRobot): ProjectedLiveRobotGeometry 
     transform: robot.T_component_navigation,
     pose,
     poseYaw: transformYaw(robot.pose.yaw, robot.T_component_navigation),
-    goal: goal ? Object.freeze({ x: goal.x, y: goal.y }) : null,
+    goal: goal ? Object.freeze(goal) : null,
     plannedPath: projectedPath(robot.planned_path, robot.T_component_navigation),
     globalPlannedPath: projectedPath(robot.global_planned_path, robot.T_component_navigation),
     localPlannedPath: projectedPath(robot.local_planned_path, robot.T_component_navigation),
@@ -318,7 +317,7 @@ export function liveRobotToMapRobot(robot: LiveReplicaRobot, base?: MapRobot, el
     ...base,
     robot_id: robot.robot_id,
     robot_type: robot.robot_type ?? base?.robot_type,
-    pose: { x: geometry.pose.x, y: geometry.pose.y, yaw: geometry.poseYaw },
+    pose: { x: geometry.pose.x, y: geometry.pose.y, z: geometry.pose.z, yaw: geometry.poseYaw },
     goal: freshGoal ? geometry.goal : null,
     planned_path: freshPath ? geometry.plannedPath : emptyPath,
     global_planned_path: freshPath ? geometry.globalPlannedPath : emptyPath,

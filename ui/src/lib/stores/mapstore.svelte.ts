@@ -784,10 +784,30 @@ export const mapStore = {
 
   /** Incremental patch — the common path. Never re-fetches the whole grid. */
   applyGlobalPatch(patch: MapPatch) {
+    // globalSeq follows the global publication stream even while a local or
+    // optimized raster is displayed. state.seq is reset during view changes,
+    // so it cannot distinguish an old publication after a restore. Equal
+    // sequence numbers remain valid: a duplicate can repair a canvas that was
+    // unavailable when the first copy arrived.
+    if (patch.seq < state.globalSeq) return;
+
+    let cells: Int8Array;
+    try {
+      const raw = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
+      const inflated = inflate(raw);
+      cells = new Int8Array(inflated.buffer, inflated.byteOffset, inflated.byteLength);
+    } catch {
+      console.warn('[swarmdeck] ignored malformed map patch');
+      return;
+    }
+    if (cells.length !== patch.w * patch.h) {
+      console.warn('[swarmdeck] ignored malformed map patch');
+      return;
+    }
+
     state.globalSeq = Math.max(state.globalSeq, patch.seq);
     if (state.viewMode !== 'global' || state.showingOptimizedGrid) return;
     if (!state.info) return;
-    if (patch.transforms) state.info = { ...state.info, transforms: patch.transforms };
 
     const patchWidth = patch.width ?? state.info.width;
     const patchHeight = patch.height ?? state.info.height;
@@ -816,7 +836,8 @@ export const mapStore = {
         width: patchWidth,
         height: patchHeight,
         origin: patch.origin,
-        seq: patch.seq
+        seq: patch.seq,
+        transforms: patch.transforms ?? oldInfo.transforms
       };
       ensureCanvas(patchWidth, patchHeight);
 
@@ -842,12 +863,17 @@ export const mapStore = {
         }
       }
     } else {
+      state.info = {
+        ...state.info,
+        resolution: patch.resolution,
+        origin: patch.origin,
+        seq: patch.seq,
+        transforms: patch.transforms ?? state.info.transforms
+      };
       ensureCanvas(state.info.width, state.info.height);
     }
     if (!ctx) return;
 
-    const raw = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
-    const cells = new Int8Array(inflate(raw).buffer);
     const canvasY0 = patchHeight - patch.y0 - patch.h;
     ctx.putImageData(
       toImageData(cells, patch.w, patch.h, patch.x0, canvasY0),

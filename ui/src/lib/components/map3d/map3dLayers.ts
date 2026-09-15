@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { decalPose } from './mapFrames';
+import { decalPose, mapFrameZ, routePositions, type MapPoint3D } from './mapFrames';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -235,11 +235,13 @@ export class Map3DLayers {
       const color = new THREE.Color(fleet.colorOf(robot.robot_id));
       const goalX = robot.goal.x;
       const goalY = robot.goal.y;
-      const goalZ = getGroundZ ? getGroundZ(goalX, goalY) : 0.0;
-      const robotZ = getGroundZ ? getGroundZ(robot.pose.x, robot.pose.y) : 0.0;
+      const goalZ = mapFrameZ(robot.goal, getGroundZ);
+      // Robot pose Z may name the base/navigation origin rather than contact
+      // ground. Keep this non-planner guide attached to the rendered surface.
+      const robotGroundZ = getGroundZ?.(robot.pose.x, robot.pose.y) ?? 0;
 
       const beaconGroup = new THREE.Group();
-      beaconGroup.position.set(goalX, goalY, goalZ + 0.02);
+      beaconGroup.position.set(goalX, goalY, goalZ);
 
       // Rotating waypoint rally beacon rings
       const outerRingGeo = new THREE.RingGeometry(0.38, 0.44, 24);
@@ -275,8 +277,8 @@ export class Map3DLayers {
 
       // Dashed route line from robot to goal
       const linePts = [
-        new THREE.Vector3(robot.pose.x, robot.pose.y, robotZ + 0.06),
-        new THREE.Vector3(goalX, goalY, goalZ + 0.06)
+        new THREE.Vector3(robot.pose.x, robot.pose.y, robotGroundZ + 0.025),
+        new THREE.Vector3(goalX, goalY, goalZ)
       ];
       const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
       const lineMat = new THREE.LineDashedMaterial({
@@ -330,16 +332,11 @@ export class Map3DLayers {
   }
 
   private addRoute(
-    path: { x: number; y: number }[], color: THREE.Color, width: number,
+    path: MapPoint3D[], color: THREE.Color, width: number,
     dashed: boolean, getGroundZ?: (x: number, y: number) => number
   ) {
     // Triangle-backed screen-space lines: WebGL's native linewidth is not portable.
-    const positions: number[] = [];
-    const count = Math.min(path.length, 1024);
-    for (let i = 0; i < count; i++) {
-      const p = path[Math.round(i * (path.length - 1) / (count - 1))];
-      positions.push(p.x, p.y, (getGroundZ?.(p.x, p.y) ?? 0) + 0.3);
-    }
+    const positions = routePositions(path, getGroundZ);
     const geometry = new LineGeometry().setPositions(positions);
     for (const outline of [true, false]) {
       const material = new LineMaterial({
@@ -368,6 +365,8 @@ export class Map3DLayers {
       if (pts.length < 2) continue;
       const color = new THREE.Color(fleet.colorOf(robotId));
       const v3s = pts.map((p) => {
+        // Shared 2D trail history has no vertical pose authority. Draw it just
+        // above measured ground; unlike planner routes, no physical Z is lost.
         const z = getGroundZ ? getGroundZ(p.x, p.y) : 0.0;
         return new THREE.Vector3(p.x, p.y, z + 0.025);
       });

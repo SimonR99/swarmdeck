@@ -31,6 +31,7 @@ from ..detect.review import ReviewStore
 from ..events.logger import events
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
+from .broadcast import JsonBroadcaster
 
 # Compatibility exports for callers that historically imported map transport
 # constants/helpers from ``api.app``. The route implementation now lives in
@@ -100,6 +101,7 @@ SESSION: dict[str, Any] = {
 }
 
 _gui_clients: set[WebSocket] = set()
+_gui_broadcaster = JsonBroadcaster(_gui_clients)
 _alerts: dict[str, dict[str, Any]] = {}
 # alert_id → wall-clock time until which raise_alert is a no-op (after acknowledge)
 _alert_suppress_until: dict[str, float] = {}
@@ -200,21 +202,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
 
 
 async def broadcast(msg: dict[str, Any]) -> None:
-    dead = []
-    # Snapshot, never the live set. The send below yields, and a dashboard
-    # connecting or closing during that yield mutates `_gui_clients` while it is
-    # being iterated -- which raises RuntimeError out of broadcast() and into
-    # whichever caller was unlucky. Observed 2026-08-13 as a fleet-wide outage:
-    # the `hello` handler broadcasts `fleet_change`, so the exception surfaced
-    # as "dropped a malformed hello" and robots could not register AT ALL, on a
-    # network that was working. A GUI reload was enough to trigger it.
-    for ws in list(_gui_clients):
-        try:
-            await ws.send_json(msg)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _gui_clients.discard(ws)
+    await _gui_broadcaster.publish(msg)
 
 
 def detection_class_enabled(
@@ -1158,17 +1146,8 @@ async def get_camera(robot_id: str) -> Response:
 @app.websocket("/ws")
 async def gui_socket(ws: WebSocket) -> None:
     await ws.accept()
-    _gui_clients.add(ws)
     try:
-        await ws.send_json({"type": "map_info", "info": map_service.map_info()})
-        await ws.send_json({"type": "fleet_change", "robots": fleet_snapshot()})
-        await ws.send_json(session_state())
-        await ws.send_json({"type": "settings_state", "settings": settings_store.value})
-        await ws.send_json(review_state())
-        for costmap in costmap_snapshots():
-            await ws.send_json(costmap)
-        for a in _alerts.values():
-            await ws.send_json({"type": "alert", "alert": a})
+        await _gui_broadcaster.subscribe(ws, gui_snapshot)
 
         while True:
             raw = await ws.receive_text()
@@ -1193,6 +1172,19 @@ async def gui_socket(ws: WebSocket) -> None:
         departed = _camera_watchers.pop(ws, None)
         if departed:
             await push_camera_interest({departed})
+
+
+def gui_snapshot() -> list[dict[str, Any]]:
+    """Capture initial GUI state atomically with respect to publications."""
+    return [
+        {"type": "map_info", "info": map_service.map_info()},
+        {"type": "fleet_change", "robots": fleet_snapshot()},
+        session_state(),
+        {"type": "settings_state", "settings": settings_store.value},
+        review_state(),
+        *costmap_snapshots(),
+        *({"type": "alert", "alert": alert} for alert in _alerts.values()),
+    ]
 
 
 async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:

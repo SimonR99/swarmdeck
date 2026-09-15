@@ -28,7 +28,12 @@ function xyz() {
 }
 
 function view(scope: 'robot' | 'fleet', robotId: string): ReplicaView {
-  const chunk = { sha256: localDigest, point_count: 1, size_bytes: 28 };
+  const chunk = {
+    sha256: localDigest,
+    point_count: 1,
+    size_bytes: 28,
+    encoding: 'application/vnd.swarmdeck.xyz-f32.v1'
+  };
   const selected = {
     component_id: component,
     frame_id: 'component_frame',
@@ -119,7 +124,7 @@ test('bounded mocked UI contract covers Global/Local source scopes, live icons, 
     const frame = await fetchLiveReplicaFrame(globalSelection);
     assert.ok(frame);
     const robot = liveRobotToMapRobot(parseLiveReplicaFrame(frame).robots[0]);
-    assert.deepEqual(robot.pose, { x: 5, y: 7, yaw: 0 });
+    assert.deepEqual(robot.pose, { x: 5, y: 7, z: 0, yaw: 0 });
     await postLiveReplicaGoal(globalSelection, 'robot_7', [1, 1], { x: 5, y: 7, z: 0, yaw: 0 });
 
     assert.ok(requests.some((request) => request.startsWith('GET /api/autonomy/replicas/components/view/')));
