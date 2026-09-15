@@ -54,6 +54,7 @@ COPY deploy/patches/mgg-footprint-grid-cells-followup.patch /tmp/mgg-footprint-g
 COPY deploy/patches/mgg-home-rolling-followup.patch /tmp/mgg-home-rolling-followup.patch
 COPY deploy/patches/mgg-exploration-waiting-reason.patch /tmp/mgg-exploration-waiting-reason.patch
 COPY deploy/patches/mgg-directed-edge-cache-followup.patch /tmp/mgg-directed-edge-cache-followup.patch
+COPY deploy/patches/mgg-navigate-graph-first-followup.patch /tmp/mgg-navigate-graph-first-followup.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -94,6 +95,7 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-home-rolling-followup.patch && \
     git apply /tmp/mgg-exploration-waiting-reason.patch && \
     git apply /tmp/mgg-directed-edge-cache-followup.patch && \
+    git apply /tmp/mgg-navigate-graph-first-followup.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
