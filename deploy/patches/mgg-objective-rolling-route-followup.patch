@@ -883,7 +883,7 @@
 +        response->step.assign(n, false);
 +        response->drop.assign(n, false);
 +      },
-+      rmw_qos_profile_services_default, query_group);
++      rclcpp::ServicesQoS(), query_group);
 +  auto client = io->create_client<Service>("plan_objective");
 +  rclcpp::executors::MultiThreadedExecutor executor(
 +      rclcpp::ExecutorOptions{}, 3);
@@ -916,7 +916,7 @@
 +  request->goal.position.x = 12.0;
 +  request->goal.position.z = 0.075;
 +  request->goal.orientation.w = 1.0;
-+  const auto future = client->async_send_request(request);
++  auto future = client->async_send_request(request);
 +  const bool completed = future.wait_for(3s) == std::future_status::ready;
 +  EXPECT_TRUE(completed);
 +  if (!completed) {
