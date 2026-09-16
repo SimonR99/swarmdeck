@@ -178,6 +178,9 @@ def new_robot_evidence(robot_id):
         "authority_changed": False,
         "samples": 0,
         "exploration_statuses": [],
+        "last_exploration_status": None,
+        "last_navigation_status": None,
+        "last_navigation_failure": None,
         "ever_executing": False,
         "path_samples": 0,
         "max_path_points": 0,
@@ -217,6 +220,11 @@ def record_robot_sample(evidence, live, status_robot, mission, component):
         ),
     )
     status = status_robot.get("exploration_status")
+    evidence["last_exploration_status"] = status
+    evidence["last_navigation_status"] = status_robot.get("nav_status")
+    reason = status_robot.get("nav_failure_reason")
+    if isinstance(reason, str) and reason.strip():
+        evidence["last_navigation_failure"] = reason[:512]
     if status and status not in evidence["exploration_statuses"]:
         evidence["exploration_statuses"].append(status)
     evidence["ever_executing"] |= status == "exploring" or (
@@ -352,6 +360,7 @@ async def run(args):
     summary = {
         "outcome": "error",
         "requested_duration_s": args.duration,
+        "min_displacement_m": args.min_displacement,
         "robot_ids": sorted(ROBOT_IDS),
         "robots": {},
         "authority_changed": False,
@@ -510,7 +519,7 @@ def parse_args():
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--authority-timeout", type=float, default=20.0)
     parser.add_argument("--sample-timeout", type=float, default=3.0)
-    parser.add_argument("--min-displacement", type=float, default=0.25)
+    parser.add_argument("--min-displacement", type=float, default=5.0)
     args = parser.parse_args()
     if not args.simulation:
         parser.error("--simulation is required")

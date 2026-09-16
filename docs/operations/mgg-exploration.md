@@ -120,6 +120,12 @@ clearance, excessive roughness, steps and drops remain vetoes throughout. A
 route cannot finish in a gap or use missing ground without reaching measured
 support. Hardware retains strict observed-volume and terrain requirements.
 
+The lattice candidate filter uses the same body-evidence policy as edge
+validation. Requiring mostly ray-cleared body volume at that earlier stage can
+discard usable ground before terrain projection, especially for the taller Spot
+model. Allowing unknown body cells does not supply ground: each candidate still
+needs measured terrain, and known obstacles still reject it.
+
 MOLA mode sizes the graph's maximum edge and initial connector from the selected
 LiDAR's first ground-return ring, with one map-cell margin and grid rounding.
 For the Bistro VLP16 this gives 3 m for Bunker, 2 m for Scout and 4 m for Spot;
@@ -140,10 +146,12 @@ server/.venv/bin/python tests/deployment/exploration_acceptance.py \
 ```
 
 The test starts from a verified idle fleet, presses Explore through the GUI
-protocol, and requires path observations, an executing state and navigation-frame
-movement from every robot. It supports separate local components and always
-sends Stop All at the end. Passing this startup test does not establish full
-scene coverage or exploration completion.
+protocol, and requires path observations, an executing state and at least five
+metres of displacement in each robot's stable navigation frame. A brief startup
+movement followed by a stall is insufficient. It supports separate local
+components and always sends Stop All at the end. Also inspect completed routes
+and subsequent progress: passing this startup test does not establish full scene
+coverage or exploration completion.
 
 The independent cloud/OctoMap path remains available through
 `./scripts/sim-up --legacy-cloud --drift`. For a direct legacy Compose invocation

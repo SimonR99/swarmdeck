@@ -113,6 +113,26 @@ def test_waiting_without_dispatch_or_motion_fails():
     assert any(reason.startswith("no XY motion") for reason in result["reasons"])
 
 
+def test_recovery_retains_bounded_last_navigation_failure():
+    module = acceptance_module()
+    evidence = module.new_robot_evidence("robot_0")
+    failure = {
+        "exploration_status": "waiting",
+        "nav_status": "failed",
+        "nav_failure_reason": "terrain rejected: " + "x" * 600,
+    }
+    module.record_robot_sample(
+        evidence, live_sample(0.0), failure, "mission", "component"
+    )
+    module.record_robot_sample(
+        evidence, live_sample(0.5), status_sample(), "mission", "component"
+    )
+
+    assert evidence["last_navigation_failure"] == failure["nav_failure_reason"][:512]
+    assert evidence["last_navigation_status"] == "active"
+    assert evidence["last_exploration_status"] == "exploring"
+
+
 def test_missing_baseline_pose_fails_closed_before_any_motion_evidence():
     module = acceptance_module()
     evidence = module.new_robot_evidence("robot_0")
