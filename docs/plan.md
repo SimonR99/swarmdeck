@@ -183,6 +183,15 @@ Each item names its acceptance gate.
 - [ ] **Gaussian reconstruction from real captures.** Gate: measured alignment,
       held-out image quality, memory, training and rendering budgets, correction
       replacement and cancellation.
+- [ ] **Reproducible Jazzy images.** Gate: every image builds on a clean host
+      without Docker cache. On 2026-09-16 the ROS apt repository served only
+      MOLA 3.2.0 (the mapping image pins 2.9.0) and a fresh apt layer gave the
+      simulation image nav2 1.3.13 and September slam_toolbox and tf2 builds,
+      under which the navigation lifecycle bring-up never answers. The mapping,
+      sim and robot-ros2 Dockerfiles now carry an `ARG MGG_REV=902e868` cache
+      anchor above their apt layers so those layers keep coming from cache;
+      this only works on hosts that already hold the cache. Either mirror the
+      exact June packages or qualify MOLA 3.2 and nav2 1.3.13.
 - [ ] **Frontend restart persistence.** Gate: an explicit persistence or epoch
       solution for a restarted Swarm-SLAM frontend.
 
