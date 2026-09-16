@@ -1,9 +1,9 @@
 # Swarm-SLAM, lidar front end, for the SwarmDeck fleet.
 #
 # Keys and structure taken from upstream's own `kitti_lidar.yaml` inside a built
-# cslam workspace, not from documentation — an earlier version of this file was
+# cslam workspace, not from documentation (an earlier version of this file was
 # written from the docs and had invented half its parameter names, which ROS 2
-# would have accepted in silence.
+# would have accepted in silence).
 #
 # Topics are relative and the nodes run namespaced per robot, so `odom_icp`
 # resolves to `/robot_N/odom_icp`.
@@ -176,7 +176,7 @@
       # wall-clock second. At 0.5 m spacing that is one keyframe per robot every
       # ~36 s, which looks exactly like "cslam is producing nothing" for the
       # first several minutes of a run. Halving it doubles the rate at which the
-      # graph — and therefore any inter-robot encounter — can accumulate.
+      # graph (and therefore any inter-robot encounter) can accumulate.
       keyframe_generation_ratio_distance: 0.25
       # Gazebo does not hardware-sync the cloud and odometry.
       pointcloud_odom_approx_time_sync_s: 0.1
