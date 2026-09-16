@@ -3,29 +3,48 @@
 import importlib.util
 import re
 import runpy
-import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
+MGG_BRANCH = "swarmdeck"
 
-def test_mgg_docker_patches_are_well_formed(tmp_path):
-    """Catch malformed patch artifacts before the expensive native image build."""
+# Every image that generates mgg_msgs has to agree on the MGG revision, because
+# a mismatch changes the generated service type hashes and the planner silently
+# stops matching the mapping query server.
+MGG_SOURCES = (
+    "deploy/docker/Dockerfile.mgg",
+    "deploy/docker/build-mgg-msgs.sh",
+    "deploy/docker/Dockerfile.sim",
+    "deploy/docker/Dockerfile.robot-ros2",
+    "deploy/docker/Dockerfile.mapping",
+)
+
+
+def test_mgg_images_pin_one_branch_revision():
+    """Catch MGG source drift before the expensive native image build."""
     root = Path(__file__).parents[2]
-    dockerfile = (root / "deploy/docker/Dockerfile.mgg").read_text()
-    patches = re.findall(r"git apply /tmp/([^\s/]+\.patch)", dockerfile)
-    assert patches
-    for name in patches:
-        result = subprocess.run(
-            ["git", "apply", "--numstat", str(root / "deploy/patches" / name)],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        assert result.returncode == 0, f"{name}: {result.stderr}"
+
+    revisions = {}
+    for relative in MGG_SOURCES:
+        text = (root / relative).read_text()
+        assert "git apply" not in text, f"{relative} still applies a patch"
+        assert "deploy/patches/mgg-" not in text, f"{relative} still copies patches"
+        for revision in re.findall(r"ARG MGG_REV=([0-9a-f]{40})\b", text):
+            revisions.setdefault(revision, []).append(relative)
+
+    # Dockerfile.mgg and the three contract-only images carry the ARG; the
+    # shared build script receives the same value as its argument.
+    assert len(revisions) == 1, f"MGG revisions disagree: {revisions}"
+    assert len(next(iter(revisions.values()))) == 4
+
+    for relative in ("deploy/docker/Dockerfile.mgg", "deploy/docker/build-mgg-msgs.sh"):
+        text = (root / relative).read_text()
+        assert f"--branch {MGG_BRANCH} --single-branch" in text, relative
+
+    assert not list((root / "deploy/patches").glob("mgg-*.patch"))
 
 
 @pytest.fixture
