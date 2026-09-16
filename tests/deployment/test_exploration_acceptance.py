@@ -110,7 +110,9 @@ def test_waiting_without_dispatch_or_motion_fails():
     result = module.assess_robot(evidence, 0.25)
     assert result["passed"] is False
     assert "no waypoint/path observation" in result["reasons"]
-    assert any(reason.startswith("no XY motion") for reason in result["reasons"])
+    assert any(
+        reason.startswith("insufficient XY progress") for reason in result["reasons"]
+    )
 
 
 def test_recovery_retains_bounded_last_navigation_failure():

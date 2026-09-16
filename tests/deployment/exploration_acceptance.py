@@ -246,7 +246,10 @@ def assess_robot(evidence, min_displacement_m):
     if evidence["path_samples"] == 0:
         reasons.append("no waypoint/path observation")
     if evidence["max_displacement_m"] < min_displacement_m:
-        reasons.append(f"no XY motion (max {evidence['max_displacement_m']:.3f} m)")
+        reasons.append(
+            f"insufficient XY progress (max {evidence['max_displacement_m']:.3f} m, "
+            f"minimum {min_displacement_m:.3f} m)"
+        )
     if not evidence["ever_executing"]:
         reasons.append("Explore never reported an executing state")
     return {

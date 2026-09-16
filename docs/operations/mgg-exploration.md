@@ -126,6 +126,14 @@ discard usable ground before terrain projection, especially for the taller Spot
 model. Allowing unknown body cells does not supply ground: each candidate still
 needs measured terrain, and known obstacles still reject it.
 
+For MOLA exploration in this qualified simulation policy, a route height can be
+refined once from the indexed ground fit. Native projection may use a nearby
+return while the fit estimates ground under the footprint centre. A correction
+must remain within the platform step limit, preserve the physical start and XY
+route, and pass a second query of the adjusted body positions against the same
+map revision. Both queries share one timeout; routes already within tolerance
+use only one. Navigate, Home and hardware keep their existing validation policy.
+
 MOLA mode sizes the graph's maximum edge and initial connector from the selected
 LiDAR's first ground-return ring, with one map-cell margin and grid rounding.
 For the Bistro VLP16 this gives 3 m for Bunker, 2 m for Scout and 4 m for Spot;
