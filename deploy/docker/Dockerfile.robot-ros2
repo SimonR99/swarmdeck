@@ -1,5 +1,12 @@
 FROM ros:humble-ros-base
 
+# Cache anchor, not the pin. BuildKit keys every later RUN on the ARGs declared
+# above it, and the apt layer below must keep coming from Docker's cache: a fresh
+# install pulls newer Jazzy nav2 and slam_toolbox builds that break the
+# navigation bring-up. This reproduces the scope the cached layer was built
+# with; the real MGG pin is declared again just before its use.
+ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       gir1.2-gstreamer-1.0 \
       gstreamer1.0-plugins-base \

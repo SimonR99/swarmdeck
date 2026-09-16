@@ -11,6 +11,11 @@ import pytest
 
 MGG_BRANCH = "swarmdeck"
 MAPPING_CACHE_ANCHOR = "902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca"
+CACHE_ANCHORED_IMAGES = (
+    "Dockerfile.mapping",
+    "Dockerfile.sim",
+    "Dockerfile.robot-ros2",
+)
 
 # Every image that generates mgg_msgs has to agree on the MGG revision, because
 # a mismatch changes the generated service type hashes and the planner silently
@@ -37,9 +42,9 @@ def test_mgg_images_pin_one_branch_revision():
             match = re.fullmatch(r"ARG MGG_REV=([0-9a-f]{40})", line)
             if match:
                 revisions.setdefault(match.group(1), []).append(relative)
-        # Dockerfile.mapping keeps one earlier declaration as a Docker cache
-        # anchor for the unavailable MOLA 2.9.0 apt layer; it is not the pin.
-        if relative.endswith("Dockerfile.mapping"):
+        # The three apt-based images keep one earlier declaration as a Docker
+        # cache anchor so their apt layers stay cached; it is not the pin.
+        if relative.endswith(CACHE_ANCHORED_IMAGES):
             anchor = revisions.pop(MAPPING_CACHE_ANCHOR, None)
             assert anchor == [relative], anchor
 
