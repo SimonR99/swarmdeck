@@ -1,0 +1,118 @@
+--- a/cslam/cslam/lidar_pr/icp_utils.py
++++ b/cslam/cslam/lidar_pr/icp_utils.py
+@@ -103,7 +103,8 @@
+     return open3d_cloud.voxel_down_sample(voxel_size=voxel_size)
+ 
+ 
+-def solve_teaser(src, dst, voxel_size, min_inliers, max_matched_pairs=1000):
++def solve_teaser(src, dst, voxel_size, min_inliers, min_overlap=0.0,
++                 max_matched_pairs=1000):
+     src_feats = extract_fpfh(src, voxel_size)
+     dst_feats = extract_fpfh(dst, voxel_size)
+ 
+@@ -128,7 +129,8 @@
+ 
+     solution = solver.getSolution()
+ 
+-    valid = len(solver.getInlierMaxClique()) > min_inliers
++    inliers = len(solver.getInlierMaxClique())
++    valid = inliers > min_inliers
+ 
+     if valid:
+         # ICP refinement
+@@ -139,13 +141,29 @@
+             ),
+             open3d.pipelines.registration.ICPConvergenceCriteria(
+                 max_iteration=100))
+-        T_icp = icp_sol.transformation
+-        solution.translation = T_icp[:3, 3]
+-        solution.rotation = T_icp[:3, :3]
++        # The clique size is the only native admission test and it counts
++        # correspondences rather than measuring what the pose explains, so two
++        # keyframes tens of metres apart reach the same clique size as a real
++        # encounter. Open3D's fitness is the fraction of source points that find
++        # a correspondence within voxel_size AFTER refinement, which is the
++        # overlap the published pose accounts for. Refuse below the configured
++        # overlap rather than weld two pose graphs on a coincidence, and keep
++        # the refinement out of the solution when it is refused.
++        overlap = icp_sol.fitness
++        if overlap < min_overlap:
++            valid = False
++            rclpy.logging.get_logger('cslam').info(
++                'Failed to compute loop closure. Overlap after refinement '
++                '( {:.3f} / {:.3f} ) with {} inliers'.format(
++                    overlap, min_overlap, inliers))
++        else:
++            T_icp = icp_sol.transformation
++            solution.translation = T_icp[:3, 3]
++            solution.rotation = T_icp[:3, :3]
+     else:
+         rclpy.logging.get_logger('cslam').info(
+             'Failed to compute loop closure. Number of inliers ( {} / {} )'.
+-            format(len(solver.getInlierMaxClique()), min_inliers))
++            format(inliers, min_inliers))
+     return valid, solution.translation, solution.rotation
+ 
+ 
+@@ -185,7 +203,7 @@
+     points = ros_pointcloud_to_points(pc_msg)
+     return downsample(points, voxel_size)
+ 
+-def compute_transform(src, dst, voxel_size, min_inliers):
++def compute_transform(src, dst, voxel_size, min_inliers, min_overlap=0.0):
+     """Computes a 3D transform between 2 point clouds using TEASER++.
+ 
+     Return the pose of dst in src, as required by a BetweenFactor(src, dst).
+@@ -196,12 +214,14 @@
+         dst (Open3D point cloud): pointcloud to
+         voxel_size (int): Voxel size
+         min_inliers (int): Minimum number of inlier points correspondance to consider the registration a success
++        min_overlap (float): Minimum post-refinement overlap (Open3D ICP
++            fitness) to consider the registration a success
+ 
+     Returns:
+         (Transform, bool): transform and success flag
+     """
+     valid, translation, rotation = solve_teaser(src, dst, voxel_size,
+-                                                min_inliers)
++                                                min_inliers, min_overlap)
+     success = valid
+     # TEASER/Open3D return the transform mapping ``src`` into ``dst``.
+     # Loop-closure fields and the backend BetweenFactor use the inverse
+--- a/cslam/cslam/lidar_handler_node.py
++++ b/cslam/cslam/lidar_handler_node.py
+@@ -113,7 +113,7 @@
+                 frame_ids.append(msg.matches_keyframe_id[i])
+         for frame_id in frame_ids:
+             pc = self.local_descriptors_map[frame_id]
+-            transform, success = icp_utils.compute_transform(pc, icp_utils.ros_to_open3d(msg.data), self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"])
++            transform, success = icp_utils.compute_transform(pc, icp_utils.ros_to_open3d(msg.data), self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"], self.params["frontend.registration_min_overlap"])
+             out_msg = InterRobotLoopClosure()
+             out_msg.robot0_id = self.params["robot_id"]
+             out_msg.robot0_keyframe_id = frame_id
+@@ -131,7 +131,7 @@
+         """
+         pc0 = self.local_descriptors_map[msg.keyframe0_id]
+         pc1 = self.local_descriptors_map[msg.keyframe1_id]
+-        transform, success = icp_utils.compute_transform(pc0, pc1, self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"])
++        transform, success = icp_utils.compute_transform(pc0, pc1, self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"], self.params["frontend.registration_min_overlap"])
+         out_msg = IntraRobotLoopClosure()
+         out_msg.keyframe0_id = msg.keyframe0_id
+         out_msg.keyframe1_id = msg.keyframe1_id
+@@ -219,6 +219,7 @@
+                         ('frontend.map_manager_process_period_ms', 100),
+                         ('frontend.voxel_size', 0.5),
+                         ('frontend.registration_min_inliers', 60),
++                        ('frontend.registration_min_overlap', 0.0),
+                         ('frontend.keyframe_generation_ratio_distance', 0.5),
+                         ('frontend.pointcloud_odom_approx_time_sync_s', 0.1),
+                         ('robot_id', 0),           
+@@ -241,6 +242,8 @@
+         'frontend.voxel_size').value
+     params['frontend.registration_min_inliers'] = node.get_parameter(
+         'frontend.registration_min_inliers').value 
++    params['frontend.registration_min_overlap'] = node.get_parameter(
++        'frontend.registration_min_overlap').value
+     params['frontend.keyframe_generation_ratio_distance'] = node.get_parameter(
+         'frontend.keyframe_generation_ratio_distance').value
+     params['frontend.pointcloud_odom_approx_time_sync_s'] = node.get_parameter(

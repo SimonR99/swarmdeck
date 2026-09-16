@@ -110,10 +110,15 @@ RUN pip3 install --break-system-packages --no-cache-dir --ignore-installed psuti
 COPY deploy/patches/cslam-solution-version.patch /tmp/cslam-solution-version.patch
 COPY deploy/patches/cslam-keyframe-readiness.patch /tmp/cslam-keyframe-readiness.patch
 COPY deploy/patches/cslam-registration-budget.patch /tmp/cslam-registration-budget.patch
+# The overlap gate depends on both of the patches above: it reads the refinement
+# that registration-budget bounded, and it adds a parameter the handler patched
+# by keyframe-readiness declares. Apply it last.
+COPY deploy/patches/cslam-registration-overlap.patch /tmp/cslam-registration-overlap.patch
 RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-keyframe-readiness.patch \
-    && git apply /tmp/cslam-registration-budget.patch
+    && git apply /tmp/cslam-registration-budget.patch \
+    && git apply /tmp/cslam-registration-overlap.patch
 
 # Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \

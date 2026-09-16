@@ -20,42 +20,146 @@
       # cslam's own `/rN` namespace, where nothing publishes.
       odom_topic: "odom_icp"
       pointcloud_topic: "scan/points"
-      # 0.2 m rather than KITTI's 0.5: this is a 24 m building with 6 m rooms,
-      # and at 0.5 m a doorway is three voxels wide.
+      # 0.2 m rather than KITTI's 0.5: the indoor world this fleet started in is
+      # a 24 m building with 6 m rooms, and at 0.5 m a doorway is three voxels
+      # wide. It stays at 0.2 on ARGoS Bistro's streets because it is no longer
+      # only a downsample: cslam passes it as TEASER++'s `noise_bound`, as ICP's
+      # maximum correspondence distance, and therefore as the length scale of the
+      # `registration_min_overlap` gate below. Changing it invalidates that
+      # gate's measured threshold.
       voxel_size: 0.2
-      # TEASER++ inliers required before a candidate becomes a VERIFIED
-      # inter-robot closure. This and `similarity_threshold` below are the two
-      # knobs that decide the accuracy of the whole collaborative map, and the
-      # trade-off between them was measured directly against Gazebo ground
-      # truth:
+      # TEASER++ maximum-clique inliers required before a candidate becomes a
+      # VERIFIED closure. This, `similarity_threshold` below, and
+      # `registration_min_overlap` are the whole admission chain, and they were
+      # measured together.
       #
-      #   inliers / similarity   pairs linked   error of merged robots
-      #   100 / 0.90 (upstream)      6 of 6      14.15 - 24.07 m
-      #   175 / 0.92                 5 of 6       0.50 - 40.71 m
-      #   250 / 0.95 (shipped)       1 of 6       0.73 -  3.07 m
+      # The previous pair of values, 250 and 0.95, came from the Gazebo and
+      # RTAB-Map stack and recorded the conclusion that accuracy was
+      # "monotonically inverse" to acceptance. On ARGoS Bistro neither half of
+      # that survives. `adapters/test/ros/cslam_admission_bench.py` replays two
+      # recorded four-robot Bistro missions through cslam's own ScanContext and
+      # TEASER++, with the range truncation and voxel downsample the peer front
+      # end really applies, and scores every accepted edge against the
+      # simulator's ground-truth poses. A false merge is an accepted edge whose
+      # implied relative pose is wrong by over 0.5 m or 5 degrees. Per mission,
+      # 186 descriptor-proposed cross-robot pairs plus 48 deliberately-distant
+      # control pairs, from 16 keyframes per robot:
       #
-      # Accuracy is MONOTONICALLY INVERSE to how many closures are accepted, so
-      # there is no happy middle: 175/0.92 still admitted a closure that put one
-      # robot 40 m out. Upstream's defaults merge everything and get everything
-      # wrong, because a false closure welds two pose graphs at the wrong place
-      # and the optimiser then spreads that error across both trajectories —
-      # making the merged answer worse than the un-merged one.
+      #   homogeneous mission        correct pairs   wrong-place pairs
+      #     ScanContext similarity   0.653 - 0.917     0.580 - 0.786
+      #     TEASER++ inlier clique      10 - 68           9 - 20
+      #     ICP overlap (fitness)    0.383 - 0.803     0.007 - 0.212
+      #     ICP inlier RMSE          0.088 - 0.132     0.101 - 0.144
+      #   heterogeneous mission, mount heights 0.45/0.72/0.72/0.97 and drift
+      #     ScanContext similarity   0.561 - 0.932     0.530 - 0.782
+      #     TEASER++ inlier clique      10 - 65           7 - 22
+      #     ICP overlap (fitness)    0.351 - 0.742     0.009 - 0.248
+      #     ICP inlier RMSE          0.103 - 0.130     0.106 - 0.146
       #
-      # This building is deliberately repetitive and the Swarm-SLAM paper
-      # attributes its own outliers to exactly that, "many similar-looking
-      # sections". So we ship the strict end: fewer robots merge, and the ones
-      # that do are right. That is the same trade this repo already makes in
-      # grid registration, which refuses rather than guessing.
-      registration_min_inliers: 250
+      #   setting                    accepted  linked  false  error of merge
+      #   homogeneous
+      #     0.95 / 250      (was)        0      0 of 6    0    -
+      #     0.90 / 100  (upstream)       0      0 of 6    0    -
+      #     0.70 /  18  (no overlap)   117      6 of 6    1    up to 0.34 m
+      #     0.70 /  12  (no overlap)   126      6 of 6    3    plus 26 of the
+      #                                                       48 far controls
+      #     0.70 /  18 + overlap 0.40  115      6 of 6    0    0.003 - 0.234 m
+      #                                                       0.05 - 2.81 deg
+      #   heterogeneous
+      #     0.95 / 250      (was)        0      0 of 6    0    -
+      #     0.90 / 100  (upstream)       0      0 of 6    0    -
+      #     0.70 /  18  (no overlap)   111      6 of 6    4    up to 2.91 m
+      #     0.70 /  12  (no overlap)   116      6 of 6    4    plus 2 far
+      #                                                       controls
+      #     0.70 /  18 + overlap 0.40  105      6 of 6    0    0.005 - 0.476 m
+      #                                                       0.12 - 2.92 deg
+      #
+      # Heterogeneity and drift are a real second-order effect and nothing more:
+      # they roughly double the residual error of a correct merge and produce
+      # seven marginal registrations instead of one, but they do not move the
+      # gate, and every one of the six robot pairs still links.
+      #
+      # Two separate things had moved. Bistro keyframes are 30 m truncated
+      # outdoor street scans, and the highest ScanContext similarity reached by
+      # any pair in either mission was 0.932, between two robots 0.48 m apart,
+      # so the descriptor gate alone rejected every candidate that ever
+      # existed before any geometry ran at all. And
+      # `deploy/patches/cslam-registration-budget.patch` caps the correspondence
+      # set at 1000 pairs to bound PMC, which turned "250 inliers" from an
+      # absolute count out of an unbounded set into a demand for a 25 % clique
+      # of a capped one. The patch that bounded the solver silently invalidated
+      # the threshold it shares this file with.
+      #
+      # The inlier count on its own cannot be relaxed safely: correct pairs run
+      # down to 10 inliers while wrong-place pairs run up to 20, so the two
+      # overlap and dropping the threshold far enough to catch real encounters
+      # also admits 26 of the 48 deliberately-distant control pairs. Hence the
+      # overlap gate below, which does separate them.
+      registration_min_inliers: 18
+      # Post-refinement overlap the closure must explain, added by
+      # `deploy/patches/cslam-registration-overlap.patch`. Upstream has no
+      # residual or overlap check at all: the inlier clique is the only test,
+      # and the Open3D refinement that follows it is published unconditionally.
+      #
+      # Open3D's `fitness` is the fraction of source points that find a
+      # correspondence within `voxel_size` after refinement, so it measures how
+      # much shared surface the published pose actually accounts for. In the
+      # table above it separates with a margin on both missions: no pair wrong
+      # by more than 2 m ever exceeds 0.248, while correct pairs start at 0.351.
+      # 0.40 sits above that gap and also sheds the marginal registrations, the
+      # genuine 2 to 3 m encounters that came out 0.5 to 0.6 m off. The cost is
+      # recall, not accuracy: it drops 2 correct closures of 117 on the
+      # homogeneous mission and 6 of 111 on the heterogeneous one, out of more
+      # than a hundred that remain.
+      #
+      # Note `inlier_rmse` is NOT the quantity to gate on, even though it is the
+      # obvious analogue of the central pipeline's `max_mean_error`. It is
+      # conditioned on correspondences already being within `voxel_size`, so it
+      # reads 0.09 - 0.14 m whether the pair is right or 30 m wrong.
+      #
+      # The same gate applies to intra-robot closures, and 18 measured intra
+      # candidates say it helps there too: the 15 true revisits scored 0.402 to
+      # 1.000 and the 3 the descriptor proposed 9 to 23 m apart scored 0.115 to
+      # 0.159. The margin is thinner than on the inter-robot side, though: the
+      # tightest true revisit, 2.1 m of parallax, came in at 0.402. Raise this
+      # threshold only with intra-robot recall re-measured alongside.
+      registration_min_overlap: 0.40
       # Descriptors exchanged between robots. The paper's argument is that this
       # is the scarce resource, so it is a budget, not a firehose.
       inter_robot_loop_closure_budget: 5
       inter_robot_detection_period_sec: 5
       max_queue_size: 10
-      # ScanContext cosine similarity a candidate must clear before it is even
-      # sent for geometric verification. See registration_min_inliers above for
-      # the measured trade-off; these two move together.
-      similarity_threshold: 0.95
+      # ScanContext similarity a candidate must clear before it is even sent for
+      # geometric verification, and the ONLY gate on intra-robot candidates too.
+      # See registration_min_inliers above for the measurement.
+      #
+      # This is not a plain cosine of two descriptors: `distance_sc` maximises
+      # the mean per-sector cosine of two height profiles over every yaw shift,
+      # and every profile is all-positive because ScanContext offsets z by 2 m.
+      # That puts the whole useful range of the metric between roughly 0.53 and
+      # 0.93 on Bistro keyframes, which is why 0.95 admitted nothing at all.
+      #
+      # 0.70 is chosen for what it PRUNES, not for what it admits: the overlap
+      # gate is what separates correct from incorrect, and this threshold only
+      # decides how many pairs pay for a TEASER++ registration to find out. It
+      # drops the candidate set from 186 pairs to 127 and 117 on the two
+      # missions without losing a single robot pair from the merged component.
+      # Lowering it further costs CPU per keyframe and buys nothing; raising it
+      # towards 0.9 starts discarding real encounters, because the score tracks
+      # how alike the two scans look rather than how close the robots are. A
+      # correct pair 3.4 m apart scored 0.653 and one 7.0 m apart scored 0.561,
+      # while the best score in either mission was 0.932.
+      #
+      # CPU is the reason not to go lower. Inter-robot verification is rate
+      # limited by `inter_robot_loop_closure_budget` below, but intra-robot
+      # verification is NOT: `detect_intra` can emit one match per keyframe, and
+      # each match costs a full TEASER++ registration. At 0.95 that queue was
+      # empty because nothing passed; at 0.70 it is one registration per
+      # keyframe in the worst case, which the simulated fleet absorbs because a
+      # keyframe takes tens of seconds to earn. A platform that covers
+      # `keyframe_generation_ratio_distance` in under a couple of seconds needs
+      # this measured again on its own hardware before it is trusted.
+      similarity_threshold: 0.70
       global_descriptors_topic: "global_descriptors"
       global_descriptor_technique: "scancontext"
       intra_loop_min_inbetween_keyframes: 20
