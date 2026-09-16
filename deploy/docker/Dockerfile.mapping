@@ -7,6 +7,13 @@ FROM ros:jazzy-ros-base AS mapping-contracts
 SHELL ["/bin/bash", "-c"]
 
 ARG MOLA_VERSION=2.9.0
+# Cache anchor, not the pin. The ROS apt repository no longer serves MOLA
+# 2.9.0 (only 3.2.0 remains), so the apt layer below can only be reused from
+# Docker's cache, and BuildKit keys that layer on every ARG declared above
+# it. This declaration reproduces the scope the cached layer was built with;
+# the real MGG pin is declared again just before its use. Changing this value
+# forces a fresh apt install, which fails until MOLA is upgraded or mirrored.
+ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CMAKE_BUILD_PARALLEL_LEVEL=2
 

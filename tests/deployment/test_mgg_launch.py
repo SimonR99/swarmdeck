@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 MGG_BRANCH = "swarmdeck"
+MAPPING_CACHE_ANCHOR = "902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca"
 
 # Every image that generates mgg_msgs has to agree on the MGG revision, because
 # a mismatch changes the generated service type hashes and the planner silently
@@ -32,8 +33,15 @@ def test_mgg_images_pin_one_branch_revision():
         text = (root / relative).read_text()
         assert "git apply" not in text, f"{relative} still applies a patch"
         assert "deploy/patches/mgg-" not in text, f"{relative} still copies patches"
-        for revision in re.findall(r"ARG MGG_REV=([0-9a-f]{40})\b", text):
-            revisions.setdefault(revision, []).append(relative)
+        for line in text.splitlines():
+            match = re.fullmatch(r"ARG MGG_REV=([0-9a-f]{40})", line)
+            if match:
+                revisions.setdefault(match.group(1), []).append(relative)
+        # Dockerfile.mapping keeps one earlier declaration as a Docker cache
+        # anchor for the unavailable MOLA 2.9.0 apt layer; it is not the pin.
+        if relative.endswith("Dockerfile.mapping"):
+            anchor = revisions.pop(MAPPING_CACHE_ANCHOR, None)
+            assert anchor == [relative], anchor
 
     # Dockerfile.mgg and the three contract-only images carry the ARG; the
     # shared build script receives the same value as its argument.
