@@ -149,7 +149,10 @@ Each item names its acceptance gate.
 - [ ] **Inter-robot closure accuracy and duplicate coverage.** Gate: measured
       inter-robot candidate and accepted-closure counts, a consistent shared
       component on peers and the server, and reduced duplicate coverage versus
-      independent MGG.
+      independent MGG. Offline replay (2026-09-16) links all six robot pairs
+      with zero false merges after the peer admission change (similarity 0.70,
+      18 inliers, ICP overlap gate 0.40); the live run with a rebuilt
+      `swarmdeck-cslam` image is still owed.
 - [ ] **Separate hosts, partitions and optimizer loss.** Gate: peers collaborate
       with the server stopped; partition and rejoin do not duplicate commands or
       falsely declare completion. A frontend restart currently requires a fresh
