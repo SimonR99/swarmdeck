@@ -112,9 +112,14 @@ class PeerPoseHistory:
     def __init__(self, horizon_s: float = PEER_POSE_HISTORY_S) -> None:
         self._horizon_ns = int(float(horizon_s) * 1e9)
         self._samples: list[tuple[int, np.ndarray]] = []
+        # The bridge currently adds poses and joins captures on the same
+        # single-threaded sensor executor; the lock keeps the history correct
+        # if either side ever moves to another thread.
+        self._lock = Lock()
 
     def __len__(self) -> int:
-        return len(self._samples)
+        with self._lock:
+            return len(self._samples)
 
     def add(self, stamp_ns: int, T_reference_base) -> None:
         matrix = np.asarray(T_reference_base, dtype=np.float64)
@@ -123,23 +128,26 @@ class PeerPoseHistory:
         stamp = int(stamp_ns)
         matrix = matrix.copy()
         matrix.setflags(write=False)
-        self._samples.append((stamp, matrix))
-        # Samples usually arrive in order; a simulator restart or an out of
-        # order delivery must not leave the list unsorted for the join.
-        if len(self._samples) > 1 and stamp < self._samples[-2][0]:
-            self._samples.sort(key=lambda sample: sample[0])
-        newest = self._samples[-1][0]
-        cutoff = newest - self._horizon_ns
-        first = 0
-        while first < len(self._samples) and self._samples[first][0] < cutoff:
-            first += 1
-        if first:
-            del self._samples[:first]
+        with self._lock:
+            self._samples.append((stamp, matrix))
+            # Samples usually arrive in order; a simulator restart or an out
+            # of order delivery must not leave the list unsorted for the join.
+            if len(self._samples) > 1 and stamp < self._samples[-2][0]:
+                self._samples.sort(key=lambda sample: sample[0])
+            newest = self._samples[-1][0]
+            cutoff = newest - self._horizon_ns
+            first = 0
+            while first < len(self._samples) and self._samples[first][0] < cutoff:
+                first += 1
+            if first:
+                del self._samples[:first]
 
     def sample_at(self, stamp_ns: int, tolerance_ns: int) -> np.ndarray | None:
         """The pose nearest ``stamp_ns``, or None when none is close enough."""
 
-        if not self._samples:
+        with self._lock:
+            samples = list(self._samples)
+        if not samples:
             return None
         limit = min(int(tolerance_ns), int(MAX_PEER_POSE_TOLERANCE_S * 1e9))
         if limit < 0:
@@ -147,7 +155,7 @@ class PeerPoseHistory:
         target = int(stamp_ns)
         best: np.ndarray | None = None
         best_gap = limit + 1
-        for sample_stamp, matrix in self._samples:
+        for sample_stamp, matrix in samples:
             gap = abs(sample_stamp - target)
             if gap <= limit and gap < best_gap:
                 best, best_gap = matrix, gap
