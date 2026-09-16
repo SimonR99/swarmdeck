@@ -2270,12 +2270,12 @@ def main() -> None:
                     "SWARMDECK_PEER_COORDINATION", "0"
                 ).lower()
                 in ("1", "true", "yes"),
-                "planar_tolerance_m": 0.30 if platforms[i] == "spot" else 0.10,
+                "planar_tolerance_m": robot_spec(platforms[i]).max_step_height,
                 "max_inclination_rad": math.radians(30.0),
             },
             planning_config={
                 "backend": os.environ.get("SWARMDECK_PLANNING_BACKEND", ""),
-                "planar_tolerance_m": 0.30 if platforms[i] == "spot" else 0.10,
+                "planar_tolerance_m": robot_spec(platforms[i]).max_step_height,
                 "max_inclination_rad": math.radians(30.0),
             },
         )

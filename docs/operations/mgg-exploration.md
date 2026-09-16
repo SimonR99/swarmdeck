@@ -97,8 +97,9 @@ port options.
 
 The MOLA grid resolution is 0.20 m. Ground checks use measured surface heights;
 the terrain-step limits are 0.15 m for Bunker and Scout and 0.30 m for Spot, with
-a 30-degree slope limit. Robot dimensions and sensor offsets come from the
-simulation platform table. The supplied planning bounds are ±60 m horizontally.
+a 30-degree slope limit. Robot dimensions, sensor offsets and controller step
+limits come from the simulation platform table, so the adapter accepts the same
+platform steps as the planner. The supplied planning bounds are ±60 m horizontally.
 These settings apply to simulation; hardware needs its own qualified profile.
 
 Sparse LiDAR rays do not observe the whole body volume or the floor underneath
@@ -150,7 +151,7 @@ To test actual fleet startup against a running four-robot simulation:
 
 ```bash
 server/.venv/bin/python tests/deployment/exploration_acceptance.py \
-  --simulation --base-url http://localhost:8080 --duration 120
+  --simulation --base-url http://localhost:8080 --duration 180
 ```
 
 The test starts from a verified idle fleet, presses Explore through the GUI

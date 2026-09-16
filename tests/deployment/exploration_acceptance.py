@@ -179,6 +179,7 @@ def new_robot_evidence(robot_id):
         "samples": 0,
         "exploration_statuses": [],
         "last_exploration_status": None,
+        "last_exploration_reason": None,
         "last_navigation_status": None,
         "last_navigation_failure": None,
         "ever_executing": False,
@@ -222,6 +223,9 @@ def record_robot_sample(evidence, live, status_robot, mission, component):
     status = status_robot.get("exploration_status")
     evidence["last_exploration_status"] = status
     evidence["last_navigation_status"] = status_robot.get("nav_status")
+    reason = status_robot.get("exploration_reason")
+    if isinstance(reason, str) and reason.strip():
+        evidence["last_exploration_reason"] = reason[:512]
     reason = status_robot.get("nav_failure_reason")
     if isinstance(reason, str) and reason.strip():
         evidence["last_navigation_failure"] = reason[:512]

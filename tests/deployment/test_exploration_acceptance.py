@@ -122,6 +122,7 @@ def test_recovery_retains_bounded_last_navigation_failure():
         "exploration_status": "waiting",
         "nav_status": "failed",
         "nav_failure_reason": "terrain rejected: " + "x" * 600,
+        "exploration_reason": "Waiting for traversable ground: " + "x" * 600,
     }
     module.record_robot_sample(
         evidence, live_sample(0.0), failure, "mission", "component"
@@ -131,6 +132,7 @@ def test_recovery_retains_bounded_last_navigation_failure():
     )
 
     assert evidence["last_navigation_failure"] == failure["nav_failure_reason"][:512]
+    assert evidence["last_exploration_reason"] == failure["exploration_reason"][:512]
     assert evidence["last_navigation_status"] == "active"
     assert evidence["last_exploration_status"] == "exploring"
 
