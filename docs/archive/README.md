@@ -1,10 +1,14 @@
 # Archive
 
 These documents are kept for their evidence and their reasoning. Their content
-is unchanged and their internal links still point at each other. They are
-superseded by [the plan](../plan.md) and the
+is unchanged. They are superseded by [the plan](../plan.md) and the
 [acceptance log](../operations/acceptance-log.md), which are the current
 references. Do not update the files here; add to the plan or the log instead.
+
+Because their text is unchanged, their relative links still point at the
+locations these files had before the move, so 11 of them no longer resolve. The
+table below says where each document went and what replaces it. A repository
+link check should exclude this directory.
 
 | Document | What it was | Superseded by |
 | --- | --- | --- |

@@ -1,6 +1,7 @@
 # Contributing to SwarmDeck
 
-Start with the [README](README.md) for setup and the
+Start with the [README](README.md) for setup, the [plan](docs/plan.md) for the
+architecture and its invariants, and the
 [documentation index](docs/README.md) for subsystem guides.
 
 ## Working on a change

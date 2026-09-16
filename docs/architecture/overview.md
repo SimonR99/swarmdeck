@@ -100,7 +100,9 @@ SwarmDeck standardizes coordinate frames across heterogeneous robots:
 - `cslam`: (legacy Swarm-SLAM / RTAB-Map overlay) Consumes external collaborative graph
   summaries.
 
-See [collaborative mapping plan](collaborative-mapping-plan.md) and [collaborative-slam.md](collaborative-slam.md) for full design details.
+The archived [collaborative mapping plan](../archive/collaborative-mapping-plan.md)
+and [collaborative SLAM analysis](../archive/collaborative-slam.md) hold the full
+design details for this central service.
 
 ### Safety boundary
 

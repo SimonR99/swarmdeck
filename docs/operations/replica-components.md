@@ -149,7 +149,7 @@ placement immediately; stale telemetry cannot authorize goal input.
 This view proves coherent publication and frame identity. It does not qualify
 free-space carving, planner safety, MGG exploration behavior, Home, hardware
 calibration, or Gaussian reconstruction. Those gates remain in the
-[planning-refactor integration plan](../architecture/planning-refactor-remaining.md)
+[plan](../plan.md)
 and [MOLA runtime guide](mola-runtime.md).
 
 ## Acceptance command
@@ -162,5 +162,5 @@ python3 tests/deployment/fleet_replica_acceptance.py \
 This read-only observer waits for four committed sources, then checks aggregate
 views and immutable point chunks. Separate components are valid; it does not
 create closures or send motion commands. Use `--expected-robots` for another
-fleet size. The [benchbot record](planning-parallel-acceptance.md) contains the
-executed trial and current limitations.
+fleet size. The [acceptance log](acceptance-log.md) contains the
+executed trials and current limitations.
