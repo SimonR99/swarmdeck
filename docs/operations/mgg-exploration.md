@@ -202,6 +202,25 @@ components and always sends Stop All at the end. Also inspect completed routes
 and subsequent progress: passing this startup test does not establish full scene
 coverage or exploration completion.
 
+On 2026-09-16, revision `c31425e` passed a 180-second Bistro trial on Benchbot
+with drift odometry and MOLA. Maximum displacement from the initial pose is
+measured in each robot's stable navigation frame, not cumulative travel:
+
+| Robot | Maximum displacement | Completed routes | Controller progress failures |
+| --- | ---: | ---: | ---: |
+| R0 | 40.0 m | 7 | 0 |
+| R1 | 12.8 m | 4 | 2 |
+| R2 | 42.3 m | 8 | 0 |
+| R3 | 31.3 m | 5 | 0 |
+
+R1 recovered from both movement failures and continued exploring. All four
+retained stable mission/component/frame identities, with 156 observations each
+and no observation errors. Stop All cleared every active route. The exact
+Release image passed all 21 native test executables (288 GoogleTests). Three
+local timing-sensitive failures passed on a filtered rerun and did not recur
+in the full Benchbot suite; planner deadlines were not increased. This validates
+startup and repeated route execution, not full Bistro coverage or hardware use.
+
 The independent cloud/OctoMap path remains available through
 `./scripts/sim-up --legacy-cloud --drift`. For a direct legacy Compose invocation
 with NVIDIA rendering, add the MGG overlay to the same files and environment
