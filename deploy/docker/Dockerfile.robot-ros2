@@ -1,7 +1,5 @@
 FROM ros:humble-ros-base
 
-ARG MGG_REV=b153e639a1778bb747f32c29a5804fe4fc03677b
-
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       gir1.2-gstreamer-1.0 \
       gstreamer1.0-plugins-base \
@@ -27,6 +25,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && pip3 install --no-cache-dir websockets==10.4 \
     && rm -rf /var/lib/apt/lists/*
 
+# Declared just before its use so a pin change does not invalidate the apt
+# layers above.
+ARG MGG_REV=b153e639a1778bb747f32c29a5804fe4fc03677b
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV"
 ENV AMENT_PREFIX_PATH="/opt/swarmdeck-mgg-msgs:${AMENT_PREFIX_PATH}" \
