@@ -125,13 +125,13 @@ continues. `camera_frame` is optional when both image and CameraInfo carry the
 same frame. It explicitly permits an empty CameraInfo frame (observed on OAK);
 it never overrides a conflicting nonempty frame.
 
-Registered scans on the live fleet arrived 0.37–0.69 seconds behind the newest
+Registered scans on the live fleet arrived 0.37 to 0.69 seconds behind the newest
 image. A two-second JPEG history selects the image nearest the **scan capture
 time**, retaining the strict 50 ms join tolerance. Storage is capped at 60 frames
 and 16 MiB, plus one decoded image. Decode/projection occurs only at the display
 upload interval (four seconds by default) or after a keyframe passes motion and
 novelty gates. On the three robot CPUs, paired-sample projection including JPEG
-decode took 13–25 ms; cached-image projection took 2–4 ms for 5k–12k display
+decode took 13 to 25 ms; cached-image projection took 2 to 4 ms for 5k to 12k display
 points. No camera frames are uploaded for this feature.
 
 Capture-time TF must resolve **camera optical ← map**. Camera body axes and
