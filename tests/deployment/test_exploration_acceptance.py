@@ -270,3 +270,75 @@ def test_completed_reset_without_live_supervisor_opens_no_socket(
     )
     assert asyncio.run(module.run(args)) is False
     assert requests == ["/api/sim/reset"]
+
+
+def _evidence(module, frames):
+    evidence = {}
+    for robot_id, (component, frame) in frames.items():
+        record = module.new_robot_evidence(robot_id)
+        record["authority"] = ("mission", component, frame)
+        evidence[robot_id] = record
+    return evidence
+
+
+def _live(frames):
+    return {
+        robot_id: {"robot_id": robot_id, "navigation_frame": frame}
+        for robot_id, (_, frame) in frames.items()
+    }
+
+
+def test_verified_merge_continues_the_trial_and_is_recorded():
+    module = acceptance_module()
+    before = {"robot_0": "c:a", "robot_1": "c:a", "robot_2": "c:b", "robot_3": "c:c"}
+    after = {"robot_0": "c:m", "robot_1": "c:m", "robot_2": "c:m", "robot_3": "c:c"}
+    frames = {r: (before[r], f"{r}/map_frame") for r in before}
+    verdict = module.classify_authority_change(
+        "mission", before, "mission", after, _live(frames), _evidence(module, frames)
+    )
+    assert verdict is not None
+    kind, merges = verdict
+    assert kind == "merged"
+    assert {(m["robot_id"], m["from"], m["to"]) for m in merges} == {
+        ("robot_0", "c:a", "c:m"),
+        ("robot_1", "c:a", "c:m"),
+        ("robot_2", "c:b", "c:m"),
+    }
+
+
+def test_unchanged_components_are_a_transient_not_a_merge():
+    module = acceptance_module()
+    components = {"robot_0": "c:a", "robot_1": "c:a"}
+    frames = {r: (components[r], f"{r}/map_frame") for r in components}
+    assert module.classify_authority_change(
+        "mission",
+        components,
+        "mission",
+        dict(components),
+        _live(frames),
+        _evidence(module, frames),
+    ) == ("transient", [])
+
+
+@pytest.mark.parametrize(
+    "mission, after, frame_change",
+    [
+        ("other-mission", {"robot_0": "c:a", "robot_1": "c:a"}, False),
+        ("mission", {"robot_0": "c:a", "robot_1": "c:z"}, False),
+        ("mission", {"robot_0": "c:m", "robot_1": "c:m"}, True),
+        ("mission", {"robot_0": "c:a"}, False),
+    ],
+)
+def test_split_mission_or_frame_replacement_still_fails(mission, after, frame_change):
+    module = acceptance_module()
+    before = {"robot_0": "c:a", "robot_1": "c:a"}
+    frames = {r: (before[r], f"{r}/map_frame") for r in before}
+    live = _live(frames)
+    if frame_change:
+        live["robot_1"]["navigation_frame"] = "robot_1/other_frame"
+    assert (
+        module.classify_authority_change(
+            "mission", before, mission, after, live, _evidence(module, frames)
+        )
+        is None
+    )

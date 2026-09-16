@@ -171,6 +171,42 @@ def path_points(robot):
     return len(selected)
 
 
+def classify_authority_change(
+    previous_mission, previous_components, mission, components, live, evidence
+):
+    """Decide whether a live authority change may continue the trial.
+
+    Returns ``("transient", [])`` when the qualified component assignment is
+    unchanged (a stale-frame rejection the server issued while a solution was
+    being republished), ``("merged", merges)`` when the same mission produced
+    a verified merge (every robot's new component contains every member of its
+    old one and its navigation frame is unchanged), and ``None`` for anything
+    else: a mission change, a component split, or a frame replacement. Merges
+    are the expected result of inter-robot loop closures and do not invalidate
+    motion evidence, which is measured in each robot's own navigation frame.
+    """
+    if mission != previous_mission:
+        return None
+    if components == previous_components:
+        return "transient", []
+    merges = []
+    for robot_id, previous in previous_components.items():
+        current = components.get(robot_id)
+        if current is None:
+            return None
+        old_members = {r for r, c in previous_components.items() if c == previous}
+        new_members = {r for r, c in components.items() if c == current}
+        if not old_members <= new_members:
+            return None
+        recorded = evidence[robot_id]["authority"]
+        frame = live[robot_id].get("navigation_frame")
+        if recorded is not None and recorded[2] != frame:
+            return None
+        if current != previous:
+            merges.append({"robot_id": robot_id, "from": previous, "to": current})
+    return "merged", merges
+
+
 def new_robot_evidence(robot_id):
     return {
         "robot_id": robot_id,
@@ -371,6 +407,8 @@ async def run(args):
         "robot_ids": sorted(ROBOT_IDS),
         "robots": {},
         "authority_changed": False,
+        "merges": [],
+        "authority_transients": 0,
         "observation_errors": 0,
         "stop_all_verified": False,
     }
@@ -465,8 +503,55 @@ async def run(args):
                     if error:
                         summary["observation_errors"] += 1
             except AuthorityChanged:
-                summary["authority_changed"] = True
-                raise
+                # A verified inter-robot merge replaces component identities
+                # for every robot it joins. Re-select from the catalogue and
+                # continue when the change is a merge or a transient
+                # stale-frame rejection; anything else ends the trial.
+                try:
+                    mission_now, components_now, live_now = await qualified_live(
+                        args,
+                        robot_ids,
+                        min(deadline, time.monotonic() + args.sample_timeout),
+                    )
+                except (
+                    HTTPError,
+                    URLError,
+                    TimeoutError,
+                    OSError,
+                    RuntimeError,
+                ) as error:
+                    summary["observation_errors"] += 1
+                    summary["last_observation_error"] = str(error)[:512]
+                    continue
+                verdict = classify_authority_change(
+                    mission,
+                    components,
+                    mission_now,
+                    components_now,
+                    live_now,
+                    summary["robots"],
+                )
+                if verdict is None or (
+                    verdict[0] == "transient"
+                    and summary["authority_transients"] >= args.max_authority_transients
+                ):
+                    summary["authority_changed"] = True
+                    raise
+                kind, merges = verdict
+                if kind == "transient":
+                    summary["authority_transients"] += 1
+                else:
+                    elapsed = round(time.monotonic() - started, 1)
+                    for merge in merges:
+                        merge["elapsed_s"] = elapsed
+                    summary["merges"].extend(merges)
+                    components = components_now
+                    summary["components"] = components
+                    expected = (mission, components)
+                    for robot_id in sorted(robot_ids):
+                        summary["robots"][robot_id]["authority"] = authority_identity(
+                            mission, components[robot_id], live_now[robot_id]
+                        )
             except (HTTPError, URLError, TimeoutError, OSError, RuntimeError) as error:
                 summary["observation_errors"] += 1
                 summary["last_observation_error"] = str(error)[:512]
@@ -527,6 +612,9 @@ def parse_args():
     parser.add_argument("--authority-timeout", type=float, default=20.0)
     parser.add_argument("--sample-timeout", type=float, default=3.0)
     parser.add_argument("--min-displacement", type=float, default=5.0)
+    # Stale-frame rejections the server may issue while a peer solution is
+    # being republished; the trial re-selects the same components and goes on.
+    parser.add_argument("--max-authority-transients", type=int, default=20)
     args = parser.parse_args()
     if not args.simulation:
         parser.error("--simulation is required")
