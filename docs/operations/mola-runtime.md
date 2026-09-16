@@ -30,13 +30,16 @@ peer overlay remains hardware opt-in and keeps its planner-product defaults
 disabled until capture provenance is qualified. The read-only fleet component
 catalogue and aggregate display path are described in the [replica component
 guide](replica-components.md).
+
 ## Worker deployment
 
 Build `deploy/docker/Dockerfile.mapping` and use either the simulation
 `docker-compose.mapping.yml` overlay or the robot-local `peer_mola_mapping`
 service. Both require the active `SWARMDECK_MISSION_ID`; old missions on the map
-volume are not selected implicitly. Commands are in the
-[integration guide](decentralized-autonomy.md).
+volume are not selected implicitly. Commands are in
+[current stack operations](current-stack.md), with the historical direct Compose
+invocations in the archived
+[decentralized autonomy record](../archive/decentralized-autonomy.md).
 
 The default worker maintains one `swarmdeck-mola-import --serve` subprocess.
 It imports each component independently, then atomically publishes a whole-peer
@@ -141,12 +144,8 @@ grid in its corrected frame. Geometry replacement and retraction remove previous
 contributions. The deadlines and point/voxel limits bound work; they are not
 measured worst-case latency promises.
 
-On September 15, 2026, an isolated Benchbot replay of 147 Bistro keyframes
-(602,112 endpoints) published the metric map and planner grid in 1.97 seconds,
-including process startup and serialization. It retained all endpoints and
-surface samples, used 3,999,967 ray steps, and reached 180.3 MiB peak native RSS.
-The container had a four-core CPU allowance. This checks publication beyond the
-previous cumulative-ray failure on that map; it is not a worst-case bound.
+Measured replay and correction timings are in the
+[acceptance log](acceptance-log.md).
 
 The separate one-million-point limit is still a hard publication limit. A map
 whose captures each retain the configured maximum of 4,096 endpoints reaches it
@@ -222,40 +221,18 @@ Set `REMOTE` for a different workstation. To build first, set `SOURCE` to an
 explicit clean source export on that workstation. All acceptance containers use
 temporary map data and have networking disabled.
 
-### Workstation measurements, September 10, 2026
+### Reproduce the correction benchmark
 
-On `benchbot.yannbouteiller.com`, a Release build using MOLA 2.9.0 processed
-20 pose corrections of a deterministic 100,000-point cloud in one process.
-Including serialized output, median correction latency was **30.0 ms**
-(maximum 35.6 ms), compared with **163.8 ms** for five full one-shot imports.
-Native RSS ranged from a first sample of 71.1 MiB to a final 65.0 MiB; the
-maximum sampled RSS was 71.1 MiB. This fixture demonstrates reuse and startup
-cost savings, not a worst-case latency or long-duration memory guarantee.
-
-Reproduce the benchmark with the repository on `PYTHONPATH` and the native
-importer's installed path:
+Run it with the repository on `PYTHONPATH` and the native importer's installed
+path:
 
 ```bash
 PYTHONPATH=. python3 tests/deployment/mola_benchmark.py \
   --binary /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
 ```
 
-A read-only copy of the stopped Bistro fleet's four peer maps also imported
-successfully through the persistent worker: 991,344 points in 0.83 seconds,
-with four coherent artifact indexes. Individual maps held 214,959, 28,946,
-71,213 and 676,226 points. This validates the real map-store format; it does
-not resolve R1's limited exploration or qualify moving-robot terrain planning.
-
-The tested image is `swarmdeck-mapping:mola-runtime-review`, image ID
-`sha256:9868a7a0a4e74c85f25c22ae756c5123032013fece4f27a1c514ebfc5fb1d337`.
-It was used as `planning-mapping-1` in the stopped isolated workstation project,
-on mission `92028a23-d1d1-45b8-8d0b-509815e35950`. During that historical run,
-all four artifact indexes matched their source snapshot SHA-256 and one native
-process served them; the simulator, MGG, peer SLAM and production deployment
-were not restarted. The latest deployment scope and acceptance status are in
-the [parallel acceptance record](planning-parallel-acceptance.md), which keeps
-MGG motion on its existing OctoMap and does not claim this direct backend as a
-motion result.
+Measured correction latencies, memory samples and per-robot publication and
+query timings are in the [acceptance log](acceptance-log.md).
 
 ### Planner-product validation
 
@@ -265,26 +242,9 @@ wall, occupied endpoints, unknown space beyond, missing/partial provenance,
 steps, drops, stacked floors, translated/yaw-corrected rays, geometry replacement
 and retraction. The local autonomy suite passes 121 tests.
 
-A fresh replay of the same copied Bistro maps, now requesting both native products,
-completed in **2.38 seconds** including first provider loads, five warm refreshes
-per component and query batches. All four unqualified maps retained zero free
-voxels. Native RSS reached a maximum sampled **174.2 MiB**; this excludes Python
-provider memory and is not a continuous peak measurement.
-
-| Robot | Points | Worker publication | First provider load | Median warm refresh | Query, 8 samples |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `robot_0` | 214,959 | 295 ms | 233 ms | 8.4 ms | 1.1 ms |
-| `robot_1` | 28,946 | 35 ms | 58 ms | 1.6 ms | 0.8 ms |
-| `robot_2` | 71,213 | 88 ms | 97 ms | 3.2 ms | 1.1 ms |
-| `robot_3` | 676,226 | 810 ms | 562 ms | 23.7 ms | 0.9 ms |
-
-At the time of this historical measurement, warm refreshes reused immutable
-decoded grids but still verified artifact hashes and coherent source/index
-bytes. The current provider reuses a decoded grid when its full filesystem
-identity and publication record are unchanged; replacement or mutation triggers
-the bounded read and hash again. Queries read the published grid without
-filesystem access. The replay uses stopped maps with unqualified rays, so it
-does not measure heavy free-space carving or motion safety.
+The provider reuses a decoded grid when its full filesystem identity and
+publication record are unchanged; replacement or mutation triggers the bounded
+read and hash again. Queries read the published grid without filesystem access.
 
 The image build runs the synthetic gate automatically. It also starts the actual
 ROS query server and calls MGG's generated `QueryMapBatch` service, checking
@@ -301,13 +261,6 @@ PYTHONPATH=. timeout 90s python3 tests/deployment/mola_planner_acceptance.py \
 
 Replay writes MOLA products into that copy. It does not run ROS or send robot
 commands. Omit the last two options for the synthetic acceptance fixture.
-
-The planner image is `swarmdeck-mapping:mola-planner-review`, image ID
-`sha256:fa4f63725a37514d372ce4877d1b3a87de022f3fa7335c2eaee4353a932de16f`.
-It passed all image acceptance gates on the workstation. That earlier run retained its existing deployment images. The subsequent
-[parallel acceptance run](planning-parallel-acceptance.md) enabled native planner
-products and the MOLA query provider in a separate simulation; MGG motion still
-uses its existing exploration map.
 
 The normal simulation launcher selects the direct MGG snapshot backend and the
 MOLA query provider. The former live cloud-fed OctoMap path remains available
@@ -382,7 +335,7 @@ only product.
 The provider bounds both work and input size. Defaults are a 3 s snapshot TTL,
 2 s load deadline, 4 MiB each for the snapshot and index, a 256 MiB grid, and
 2,000,000 combined occupied/free voxels. The native parameters clamp TTL to
-0.1–60 s, load time to 1–10,000 ms, and each byte/count budget to its hard limit;
+0.1 to 60 s, load time to 1 to 10,000 ms, and each byte/count budget to its hard limit;
 malformed or over-limit metadata is rejected. A resident tree expires when its
 TTL elapses even if the authority heartbeat is unchanged, so a stale map cannot
 remain usable indefinitely.

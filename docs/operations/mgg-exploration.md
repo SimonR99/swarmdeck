@@ -15,12 +15,17 @@ is called merely by launching the dashboard or containers.
 
 ## Interface checked
 
-This integration starts from [MGGPlanner's ROS 2 branch](https://github.com/MISTLab/MGGPlanner/tree/ros2),
-commit `902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca`, and applies SwarmDeck's pinned
-patch series. The upstream commit alone does not provide the external path
-execution, replan, lifecycle, coordination-exclusion, or map-query contract
-described here. Its top-level README still contains ROS 1 instructions; the
-relevant packages are under `ros2/src`.
+MGG is built from the `swarmdeck` branch of
+[MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
+`b153e639a1778bb747f32c29a5804fe4fc03677b` (59 commits over upstream
+`902e868`), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+changes are made in that repository and the pin is advanced.
+`deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
+service type hashes match across images. Upstream `902e868` alone does not
+provide the external path execution, replan, lifecycle,
+coordination-exclusion, or map-query contract described here. The upstream
+top-level README still contains ROS 1 instructions; the relevant packages are
+under `ros2/src`.
 
 Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 
@@ -220,24 +225,8 @@ components and always sends Stop All at the end. Also inspect completed routes
 and subsequent progress: passing this startup test does not establish full scene
 coverage or exploration completion.
 
-On 2026-09-16, revision `c31425e` passed a 180-second Bistro trial on Benchbot
-with drift odometry and MOLA. Maximum displacement from the initial pose is
-measured in each robot's stable navigation frame, not cumulative travel:
-
-| Robot | Maximum displacement | Completed routes | Controller progress failures |
-| --- | ---: | ---: | ---: |
-| R0 | 40.0 m | 7 | 0 |
-| R1 | 12.8 m | 4 | 2 |
-| R2 | 42.3 m | 8 | 0 |
-| R3 | 31.3 m | 5 | 0 |
-
-R1 recovered from both movement failures and continued exploring. All four
-retained stable mission/component/frame identities, with 156 observations each
-and no observation errors. Stop All cleared every active route. The exact
-Release image passed all 21 native test executables (288 GoogleTests). Three
-local timing-sensitive failures passed on a filtered rerun and did not recur
-in the full Benchbot suite; planner deadlines were not increased. This validates
-startup and repeated route execution, not full Bistro coverage or hardware use.
+Measured results for this test, including the 2026-09-16 four-robot Bistro
+trial, are in the [acceptance log](acceptance-log.md).
 
 The independent cloud/OctoMap path remains available through
 `./scripts/sim-up --legacy-cloud --drift`. For a direct legacy Compose invocation
@@ -283,19 +272,18 @@ identity transforms.
 
 ## ROS 2 hardware
 
-Hardware must run the SwarmDeck-patched MGG image. A workspace built directly
-from the pinned upstream commit is incompatible with the adapter lifecycle.
-Build the image from the repository root, or use the equivalent image built by
-the robot-local deployment profiles:
+Hardware must run the MGG image built from the pinned `swarmdeck` branch. A
+workspace built from upstream `902e868` is incompatible with the adapter
+lifecycle. Build the image from the repository root, or use the equivalent image
+built by the robot-local deployment profiles:
 
 ```bash
 docker build -f deploy/docker/Dockerfile.mgg -t swarmdeck-mgg:local .
 ```
 
-The Dockerfile checks out the pinned upstream revision, applies the complete
-patch series in order, and rebuilds `mgg_ros` and `mgg_pci`. For development
-outside the image, reproduce that exact patched source and build; do not launch
-an unpatched upstream workspace. Exploration uses standard Trigger and Path
+The Dockerfile checks out `MGG_REV` from that branch and builds `mgg_ros` and
+`mgg_pci`. For development outside the image, build the same pinned source; do
+not launch an upstream workspace. Exploration uses standard Trigger and Path
 messages in the adapter. The opt-in `planning.backend: mgg` objective interface
 also requires matching generated `mgg_msgs` in the adapter, including
 `PlanObjective` and `RefineObjectiveRoute`. Rebuild the simulation, mapping and
@@ -426,10 +414,10 @@ The terrain service reports geometric steps and surface roughness separately;
 MGG applies the platform step limit and its own roughness limit to those metrics.
 This remains a deadline, not a promised route. Exploration
 keeps its shorter graph-search budget, and hardware retains its configured MGG
-default unless a site profile overrides it. The pinned patch series includes
-`deploy/patches/mgg-traversal-lifecycle.patch` and
-`deploy/patches/mgg-external-path-execution.patch`; rebuild the MGG image when
-any MGG patch changes. External execution leaves movement failure and its
+default unless a site profile overrides it. The traversal lifecycle and external
+path execution live in the pinned `swarmdeck` branch; advance `MGG_REV` and
+rebuild every MGG and message image together when the planner changes.
+External execution leaves movement failure and its
 bounded replacement budget to the robot controller boundary. Empty or
 near-endpoint planner results remain waiting work and use the bounded retry
 schedule described above. A stopped session cannot publish a late planner
@@ -460,8 +448,6 @@ docker run --rm --network none -e ROS_DOMAIN_ID=173 \
     python3 adapters/test/ros/mgg_contract_smoke.py'
 ```
 
-The Bistro regression run with drift odometry confirmed goals and motion on all
-four robots, including Spot, and a successful Spot return to within the existing
-navigation position tolerance. Completion and repeated-stall outcomes are tested
-with native PCI and controlled planner responses; a full Bistro coverage run is
-not part of that short regression.
+Completion and repeated-stall outcomes are tested with native PCI and controlled
+planner responses; a full Bistro coverage run is not part of that short
+regression. Live Bistro results are in the [acceptance log](acceptance-log.md).
