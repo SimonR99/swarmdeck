@@ -124,18 +124,24 @@ independently of the ordinary graph-edge limit.
 The final indexed query also checks paths already accepted by native terrain
 projection. Its surface fit needs several nearby columns, so sparse LiDAR rings
 can leave gaps between measured supports. Under the simulation's provisional
-policy, each such gap must close on measured ground within the same connector
-limit, including the distance to that closing sample. A height change across a
-gap cannot exceed the platform step limit. Occupied cells, known insufficient
-clearance, excessive roughness, steps and drops remain vetoes throughout. A
-route cannot finish in a gap or use missing ground without reaching measured
-support. Hardware retains strict observed-volume and terrain requirements.
+policy, each interval of missing terrain is bounded by the same connector
+limit, including the distance to any closing measured sample. A height change
+across a gap cannot exceed the platform step limit. Occupied cells, known insufficient
+clearance, excessive roughness, steps and drops remain vetoes throughout. A route
+selected by Explore must finish on measured support. Qualified MOLA Navigate
+and Home may end a local section in an unknown interval within that same
+distance bound, anchored at the physical start or the last measured support.
+An entirely unknown bootstrap section is subject to the same bound. These
+intervals remain unknown; they are not written into the map as free space.
+Hardware retains strict observed-volume and terrain requirements unless its
+deployment explicitly qualifies and enables the provisional policy.
 
 The lattice candidate filter uses the same body-evidence policy as edge
 validation. Requiring mostly ray-cleared body volume at that earlier stage can
 discard usable ground before terrain projection, especially for the taller Spot
-model. Allowing unknown body cells does not supply ground: each candidate still
-needs measured terrain, and known obstacles still reject it.
+model. Allowing unknown body cells does not supply ground: candidates must meet
+the terrain policy's measured-support or bounded-connector requirements, and
+known obstacles still reject them.
 
 Qualified MOLA exploration starts at the robot's measured pose. A nearby floor
 return must not move that starting pose vertically; the first edge connects it
@@ -145,7 +151,7 @@ avoiding the unused corners of its enclosing square. It checks occupied
 voxel boundaries and has a fixed work budget. Hardware's strict body policy is
 unchanged.
 
-For MOLA exploration in this qualified simulation policy, a route height can be
+For MOLA routes in this qualified simulation policy, a route height can be
 refined once from the indexed ground fit. Native projection may use a nearby
 return while the fit estimates ground under the footprint centre. Only the
 smallest height correction needed to enter the existing tolerance band is
@@ -153,10 +159,12 @@ applied. It must remain within the platform step limit and preserve the physical
 start, XY route and heights already within tolerance. The adjusted route must
 pass the native swept-body check again, followed by a second indexed terrain
 and body query against the same map revision. Both queries share one timeout;
-routes already within tolerance use only one. This exploration query samples
+routes already within tolerance use only one. This query samples
 terrain at horizontal intervals, keeping sample positions consistent across
 height refinement; the native body sweep still checks the full 3D segment.
-Navigate, Home and hardware keep their existing height-refinement policy.
+Navigate and Home keep their complete local endpoint and global destination;
+only Explore may return a shorter validated prefix. Strict hardware profiles
+retain their existing admission requirements.
 
 While a robot follows a qualified MOLA route, the remaining-route validator
 preserves those accepted heights and samples between them. It checks the latest
@@ -391,6 +399,12 @@ Continuation retains the exact goal in the stable planning frame. Transforming
 the UI goal happens before planning; the final path is compared in that same
 frame. Route tokens, mission/component authority, and current map checks fence
 continuations, and cancellation invalidates outstanding work.
+
+Graph poses use driving height, while UI goals use navigation-base height.
+An unsupported tentative goal inherits the preceding graph pose's driving
+height before local sections are clipped. This avoids interpolating between
+different height conventions and inventing a step. Local terrain projection
+still resolves the floor as the robot approaches the destination.
 
 The ARGoS Jolt stand-ins are upright rigid bodies. SwarmDeck adds collision-checked
 step assistance for 0.15 m steps on Bunker/Scout and 0.30 m steps on Spot. It

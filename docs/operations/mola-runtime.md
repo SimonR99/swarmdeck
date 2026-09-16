@@ -22,8 +22,10 @@ flowchart LR
 The native planner product adds occupied/free voxels and terrain samples to the
 point-geometry layer. Both the MOLA provider and the existing indexed provider
 use the same terrain-query implementation. In the simulation MOLA path, MGG
-consumes this product and uses a read-only OctoMap spatial index internally for
-graph/grid work; the independent raw-cloud/depth mapper is disabled. The robot
+reads this immutable native grid directly for graph/grid work, without an
+OctoMap conversion. Occupied-only collision checks retain measured surface
+heights; strict queries and missing height evidence retain full voxel bounds.
+Unknown cells remain unknown. The independent raw-cloud/depth mapper is disabled. The robot
 peer overlay remains hardware opt-in and keeps its planner-product defaults
 disabled until capture provenance is qualified. The read-only fleet component
 catalogue and aggregate display path are described in the [replica component

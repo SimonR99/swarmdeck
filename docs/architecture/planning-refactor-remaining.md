@@ -14,7 +14,7 @@ contains measured results and known failures.
 | Priority | Deliverable | Acceptance before enabling |
 | --- | --- | --- |
 | 1 | Persistent native MOLA map ownership and a loadable MOLA framework module. Reuse keyframe geometry for pose corrections; replace/retract geometry coherently. | Native insertion/correction/replacement tests, bounded process failure recovery, real MOLA module loading and map callbacks, same-process multi-revision replay. |
-| 2 | MOLA map products behind the planner's map-provider interface, with observation provenance and explicit free/occupied/unknown terrain semantics. | Corrected geometry and sensor origins agree; old walls disappear; floor, curb, step, drop and stacked-surface tests pass; measured query/build budgets. MGG's OctoMap remains explicit until this replacement is qualified. |
+| 2 | MOLA map products behind the planner's map-provider interface, with observation provenance and explicit free/occupied/unknown terrain semantics. | Corrected geometry and sensor origins agree; old walls disappear; floor, curb, step, drop and stacked-surface tests pass; measured query/build budgets. The native grid replaces the internal OctoMap conversion; motion qualification remains required. |
 | 3 | Selectable calibrated odometry/capture providers for simulation, SuperOdometry and FAST-LIVO2; MOLA-native odometry can use the same boundary. | Capture-time transforms, estimator resets, clock domains and covariance provenance verified against recorded data. Only one provider publishes local odometry; Swarm-SLAM remains the corrected-pose authority. |
 | 4 | Finish shared graph → grid → local-control planning for Explore, Navigate and Home. Add blocked-corridor topological replanning and speed limits. | Four-robot startup and Home success against independent simulation truth; cancellation and map corrections stop/replan correctly; moving-obstacle and blind-corner trials. |
 | 5 | Qualify peer SLAM and exploration coordination on Bistro and separate hosts. | Accurate inter-robot closures, reduced duplicate coverage, no starvation or false completion, partition/rejoin and optimizer-loss tests. Frontend restart must have an explicit persistence/epoch solution. |
@@ -103,17 +103,18 @@ were observed.
 
 ## Current graph-provider milestone
 
-MGG's opt-in native `mola_snapshot` backend is implemented and has passed 216
-native tests plus actual mapper-to-planner initial/reused/corrected fixtures.
-A live Bistro request built a graph for R3; the other robots rejected their
-connections. Four-robot motion qualification is therefore still open.
+MGG's `mola_snapshot` backend is the normal simulation provider. It reads the
+immutable native grid directly and preserves explicit occupied/free/unknown
+evidence. Navigate and Home retain a global graph route and refine bounded local
+sections; Explore retains its existing graph selector. Native regression tests
+cover measured-floor collision, route continuation, terrain checks, and request
+supersession. These tests do not establish successful fleet navigation.
 
-Next work should first distinguish unknown body clearance from occupied and
-unsupported terrain in aggregate graph diagnostics, then align graph, refined
-corridor and controller admission without relaxing unknown-space checks.
-Unchanged solver clocks also cause unnecessary rematerialization: reduce repeated
-artifact validation and the snapshot-to-ready-index availability gap while
-preserving exact authority and correction fences. The
+Current motion qualification checks startup, distant Navigate, Return Home,
+and repeated exploration under the same terrain policy. Sparse floor evidence
+and base-versus-driving height conventions must agree across native projection,
+indexed queries, and route validation. Unchanged artifacts reuse their decoded
+grid while authority and correction checks remain enforced. The
 [acceptance record](../operations/navigation-live-map-acceptance.md) contains
 image identities, timings and failed motion cases.
 
@@ -122,9 +123,9 @@ image identities, timings and failed motion cases.
 The direct `mola_snapshot` MGG backend connects the qualified native planner grid
 to graph construction through `MapInterface`, without an OctoMap conversion.
 MOLA owns the geometry and explicit free/occupied cells. This is the normal
-simulation backend; physical robot use still requires qualification. The remaining work is to
-qualify that backend under motion, complete shared graph-to-grid-to-controller behavior for
-Explore, Navigate, and Home, and extend four-robot startup validation to correction,
+simulation backend; physical robot use still requires qualification. Remaining
+work includes fleet motion acceptance, shared exploration routing and blocked
+corridor feedback, and extending four-robot startup validation to correction,
 replanning, and moving-obstacle trials. Physical ROS 2 gateways, ARM builds,
 calibration, bounded peer traffic, and low-speed controller trials remain
 hardware gates. Gaussian reconstruction remains a separate fixed-pose batch
@@ -147,5 +148,6 @@ The [benchbot acceptance record](../operations/planning-parallel-acceptance.md)
 records four-robot native free-space production, HTTP/browser checks, and the
 bounded Explore/Stop All trial. R1 still reaches a planner-generated blocked
 state. No live inter-robot closure or full MOLA-driven exploration qualification
-is claimed. The next priority is MGG's map-provider migration and blocked-route
-recovery, then Navigate/Home and coordinated multi-host acceptance.
+is claimed by that earlier trial. The map-provider migration and explicit
+graph-to-local routing are implemented; blocked-route recovery, fleet motion
+qualification, and coordinated multi-host acceptance remain ongoing work.

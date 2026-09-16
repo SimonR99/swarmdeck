@@ -67,6 +67,7 @@ Camera-colorized point clouds require synchronized images, camera/lidar
 calibration, and capture-time poses; RGB-D depth is useful for correspondence
 and occlusion handling but is not required for every colorized capture.
 Gaussian splatting is an optional fixed-pose reconstruction workflow and is not
-launched merely by selecting a UI layer. MGG consumes a read-only OctoMap
-spatial index produced from MOLA's coherent output; independent raw-cloud
-mapping is disabled in MOLA mode.
+launched merely by selecting a UI layer. MGG reads MOLA's immutable native
+planner grid directly, without constructing an OctoMap tree. Independent
+raw-cloud mapping is disabled in MOLA mode; OctoMap belongs to the explicit
+legacy cloud backend.

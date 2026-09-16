@@ -73,6 +73,7 @@ COPY deploy/patches/mgg-mola-read-lease-ttl-followup.patch /tmp/mgg-mola-read-le
 COPY deploy/patches/mgg-exploration-swept-cylinder-followup.patch /tmp/mgg-exploration-swept-cylinder-followup.patch
 COPY deploy/patches/mgg-objective-rolling-route-followup.patch /tmp/mgg-objective-rolling-route-followup.patch
 COPY deploy/patches/mgg-mola-measured-body-followup.patch /tmp/mgg-mola-measured-body-followup.patch
+COPY deploy/patches/mgg-qualified-provisional-objective-followup.patch /tmp/mgg-qualified-provisional-objective-followup.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -132,6 +133,7 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-exploration-swept-cylinder-followup.patch && \
     git apply /tmp/mgg-objective-rolling-route-followup.patch && \
     git apply /tmp/mgg-mola-measured-body-followup.patch && \
+    git apply /tmp/mgg-qualified-provisional-objective-followup.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

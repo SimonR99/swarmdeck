@@ -81,15 +81,13 @@
      return result;
 --- a/ros2/src/mgg_core/test/test_planning_stages.cpp
 +++ b/ros2/src/mgg_core/test/test_planning_stages.cpp
-@@ -60,16 +60,18 @@
-       chain.graph, StateVec(0.1, 0.0, 0.0, 0.0), far);
+@@ -61,15 +61,17 @@
    ASSERT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
    ASSERT_FALSE(route.partial);
--  ASSERT_EQ(route.poses.size(), 4u);
+   ASSERT_EQ(route.poses.size(), 4u);
 -  EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
 -  // The prefix remains topology only. The grid stage must append and reach
 -  // the exact operator goal before this request can succeed.
-+  ASSERT_EQ(route.poses.size(), 4u);
 +  EXPECT_DOUBLE_EQ(route.poses[2].x(), 2.0);
 +  EXPECT_DOUBLE_EQ(route.poses.back().x(), 30.0);
 +  EXPECT_DOUBLE_EQ(route.poses.back().y(), 4.0);
@@ -346,7 +344,29 @@
    mgg::RouteCorridor corridor;
    corridor.request = core;
    bool explicit_objective_planned = false;
-@@ -3705,18 +3738,19 @@
+@@ -3698,6 +3731,21 @@
+         explicit_objective_planned = true;
+         corridor =
+             objective_planner.plan(graph, graph_current, graph_request);
++        if (core.objective == mgg::ObjectiveKind::kNavigate &&
++            robot_params_.type == mgg::RobotType::kGroundRobot &&
++            !projected_goal_supported && corridor.poses.size() >= 2u &&
++            (corridor.poses.back().head<2>() - core.goal.pose.head<2>())
++                    .cwiseAbs().maxCoeff() <= 1e-6) {
++          // An unsupported UI goal owns an exact navigation-base pose, while
++          // graph vertices and rolling proxies use driving height.  Keep the
++          // optimistic connector on its preceding graph driving plane until a
++          // later local window observes terrain near the goal.  Interpolating
++          // the request's base Z here fabricates a long slope and a false step
++          // at the first horizon.  corridor.request below still retains the
++          // exact caller-owned XYZ and yaw for final-window binding.
++          corridor.poses.back().z() =
++              corridor.poses[corridor.poses.size() - 2u].z();
++        }
+         // Graph lookup uses driving height, while refinement and the response
+         // retain the caller's exact base-pose goal.
+         corridor.request = core;
+@@ -3705,18 +3753,19 @@
      }
    }
  
@@ -372,7 +392,7 @@
        mgg::RouteCorridor local = corridor;
        local.poses.clear();
        double remaining = objective_route_horizon_m_;
-@@ -3745,15 +3779,17 @@
+@@ -3745,15 +3794,17 @@
        if (more) {
          local.request.goal.pose = local.poses.back();
          local.request.goal.landmark_id.clear();
@@ -398,7 +418,7 @@
        }
        corridor = std::move(local);
      }
-@@ -3765,15 +3801,16 @@
+@@ -3765,15 +3816,16 @@
            ? &objective_grid_limits_
            : nullptr;
    mgg::RouteCorridor primary = corridor;
@@ -418,7 +438,7 @@
         (provisional_physical_home &&
          corridor.status == mgg::PlanningStatus::kUnreachable &&
          corridor.poses.empty() &&
-@@ -3793,7 +3830,7 @@
+@@ -3793,7 +3845,7 @@
    const auto objective_refinement_started = std::chrono::steady_clock::now();
    mgg::FeasiblePath path = refineCorridor(primary, objective_limits);
    const std::string primary_failure_reason = path.reason;
@@ -427,7 +447,7 @@
        path.status != mgg::PlanningStatus::kSucceeded) {
      const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
          std::chrono::steady_clock::now() - objective_refinement_started);
-@@ -3806,6 +3843,9 @@
+@@ -3806,6 +3858,9 @@
        mgg::GridRefinementLimits remaining = objective_grid_limits_;
        remaining.timeout -= elapsed;
        mgg::FeasiblePath fallback = refineCorridor(direct, &remaining);
@@ -437,7 +457,7 @@
        if (fallback.status != mgg::PlanningStatus::kSucceeded) {
          fallback.reason =
              "graph corridor: " +
-@@ -3816,18 +3856,19 @@
+@@ -3816,18 +3871,19 @@
        path = std::move(fallback);
      }
    }
@@ -461,7 +481,7 @@
              boundedObjectiveFailure(primary_failure_reason) +
              " [local endpoint fallback: " +
              boundedObjectiveFailure(fallback.reason) + "]";
-@@ -3859,13 +3900,24 @@
+@@ -3859,13 +3915,24 @@
        path.indexed_map_validated = false;
      }
    }
@@ -491,7 +511,7 @@
    }
    response->status = static_cast<std::uint8_t>(path.status);
    response->component_id = path.component_id;
-@@ -3883,17 +3935,17 @@
+@@ -3883,17 +3950,17 @@
        path.indexed_map_validated;
    response->reason = path.reason;
    for (const auto& pose : path.poses) response->path.push_back(toPoseMsg(pose));
@@ -513,7 +533,7 @@
    }
  }
  
-@@ -3909,8 +3961,8 @@
+@@ -3909,8 +3976,8 @@
    const IndexedQueryContext query_context = indexedQueryContext();
    auto finish = [&](mgg::PlanningStatus status, const std::string& reason) {
      response->status = static_cast<std::uint8_t>(status);
@@ -524,7 +544,7 @@
                                   : component_id_;
      response->graph_revision = graph_revision_;
      response->map_revision = map_revision_;
-@@ -3922,16 +3974,18 @@
+@@ -3922,16 +3989,18 @@
      }
      response->reason = reason;
    };
@@ -549,7 +569,7 @@
        (request->map_revision == 0 || request->map_revision == map_revision_);
    const bool request_has_mapping_key =
        request->map_epoch != 0 || request->mapping_graph_revision != 0 ||
-@@ -3963,27 +4017,27 @@
+@@ -3963,27 +4032,27 @@
      return;
    }
    if ((current_state_.head<2>() -
@@ -586,7 +606,7 @@
      const double distance =
          (target.head<2>() - previous.head<2>()).norm();
      if (distance > remaining + 1e-9) {
-@@ -4000,14 +4054,14 @@
+@@ -4000,14 +4069,14 @@
      ++next_index;
      if (remaining <= 1e-9) break;
    }
@@ -606,7 +626,7 @@
    corridor.request.map_revision = map_revision_;
    corridor.request.map_epoch = request->map_epoch;
    corridor.request.mapping_graph_revision = request->mapping_graph_revision;
-@@ -4017,23 +4071,22 @@
+@@ -4017,23 +4086,22 @@
    corridor.request.goal = more
                                ? mgg::PlanningGoal{
                                      local_poses.back(), ""}
@@ -634,7 +654,7 @@
              boundedObjectiveFailure(primary_failure_reason) +
              " [local endpoint fallback: " +
              boundedObjectiveFailure(fallback.reason) + "]";
-@@ -4059,13 +4112,22 @@
+@@ -4059,13 +4127,22 @@
        path.partial = false;
      }
    }
@@ -680,7 +700,7 @@
    static void setIndexedTerrainLimits(PlannerNode& node, double step,
                                        double inclination) {
      const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
-@@ -1141,9 +1152,14 @@
+@@ -1141,12 +1152,55 @@
      ASSERT_EQ(response->status,
                mgg_msgs::srv::PlanObjective::Response::SUCCEEDED)
          << distance << "m: " << response->reason;
@@ -697,7 +717,48 @@
    }
  }
  
-@@ -1195,9 +1211,9 @@
++TEST(PlannerObjective,
++     UnsupportedFarNavigateKeepsFirstHorizonOnDrivingPlane) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("use_sim_time", true),
++       rclcpp::Parameter("map.resolution", 0.15),
++       rclcpp::Parameter("objective_route_horizon_m", 8.0),
++       rclcpp::Parameter("objective_body_evidence_policy", "observed_ground"),
++       rclcpp::Parameter("objective_ground_evidence_policy",
++                         "provisional_unknown")});
++  auto node = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureBackboneTest(*node);
++  Peer::setPlanningBody(*node, Eigen::Vector3d(1.023, 0.778, 0.40));
++  Peer::setMaxGroundHeight(*node, 0.475);
++  Peer::acceptOdometry(*node, 0.0, 0.0, 0.20);
++  Peer::observeGroundRectangle(*node, -0.6, 0.6, -0.5, 0.5);
++  Peer::finishMapRevision(*node);
++
++  const auto response = Peer::requestObjective(
++      *node, mgg::ObjectiveKind::kNavigate,
++      // Deliberately use a UI/base height unrelated to the graph's driving
++      // convention. Terrain at this distant endpoint is still unknown.
++      mgg::StateVec(12.0, 0.0, 0.0, 0.7));
++  ASSERT_EQ(response->status,
++            mgg_msgs::srv::PlanObjective::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_TRUE(response->partial);
++  ASSERT_FALSE(response->path.empty());
++  EXPECT_NEAR(response->path.back().position.x, 8.0, 1e-6);
++  EXPECT_NEAR(response->path.back().position.z, 0.20, 1e-6);
++  ASSERT_FALSE(response->global_path.empty());
++  EXPECT_NEAR(response->global_path.back().position.x, 12.0, 1e-9);
++  EXPECT_NEAR(response->global_path.back().position.z, 0.0, 1e-9);
++  EXPECT_NEAR(response->global_path.back().orientation.z, std::sin(0.35),
++              1e-9);
++}
++
+ TEST(PlannerObjective, ExplicitObjectiveUsesBoundedWiderDetourWindow) {
+   using Peer = mgg_ros::PlannerNodeTestPeer;
+   const auto make = [](double maximum_margin,
+@@ -1195,9 +1249,9 @@
    ASSERT_NE(response, nullptr);
    ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
        << response->reason;
@@ -709,7 +770,7 @@
    EXPECT_NEAR(response->path.back().orientation.z, std::sin(0.35), 1e-9);
    EXPECT_NEAR(response->path.back().orientation.w, std::cos(0.35), 1e-9);
    EXPECT_TRUE(std::any_of(response->path.begin(), response->path.end(),
-@@ -1360,7 +1376,7 @@
+@@ -1360,7 +1414,7 @@
    auto rejected = Peer::refineObjectiveRoute(*node, early);
    EXPECT_EQ(rejected->status,
              mgg_msgs::srv::RefineObjectiveRoute::Response::BLOCKED);
@@ -718,7 +779,7 @@
              std::string::npos);
  
    bool complete = false;
-@@ -1546,7 +1562,7 @@
+@@ -1546,7 +1600,7 @@
              mgg_msgs::srv::PlanObjective::Response::BLOCKED);
    EXPECT_TRUE(response->path.empty());
    EXPECT_NE(response->reason.find("exact goal rejected"), std::string::npos);
@@ -727,7 +788,7 @@
              std::string::npos);
  }
  
-@@ -2462,7 +2478,7 @@
+@@ -2462,7 +2516,7 @@
        << response->reason;
  }
  
@@ -736,7 +797,7 @@
    rclcpp::NodeOptions options;
    options.parameter_overrides(
        {rclcpp::Parameter("map.resolution", 0.05)});
-@@ -2476,10 +2492,89 @@
+@@ -2476,10 +2530,89 @@
    ASSERT_NE(response, nullptr);
    ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
        << response->reason;
@@ -829,7 +890,7 @@
  }
  
  TEST(PlannerObjective, NavigateResolvesStaleStartHeightAcrossLongShallowRamp) {
-@@ -2891,6 +2986,116 @@
+@@ -2891,6 +3024,116 @@
  
    executor.cancel();
    spinner.join();

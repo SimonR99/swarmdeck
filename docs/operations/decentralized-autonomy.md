@@ -234,7 +234,9 @@ Adapters with MGG configured advertise `plan_objective`. The GUI then sends
 Navigate and Return Home objectives directly to that robot, without requiring
 a central A* route. Return Home resolves the initial keyframe through the fresh
 onboard correction; the server does not substitute its cached home coordinates.
-Nav2 FollowPath receives the complete MGG path. Removing the onboard overlay
+Nav2 FollowPath receives the current locally refined section of MGG's global
+route. The adapter requests the next section after arrival and retains the
+original Navigate or Home destination throughout. Removing the onboard overlay
 and restarting the adapter restores the legacy central map path.
 
 An executing Home route is cancelled when its navigation transform moves more
