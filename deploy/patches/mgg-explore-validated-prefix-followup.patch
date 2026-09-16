@@ -511,7 +511,7 @@
          } else if (active_case == kFiniteRootThenBlind) {
            set_missing_roughness(2, n);
          } else if ((active_case >= kOccupiedInsideGap &&
-@@ -3544,7 +3554,14 @@
+@@ -3544,7 +3554,15 @@
          response->step.assign(n, false);
          response->drop.assign(n, false);
          if (step_sample.load() < n) response->step[step_sample.load()] = true;
@@ -520,14 +520,15 @@
 +          response->drop[drop_sample.load()] = true;
 +        }
 +        for (std::size_t i = 0; i < n; ++i) {
-+          if (request->samples[i].x >= drop_at_or_after_x.load()) {
++          if (request->samples[i].x >=
++              request->samples.front().x + drop_at_or_after_x.load()) {
 +            response->drop[i] = true;
 +          }
 +        }
          if (n > 5 && active_case == kOccupiedInsideGap) {
            response->occupancy[4] = Query::Response::OCCUPIED;
          } else if (n > 5 && active_case == kLowClearanceInsideGap) {
-@@ -3563,6 +3580,16 @@
+@@ -3563,6 +3581,16 @@
          }
          if (stale_refined_query.load() && query_ordinal == 2) {
            ++response->graph_revision;
@@ -544,7 +545,17 @@
          }
        });
    rclcpp::executors::MultiThreadedExecutor executor(
-@@ -3964,6 +3991,97 @@
+@@ -3896,7 +3924,8 @@
+   path.status = mgg::PlanningStatus::kSucceeded;
+   path.poses = {mgg::StateVec(0.0, 0.0, 0.0, 3.0),
+                 mgg::StateVec(1.2, 0.0, 0.0, -3.0)};
+-  EXPECT_TRUE(mgg_ros::PlannerNodeTestPeer::query(*planner, path, true));
++  EXPECT_TRUE(mgg_ros::PlannerNodeTestPeer::query(*planner, path, true))
++      << path.reason;
+   EXPECT_EQ(query_count.load(), 1u);
+ 
+   refinement_dip = 0.11;
+@@ -3964,6 +3993,98 @@
              std::string::npos);
    terrain_case = kOrdinaryTerrain;
  
@@ -630,7 +641,8 @@
 +  path.status = mgg::PlanningStatus::kSucceeded;
 +  path.poses = {mgg::StateVec(0.0, 0.0, 0.0, 0.0),
 +                mgg::StateVec(3.0, 0.0, 0.0, 0.0)};
-+  EXPECT_TRUE(mgg_ros::PlannerNodeTestPeer::query(*planner, path, true));
++  EXPECT_TRUE(mgg_ros::PlannerNodeTestPeer::query(*planner, path, true))
++      << path.reason;
 +  EXPECT_TRUE(path.partial);
 +  EXPECT_EQ(query_count.load(), 2u);
 +  ASSERT_FALSE(path.poses.empty());
