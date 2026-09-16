@@ -135,6 +135,14 @@ route, and pass a second query of the adjusted body positions against the same
 map revision. Both queries share one timeout; routes already within tolerance
 use only one. Navigate, Home and hardware keep their existing validation policy.
 
+If a candidate's far end fails these checks, qualified simulation exploration
+can use its already-validated prefix to collect more ground data. The prefix
+must end on measured support at least `partial_route_min_progress_m` (1 m by
+default) from the physical start, before the first rejected sample. Every
+included sample retains the same terrain and body checks; adjusted heights
+still need the second query. This fallback applies only to exploration and
+does not shorten manually requested destinations or Return Home routes.
+
 MOLA mode sizes the graph's maximum edge and initial connector from the selected
 LiDAR's first ground-return ring, with one map-cell margin and grid rounding.
 For the Bistro VLP16 this gives 3 m for Bunker, 2 m for Scout and 4 m for Spot;
@@ -146,6 +154,12 @@ Unchanged optimizer poses advance the replica publication and causal solution
 order without replacing the map snapshot. Captures and actual pose corrections
 advance the mapping graph revision. This avoids rebuilding identical MOLA
 products and repeatedly interrupting an idle robot's planner.
+
+Each planning cycle admits a fresh mapping snapshot before graph construction.
+An expensive graph build must not expire its own snapshot simply by holding
+the callback lock. The query still uses the exact captured revision and source
+stamp, checks the live authority and transform after each response, and rejects
+provider staleness or a changed MOLA generation before publishing the route.
 
 To test actual fleet startup against a running four-robot simulation:
 
