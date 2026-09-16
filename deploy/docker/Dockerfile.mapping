@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Declared just before its use: an ARG invalidates the cache of every RUN
 # that follows it, and the apt layers above must stay cached because the ROS
 # repository no longer serves the pinned MOLA release.
-ARG MGG_REV=b153e639a1778bb747f32c29a5804fe4fc03677b
+ARG MGG_REV=043fbd760ed604fc50af69b0a87139e9b6396055
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
     && rm -rf /tmp/mgg-msgs-source

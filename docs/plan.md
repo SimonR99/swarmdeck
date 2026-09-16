@@ -58,8 +58,8 @@ local obstacle avoidance, and the adapter owns the final command boundary.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`b153e639a1778bb747f32c29a5804fe4fc03677b` (59 commits over upstream
-`902e868`), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+`043fbd760ed604fc50af69b0a87139e9b6396055` (the 59 ported commits over
+upstream `902e868` plus the authority tilt tolerance), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
@@ -124,7 +124,7 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
 | 1 | Persistent native MOLA map ownership and a loadable MOLA framework module | Done | 2026-09-10 workstation correction benchmark; 2026-09-15 Bistro replay |
 | 2 | MOLA map products behind the planner map-provider interface, with explicit free, occupied and unknown terrain semantics | Sim only | 2026-09-10 four-robot native free-space production; the native grid is the simulation default and hardware use is unqualified |
 | 3 | Selectable calibrated odometry and capture providers for simulation, SuperOdometry and FAST-LIVO2 | Partial | 2026-09-15 Fast-LIVO2 mission on domain 219; SuperOdometry and FAST-LIVO2 capture contracts remain occupied-only |
-| 4 | Shared graph, grid and local-control planning for Explore, Navigate and Home, with blocked-corridor replanning and speed limits | Partial | 2026-09-16 `c31425e` four-robot Bistro exploration; unified Explore and blocked-corridor feedback are implemented on MGG `swarmdeck` head `494ce66` (340 native tests) but not yet pinned or live-tested; speed limits are not implemented |
+| 4 | Shared graph, grid and local-control planning for Explore, Navigate and Home, with blocked-corridor replanning and speed limits | Partial | 2026-09-16 `c31425e` four-robot Bistro exploration; unified Explore and blocked-corridor feedback are implemented on MGG `swarmdeck` head `c4eff1b` (340 native tests) but not yet pinned or live-tested; speed limits are not implemented |
 | 5 | Qualify peer SLAM and exploration coordination on Bistro and on separate hosts | Partial | verified multi-robot components observed in the replica catalogue; no multi-host, partition or optimizer-loss trial |
 | 6 | Qualify per-robot gateways, ARM builds and physical ROS 2 deployment | Not started | no ARM build, packet capture or hardware motion trial is recorded |
 | Parallel | Fixed-pose Gaussian batch reconstruction, then incremental training | Partial | native CUDA smoke completed nine optimizer iterations and converted 540 Gaussians; no real-capture alignment measurement |
@@ -142,7 +142,7 @@ Each item names its acceptance gate.
       corrections stop or replan correctly.
 - [ ] **Blocked-corridor topological replanning and speed limits.** Gate: a
       failed edge is excluded from a new topological search, and refined paths
-      carry speed limits. Implemented in MGG at `494ce66`: Explore now runs
+      carry speed limits. Implemented in MGG at `494ce66` (branch head `c4eff1b`): Explore now runs
       through the shared topological and grid stages, and a bounded, expiring
       blocked-corridor registry (64 entries, 10 s, 8 map revisions) steers the
       topological search for all three objectives; native tests grew from 319
