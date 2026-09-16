@@ -106,7 +106,8 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
 15. Selecting a backend that has no valid product returns unavailable. There is
     no silent fallback to a coarser map, to raw clouds, or to a relabelled frame.
 16. A coarse voxel index cannot enforce a fine step limit. The exact surface
-    query is the safety gate; 0.20 m voxel centres do not resolve a 0.15 m step.
+    query is the safety gate; 20 cm voxel centres alone cannot enforce a 10 cm
+    platform step limit.
 17. Simulation terrain step settings are 0.15 m for Bunker and Scout and 0.30 m
     for Spot. These are simulator parameters, not hardware guarantees.
 18. Simulation ground truth is used only for scoring, never as an inter-robot
@@ -158,9 +159,10 @@ Each item names its acceptance gate.
 - [ ] **Per-robot network gateways.** Gate: packet captures show no DDS
       discovery on fleet links; required collaboration survives server and peer
       loss within measured traffic budgets.
-- [ ] **Long-duration map capacity.** Gate: measure the next capacity boundary.
-      The one-million-point publication limit is reached at 245 captures when
-      each capture retains the configured maximum of 4,096 endpoints.
+- [ ] **Long-duration map capacity.** Gate: measure when a long mission reaches
+      the indexed-map input bounds (1,000,000 points, 2,000,000 voxels,
+      4,000,000 ray steps, eight seconds of build time) and what the planner does
+      past them; exceeding a bound currently returns `UNAVAILABLE`.
 - [ ] **Gaussian reconstruction from real captures.** Gate: measured alignment,
       held-out image quality, memory, training and rendering budgets, correction
       replacement and cancellation.
