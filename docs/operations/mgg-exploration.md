@@ -27,6 +27,15 @@ coordination-exclusion, or map-query contract described here. The upstream
 top-level README still contains ROS 1 instructions; the relevant packages are
 under `ros2/src`.
 
+The branch head (`494ce66`) additionally routes Explore through the shared
+topological and grid stages and adds blocked-corridor feedback. That head is
+not pinned: the deployed `MGG_REV` stays at `b153e63` until a live Bistro
+exploration trial with the new head passes, because live PCI exploration then
+receives the refined corridor instead of the shortcut lattice walk and can be
+refused on terrain. The four new parameters `blocked_corridor_max_entries`,
+`blocked_corridor_cell_size_m`, `blocked_corridor_ttl_s` and
+`blocked_corridor_revision_window` are optional with clamped defaults.
+
 Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 
 | Endpoint | ROS 2 type | Purpose |
