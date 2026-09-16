@@ -129,9 +129,11 @@ transform is never substituted. Nav2 remains responsible for local obstacle
 avoidance and executes in the robot's configured navigation frame.
 
 The MOLA worker is native and persistent. It owns the coherent geometry product
-for the selected mission; MGG queries a read-only OctoMap spatial index built
-from that MOLA output. Independent raw-cloud/depth mapping is disabled in MOLA
-mode. MOLA does not optimize poses or publish competing TF edges. See [current
+for the selected mission; MGG reads its immutable planner grid directly, without
+rebuilding an OctoMap tree. Measured surface heights keep coarse floor cells
+from becoming artificial body obstacles. Unknown cells remain unknown.
+Independent raw-cloud/depth mapping is disabled in MOLA mode. MOLA does not
+optimize poses or publish competing TF edges. See [current
 stack operations](docs/operations/current-stack.md)
 for commands and [decentralized autonomy](docs/operations/decentralized-autonomy.md)
 for the design and acceptance history.

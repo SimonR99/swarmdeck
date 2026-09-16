@@ -119,10 +119,10 @@ image identities, timings and failed motion cases.
 
 ## Remaining qualification
 
-The direct `mola_snapshot` MGG backend now connects the qualified planner product
-to graph construction through `MapInterface`. It uses OctoMap as a read-only
-query index over MOLA's explicit free/occupied cells; MOLA owns the geometry.
-This path is opt-in until its acceptance checks pass. The remaining work is to
+The direct `mola_snapshot` MGG backend connects the qualified native planner grid
+to graph construction through `MapInterface`, without an OctoMap conversion.
+MOLA owns the geometry and explicit free/occupied cells. This is the normal
+simulation backend; physical robot use still requires qualification. The remaining work is to
 qualify that backend under motion, complete shared graph-to-grid-to-controller behavior for
 Explore, Navigate, and Home, and extend four-robot startup validation to correction,
 replanning, and moving-obstacle trials. Physical ROS 2 gateways, ARM builds,

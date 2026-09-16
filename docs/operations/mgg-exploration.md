@@ -32,6 +32,9 @@ Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 | `status` | `std_msgs/msg/String` | Timestamped JSON lifecycle state: starting, exploring, waiting, complete, blocked, stopped |
 | `command_path` | `nav_msgs/msg/Path` | PCI's current exploration path; transient-local QoS |
 | `mggplanner` | `mgg_msgs/srv/PlannerSrv` | Internal PCI-to-planner request |
+| `plan_objective` | `mgg_msgs/srv/PlanObjective` | Plan a graph route for Navigate or Return Home and refine its first local section |
+| `refine_objective_route` | `mgg_msgs/srv/RefineObjectiveRoute` | Refine the next section of the retained graph route after local arrival |
+| `validate_objective_route` | `mgg_msgs/srv/ValidateObjectiveRoute` | Check the remaining local route against current terrain and obstacles |
 | `map_odometry` | `nav_msgs/msg/Odometry` | Robot pose in the planner's map frame |
 | `mapping_cloud` | `sensor_msgs/msg/PointCloud2` | Live sensor clouds, retaining each sensor’s frame/stamp |
 
@@ -101,6 +104,13 @@ a 30-degree slope limit. Robot dimensions, sensor offsets and controller step
 limits come from the simulation platform table, so the adapter accepts the same
 platform steps as the planner. The supplied planning bounds are ±60 m horizontally.
 These settings apply to simulation; hardware needs its own qualified profile.
+
+In MOLA mode, MGG reads the immutable native planner grid directly. It does not
+reconstruct an OctoMap tree. Occupied-only body checks retain measured surface
+heights so a coarse floor voxel cannot protrude upward into the robot's body
+solely because of its cell boundary. Missing height evidence remains conservative,
+and strict observed-volume checks retain full voxel bounds. The separate legacy
+cloud backend still uses OctoMap.
 
 Sparse LiDAR rays do not observe the whole body volume or the floor underneath
 a stationary robot. The simulation's explicit `observed_ground` body policy
@@ -359,7 +369,28 @@ native Jazzy PCI in isolated Docker containers. Physical driving and the
 robot’s actual sensor/TF connectivity still need an on-robot check; these
 tests do not establish that a particular hardware deployment is ready to move.
 
-## Simulation steps and return home
+## Navigate, return home, and terrain
+
+Navigate and Return Home retain a complete graph route to the requested
+destination. The grid planner refines only the next local section (8 m by
+default), and the indexed terrain query validates that section before the
+controller follows it. Reaching a local endpoint advances the retained route;
+it does not complete the operator's command. The displayed global route and
+requested destination remain fixed while local sections advance. Arrival is
+reported only after the final section reaches the requested endpoint.
+
+For a Navigate destination outside existing topology, the graph may include a
+tentative connection toward that destination. It supplies a global direction,
+not free-space or ground evidence. The robot must pass the same local terrain,
+body, and obstacle checks as each section becomes relevant. Unknown distant
+terrain therefore need not invalidate the entire request before motion starts.
+Local grid repair stays within the current section; it does not replace a
+long graph route with a full-distance grid search.
+
+Continuation retains the exact goal in the stable planning frame. Transforming
+the UI goal happens before planning; the final path is compared in that same
+frame. Route tokens, mission/component authority, and current map checks fence
+continuations, and cancellation invalidates outstanding work.
 
 The ARGoS Jolt stand-ins are upright rigid bodies. SwarmDeck adds collision-checked
 step assistance for 0.15 m steps on Bunker/Scout and 0.30 m steps on Spot. It
@@ -375,9 +406,11 @@ synthetic ground. Missing support retains the existing graph height instead of
 turning the `-1` sentinel into an artificial upward jump. The root uses the same
 collision-box offset as projected vertices even inside the sensor blind spot;
 MOLA's sensor-derived connector limits are described above. The
-simulation fleet gives explicit Navigate/Home grid refinement 2000 ms: a
-20-metre Bistro route required 858 ms on the GPU test host, exceeding the
-previous 500 ms limit. This remains a deadline, not a promised route. Exploration
+simulation fleet gives each explicit Navigate/Home grid refinement a 2000 ms
+deadline. Refinement is local even when the destination is much farther away.
+The terrain service reports geometric steps and surface roughness separately;
+MGG applies the platform step limit and its own roughness limit to those metrics.
+This remains a deadline, not a promised route. Exploration
 keeps its shorter graph-search budget, and hardware retains its configured MGG
 default unless a site profile overrides it. The pinned patch series includes
 `deploy/patches/mgg-traversal-lifecycle.patch` and

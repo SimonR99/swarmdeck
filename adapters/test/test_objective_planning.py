@@ -1241,8 +1241,105 @@ def test_partial_route_is_rejected_before_dispatch(monkeypatch, objective):
 
     assert not accepted
     bridge.follow_path.assert_not_called()
-    expected = "full route" if objective == "navigate" else "installed ABI"
-    assert expected in bridge.node.get_logger().warning.call_args.args[0]
+    assert "installed ABI" in bridge.node.get_logger().warning.call_args.args[0]
+
+
+def test_partial_navigate_refines_local_chunks_without_moving_global_goal(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -1.5, -2.0],
+    )
+    middle = rolling_home_response(partial=True, path_x=[-0.5, -1.2])
+    final = rolling_home_response(partial=False, path_x=[-1.2, -2.0])
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=[middle, final])
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    goal = {"x": -2.0, "y": 1.0}
+    assert planner.navigate(goal)
+    first_global = planner.global_display_plan()
+    assert first_global.poses[-1].x == pytest.approx(goal["x"])
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-0.5)
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert planner.global_display_plan() is first_global
+    assert planner._objective_goal == goal
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-1.2)
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.follow_path.call_count == 3)
+    assert planner.global_display_plan() is first_global
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
+    assert (
+        planner.decorate_state({"nav_status": "active"})["objective_continuation"][
+            "phase"
+        ]
+        == "following_final"
+    )
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert planner._active_route is None
+    assert planner.global_display_plan() is None
+
+
+def test_partial_navigate_rejects_final_chunk_before_exact_endpoint(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+    )
+    wrong_final = rolling_home_response(partial=False, path_x=[-0.5, -1.99])
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=[wrong_final])
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    assert planner.navigate({"x": -2.0, "y": 1.0})
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert bridge.follow_path.call_count == 1
+    assert (
+        "endpoint differs"
+        in planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+    )
+
+
+def test_partial_navigate_compares_final_chunk_in_stable_planning_frame(monkeypatch):
+    monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", "{robot}/odom")
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, 0.5],
+        global_path=[0.0, 0.5, 1.0],
+    )
+    initial.global_path[-1].position.y = 2.0
+    final = rolling_home_response(partial=False, path_x=[0.5, 1.0])
+    final.path[-1].position.y = 2.0
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=[final])
+    authority = stable_planning_authority(map_x=1.0)
+    authority["T_component_navigation"] = [
+        [0.0, -1.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    planner.authority_reader = NS(current=lambda: authority)
+
+    caller_goal = {"x": 2.0, "y": 0.0, "z": 0.4, "yaw": 0.0}
+    assert planner.navigate(caller_goal)
+    assert planner._objective_goal == caller_goal
+    assert planner._rolling_planned_goal["x"] == pytest.approx(1.0)
+    assert planner._rolling_planned_goal["y"] == pytest.approx(2.0)
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(1.0)
+    assert bridge.follow_path.call_args.args[0].poses[-1].y == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize("indexed", [False, True])
@@ -1334,7 +1431,10 @@ def test_final_home_chunk_matches_route_goal_across_small_anchor_correction(
     assert planner._objective_goal["x"] == pytest.approx(-2.0)
 
 
-def test_partial_home_success_is_hidden_while_refinement_is_pending(monkeypatch):
+@pytest.mark.parametrize("objective", ["navigate", "return_home"])
+def test_partial_success_is_hidden_and_cancellation_retires_refinement(
+    monkeypatch, objective
+):
     initial = rolling_home_response(
         partial=True,
         path_x=[0.0, -0.5],
@@ -1350,7 +1450,12 @@ def test_partial_home_success_is_hidden_while_refinement_is_pending(monkeypatch)
     planner.refine_client.call_async.side_effect = None
     planner.refine_client.call_async.return_value = pending
 
-    assert planner.return_home()
+    accepted = (
+        planner.navigate({"x": -2.0, "y": 1.0})
+        if objective == "navigate"
+        else planner.return_home()
+    )
+    assert accepted
     bridge.nav_status = "succeeded"
     planner._check_active_authority()
     assert wait_until(lambda: planner.refine_client.call_async.called)

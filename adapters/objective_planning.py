@@ -126,6 +126,7 @@ class MggObjectivePlanning:
         self._rolling_route_id = None
         self._rolling_partial = False
         self._rolling_global_plan = None
+        self._rolling_planned_goal = None
         self._rolling_authority_binding = None
         self._continuation_generation = None
         self._continuation_deadline = None
@@ -319,6 +320,7 @@ class MggObjectivePlanning:
         self._rolling_route_id = None
         self._rolling_partial = False
         self._rolling_global_plan = None
+        self._rolling_planned_goal = None
         self._rolling_authority_binding = None
         self._continuation_generation = None
         self._continuation_deadline = None
@@ -673,14 +675,14 @@ class MggObjectivePlanning:
         if self.bridge.nav_status == "succeeded":
             self._retire_route_validation()
             with self._active_lock:
-                continue_home = bool(
+                continue_route = bool(
                     self._active_route == active
-                    and self._objective_kind == "return_home"
+                    and self._objective_kind in ("navigate", "return_home")
                     and self._rolling_partial
                     and self._rolling_route_id
                 )
-            if continue_home:
-                self._start_home_continuation(active)
+            if continue_route:
+                self._start_route_continuation(active)
                 return
             with self._active_lock:
                 if self._active_route == active:
@@ -809,8 +811,8 @@ class MggObjectivePlanning:
         claim = self.claim_objective(objective, goal)
         return self.execute_claimed(claim)
 
-    def _start_home_continuation(self, active) -> bool:
-        """Move a completed local Home chunk into bounded native refinement."""
+    def _start_route_continuation(self, active) -> bool:
+        """Move a completed local objective chunk into bounded refinement."""
 
         generation, binding, home_intent, _, _, _ = active
         if not self.bridge.set_goal_pending_if_current(generation):
@@ -819,7 +821,7 @@ class MggObjectivePlanning:
             if (
                 self._active_route != active
                 or generation != self.bridge._goal_generation
-                or self._objective_kind != "return_home"
+                or self._objective_kind not in ("navigate", "return_home")
                 or not self._rolling_partial
                 or not self._rolling_route_id
             ):
@@ -869,7 +871,7 @@ class MggObjectivePlanning:
                 with self._active_lock:
                     binding = self._rolling_authority_binding
                 try:
-                    outcome, message = self._refine_home_once(
+                    outcome, message = self._refine_route_once(
                         generation,
                         route_id,
                         home_intent,
@@ -879,7 +881,7 @@ class MggObjectivePlanning:
                     )
                 except Exception as exc:
                     outcome = "failed"
-                    message = f"MGG Home refinement failed: {exc}"
+                    message = f"MGG objective refinement failed: {exc}"
                 if outcome == "submitted":
                     return
                 if outcome == "superseded":
@@ -911,11 +913,11 @@ class MggObjectivePlanning:
                         binding=binding,
                     ):
                         self.bridge.node.get_logger().warning(
-                            f"[{self.bridge.id}] MGG Home local route replaced: {message}"
+                            f"[{self.bridge.id}] MGG objective local route replaced: {message}"
                         )
                     return
                 if outcome == "retry":
-                    message = "MGG Home refinement deadline expired"
+                    message = "MGG objective refinement deadline expired"
                 self._fail_if_current(message, generation)
                 return
         finally:
@@ -929,7 +931,7 @@ class MggObjectivePlanning:
             and self._continuation_generation == generation
             and self._rolling_route_id == route_id
             and self._home_intent == home_intent
-            and self._objective_kind == "return_home"
+            and self._objective_kind in ("navigate", "return_home")
         )
 
     def _wait_for_continuation(
@@ -945,7 +947,7 @@ class MggObjectivePlanning:
             time.sleep(min(0.02, remaining))
         return self._owns_continuation(generation, route_id, home_intent)
 
-    def _refine_home_once(
+    def _refine_route_once(
         self,
         generation,
         route_id,
@@ -956,14 +958,14 @@ class MggObjectivePlanning:
     ) -> tuple[str, str]:
         service, client = self.refine_service_type, self.refine_client
         if service is None or client is None:
-            return "failed", "installed mgg_msgs lacks rolling Home refinement"
+            return "failed", "installed mgg_msgs lacks rolling route refinement"
         if not self._owns_continuation(generation, route_id, home_intent):
             return "superseded", ""
         remaining = self._remaining(deadline)
         if remaining <= 0.0:
-            return "retry", "MGG Home refinement deadline expired"
+            return "retry", "MGG objective refinement deadline expired"
         if not client.wait_for_service(timeout_sec=min(3.0, remaining)):
-            return "retry", "MGG Home refinement service is unavailable"
+            return "retry", "MGG objective refinement service is unavailable"
         raw_authority = self._raw_authority()
         authority = (
             self._authority_from_raw(raw_authority)
@@ -980,7 +982,7 @@ class MggObjectivePlanning:
             )
             or self._route_authority_changed(binding, authority)
         ):
-            return "replan", "map authority or Home landmark changed"
+            return "replan", "map authority or objective landmark changed"
         try:
             mapping_snapshot = self._mapping_snapshot(authority)
         except ValueError as exc:
@@ -988,7 +990,7 @@ class MggObjectivePlanning:
         with self._active_lock:
             indexed_required = self._indexed_map_validated
         if indexed_required and mapping_snapshot is None:
-            return "failed", "rolling Home requires indexed map authority"
+            return "failed", "rolling objective requires indexed map authority"
 
         request = service.Request()
         request.mission_id = str(authority["mission_id"])
@@ -1008,7 +1010,7 @@ class MggObjectivePlanning:
         try:
             future = client.call_async(request)
         except Exception as exc:
-            return "retry", f"MGG Home refinement request failed: {exc}"
+            return "retry", f"MGG objective refinement request failed: {exc}"
         while not future.done() and time.monotonic() < deadline:
             if not self._owns_continuation(generation, route_id, home_intent):
                 future.cancel()
@@ -1016,13 +1018,13 @@ class MggObjectivePlanning:
             time.sleep(0.02)
         if not future.done():
             future.cancel()
-            return "retry", "MGG Home refinement request timed out"
+            return "retry", "MGG objective refinement request timed out"
         if not self._owns_continuation(generation, route_id, home_intent):
             return "superseded", ""
         try:
             response = future.result()
         except Exception as exc:
-            return "retry", f"MGG Home refinement request failed: {exc}"
+            return "retry", f"MGG objective refinement request failed: {exc}"
         if response.status != service.Response.SUCCEEDED:
             reason = response.reason or f"MGG refinement status {response.status}"
             if response.status in {
@@ -1059,7 +1061,7 @@ class MggObjectivePlanning:
             )
             or (mapping_snapshot is not None and current_snapshot != mapping_snapshot)
         ):
-            return "replan", "map authority changed while MGG refined Home"
+            return "replan", "map authority changed while MGG refined the objective"
 
         stamp = self.bridge.node.get_clock().now().to_msg()
         local_path = SimpleNamespace(
@@ -1084,9 +1086,9 @@ class MggObjectivePlanning:
         # Small accepted corrections do not move the cached graph route's goal.
         # Material corrections are fenced above and require a new route.
         with self._active_lock:
-            goal = deepcopy(self._objective_goal)
+            goal = deepcopy(self._rolling_planned_goal)
         if not isinstance(goal, dict):
-            return "failed", "retained Home goal is unavailable"
+            return "failed", "retained objective goal is unavailable"
         if not partial:
             endpoint = plan.poses[-1]
             endpoint_error = math.hypot(
@@ -1095,7 +1097,7 @@ class MggObjectivePlanning:
             if endpoint_error > FULL_ROUTE_ENDPOINT_TOLERANCE_M:
                 return (
                     "failed",
-                    "MGG final Home chunk endpoint differs from Home by "
+                    "MGG final objective chunk endpoint differs from its goal by "
                     f"{endpoint_error:.3f}m",
                 )
         pre_submit_rejected = [False]
@@ -1119,20 +1121,21 @@ class MggObjectivePlanning:
                 return "replan", "map authority changed before refined route dispatch"
             if not self._owns_continuation(generation, route_id, home_intent):
                 return "superseded", ""
-            return "failed", "MGG refined Home route could not be submitted"
+            return "failed", "MGG refined objective route could not be submitted"
         with self._active_lock:
             if (
                 submitted_generation != self.bridge._goal_generation
                 or self._continuation_generation != generation
                 or self._rolling_route_id != route_id
                 or self._home_intent != home_intent
-                or self._objective_kind != "return_home"
+                or self._objective_kind not in ("navigate", "return_home")
             ):
                 return "superseded", ""
             self._continuation_generation = None
             self._continuation_deadline = None
             self._rolling_partial = partial
             self._rolling_global_plan = (submitted_generation, global_plan)
+            self._rolling_planned_goal = deepcopy(goal)
             self._indexed_map_validated = indexed_map_validated
             route_points = tuple((pose.x, pose.y, pose.z) for pose in global_plan.poses)
             self._active_route = (
@@ -1372,13 +1375,6 @@ class MggObjectivePlanning:
         partial = getattr(response, "partial", False)
         if type(partial) is not bool:
             return "terminal", "MGG returned an invalid partial-route flag", generation
-        if partial and objective != "return_home":
-            return (
-                "terminal",
-                "MGG returned a partial route; a full route to the requested "
-                "objective is required",
-                generation,
-            )
         route_id = getattr(response, "route_id", "")
         if not isinstance(route_id, str) or len(route_id) > 512:
             return "terminal", "MGG returned an invalid route token", generation
@@ -1389,14 +1385,14 @@ class MggObjectivePlanning:
         ):
             return (
                 "terminal",
-                "MGG partial Home route cannot continue with the installed ABI",
+                "MGG partial route cannot continue with the installed ABI",
                 generation,
             )
         global_poses = getattr(response, "global_path", None)
         if not global_poses:
             global_poses = response.path if not partial else None
         if global_poses is None:
-            return "terminal", "MGG partial Home route has no global route", generation
+            return "terminal", "MGG partial route has no global route", generation
         global_path = SimpleNamespace(
             header=SimpleNamespace(frame_id=self.frame, stamp=stamp),
             poses=[
@@ -1487,6 +1483,7 @@ class MggObjectivePlanning:
             self._rolling_route_id = route_id if partial else None
             self._rolling_partial = partial
             self._rolling_global_plan = (submitted_generation, global_plan)
+            self._rolling_planned_goal = deepcopy(goal)
             self._rolling_authority_binding = authority_binding
             self._continuation_generation = None
             self._continuation_deadline = None

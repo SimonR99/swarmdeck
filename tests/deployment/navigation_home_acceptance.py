@@ -115,6 +115,19 @@ def endpoint_error_is_acceptable(summary, output, tolerance=0.05):
     )
 
 
+def rolling_route_evidence_is_complete(summary):
+    return (
+        {"following_local", "following_final"}.issubset(summary["observed_phases"])
+        and summary["local_endpoint_changes"] >= 1
+        and endpoint_error_is_acceptable(summary, "global_endpoint_error_m")
+        and endpoint_error_is_acceptable(summary, "final_local_endpoint_error_m")
+    )
+
+
+def rolling_route_observed(summary, required=False):
+    return required or "following_local" in summary["observed_phases"]
+
+
 def home_target(robot):
     home = (robot.get("home") or {}).get("T_navigation_home")
     if (
@@ -134,15 +147,17 @@ def objective_completed(
     observed_phases,
     current_phase=None,
     require_rolling_home=False,
+    require_rolling_route=False,
 ):
-    """Reject a rolling Home chunk's transient controller success."""
+    """Reject a rolling objective chunk's transient controller success."""
     if status != "succeeded" or active_samples <= 0:
         return False
-    if mode != "home":
-        return True
     if current_phase in {"planning", "following_local"}:
         return False
-    if require_rolling_home or "following_local" in observed_phases:
+    rolling_required = require_rolling_route or (
+        mode == "home" and require_rolling_home
+    )
+    if rolling_required or "following_local" in observed_phases:
         return "following_final" in observed_phases
     return True
 
@@ -158,6 +173,7 @@ def parse_args():
     parser.add_argument("--duration", type=float, default=180.0)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--arrival-tolerance", type=float, default=0.5)
+    parser.add_argument("--require-rolling-route", action="store_true")
     parser.add_argument("--require-rolling-home", action="store_true")
     args = parser.parse_args()
     if not args.robot.startswith("robot_"):
@@ -302,8 +318,10 @@ async def run(args):
         "local_endpoint_changes": 0,
         "observed_phases": [],
         "local_endpoint_error_m": None,
+        "final_local_endpoint_error_m": None,
         "global_endpoint_error_m": None,
         "local_endpoint_error_m_invalid": False,
+        "final_local_endpoint_error_m_invalid": False,
         "global_endpoint_error_m_invalid": False,
         "remaining_error_m": None,
         "observation_errors": 0,
@@ -376,6 +394,9 @@ async def run(args):
             trial_deadline = started + args.duration
             next_progress = started + 10.0
             status_robot = baseline
+            rolling_required = getattr(args, "require_rolling_route", False) or (
+                args.mode == "home" and getattr(args, "require_rolling_home", False)
+            )
             while time.monotonic() < trial_deadline:
                 await asyncio.sleep(args.poll)
                 try:
@@ -443,12 +464,30 @@ async def run(args):
                         summary["max_displacement_m"] = max(
                             summary["max_displacement_m"], displacement
                         )
-                        for field, output in (
-                            ("local_planned_path", "local_endpoint_error_m"),
-                            ("global_planned_path", "global_endpoint_error_m"),
-                        ):
+                        track_path_endpoint_error(
+                            summary,
+                            robot_now,
+                            target,
+                            "local_planned_path",
+                            "local_endpoint_error_m",
+                        )
+                        track_path_endpoint_error(
+                            summary,
+                            robot_now,
+                            target,
+                            "global_planned_path",
+                            "global_endpoint_error_m",
+                        )
+                        phase = (status_robot.get("objective_continuation") or {}).get(
+                            "phase"
+                        )
+                        if phase == "following_final":
                             track_path_endpoint_error(
-                                summary, robot_now, target, field, output
+                                summary,
+                                robot_now,
+                                target,
+                                "local_planned_path",
+                                "final_local_endpoint_error_m",
                             )
                         local_path = robot_now.get("local_planned_path") or []
                         if local_path:
@@ -505,7 +544,8 @@ async def run(args):
                     summary["active_samples"],
                     summary["observed_phases"],
                     phase,
-                    args.require_rolling_home,
+                    getattr(args, "require_rolling_home", False),
+                    getattr(args, "require_rolling_route", False),
                 ):
                     summary["outcome"] = "succeeded"
                     break
@@ -558,6 +598,10 @@ async def run(args):
                         )
                         for field, output in (
                             ("local_planned_path", "local_endpoint_error_m"),
+                            (
+                                "local_planned_path",
+                                "final_local_endpoint_error_m",
+                            ),
                             ("global_planned_path", "global_endpoint_error_m"),
                         ):
                             track_path_endpoint_error(
@@ -582,6 +626,7 @@ async def run(args):
             await asyncio.gather(reader, return_exceptions=True)
     if summary["outcome"] == "succeeded":
         evidence_error = None
+        use_rolling_evidence = rolling_route_observed(summary, rolling_required)
         if not summary["final_qualified_sample"] or not summary["qualified_samples"]:
             evidence_error = "qualified post-command observations are missing"
         elif (
@@ -590,24 +635,21 @@ async def run(args):
             or summary["remaining_error_m"] > args.arrival_tolerance
         ):
             evidence_error = "final pose is outside the arrival tolerance"
-        elif args.mode == "navigate" and not endpoint_error_is_acceptable(
-            summary, "local_endpoint_error_m"
+        elif (
+            args.mode == "navigate"
+            and not use_rolling_evidence
+            and not endpoint_error_is_acceptable(summary, "local_endpoint_error_m")
         ):
             evidence_error = "no exact local Navigate endpoint was observed"
-        elif args.require_rolling_home and (
-            not {"following_local", "following_final"}.issubset(
-                summary["observed_phases"]
-            )
-            or summary["local_endpoint_changes"] < 1
-            or not endpoint_error_is_acceptable(summary, "global_endpoint_error_m")
-        ):
-            evidence_error = "rolling Home phase or endpoint evidence is incomplete"
+        elif use_rolling_evidence and not rolling_route_evidence_is_complete(summary):
+            evidence_error = "rolling route phase or endpoint evidence is incomplete"
         if evidence_error is not None:
             summary["outcome"] = "inconclusive"
             summary["failure_reason"] = evidence_error
     for key in (
         "max_displacement_m",
         "local_endpoint_error_m",
+        "final_local_endpoint_error_m",
         "global_endpoint_error_m",
         "remaining_error_m",
     ):

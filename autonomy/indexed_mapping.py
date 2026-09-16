@@ -339,6 +339,9 @@ class IndexedMapView:
         self.ray_angular_resolution_rad = float(ray_angular_resolution_rad)
         self.max_step_m = float(max_step_m)
         self.max_drop_m = float(max_drop_m)
+        # Retained as a public configuration value for callers which use the
+        # query's explicit roughness metric.  Roughness is not a geometric step:
+        # consumers choose their own platform-specific roughness limit.
         self.max_roughness_m = float(max_roughness_m)
         self._lock = threading.RLock()
         self._chunk_cache: dict[str, np.ndarray] = {}
@@ -645,7 +648,7 @@ class IndexedMapView:
                 clearance.append(overhead)
                 rise = prior_ground is not None and height - prior_ground > max_step_m
                 fall = prior_ground is not None and prior_ground - height > max_drop_m
-                step.append(rise or surface_roughness > self.max_roughness_m)
+                step.append(rise)
                 drop.append(fall)
                 prior_ground = height
             if state is VoxelOccupancy.UNKNOWN and request.stop_at_unknown:

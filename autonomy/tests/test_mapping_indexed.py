@@ -451,6 +451,67 @@ def test_query_uses_platform_step_and_drop_limits() -> None:
     assert tracked_reverse.drop == (False, True)
 
 
+def test_roughness_is_reported_separately_from_geometric_steps() -> None:
+    key = SnapshotKey("roughness", 0, 0, "a" * 64)
+
+    def query(amplitude: float):
+        columns = {
+            (-1, -1): (-amplitude,),
+            (-1, 0): (amplitude,),
+            (0, -1): (amplitude,),
+            (0, 0): (-amplitude,),
+        }
+        view = IndexedMapView(max_roughness_m=0.08)
+        view.publish(IndexedGrid(key, "b" * 64, 1, 1, set(), set(), columns, 0.2, 4))
+        return view.query(
+            QueryRequest(
+                key,
+                ((0.0, 0.0, 0.5),),
+                (0.1, 0.1, 0.1),
+                stop_at_unknown=False,
+                max_step_m=0.15,
+                max_drop_m=0.15,
+            )
+        )
+
+    within_consumer_limit = query(0.09)
+    assert within_consumer_limit.roughness == pytest.approx((0.09,))
+    assert within_consumer_limit.step == (False,)
+    assert within_consumer_limit.roughness[0] <= 0.10
+
+    too_rough_for_consumer = query(0.12)
+    assert too_rough_for_consumer.roughness == pytest.approx((0.12,))
+    assert too_rough_for_consumer.step == (False,)
+    assert too_rough_for_consumer.roughness[0] > 0.10
+
+
+def test_unknown_terrain_resets_geometric_step_comparison() -> None:
+    key = SnapshotKey("unknown-gap", 0, 0, "a" * 64)
+    columns = {
+        **{(x, y): (0.0,) for x in (-1, 0, 1) for y in (-1, 0, 1)},
+        **{(x, y): (0.4,) for x in (19, 20, 21) for y in (-1, 0, 1)},
+    }
+    view = IndexedMapView()
+    view.publish(IndexedGrid(key, "b" * 64, 1, 1, set(), set(), columns, 0.2, 18))
+
+    result = view.query(
+        QueryRequest(
+            key,
+            ((0.0, 0.0, 0.5), (2.0, 0.0, 0.5), (4.0, 0.0, 0.9)),
+            (0.1, 0.1, 0.1),
+            stop_at_unknown=False,
+            max_step_m=0.15,
+            max_drop_m=0.15,
+        )
+    )
+
+    assert math.isnan(result.ground_z[1])
+    assert result.ground_z[0] == pytest.approx(0.0)
+    assert result.ground_z[2] == pytest.approx(0.4)
+    assert result.step == (False, False, False)
+    assert result.drop == (False, False, False)
+
+
 @pytest.mark.parametrize("value", (0.0, -0.1, math.inf, math.nan, True))
 def test_query_rejects_invalid_platform_terrain_limits(value) -> None:
     key = SnapshotKey("platform", 0, 0, "a" * 64)

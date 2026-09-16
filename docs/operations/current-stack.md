@@ -50,9 +50,11 @@ mission, domain, capture-provider, and map-authority settings. A sparse
 cold-start scan cannot certify the whole robot body volume, and unknown or
 stale terrain remains subject to the planner's safety gates.
 
-In MOLA mode, MGG reads a read-only OctoMap spatial index generated from the
-coherent MOLA product. The independent raw-cloud/depth mapper path is disabled;
-the OctoMap index is an internal query structure, not a second map authority.
+In MOLA mode, MGG reads the coherent native planner grid directly through
+`MapInterface`; no OctoMap tree is constructed. Occupied-only collision queries
+use measured surface heights, with full voxel bounds when measurements are
+missing. Strict queries retain full voxel bounds and unknown occupancy. The
+independent raw-cloud/depth mapper path is disabled.
 Hardware MOLA use remains an overlay that requires qualified peer capture
 provenance, calibration, and frame ownership.
 

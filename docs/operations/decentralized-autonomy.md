@@ -29,11 +29,12 @@ replication code. The geometry mapper uses NumPy; native MOLA integration lives
 in `swarmdeck_ros/src/swarmdeck_mapping`. Swarm-SLAM supplies corrected poses.
 The MOLA consumer does not optimize them or publish competing TF edges.
 
-The default MGG deployment retains its OctoMap for high-rate grid expansion and
-gain calculations. Its final corridor check can use one bounded indexed-map
-request before returning Explore, Navigate, or ReturnHome. Both that index and
-MOLA consume the same corrected snapshot and immutable chunks; the query does
-not deserialize the `.metricmap` artifact or make RPC calls per planner voxel.
+The default MOLA deployment exposes its immutable native grid directly to MGG
+for grid expansion and gain calculations. Its final corridor check uses one
+bounded indexed-map request before returning Explore, Navigate, or ReturnHome.
+Both providers consume the same corrected snapshot and immutable chunks; the
+query does not deserialize the `.metricmap` artifact or make RPC calls per
+planner voxel. OctoMap remains confined to the explicit legacy cloud backend.
 
 ## Build and test
 
@@ -222,11 +223,12 @@ selects the exact mission. Otherwise a reader pins its first accepted mission;
 changing missions requires restarting the adapter/reader, consistent with the
 fresh fleet mission and DDS domain required after native frontend restarts.
 
-The indexed final corridor gate remains separately opt-in with
-`SWARMDECK_INDEXED_MAP_QUERY=1`: sparse cold-start LiDAR coverage can leave the
-body volume unknown and prevent any exploratory movement. Until sensor coverage
-is validated, MGG uses its existing OctoMap and Nav2 local avoidance. This is
-an explicit deployment choice, not a fallback after an indexed query fails.
+The indexed final corridor gate is enabled in the normal MOLA simulation stack.
+Other deployments select it with `SWARMDECK_INDEXED_MAP_QUERY=1`: sparse
+cold-start LiDAR coverage can leave the body volume unknown and prevent motion.
+Disabling the gate is an explicit deployment choice, never an automatic fallback
+after an indexed query fails. The selected map backend still governs graph/grid
+queries, and Nav2 provides local avoidance on ROS 2 robots.
 
 Adapters with MGG configured advertise `plan_objective`. The GUI then sends
 Navigate and Return Home objectives directly to that robot, without requiring
@@ -814,9 +816,10 @@ progress. In particular:
   corridors back into topological replanning. Current local detours require
   clear corridor vertices, and speed limits are not yet generated. The reusable
   topological stage handles Navigate and Home; Explore retains its selector.
-- Establish a sensor coverage/bootstrap policy before enabling the strict indexed
-  terrain gate. MGG still uses its local OctoMap for frontier construction and
-  information gain; Inspect and Rendezvous remain unsupported objectives.
+- Qualify the simulation's sensor coverage/bootstrap policy on physical robots
+  before enabling their strict indexed terrain gate. MOLA's native grid supplies
+  frontier construction and information gain; Inspect and Rendezvous remain
+  unsupported objectives.
 - Extend the passing native CUDA smoke to real captures and measure alignment,
   memory scaling, training time, and rendering cost. The three-view fixture
   completed nine optimizer iterations and converted 540 Gaussians; it does not

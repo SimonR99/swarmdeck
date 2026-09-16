@@ -1,0 +1,949 @@
+--- a/ros2/src/mgg_core/src/planning_stages.cpp
++++ b/ros2/src/mgg_core/src/planning_stages.cpp
+@@ -54,7 +54,10 @@
+     if (request.objective == ObjectiveKind::kNavigate) {
+       result.status = PlanningStatus::kSucceeded;
+       result.reason.clear();
+-      return result;  // bounded grid stage must solve current->exact goal
++      // Bootstrap an unvalidated global corridor from the live pose. The
++      // rolling grid stage exposes and checks only its bounded first window.
++      result.poses = {current, goal};
++      return result;
+     }
+     char reason[192];
+     std::snprintf(reason, sizeof(reason),
+@@ -70,6 +73,7 @@
+     if (request.objective == ObjectiveKind::kNavigate) {
+       result.status = PlanningStatus::kSucceeded;
+       result.reason.clear();
++      result.poses = {current, goal};
+       return result;
+     }
+     result.reason = "could not solve the topological graph";
+@@ -92,7 +96,11 @@
+     // search directly from current to the exact request-owned goal.
+     const double initial_remaining =
+         (goal.head<2>() - current.head<2>()).norm();
+-    struct RankedSeed { Vertex* vertex; double remaining; double cost; };
++    struct RankedSeed {
++      Vertex* vertex;
++      double remaining;
++      double graph_cost;
++    };
+     std::vector<RankedSeed> eligible;
+     eligible.reserve(graph.vertices_map_.size());
+     for (const auto& entry : graph.vertices_map_) {
+@@ -111,8 +119,10 @@
+     }
+     std::sort(eligible.begin(), eligible.end(),
+               [](const RankedSeed& a, const RankedSeed& b) {
+-                return std::tie(a.remaining, a.cost, a.vertex->id) <
+-                       std::tie(b.remaining, b.cost, b.vertex->id);
++                const double a_total = a.graph_cost + a.remaining;
++                const double b_total = b.graph_cost + b.remaining;
++                return std::tie(a_total, a.remaining, a.vertex->id) <
++                       std::tie(b_total, b.remaining, b.vertex->id);
+               });
+     for (const RankedSeed& candidate : eligible) {
+       std::vector<StateVec> candidate_path;
+@@ -124,6 +134,22 @@
+         break;
+       }
+     }
++    if (result.poses.empty()) {
++      // Even when no existing vertex advances toward the goal, anchor the
++      // tentative connector at the current graph vertex.  This keeps an
++      // arbitrary distant Navigate in the persistent-route hierarchy instead
++      // of handing the complete distance to the bounded local grid.
++      result.poses.push_back(source->state);
++    }
++    // The persistent graph is the global route authority.  Its best reachable
++    // vertex is followed by an optimistic connector to the request-owned goal;
++    // rolling local refinement will validate this connector as the robot
++    // approaches it.  Keeping the exact goal here prevents a nearby graph
++    // vertex from being mistaken for successful Navigate completion.
++    if (!result.poses.empty() &&
++        !result.poses.back().head<3>().isApprox(goal.head<3>())) {
++      result.poses.push_back(goal);
++    }
+     result.status = PlanningStatus::kSucceeded;
+     result.partial = false;
+     result.reason.clear();
+@@ -136,7 +162,8 @@
+     if (request.objective == ObjectiveKind::kNavigate) {
+       result.status = PlanningStatus::kSucceeded;
+       result.reason.clear();
+-      return result;  // disconnected topology cannot suppress map A*
++      result.poses = {current, goal};
++      return result;
+     }
+     result.reason = "goal is in a disconnected graph component";
+     return result;
+--- a/ros2/src/mgg_core/test/test_planning_stages.cpp
++++ b/ros2/src/mgg_core/test/test_planning_stages.cpp
+@@ -60,16 +60,18 @@
+       chain.graph, StateVec(0.1, 0.0, 0.0, 0.0), far);
+   ASSERT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
+   ASSERT_FALSE(route.partial);
+-  ASSERT_EQ(route.poses.size(), 4u);
+-  EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
+-  // The prefix remains topology only. The grid stage must append and reach
+-  // the exact operator goal before this request can succeed.
++  ASSERT_EQ(route.poses.size(), 5u);
++  EXPECT_DOUBLE_EQ(route.poses[3].x(), 3.0);
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), 30.0);
++  EXPECT_DOUBLE_EQ(route.poses.back().y(), 4.0);
++  // The final edge is an optimistic global connector. Rolling grid refinement
++  // validates it in bounded local windows without changing the destination.
+   EXPECT_DOUBLE_EQ(route.request.goal.pose.x(), 30.0);
+   EXPECT_DOUBLE_EQ(route.request.goal.pose.y(), 4.0);
+   EXPECT_DOUBLE_EQ(route.request.goal.pose[3], 1.2);
+ }
+ 
+-TEST(PlanningStages, FarNavigateWithoutHelpfulPrefixRequestsDirectGridCompletion) {
++TEST(PlanningStages, FarNavigateWithoutHelpfulPrefixKeepsTentativeGraphRoute) {
+   Chain chain;
+   TopologicalGoalPlanner planner("component-a", 12, 34, 0.25, 1.0);
+   auto far = request(ObjectiveKind::kNavigate);
+@@ -77,7 +79,9 @@
+   const auto route = planner.plan(chain.graph, StateVec::Zero(), far);
+   EXPECT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
+   EXPECT_FALSE(route.partial);
+-  EXPECT_TRUE(route.poses.empty());
++  ASSERT_EQ(route.poses.size(), 2u);
++  EXPECT_DOUBLE_EQ(route.poses.front().x(), 0.0);
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), -30.0);
+ }
+ 
+ TEST(PlanningStages, PartialProgressMustMeetTheConfiguredMinimum) {
+@@ -88,7 +92,9 @@
+   const auto route = planner.plan(chain.graph, StateVec::Zero(), far);
+   EXPECT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
+   EXPECT_FALSE(route.partial);
+-  EXPECT_TRUE(route.poses.empty());
++  ASSERT_EQ(route.poses.size(), 2u);
++  EXPECT_DOUBLE_EQ(route.poses.front().x(), 0.0);
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), 30.0);
+ }
+ 
+ TEST(PlanningStages, DisconnectedCloserProxyIsNotSelected) {
+@@ -102,7 +108,30 @@
+   ASSERT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
+   ASSERT_FALSE(route.partial);
+   ASSERT_FALSE(route.poses.empty());
+-  EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
++  ASSERT_EQ(route.poses.size(), 5u);
++  EXPECT_DOUBLE_EQ(route.poses[3].x(), 3.0);
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), 30.0);
++}
++
++TEST(PlanningStages, TentativeConnectorMinimizesGraphPlusUnknownCost) {
++  GraphManager graph;
++  auto* source = new Vertex(0, StateVec(0.0, 0.0, 0.0, 0.0));
++  auto* cheap = new Vertex(1, StateVec(4.0, 0.0, 0.0, 0.0));
++  auto* expensive = new Vertex(2, StateVec(9.0, 0.0, 0.0, 0.0));
++  graph.addVertex(source);
++  graph.addVertex(cheap);
++  graph.addVertex(expensive);
++  graph.addEdge(source, cheap, 4.0);
++  graph.addEdge(source, expensive, 20.0);
++  TopologicalGoalPlanner planner("component-a", 12, 34, 0.25, 1.0);
++  auto far = request(ObjectiveKind::kNavigate);
++  far.goal.pose = StateVec(10.0, 0.0, 0.0, 0.0);
++
++  const auto route = planner.plan(graph, StateVec::Zero(), far);
++  ASSERT_EQ(route.status, PlanningStatus::kSucceeded) << route.reason;
++  ASSERT_EQ(route.poses.size(), 3u);
++  EXPECT_DOUBLE_EQ(route.poses[1].x(), 4.0);
++  EXPECT_DOUBLE_EQ(route.poses.back().x(), 10.0);
+ }
+ 
+ TEST(PlanningStages, StaleMapOrGraphSnapshotIsRejected) {
+--- a/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
++++ b/ros2/src/mgg_ros/include/mgg_ros/planner_node.h
+@@ -216,18 +216,21 @@
+ 
+   mgg::StateVec current_state_ = mgg::StateVec::Zero();
+   bool have_odometry_ = false;
+-  struct CachedHomeRoute {
++  struct CachedObjectiveRoute {
+     std::string id;
+     std::string mission_id;
+     std::string component_id;
++    mgg::ObjectiveKind objective = mgg::ObjectiveKind::kNavigate;
++    std::uint64_t graph_revision = 0;
+     mgg::PlanningGoal exact_goal;
+     std::vector<mgg::StateVec> global_poses;
+     std::size_t next_index = 0;
+     mgg::StateVec expected_endpoint = mgg::StateVec::Zero();
+   };
+-  std::unique_ptr<CachedHomeRoute> cached_home_route_;
++  std::unique_ptr<CachedObjectiveRoute> cached_objective_route_;
+   std::string route_instance_id_;
+   std::uint64_t route_sequence_ = 0;
++  std::uint64_t objective_request_generation_ = 0;
+   /// First finite navigation pose.  This is the mission home landmark and is
+   /// latched before mapping or commanded motion can move the current pose.
+   mgg::StateVec initial_state_ = mgg::StateVec::Zero();
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -40,12 +40,13 @@
+          compact.substr(compact.size() - kTail);
+ }
+ 
+-bool hasSkippableHomeWaypointRejection(
++bool hasSkippableObjectiveWaypointRejection(
+     const mgg::RouteCorridor& corridor, const std::string& reason) {
+   constexpr char kPrefix[] = "route corridor waypoint[";
+   constexpr char kSuffix[] = "] rejected:";
+   if (corridor.status != mgg::PlanningStatus::kSucceeded ||
+-      corridor.request.objective != mgg::ObjectiveKind::kReturnHome ||
++      (corridor.request.objective != mgg::ObjectiveKind::kReturnHome &&
++       corridor.request.objective != mgg::ObjectiveKind::kNavigate) ||
+       corridor.poses.empty() ||
+       reason.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0) {
+     return false;
+@@ -89,7 +90,7 @@
+   return !corridor.partial || index + 1u < corridor.poses.size();
+ }
+ 
+-mgg::RouteCorridor homeLocalEndpointCorridor(
++mgg::RouteCorridor objectiveLocalEndpointCorridor(
+     const mgg::RouteCorridor& corridor) {
+   mgg::RouteCorridor endpoint = corridor;
+   if (endpoint.partial && !endpoint.poses.empty()) {
+@@ -99,7 +100,7 @@
+   } else {
+     // A full corridor's endpoint remains request-owned. Clearing a matching
+     // final graph pose makes the grid planner project and validate that exact
+-    // Home goal again before searching.
++    // objective goal again before searching.
+     endpoint.poses.clear();
+   }
+   return endpoint;
+@@ -2891,7 +2892,8 @@
+                from.head<2>(), to.head<2>(), body.head<2>()) !=
+            mgg::GeofenceManager::CoordinateStatus::kViolated;
+   };
+-  const auto project = [this, body, center_offset, current_anchor, home_anchor,
++  const auto project = [this, body, footprint_body, center_offset,
++                        current_anchor, home_anchor,
+                         have_connected_home_anchor, request_targets_home_anchor,
+                         &corridor, &samePosition, &isPhysicalCurrent,
+                         &geofenceContains,
+@@ -2902,6 +2904,10 @@
+     const bool at_physical_current_xy =
+         (state.head<2>() - current_anchor.head<2>())
+             .cwiseAbs().maxCoeff() <= 1e-6;
++    const bool qualified_mola_ground =
++        observed_ground_body_evidence_ && provisional_unknown_ground_ &&
++        map_backend_ == "mola_snapshot" &&
++        robot_params_.type == mgg::RobotType::kGroundRobot;
+     if (robot_params_.type == mgg::RobotType::kGroundRobot) {
+       const bool exact_navigate_goal =
+           corridor.request.objective == mgg::ObjectiveKind::kNavigate &&
+@@ -2914,9 +2920,10 @@
+                   .cwiseAbs().maxCoeff() <= 1e-6;
+       const bool resolve_exact_navigate_height =
+           exact_navigate_goal && !at_physical_current_xy;
+-      const bool height_projected =
+-          ground_ &&
+-          (resolve_exact_navigate_height
++      const bool height_projected = ground_ &&
++          (qualified_mola_ground && physical_current
++               ? (state = current_anchor, true)
++               : resolve_exact_navigate_height
+                ? resolveNavigateGoalDrivingHeight(state)
+                : projectStateToDrivingHeight(state, exact_explicit_goal));
+       if (!height_projected) {
+@@ -2964,7 +2971,7 @@
+         }
+       }
+     }
+-    const Eigen::Vector3d center = state.head<3>() + center_offset;
++    Eigen::Vector3d center = state.head<3>() + center_offset;
+     // Odometry proves that the robot already occupies this one exact pose.
+     // Permit it to seed a route even when a conservative terrain footprint
+     // query rejects the stationary pose. Body occupancy and geofence checks
+@@ -2980,7 +2987,10 @@
+                    : mgg::GridProjectionStatus::kNoGround;
+       }
+     }
+-    const mgg::VoxelStatus body_status = objectiveBodyStatus(center, body);
++    const mgg::VoxelStatus body_status =
++        qualified_mola_ground
++            ? objectiveSweptBodyStatus(center, center, footprint_body)
++            : objectiveBodyStatus(center, body);
+     if (body_status == mgg::VoxelStatus::kOccupied) {
+       return mgg::GridProjectionStatus::kBodyOccupied;
+     }
+@@ -2995,7 +3005,7 @@
+                : mgg::GridProjectionStatus::kSupported;
+   };
+   const auto traverse =
+-      [this, body, center_offset, current_anchor, home_anchor,
++      [this, body, footprint_body, center_offset, current_anchor, home_anchor,
+        have_connected_home_anchor, &samePosition,
+        &isPhysicalCurrent,
+        &geofenceAllows,
+@@ -3062,17 +3072,38 @@
+         // robot center offset is applied only to the additional collision
+         // sweep below; passing an offset pose to GroundProjection would shift
+         // the returned driving pose by -center_offset.z.
++        const bool qualified_mola_ground =
++            observed_ground_body_evidence_ && provisional_unknown_ground_ &&
++            map_backend_ == "mola_snapshot";
+         if (ground_->getProjectedEdgeStatus(
+-                a.head<3>(), b.head<3>(), body,
++                a.head<3>(), b.head<3>(),
++                qualified_mola_ground ? footprint_body : body,
+                 /*stop_at_unknown_voxel=*/!observed_ground_body_evidence_,
+-                projected, provisional_unknown_ground_) !=
++                projected, provisional_unknown_ground_,
++                qualified_mola_ground && a_physical_current) !=
+                 mgg::ProjectedEdgeStatus::kAdmissible ||
+             projected.size() < 2) {
+           return false;
+         }
++        if (qualified_mola_ground) {
++          if (a_physical_current) projected.front() = a.head<3>();
++          if (b_physical_current) projected.back() = b.head<3>();
++        }
+         if (provisional_unknown_ground_) {
+           double inherited_z = a.z();
+-          for (Eigen::Vector3d& driving_pose : projected) {
++          for (std::size_t projected_index = 0;
++               projected_index < projected.size(); ++projected_index) {
++            Eigen::Vector3d& driving_pose = projected[projected_index];
++            const bool preserved_physical_endpoint =
++                qualified_mola_ground &&
++                ((projected_index == 0 && a_physical_current) ||
++                 (projected_index + 1 == projected.size() &&
++                  b_physical_current));
++            if (preserved_physical_endpoint) {
++              driving_pose = projected_index == 0 ? a.head<3>() : b.head<3>();
++              inherited_z = driving_pose.z();
++              continue;
++            }
+             mgg::StateVec supported = mgg::StateVec::Zero();
+             supported.head<3>() = driving_pose;
+             if (projectStateToDrivingHeight(supported, true)) {
+@@ -3506,6 +3537,8 @@
+     const std::shared_ptr<mgg_msgs::srv::PlanObjective::Request> request,
+   std::shared_ptr<mgg_msgs::srv::PlanObjective::Response> response) {
+   std::unique_lock<std::recursive_mutex> lock(planner_mutex_);
++  const std::uint64_t objective_generation =
++      ++objective_request_generation_;
+   auto map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
+                                        : mgg::MolaMap::ReadLease{};
+   refreshMolaRevision();
+@@ -3526,7 +3559,7 @@
+   core.map_source_stamp_nanosec = request->map_source_stamp.nanosec;
+   // A new operator objective supersedes the only cached rolling route. Its
+   // opaque token can never become current again within this node instance.
+-  cached_home_route_.reset();
++  cached_objective_route_.reset();
+   mgg::RouteCorridor corridor;
+   corridor.request = core;
+   bool explicit_objective_planned = false;
+@@ -3705,18 +3738,19 @@
+     }
+   }
+ 
+-  std::vector<mgg::StateVec> global_home_path;
+-  std::unique_ptr<CachedHomeRoute> pending_home_route;
+-  if (core.objective == mgg::ObjectiveKind::kReturnHome &&
++  std::vector<mgg::StateVec> global_objective_path;
++  std::unique_ptr<CachedObjectiveRoute> pending_objective_route;
++  if ((core.objective == mgg::ObjectiveKind::kNavigate ||
++       core.objective == mgg::ObjectiveKind::kReturnHome) &&
+       corridor.status == mgg::PlanningStatus::kSucceeded &&
+       !corridor.poses.empty()) {
+     if (corridor.poses.size() > objective_route_max_poses_) {
+       corridor.status = mgg::PlanningStatus::kBlocked;
+-      corridor.reason = "persistent Home route exceeds the bounded pose limit";
++      corridor.reason = "persistent objective route exceeds the bounded pose limit";
+       corridor.poses.clear();
+     } else {
+-      global_home_path = corridor.poses;
+-      global_home_path.back()[3] = core.goal.pose[3];
++      global_objective_path = corridor.poses;
++      global_objective_path.back()[3] = core.goal.pose[3];
+       mgg::RouteCorridor local = corridor;
+       local.poses.clear();
+       double remaining = objective_route_horizon_m_;
+@@ -3745,15 +3779,17 @@
+       if (more) {
+         local.request.goal.pose = local.poses.back();
+         local.request.goal.landmark_id.clear();
+-        pending_home_route = std::make_unique<CachedHomeRoute>();
+-        pending_home_route->id = route_instance_id_ + "-" +
++        pending_objective_route = std::make_unique<CachedObjectiveRoute>();
++        pending_objective_route->id = route_instance_id_ + "-" +
+                                  std::to_string(++route_sequence_);
+-        pending_home_route->mission_id = core.mission_id;
+-        pending_home_route->component_id = core.component_id;
+-        pending_home_route->exact_goal = core.goal;
+-        pending_home_route->global_poses = global_home_path;
+-        pending_home_route->next_index = next_index;
+-        pending_home_route->expected_endpoint = local.poses.back();
++        pending_objective_route->mission_id = core.mission_id;
++        pending_objective_route->component_id = core.component_id;
++        pending_objective_route->objective = core.objective;
++        pending_objective_route->graph_revision = core.graph_revision;
++        pending_objective_route->exact_goal = core.goal;
++        pending_objective_route->global_poses = global_objective_path;
++        pending_objective_route->next_index = next_index;
++        pending_objective_route->expected_endpoint = local.poses.back();
+       }
+       corridor = std::move(local);
+     }
+@@ -3765,15 +3801,16 @@
+           ? &objective_grid_limits_
+           : nullptr;
+   mgg::RouteCorridor primary = corridor;
+-  const bool navigate_graph_primary =
++  const bool objective_graph_primary =
+       explicit_objective_planned &&
+-      core.objective == mgg::ObjectiveKind::kNavigate &&
++      (core.objective == mgg::ObjectiveKind::kNavigate ||
++       core.objective == mgg::ObjectiveKind::kReturnHome) &&
+       corridor.status == mgg::PlanningStatus::kSucceeded &&
+       !corridor.poses.empty();
+   const bool direct_primary =
+       explicit_objective_planned &&
+       ((core.objective == mgg::ObjectiveKind::kNavigate &&
+-        !navigate_graph_primary) ||
++        !objective_graph_primary) ||
+        (provisional_physical_home &&
+         corridor.status == mgg::PlanningStatus::kUnreachable &&
+         corridor.poses.empty() &&
+@@ -3793,7 +3830,7 @@
+   const auto objective_refinement_started = std::chrono::steady_clock::now();
+   mgg::FeasiblePath path = refineCorridor(primary, objective_limits);
+   const std::string primary_failure_reason = path.reason;
+-  if (navigate_graph_primary &&
++  if (objective_graph_primary &&
+       path.status != mgg::PlanningStatus::kSucceeded) {
+     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+         std::chrono::steady_clock::now() - objective_refinement_started);
+@@ -3806,6 +3843,9 @@
+       mgg::GridRefinementLimits remaining = objective_grid_limits_;
+       remaining.timeout -= elapsed;
+       mgg::FeasiblePath fallback = refineCorridor(direct, &remaining);
++      if (fallback.status == mgg::PlanningStatus::kSucceeded) {
++        fallback.partial = corridor.partial;
++      }
+       if (fallback.status != mgg::PlanningStatus::kSucceeded) {
+         fallback.reason =
+             "graph corridor: " +
+@@ -3816,18 +3856,19 @@
+       path = std::move(fallback);
+     }
+   }
+-  if (path.status != mgg::PlanningStatus::kSucceeded &&
+-      hasSkippableHomeWaypointRejection(primary, path.reason)) {
++  if (!objective_graph_primary &&
++      path.status != mgg::PlanningStatus::kSucceeded &&
++      hasSkippableObjectiveWaypointRejection(primary, path.reason)) {
+     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+         std::chrono::steady_clock::now() - objective_refinement_started);
+     if (elapsed < objective_grid_limits_.timeout) {
+-      mgg::RouteCorridor endpoint = homeLocalEndpointCorridor(primary);
++      mgg::RouteCorridor endpoint = objectiveLocalEndpointCorridor(primary);
+       mgg::GridRefinementLimits remaining = objective_grid_limits_;
+       remaining.timeout -= elapsed;
+       mgg::FeasiblePath fallback = refineCorridor(endpoint, &remaining);
+       if (fallback.status != mgg::PlanningStatus::kSucceeded) {
+         fallback.reason =
+-            "Home graph corridor: " +
++            "objective graph corridor: " +
+             boundedObjectiveFailure(primary_failure_reason) +
+             " [local endpoint fallback: " +
+             boundedObjectiveFailure(fallback.reason) + "]";
+@@ -3859,13 +3900,24 @@
+       path.indexed_map_validated = false;
+     }
+   }
+-  if (path.status == mgg::PlanningStatus::kSucceeded && path.partial &&
+-      pending_home_route) {
++  if (!lock.owns_lock()) lock.lock();
++  if (objective_generation != objective_request_generation_) {
++    path.status = mgg::PlanningStatus::kBlocked;
++    path.reason = "objective was superseded during route validation";
++    path.poses.clear();
++    path.partial = false;
++    path.indexed_map_validated = false;
++  }
++  if (objective_generation == objective_request_generation_ &&
++      path.status == mgg::PlanningStatus::kSucceeded && path.partial &&
++      pending_objective_route) {
+     if (!lock.owns_lock()) lock.lock();
+-    cached_home_route_ = std::move(pending_home_route);
+-  } else if (core.objective == mgg::ObjectiveKind::kReturnHome) {
++    cached_objective_route_ = std::move(pending_objective_route);
++  } else if (objective_generation == objective_request_generation_ &&
++             (core.objective == mgg::ObjectiveKind::kReturnHome ||
++              core.objective == mgg::ObjectiveKind::kNavigate)) {
+     if (!lock.owns_lock()) lock.lock();
+-    cached_home_route_.reset();
++    cached_objective_route_.reset();
+   }
+   response->status = static_cast<std::uint8_t>(path.status);
+   response->component_id = path.component_id;
+@@ -3883,17 +3935,17 @@
+       path.indexed_map_validated;
+   response->reason = path.reason;
+   for (const auto& pose : path.poses) response->path.push_back(toPoseMsg(pose));
+-  if (!global_home_path.empty()) {
++  if (!global_objective_path.empty()) {
+     mgg::FeasiblePath display;
+-    display.poses = global_home_path;
++    display.poses = global_objective_path;
+     convertPathToNavigationBase(display);
+     for (const auto& pose : display.poses)
+       response->global_path.push_back(toPoseMsg(pose));
+     response->global_path.back() = toPoseMsg(core.goal.pose);
+   }
+-  if (cached_home_route_ && path.status == mgg::PlanningStatus::kSucceeded &&
++  if (cached_objective_route_ && path.status == mgg::PlanningStatus::kSucceeded &&
+       path.partial) {
+-    response->route_id = cached_home_route_->id;
++    response->route_id = cached_objective_route_->id;
+   }
+ }
+ 
+@@ -3909,8 +3961,8 @@
+   const IndexedQueryContext query_context = indexedQueryContext();
+   auto finish = [&](mgg::PlanningStatus status, const std::string& reason) {
+     response->status = static_cast<std::uint8_t>(status);
+-    response->component_id = cached_home_route_
+-                                 ? cached_home_route_->component_id
++    response->component_id = cached_objective_route_
++                                 ? cached_objective_route_->component_id
+                                  : component_id_;
+     response->graph_revision = graph_revision_;
+     response->map_revision = map_revision_;
+@@ -3922,16 +3974,18 @@
+     }
+     response->reason = reason;
+   };
+-  if (!cached_home_route_ || request->route_id.empty() ||
+-      request->route_id != cached_home_route_->id ||
+-      request->mission_id != cached_home_route_->mission_id ||
+-      request->component_id != cached_home_route_->component_id) {
++  if (!cached_objective_route_ || request->route_id.empty() ||
++      request->route_id != cached_objective_route_->id ||
++      request->mission_id != cached_objective_route_->mission_id ||
++      request->component_id != cached_objective_route_->component_id) {
+     finish(mgg::PlanningStatus::kBlocked,
+-           "Home route token is unknown, expired, or superseded");
++           "objective route token is unknown, expired, or superseded");
+     return;
+   }
++  const std::string refining_route_id = cached_objective_route_->id;
+   const bool native_revision_matches =
+-      (request->graph_revision == 0 || request->graph_revision == graph_revision_) &&
++      (request->graph_revision == 0 ||
++       request->graph_revision == cached_objective_route_->graph_revision) &&
+       (request->map_revision == 0 || request->map_revision == map_revision_);
+   const bool request_has_mapping_key =
+       request->map_epoch != 0 || request->mapping_graph_revision != 0 ||
+@@ -3963,27 +4017,27 @@
+     return;
+   }
+   if ((current_state_.head<2>() -
+-       cached_home_route_->expected_endpoint.head<2>()).norm() >
++       cached_objective_route_->expected_endpoint.head<2>()).norm() >
+       objective_route_progress_tolerance_m_) {
+     finish(mgg::PlanningStatus::kBlocked,
+-           "robot is outside the completed Home route window");
++           "robot is outside the completed objective route window");
+     return;
+   }
+-  if (cached_home_route_->next_index >=
+-      cached_home_route_->global_poses.size()) {
+-    finish(mgg::PlanningStatus::kBlocked, "Home route is already complete");
+-    cached_home_route_.reset();
++  if (cached_objective_route_->next_index >=
++      cached_objective_route_->global_poses.size()) {
++    finish(mgg::PlanningStatus::kBlocked, "objective route is already complete");
++    cached_objective_route_.reset();
+     return;
+   }
+ 
+-  const std::size_t begin = cached_home_route_->next_index;
++  const std::size_t begin = cached_objective_route_->next_index;
+   std::size_t next_index = begin;
+   double remaining = objective_route_horizon_m_;
+   mgg::StateVec previous = current_state_;
+   std::vector<mgg::StateVec> local_poses;
+-  while (next_index < cached_home_route_->global_poses.size()) {
++  while (next_index < cached_objective_route_->global_poses.size()) {
+     const mgg::StateVec& target =
+-        cached_home_route_->global_poses[next_index];
++        cached_objective_route_->global_poses[next_index];
+     const double distance =
+         (target.head<2>() - previous.head<2>()).norm();
+     if (distance > remaining + 1e-9) {
+@@ -4000,14 +4054,14 @@
+     ++next_index;
+     if (remaining <= 1e-9) break;
+   }
+-  const bool more = next_index < cached_home_route_->global_poses.size();
++  const bool more = next_index < cached_objective_route_->global_poses.size();
+   mgg::RouteCorridor corridor;
+   corridor.status = mgg::PlanningStatus::kSucceeded;
+   corridor.partial = more;
+-  corridor.request.mission_id = cached_home_route_->mission_id;
+-  corridor.request.objective = mgg::ObjectiveKind::kReturnHome;
+-  corridor.request.component_id = cached_home_route_->component_id;
+-  corridor.request.graph_revision = graph_revision_;
++  corridor.request.mission_id = cached_objective_route_->mission_id;
++  corridor.request.objective = cached_objective_route_->objective;
++  corridor.request.component_id = cached_objective_route_->component_id;
++  corridor.request.graph_revision = cached_objective_route_->graph_revision;
+   corridor.request.map_revision = map_revision_;
+   corridor.request.map_epoch = request->map_epoch;
+   corridor.request.mapping_graph_revision = request->mapping_graph_revision;
+@@ -4017,23 +4071,22 @@
+   corridor.request.goal = more
+                               ? mgg::PlanningGoal{
+                                     local_poses.back(), ""}
+-                              : cached_home_route_->exact_goal;
++                              : cached_objective_route_->exact_goal;
+   corridor.poses = std::move(local_poses);
+   const auto objective_refinement_started = std::chrono::steady_clock::now();
+   mgg::FeasiblePath path = refineCorridor(corridor, &objective_grid_limits_);
+   const std::string primary_failure_reason = path.reason;
+-  if (path.status != mgg::PlanningStatus::kSucceeded &&
+-      hasSkippableHomeWaypointRejection(corridor, path.reason)) {
++  if (path.status != mgg::PlanningStatus::kSucceeded) {
+     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+         std::chrono::steady_clock::now() - objective_refinement_started);
+     if (elapsed < objective_grid_limits_.timeout) {
+-      mgg::RouteCorridor endpoint = homeLocalEndpointCorridor(corridor);
++      mgg::RouteCorridor endpoint = objectiveLocalEndpointCorridor(corridor);
+       mgg::GridRefinementLimits remaining = objective_grid_limits_;
+       remaining.timeout -= elapsed;
+       mgg::FeasiblePath fallback = refineCorridor(endpoint, &remaining);
+       if (fallback.status != mgg::PlanningStatus::kSucceeded) {
+         fallback.reason =
+-            "Home graph corridor: " +
++            "objective graph corridor: " +
+             boundedObjectiveFailure(primary_failure_reason) +
+             " [local endpoint fallback: " +
+             boundedObjectiveFailure(fallback.reason) + "]";
+@@ -4059,13 +4112,22 @@
+       path.partial = false;
+     }
+   }
++  if (path.status == mgg::PlanningStatus::kSucceeded &&
++      (!cached_objective_route_ ||
++       cached_objective_route_->id != refining_route_id)) {
++    path.status = mgg::PlanningStatus::kBlocked;
++    path.reason = "objective route was superseded during validation";
++    path.poses.clear();
++    path.partial = false;
++    path.indexed_map_validated = false;
++  }
+   if (path.status == mgg::PlanningStatus::kSucceeded) {
+     if (path.partial) {
+-      cached_home_route_->next_index = next_index;
+-      cached_home_route_->expected_endpoint =
++      cached_objective_route_->next_index = next_index;
++      cached_objective_route_->expected_endpoint =
+           corridor.request.goal.pose;
+     } else {
+-      cached_home_route_.reset();
++      cached_objective_route_.reset();
+     }
+   }
+   response->status = static_cast<std::uint8_t>(path.status);
+--- a/ros2/src/mgg_ros/test/test_objective_service.cpp
++++ b/ros2/src/mgg_ros/test/test_objective_service.cpp
+@@ -958,6 +958,17 @@
+     return static_cast<bool>(node.indexed_map_client_);
+   }
+ 
++  static std::string cachedObjectiveRouteId(PlannerNode& node) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    return node.cached_objective_route_ ? node.cached_objective_route_->id : "";
++  }
++
++  static mgg_msgs::msg::MappingSnapshot mappingSnapshot(
++      PlannerNode& node) {
++    const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
++    return node.mapping_snapshot_;
++  }
++
+   static void setIndexedTerrainLimits(PlannerNode& node, double step,
+                                       double inclination) {
+     const std::lock_guard<std::recursive_mutex> lock(node.planner_mutex_);
+@@ -1141,9 +1152,14 @@
+     ASSERT_EQ(response->status,
+               mgg_msgs::srv::PlanObjective::Response::SUCCEEDED)
+         << distance << "m: " << response->reason;
++    EXPECT_TRUE(response->partial);
++    EXPECT_FALSE(response->route_id.empty());
+     ASSERT_FALSE(response->path.empty());
+-    EXPECT_NEAR(response->path.back().position.x, distance, 1e-9);
+-    EXPECT_NEAR(response->path.back().orientation.z, std::sin(0.35), 1e-9);
++    EXPECT_LE(response->path.back().position.x, 8.0 + 1e-9);
++    ASSERT_FALSE(response->global_path.empty());
++    EXPECT_NEAR(response->global_path.back().position.x, distance, 1e-9);
++    EXPECT_NEAR(response->global_path.back().orientation.z, std::sin(0.35),
++                1e-9);
+   }
+ }
+ 
+@@ -1195,9 +1211,9 @@
+   ASSERT_NE(response, nullptr);
+   ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
+       << response->reason;
++  EXPECT_TRUE(response->partial);
+   ASSERT_FALSE(response->path.empty());
+-  EXPECT_NEAR(response->path.back().position.x, goal.x(), 1e-6);
+-  EXPECT_NEAR(response->path.back().position.y, goal.y(), 1e-6);
++  EXPECT_LE(response->path.back().position.x, 8.0 + 1e-6);
+   EXPECT_NEAR(response->path.back().orientation.z, std::sin(0.35), 1e-9);
+   EXPECT_NEAR(response->path.back().orientation.w, std::cos(0.35), 1e-9);
+   EXPECT_TRUE(std::any_of(response->path.begin(), response->path.end(),
+@@ -1360,7 +1376,7 @@
+   auto rejected = Peer::refineObjectiveRoute(*node, early);
+   EXPECT_EQ(rejected->status,
+             mgg_msgs::srv::RefineObjectiveRoute::Response::BLOCKED);
+-  EXPECT_NE(rejected->reason.find("outside the completed Home route window"),
++  EXPECT_NE(rejected->reason.find("outside the completed objective route window"),
+             std::string::npos);
+ 
+   bool complete = false;
+@@ -1546,7 +1562,7 @@
+             mgg_msgs::srv::PlanObjective::Response::BLOCKED);
+   EXPECT_TRUE(response->path.empty());
+   EXPECT_NE(response->reason.find("exact goal rejected"), std::string::npos);
+-  EXPECT_NE(response->reason.find("local endpoint fallback"),
++  EXPECT_NE(response->reason.find("direct fallback"),
+             std::string::npos);
+ }
+ 
+@@ -2462,7 +2478,7 @@
+       << response->reason;
+ }
+ 
+-TEST(PlannerObjective, NavigateCompletesThirtyMetreKnownRoadExactly) {
++TEST(PlannerObjective, NavigateReturnsBoundedWindowForThirtyMetreKnownRoad) {
+   rclcpp::NodeOptions options;
+   options.parameter_overrides(
+       {rclcpp::Parameter("map.resolution", 0.05)});
+@@ -2476,10 +2492,89 @@
+   ASSERT_NE(response, nullptr);
+   ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
+       << response->reason;
+-  EXPECT_FALSE(response->partial);
++  EXPECT_TRUE(response->partial);
++  EXPECT_FALSE(response->route_id.empty());
++  ASSERT_FALSE(response->global_path.empty());
+   ASSERT_FALSE(response->path.empty());
+-  EXPECT_NEAR(response->path.back().position.x, exact_goal.x(), 1e-3);
+-  EXPECT_NEAR(response->path.back().position.y, exact_goal.y(), 1e-3);
++  EXPECT_LE(response->path.back().position.x, 8.0 + 1e-3);
++  EXPECT_NEAR(response->global_path.back().position.x, exact_goal.x(), 1e-3);
++  EXPECT_NEAR(response->global_path.back().position.y, exact_goal.y(), 1e-3);
++}
++
++TEST(PlannerObjective, RollingNavigateKeepsFixedGoalAcrossGraphGrowth) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05),
++       rclcpp::Parameter("objective_route_horizon_m", 3.0)});
++  auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*planner);
++
++  const mgg::StateVec exact_goal(12.0, 0.0, 0.075, 0.8);
++  auto response = Peer::requestObjective(
++      *planner, mgg::ObjectiveKind::kNavigate, exact_goal);
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
++      << response->reason;
++  ASSERT_TRUE(response->partial);
++  ASSERT_FALSE(response->route_id.empty());
++  ASSERT_FALSE(response->global_path.empty());
++  EXPECT_NEAR(response->global_path.back().position.x, exact_goal.x(), 1e-9);
++  EXPECT_NEAR(response->global_path.back().orientation.z, std::sin(0.4), 1e-9);
++  const std::string route_id = response->route_id;
++  const std::uint64_t captured_graph_revision = response->graph_revision;
++
++  auto premature =
++      std::make_shared<mgg_msgs::srv::RefineObjectiveRoute::Request>();
++  premature->route_id = route_id;
++  premature->component_id = response->component_id;
++  premature->graph_revision = captured_graph_revision;
++  EXPECT_EQ(Peer::refineObjectiveRoute(*planner, premature)->status,
++            mgg_msgs::srv::RefineObjectiveRoute::Response::BLOCKED);
++
++  bool complete = false;
++  for (int chunk = 0; chunk < 8 && !complete; ++chunk) {
++    ASSERT_FALSE(response->path.empty());
++    const auto endpoint = response->path.back().position;
++    // Normal odometry updates may grow the live graph, but the token remains
++    // bound to the immutable graph route captured by the first request.
++    Peer::acceptOdometry(*planner, endpoint.x, endpoint.y, endpoint.z);
++    auto request =
++        std::make_shared<mgg_msgs::srv::RefineObjectiveRoute::Request>();
++    request->route_id = route_id;
++    request->component_id = response->component_id;
++    request->graph_revision = captured_graph_revision;
++    const auto next = Peer::refineObjectiveRoute(*planner, request);
++    ASSERT_EQ(next->status,
++              mgg_msgs::srv::RefineObjectiveRoute::Response::SUCCEEDED)
++        << next->reason;
++    complete = !next->partial;
++    response->path = next->path;
++    response->partial = next->partial;
++  }
++  ASSERT_TRUE(complete);
++  ASSERT_FALSE(response->path.empty());
++  EXPECT_NEAR(response->path.back().position.x, exact_goal.x(), 1e-9);
++  EXPECT_NEAR(response->path.back().orientation.z, std::sin(0.4), 1e-9);
++}
++
++TEST(PlannerObjective, RollingNavigateDoesNotValidateBeyondCurrentHorizon) {
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05),
++       rclcpp::Parameter("objective_route_horizon_m", 3.0)});
++  auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*planner);
++  Peer::addGridObstacle(*planner, 0.325, true, 10.0);
++
++  const auto response = Peer::requestObjective(
++      *planner, mgg::ObjectiveKind::kNavigate,
++      mgg::StateVec(12.0, 0.0, 0.075, 0.0));
++  ASSERT_EQ(response->status, Service::Response::SUCCEEDED)
++      << response->reason;
++  EXPECT_TRUE(response->partial);
++  ASSERT_FALSE(response->path.empty());
++  EXPECT_LE(response->path.back().position.x, 3.0 + 1e-3);
+ }
+ 
+ TEST(PlannerObjective, NavigateResolvesStaleStartHeightAcrossLongShallowRamp) {
+@@ -2891,6 +2986,116 @@
+ 
+   executor.cancel();
+   spinner.join();
++}
++
++TEST(PlannerObjective, OlderIndexedRequestCannotReplaceNewerRouteCache) {
++  using Query = mgg_msgs::srv::QueryMapBatch;
++  using Peer = mgg_ros::PlannerNodeTestPeer;
++  rclcpp::NodeOptions options;
++  options.parameter_overrides(
++      {rclcpp::Parameter("map.resolution", 0.05),
++       rclcpp::Parameter("objective_route_horizon_m", 3.0),
++       rclcpp::Parameter("indexed_map_query_timeout_s", 1.0),
++       rclcpp::Parameter("indexed_map_query_service",
++                         "/supersession/query_batch")});
++  auto planner = std::make_shared<mgg_ros::PlannerNode>(options);
++  Peer::configureLongKnownRoad(*planner);
++  Peer::setFreshMappingComponent(*planner, "shared-component");
++  auto io = std::make_shared<rclcpp::Node>("supersession_io");
++  std::string newer_route_id;
++  std::atomic<int> query_count{0};
++  auto query_group = io->create_callback_group(
++      rclcpp::CallbackGroupType::Reentrant);
++  auto query_service = io->create_service<Query>(
++      "/supersession/query_batch",
++      [planner, &newer_route_id,
++       &query_count](const Query::Request::SharedPtr request,
++                     Query::Response::SharedPtr response) {
++        // The first objective has released planner_mutex_ while awaiting this
++        // reply. Complete a newer rolling objective (its nested query is
++        // served by the executor's third thread), then let the older request
++        // resume and prove it cannot overwrite the newer cache.
++        if (query_count.fetch_add(1) == 0) {
++          const auto newer = Peer::requestMappedObjective(
++              *planner, mgg::ObjectiveKind::kNavigate,
++              mgg::StateVec(15.0, 0.0, 0.075, 0.2));
++          if (newer->status == Service::Response::SUCCEEDED) {
++            newer_route_id = newer->route_id;
++          }
++        }
++        response->status = Query::Response::OK;
++        response->component_id = request->component_id;
++        response->epoch = request->epoch;
++        response->graph_revision = request->graph_revision;
++        response->geometry_revision = request->geometry_revision;
++        const auto n = request->samples.size();
++        response->occupancy.assign(n, Query::Response::FREE);
++        response->ground_z.assign(n, 0.0);
++        response->roughness.assign(n, 0.0);
++        response->clearance.assign(n, 100.0);
++        response->step.assign(n, false);
++        response->drop.assign(n, false);
++      },
++      rmw_qos_profile_services_default, query_group);
++  auto client = io->create_client<Service>("plan_objective");
++  rclcpp::executors::MultiThreadedExecutor executor(
++      rclcpp::ExecutorOptions{}, 3);
++  executor.add_node(planner);
++  executor.add_node(io);
++  std::thread spinner([&executor]() { executor.spin(); });
++  const bool objective_ready = client->wait_for_service(3s);
++  const auto deadline = std::chrono::steady_clock::now() + 3s;
++  while (!Peer::queryReady(*planner) &&
++         std::chrono::steady_clock::now() < deadline) {
++    std::this_thread::sleep_for(10ms);
++  }
++  const bool query_ready = Peer::queryReady(*planner);
++  EXPECT_TRUE(objective_ready);
++  EXPECT_TRUE(query_ready);
++  if (!objective_ready || !query_ready) {
++    executor.cancel();
++    spinner.join();
++    return;
++  }
++
++  auto request = std::make_shared<Service::Request>();
++  request->objective = Service::Request::NAVIGATE;
++  const auto snapshot = Peer::mappingSnapshot(*planner);
++  request->component_id = snapshot.component_id;
++  request->map_epoch = snapshot.epoch;
++  request->mapping_graph_revision = snapshot.graph_revision;
++  request->geometry_revision = snapshot.geometry_revision;
++  request->map_source_stamp = snapshot.source_stamp;
++  request->goal.position.x = 12.0;
++  request->goal.position.z = 0.075;
++  request->goal.orientation.w = 1.0;
++  const auto future = client->async_send_request(request);
++  const bool completed = future.wait_for(3s) == std::future_status::ready;
++  EXPECT_TRUE(completed);
++  if (!completed) {
++    executor.cancel();
++    spinner.join();
++    return;
++  }
++  const auto older = future.get();
++  EXPECT_NE(older, nullptr);
++  if (!older) {
++    executor.cancel();
++    spinner.join();
++    return;
++  }
++  EXPECT_EQ(older->status, Service::Response::BLOCKED) << older->reason;
++  EXPECT_NE(older->reason.find("superseded"), std::string::npos);
++  EXPECT_FALSE(newer_route_id.empty());
++  if (newer_route_id.empty()) {
++    executor.cancel();
++    spinner.join();
++    return;
++  }
++  EXPECT_EQ(Peer::cachedObjectiveRouteId(*planner), newer_route_id);
++
++  executor.cancel();
++  spinner.join();
+ }
+ 
+ TEST(PlannerObjective, PartialProxyCannotCrossObservedWall) {
+
