@@ -69,6 +69,7 @@ COPY deploy/patches/mgg-grid-body-evidence-followup.patch /tmp/mgg-grid-body-evi
 COPY deploy/patches/mgg-explore-ground-refinement-followup.patch /tmp/mgg-explore-ground-refinement-followup.patch
 COPY deploy/patches/mgg-indexed-snapshot-freshness-followup.patch /tmp/mgg-indexed-snapshot-freshness-followup.patch
 COPY deploy/patches/mgg-explore-validated-prefix-followup.patch /tmp/mgg-explore-validated-prefix-followup.patch
+COPY deploy/patches/mgg-mola-read-lease-ttl-followup.patch /tmp/mgg-mola-read-lease-ttl-followup.patch
 RUN cd /opt/mgg && \
     git apply /tmp/mgg-traversal-lifecycle.patch && \
     git apply /tmp/mgg-planning-stages.patch && \
@@ -124,6 +125,7 @@ RUN cd /opt/mgg && \
     git apply /tmp/mgg-explore-ground-refinement-followup.patch && \
     git apply /tmp/mgg-indexed-snapshot-freshness-followup.patch && \
     git apply /tmp/mgg-explore-validated-prefix-followup.patch && \
+    git apply /tmp/mgg-mola-read-lease-ttl-followup.patch && \
     cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF

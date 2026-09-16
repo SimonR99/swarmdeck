@@ -1,0 +1,425 @@
+diff --git a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h
+index cec8245..43d8c53 100644
+--- a/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h
++++ b/ros2/src/mgg_map_octomap/include/mgg_map_octomap/mola_map.h
+@@ -48,22 +48,37 @@ struct MolaSnapshotRequest {
+ /// validation and tree construction on one worker; planner callbacks never
+ /// decode a grid. The active immutable tree is replaced atomically.
+ class MolaMap : public MapInterface {
++ private:
++  struct Snapshot;
++
+  public:
+-  /// Keeps one immutable active snapshot installed for a bounded group of
+-  /// MapInterface calls. Publication can continue decoding off-thread, but
+-  /// commits wait until the lease is released.
++  /// Keeps one exact immutable snapshot for a bounded group of MapInterface
++  /// calls. Publication is excluded by default; allowPublication() lets a
++  /// worker commit while this transaction retains its admitted snapshot.
+   class ReadLease {
+    public:
+     ReadLease() = default;
+-    ReadLease(ReadLease&&) = default;
+-    ReadLease& operator=(ReadLease&&) = default;
++    ReadLease(ReadLease&& other) noexcept;
++    ReadLease& operator=(ReadLease&& other) noexcept;
++    ~ReadLease();
+ 
+     ReadLease(const ReadLease&) = delete;
+     ReadLease& operator=(const ReadLease&) = delete;
+ 
++    /// Permit snapshot publication while retaining this transaction's exact
++    /// immutable snapshot. The lease remains thread-affine.
++    void allowPublication();
++    /// Re-establish publication exclusion before completing the transaction.
++    void reacquirePublication();
++
+    private:
+     friend class MolaMap;
+-    explicit ReadLease(std::recursive_mutex& mutex) : lock_(mutex) {}
++    explicit ReadLease(const MolaMap& owner);
++    void release() noexcept;
++
++    const MolaMap* owner_ = nullptr;
++    std::shared_ptr<const Snapshot> snapshot_;
++    std::thread::id owner_thread_;
+     std::unique_lock<std::recursive_mutex> lock_;
+   };
+ 
+@@ -144,10 +159,16 @@ class MolaMap : public MapInterface {
+   void setRobotRadius(double robot_radius) override;
+ 
+  private:
+-  struct Snapshot;
+   struct PendingRequest;
++  struct ThreadPin {
++    const MolaMap* owner = nullptr;
++    std::shared_ptr<const Snapshot> snapshot;
++    std::size_t depth = 0;
++  };
+ 
+   std::shared_ptr<const Snapshot> current() const;
++  std::shared_ptr<const Snapshot> beginReadLease() const;
++  void endReadLease(const std::shared_ptr<const Snapshot>& snapshot) const;
+   void workerLoop();
+   std::shared_ptr<const Snapshot> load(const PendingRequest& pending) const;
+   void failIfLatest(std::uint64_t generation, const std::string& error);
+@@ -165,6 +186,7 @@ class MolaMap : public MapInterface {
+   mutable std::recursive_mutex publication_mutex_;
+   mutable std::shared_ptr<const Snapshot> active_;
+   mutable std::atomic<std::uint64_t> active_generation_{0};
++  static thread_local std::vector<ThreadPin> thread_pins_;
+ };
+ 
+ }  // namespace mgg
+diff --git a/ros2/src/mgg_map_octomap/src/mola_map.cpp b/ros2/src/mgg_map_octomap/src/mola_map.cpp
+index 87f27ef..11d456b 100644
+--- a/ros2/src/mgg_map_octomap/src/mola_map.cpp
++++ b/ros2/src/mgg_map_octomap/src/mola_map.cpp
+@@ -240,6 +240,7 @@ struct MolaMap::Snapshot {
+   std::shared_ptr<OctomapMap> map;
+   std::string artifact_digest;
+   Clock::time_point validated_at;
++  mutable std::atomic<std::size_t> reader_pins{0};
+ };
+ 
+ struct MolaMap::PendingRequest {
+@@ -248,6 +249,68 @@ struct MolaMap::PendingRequest {
+   Clock::time_point received_at;
+ };
+ 
++thread_local std::vector<MolaMap::ThreadPin> MolaMap::thread_pins_;
++
++MolaMap::ReadLease::ReadLease(const MolaMap& owner)
++    : owner_(&owner),
++      owner_thread_(std::this_thread::get_id()),
++      lock_(owner.publication_mutex_) {
++  snapshot_ = owner.beginReadLease();
++}
++
++MolaMap::ReadLease::ReadLease(ReadLease&& other) noexcept
++    : owner_(other.owner_),
++      snapshot_(std::move(other.snapshot_)),
++      owner_thread_(other.owner_thread_),
++      lock_(std::move(other.lock_)) {
++  if (owner_ != nullptr && owner_thread_ != std::this_thread::get_id())
++    std::terminate();
++  other.owner_ = nullptr;
++  other.owner_thread_ = std::thread::id{};
++}
++
++MolaMap::ReadLease& MolaMap::ReadLease::operator=(ReadLease&& other) noexcept {
++  if (this == &other) return *this;
++  if (other.owner_ != nullptr &&
++      other.owner_thread_ != std::this_thread::get_id())
++    std::terminate();
++  release();
++  owner_ = other.owner_;
++  snapshot_ = std::move(other.snapshot_);
++  owner_thread_ = other.owner_thread_;
++  lock_ = std::move(other.lock_);
++  other.owner_ = nullptr;
++  other.owner_thread_ = std::thread::id{};
++  return *this;
++}
++
++MolaMap::ReadLease::~ReadLease() { release(); }
++
++void MolaMap::ReadLease::allowPublication() {
++  if (owner_ == nullptr || !lock_.owns_lock()) return;
++  if (owner_thread_ != std::this_thread::get_id())
++    throw std::logic_error("MOLA read lease used from another thread");
++  lock_.unlock();
++}
++
++void MolaMap::ReadLease::reacquirePublication() {
++  if (owner_ == nullptr || lock_.owns_lock()) return;
++  if (owner_thread_ != std::this_thread::get_id())
++    throw std::logic_error("MOLA read lease used from another thread");
++  lock_.lock();
++}
++
++void MolaMap::ReadLease::release() noexcept {
++  if (owner_ == nullptr) return;
++  if (owner_thread_ != std::this_thread::get_id()) std::terminate();
++  if (!lock_.owns_lock()) lock_.lock();
++  owner_->endReadLease(snapshot_);
++  lock_.unlock();
++  owner_ = nullptr;
++  snapshot_.reset();
++  owner_thread_ = std::thread::id{};
++}
++
+ MolaMap::MolaMap(MolaMapConfig config) : config_(std::move(config)) {
+   if (config_.peer_root.empty() || !std::filesystem::path(config_.peer_root).is_absolute() ||
+       !std::isfinite(config_.resolution) || config_.resolution <= 0.0 ||
+@@ -314,7 +377,41 @@ void MolaMap::requestSnapshot(const MolaSnapshotRequest& request) {
+ }
+ 
+ MolaMap::ReadLease MolaMap::acquireReadLease() const {
+-  return ReadLease(publication_mutex_);
++  return ReadLease(*this);
++}
++
++std::shared_ptr<const MolaMap::Snapshot> MolaMap::beginReadLease() const {
++  for (auto& pin : thread_pins_) {
++    if (pin.owner != this) continue;
++    ++pin.depth;
++    if (pin.snapshot != nullptr)
++      pin.snapshot->reader_pins.fetch_add(1, std::memory_order_relaxed);
++    return pin.snapshot;
++  }
++  const auto snapshot = current();
++  thread_pins_.push_back(ThreadPin{this, snapshot, 1});
++  if (snapshot != nullptr)
++    snapshot->reader_pins.fetch_add(1, std::memory_order_relaxed);
++  return snapshot;
++}
++
++void MolaMap::endReadLease(
++    const std::shared_ptr<const Snapshot>& snapshot) const {
++  for (auto pin = thread_pins_.begin(); pin != thread_pins_.end(); ++pin) {
++    if (pin->owner != this) continue;
++    if (pin->depth == 0 || pin->snapshot != snapshot) std::terminate();
++    if (snapshot != nullptr &&
++        snapshot->reader_pins.fetch_sub(1, std::memory_order_acq_rel) == 0)
++      std::terminate();
++    if (--pin->depth != 0) return;
++    thread_pins_.erase(pin);
++    // If this was the final pin of an expired active snapshot, restore the
++    // ordinary expiry behavior now. A coherent heartbeat may already have
++    // installed a fresh replacement, in which case current() preserves it.
++    (void)current();
++    return;
++  }
++  std::terminate();
+ }
+ 
+ std::string MolaMap::lastError() const {
+@@ -728,6 +825,9 @@ std::shared_ptr<const MolaMap::Snapshot> MolaMap::load(
+ }
+ 
+ std::shared_ptr<const MolaMap::Snapshot> MolaMap::current() const {
++  for (const auto& pin : thread_pins_) {
++    if (pin.owner == this) return pin.snapshot;
++  }
+   auto value = std::atomic_load(&active_);
+   if (value == nullptr) return nullptr;
+   if (std::chrono::duration<double>(Clock::now() - value->validated_at).count() >
+@@ -737,6 +837,12 @@ std::shared_ptr<const MolaMap::Snapshot> MolaMap::current() const {
+     if (value != nullptr &&
+         std::chrono::duration<double>(Clock::now() - value->validated_at).count() >
+             config_.snapshot_ttl_sec) {
++      // A transaction admitted while this exact snapshot was fresh may finish
++      // on it, but another thread may neither use nor expire that transaction's
++      // snapshot. The final pin release performs ordinary expiry if no coherent
++      // heartbeat has installed a refreshed replacement.
++      if (value->reader_pins.load(std::memory_order_acquire) != 0)
++        return nullptr;
+       std::atomic_store(&active_, std::shared_ptr<const Snapshot>());
+       active_generation_.fetch_add(1, std::memory_order_release);
+       return nullptr;
+diff --git a/ros2/src/mgg_map_octomap/test/test_mola_map.cpp b/ros2/src/mgg_map_octomap/test/test_mola_map.cpp
+index 6705523..ef28597 100644
+--- a/ros2/src/mgg_map_octomap/test/test_mola_map.cpp
++++ b/ros2/src/mgg_map_octomap/test/test_mola_map.cpp
+@@ -354,6 +354,144 @@ TEST(MolaMap, ReadLeaseKeepsOneSnapshotAcrossAQueryTransaction) {
+             VoxelStatus::kOccupied);
+ }
+ 
++TEST(MolaMap, ReadLeasePinsAdmittedSnapshotAcrossTtlAndPublicationWindow) {
++  Publication publication;
++  auto map_config = config(publication);
++  map_config.snapshot_ttl_sec = 0.05;
++  MolaMap provider(map_config);
++  const auto request = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  const auto loaded_generation = provider.activeGeneration();
++
++  {
++    auto lease = provider.acquireReadLease();
++    // Exercise the same RHS-before-move-assignment ordering used by planner
++    // callback lease replacement. The nested acquisition inherits one pin.
++    lease = provider.acquireReadLease();
++    std::this_thread::sleep_for(std::chrono::milliseconds(80));
++    EXPECT_TRUE(provider.getStatus());
++    EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++              VoxelStatus::kOccupied);
++    {
++      auto nested = provider.acquireReadLease();
++      EXPECT_TRUE(provider.getStatus());
++    }
++
++    lease.allowPublication();
++    std::atomic<bool> other_status{true};
++    std::thread other([&]() {
++      auto other_lease = provider.acquireReadLease();
++      other_status.store(provider.getStatus(), std::memory_order_release);
++    });
++    other.join();
++    EXPECT_FALSE(other_status.load(std::memory_order_acquire));
++    EXPECT_EQ(provider.activeGeneration(), loaded_generation);
++    EXPECT_TRUE(provider.getStatus());
++    lease.reacquirePublication();
++  }
++
++  EXPECT_FALSE(provider.getStatus());
++  EXPECT_GT(provider.activeGeneration(), loaded_generation);
++}
++
++TEST(MolaMap, ExpiredSnapshotCannotBePinnedAtLeaseAdmission) {
++  Publication publication;
++  auto map_config = config(publication);
++  map_config.snapshot_ttl_sec = 0.05;
++  MolaMap provider(map_config);
++  const auto request = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  const auto loaded_generation = provider.activeGeneration();
++  std::this_thread::sleep_for(std::chrono::milliseconds(80));
++
++  {
++    auto stale = provider.acquireReadLease();
++    EXPECT_FALSE(provider.getStatus());
++    EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++              VoxelStatus::kUnknown);
++  }
++  EXPECT_GT(provider.activeGeneration(), loaded_generation);
++}
++
++TEST(MolaMap, HeartbeatRefreshReplacesExpiredActiveBesideOlderPin) {
++  Publication publication;
++  auto map_config = config(publication);
++  map_config.snapshot_ttl_sec = 0.05;
++  MolaMap provider(map_config);
++  const auto request = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(request);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  const auto loaded_generation = provider.activeGeneration();
++  auto status_on_other_thread = [&]() {
++    std::atomic<bool> status{false};
++    std::thread other([&]() {
++      auto lease = provider.acquireReadLease();
++      status.store(provider.getStatus(), std::memory_order_release);
++    });
++    other.join();
++    return status.load(std::memory_order_acquire);
++  };
++
++  {
++    auto lease = provider.acquireReadLease();
++    lease.allowPublication();
++    std::this_thread::sleep_for(std::chrono::milliseconds(80));
++    EXPECT_FALSE(status_on_other_thread());
++    EXPECT_EQ(provider.activeGeneration(), loaded_generation);
++
++    provider.requestSnapshot(request);
++    ASSERT_TRUE(waitFor(status_on_other_thread)) << provider.lastError();
++    EXPECT_EQ(provider.activeGeneration(), loaded_generation);
++    // The transaction remains on its admitted immutable object even though a
++    // coherent, freshly validated replacement is now active for new readers.
++    EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++              VoxelStatus::kOccupied);
++    lease.reacquirePublication();
++  }
++
++  EXPECT_TRUE(provider.getStatus());
++  EXPECT_EQ(provider.activeGeneration(), loaded_generation);
++}
++
++TEST(MolaMap, CorrectionDuringPublicationWindowInvalidatesGenerationNotPin) {
++  Publication publication;
++  MolaMap provider(config(publication));
++  const auto first = publication.publish(0, {{5, 0, 0}}, freeBlock());
++  provider.requestSnapshot(first);
++  ASSERT_TRUE(waitFor([&]() { return provider.getStatus(); }))
++      << provider.lastError();
++  const auto loaded_generation = provider.activeGeneration();
++  const auto second = publication.publish(1, {{8, 0, 0}}, freeBlock());
++
++  {
++    auto lease = provider.acquireReadLease();
++    lease.allowPublication();
++    provider.requestSnapshot(second);
++    EXPECT_GT(provider.activeGeneration(), loaded_generation);
++    EXPECT_TRUE(provider.getStatus());
++    EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++              VoxelStatus::kOccupied);
++    {
++      auto nested = provider.acquireReadLease();
++      EXPECT_EQ(provider.getVoxelStatus({1.1, 0.1, 0.1}),
++                VoxelStatus::kOccupied);
++    }
++    lease.reacquirePublication();
++  }
++
++  ASSERT_TRUE(waitFor([&]() {
++    return provider.getStatus() &&
++           provider.getVoxelStatus({1.1, 0.1, 0.1}) == VoxelStatus::kFree;
++  })) << provider.lastError();
++  EXPECT_EQ(provider.getVoxelStatus({1.7, 0.1, 0.1}),
++            VoxelStatus::kOccupied);
++}
++
+ TEST(MolaMap, RejectsFreeCellsWithoutQualifiedRayEvidence) {
+   Publication publication;
+   MolaMap provider(config(publication));
+diff --git a/ros2/src/mgg_ros/src/planner_node.cpp b/ros2/src/mgg_ros/src/planner_node.cpp
+index ab56c22..3368d09 100644
+--- a/ros2/src/mgg_ros/src/planner_node.cpp
++++ b/ros2/src/mgg_ros/src/planner_node.cpp
+@@ -2053,15 +2053,14 @@ void PlannerNode::onPlanRequest(
+   const bool allow_explore_height_refinement =
+       map_backend_ == "mola_snapshot" && provisional_unknown_ground_ &&
+       observed_ground_body_evidence_;
+-  map_read = mgg::MolaMap::ReadLease{};
++  map_read.allowPublication();
+   lock.unlock();
+   if (feasible.status == mgg::PlanningStatus::kSucceeded) {
+     queryIndexedMap(feasible, query_context,
+                     allow_explore_height_refinement);
+   }
+   lock.lock();
+-  map_read = mola_map_ != nullptr ? mola_map_->acquireReadLease()
+-                                  : mgg::MolaMap::ReadLease{};
++  map_read.reacquirePublication();
+   const bool mola_ready = mola_map_ == nullptr || mola_map_->getStatus();
+   refreshMolaRevision();
+   if (mola_map_ != nullptr &&
+@@ -3674,14 +3673,14 @@ void PlannerNode::onObjectiveRequest(
+       core.objective == mgg::ObjectiveKind::kExplore &&
+       map_backend_ == "mola_snapshot" && provisional_unknown_ground_ &&
+       observed_ground_body_evidence_;
+-  map_read = mgg::MolaMap::ReadLease{};
++  map_read.allowPublication();
+   lock.unlock();
+   if (path.status == mgg::PlanningStatus::kSucceeded) {
+     queryIndexedMap(path, query_context, allow_explore_height_refinement);
+   }
+   if (mola_map_ != nullptr) {
+     lock.lock();
+-    map_read = mola_map_->acquireReadLease();
++    map_read.reacquirePublication();
+     const bool mola_ready = mola_map_->getStatus();
+     refreshMolaRevision();
+     if (path.status == mgg::PlanningStatus::kSucceeded &&
+@@ -3876,13 +3875,13 @@ void PlannerNode::onRefineObjectiveRoute(
+       path = std::move(fallback);
+     }
+   }
+-  map_read = mgg::MolaMap::ReadLease{};
++  map_read.allowPublication();
+   lock.unlock();
+   if (path.status == mgg::PlanningStatus::kSucceeded)
+     queryIndexedMap(path, query_context);
+   lock.lock();
+   if (mola_map_ != nullptr) {
+-    map_read = mola_map_->acquireReadLease();
++    map_read.reacquirePublication();
+     const bool mola_ready = mola_map_->getStatus();
+     refreshMolaRevision();
+     if (path.status == mgg::PlanningStatus::kSucceeded &&

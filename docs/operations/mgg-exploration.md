@@ -161,6 +161,13 @@ the callback lock. The query still uses the exact captured revision and source
 stamp, checks the live authority and transform after each response, and rejects
 provider staleness or a changed MOLA generation before publishing the route.
 
+The native MOLA read lease also retains that fresh, immutable map throughout
+the planning call. It permits publication during the indexed query while
+preserving the caller's map view; actual corrections still invalidate the
+result. Other callers cannot acquire an expired snapshot, and completing a
+lease does not extend its freshness. This prevents longer graph searches from
+invalidating themselves while their lock delays a heartbeat refresh.
+
 To test actual fleet startup against a running four-robot simulation:
 
 ```bash
