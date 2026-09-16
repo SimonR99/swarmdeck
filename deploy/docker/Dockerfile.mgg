@@ -1,6 +1,8 @@
 FROM ros:jazzy-perception
 SHELL ["/bin/bash", "-c"]
-ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+# SwarmDeck's planner work lives on the `swarmdeck` branch of MGGPlanner, which
+# carries the changes this deployment used to apply as a patch series.
+ARG MGG_REV=b153e639a1778bb747f32c29a5804fe4fc03677b
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
     libeigen3-dev libboost-dev libyaml-cpp-dev libssl-dev nlohmann-json3-dev ros-jazzy-octomap \
@@ -9,132 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-rclpy \
     ros-jazzy-tf2-geometry-msgs ros-jazzy-rosidl-default-generators \
     && rm -rf /var/lib/apt/lists/*
-RUN git clone --branch ros2 --single-branch https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
+RUN git clone --branch swarmdeck --single-branch https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
     && git -C /opt/mgg checkout "$MGG_REV"
 WORKDIR /opt/mgg/ros2
 RUN source /opt/ros/jazzy/setup.bash && \
-    CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
-    --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-COPY deploy/patches/mgg-traversal-lifecycle.patch /tmp/mgg-traversal-lifecycle.patch
-COPY deploy/patches/mgg-planning-stages.patch /tmp/mgg-planning-stages.patch
-COPY deploy/patches/mgg-objective-service.patch /tmp/mgg-objective-service.patch
-COPY deploy/patches/mgg-coordination-exclusions.patch /tmp/mgg-coordination-exclusions.patch
-COPY deploy/patches/mgg-objective-native-tests.patch /tmp/mgg-objective-native-tests.patch
-COPY deploy/patches/mgg-indexed-map-query.patch /tmp/mgg-indexed-map-query.patch
-COPY deploy/patches/mgg-home-backbone.patch /tmp/mgg-home-backbone.patch
-COPY deploy/patches/mgg-grid-refinement.patch /tmp/mgg-grid-refinement.patch
-COPY deploy/patches/mgg-trajectory-backbone.patch /tmp/mgg-trajectory-backbone.patch
-COPY deploy/patches/mgg-objective-diagnostics.patch /tmp/mgg-objective-diagnostics.patch
-COPY deploy/patches/mgg-external-path-execution.patch /tmp/mgg-external-path-execution.patch
-COPY deploy/patches/mgg-partial-route-navigate.patch /tmp/mgg-partial-route-navigate.patch
-COPY deploy/patches/mgg-objective-start-support.patch /tmp/mgg-objective-start-support.patch
-COPY deploy/patches/mgg-mola-map-provider.patch /tmp/mgg-mola-map-provider.patch
-COPY deploy/patches/mgg-objective-projected-endpoint.patch /tmp/mgg-objective-projected-endpoint.patch
-COPY deploy/patches/mgg-grid-clearance-diagnostics.patch /tmp/mgg-grid-clearance-diagnostics.patch
-COPY deploy/patches/mgg-complete-distant-route.patch /tmp/mgg-complete-distant-route.patch
-COPY deploy/patches/mgg-forward-route-diagnostics.patch /tmp/mgg-forward-route-diagnostics.patch
-COPY deploy/patches/mgg-objective-start-connectivity.patch /tmp/mgg-objective-start-connectivity.patch
-COPY deploy/patches/mgg-objective-ground-evidence.patch /tmp/mgg-objective-ground-evidence.patch
-COPY deploy/patches/mgg-objective-footprint-terrain.patch /tmp/mgg-objective-footprint-terrain.patch
-COPY deploy/patches/mgg-octomap-measured-ground.patch /tmp/mgg-octomap-measured-ground.patch
-COPY deploy/patches/mgg-provisional-unknown-ground.patch /tmp/mgg-provisional-unknown-ground.patch
-COPY deploy/patches/mgg-exploration-terrain.patch /tmp/mgg-exploration-terrain.patch
-COPY deploy/patches/mgg-route-validation.patch /tmp/mgg-route-validation.patch
-COPY deploy/patches/mgg-objective-terrain-cache.patch /tmp/mgg-objective-terrain-cache.patch
-COPY deploy/patches/mgg-ground-projection-signed-clearance.patch /tmp/mgg-ground-projection-signed-clearance.patch
-COPY deploy/patches/mgg-distant-objective-regression.patch /tmp/mgg-distant-objective-regression.patch
-COPY deploy/patches/mgg-exploration-driving-height.patch /tmp/mgg-exploration-driving-height.patch
-COPY deploy/patches/mgg-live-navigation-followup.patch /tmp/mgg-live-navigation-followup.patch
-COPY deploy/patches/mgg-live-home-direct-followup.patch /tmp/mgg-live-home-direct-followup.patch
-COPY deploy/patches/mgg-footprint-circle-followup.patch /tmp/mgg-footprint-circle-followup.patch
-COPY deploy/patches/mgg-footprint-failure-diagnostic.patch /tmp/mgg-footprint-failure-diagnostic.patch
-COPY deploy/patches/mgg-home-objective-budget-followup.patch /tmp/mgg-home-objective-budget-followup.patch
-COPY deploy/patches/mgg-physical-current-start-followup.patch /tmp/mgg-physical-current-start-followup.patch
-COPY deploy/patches/mgg-footprint-grid-cells-followup.patch /tmp/mgg-footprint-grid-cells-followup.patch
-COPY deploy/patches/mgg-home-rolling-followup.patch /tmp/mgg-home-rolling-followup.patch
-COPY deploy/patches/mgg-exploration-waiting-reason.patch /tmp/mgg-exploration-waiting-reason.patch
-COPY deploy/patches/mgg-directed-edge-cache-followup.patch /tmp/mgg-directed-edge-cache-followup.patch
-COPY deploy/patches/mgg-navigate-graph-first-followup.patch /tmp/mgg-navigate-graph-first-followup.patch
-COPY deploy/patches/mgg-navigate-endpoint-height-followup.patch /tmp/mgg-navigate-endpoint-height-followup.patch
-COPY deploy/patches/mgg-objective-wide-window-followup.patch /tmp/mgg-objective-wide-window-followup.patch
-COPY deploy/patches/mgg-provisional-parent-height-followup.patch /tmp/mgg-provisional-parent-height-followup.patch
-COPY deploy/patches/mgg-known-height-memo-followup.patch /tmp/mgg-known-height-memo-followup.patch
-COPY deploy/patches/mgg-connected-footprint-support-followup.patch /tmp/mgg-connected-footprint-support-followup.patch
-COPY deploy/patches/mgg-home-obstacle-detour-followup.patch /tmp/mgg-home-obstacle-detour-followup.patch
-COPY deploy/patches/mgg-validator-physical-start-followup.patch /tmp/mgg-validator-physical-start-followup.patch
-COPY deploy/patches/mgg-platform-terrain-query.patch /tmp/mgg-platform-terrain-query.patch
-COPY deploy/patches/mgg-mola-exploration-followup.patch /tmp/mgg-mola-exploration-followup.patch
-COPY deploy/patches/mgg-exploration-terrain-validation-followup.patch /tmp/mgg-exploration-terrain-validation-followup.patch
-COPY deploy/patches/mgg-grid-body-evidence-followup.patch /tmp/mgg-grid-body-evidence-followup.patch
-COPY deploy/patches/mgg-explore-ground-refinement-followup.patch /tmp/mgg-explore-ground-refinement-followup.patch
-COPY deploy/patches/mgg-indexed-snapshot-freshness-followup.patch /tmp/mgg-indexed-snapshot-freshness-followup.patch
-COPY deploy/patches/mgg-explore-validated-prefix-followup.patch /tmp/mgg-explore-validated-prefix-followup.patch
-COPY deploy/patches/mgg-mola-read-lease-ttl-followup.patch /tmp/mgg-mola-read-lease-ttl-followup.patch
-COPY deploy/patches/mgg-exploration-swept-cylinder-followup.patch /tmp/mgg-exploration-swept-cylinder-followup.patch
-COPY deploy/patches/mgg-objective-rolling-route-followup.patch /tmp/mgg-objective-rolling-route-followup.patch
-COPY deploy/patches/mgg-mola-measured-body-followup.patch /tmp/mgg-mola-measured-body-followup.patch
-COPY deploy/patches/mgg-qualified-provisional-objective-followup.patch /tmp/mgg-qualified-provisional-objective-followup.patch
-RUN cd /opt/mgg && \
-    git apply /tmp/mgg-traversal-lifecycle.patch && \
-    git apply /tmp/mgg-planning-stages.patch && \
-    git apply /tmp/mgg-objective-service.patch && \
-    git apply /tmp/mgg-coordination-exclusions.patch && \
-    git apply /tmp/mgg-objective-native-tests.patch && \
-    git apply /tmp/mgg-indexed-map-query.patch && \
-    git apply /tmp/mgg-home-backbone.patch && \
-    git apply /tmp/mgg-grid-refinement.patch && \
-    git apply /tmp/mgg-trajectory-backbone.patch && \
-    git apply /tmp/mgg-objective-diagnostics.patch && \
-    git apply /tmp/mgg-external-path-execution.patch && \
-    git apply /tmp/mgg-partial-route-navigate.patch && \
-    git apply /tmp/mgg-objective-start-support.patch && \
-    git apply /tmp/mgg-mola-map-provider.patch && \
-    git apply /tmp/mgg-objective-projected-endpoint.patch && \
-    git apply /tmp/mgg-grid-clearance-diagnostics.patch && \
-    git apply /tmp/mgg-complete-distant-route.patch && \
-    git apply /tmp/mgg-forward-route-diagnostics.patch && \
-    git apply /tmp/mgg-objective-start-connectivity.patch && \
-    git apply /tmp/mgg-objective-ground-evidence.patch && \
-    git apply /tmp/mgg-objective-footprint-terrain.patch && \
-    git apply /tmp/mgg-octomap-measured-ground.patch && \
-    git apply /tmp/mgg-provisional-unknown-ground.patch && \
-    git apply /tmp/mgg-exploration-terrain.patch && \
-    git apply /tmp/mgg-route-validation.patch && \
-    git apply /tmp/mgg-objective-terrain-cache.patch && \
-    git apply /tmp/mgg-ground-projection-signed-clearance.patch && \
-    git apply /tmp/mgg-distant-objective-regression.patch && \
-    git apply /tmp/mgg-exploration-driving-height.patch && \
-    git apply /tmp/mgg-live-navigation-followup.patch && \
-    git apply /tmp/mgg-live-home-direct-followup.patch && \
-    git apply /tmp/mgg-footprint-circle-followup.patch && \
-    git apply /tmp/mgg-footprint-failure-diagnostic.patch && \
-    git apply /tmp/mgg-home-objective-budget-followup.patch && \
-    git apply /tmp/mgg-physical-current-start-followup.patch && \
-    git apply /tmp/mgg-footprint-grid-cells-followup.patch && \
-    git apply /tmp/mgg-home-rolling-followup.patch && \
-    git apply /tmp/mgg-exploration-waiting-reason.patch && \
-    git apply /tmp/mgg-directed-edge-cache-followup.patch && \
-    git apply /tmp/mgg-navigate-graph-first-followup.patch && \
-    git apply /tmp/mgg-navigate-endpoint-height-followup.patch && \
-    git apply /tmp/mgg-objective-wide-window-followup.patch && \
-    git apply /tmp/mgg-provisional-parent-height-followup.patch && \
-    git apply /tmp/mgg-known-height-memo-followup.patch && \
-    git apply /tmp/mgg-connected-footprint-support-followup.patch && \
-    git apply /tmp/mgg-home-obstacle-detour-followup.patch && \
-    git apply /tmp/mgg-validator-physical-start-followup.patch && \
-    git apply /tmp/mgg-platform-terrain-query.patch && \
-    git apply /tmp/mgg-mola-exploration-followup.patch && \
-    git apply /tmp/mgg-exploration-terrain-validation-followup.patch && \
-    git apply /tmp/mgg-grid-body-evidence-followup.patch && \
-    git apply /tmp/mgg-explore-ground-refinement-followup.patch && \
-    git apply /tmp/mgg-indexed-snapshot-freshness-followup.patch && \
-    git apply /tmp/mgg-explore-validated-prefix-followup.patch && \
-    git apply /tmp/mgg-mola-read-lease-ttl-followup.patch && \
-    git apply /tmp/mgg-exploration-swept-cylinder-followup.patch && \
-    git apply /tmp/mgg-objective-rolling-route-followup.patch && \
-    git apply /tmp/mgg-mola-measured-body-followup.patch && \
-    git apply /tmp/mgg-qualified-provisional-objective-followup.patch && \
-    cd ros2 && source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
     --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 COPY deploy/mgg /app/deploy/mgg

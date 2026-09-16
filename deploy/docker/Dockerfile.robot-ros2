@@ -1,6 +1,6 @@
 FROM ros:humble-ros-base
 
-ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+ARG MGG_REV=b153e639a1778bb747f32c29a5804fe4fc03677b
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       gir1.2-gstreamer-1.0 \
@@ -27,11 +27,6 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && pip3 install --no-cache-dir websockets==10.4 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY deploy/patches/mgg-objective-msgs.patch /tmp/mgg-objective-msgs.patch
-COPY deploy/patches/mgg-indexed-map-msgs.patch /tmp/mgg-indexed-map-msgs.patch
-COPY deploy/patches/mgg-partial-route-navigate.patch /tmp/mgg-partial-route-navigate.patch
-COPY deploy/patches/mgg-route-validation.patch /tmp/mgg-route-validation.patch
-COPY deploy/patches/mgg-home-rolling-followup.patch /tmp/mgg-home-rolling-followup.patch
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV"
 ENV AMENT_PREFIX_PATH="/opt/swarmdeck-mgg-msgs:${AMENT_PREFIX_PATH}" \
