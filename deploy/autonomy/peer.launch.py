@@ -4,6 +4,12 @@ Required environment: SWARMDECK_MISSION_ID (fresh UUID), ROS_DOMAIN_ID (shared
 peer domain), SWARMDECK_PEER_NAMES (JSON array), SWARMDECK_PEER_INDEX.
 SWARMDECK_SENSOR_DOMAIN_ID may select a separate robot-local sensor domain.
 Robot-specific sensor topics and frames are explicit overrides for hardware.
+
+SWARMDECK_PEER_BODY_MASK ("true" to enable, default off) drops lidar returns
+that fall inside another robot at the capture stamp. It requires
+SWARMDECK_PEER_PLATFORMS, a JSON object naming each robot's platform, and a
+pose stream for every robot in one shared frame
+(SWARMDECK_PEER_POSE_TOPIC_TEMPLATE, SWARMDECK_PEER_POSE_FRAME).
 """
 
 import os
@@ -37,6 +43,14 @@ def generate_launch_description():
     capture_provenance_topic = os.environ.get(
         "SWARMDECK_CAPTURE_PROVENANCE_TOPIC",
         f"/{ns}/scan/capture_provenance" if capture_provider == "simulation" else "",
+    )
+    # Peer-body masking is opt in. Hardware profiles leave SWARMDECK_PEER_BODY_MASK
+    # unset because no hardware deployment guarantees a peer pose in a frame
+    # shared with the capture; the simulation overlay sets it, along with the
+    # platform each robot is, which the simulation launcher resolves from the
+    # scenario config.
+    peer_body_mask = (
+        os.environ.get("SWARMDECK_PEER_BODY_MASK", "false").strip().lower() == "true"
     )
     config = "/cslam_ws/install/swarmdeck_cslam/share/swarmdeck_cslam/config/cslam_lidar.yaml"
     common = [
@@ -93,6 +107,20 @@ def generate_launch_description():
                 or ("body" if capture_provider == "simulation" else "optical"),
                 "max_stored_raw_capture_points": int(
                     os.environ.get("SWARMDECK_MAX_STORED_RAW_CAPTURE_POINTS", "4096")
+                ),
+                "peer_body_mask": peer_body_mask,
+                "peer_platforms": os.environ.get("SWARMDECK_PEER_PLATFORMS") or "{}",
+                "peer_pose_topic_template": os.environ.get(
+                    "SWARMDECK_PEER_POSE_TOPIC_TEMPLATE"
+                )
+                or "/{robot}/ground_truth",
+                "peer_pose_frame": os.environ.get("SWARMDECK_PEER_POSE_FRAME")
+                or "world",
+                "peer_mask_pose_tolerance_s": float(
+                    os.environ.get("SWARMDECK_PEER_MASK_POSE_TOLERANCE_S") or "0.05"
+                ),
+                "peer_mask_margin_m": float(
+                    os.environ.get("SWARMDECK_PEER_MASK_MARGIN_M") or "0.15"
                 ),
                 "tf_topic": os.environ.get("SWARMDECK_TF_TOPIC", f"/{ns}/tf"),
                 "tf_static_topic": os.environ.get(

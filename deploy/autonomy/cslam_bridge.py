@@ -50,6 +50,12 @@ from autonomy.capture_color import (
     select_geometry_and_color,
     select_rgbd_observation,
 )
+from autonomy.peer_mask import (
+    MAX_PEER_POSE_TOLERANCE_S,
+    PeerBodyMask,
+    idle_mask_counters,
+    peer_body,
+)
 from autonomy.cslam import CslamMapper, pose_matrix, publish_snapshot_if_new
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaClient
@@ -121,6 +127,14 @@ class Bridge(Node):
             "color_frame": "",
             "color_frame_convention": "optical",
             "max_stored_raw_capture_points": DEFAULT_STORED_RAW_CAPTURE_POINTS,
+            # Peer-body masking. Off unless a profile turns it on; see the
+            # block that reads these below for why hardware leaves it off.
+            "peer_body_mask": False,
+            "peer_platforms": "{}",
+            "peer_pose_topic_template": "/{robot}/ground_truth",
+            "peer_pose_frame": "world",
+            "peer_mask_pose_tolerance_s": 0.05,
+            "peer_mask_margin_m": 0.15,
         }
         for key, value in params.items():
             self.declare_parameter(key, value)
@@ -232,6 +246,50 @@ class Bridge(Node):
                 "max_stored_raw_capture_points must be between 1 and "
                 f"{MAX_RAW_CAPTURE_POINTS}"
             )
+        # Peer-body mask. A grouped start has every robot scanning its
+        # neighbours, and those returns describe a body that drives away, so
+        # they are removed here rather than left for later free-space rays to
+        # argue with. It stays off unless a profile enables it: masking needs a
+        # peer pose in a frame shared with this capture at the capture stamp,
+        # which simulation publishes and a hardware fleet does not guarantee.
+        self.peer_mask = None
+        self.peer_mask_margin_m = float(p["peer_mask_margin_m"])
+        self.peer_mask_tolerance_s = float(p["peer_mask_pose_tolerance_s"])
+        self.peer_pose_frame = str(p["peer_pose_frame"]).strip("/")
+        if bool(p["peer_body_mask"]):
+            if not 0.0 < self.peer_mask_tolerance_s <= MAX_PEER_POSE_TOLERANCE_S:
+                raise ValueError(
+                    "peer_mask_pose_tolerance_s must be positive and at most "
+                    f"{MAX_PEER_POSE_TOLERANCE_S}"
+                )
+            if not self.peer_pose_frame:
+                raise ValueError("peer_pose_frame must name the shared pose frame")
+            template = str(p["peer_pose_topic_template"])
+            if "{robot}" not in template:
+                raise ValueError("peer_pose_topic_template must contain {robot}")
+            platforms = json.loads(p["peer_platforms"] or "{}")
+            fleet = sorted(names.values())
+            missing = sorted(set(fleet) - set(platforms))
+            if missing:
+                raise ValueError(
+                    "peer_platforms must give every fleet robot a platform; "
+                    f"missing {missing}"
+                )
+            # This robot's own body is resolved too: an unknown platform must
+            # fail at startup rather than silently leave one robot unmasked.
+            self.peer_mask = PeerBodyMask(
+                self.robot,
+                {name: peer_body(platforms[name]) for name in fleet},
+                int(self.peer_mask_tolerance_s * 1e9),
+                self.peer_mask_margin_m,
+            )
+            for name in fleet:
+                self.sensor_node.create_subscription(
+                    Odometry,
+                    template.format(robot=name),
+                    self._peer_pose_callback(name),
+                    qos_profile_sensor_data,
+                )
         provenance_topic = str(p["capture_provenance_topic"] or "")
         self.raw_capture_enabled = bool(
             provenance_topic
@@ -481,6 +539,28 @@ class Bridge(Node):
             self.sensor_node.destroy_node()
             rclpy.try_shutdown(context=self.sensor_context)
 
+    def _peer_pose_callback(self, robot):
+        """Buffer one robot's timestamped pose in the shared reference frame.
+
+        Every sample is retained with its own stamp. The mask joins a capture
+        to the sample that was true at the capture stamp, so nothing here may
+        collapse the history down to a latest pose.
+        """
+
+        def handle(message):
+            # Composing poses only means anything if they share a frame. A
+            # sample in a robot-local odometry frame is not comparable with
+            # ours and must never be silently treated as if it were.
+            if message.header.frame_id.strip("/") != self.peer_pose_frame:
+                self.peer_mask.reject_pose()
+                return
+            stamp_ns = (
+                message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+            )
+            self.peer_mask.add_pose(robot, stamp_ns, pose_matrix(message.pose.pose))
+
+        return handle
+
     def raw_cloud(self, cloud):
         self.pending_cloud = cloud  # latest-only under sensor overload
 
@@ -622,6 +702,13 @@ class Bridge(Node):
         ]
         T = np.asarray(pose_matrix(transform_pose(mount.transform)))
         xyz = xyz @ T[:3, :3].T + T[:3, 3]
+        stamp_ns = cloud.header.stamp.sec * 1_000_000_000 + cloud.header.stamp.nanosec
+        # Before anything downstream sees the capture: the normalized topic
+        # Swarm-SLAM keyframes from, the cached raw capture that carries
+        # provenance, and every MOLA product that derives free-space evidence
+        # from it. Masked points are dropped endpoints, not free space.
+        if self.peer_mask is not None:
+            xyz = self.peer_mask.apply(xyz, stamp_ns)
         header = Header(stamp=cloud.header.stamp, frame_id=self.base)
         out = point_cloud2.create_cloud_xyz32(header, xyz)
         odom = Odometry()
@@ -630,7 +717,6 @@ class Bridge(Node):
         odom.pose.pose = transform_pose(local.transform)
         # TF has no covariance. Zero is explicitly unknown at this boundary;
         # optimizer noise remains configured independently, never inferred here.
-        stamp_ns = cloud.header.stamp.sec * 1_000_000_000 + cloud.header.stamp.nanosec
         with self._shared_lock:
             self.capture_calibrations[stamp_ns] = (T, cloud.header.frame_id)
             while len(self.capture_calibrations) > 1024:
@@ -924,6 +1010,18 @@ class Bridge(Node):
             "raw_capture_points_received": self.raw_capture_points_received,
             "raw_capture_points_stored": self.raw_capture_points_stored,
             "max_stored_raw_capture_points": self.max_stored_raw_capture_points,
+            # Peer-body mask. `points_dropped` counts removed endpoints, which
+            # were never converted into free space; `peers_skipped_stale`
+            # counts peer/capture pairs left unmasked for want of a pose close
+            # enough to the capture stamp.
+            "peer_body_mask": self.peer_mask is not None,
+            "peer_body_mask_margin_m": self.peer_mask_margin_m,
+            "peer_body_mask_pose_tolerance_s": self.peer_mask_tolerance_s,
+            **(
+                idle_mask_counters()
+                if self.peer_mask is None
+                else self.peer_mask.counters()
+            ),
             "color_images_received": self.color_images_received,
             "depth_images_received": self.depth_images_received,
             "color_frames_rejected": self.color_frames_rejected,

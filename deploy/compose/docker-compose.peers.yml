@@ -16,6 +16,15 @@ x-peer: &peer
     SWARMDECK_USE_SIM_TIME: "true"
     SWARMDECK_CAPTURE_PROVIDER: "${SWARMDECK_CAPTURE_PROVIDER:-unknown}"
     SWARMDECK_COLOR_FRAME_CONVENTION: body
+    # Simulation only. The ARGoS bridge publishes every robot's pose in the
+    # shared `world` frame, so a capture can drop the returns that landed on a
+    # neighbour's chassis. Hardware has no such shared-frame peer pose and
+    # leaves this unset. Both values come from deploy/simulation_launch.py,
+    # which is the only component that knows the scenario's fleet.robot_types;
+    # a compose bring-up by hand therefore runs with the mask off rather than
+    # failing on an unknown platform.
+    SWARMDECK_PEER_BODY_MASK: "${SWARMDECK_PEER_BODY_MASK:-false}"
+    SWARMDECK_PEER_PLATFORMS: "${SWARMDECK_PEER_PLATFORMS:-}"
     SWARMDECK_SERVER_URL: http://server:8080
   volumes:
     - ../../autonomy:/app/autonomy:ro

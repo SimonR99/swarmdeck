@@ -152,6 +152,54 @@ def scalar(value: str) -> str:
     return value
 
 
+def platforms_from_config(path: Path, names: list[str]) -> dict[str, str]:
+    """Resolve each robot's platform, the way the ARGoS session generator does.
+
+    `fleet.robot_type` is the fleet default and `fleet.robot_types` overrides
+    it per robot. The peer bridge needs this because it cannot import the
+    simulation package to look a chassis up itself, and a peer-body mask sized
+    from the wrong platform masks the wrong volume. Parsed with the same
+    indentation scan as the fleet scalars so the host keeps needing no YAML
+    dependency; unknown keys are simply not matched.
+    """
+    in_fleet = False
+    child_indent: int | None = None
+    in_types = False
+    default: str | None = None
+    overrides: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            in_fleet = re.fullmatch(r"fleet\s*:\s*(?:#.*)?", line) is not None
+            in_types = False
+            continue
+        if not in_fleet:
+            continue
+        indentation = len(line) - len(line.lstrip(" "))
+        if child_indent is None:
+            child_indent = indentation
+        if indentation == child_indent:
+            in_types = re.match(r"^\s+robot_types\s*:\s*(?:#.*)?$", line) is not None
+            match = re.match(r"^\s+robot_type\s*:\s*(.*?)\s*$", line)
+            if match and match.group(1).split("#", 1)[0].strip():
+                default = scalar(match.group(1))
+            continue
+        if in_types and indentation > child_indent:
+            match = re.match(r"^\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$", line)
+            if match:
+                overrides[match.group(1)] = scalar(match.group(2))
+    unknown = sorted(set(overrides) - set(names))
+    if unknown:
+        raise ValueError(
+            f"{path} fleet.robot_types names robots outside this fleet: {unknown}"
+        )
+    # Mirrors DEFAULT_ROBOT_PROFILE in the simulation package: a config that
+    # names no platform spawns Scout Minis, and the mask must describe the
+    # bodies that were actually spawned.
+    return {name: overrides.get(name, default or "scout_mini") for name in names}
+
+
 def fleet_from_config(path: Path) -> tuple[int, str]:
     """Read the two required fleet scalars without adding a host YAML dependency."""
     in_fleet = False
@@ -261,6 +309,7 @@ def process_environment(
     spec: dict, epoch: dict[str, str] | None = None
 ) -> dict[str, str]:
     environment = dict(os.environ)
+    platforms = spec.get("robot_platforms") or {}
     environment.update(
         COMPOSE_PROFILES="argos",
         SWARMDECK_CONFIG=spec["container_config"],
@@ -269,6 +318,15 @@ def process_environment(
         EXPLORE_SECONDS=str(spec["explore"]),
         SWARMDECK_ROBOT_COUNT=str(spec["robot_count"]),
         SWARMDECK_PEER_NAMES=json.dumps(spec["robot_names"], separators=(",", ":")),
+        # Simulation publishes every robot's pose in one shared frame, so the
+        # peers can drop returns that landed on a neighbour before the
+        # keyframe is retained. Hardware profiles never set this. A state file
+        # saved before platforms were recorded masks nothing rather than
+        # starting peers that cannot size a body.
+        SWARMDECK_PEER_BODY_MASK="true" if platforms else "false",
+        SWARMDECK_PEER_PLATFORMS=json.dumps(
+            platforms, separators=(",", ":"), sort_keys=True
+        ),
         SWARMDECK_CAPTURE_PROVIDER="simulation",
         SWARMDECK_MGG_MAP_BACKEND=(
             "mola_snapshot" if spec["backend"] == "mola" else "cloud_octomap"
@@ -502,6 +560,7 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
         raise ValueError("targets and exploration seconds must be nonnegative")
     source = scenario_path(args.scenario)
     count, prefix = fleet_from_config(source)
+    names = [f"{prefix}{index}" for index in range(count)]
     if args.backend == "mola" and count > MAX_SIMULATION_PEERS:
         raise ValueError(
             f"MOLA simulation supports at most {MAX_SIMULATION_PEERS} peers; "
@@ -545,7 +604,8 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
         "scenario": str(source),
         "container_config": container_config,
         "robot_count": count,
-        "robot_names": [f"{prefix}{index}" for index in range(count)],
+        "robot_names": names,
+        "robot_platforms": platforms_from_config(source, names),
         "render": args.render,
         "odometry": args.odometry,
         "targets": args.targets,
