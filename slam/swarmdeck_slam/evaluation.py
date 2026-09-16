@@ -22,7 +22,7 @@ because they are blind to different failures:
   headline number for a collaborative system: how far the recovered
   ``T_world_map`` for each robot is from the true one. This is the metric
   behind the 11-16 m failure recorded in
-  ``docs/architecture/collaborative-slam.md``.
+  ``docs/archive/collaborative-slam.md``.
 * **Component correctness** (:func:`score_components`) -- did the system group
   robots that genuinely share a frame, and keep apart robots that do not.
   Reported as two separate rates, never averaged, because a false merge
@@ -302,7 +302,7 @@ class InterRobotTransformError:
     Everything else in this module can be locally excellent while this is 15 m
     off: a plausible per-robot trajectory fused into the wrong place in the
     fleet frame. That failure already happened once in this repository (see
-    ``docs/architecture/collaborative-slam.md``, 11-16 m against a grid
+    ``docs/archive/collaborative-slam.md``, 11-16 m against a grid
     registration baseline of 0.03-0.20 m), which is why it gets its own metric
     rather than being folded into ATE.
     """

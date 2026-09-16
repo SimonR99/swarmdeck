@@ -43,7 +43,7 @@ as well. Gazebo carried a second, dedicated bumper lidar for it; an ARGoS robot
 has one lidar, and `nav2_params.yaml` still names both sources.
 
 This is still 2D SLAM either way. It cannot use the 3D structure, correct z/roll/
-pitch drift, or close loops visually; see docs/architecture/collaborative-slam.md for what a
+pitch drift, or close loops visually; see docs/archive/collaborative-slam.md for what a
 3D-capable per-robot SLAM would change.
 """
 

@@ -2,7 +2,7 @@
 
 This is the module that replaces occupancy-grid stitching
 (``server/swarmdeck_server/mapsvc/registration.py``) with trajectory
-optimization. See ``docs/architecture/collaborative-slam.md`` for why the grid
+optimization. See ``docs/archive/collaborative-slam.md`` for why the grid
 approach failed: it re-registered whole grids pairwise against one reference,
 with no loop-consistency check and no feedback into either robot's own
 trajectory. This module optimizes one joint graph of keyframe poses instead,

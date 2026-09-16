@@ -3,7 +3,7 @@
 The old backend (``server/swarmdeck_server/mapsvc/registration.py``) treated an
 occupancy grid as data: each robot built one independently, and a separate FFT
 correlation stage then guessed the rigid transform that would make two grids
-line up. That guess was fragile (see ``docs/architecture/collaborative-slam.md``)
+line up. That guess was fragile (see ``docs/archive/collaborative-slam.md``)
 and, worse, it was blind -- nothing about grid correlation can tell you whether
 the transform it found is *right*, only that it scores well.
 

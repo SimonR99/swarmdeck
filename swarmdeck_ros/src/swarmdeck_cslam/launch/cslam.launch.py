@@ -6,7 +6,7 @@
 **Status: experimental.** The image builds on Jazzy against apt GTSAM 4.2 and
 the Gazebo fleet has produced geometrically verified inter-robot closures.
 RTAB-Map grids and cslam trajectories still disagree, so cslam transforms are
-not ready for physical navigation. See docs/architecture/collaborative-slam.md.
+not ready for physical navigation. See docs/archive/collaborative-slam.md.
 
 What this is for. Everything upstream of it — SLAM Toolbox, RTAB-Map, the grid
 merge — leaves each robot with a private pose graph, so no robot's drift is ever

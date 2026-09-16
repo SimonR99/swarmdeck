@@ -31,7 +31,7 @@ the backend map service, Nav2's static layer and the GUI cannot tell which
 backend produced it. That is the property that makes this swap cheap.
 
 What it still does NOT do: share anything between robots. Each robot keeps a
-private pose graph and its own map frame. See docs/architecture/collaborative-slam.md.
+private pose graph and its own map frame. See docs/archive/collaborative-slam.md.
 """
 
 from launch import LaunchDescription

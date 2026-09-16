@@ -36,7 +36,7 @@ numpy only — no OpenCV, no PCL, no extra packages. It is far simpler than a
 pose-graph SLAM backend and needs no inter-robot communication, which matters
 for a mixed ROS 1 / ROS 2 fleet where robots cannot share a SLAM system. It is
 also only a *map stitcher*: it never feeds a correction back to any robot, so it
-cannot fix anyone's drift. See docs/architecture/collaborative-slam.md.
+cannot fix anyone's drift. See docs/archive/collaborative-slam.md.
 """
 
 from __future__ import annotations
