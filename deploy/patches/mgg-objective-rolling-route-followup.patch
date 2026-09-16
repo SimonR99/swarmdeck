@@ -89,8 +89,8 @@
 -  EXPECT_DOUBLE_EQ(route.poses.back().x(), 3.0);
 -  // The prefix remains topology only. The grid stage must append and reach
 -  // the exact operator goal before this request can succeed.
-+  ASSERT_EQ(route.poses.size(), 5u);
-+  EXPECT_DOUBLE_EQ(route.poses[3].x(), 3.0);
++  ASSERT_EQ(route.poses.size(), 4u);
++  EXPECT_DOUBLE_EQ(route.poses[2].x(), 2.0);
 +  EXPECT_DOUBLE_EQ(route.poses.back().x(), 30.0);
 +  EXPECT_DOUBLE_EQ(route.poses.back().y(), 4.0);
 +  // The final edge is an optimistic global connector. Rolling grid refinement
