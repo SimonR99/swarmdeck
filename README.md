@@ -8,7 +8,8 @@ commanded from the same UI.
 
 [Quick start](#quick-start) · [Architecture](#architecture) ·
 [3D map](#3d-map) · [Physical robots](#physical-robots) ·
-[Documentation](docs/README.md) · [Contributing](CONTRIBUTING.md)
+[Plan](docs/plan.md) · [Documentation](docs/README.md) ·
+[Contributing](CONTRIBUTING.md)
 
 ![SwarmDeck tactical map with simulated robots, camera video, and navigation controls](docs/images/tactical-map.png)
 
@@ -105,38 +106,12 @@ flowchart LR
 ```
 
 The central server path remains available for diagnostics, historical maps, and
-the explicit legacy mode. The normal simulation launcher selects the following
-onboard authority chain:
-
-```mermaid
-flowchart LR
-    A["ARGoS or physical sensors"] --> B["Capture-time<br/>sensor/keyframe normalization"]
-    B --> C["Peer Swarm-SLAM<br/>corrected poses + component"]
-    C --> D["Native MOLA<br/>persistent geometry / terrain"]
-    D --> E["Indexed map query<br/>coherent snapshot"]
-    E --> F["MGG<br/>graph + bounded grid"]
-    F --> G["Local controller / Nav2"]
-    G --> H["Robot adapter<br/>cmd_vel / action"]
-    C --> R["Server replica"]
-    R --> UI["Dashboard inspector"]
-```
-
-Every keyframe carries its capture-time sensor pose and source frame. Peer
-Swarm-SLAM may publish a component correction, but consumers accept only a
-fresh, coherent authority for the same mission and revision. MOLA products,
-indexed queries, and MGG use that same snapshot; an unverified identity
-transform is never substituted. Nav2 remains responsible for local obstacle
-avoidance and executes in the robot's configured navigation frame.
-
-The MOLA worker is native and persistent. It owns the coherent geometry product
-for the selected mission; MGG reads its immutable planner grid directly, without
-rebuilding an OctoMap tree. Measured surface heights keep coarse floor cells
-from becoming artificial body obstacles. Unknown cells remain unknown.
-Independent raw-cloud/depth mapping is disabled in MOLA mode. MOLA does not
-optimize poses or publish competing TF edges. See [current
-stack operations](docs/operations/current-stack.md)
-for commands and [decentralized autonomy](docs/operations/decentralized-autonomy.md)
-for the design and acceptance history.
+the explicit legacy mode. The normal simulation launcher selects the onboard
+authority chain: sensors, capture, peer Swarm-SLAM, native MOLA, indexed query,
+MGG, Nav2, adapter. [`docs/plan.md`](docs/plan.md) owns that chain, its
+ownership table and its invariants. Use [current stack
+operations](docs/operations/current-stack.md) for commands and the [acceptance
+log](docs/operations/acceptance-log.md) for measured trials.
 
 ## 3D map
 
@@ -189,7 +164,7 @@ the trusted network.
 | [`autonomy/`](autonomy/) | Capture, peer coordination, mapping products, and replication contracts |
 | [`swarmdeck_ros/`](swarmdeck_ros/) | ROS simulation, mapping, navigation, and bring-up packages |
 | [`configs/`](configs/) · [`deploy/`](deploy/) | Session configs, Compose files, and robot profiles |
-| [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools and detailed guides |
+| [`scripts/`](scripts/) · [`docs/`](docs/README.md) | Operations tools, the plan, and detailed guides |
 
 ## Current validation and limits
 
@@ -205,8 +180,9 @@ and fleet-wide exploration is not yet a qualified acceptance result.
 The simulation terrain-step limits are 0.15 m for Bunker and Scout and 0.30 m
 for Spot. These are simulation settings, not hardware guarantees. Gaussian
 quality and resource scaling, multi-host recovery, and fleet-wide autonomy
-remain acceptance work. Historical run details, exact old settings, and
-debugging chronology stay in the linked acceptance documents.
+remain acceptance work. Every measured trial is in the [acceptance
+log](docs/operations/acceptance-log.md); exact old settings and the debugging
+chronology stay in [the archive](docs/archive/README.md).
 
 Authentication, production high availability, MCAP capture, and complete
 session replay are not implemented. Do not expose robot controls directly to
