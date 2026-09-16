@@ -1,8 +1,11 @@
-# Current stack operations
+# Current stack
 
-Use these commands from the repository root. They describe the checked-in
-launcher and Compose files on `planning-refactor`; physical robot profiles
-have additional sensor, ROS-domain, and calibration requirements.
+This page describes the interfaces and commands that are current on
+`planning-refactor`. The architecture, invariants and open gates are in
+[the plan](../plan.md); dated trials are in the
+[acceptance log](acceptance-log.md). Run the commands below from the repository
+root. They describe the checked-in launcher and Compose files; physical robot
+profiles have additional sensor, ROS-domain and calibration requirements.
 
 ## Select a mode
 
@@ -44,11 +47,11 @@ MOLA Compose overlays. It also sets the simulation capture provider to
 `simulation`, creates a fresh mission/domain epoch, and keeps a reset
 supervisor for lifecycle recovery. The indexed query polls every 0.5 seconds
 and rejects snapshots older than 3 seconds. `--legacy-cloud` is the explicit
-fallback. Advanced direct Compose usage is documented in
-[decentralized autonomy](decentralized-autonomy.md); it must reproduce those
-mission, domain, capture-provider, and map-authority settings. A sparse
-cold-start scan cannot certify the whole robot body volume, and unknown or
-stale terrain remains subject to the planner's safety gates.
+fallback. Advanced direct Compose usage is recorded in the archived
+[decentralized autonomy record](../archive/decentralized-autonomy.md); it must
+reproduce those mission, domain, capture-provider, and map-authority settings.
+A sparse cold-start scan cannot certify the whole robot body volume, and
+unknown or stale terrain remains subject to the planner's safety gates.
 
 In MOLA mode, MGG reads the coherent native planner grid directly through
 `MapInterface`; no OctoMap tree is constructed. Occupied-only collision queries
@@ -67,6 +70,46 @@ status panels to check the services. For an onboard run, confirm the
 mission, component, graph revision, geometry revision, navigation frame, and
 source timestamp agree before interpreting a planner result. Rejected or stale
 authority must not be repaired by relabeling a grid frame.
+
+The normal ARGoS launcher composes the peer, mapping, and onboard-planning
+services and selects MOLA as MGG's map authority. The explicit `--legacy-cloud`
+launcher mode retains the former central cloud/OctoMap path for comparison and
+recovery. MOLA consumes the peer snapshot and does not optimize poses or publish
+competing TF edges. MGG consumes an exact, mission-pinned map authority. A
+missing or stale shared transform blocks the dependent operation rather than
+assuming that two local frames coincide.
+
+## Frames and ownership
+
+Adapters capture points in a sensor frame and associate them with a pose at the
+capture timestamp. The local odometry and navigation frames remain robot-owned.
+Peer Swarm-SLAM can establish a verified component frame and correction. The
+same correction identity and map revision flow into the MOLA product and
+indexed query. MGG plans in the configured robot navigation frame; Nav2 handles
+local obstacle avoidance and the adapter owns the final command boundary.
+
+The server stores replicas, events, keyframes, and catalogue metadata for the
+operator. It receives peer and MOLA revisions as replicas without becoming the
+authority for an onboard planner. Browser overlays are therefore diagnostic
+unless their component and frame metadata are valid.
+
+The UI keeps map transforms when a raster grows, rejects stale or malformed
+patches, projects poses with their full SE(3) XYZ values in 3D, and samples
+rendered routes to at most 1,024 points while preserving both endpoints. The
+top-down 2D layer keeps the selected map-frame transform and uses XY for
+display, so a path does not slide or acquire visually exaggerated Z jumps when
+a new revision arrives.
+
+The simulation terrain admission settings are 0.15 m for Bunker and Scout and
+0.30 m for Spot. These are simulator parameters, not hardware guarantees.
+Camera-colorized point clouds require synchronized images, camera/lidar
+calibration, and capture-time poses; RGB-D depth is useful for correspondence
+and occlusion handling but is not required for every colorized capture.
+Gaussian splatting is an optional fixed-pose reconstruction workflow and is not
+launched merely by selecting a UI layer. MGG reads MOLA's immutable native
+planner grid directly, without constructing an OctoMap tree. Independent
+raw-cloud mapping is disabled in MOLA mode; OctoMap belongs to the explicit
+legacy cloud backend.
 
 ## Hardware boundary
 
@@ -91,7 +134,6 @@ for fan-out encoding and delivery; this is a workload sample, not a universal
 network guarantee.
 
 This does not qualify every physical platform, long-duration resource budget,
-terrain, or multi-host recovery path. Exact historical test settings and debug
-chronology are retained in [decentralized autonomy](decentralized-autonomy.md),
-[navigation acceptance](navigation-live-map-acceptance.md), and related
-acceptance pages.
+terrain, or multi-host recovery path. Measured trials are in the
+[acceptance log](acceptance-log.md); exact historical settings and the debug
+chronology stay in [the archive](../archive/README.md).
