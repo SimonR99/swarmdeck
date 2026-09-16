@@ -111,7 +111,11 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
 17. Simulation terrain step settings are 0.15 m for Bunker and Scout and 0.30 m
     for Spot. These are simulator parameters, not hardware guarantees.
 18. Simulation ground truth is used only for scoring, never as an inter-robot
-    alignment source or a planner input.
+    alignment source or a planner input. The one exception is the
+    simulation-only peer-body mask, which reads every robot's ground-truth pose
+    to delete returns that landed on a neighbour at the capture stamp; it feeds
+    no pose estimate and is off on hardware. Trials that use it must say so,
+    because hardware robots remain visible to each other.
 
 ## Status
 

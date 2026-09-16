@@ -61,6 +61,18 @@ independent raw-cloud/depth mapper path is disabled.
 Hardware MOLA use remains an overlay that requires qualified peer capture
 provenance, calibration, and frame ownership.
 
+The launcher also enables the simulation peer-body mask: it sets
+`SWARMDECK_PEER_BODY_MASK=true` and `SWARMDECK_PEER_PLATFORMS` (each robot's
+platform from the scenario's `fleet.robot_type` and `fleet.robot_types`) so
+each peer bridge drops returns inside another robot's body at the capture
+stamp. Peer poses come from `/robot_N/ground_truth` in the `world` frame
+(`SWARMDECK_PEER_POSE_TOPIC_TEMPLATE`, `SWARMDECK_PEER_POSE_FRAME`), joined
+within `SWARMDECK_PEER_MASK_POSE_TOLERANCE_S` (0.05 s) and inflated by
+`SWARMDECK_PEER_MASK_MARGIN_M` (0.15 m). Hardware profiles leave the mask
+unset. The bridge status reports `peer_body_mask_points_dropped`,
+`peer_body_mask_points_dropped_by_peer` and
+`peer_body_mask_peers_skipped_stale`.
+
 Unchanged planner artifacts reuse their decoded grid without rereading or
 hashing the file. The cache checks file identity and the current publication;
 changed files undergo the full bounded read, hash, and validation again.
