@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import numpy as np
@@ -45,6 +46,26 @@ def pose_matrix(pose):
     return validate_se3(T)
 
 
+SOLUTION_CHANGE_TRANSLATION_M = 0.005
+SOLUTION_CHANGE_ROTATION_RAD = math.radians(0.05)
+
+
+def pose_moved(pose, previous, translation_m, rotation_rad) -> bool:
+    """True when two SE(3) poses differ beyond the given tolerances."""
+
+    current = np.asarray(pose, dtype=float)
+    reference = np.asarray(previous, dtype=float)
+    if current.shape != (4, 4) or reference.shape != (4, 4):
+        return True
+    if not np.isfinite(current).all() or not np.isfinite(reference).all():
+        return True
+    translation = float(np.linalg.norm(current[:3, 3] - reference[:3, 3]))
+    relative = reference[:3, :3].T @ current[:3, :3]
+    cosine = (float(np.trace(relative)) - 1.0) / 2.0
+    rotation = float(math.acos(max(-1.0, min(1.0, cosine))))
+    return translation > translation_m or rotation > rotation_rad
+
+
 def publish_snapshot_if_new(
     path: Path,
     snapshot: dict,
@@ -75,6 +96,15 @@ class CslamMapper:
     ):
         self.mapper = mapper
         self.robot_id, self.robot_index = robot_id, robot_index
+        # A solver re-optimizes on every accepted closure and on a timer, and
+        # its poses move by numerical noise each time. Only a movement beyond
+        # these tolerances is a correction that replaces map geometry; smaller
+        # deltas advance the replica publication as causal state and leave the
+        # MOLA product untouched, so an idle merged fleet does not rebuild its
+        # planning map every solver cycle. Deltas accumulate against the last
+        # applied poses, so a slow drift is still applied once it exceeds them.
+        self.solution_change_translation_m = SOLUTION_CHANGE_TRANSLATION_M
+        self.solution_change_rotation_rad = SOLUTION_CHANGE_ROTATION_RAD
         self.mission_id, self.robot_names = mission_id, robot_names
         self.capture_provider = capture_provider(capture_provider_name)
         self.anchor = KeyframeId(robot_id, mission_id, 0)
@@ -196,7 +226,12 @@ class CslamMapper:
         poses[anchor] = anchor_pose
         changed = anchor != self.anchor or any(
             key not in self.poses
-            or not np.allclose(pose, self.poses[key], atol=1e-6, rtol=0)
+            or pose_moved(
+                pose,
+                self.poses[key],
+                self.solution_change_translation_m,
+                self.solution_change_rotation_rad,
+            )
             for key, pose in poses.items()
         )
         self.solution_order = order

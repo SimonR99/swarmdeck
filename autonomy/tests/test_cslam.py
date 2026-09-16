@@ -234,3 +234,62 @@ def test_keyframe_identity_includes_provider_evidence(tmp_path):
     )
     with pytest.raises(ValueError, match="different capture data"):
         core.capture(0, 10, IDENTITY_SE3, [[1, 0, 0]], provenance=evidence)
+
+
+def test_solver_noise_below_tolerance_is_not_a_correction(tmp_path):
+    core = CslamMapper(
+        CorrectionAwareMapper(SubmapStore(tmp_path / "maps")),
+        "r0",
+        0,
+        str(uuid.uuid4()),
+        {0: "r0"},
+    )
+    core.capture(0, 1, IDENTITY_SE3, [[1, 0, 0]])
+    msg = NS(
+        success=True,
+        mission_id=core.mission_id,
+        solution_clock=1,
+        optimizer_robot_id=0,
+        origin_robot_id=0,
+        estimates=[value(0, 0, 0)],
+        anchor_estimates=[value(0, 0, 0)],
+    )
+    assert not core.solution(msg)
+    revision = core.revision
+    replica_revision = core.envelope()["revision"]
+
+    # One millimetre of solver noise: causal state advances, geometry does not.
+    msg.solution_clock = 2
+    msg.estimates = [value(0, 0, 0.001)]
+    msg.anchor_estimates = [value(0, 0, 0.001)]
+    assert not core.solution(msg)
+    assert core.solution_order == (2, 0)
+    assert core.revision == revision
+    assert core.correction_revision == 0
+    assert core.envelope()["revision"] == replica_revision + 1
+
+    # Repeated noise that never exceeds the tolerance still applies nothing.
+    msg.solution_clock = 3
+    msg.estimates = [value(0, 0, 0.004)]
+    msg.anchor_estimates = [value(0, 0, 0.004)]
+    assert not core.solution(msg)
+    assert core.revision == revision
+
+    # A real correction beyond the tolerance replaces geometry.
+    msg.solution_clock = 4
+    msg.estimates = [value(0, 0, 0.02)]
+    msg.anchor_estimates = [value(0, 0, 0.02)]
+    assert core.solution(msg)
+    assert core.revision == revision + 1
+    assert core.correction_revision == 1
+
+    # Drift accumulates against the applied poses, not the last noisy result.
+    msg.solution_clock = 5
+    msg.estimates = [value(0, 0, 0.024)]
+    msg.anchor_estimates = [value(0, 0, 0.024)]
+    assert not core.solution(msg)
+    msg.solution_clock = 6
+    msg.estimates = [value(0, 0, 0.026)]
+    msg.anchor_estimates = [value(0, 0, 0.026)]
+    assert core.solution(msg)
+    assert core.correction_revision == 2
