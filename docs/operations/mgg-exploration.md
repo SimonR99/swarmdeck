@@ -127,13 +127,32 @@ discard usable ground before terrain projection, especially for the taller Spot
 model. Allowing unknown body cells does not supply ground: each candidate still
 needs measured terrain, and known obstacles still reject it.
 
+Qualified MOLA exploration starts at the robot's measured pose. A nearby floor
+return must not move that starting pose vertically; the first edge connects it
+to measured terrain while retaining the step and collision checks. The extra
+body check sweeps a circular footprint that encloses the robot at every yaw,
+avoiding the unused corners of its enclosing square. It checks occupied
+voxel boundaries and has a fixed work budget. Hardware's strict body policy is
+unchanged.
+
 For MOLA exploration in this qualified simulation policy, a route height can be
 refined once from the indexed ground fit. Native projection may use a nearby
-return while the fit estimates ground under the footprint centre. A correction
-must remain within the platform step limit, preserve the physical start and XY
-route, and pass a second query of the adjusted body positions against the same
-map revision. Both queries share one timeout; routes already within tolerance
-use only one. Navigate, Home and hardware keep their existing validation policy.
+return while the fit estimates ground under the footprint centre. Only the
+smallest height correction needed to enter the existing tolerance band is
+applied. It must remain within the platform step limit and preserve the physical
+start, XY route and heights already within tolerance. The adjusted route must
+pass the native swept-body check again, followed by a second indexed terrain
+and body query against the same map revision. Both queries share one timeout;
+routes already within tolerance use only one. This exploration query samples
+terrain at horizontal intervals, keeping sample positions consistent across
+height refinement; the native body sweep still checks the full 3D segment.
+Navigate, Home and hardware keep their existing height-refinement policy.
+
+While a robot follows a qualified MOLA route, the remaining-route validator
+preserves those accepted heights and samples between them. It checks the latest
+map for footprint terrain, occupied space, steps and geofence violations within
+a bounded lookahead. Resampling keeps the geometry that planning approved;
+reprojecting it onto a nearby floor return could falsely reject that route.
 
 If a candidate's far end fails these checks, qualified simulation exploration
 can use its already-validated prefix to collect more ground data. The prefix
@@ -336,7 +355,7 @@ probes can cross unobserved air to find known occupied floor, without inserting
 synthetic ground. Missing support retains the existing graph height instead of
 turning the `-1` sentinel into an artificial upward jump. The root uses the same
 collision-box offset as projected vertices even inside the sensor blind spot;
-Spot’s edge cap reaches 2.5 m so its graph can reach camera-observed floor. The
+MOLA's sensor-derived connector limits are described above. The
 simulation fleet gives explicit Navigate/Home grid refinement 2000 ms: a
 20-metre Bistro route required 858 ms on the GPU test host, exceeding the
 previous 500 ms limit. This remains a deadline, not a promised route. Exploration
