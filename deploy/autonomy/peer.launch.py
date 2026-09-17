@@ -53,6 +53,19 @@ def generate_launch_description():
         os.environ.get("SWARMDECK_PEER_BODY_MASK", "false").strip().lower() == "true"
     )
     config = "/cslam_ws/install/swarmdeck_cslam/share/swarmdeck_cslam/config/cslam_lidar.yaml"
+    # Inter-robot closures merge the fleet into one component, but on a mixed
+    # fleet the vertical placement between platforms is off by about 0.3 m, and
+    # the merged floors then fail the terrain step gate everywhere. Until the
+    # inter-robot constraints are planar or ground-plane corrected, a budget of
+    # zero keeps every robot in its own component; intra-robot closures are
+    # unaffected. Set SWARMDECK_INTER_ROBOT_CLOSURES=true to re-enable them.
+    inter_robot_closures = (
+        os.environ.get("SWARMDECK_INTER_ROBOT_CLOSURES", "false").strip().lower()
+        == "true"
+    )
+    inter_robot_overrides = (
+        {} if inter_robot_closures else {"frontend.inter_robot_loop_closure_budget": 0}
+    )
     common = [
         config,
         {
@@ -63,6 +76,7 @@ def generate_launch_description():
             "frontend.odom_topic": f"/r{index}/normalized_odom",
             "frontend.pointcloud_topic": f"/r{index}/normalized_cloud",
             "frontend.keyframe_min_subscribers": 2,
+            **inter_robot_overrides,
             "backend.max_waiting_time_sec": 30,
             # Correction TF is owned by the downstream solution adapter. The
             # experimental upstream reference-frame TF is never a second authority.

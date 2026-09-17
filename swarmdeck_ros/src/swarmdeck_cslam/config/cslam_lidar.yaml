@@ -178,6 +178,20 @@
       # first several minutes of a run. Halving it doubles the rate at which the
       # graph (and therefore any inter-robot encounter) can accumulate.
       keyframe_generation_ratio_distance: 0.25
+      # Scene-change keyframes, added by
+      # `deploy/patches/cslam-scene-change-keyframe.patch`. Keyframes are earned
+      # by distance only, so a stationary robot keeps planning on a view that a
+      # neighbour has since driven out of: measured on Bistro, the robot parked
+      # 2 m behind another had no measured floor anywhere ahead and never moved.
+      # The signature is the minimum planar range in each of `bins` azimuth
+      # sectors; a new keyframe is taken when at least `fraction` of the sectors
+      # moved by more than `range_m` (or appeared or vanished), at most once per
+      # `min_period_s`. A Bunker 2 m away spans about 28 degrees, six of the 72
+      # sectors, so 0.05 (four sectors) catches it. A fraction of 0 disables it.
+      keyframe_scene_change_fraction: 0.05
+      keyframe_scene_change_range_m: 0.5
+      keyframe_scene_change_bins: 72
+      keyframe_scene_change_min_period_s: 5.0
       # Gazebo does not hardware-sync the cloud and odometry.
       pointcloud_odom_approx_time_sync_s: 0.1
       use_vertex_cover_selection: true

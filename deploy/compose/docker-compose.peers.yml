@@ -25,6 +25,9 @@ x-peer: &peer
     # failing on an unknown platform.
     SWARMDECK_PEER_BODY_MASK: "${SWARMDECK_PEER_BODY_MASK:-false}"
     SWARMDECK_PEER_PLATFORMS: "${SWARMDECK_PEER_PLATFORMS:-}"
+    # Inter-robot merges stay off until their vertical bias is fixed; see
+    # deploy/autonomy/peer.launch.py.
+    SWARMDECK_INTER_ROBOT_CLOSURES: "${SWARMDECK_INTER_ROBOT_CLOSURES:-false}"
     SWARMDECK_SERVER_URL: http://server:8080
   volumes:
     - ../../autonomy:/app/autonomy:ro

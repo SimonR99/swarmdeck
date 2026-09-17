@@ -129,3 +129,67 @@ def test_config_sets_no_frontend_key_the_patch_chain_leaves_undeclared(frontend)
     for key in invented:
         if key.split(".", 1)[1] in frontend:
             assert key in patched, f"{key} is set but no cslam patch declares it"
+
+
+SCENE_PATCH = REPO / "deploy/patches/cslam-scene-change-keyframe.patch"
+
+
+def _scene_functions():
+    """Load the two pure helpers straight out of the patch's added lines."""
+    import numpy as np
+
+    lines = added_lines(SCENE_PATCH.read_text())
+    start = next(i for i, l in enumerate(lines) if "def scene_signature" in l) - 1
+    # The helpers end where the patch starts editing generate_new_keyframe.
+    end = next(i for i, l in enumerate(lines) if "stamp = msg[1].header.stamp" in l)
+    body = "\n".join(l[4:] if l.startswith("    ") else l for l in lines[start:end])
+    namespace = {"np": np}
+    exec(body.replace("@staticmethod\n", ""), namespace)
+    return namespace["scene_signature"], namespace["scene_changed"]
+
+
+def test_scene_change_patch_declares_and_reads_its_parameters(frontend):
+    added = "\n".join(added_lines(SCENE_PATCH.read_text()))
+    for name in (
+        "keyframe_scene_change_fraction",
+        "keyframe_scene_change_range_m",
+        "keyframe_scene_change_bins",
+        "keyframe_scene_change_min_period_s",
+    ):
+        assert f"('frontend.{name}'," in added, name
+        assert name in frontend, name
+    # Off by default upstream; the shipped config turns it on.
+    assert "('frontend.keyframe_scene_change_fraction', 0.0)," in added
+    assert 0.0 < frontend["keyframe_scene_change_fraction"] < 0.5
+    text = DOCKERFILE.read_text()
+    assert text.index("git apply /tmp/cslam-registration-overlap.patch") < text.index(
+        "git apply /tmp/cslam-scene-change-keyframe.patch"
+    )
+
+
+def test_a_neighbour_leaving_changes_the_scene_but_noise_does_not():
+    import numpy as np
+
+    signature, changed = _scene_functions()
+    angles = np.linspace(-np.pi, np.pi, 720, endpoint=False)
+    wall = np.stack([15 * np.cos(angles), 15 * np.sin(angles), 0 * angles], axis=1)
+    # A neighbour two metres ahead: its returns are masked, so those sectors
+    # hold only the far wall. After it leaves, the low rings reach the floor.
+    ahead = np.abs(angles) < np.radians(14)
+    floor = np.stack(
+        [3 * np.cos(angles[ahead]), 3 * np.sin(angles[ahead]), 0 * angles[ahead]],
+        axis=1,
+    )
+    before = signature(wall, 72)
+    after = signature(np.vstack([wall, floor]), 72)
+    assert changed(before, after, 0.5, 0.05)
+    noisy = wall + np.random.default_rng(1).normal(0, 0.02, wall.shape)
+    assert not changed(before, signature(noisy, 72), 0.5, 0.05)
+    assert not changed(None, after, 0.5, 0.05)
+    assert not changed(before, after, 0.5, 0.0)  # disabled
+
+
+def test_inter_robot_closures_default_off_in_the_peer_launch():
+    text = (REPO / "deploy/autonomy/peer.launch.py").read_text()
+    assert '"SWARMDECK_INTER_ROBOT_CLOSURES", "false"' in text
+    assert '"frontend.inter_robot_loop_closure_budget": 0' in text
