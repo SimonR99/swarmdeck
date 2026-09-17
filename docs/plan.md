@@ -153,6 +153,15 @@ Each item names its acceptance gate.
       unimplemented; `queryIndexedMap` refuses height refinement and prefix
       truncation whenever speed limits are present, which must be resolved
       first.
+- [ ] **Peers as live obstacles for the global route.** Gate: at a grouped
+      Bistro start, exploration routes avoid neighbouring robots and no robot
+      ends in Nav2 `Failed to make progress` against a peer. The capture-time
+      peer-body mask keeps robots out of the persistent map, so MGG's route
+      no longer sees them while Nav2's live costmap still does; feed each
+      peer's current position and body radius to MGG as a temporary exclusion
+      (simulation adapter first, then the intentions channel for hardware).
+      Also explain robot_2's burst of 121 keyframes in three minutes of
+      near-stationary recovery motion.
 - [ ] **Moving obstacles and blind corners.** Gate: controlled trials where the
       local controller stops or avoids, then resumes or requests a valid
       replacement corridor.
