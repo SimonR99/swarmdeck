@@ -257,7 +257,9 @@ class MolaDirectorySource:
         if index.get("source_sha256") != _sha256(source_raw):
             raise PublicationPending("MOLA index does not match current snapshot bytes")
         if index.get("source_snapshot_id") != snapshot.get("snapshot_id"):
-            raise PublicationPending("MOLA index does not match current snapshot identity")
+            raise PublicationPending(
+                "MOLA index does not match current snapshot identity"
+            )
         artifacts = index.get("artifacts")
         if not isinstance(artifacts, list) or len(artifacts) > MAX_COMPONENTS:
             raise ValueError("MOLA index artifacts must be a list")

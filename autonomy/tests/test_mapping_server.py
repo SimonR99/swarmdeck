@@ -461,8 +461,6 @@ def test_registry_keeps_serving_through_a_pending_publication(
     pending[pending_in] = False
     registry.refresh_once()
     assert (
-        registry.query(
-            "robot_0", QueryRequest(key, samples, (0.1, 0.1, 0.1))
-        ).status
+        registry.query("robot_0", QueryRequest(key, samples, (0.1, 0.1, 0.1))).status
         is QueryStatus.OK
     )
