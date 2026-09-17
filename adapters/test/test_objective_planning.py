@@ -1286,6 +1286,99 @@ def test_partial_navigate_refines_local_chunks_without_moving_global_goal(monkey
     assert planner.global_display_plan() is None
 
 
+def test_navigate_follows_short_validated_prefix_sections_to_a_far_goal(monkeypatch):
+    """A goal beyond the measured floor arrives section by section.
+
+    Native MGG shortens each section to the terrain its indexed authority has
+    validated, so the sections are much shorter than the planning horizon. Only
+    the final one owns the exact destination.
+    """
+
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, 2.0],
+        global_path=[0.0, 2.0, 5.0, 8.0, 12.0],
+    )
+    sections = [
+        rolling_home_response(partial=True, path_x=[2.0, 5.0]),
+        rolling_home_response(partial=True, path_x=[5.0, 8.0]),
+        rolling_home_response(partial=False, path_x=[8.0, 12.0]),
+    ]
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=sections)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    goal = {"x": 12.0, "y": 1.0}
+    assert planner.navigate(goal)
+    retained_global = planner.global_display_plan()
+    assert retained_global.poses[-1].x == pytest.approx(12.0)
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(2.0)
+
+    for expected_x in (5.0, 8.0):
+        assert (
+            planner.decorate_state({"nav_status": "active"})[
+                "objective_continuation"
+            ]["phase"]
+            == "following_local"
+        )
+        bridge.nav_status = "succeeded"
+        planner._check_active_authority()
+        assert wait_until(
+            lambda x=expected_x: bridge.follow_path.call_args.args[0].poses[-1].x
+            == pytest.approx(x)
+        )
+        # The committed destination never moves while prefixes are followed.
+        assert planner.global_display_plan() is retained_global
+        assert planner._objective_goal == goal
+        assert planner._rolling_no_progress_sections == 0
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.follow_path.call_count == 4)
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(12.0)
+    assert (
+        planner.decorate_state({"nav_status": "active"})["objective_continuation"][
+            "phase"
+        ]
+        == "following_final"
+    )
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert planner._active_route is None
+    assert planner.global_display_plan() is None
+
+
+def test_prefix_sections_without_progress_end_the_objective_with_a_reason(
+    monkeypatch,
+):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, 2.0],
+        global_path=[0.0, 2.0, 12.0],
+    )
+    # Each continuation validates terrain that leads nowhere nearer the goal.
+    stalled = [
+        rolling_home_response(partial=True, path_x=[2.0, 2.0 - step * 0.01])
+        for step in (1, 2, 3)
+    ]
+    bridge, planner, _ = rig(monkeypatch, initial, refine_responses=stalled)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    assert planner.navigate({"x": 12.0, "y": 1.0})
+    for expected_calls in (2, 3):
+        bridge.nav_status = "succeeded"
+        planner._check_active_authority()
+        assert wait_until(lambda n=expected_calls: bridge.follow_path.call_count == n)
+
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    # The third stalled section is refused before dispatch.
+    assert bridge.follow_path.call_count == 3
+    reason = planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
+    assert "came no closer to its goal across 3 consecutive validated sections" in reason
+
+
 def test_partial_navigate_rejects_final_chunk_before_exact_endpoint(monkeypatch):
     initial = rolling_home_response(
         partial=True,

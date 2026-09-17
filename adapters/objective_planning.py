@@ -16,6 +16,14 @@ from autonomy.live_mapping import navigation_goal, solution_order
 MAX_NAV_FAILURE_REASON_LENGTH = 512
 FULL_ROUTE_ENDPOINT_TOLERANCE_M = 0.001
 GRID_REFINEMENT_DEADLINE_REASON = "grid refinement exceeded its cooperative deadline"
+# A committed objective is delivered section by section as terrain validates.
+# Native MGG guarantees each section makes useful progress along its route, but
+# a route that keeps leading sideways or doubling back could otherwise continue
+# forever. Every section that fails to bring the closest planned endpoint any
+# nearer to the committed goal counts once; this many consecutive such sections
+# ends the objective rather than looping.
+PREFIX_NO_PROGRESS_LIMIT = 3
+PREFIX_PROGRESS_EPSILON_M = 0.05
 
 
 @dataclass(frozen=True)
@@ -128,6 +136,8 @@ class MggObjectivePlanning:
         self._rolling_global_plan = None
         self._rolling_planned_goal = None
         self._rolling_authority_binding = None
+        self._rolling_best_remaining_m = None
+        self._rolling_no_progress_sections = 0
         self._continuation_generation = None
         self._continuation_deadline = None
         self._continuation_thread = None
@@ -322,8 +332,17 @@ class MggObjectivePlanning:
         self._rolling_global_plan = None
         self._rolling_planned_goal = None
         self._rolling_authority_binding = None
+        self._rolling_best_remaining_m = None
+        self._rolling_no_progress_sections = 0
         self._continuation_generation = None
         self._continuation_deadline = None
+
+    @staticmethod
+    def _remaining_goal_distance(plan, goal) -> float:
+        """Planar distance from a section's planned endpoint to the objective."""
+
+        endpoint = plan.poses[-1]
+        return math.hypot(endpoint.x - float(goal["x"]), endpoint.y - float(goal["y"]))
 
     def global_display_plan(self):
         """Return the immutable full graph route owned by the current command."""
@@ -1090,15 +1109,36 @@ class MggObjectivePlanning:
         if not isinstance(goal, dict):
             return "failed", "retained objective goal is unavailable"
         if not partial:
-            endpoint = plan.poses[-1]
-            endpoint_error = math.hypot(
-                endpoint.x - float(goal["x"]), endpoint.y - float(goal["y"])
-            )
+            # The exact endpoint is owned by the final section only. An earlier
+            # section stops wherever validated terrain ends.
+            endpoint_error = self._remaining_goal_distance(plan, goal)
             if endpoint_error > FULL_ROUTE_ENDPOINT_TOLERANCE_M:
                 return (
                     "failed",
                     "MGG final objective chunk endpoint differs from its goal by "
                     f"{endpoint_error:.3f}m",
+                )
+        else:
+            # Native MGG shortens a section to the terrain it has validated, so
+            # consecutive sections can be short. They must still carry the robot
+            # closer to the committed goal, or the objective ends here.
+            remaining_m = self._remaining_goal_distance(plan, goal)
+            with self._active_lock:
+                best = self._rolling_best_remaining_m
+                if best is None or remaining_m < best - PREFIX_PROGRESS_EPSILON_M:
+                    self._rolling_best_remaining_m = remaining_m
+                    self._rolling_no_progress_sections = 0
+                else:
+                    self._rolling_no_progress_sections += 1
+                stalled = (
+                    self._rolling_no_progress_sections >= PREFIX_NO_PROGRESS_LIMIT
+                )
+            if stalled:
+                return (
+                    "failed",
+                    "MGG objective route came no closer to its goal across "
+                    f"{PREFIX_NO_PROGRESS_LIMIT} consecutive validated sections "
+                    f"(still {remaining_m:.3f}m away)",
                 )
         pre_submit_rejected = [False]
 
@@ -1485,6 +1525,11 @@ class MggObjectivePlanning:
             self._rolling_global_plan = (submitted_generation, global_plan)
             self._rolling_planned_goal = deepcopy(goal)
             self._rolling_authority_binding = authority_binding
+            # The first section establishes how close the objective has come.
+            self._rolling_best_remaining_m = (
+                self._remaining_goal_distance(plan, goal) if partial else None
+            )
+            self._rolling_no_progress_sections = 0
             self._continuation_generation = None
             self._continuation_deadline = None
             self._active_route = (
