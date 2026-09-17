@@ -17,7 +17,7 @@ is called merely by launching the dashboard or containers.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`73f8177cc07a7548278e15283f37311ee6da8bae` (the 59 ported commits over
+`c309c1ae091b0597db8cea7e047b56e1432107d3` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
@@ -27,12 +27,11 @@ coordination-exclusion, or map-query contract described here. The upstream
 top-level README still contains ROS 1 instructions; the relevant packages are
 under `ros2/src`.
 
-The branch head (`c4eff1b`) additionally routes Explore through the shared
-topological and grid stages and adds blocked-corridor feedback. That head is
-not pinned: the deployed `MGG_REV` stays at `73f8177` until a live Bistro
-exploration trial with the new head passes, because live PCI exploration then
-receives the refined corridor instead of the shortcut lattice walk and can be
-refused on terrain. The four new parameters `blocked_corridor_max_entries`,
+`MGG_REV` follows the head of that branch: planner changes are committed and
+pushed there, then the revision is advanced. The head includes the shared
+Explore stages with blocked-corridor feedback, the authority tilt tolerance,
+the loader coherence retry, visibility retirement and validated-prefix
+navigation. The four parameters `blocked_corridor_max_entries`,
 `blocked_corridor_cell_size_m`, `blocked_corridor_ttl_s` and
 `blocked_corridor_revision_window` are optional with clamped defaults.
 
