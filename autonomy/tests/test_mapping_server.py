@@ -400,3 +400,69 @@ def test_registry_backoff_is_per_source_and_resets_on_snapshot_replacement(
         ).status
         is QueryStatus.OK
     )
+
+
+@pytest.mark.parametrize("pending_in", ["component_ids", "refresh"])
+def test_registry_keeps_serving_through_a_pending_publication(
+    tmp_path, pending_in
+) -> None:
+    from autonomy.map_provider import PublicationPending
+
+    peer = tmp_path / SESSION / "robot_0"
+    peer.mkdir(parents=True)
+    (peer / "provider.index").write_text("ready")
+    key = SnapshotKey("provider-component", 1, 2, "a" * 64)
+    newer = SnapshotKey("provider-component", 1, 3, "c" * 64)
+    pending = {"component_ids": False, "refresh": False}
+    now = [100.0]
+
+    class Provider:
+        def __init__(self, peer_root):
+            self.peer_root = peer_root
+            self.publication_path = peer_root / "provider.index"
+
+        def component_ids(self):
+            if pending["component_ids"]:
+                raise PublicationPending("index does not match current snapshot")
+            return (key.component_id,)
+
+        def signature(self):
+            return (1,)
+
+        def refresh(self, view, component_id):
+            if pending["refresh"]:
+                raise PublicationPending("publication changed while reading")
+            return view.publish(
+                IndexedGrid(
+                    key, "b" * 64, 123, 1, {(0, 0, 2)}, set(), {(0, 0): (0.5,)}, 0.2, 1
+                )
+            )
+
+    registry = IndexRegistry(
+        tmp_path,
+        SESSION,
+        snapshot_age_s=3,
+        poll_s=0.1,
+        clock=lambda: now[0],
+        provider_factory=Provider,
+    )
+    registry.refresh_once()
+    pending[pending_in] = True
+    registry.refresh_once()
+
+    samples = ((0.1, 0.1, 0.5),)
+    served = registry.query("robot_0", QueryRequest(key, samples, (0.1, 0.1, 0.1)))
+    assert served.status is QueryStatus.OK
+    ahead = registry.query("robot_0", QueryRequest(newer, samples, (0.1, 0.1, 0.1)))
+    assert ahead.status is QueryStatus.STALE
+    assert ahead.detail == "requested snapshot is not current"
+
+    # No failure backoff either: the same source is read again on the next poll.
+    pending[pending_in] = False
+    registry.refresh_once()
+    assert (
+        registry.query(
+            "robot_0", QueryRequest(key, samples, (0.1, 0.1, 0.1))
+        ).status
+        is QueryStatus.OK
+    )

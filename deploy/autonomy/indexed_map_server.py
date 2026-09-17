@@ -25,7 +25,11 @@ from autonomy.indexed_mapping import (
     SnapshotDirectorySource,
     SnapshotKey,
 )
-from autonomy.map_provider import MapProvider, MapProviderFactory
+from autonomy.map_provider import (
+    MapProvider,
+    MapProviderFactory,
+    PublicationPending,
+)
 
 LOGGER = logging.getLogger("swarmdeck.indexed_map_server")
 
@@ -190,6 +194,11 @@ class IndexRegistry:
                 continue
             try:
                 components = source.component_ids()
+            except PublicationPending:
+                # Between two publications: keep serving the indexed one for
+                # its own key and look again on the next poll.
+                preserve_roots.add(root)
+                continue
             except (OSError, ValueError) as exc:
                 self._invalidate_root(root, f"map publication validation failed: {exc}")
                 self._record_failure(root, signature, now)
@@ -219,6 +228,9 @@ class IndexRegistry:
                 self._roots[identity] = root
             try:
                 source.refresh(view, component)
+            except PublicationPending:
+                failed_roots.add(root)
+                continue
             except (OSError, ValueError) as exc:
                 # IndexedMapView invalidates its old publication on every
                 # extraction, integrity, or build failure.

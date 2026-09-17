@@ -8,6 +8,17 @@ from typing import Callable, Protocol
 from .indexed_mapping import IndexedMapView, SnapshotKey
 
 
+class PublicationPending(ValueError):
+    """The source is between two coherent publications.
+
+    The writer replaces the snapshot first and its planner product one to
+    three seconds later, and any file may be replaced during a read. Neither
+    says anything about the publication already indexed: that one stays
+    coherent with its own snapshot key, so it keeps serving requests for that
+    key until the next refresh, bounded by the coherent-read age.
+    """
+
+
 class MapProvider(Protocol):
     """One peer's source of verified planner-grid publications."""
 

@@ -14,6 +14,7 @@ from typing import Mapping
 
 from .contracts import SCHEMA_VERSION
 from .indexed_mapping import IndexedGrid, IndexedMapView, SnapshotKey
+from .map_provider import PublicationPending
 
 GRID_MAGIC = b"SDMGRID1"
 GRID_SCHEMA = "swarmdeck.mola_planner_grid.v1"
@@ -135,9 +136,9 @@ def _bounded_stable_read_with_identity(
     identity_opened = _stat_identity(opened)
     identity_after = _stat_identity(after)
     if identity_before != identity_opened or identity_opened != identity_after:
-        raise ValueError(f"{field} changed while reading")
+        raise PublicationPending(f"{field} changed while reading")
     if len(raw) != before.st_size:
-        raise ValueError(f"{field} changed while reading")
+        raise PublicationPending(f"{field} changed while reading")
     return raw, identity_after
 
 
@@ -254,9 +255,9 @@ class MolaDirectorySource:
         if index.get("version") != 1:
             raise ValueError("unsupported MOLA index version")
         if index.get("source_sha256") != _sha256(source_raw):
-            raise ValueError("MOLA index does not match current snapshot bytes")
+            raise PublicationPending("MOLA index does not match current snapshot bytes")
         if index.get("source_snapshot_id") != snapshot.get("snapshot_id"):
-            raise ValueError("MOLA index does not match current snapshot identity")
+            raise PublicationPending("MOLA index does not match current snapshot identity")
         artifacts = index.get("artifacts")
         if not isinstance(artifacts, list) or len(artifacts) > MAX_COMPONENTS:
             raise ValueError("MOLA index artifacts must be a list")
@@ -357,7 +358,7 @@ class MolaDirectorySource:
                 )
                 or self._artifact_identity(path, expected_size) != artifact_identity
             ):
-                raise ValueError("MOLA publication changed while reading")
+                raise PublicationPending("MOLA publication changed while reading")
             return view.publish(
                 grid.refreshed(
                     source_stamp_ns=grid.source_stamp_ns,
