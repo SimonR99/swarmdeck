@@ -59,6 +59,10 @@ struct PlannerGridLimits
   double max_build_s{8.0};
   double ray_angular_resolution_rad{0.08726646259971647};  // 5 degrees
   double ray_step_fraction{0.75};
+  // Qualified free rays, all observed strictly later than every endpoint in a
+  // voxel, that must pass through it before its endpoints are retired. One
+  // ray is counted once per voxel however many steps it spends there.
+  std::size_t min_clearing_traversals{3};
 };
 
 /** Immutable sparse map product. Unknown is represented by voxel absence. */
@@ -73,6 +77,10 @@ struct NativePlannerGrid
   std::size_t point_count{};
   std::size_t ray_steps{};
   std::size_t qualified_ray_keyframes{};
+  // Endpoints withheld from `occupied` and `surfaces` because later qualified
+  // rays saw through their voxels. `surfaces.size() + retired_count` always
+  // equals `point_count`.
+  std::size_t retired_count{};
   std::vector<PlannerVoxel> occupied;
   std::vector<PlannerVoxel> free;
   std::vector<PlannerSurfaceSample> surfaces;

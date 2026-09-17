@@ -13,7 +13,10 @@ import pytest
 import autonomy.mola_mapping as mola_mapping
 from autonomy.contracts import (
     IDENTITY_SE3,
+    DeskewStatus,
     KeyframeId,
+    RayOriginAssociation,
+    RayReturnSemantics,
     SubmapId,
     component_id_for_anchor,
 )
@@ -40,23 +43,48 @@ def canonical(value) -> bytes:
 
 
 def write_publication(
-    tmp_path, *, free=((1, 0, 2),), qualified=0, alternate_json=False
+    tmp_path, *, free=((1, 0, 2),), qualified=0, alternate_json=False, retired=0
 ):
     peer = tmp_path / SESSION / "robot_0"
     store = SubmapStore(peer / "geometry")
     keyframe = KeyframeId("robot_0", SESSION, 0)
+    # A retired endpoint keeps its place in the manifest's stored point count
+    # but carries no surface sample and no occupied voxel. Its voxel (1, 0, 2)
+    # is the one the qualified rays carved free.
+    points = [[0.1, 0.1, 0.5]] + [[0.3, 0.1, 0.5]] * retired
     store.add_submap(
         SubmapId.from_keyframe(keyframe),
-        [[0.1, 0.1, 0.5]],
+        points,
         keyframe_poses_local={keyframe: IDENTITY_SE3},
         sensor_origins_local=(),
         resolution_m=0.2,
         observed_at_ns=123,
     )
     snapshot = store.snapshot().to_dict()
+    manifest = snapshot["manifests"][0]
+    # The store only records qualified ray evidence for a submap with a durable
+    # capture, which this provider test does not stage. Declare the evidence on
+    # the published manifest directly, which is what the validator reads.
+    if qualified:
+        for submap in manifest["submaps"]:
+            submap["sensor_origins"] = [[0.0, 0.0, 0.0]]
+            submap["ray_evidence"] = {
+                "return_semantics": RayReturnSemantics.FIRST_RETURN.value,
+                "deskew": DeskewStatus.NOT_REQUIRED.value,
+                "origin_association": RayOriginAssociation.SINGLE_CAPTURE.value,
+            }
+        # snapshot_id is the digest over the canonical manifests, so restate it
+        # after declaring the evidence.
+        snapshot["snapshot_id"] = hashlib.sha256(
+            canonical(
+                [
+                    {**item, "schema": snapshot["schema"]}
+                    for item in snapshot["manifests"]
+                ]
+            )
+        ).hexdigest()
     source_raw = canonical(snapshot)
     (peer / "snapshot.json").write_bytes(source_raw)
-    manifest = snapshot["manifests"][0]
     revision = manifest["graph_revision"]
     nested_source_id = "c" * 64
     nested_source_sha = "d" * 64
@@ -83,10 +111,11 @@ def write_publication(
         "resolution_m": 0.2,
         "ray_angular_resolution_rad": math.radians(5.0),
         "ray_step_fraction": 0.75,
-        "point_count": 1,
+        "point_count": 1 + retired,
         "occupied_count": 1,
         "free_count": len(free),
         "surface_count": 1,
+        "retired_count": retired,
         "ray_steps": len(free),
         "qualified_ray_keyframes": qualified,
     }
@@ -280,6 +309,88 @@ def test_mola_provider_rejects_free_space_without_qualified_rays(tmp_path) -> No
         ).status
         is QueryStatus.UNAVAILABLE
     )
+
+
+def test_mola_provider_accepts_visibility_retired_endpoints(tmp_path) -> None:
+    peer, component, geometry = write_publication(tmp_path, qualified=1, retired=1)
+    provider = MolaDirectorySource(peer)
+    view = IndexedMapView()
+
+    key = provider.refresh(view, component)
+    # point_count still covers every stored point; the retired endpoint simply
+    # has no surface sample and no occupied voxel.
+    assert view.stats.point_count == 2
+    assert key == SnapshotKey(component, 0, 0, geometry)
+    # The retired endpoint's own voxel is the free one the rays carved.
+    assert (
+        view.query(
+            QueryRequest(key, ((0.3, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        ).occupancy
+        == (VoxelOccupancy.FREE,)
+    )
+
+
+def test_mola_provider_rejects_surface_and_retired_counts_below_points(
+    tmp_path,
+) -> None:
+    peer, component, _ = write_publication(tmp_path, qualified=1, retired=1)
+    grid_path = peer / "mola" / "components" / "component.sdpg"
+    raw = grid_path.read_bytes()
+    metadata_size = struct.unpack_from("<I", raw, 8)[0]
+    metadata = json.loads(raw[12 : 12 + metadata_size])
+    # Claim nothing was retired while the manifest still stores two points.
+    metadata["retired_count"] = 0
+    replacement = canonical(metadata)
+    grid_raw = (
+        GRID_MAGIC
+        + struct.pack("<I", len(replacement))
+        + replacement
+        + raw[12 + metadata_size :]
+    )
+    grid_path.write_bytes(grid_raw)
+    index = json.loads((peer / "mola" / "index.json").read_bytes())
+    index["artifacts"][0]["planner"]["size_bytes"] = len(grid_raw)
+    index["artifacts"][0]["planner"]["sha256"] = hashlib.sha256(grid_raw).hexdigest()
+    (peer / "mola" / "index.json").write_bytes(canonical(index))
+    provider = MolaDirectorySource(peer)
+
+    with pytest.raises(
+        ValueError, match="surface and retired counts do not match point count"
+    ):
+        provider.refresh(IndexedMapView(), component)
+
+
+def test_mola_provider_rejects_retirement_without_qualified_rays(tmp_path) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0, retired=1)
+    provider = MolaDirectorySource(peer)
+
+    with pytest.raises(ValueError, match="lacks qualified ray evidence"):
+        provider.refresh(IndexedMapView(), component)
+
+
+def test_mola_provider_rejects_a_grid_without_a_retired_count(tmp_path) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    grid_path = peer / "mola" / "components" / "component.sdpg"
+    raw = grid_path.read_bytes()
+    metadata_size = struct.unpack_from("<I", raw, 8)[0]
+    metadata = json.loads(raw[12 : 12 + metadata_size])
+    del metadata["retired_count"]
+    replacement = canonical(metadata)
+    grid_raw = (
+        GRID_MAGIC
+        + struct.pack("<I", len(replacement))
+        + replacement
+        + raw[12 + metadata_size :]
+    )
+    grid_path.write_bytes(grid_raw)
+    index = json.loads((peer / "mola" / "index.json").read_bytes())
+    index["artifacts"][0]["planner"]["size_bytes"] = len(grid_raw)
+    index["artifacts"][0]["planner"]["sha256"] = hashlib.sha256(grid_raw).hexdigest()
+    (peer / "mola" / "index.json").write_bytes(canonical(index))
+    provider = MolaDirectorySource(peer)
+
+    with pytest.raises(ValueError, match="metadata schema is invalid"):
+        provider.refresh(IndexedMapView(), component)
 
 
 def test_mola_provider_invalidates_when_worker_index_is_not_current(tmp_path) -> None:

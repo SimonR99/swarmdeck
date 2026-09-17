@@ -40,6 +40,7 @@ _METADATA_FIELDS = {
     "occupied_count",
     "free_count",
     "surface_count",
+    "retired_count",
     "ray_steps",
     "qualified_ray_keyframes",
 }
@@ -501,6 +502,9 @@ class MolaDirectorySource:
         surface_count = _uint(
             metadata.get("surface_count"), "surface_count", maximum=MAX_POINTS
         )
+        retired_count = _uint(
+            metadata.get("retired_count"), "retired_count", maximum=MAX_POINTS
+        )
         ray_steps = _uint(metadata.get("ray_steps"), "ray_steps", maximum=MAX_RAY_STEPS)
         qualified = _uint(
             metadata.get("qualified_ray_keyframes"), "qualified_ray_keyframes"
@@ -528,11 +532,18 @@ class MolaDirectorySource:
             raise ValueError(
                 "planner point count or source stamp does not match manifest"
             )
-        if surface_count != point_count:
-            raise ValueError("planner surface count does not match point count")
+        # point_count stays the manifest's stored point count. Every stored
+        # point is either a surface sample or an endpoint the builder retired
+        # because later qualified rays saw through its voxel.
+        if surface_count + retired_count != point_count:
+            raise ValueError(
+                "planner surface and retired counts do not match point count"
+            )
         if qualified != _qualified_ray_keyframes(manifest):
             raise ValueError("planner qualified-ray count does not match manifest")
-        if qualified == 0 and (free_count != 0 or ray_steps != 0):
+        # Retirement rests on the same evidence free space does: only a
+        # qualified capture's rays can prove an endpoint was seen through.
+        if qualified == 0 and (free_count != 0 or ray_steps != 0 or retired_count != 0):
             raise ValueError("planner free space lacks qualified ray evidence")
 
         resolution = metadata.get("resolution_m")
@@ -577,6 +588,10 @@ class MolaDirectorySource:
             if prior_surface is not None and value < prior_surface:
                 raise ValueError("planner surface records are not sorted")
             surface_voxel = (x, y, math.floor(z / float(resolution)))
+            # Retirement drops a voxel's surface samples together with the
+            # voxel itself, so every surviving sample still stands on an
+            # occupied voxel. A retired voxel appears in the free set instead,
+            # which the occupied/free overlap check above already separates.
             if surface_voxel not in occupied:
                 raise ValueError("planner surface has no occupied endpoint")
             prior_surface = value

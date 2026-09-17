@@ -90,14 +90,33 @@ struct RayCandidate
 struct RayFrame
 {
   Point3d origin;
+  std::uint64_t observed_at_ns{};
   std::vector<RayCandidate> candidates;
 };
+
+/**
+ * Visibility evidence held for one occupied voxel.
+ *
+ * `newest_endpoint_ns` is final before any ray is carved, because every
+ * keyframe's endpoints are ingested first. A traversal therefore only needs a
+ * single saturating counter: it is admitted when its own capture is strictly
+ * later than every endpoint in the voxel, so an endpoint seen again after the
+ * clearing rays re-confirms the voxel and silently disqualifies them.
+ */
+struct VoxelEvidence
+{
+  std::uint64_t newest_endpoint_ns{};
+  std::uint32_t clearing_traversals{};
+  bool retired{};
+};
+
+using OccupiedVoxels = std::unordered_map<PlannerVoxel, VoxelEvidence, VoxelHash>;
 
 void validateLimits(const PlannerGridLimits& limits)
 {
   if (!(std::isfinite(limits.resolution_m) && limits.resolution_m > 0) ||
       limits.max_points == 0 || limits.max_voxels == 0 ||
-      limits.max_ray_steps == 0 ||
+      limits.max_ray_steps == 0 || limits.min_clearing_traversals == 0 ||
       !(std::isfinite(limits.max_build_s) && limits.max_build_s > 0) ||
       !(std::isfinite(limits.ray_angular_resolution_rad) &&
         limits.ray_angular_resolution_rad > 0) ||
@@ -255,7 +274,7 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
     throw std::invalid_argument("MOLA keyframe provenance membership mismatch");
 
   const auto started = Clock::now();
-  std::unordered_set<PlannerVoxel, VoxelHash> occupied;
+  OccupiedVoxels occupied;
   std::unordered_set<PlannerVoxel, VoxelHash> free;
   std::vector<PlannerSurfaceSample> surfaces;
   std::vector<RayFrame> ray_frames;
@@ -297,7 +316,9 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
       keyframe.points_local->getPointFast(index, x, y, z);
       const auto point = transform(found_pose->second, x, y, z);
       const auto voxel = voxelFor(point, limits.resolution_m);
-      occupied.emplace(voxel);
+      auto& evidence = occupied[voxel];
+      evidence.newest_endpoint_ns =
+          std::max(evidence.newest_endpoint_ns, keyframe.observed_at_ns);
       surfaces.push_back({voxel.x, voxel.y, point.z});
       if (occupied.size() > limits.max_voxels)
         throw std::runtime_error("planner occupied voxel budget exceeded");
@@ -329,7 +350,7 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
       if ((index & 4095U) == 0) checkTime(started, limits);
     }
 
-    RayFrame frame{origin, {}};
+    RayFrame frame{origin, keyframe.observed_at_ns, {}};
     frame.candidates.reserve(representatives.size());
     for (const auto& item : representatives)
     {
@@ -390,6 +411,13 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
         const auto steps = candidate.additions + 1;
         const auto& endpoint = candidate.endpoint;
         const auto& origin = frame.origin;
+        // A step fraction below one lets consecutive steps of one ray land in
+        // the same voxel. Steps advance monotonically along the ray, so
+        // skipping a repeat of the immediately preceding voxel counts each ray
+        // exactly once per voxel and keeps one stray ray from retiring
+        // anything on its own.
+        PlannerVoxel previous_voxel{};
+        bool have_previous = false;
         for (std::size_t ordinal = 1; ordinal < steps; ++ordinal)
         {
           const auto scale = static_cast<double>(ordinal) / static_cast<double>(steps);
@@ -398,10 +426,27 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
                origin.y + (endpoint.y - origin.y) * scale,
                origin.z + (endpoint.z - origin.z) * scale},
               limits.resolution_m);
-          if (occupied.find(voxel) == occupied.end()) free.emplace(voxel);
-          if (free.size() >
-              limits.max_voxels - std::min(limits.max_voxels, occupied.size()))
-            throw std::runtime_error("planner total voxel budget exceeded");
+          if (!have_previous || !(voxel == previous_voxel))
+          {
+            previous_voxel = voxel;
+            have_previous = true;
+            const auto found = occupied.find(voxel);
+            if (found == occupied.end())
+            {
+              free.emplace(voxel);
+              if (free.size() >
+                  limits.max_voxels - std::min(limits.max_voxels, occupied.size()))
+                throw std::runtime_error("planner total voxel budget exceeded");
+            }
+            // Seeing through an occupied voxel is the only evidence that can
+            // disprove its endpoints. Rays observed no later than the newest
+            // endpoint there prove nothing: the object may have arrived after
+            // them.
+            else if (
+                frame.observed_at_ns > found->second.newest_endpoint_ns &&
+                found->second.clearing_traversals < limits.min_clearing_traversals)
+              ++found->second.clearing_traversals;
+          }
           if ((ordinal & 4095U) == 0) checkTime(started, limits);
         }
       }
@@ -418,6 +463,45 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
   if (point_count != snapshot.geometry_map->point_count())
     throw std::invalid_argument("MOLA keyframe provenance point count mismatch");
 
+  // Visibility retirement. Obstacle expiry alone cannot prove an area clear,
+  // so a body that stood in front of the sensor when it was captured would
+  // otherwise stay in the product forever, both as an occupied voxel and as a
+  // terrain surface sample. Repeated qualified free rays observed later than
+  // every endpoint in the voxel are the positive evidence that retires those
+  // endpoints. Unknown space is untouched: a voxel nothing ever saw through
+  // keeps whatever it had.
+  std::size_t retired_voxels = 0;
+  for (auto& entry : occupied)
+  {
+    if (entry.second.clearing_traversals < limits.min_clearing_traversals) continue;
+    entry.second.retired = true;
+    ++retired_voxels;
+    // The endpoint was the only reason the existing carving rule left this
+    // voxel out of the free set, and the rays that retired it did traverse it.
+    free.emplace(entry.first);
+  }
+  checkTime(started, limits);
+  std::size_t retired_count = 0;
+  if (retired_voxels != 0)
+  {
+    std::vector<PlannerSurfaceSample> kept;
+    kept.reserve(surfaces.size());
+    for (const auto& sample : surfaces)
+    {
+      // A surface sample carries its exact endpoint height, so its voxel is
+      // recoverable without storing it a second time.
+      const auto found = occupied.find(
+          {sample.x, sample.y, cellCoordinate(sample.z, limits.resolution_m)});
+      if (found != occupied.end() && found->second.retired)
+      {
+        ++retired_count;
+        continue;
+      }
+      kept.push_back(sample);
+    }
+    surfaces = std::move(kept);
+  }
+
   checkTime(started, limits);
   auto result = std::make_shared<NativePlannerGrid>();
   result->graph_version = snapshot.graph_version;
@@ -428,7 +512,10 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
   result->point_count = point_count;
   result->ray_steps = ray_steps;
   result->qualified_ray_keyframes = qualified_ray_keyframes;
-  result->occupied.assign(occupied.begin(), occupied.end());
+  result->retired_count = retired_count;
+  result->occupied.reserve(occupied.size() - retired_voxels);
+  for (const auto& entry : occupied)
+    if (!entry.second.retired) result->occupied.push_back(entry.first);
   result->free.assign(free.begin(), free.end());
   result->surfaces = std::move(surfaces);
   for (const auto& keyframe : snapshot.keyframes)
@@ -464,8 +551,12 @@ PlannerGridArtifact writeNativePlannerGrid(
       !isDigest(grid.identity.source_snapshot_id) ||
       !isDigest(grid.identity.source_sha256))
     throw std::invalid_argument("planner grid identity is invalid");
-  if (grid.point_count != grid.surfaces.size())
-    throw std::invalid_argument("planner surface count does not match point count");
+  // `point_count` stays the manifest's stored point count. Every stored point
+  // is either a surface sample or a visibility-retired endpoint.
+  if (grid.retired_count > grid.point_count ||
+      grid.surfaces.size() != grid.point_count - grid.retired_count)
+    throw std::invalid_argument(
+        "planner surface and retired counts do not match point count");
   if (grid.point_count > kMaxPlannerProductPoints ||
       grid.occupied.size() > kMaxPlannerProductVoxels ||
       grid.free.size() > kMaxPlannerProductVoxels ||
@@ -517,6 +608,7 @@ PlannerGridArtifact writeNativePlannerGrid(
       {"occupied_count", grid.occupied.size()},
       {"free_count", grid.free.size()},
       {"surface_count", grid.surfaces.size()},
+      {"retired_count", grid.retired_count},
       {"ray_steps", grid.ray_steps},
       {"qualified_ray_keyframes", grid.qualified_ray_keyframes}};
   const auto metadata_bytes = metadata.dump();

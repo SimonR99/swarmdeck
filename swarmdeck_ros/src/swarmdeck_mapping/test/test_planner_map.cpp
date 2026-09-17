@@ -49,6 +49,18 @@ bool contains(const std::vector<PlannerVoxel>& values, const PlannerVoxel& value
   return std::binary_search(values.begin(), values.end(), value);
 }
 
+// One capture of `points`. A qualified capture proves a single sensor origin
+// applies to all of its first returns, which is what admits its rays as
+// free-space and see-through evidence.
+SubmapInput capture(
+    const char* external_id, const std::vector<PointXYZ>& points,
+    const std::uint64_t observed_at_ns, const bool qualified)
+{
+  std::vector<PointXYZ> origins;
+  if (qualified) origins.push_back({0.01F, 0.01F, 0.01F});
+  return {external_id, points, pose(), origins, observed_at_ns, qualified};
+}
+
 std::vector<PointXYZ> patch(
     const float center_x, const float z, const float center_y = 0.1F)
 {
@@ -224,6 +236,114 @@ int main()
   require(!lower_heights.empty() && std::abs(lower_heights.front() + 0.35) < 1e-6,
           "down-step surface height was lost");
 
+  // Visibility retirement. A peer robot standing beside this one at a grouped
+  // start enters the persistent product both as an occupied voxel and as
+  // terrain surface samples. Obstacle expiry alone cannot prove an area clear,
+  // so only repeated qualified rays that see through the same voxel, observed
+  // later than every endpoint in it, may retire those endpoints.
+  const std::vector<PointXYZ> body_points{{1.05F, 0.01F, 0.01F}};
+  const std::vector<PointXYZ> beyond_points{{2.05F, 0.01F, 0.01F}};
+  const PlannerVoxel body_voxel{5, 0, 0};
+  const PlannerVoxel beyond_voxel{10, 0, 0};
+  const auto clearing_grid = [](const std::vector<SubmapInput>& captures,
+                                const PlannerGridLimits& limits = {}) {
+    MolaSubmapBridge clearing_bridge;
+    clearing_bridge.replaceGeometrySnapshot(
+        captures, version(0, '5'), "{}", identity('5'));
+    return buildNativePlannerGrid(*clearing_bridge.currentSnapshot(), limits);
+  };
+
+  const std::vector<SubmapInput> retiring_captures{
+      capture("body", body_points, 100, true),
+      capture("clear_a", beyond_points, 200, true),
+      capture("clear_b", beyond_points, 300, true),
+      capture("clear_c", beyond_points, 400, true)};
+  const auto retired = clearing_grid(retiring_captures);
+  require(retired->retired_count == 1, "a seen-through body was not retired");
+  require(
+      !contains(retired->occupied, body_voxel),
+      "a retired body remained an occupied voxel");
+  require(
+      contains(retired->free, body_voxel),
+      "a retired body that the rays carved did not become free");
+  require(
+      heightsAt(*retired, body_voxel.x).empty(),
+      "a retired body kept its terrain surface sample");
+  require(
+      contains(retired->occupied, beyond_voxel),
+      "the endpoint behind a retired body was lost");
+  require(
+      retired->point_count == 4 && retired->surfaces.size() == 3 &&
+          retired->surfaces.size() + retired->retired_count ==
+              retired->point_count,
+      "retired surfaces do not account for every stored point");
+
+  // The rays only prove the voxel was empty while they passed. A capture newer
+  // than them puts the body back and keeps every endpoint in that voxel,
+  // including the older ones the rays had otherwise disproved.
+  auto returning_captures = retiring_captures;
+  returning_captures.push_back(capture("body_again", body_points, 500, false));
+  const auto returning = clearing_grid(returning_captures);
+  require(
+      returning->retired_count == 0,
+      "a body observed after the clearing rays was retired");
+  require(
+      contains(returning->occupied, body_voxel),
+      "a returning body is not occupied");
+  require(
+      heightsAt(*returning, body_voxel.x).size() == 2,
+      "a returning body lost a terrain surface sample");
+
+  // Rays terminate at what they hit, so a wall is never traversed however many
+  // times it is measured.
+  const auto repeated_wall = clearing_grid(
+      {capture("hit_a", body_points, 100, true),
+       capture("hit_b", body_points, 200, true),
+       capture("hit_c", body_points, 300, true)});
+  require(
+      repeated_wall->retired_count == 0 &&
+          contains(repeated_wall->occupied, body_voxel) &&
+          heightsAt(*repeated_wall, body_voxel.x).size() == 3,
+      "a repeatedly measured wall was retired");
+
+  const std::vector<SubmapInput> stray_captures{
+      capture("body", body_points, 100, true),
+      capture("clear_a", beyond_points, 200, true)};
+  const auto stray = clearing_grid(stray_captures);
+  require(
+      stray->retired_count == 0 && contains(stray->occupied, body_voxel),
+      "a single stray traversal retired a body");
+  PlannerGridLimits eager_clearing;
+  eager_clearing.min_clearing_traversals = 1;
+  const auto eager = clearing_grid(stray_captures, eager_clearing);
+  require(
+      eager->retired_count == 1 && !contains(eager->occupied, body_voxel),
+      "min_clearing_traversals is not the retirement threshold");
+
+  // A ray that passed before the body arrived proves nothing about it.
+  const auto older_rays = clearing_grid(
+      {capture("clear_a", beyond_points, 100, true),
+       capture("clear_b", beyond_points, 200, true),
+       capture("clear_c", beyond_points, 300, true),
+       capture("body", body_points, 500, true)});
+  require(
+      older_rays->retired_count == 0 &&
+          contains(older_rays->occupied, body_voxel),
+      "traversals older than the endpoint retired it");
+
+  const auto unqualified_clearing = clearing_grid(
+      {capture("body", body_points, 100, false),
+       capture("clear_a", beyond_points, 200, false),
+       capture("clear_b", beyond_points, 300, false),
+       capture("clear_c", beyond_points, 400, false)});
+  require(
+      unqualified_clearing->free.empty() && unqualified_clearing->ray_steps == 0,
+      "captures without ray evidence carved free space");
+  require(
+      unqualified_clearing->retired_count == 0 &&
+          contains(unqualified_clearing->occupied, body_voxel),
+      "captures without ray evidence retired a body");
+
   PlannerGridLimits tiny_ray_budget;
   tiny_ray_budget.max_ray_steps = 1;
   const auto bounded = buildNativePlannerGrid(*snapshot0, tiny_ray_budget);
@@ -302,7 +422,44 @@ int main()
   require(metadata.at("free_count") == 0, "explicit empty free count is absent");
   require(metadata.at("qualified_ray_keyframes") == 0,
           "qualified-ray count is incorrect");
+  require(metadata.at("retired_count") == 0,
+          "explicit empty retired count is absent");
+  require(
+      metadata.at("surface_count").get<std::size_t>() +
+              metadata.at("retired_count").get<std::size_t>() ==
+          metadata.at("point_count").get<std::size_t>(),
+      "exported surface and retired counts do not cover the point count");
   require(first.size_bytes == bytes.size(), "reported planner byte size is wrong");
+
+  // SDMGRID1 carries the retirement so every reader can still cross-check
+  // point_count against the manifest chunks.
+  (void)writeNativePlannerGrid(*retired, root / "retired.sdmgrid");
+  std::ifstream retired_input(root / "retired.sdmgrid", std::ios::binary);
+  const std::string retired_bytes(
+      (std::istreambuf_iterator<char>(retired_input)),
+      std::istreambuf_iterator<char>());
+  const auto retired_metadata = nlohmann::json::parse(
+      retired_bytes.substr(12, readU32(retired_bytes, 8)));
+  require(
+      retired_metadata.at("retired_count") == 1 &&
+          retired_metadata.at("surface_count") == 3 &&
+          retired_metadata.at("point_count") == 4,
+      "exported retirement does not match the built product");
+
+  NativePlannerGrid tampered = *retired;
+  tampered.retired_count = 0;
+  bool contract_rejected = false;
+  try
+  {
+    (void)writeNativePlannerGrid(tampered, root / "tampered.sdmgrid");
+  }
+  catch (const std::invalid_argument&)
+  {
+    contract_rejected = true;
+  }
+  require(
+      contract_rejected,
+      "planner export accepted surface and retired counts below point_count");
   std::filesystem::remove_all(root);
   return 0;
 }

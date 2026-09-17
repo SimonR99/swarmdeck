@@ -61,6 +61,23 @@ carved only when the manifest declares `first_return`, `deskewed`,
 otherwise unqualified evidence produces occupied endpoints and surface samples
 without any free-space claims.
 
+Endpoints are retired by visibility, never by age. A dynamic body captured in
+front of the sensor (a peer robot at a grouped start, for example) leaves an
+occupied voxel and terrain surface samples that obstacle expiry alone cannot
+disprove. The builder drops both once at least `min_clearing_traversals`
+qualified free rays, each observed strictly later than every endpoint in that
+voxel, have passed through it; one ray counts once per voxel however many steps
+it spends there. An endpoint observed after those rays re-confirms the voxel and
+keeps everything in it, including the older endpoints. A retired voxel joins the
+free set because the same rays carved it; a voxel no ray ever crossed stays
+exactly as it was. `min_clearing_traversals` defaults to 3 and lives in
+`PlannerGridLimits` (`include/swarmdeck_mapping/planner_map.hpp`).
+
+`SDMGRID1` therefore carries `retired_count` beside `surface_count`, and
+`surface_count + retired_count == point_count` always holds, where `point_count`
+remains the manifest's stored point count that every reader cross-checks against
+the geometry chunks.
+
 Run it directly in the mapping image:
 
 ```bash

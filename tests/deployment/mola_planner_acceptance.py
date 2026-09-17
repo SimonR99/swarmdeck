@@ -456,6 +456,21 @@ def run_replay(binary: Path, maps_root: Path, mission_id: str) -> dict[str, obje
                     raise RuntimeError(
                         f"{peer}/{component}: qualified-ray count mismatch"
                     )
+                surfaces = metadata.get("surface_count")
+                retired = metadata.get("retired_count")
+                if (
+                    not isinstance(surfaces, int)
+                    or isinstance(surfaces, bool)
+                    or not isinstance(retired, int)
+                    or isinstance(retired, bool)
+                    or surfaces < 0
+                    or retired < 0
+                    or surfaces + retired != expected_points
+                ):
+                    raise RuntimeError(
+                        f"{peer}/{component}: surface and retired counts do not "
+                        "cover the stored points"
+                    )
                 if qualified == 0 and metadata.get("free_count") != 0:
                     raise RuntimeError(
                         f"{peer}/{component}: unqualified map has free voxels"
