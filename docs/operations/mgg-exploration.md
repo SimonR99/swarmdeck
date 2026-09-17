@@ -17,8 +17,8 @@ is called merely by launching the dashboard or containers.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`74e1a2da38e6cb6e9fe6c3c8eedfdc24804a9498` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance and the loader coherence retry), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+`73f8177cc07a7548278e15283f37311ee6da8bae` (the 59 ported commits over
+upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images. Upstream `902e868` alone does not
@@ -29,7 +29,7 @@ under `ros2/src`.
 
 The branch head (`c4eff1b`) additionally routes Explore through the shared
 topological and grid stages and adds blocked-corridor feedback. That head is
-not pinned: the deployed `MGG_REV` stays at `74e1a2d` until a live Bistro
+not pinned: the deployed `MGG_REV` stays at `73f8177` until a live Bistro
 exploration trial with the new head passes, because live PCI exploration then
 receives the refined corridor instead of the shortcut lattice walk and can be
 refused on terrain. The four new parameters `blocked_corridor_max_entries`,
