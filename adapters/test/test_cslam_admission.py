@@ -193,3 +193,11 @@ def test_inter_robot_closures_default_off_in_the_peer_launch():
     text = (REPO / "deploy/autonomy/peer.launch.py").read_text()
     assert '"SWARMDECK_INTER_ROBOT_CLOSURES", "false"' in text
     assert '"frontend.inter_robot_loop_closure_budget": 0' in text
+
+
+def test_zero_budget_is_an_explicit_inter_robot_off_switch():
+    patch = (REPO / "deploy/patches/cslam-inter-robot-switch.patch").read_text()
+    added = "\n".join(added_lines(patch))
+    assert 'if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:' in added
+    assert "return" in added
+    assert "git apply /tmp/cslam-inter-robot-switch.patch" in DOCKERFILE.read_text()

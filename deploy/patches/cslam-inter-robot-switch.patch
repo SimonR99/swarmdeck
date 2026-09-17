@@ -1,0 +1,13 @@
+--- a/cslam/cslam/global_descriptor_loop_closure_detection.py
++++ b/cslam/cslam/global_descriptor_loop_closure_detection.py
+@@ -312,6 +312,10 @@
+         Returns:
+             list(int): selected keyframes from other robots to match
+         """
++        # A budget of zero or less switches inter-robot detection off. The
++        # selector does not treat zero as "select nothing", so say so here.
++        if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:
++            return
+         neighbors_is_in_range, neighbors_in_range_list = self.neighbor_manager.check_neighbors_in_range(
+         )
+         #self.node.get_logger().info('Neighbors in range: ' +  str(neighbors_in_range_list))

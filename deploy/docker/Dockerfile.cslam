@@ -117,12 +117,15 @@ COPY deploy/patches/cslam-registration-overlap.patch /tmp/cslam-registration-ove
 # A stationary robot otherwise never re-observes a scene that changed in front
 # of it. Touches only the lidar handler, after the overlap patch that edits it.
 COPY deploy/patches/cslam-scene-change-keyframe.patch /tmp/cslam-scene-change-keyframe.patch
+# Swarm-SLAM's selector does not treat a zero budget as off; this guard does.
+COPY deploy/patches/cslam-inter-robot-switch.patch /tmp/cslam-inter-robot-switch.patch
 RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-keyframe-readiness.patch \
     && git apply /tmp/cslam-registration-budget.patch \
     && git apply /tmp/cslam-registration-overlap.patch \
-    && git apply /tmp/cslam-scene-change-keyframe.patch
+    && git apply /tmp/cslam-scene-change-keyframe.patch \
+    && git apply /tmp/cslam-inter-robot-switch.patch
 
 # Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \
