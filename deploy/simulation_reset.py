@@ -143,7 +143,10 @@ class Supervisor:
         services: list[str],
         server_url: str = "",
         expected_robots: int = 0,
+        prune_service: str = "",
+        prune_path: str = "/maps",
     ):
+        self.prune_service, self.prune_path = prune_service, prune_path
         self.root, self.env_file = root, env_file
         self.compose_command, self.services = command, services
         self.server_url, self.expected_robots = server_url.rstrip("/"), expected_robots
@@ -247,6 +250,33 @@ class Supervisor:
                 SWARMDECK_MISSION_ID=mission,
                 SWARMDECK_TEST_DOMAIN=str(domain),
             )
+            if self.prune_service:
+                # Peers write one directory per mission into a volume only the
+                # simulation uses, and nothing reads a mission after its reset.
+                # The services are stopped, so nothing holds the old files.
+                # Reported as part of stopping: the reset protocol names no
+                # separate phase for it and its readers need not learn one.
+                self.run_command(
+                    request,
+                    "stopping",
+                    [
+                        *self.compose_command,
+                        "--env-file",
+                        str(self.env_file),
+                        "run",
+                        "--rm",
+                        "--no-deps",
+                        "-T",
+                        "--entrypoint",
+                        "sh",
+                        self.prune_service,
+                        "-c",
+                        'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
+                        "sh",
+                        self.prune_path,
+                    ],
+                    start_environment,
+                )
             self.status(
                 request, "starting", ok=None, mission_id=mission, domain_id=domain
             )
@@ -368,8 +398,22 @@ def main() -> None:
     parser.add_argument("--poll", type=float, default=0.5)
     parser.add_argument("--server-url", default="http://127.0.0.1:8080")
     parser.add_argument("--expected-robots", type=int, default=0)
+    parser.add_argument(
+        "--prune-maps-service",
+        default="",
+        help="service that mounts the simulation's peer maps volume read-write; "
+        "its earlier missions are deleted at every reset",
+    )
+    parser.add_argument("--prune-maps-path", default="/maps")
     args = parser.parse_args()
     service_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+    if args.prune_maps_service and (
+        service_pattern.fullmatch(args.prune_maps_service) is None
+        or re.fullmatch(r"/[A-Za-z0-9_./-]+", args.prune_maps_path) is None
+        or ".." in args.prune_maps_path
+        or args.prune_maps_path.rstrip("/") == ""
+    ):
+        parser.error("prune service or path is not valid")
     if any(service_pattern.fullmatch(service) is None for service in args.service):
         parser.error(
             "service names may contain only letters, digits, dot, underscore and dash"
@@ -396,6 +440,8 @@ def main() -> None:
         args.service,
         args.server_url,
         args.expected_robots,
+        args.prune_maps_service,
+        args.prune_maps_path,
     )
     args.root.mkdir(parents=True, exist_ok=True)
     # A second supervisor could otherwise claim a request after a stale timeout

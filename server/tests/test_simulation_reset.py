@@ -179,6 +179,43 @@ def test_supervisor_stops_before_new_epoch_and_recreates(tmp_path):
     assert not supervisor.poll_once()
 
 
+def test_supervisor_prunes_earlier_missions_between_stop_and_start(tmp_path):
+    root, env = tmp_path / "reset", tmp_path / "deployment.env"
+    env.write_text("SWARMDECK_MISSION_ID=old\nSWARMDECK_TEST_DOMAIN=200\n")
+    request = {"version": 1, "request_id": "request-prune", "requested_at_ns": 1}
+    supervisor = Supervisor(
+        root,
+        env,
+        ["docker", "compose", "-p", "test"],
+        ["sim"],
+        prune_service="mapping-query",
+    )
+    with patch(
+        "deploy.simulation_reset.subprocess.run",
+        return_value=types.SimpleNamespace(stdout="sim\n"),
+    ) as run:
+        supervisor.run(request)
+    stop, prune, start = (call.args[0] for call in run.call_args_list[:3])
+    assert stop[-2:] == ["stop", "sim"]
+    assert prune[prune.index("run") :] == [
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--entrypoint",
+        "sh",
+        "mapping-query",
+        "-c",
+        'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
+        "sh",
+        "/maps",
+    ]
+    assert "up" in start
+    # The one-off container belongs to the new epoch, never to the old one.
+    assert run.call_args_list[1].kwargs["env"]["SWARMDECK_MISSION_ID"] != "old"
+    assert json.loads((root / "status.json").read_text())["phase"] == "done"
+
+
 def test_epoch_update_preserves_deployment_settings_and_mode(tmp_path):
     env = tmp_path / "deployment.env"
     env.write_text(

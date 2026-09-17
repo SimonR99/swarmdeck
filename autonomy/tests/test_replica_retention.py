@@ -214,3 +214,27 @@ def test_separate_store_connections_cannot_collect_during_publication(
     assert collector.read_chunk(digest) == b"live"
     writer.close()
     collector.close()
+
+
+def test_discard_history_keeps_only_the_named_missions(tmp_path):
+    store = ReplicaStore(tmp_path, max_bytes=1024, retention_s=10, clock=lambda: 0.0)
+    old, real, live = str(uuid4()), str(uuid4()), str(uuid4())
+    upload(store, manifest(old, b"old-only"), b"old-only")
+    upload(store, manifest(old, b"shared", robot="r1"), b"shared")
+    upload(store, manifest(real, b"real-map"), b"real-map")
+    upload(store, manifest(live, b"shared"), b"shared")
+
+    result = store.discard_history({live, real})
+
+    assert result["sessions"] == [old]
+    assert result["bytes"] == len(b"old-only")
+    assert store.get("r0", old) is None and store.get("r1", old) is None
+    assert store.get("r0", real) is not None and store.get("r0", live) is not None
+    chunks = {path.name for path in (tmp_path / "chunks").iterdir()}
+    assert hashlib.sha256(b"old-only").hexdigest() not in chunks
+    # Geometry a surviving mission also references stays on disk.
+    assert hashlib.sha256(b"shared").hexdigest() in chunks
+    assert hashlib.sha256(b"real-map").hexdigest() in chunks
+    # Discarding again finds nothing left to do.
+    assert store.discard_history({live, real}) == {"sessions": [], "bytes": 0}
+    store.close()

@@ -223,27 +223,55 @@ class ReplicaStore:
         for session, published in rows[:-1]:
             if freed >= needed or published > cutoff:
                 break
-            owned = [
-                row[0]
-                for row in self.db.execute(
-                    "SELECT DISTINCT hash FROM chunk_refs WHERE session=?", (session,)
-                )
-            ]
-            self.db.execute("DELETE FROM chunk_refs WHERE session=?", (session,))
-            self.db.execute("DELETE FROM manifests WHERE session=?", (session,))
-            self.db.execute("DELETE FROM sessions WHERE session=?", (session,))
-            for digest in owned:
-                row = self.db.execute(
-                    "SELECT size FROM chunks WHERE hash=? AND NOT EXISTS "
-                    "(SELECT 1 FROM chunk_refs WHERE chunk_refs.hash=chunks.hash)",
-                    (digest,),
-                ).fetchone()
-                if row:
-                    (self.chunks / digest).unlink(missing_ok=True)
-                    self.db.execute("DELETE FROM chunks WHERE hash=?", (digest,))
-                    freed += row[0]
+            freed += self._retire_session(session)
             retired.append(session)
         return {"sessions": retired, "bytes": freed}
+
+    def _retire_session(self, session):
+        """Delete one mission's manifests and the geometry only it referenced."""
+        owned = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT DISTINCT hash FROM chunk_refs WHERE session=?", (session,)
+            )
+        ]
+        self.db.execute("DELETE FROM chunk_refs WHERE session=?", (session,))
+        self.db.execute("DELETE FROM manifests WHERE session=?", (session,))
+        self.db.execute("DELETE FROM sessions WHERE session=?", (session,))
+        freed = 0
+        for digest in owned:
+            row = self.db.execute(
+                "SELECT size FROM chunks WHERE hash=? AND NOT EXISTS "
+                "(SELECT 1 FROM chunk_refs WHERE chunk_refs.hash=chunks.hash)",
+                (digest,),
+            ).fetchone()
+            if row:
+                (self.chunks / digest).unlink(missing_ok=True)
+                self.db.execute("DELETE FROM chunks WHERE hash=?", (digest,))
+                freed += row[0]
+        return freed
+
+    def discard_history(self, keep=()):
+        """Retire every mission except those named in `keep`.
+
+        A simulation mints a new mission at every reset and nothing reads the
+        maps of the ones before it, so its server discards them at start-up.
+        Missions to preserve, such as maps from real robots sharing the store,
+        are named explicitly.
+        """
+        keep = {str(session) for session in keep}
+        with self._write():
+            sessions = [
+                row[0]
+                for row in self.db.execute(
+                    "SELECT DISTINCT session FROM manifests ORDER BY session"
+                )
+                if row[0] not in keep
+            ]
+            freed = sum(self._retire_session(session) for session in sessions)
+            # Uploads that never reached a manifest belong to no mission.
+            freed += self._collect_unreferenced(4096)["bytes"]
+        return {"sessions": sessions, "bytes": freed}
 
     def close(self):
         with self.lock:

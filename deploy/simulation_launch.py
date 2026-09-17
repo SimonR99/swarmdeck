@@ -518,6 +518,9 @@ def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
         arguments.extend(("--compose-file", compose_file))
     for service in spec["reset_services"]:
         arguments.extend(("--service", service))
+    if "mapping-query" in spec["reset_services"]:
+        # It mounts the simulation's peer maps volume read-write.
+        arguments.extend(("--prune-maps-service", "mapping-query"))
     RESET_ROOT.mkdir(parents=True, exist_ok=True)
     log = (RESET_ROOT / "supervisor.log").open("ab")
     try:

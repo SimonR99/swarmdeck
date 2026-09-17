@@ -28,11 +28,39 @@ def store():
     root = os.environ.get("SWARMDECK_REPLICA_DIR")
     if not root:
         root = Path(__file__).resolve().parents[3] / "sessions" / "replicas"
-    return ReplicaStore(
+    replicas = ReplicaStore(
         root,
         max_bytes=int(os.environ.get("SWARMDECK_REPLICA_MAX_BYTES", 1024**3)),
         retention_s=float(os.environ.get("SWARMDECK_REPLICA_RETENTION_S", 3600)),
     )
+    if os.environ.get("SWARMDECK_REPLICA_DISCARD_HISTORY", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        # The simulation overlay sets this: each reset starts this server with
+        # a new mission, and the maps of earlier simulated missions are never
+        # read again. Real maps sharing the store are kept by naming them.
+        keep = {
+            value.strip()
+            for value in os.environ.get("SWARMDECK_REPLICA_KEEP_SESSIONS", "").split(
+                ","
+            )
+            if value.strip()
+        }
+        mission = os.environ.get("SWARMDECK_MISSION_ID", "").strip()
+        if not mission:
+            # Without the live mission's name there is nothing to tell it from
+            # history, and a restart would discard the map being built.
+            log.warning("Replica history kept: SWARMDECK_MISSION_ID is not set")
+        else:
+            discarded = replicas.discard_history(keep | {mission})
+            log.warning(
+                "Discarded %d earlier mission(s), %d bytes, from the replica store",
+                len(discarded["sessions"]),
+                discarded["bytes"],
+            )
+    return replicas
 
 
 async def bounded_body(request, limit):
