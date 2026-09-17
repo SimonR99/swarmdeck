@@ -48,10 +48,15 @@ controller_server:
 
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
-      # Forward is preferred by the critic below, but reverse remains
-      # available when a point is behind the robot or the forward path is
-      # blocked.
-      min_vel_x: -0.6
+      # Reverse stays available for backing out, but only slowly. With a
+      # symmetric 0.6 m/s the critics are indifferent between nose-first and
+      # tail-first, and PreferForward (scale 1.0) cannot break the tie: from
+      # the grouped start, where MGG's first paths pass through parked
+      # neighbours it cannot see, DWB swung the robots through full-speed
+      # reverse arcs up to 4 m off the validated corridor and they wedged on
+      # kerbs (three cold starts failed; measured 2026-09-17). At 0.15 m/s,
+      # the wedge-escape speed, turning toward the path is always cheaper.
+      min_vel_x: -0.15
       max_vel_x: 0.6
       max_vel_theta: 1.2
       min_speed_xy: 0.0

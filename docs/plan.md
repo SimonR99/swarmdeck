@@ -153,16 +153,14 @@ Each item names its acceptance gate.
       unimplemented; `queryIndexedMap` refuses height refinement and prefix
       truncation whenever speed limits are present, which must be resolved
       first.
-- [ ] **Cold-start Navigate beyond the first ground ring.** Implemented as
-      validated-prefix sections with a continuation (MGG `pin-20260917`,
-      adapter no-progress bound of three sections); live check owed. Gate: a 3 m goal
-      straight ahead succeeds for every platform from a fresh start. On
-      2026-09-16 with the mask on, robot_0 and robot_3 arrived within 0.22 m,
-      while robot_1 (one keyframe) was refused with `provisional terrain
-      connector exceeds its bound` and the Scout with `route is occupied or
-      unknown` because the goal lay beyond its first ground ring. Also explain
-      robot_1's chronic stall at its start position (2.2 m in the same run
-      where the other three explored 35 to 39 m).
+- [x] **Cold-start Navigate beyond the first ground ring.** Validated-prefix
+      sections with a continuation (MGG `swarmdeck`), adapter no-progress bound
+      of three sections, scene-change keyframes for parked robots, paced
+      retries for a momentarily unavailable planning or indexed map, and an
+      index that keeps serving while the next product is pending. Measured
+      2026-09-17 from a fresh grouped start: 16 of 18 goals at 3 m and five
+      headings per robot arrived within 0.32 m; both refusals named a goal on a
+      0.30 m and a 0.67 m rise.
 - [ ] **Peers as live obstacles for the global route.** Phantom bodies of
       robots that have left are now retired by visibility (three later
       qualified rays through the voxel); present neighbours remain an open
@@ -173,6 +171,13 @@ Each item names its acceptance gate.
       no longer sees them while Nav2's live costmap still does; feed each
       peer's current position and body radius to MGG as a temporary exclusion
       (simulation adapter first, then the intentions channel for hardware).
+      Measured 2026-09-17: this is what breaks Fleet Explore from the grouped
+      start. First paths run through parked neighbours, the local controller
+      improvises outside the validated corridor, and robots wedge beside a
+      0.19 m kerb at (-9.7, 3.3) and near (-11.6, 7.6) in the simulation frame.
+      Limiting reverse to 0.15 m/s made one grouped start pass and did not
+      cure the next; Explore from dispersed poses passes (25 to 33 m each).
+      Also find out why a route MGG admits beside that kerb is not drivable.
       Also explain robot_2's burst of 121 keyframes in three minutes of
       near-stationary recovery motion.
 - [ ] **Moving obstacles and blind corners.** Gate: controlled trials where the
