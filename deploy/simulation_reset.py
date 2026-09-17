@@ -143,10 +143,10 @@ class Supervisor:
         services: list[str],
         server_url: str = "",
         expected_robots: int = 0,
-        prune_service: str = "",
-        prune_path: str = "/maps",
+        prune_volume: str = "",
+        prune_image: str = "",
     ):
-        self.prune_service, self.prune_path = prune_service, prune_path
+        self.prune_volume, self.prune_image = prune_volume, prune_image
         self.root, self.env_file = root, env_file
         self.compose_command, self.services = command, services
         self.server_url, self.expected_robots = server_url.rstrip("/"), expected_robots
@@ -250,30 +250,30 @@ class Supervisor:
                 SWARMDECK_MISSION_ID=mission,
                 SWARMDECK_TEST_DOMAIN=str(domain),
             )
-            if self.prune_service:
+            if self.prune_volume and self.prune_image:
                 # Peers write one directory per mission into a volume only the
                 # simulation uses, and nothing reads a mission after its reset.
-                # The services are stopped, so nothing holds the old files.
+                # The services are stopped, so nothing holds the old files. A
+                # plain container does this: the stack's own services share
+                # the stopped simulator's network and cannot start without it.
                 # Reported as part of stopping: the reset protocol names no
                 # separate phase for it and its readers need not learn one.
                 self.run_command(
                     request,
                     "stopping",
                     [
-                        *self.compose_command,
-                        "--env-file",
-                        str(self.env_file),
+                        "docker",
                         "run",
                         "--rm",
-                        "--no-deps",
-                        "-T",
+                        "--network",
+                        "none",
+                        "--volume",
+                        f"{self.prune_volume}:/maps",
                         "--entrypoint",
                         "sh",
-                        self.prune_service,
+                        self.prune_image,
                         "-c",
-                        'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
-                        "sh",
-                        self.prune_path,
+                        "find /maps -mindepth 1 -maxdepth 1 -exec rm -rf {} +",
                     ],
                     start_environment,
                 )
@@ -399,21 +399,27 @@ def main() -> None:
     parser.add_argument("--server-url", default="http://127.0.0.1:8080")
     parser.add_argument("--expected-robots", type=int, default=0)
     parser.add_argument(
-        "--prune-maps-service",
+        "--prune-maps-volume",
         default="",
-        help="service that mounts the simulation's peer maps volume read-write; "
-        "its earlier missions are deleted at every reset",
+        help="Docker volume holding the simulation's peer maps; every earlier "
+        "mission in it is deleted at each reset",
     )
-    parser.add_argument("--prune-maps-path", default="/maps")
+    parser.add_argument(
+        "--prune-maps-image",
+        default="",
+        help="locally available image with a POSIX shell, used to empty the volume",
+    )
     args = parser.parse_args()
     service_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
-    if args.prune_maps_service and (
-        service_pattern.fullmatch(args.prune_maps_service) is None
-        or re.fullmatch(r"/[A-Za-z0-9_./-]+", args.prune_maps_path) is None
-        or ".." in args.prune_maps_path
-        or args.prune_maps_path.rstrip("/") == ""
+    if bool(args.prune_maps_volume) != bool(args.prune_maps_image) or (
+        args.prune_maps_volume
+        and (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.prune_maps_volume) is None
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:@-]*", args.prune_maps_image)
+            is None
+        )
     ):
-        parser.error("prune service or path is not valid")
+        parser.error("--prune-maps-volume and --prune-maps-image go together")
     if any(service_pattern.fullmatch(service) is None for service in args.service):
         parser.error(
             "service names may contain only letters, digits, dot, underscore and dash"
@@ -440,8 +446,8 @@ def main() -> None:
         args.service,
         args.server_url,
         args.expected_robots,
-        args.prune_maps_service,
-        args.prune_maps_path,
+        args.prune_maps_volume,
+        args.prune_maps_image,
     )
     args.root.mkdir(parents=True, exist_ok=True)
     # A second supervisor could otherwise claim a request after a stale timeout

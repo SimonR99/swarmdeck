@@ -188,7 +188,8 @@ def test_supervisor_prunes_earlier_missions_between_stop_and_start(tmp_path):
         env,
         ["docker", "compose", "-p", "test"],
         ["sim"],
-        prune_service="mapping-query",
+        prune_volume="test_peer_maps",
+        prune_image="swarmdeck-mapping:test",
     )
     with patch(
         "deploy.simulation_reset.subprocess.run",
@@ -197,18 +198,19 @@ def test_supervisor_prunes_earlier_missions_between_stop_and_start(tmp_path):
         supervisor.run(request)
     stop, prune, start = (call.args[0] for call in run.call_args_list[:3])
     assert stop[-2:] == ["stop", "sim"]
-    assert prune[prune.index("run") :] == [
+    assert prune == [
+        "docker",
         "run",
         "--rm",
-        "--no-deps",
-        "-T",
+        "--network",
+        "none",
+        "--volume",
+        "test_peer_maps:/maps",
         "--entrypoint",
         "sh",
-        "mapping-query",
+        "swarmdeck-mapping:test",
         "-c",
-        'find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
-        "sh",
-        "/maps",
+        "find /maps -mindepth 1 -maxdepth 1 -exec rm -rf {} +",
     ]
     assert "up" in start
     # The one-off container belongs to the new epoch, never to the old one.

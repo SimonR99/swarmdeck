@@ -500,6 +500,36 @@ def stop_supervisor(project: str | None = None) -> None:
     (RESET_ROOT / "launcher-supervisor.json").unlink(missing_ok=True)
 
 
+def peer_maps_prune_arguments(spec: dict, environment: dict[str, str]) -> list[str]:
+    """Name the simulation's peer maps volume and an image able to empty it.
+
+    Both come from the resolved Compose model, so overrides that retag the
+    mapping image or rename the volume are followed. Without a mapping service
+    there is no such volume and nothing to prune.
+    """
+    if "mapping" not in spec["reset_services"]:
+        return []
+    command = ["docker", "compose", "-p", spec["project"]]
+    for compose_file in spec["compose_files"]:
+        command.extend(("-f", compose_file))
+    try:
+        model = json.loads(
+            subprocess.run(
+                [*command, "config", "--format", "json"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            ).stdout
+        )
+        volume = model["volumes"]["peer_maps"]["name"]
+        image = model["services"]["mapping"]["image"]
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError):
+        return []
+    return ["--prune-maps-volume", volume, "--prune-maps-image", image]
+
+
 def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
     stop_supervisor(spec["project"])
     arguments = [
@@ -518,9 +548,7 @@ def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
         arguments.extend(("--compose-file", compose_file))
     for service in spec["reset_services"]:
         arguments.extend(("--service", service))
-    if "mapping-query" in spec["reset_services"]:
-        # It mounts the simulation's peer maps volume read-write.
-        arguments.extend(("--prune-maps-service", "mapping-query"))
+    arguments.extend(peer_maps_prune_arguments(spec, environment))
     RESET_ROOT.mkdir(parents=True, exist_ok=True)
     log = (RESET_ROOT / "supervisor.log").open("ab")
     try:
