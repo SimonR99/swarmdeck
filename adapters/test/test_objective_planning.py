@@ -1315,9 +1315,9 @@ def test_navigate_follows_short_validated_prefix_sections_to_a_far_goal(monkeypa
 
     for expected_x in (5.0, 8.0):
         assert (
-            planner.decorate_state({"nav_status": "active"})[
-                "objective_continuation"
-            ]["phase"]
+            planner.decorate_state({"nav_status": "active"})["objective_continuation"][
+                "phase"
+            ]
             == "following_local"
         )
         bridge.nav_status = "succeeded"
@@ -1376,7 +1376,9 @@ def test_prefix_sections_without_progress_end_the_objective_with_a_reason(
     # The third stalled section is refused before dispatch.
     assert bridge.follow_path.call_count == 3
     reason = planner.decorate_state({"nav_status": "failed"})["nav_failure_reason"]
-    assert "came no closer to its goal across 3 consecutive validated sections" in reason
+    assert (
+        "came no closer to its goal across 3 consecutive validated sections" in reason
+    )
 
 
 def test_partial_navigate_rejects_final_chunk_before_exact_endpoint(monkeypatch):

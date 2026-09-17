@@ -1130,9 +1130,7 @@ class MggObjectivePlanning:
                     self._rolling_no_progress_sections = 0
                 else:
                     self._rolling_no_progress_sections += 1
-                stalled = (
-                    self._rolling_no_progress_sections >= PREFIX_NO_PROGRESS_LIMIT
-                )
+                stalled = self._rolling_no_progress_sections >= PREFIX_NO_PROGRESS_LIMIT
             if stalled:
                 return (
                     "failed",
