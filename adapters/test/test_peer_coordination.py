@@ -1,8 +1,10 @@
 import json
+import math
 import sys
 from types import SimpleNamespace as NS
 import uuid
 import numpy as np
+import pytest
 from adapters.peer_coordination import PeerCoordinator
 from adapters.exploration import PlannerPath, PlannerPose
 
@@ -518,3 +520,95 @@ def test_stale_lease_retains_and_validates_one_plan_authority_binding(monkeypatc
     assert coordinator.generation == 4
     assert coordinator.token is None
     assert coordinator.reservation_signature is None
+
+
+def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch):
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=lambda **kw: NS(**kw)))
+    monkeypatch.setitem(
+        sys.modules,
+        "geometry_msgs.msg",
+        NS(
+            Pose=lambda: NS(position=NS(x=0, y=0, z=0), orientation=NS(w=1)),
+            PoseArray=lambda: NS(header=NS(frame_id=""), poses=[]),
+        ),
+    )
+    mission = str(uuid.uuid4())
+    wire, now = [], [0.0]
+
+    def coordinator(robot, start):
+        sent = []
+        node = NS(
+            create_publisher=lambda *args: NS(
+                publish=lambda msg: (
+                    (sent.append(msg), wire.append(msg))
+                    if hasattr(msg, "data")
+                    else sent.append(msg)
+                )
+            ),
+            create_subscription=lambda *args: None,
+        )
+        value = PeerCoordinator(
+            NS(node=node, id=robot, map_frame="map"),
+            {"deployment_start_pose": start},
+        )
+        value.clock = lambda: now[0]
+        value.on_authority(
+            NS(
+                data=json.dumps(
+                    {
+                        "robot_id": robot,
+                        "mission_id": mission,
+                        "participants": ["r0", "r1"],
+                        # Each robot holds its own map component.
+                        "component_id": f"component:{robot}",
+                        "solution_order": [0, -1],
+                        "navigation_frame": "map",
+                        "T_component_navigation": np.eye(4).tolist(),
+                    }
+                )
+            )
+        )
+        return value, sent
+
+    # Both start facing -y, 2 m apart; each plans 5 m straight ahead in its own
+    # map frame, which is the same place on the ground give or take 2 m.
+    r0, _ = coordinator("r0", {"x": -11.2, "y": 4.0, "yaw": -math.pi / 2})
+    r1, r1_sent = coordinator("r1", {"x": -13.2, "y": 4.0, "yaw": -math.pi / 2})
+    ahead = PlannerPath(
+        "map", 100, (PlannerPose(0, 0, 0, 0, 0, 0, 1), PlannerPose(5, 0, 0, 0, 0, 0, 1))
+    )
+    assert r0.reserve(ahead, 1) == "pending"
+    claim = json.loads(wire[-1].data)
+    assert claim["component_id"] == f"deployment:{mission}"
+    assert claim["target"] == pytest.approx([-11.2, -1.0, 0.0])
+
+    longer = PlannerPath(
+        "map",
+        100,
+        (
+            PlannerPose(0, 0, 0, 0, 0, 0, 1),
+            PlannerPose(2, 2, 0, 0, 0, 0, 1),
+            PlannerPose(5, 0, 0, 0, 0, 0, 1),
+        ),
+    )
+    assert r1.reserve(longer, 1) == "pending"
+    r1.receive(NS(data=json.dumps(claim)))
+    now[0] = 1.0
+    assert r1.reserve(longer, 1) == "rejected"
+    assert r1.last_decision_reason == "conflict won by r0"
+    # MGG receives the winner's target in r1's own planning frame: 2 m to its
+    # left (+y) and 5 m ahead.
+    r1.publish_exclusions()
+    excluded = [m for m in r1_sent if hasattr(m, "poses") and m.poses][-1].poses[0]
+    assert (excluded.position.x, excluded.position.y) == pytest.approx((5.0, 2.0))
+
+    # A frontier on the far side of the street is nobody else's.
+    elsewhere = PlannerPath(
+        "map",
+        101,
+        (PlannerPose(0, 0, 0, 0, 0, 0, 1), PlannerPose(-9, 0, 0, 0, 0, 0, 1)),
+    )
+    assert r1.reserve(elsewhere, 2) == "pending"
+    now[0] = 2.0
+    assert r1.reserve(elsewhere, 2) == "granted"

@@ -116,6 +116,13 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     to delete returns that landed on a neighbour at the capture stamp; it feeds
     no pose estimate and is off on hardware. Trials that use it must say so,
     because hardware robots remain visible to each other.
+19. Frontier reservations are arbitrated only between robots that share a
+    frame: one verified map component, or, where a deployment has surveyed
+    every robot's start pose, that deployment frame
+    (`SWARMDECK_COORDINATION_FRAME=deployment`, on in simulation). The
+    deployment frame carries reservation targets only, whose radius absorbs
+    metres of drift; it never aligns maps, moves a pose or reaches a planner's
+    geometry. Without either, robots explore independently.
 
 ## Status
 

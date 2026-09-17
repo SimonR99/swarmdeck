@@ -2272,6 +2272,17 @@ def main() -> None:
                 in ("1", "true", "yes"),
                 "planar_tolerance_m": robot_spec(platforms[i]).max_step_height,
                 "max_inclination_rad": math.radians(30.0),
+                # The simulation knows where it spawned every robot, so
+                # frontier reservations can be arbitrated in that frame while
+                # the robots' maps stay separate components.
+                "deployment_start_pose": (
+                    (((fleet_cfg or {}).get("map") or {}).get("start_poses") or {}).get(
+                        f"{args.prefix}{i}"
+                    )
+                    if os.environ.get("SWARMDECK_COORDINATION_FRAME", "").lower()
+                    == "deployment"
+                    else None
+                ),
             },
             planning_config={
                 "backend": os.environ.get("SWARMDECK_PLANNING_BACKEND", ""),

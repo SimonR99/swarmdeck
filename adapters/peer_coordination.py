@@ -23,6 +23,23 @@ from adapters.mapping_authority import (
 )
 
 
+def deployment_transform(pose):
+    """Deployment-from-map transform of a surveyed start pose, or None."""
+    if not isinstance(pose, dict):
+        return None
+    try:
+        x, y = float(pose["x"]), float(pose["y"])
+        yaw = float(pose.get("yaw", 0.0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (x, y, yaw)):
+        return None
+    c, s = math.cos(yaw), math.sin(yaw)
+    return np.array(
+        [[c, -s, 0.0, x], [s, c, 0.0, y], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    )
+
+
 class PeerCoordinator:
     """Nonblocking reservation API used by MggExploration's command arbiter.
 
@@ -54,6 +71,15 @@ class PeerCoordinator:
         self.reservation_signature = None
         self.last_publish = 0.0
         self.radius = float(config.get("reservation_radius_m", 2.0))
+        # Leases are arbitrated inside one verified map component, so a fleet
+        # whose robots each hold their own component (inter-robot closures off)
+        # assigns no frontiers at all. A deployment that surveyed where every
+        # robot starts can arbitrate in that shared frame instead. It is used
+        # for reservations only, whose radius absorbs metres of drift; no map
+        # geometry ever passes through it.
+        self.deployment_from_map = deployment_transform(
+            config.get("deployment_start_pose")
+        )
         self.run_id, self.completion = None, None
         self.exhaustion_signature = None
         self.report_sequence, self.reported_at = 0, 0.0
@@ -103,7 +129,15 @@ class PeerCoordinator:
             transform = selected["T_component_navigation"]
             if "solution_order" not in value:
                 return
-            signature = (value["mission_id"], value["component_id"])
+            component = value["component_id"]
+            if self.deployment_from_map is not None:
+                map_from_planning = np.linalg.solve(
+                    np.asarray(value["T_component_navigation"], dtype=float),
+                    np.asarray(transform, dtype=float),
+                )
+                transform = (self.deployment_from_map @ map_from_planning).tolist()
+                component = f"deployment:{value['mission_id']}"
+            signature = (value["mission_id"], component)
             if self.authority:
                 reservation_changed = (
                     self.token is not None
@@ -131,7 +165,7 @@ class PeerCoordinator:
                     set(value["participants"]),
                     clock=self.clock,
                 )
-            self.arbiter.set_component(value["component_id"])
+            self.arbiter.set_component(component)
             self.raw_authority = value
             self.authority = {
                 **selected,

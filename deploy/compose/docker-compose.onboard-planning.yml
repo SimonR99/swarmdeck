@@ -14,6 +14,10 @@ services:
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_MAPPING_AUTHORITY: onboard
       SWARMDECK_PEER_COORDINATION: "1"
+      # Inter-robot closures are off, so every robot is its own map component
+      # and component-scoped leases would assign no frontiers. Arbitrate in
+      # the frame of the configured start poses instead.
+      SWARMDECK_COORDINATION_FRAME: ${SWARMDECK_COORDINATION_FRAME:-deployment}
       SWARMDECK_PLANNING_BACKEND: mgg
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
   mgg:
