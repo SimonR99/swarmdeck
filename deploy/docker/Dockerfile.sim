@@ -58,7 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Declared just before its use so a pin change does not invalidate the apt
 # layers above.
-ARG MGG_REV=3a548d4a5cebc9b54262072f1492035221e1f513
+ARG MGG_REV=820f85e2fd89dfbf33f369e03bff4f56473260fe
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV"
 ENV AMENT_PREFIX_PATH="/opt/swarmdeck-mgg-msgs:${AMENT_PREFIX_PATH}" \

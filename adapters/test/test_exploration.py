@@ -260,6 +260,37 @@ def test_start_stop_and_late_paths():
     explorer.stop_client.call_async.assert_called_once()
 
 
+def test_departure_delay_is_served_by_the_tick_and_cancelled_by_stop(monkeypatch):
+    from adapters import exploration
+
+    now = [100.0]
+    monkeypatch.setattr(exploration.time, "monotonic", lambda: now[0])
+    bridge, explorer = rig()
+    explorer.start(delay_s=8.0)
+    assert not explorer.active
+    assert explorer.status == "waiting"
+    assert "departing in turn" in explorer.reason
+    explorer.start_client.call_async.assert_not_called()
+    # A repeated command neither restarts the wait nor jumps the queue.
+    now[0] = 104.0
+    explorer.start(delay_s=8.0)
+    explorer.tick()
+    explorer.start_client.call_async.assert_not_called()
+    now[0] = 108.1
+    explorer.tick()
+    explorer.start_client.call_async.assert_called_once()
+    assert explorer.departure_at is None
+
+    # Stop before the turn comes: the robot never departs.
+    bridge, explorer = rig()
+    explorer.start(delay_s=8.0)
+    explorer.stop()
+    now[0] = 200.0
+    explorer.tick()
+    explorer.start_client.call_async.assert_not_called()
+    assert not explorer.active and explorer.status == "stopped"
+
+
 def test_newer_path_cannot_replace_active_controller_goal():
     bridge, explorer = rig()
     explorer.start()

@@ -2273,6 +2273,11 @@ def main() -> None:
                 in ("1", "true", "yes"),
                 "planar_tolerance_m": robot_spec(platforms[i]).max_step_height,
                 "max_inclination_rad": math.radians(30.0),
+                # Robots spawned 2 m apart leave in turn, so nobody plans its
+                # first route through a neighbour that has yet to move.
+                "departure_stagger_s": float(
+                    os.environ.get("SWARMDECK_EXPLORE_STAGGER_S", "0") or 0
+                ),
                 # The simulation knows where it spawned every robot, so
                 # frontier reservations can be arbitrated in that frame while
                 # the robots' maps stay separate components.

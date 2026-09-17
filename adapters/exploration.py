@@ -150,6 +150,11 @@ def follow_path_goal(plan: PlannerPath):
 
 
 class MggExploration:
+    # Class defaults keep an explorer assembled without __init__ (tests, and
+    # subclasses that build their own clients) from departing on a delay.
+    departure_at = None
+    departure_stagger_s = 0.0
+
     def __init__(self, bridge, config):
         from std_srvs.srv import Trigger
         from nav_msgs.msg import Path
@@ -159,6 +164,10 @@ class MggExploration:
 
         self.bridge = bridge
         self.awaiting_terminal = False
+        self.departure_at = None
+        self.departure_stagger_s = self._bounded_float(
+            config.get("departure_stagger_s", 0.0), 0.0, 120.0, 0.0
+        )
         self.status = "idle"
         self.reason = None
         self.active = False
@@ -253,9 +262,24 @@ class MggExploration:
             return default
         return min(upper, max(lower, parsed))
 
-    def start(self):
+    def start(self, delay_s=0.0):
+        """Start exploring, optionally after a departure delay.
+
+        A fleet told to explore from a grouped start leaves in turn: every
+        robot's first route otherwise runs through neighbours that have not
+        moved yet, which no map contains. The delay is served in ``tick`` and
+        any stop or manual command cancels it.
+        """
         if self.active:
             return
+        if delay_s > 0.0 and self.departure_at is None:
+            self.departure_at = time.monotonic() + delay_s
+            self.status = "waiting"
+            self.reason = f"departing in turn, in {delay_s:.0f} s"
+            return
+        if self.departure_at is not None and time.monotonic() < self.departure_at:
+            return
+        self.departure_at = None
         self.reason = None
         if any(
             future is not None and not future.done()
@@ -346,6 +370,7 @@ class MggExploration:
             self.stop(status="blocked" if request_kind == "replan" else "stopped")
 
     def stop(self, *, notify_planner=True, status="stopped", cancel_navigation=True):
+        self.departure_at = None
         self.status = status
         if status in ("complete", "locally_exhausted"):
             self.reason = None
@@ -386,6 +411,8 @@ class MggExploration:
         # A planner restart can orphan a DDS request forever. Retire expired
         # futures even after Stop, so a later operator start can recover.
         now = time.monotonic()
+        if self.departure_at is not None and now >= self.departure_at:
+            self.start()
         self._completed_goal_superseded()
         self._check_controller_result(now)
         self._drive_controller_replan(now)
