@@ -75,10 +75,12 @@ BISTRO_APERTURE = 2.0
 BISTRO_SHUTTER = 0.02
 BISTRO_ISO = 400.0
 
-# Shared deployment on a clear street patch; z clears the local cobblestones.
+# Shared deployment on the crown of the street; z clears the local cobblestones.
+# The road is cambered into a gutter along the west kerb, and a light robot
+# spawned at x = -14 slides into it, so both columns keep 1.2 m or more from a kerb.
 BISTRO_DEFAULT_START_POSES = {
     f"robot_{i}": {"x": x, "y": y, "z": 0.15, "yaw": -math.pi / 2}
-    for i, (x, y) in enumerate(((-12, 4), (-12, 6), (-14, 4), (-14, 6)))
+    for i, (x, y) in enumerate(((-11.2, 4), (-11.2, 6), (-13.2, 4), (-13.2, 6)))
 }
 
 # Safe street / sidewalk coordinates for detection targets in Bistro

@@ -22,12 +22,16 @@ map:
   merge_mode: graph         # pose-graph occupancy; no grid registration
   size_m: 120.0             # merged grid extent for the Bistro street network
   resolution: 0.05
-  # Shared street deployment; 2 m spacing leaves clearance for every platform.
+  # Shared street deployment on the crown of the road. The street is cambered
+  # into a gutter along the west kerb (x near -14.9): at x = -14 the Scout slid
+  # 0.4 m west after every spawn and came to rest against the kerb, where its
+  # own footprint fails the terrain check and it never gets a path (measured
+  # 2026-09-17). Both columns now stand 1.2 m or more from a kerb, 2 m apart.
   start_poses:
-    robot_0: {x: -12.0, y: 4.0, z: 0.15, yaw: -1.5707963268}
-    robot_1: {x: -12.0, y: 6.0, z: 0.15, yaw: -1.5707963268}
-    robot_2: {x: -14.0, y: 4.0, z: 0.15, yaw: -1.5707963268}
-    robot_3: {x: -14.0, y: 6.0, z: 0.15, yaw: -1.5707963268}
+    robot_0: {x: -11.2, y: 4.0, z: 0.15, yaw: -1.5707963268}
+    robot_1: {x: -11.2, y: 6.0, z: 0.15, yaw: -1.5707963268}
+    robot_2: {x: -13.2, y: 4.0, z: 0.15, yaw: -1.5707963268}
+    robot_3: {x: -13.2, y: 6.0, z: 0.15, yaw: -1.5707963268}
 
 alerts:
   unattended_threshold_s: 45
