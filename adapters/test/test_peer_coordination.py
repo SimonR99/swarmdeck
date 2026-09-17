@@ -611,6 +611,34 @@ def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch)
     assert not np.allclose(r0.authority["T_component_navigation"], np.eye(4))
     assert np.allclose(r0.reservation_transform, np.eye(4))
 
+    # Each robot reports where it stands; the other's planner receives it as
+    # a body in its own planning frame. r0 has driven 1 m forward and stands
+    # 2 m to r1's left and 1 m ahead of it.
+    r0.bridge.map_pose = lambda: {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    r1.bridge.map_pose = lambda: {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    r0.publish_peer_bodies()
+    report = json.loads(wire[-1].data)
+    assert (report["robot_id"], report["x"], report["y"]) == (
+        "r0",
+        pytest.approx(-11.2),
+        pytest.approx(3.0),
+    )
+    r1.receive_peer_pose(wire[-1])
+    r1.receive_peer_pose(NS(data=json.dumps({**report, "robot_id": "r1"})))
+    r1.receive_peer_pose(NS(data=json.dumps({**report, "session_id": "other"})))
+    r1.publish_peer_bodies()
+    bodies = [m for m in r1_sent if hasattr(m, "poses")][-1]
+    assert bodies.header.frame_id == r1.frame
+    assert [(b.position.x, b.position.y) for b in bodies.poses] == [
+        pytest.approx((1.0, 2.0))
+    ]
+    # Reports that stop arriving stop blocking the planner.
+    now[0] += 4.0
+    r1.on_authority(NS(data=json.dumps(r1.raw_authority | {"solution_order": [1, 0]})))
+    r1.publish_peer_bodies()
+    assert [m for m in r1_sent if hasattr(m, "poses")][-1].poses == []
+    now[0] = 1.0
+
     # A frontier on the far side of the street is nobody else's.
     elsewhere = PlannerPath(
         "map",

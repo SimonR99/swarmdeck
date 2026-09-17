@@ -58,7 +58,7 @@ local obstacle avoidance, and the adapter owns the final command boundary.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`820f85e2fd89dfbf33f369e03bff4f56473260fe` (the 59 ported commits over
+`004c517b90a0295940d8f851a4922138d63b0e53` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
@@ -122,7 +122,10 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     (`SWARMDECK_COORDINATION_FRAME=deployment`, on in simulation). The
     deployment frame carries reservation targets only, whose radius absorbs
     metres of drift; it never aligns maps, moves a pose or reaches a planner's
-    geometry. Without either, robots explore independently.
+    geometry. Without either, robots explore independently. The same frame
+    carries each robot's reported position to its peers' planners as a
+    transient keep-out disc; it expires with the reports and is never stored
+    in a map.
 
 ## Status
 

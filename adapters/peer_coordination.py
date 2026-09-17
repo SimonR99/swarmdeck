@@ -103,6 +103,24 @@ class PeerCoordinator:
         self.authority_subscription = bridge.node.create_subscription(
             String, f"/{bridge.id}/map_authority", self.on_authority, 5
         )
+        # Where the other robots stand. They are masked out of every map, so
+        # the planner learns about them here: each robot reports its position
+        # in the deployment frame and hands the others' to its own MGG, which
+        # keeps a disc around each clear of routes for as long as reports come.
+        self.peer_positions = {}
+        self.peer_bodies_at = 0.0
+        self.peer_pose_publisher = self.peer_pose_subscription = None
+        self.peer_bodies_publisher = None
+        if self.deployment_from_map is not None:
+            self.peer_pose_publisher = bridge.node.create_publisher(
+                String, "/swarmdeck/peer_poses", 20
+            )
+            self.peer_pose_subscription = bridge.node.create_subscription(
+                String, "/swarmdeck/peer_poses", self.receive_peer_pose, 20
+            )
+            self.peer_bodies_publisher = bridge.node.create_publisher(
+                PoseArray, f"/{bridge.id}/mgg/peer_bodies", 5
+            )
 
     def publish(self, intention):
         if intention is not None:
@@ -262,9 +280,74 @@ class PeerCoordinator:
         self.exclusions_publisher.publish(message)
         self.exclusions_at = self.clock()
 
+    def receive_peer_pose(self, msg):
+        try:
+            if len(msg.data) > 512:
+                return
+            value = json.loads(msg.data)
+            robot, x, y = str(value["robot_id"]), float(value["x"]), float(value["y"])
+            if (
+                robot == self.bridge.id
+                or not self.raw_authority
+                or value["session_id"] != self.raw_authority["mission_id"]
+                or robot not in self.raw_authority["participants"]
+                or not (math.isfinite(x) and math.isfinite(y))
+            ):
+                return
+            self.peer_positions[robot] = (x, y, self.clock())
+        except (ValueError, KeyError, TypeError):
+            return
+
+    def publish_peer_bodies(self):
+        """Report this robot's position and hand the peers' to the planner."""
+        self.peer_bodies_at = self.clock()
+        if self.peer_bodies_publisher is None or not self.authority:
+            return
+        fresh = self.clock() - self.received_at <= 3.0
+        pose = getattr(self.bridge, "map_pose", None)
+        try:
+            pose = pose() if callable(pose) else None
+            if fresh and pose is not None:
+                here = self.deployment_from_map @ np.array(
+                    [float(pose["x"]), float(pose["y"]), 0.0, 1.0]
+                )
+                if np.all(np.isfinite(here)):
+                    self.peer_pose_publisher.publish(
+                        self.msg_type(
+                            data=json.dumps(
+                                {
+                                    "robot_id": self.bridge.id,
+                                    "session_id": self.raw_authority["mission_id"],
+                                    "x": float(here[0]),
+                                    "y": float(here[1]),
+                                }
+                            )
+                        )
+                    )
+        except (KeyError, TypeError, ValueError):
+            pass
+        message = self.exclusions_type()
+        message.header.frame_id = self.frame
+        if fresh:
+            planning_from_deployment = np.linalg.inv(
+                self.authority["T_component_navigation"]
+            )
+            for robot, (x, y, seen) in self.peer_positions.items():
+                if self.clock() - seen > 3.0:
+                    continue
+                xyz = planning_from_deployment @ np.array([x, y, 0.0, 1.0])
+                body = self.pose_type()
+                body.position.x, body.position.y = float(xyz[0]), float(xyz[1])
+                body.position.z = 0.0
+                body.orientation.w = 1.0
+                message.poses.append(body)
+        self.peer_bodies_publisher.publish(message)
+
     def tick(self):
         if self.clock() - self.reported_at >= 1.0:
             self.report_progress()
+        if self.clock() - self.peer_bodies_at >= 0.5:
+            self.publish_peer_bodies()
         if self.clock() - self.exclusions_at >= 0.5:
             self.publish_exclusions()
         if self.arbiter is None or self.arbiter.local is None:
