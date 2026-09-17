@@ -89,7 +89,7 @@ def test_normalized_points_keep_physical_lidar_origin(tmp_path):
     assert submap.sensor_origins == ((0, 0, 1.2),)
 
 
-def test_identical_new_solver_result_advances_replica_without_map_revision(tmp_path):
+def test_identical_solver_results_do_not_rename_the_component_frame(tmp_path):
     core = CslamMapper(
         CorrectionAwareMapper(SubmapStore(tmp_path)),
         "r0",
@@ -109,46 +109,31 @@ def test_identical_new_solver_result_advances_replica_without_map_revision(tmp_p
     )
     revision = core.revision
     initial = core.envelope()
-    replica_revision = initial["revision"]
-    snapshot_id = initial["snapshot"]["snapshot_id"]
-    geometry_revision = initial["snapshot"]["manifests"][0]["geometry_revision"]
-    replica = ReplicaStore(tmp_path / "replica")
-    for chunk in initial["chunks"]:
-        replica.put_chunk(chunk["sha256"], core.mapper.get_chunk(chunk["sha256"]))
-    assert replica.publish(initial)
-    assert not core.solution(msg)
-    assert core.solution_order == (1, 0)
-    assert core.revision == revision
-    assert core.correction_revision == 0
-    envelope = core.envelope()
-    assert envelope["solution_order"] == [1, 0]
-    assert envelope["revision"] == replica_revision + 1
-    assert envelope["snapshot"] == initial["snapshot"]
-    assert envelope["snapshot"]["snapshot_id"] == snapshot_id
-    assert (
-        envelope["snapshot"]["manifests"][0]["graph_revision"]["revision"] == revision
-    )
-    assert (
-        envelope["snapshot"]["manifests"][0]["geometry_revision"] == geometry_revision
-    )
-    assert replica.publish(envelope)
+    # The solver reports every few seconds whether or not anything moved. A
+    # goal is only accepted for the advertised solution order, and the replica
+    # cannot follow one revision per report, so an unchanged result must leave
+    # the order, the map revision and the replica revision alone.
+    for clock in (1, 2, 3):
+        msg.solution_clock = clock
+        assert not core.solution(msg)
+        assert core.solution_order == (0, -1)
+        assert core.revision == revision
+        assert core.correction_revision == 0
+        assert core.envelope() == initial
 
+    # The clock is still remembered: a replayed result is not processed again.
     msg.solution_clock = 2
-    assert not core.solution(msg)
-    second_noop = core.envelope()
-    assert core.revision == revision
-    assert second_noop["revision"] == replica_revision + 2
-    assert second_noop["snapshot"] == initial["snapshot"]
-    assert replica.publish(second_noop)
-
-    msg.solution_clock = 3
     msg.estimates = [value(0, 0, 1)]
     msg.anchor_estimates = [value(0, 0, 1)]
+    assert not core.solution(msg)
+    assert core.correction_revision == 0
+
+    msg.solution_clock = 4
     assert core.solution(msg)
+    assert core.solution_order == (4, 0)
     assert core.revision == revision + 1
-    assert core.envelope()["revision"] == replica_revision + 3
+    assert core.envelope()["revision"] == initial["revision"] + 1
     assert core.correction_revision == 1
-    replica.close()
 
 
 def test_snapshot_publication_ignores_replica_only_updates(tmp_path):
@@ -258,15 +243,15 @@ def test_solver_noise_below_tolerance_is_not_a_correction(tmp_path):
     revision = core.revision
     replica_revision = core.envelope()["revision"]
 
-    # One millimetre of solver noise: causal state advances, geometry does not.
+    # One millimetre of solver noise: neither the frame nor the geometry moves.
     msg.solution_clock = 2
     msg.estimates = [value(0, 0, 0.001)]
     msg.anchor_estimates = [value(0, 0, 0.001)]
     assert not core.solution(msg)
-    assert core.solution_order == (2, 0)
+    assert core.solution_order == (0, -1)
     assert core.revision == revision
     assert core.correction_revision == 0
-    assert core.envelope()["revision"] == replica_revision + 1
+    assert core.envelope()["revision"] == replica_revision
 
     # Repeated noise that never exceeds the tolerance still applies nothing.
     msg.solution_clock = 3

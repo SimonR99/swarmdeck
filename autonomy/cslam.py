@@ -111,6 +111,8 @@ class CslamMapper:
         self.poses, self.local_poses, self.capture_digests = {}, {}, {}
         self.T_component_local = np.eye(4)
         self.solution_order = (0, -1)
+        # Newest solver clock accepted, whether or not it moved a pose.
+        self.solver_order = (0, -1)
         self.revision = 0
         self.replica_revision = 0
         self.correction_revision = 0
@@ -193,7 +195,7 @@ class CslamMapper:
         if not message.success or message.mission_id != self.mission_id:
             return False
         order = (int(message.solution_clock), int(message.optimizer_robot_id))
-        if order <= self.solution_order:
+        if order <= max(self.solution_order, self.solver_order):
             return False
         # Anchor values are supplied by the solver, not inferred from robot
         # starts, proximity, or a dashboard transform.
@@ -234,14 +236,18 @@ class CslamMapper:
             )
             for key, pose in poses.items()
         )
-        self.solution_order = order
+        self.solver_order = order
         if not changed:
-            # Accepted solver clocks are causal map state even when the poses
-            # are numerically unchanged. Advance the replica publication
-            # without manufacturing a new graph revision and forcing MOLA to
-            # rebuild an identical pose product.
-            self.replica_revision += 1
+            # The advertised solution order names the component frame, and
+            # every goal is checked against it. A result that moves no pose
+            # leaves that frame as it was, so it must not rename it: the
+            # solver reports every few seconds, the replica cannot follow a
+            # revision per report, and the server then refuses every goal for
+            # this robot as a stale frame (robot at [1597, 0], replica at
+            # [88, 0] after four idle hours, 2026-09-17). Remember the clock
+            # for ordering only.
             return False
+        self.solution_order = order
         if anchor != self.anchor:
             self.epoch += 1
         self.anchor, self.poses = anchor, poses
