@@ -95,6 +95,58 @@ def test_failed_large_upload_commits_reclamation_without_changing_manifest(tmp_p
     store.close()
 
 
+def test_budget_pressure_retires_the_oldest_missions_but_never_the_current_one(
+    tmp_path,
+):
+    now = [0.0]
+    store = ReplicaStore(tmp_path, max_bytes=12, retention_s=10, clock=lambda: now[0])
+    oldest, older, current = (str(uuid4()) for _ in range(3))
+    upload(store, manifest(oldest, b"aaaa"), b"aaaa")
+    # Geometry shared with a surviving mission outlives its first owner.
+    store.publish(manifest(current, b"aaaa", robot="r1"))
+    now[0] = 1
+    upload(store, manifest(older, b"bbbb"), b"bbbb")
+    now[0] = 2
+    upload(store, manifest(current, b"cccc"), b"cccc")
+    # Inside the retention interval every mission still blocks the upload.
+    fresh = manifest(current, b"dddd", 2)
+    with pytest.raises(OverflowError):
+        store.put_chunk(fresh["chunks"][0]["sha256"], b"dddd")
+    assert len(store.index()) == 4
+    now[0] = 100
+    upload(store, fresh, b"dddd")
+    assert store.get("r0", oldest) is None
+    assert store.get("r0", older) is None
+    assert not store.has_chunk(manifest(older, b"bbbb")["chunks"][0]["sha256"])
+    assert store.read_chunk(manifest(oldest, b"aaaa")["chunks"][0]["sha256"]) == b"aaaa"
+    assert store.get("r1", current)["revision"] == 1
+    assert store.get("r0", current) == fresh
+    # The mission being mapped is never retired to make room for itself.
+    now[0] = 200
+    with pytest.raises(OverflowError):
+        store.put_chunk(hashlib.sha256(b"eeeee").hexdigest(), b"eeeee")
+    assert store.get("r0", current) == fresh
+    store.close()
+
+
+def test_history_recorded_before_publication_times_is_dated_by_its_geometry(tmp_path):
+    now = [0.0]
+    store = ReplicaStore(tmp_path, max_bytes=8, retention_s=10, clock=lambda: now[0])
+    first, second = str(uuid4()), str(uuid4())
+    upload(store, manifest(first, b"aaaa"), b"aaaa")
+    now[0] = 5
+    upload(store, manifest(second, b"bbbb"), b"bbbb")
+    store.db.execute("DROP TABLE sessions")
+    store.db.commit()
+    store.close()
+    now[0] = 100
+    store = ReplicaStore(tmp_path, max_bytes=8, retention_s=10, clock=lambda: now[0])
+    store.put_chunk(hashlib.sha256(b"cccc").hexdigest(), b"cccc")
+    assert store.get("r0", first) is None
+    assert store.get("r0", second) == manifest(second, b"bbbb")
+    store.close()
+
+
 def test_old_schema_migration_preserves_references_and_recovers_interrupted_deletion(
     tmp_path,
 ):

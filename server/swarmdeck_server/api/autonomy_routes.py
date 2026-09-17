@@ -3,6 +3,7 @@
 import asyncio
 from functools import lru_cache
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from autonomy.replication import (
 )
 
 router = APIRouter(prefix="/api/autonomy", tags=["autonomy"])
+log = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -103,6 +105,9 @@ async def put_chunk(digest: str, request: Request):
         changed = await asyncio.to_thread(store().put_chunk, digest, body)
         return {"ok": True, "changed": changed}
     except OverflowError as exc:
+        # A rejected chunk stops that robot's replica from advancing, and the
+        # peer records only the status code; say why on the receiving side.
+        log.warning("Rejected replica chunk %s: %s", digest, exc)
         return JSONResponse({"error": str(exc)}, status_code=413)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

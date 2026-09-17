@@ -111,6 +111,12 @@ class ReplicaStore:
             self.db.execute(
                 "CREATE INDEX IF NOT EXISTS chunks_touched ON chunks(touched)"
             )
+            # Publication recency per mission orders history retirement under
+            # budget pressure. It lives beside `manifests` so that table keeps
+            # its layout for stores written by earlier releases.
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS sessions (session TEXT PRIMARY KEY, published REAL NOT NULL)"
+            )
             if not indexed:
                 for robot, session, body in self.db.execute(
                     "SELECT robot, session, body FROM manifests"
@@ -131,6 +137,14 @@ class ReplicaStore:
                         )
             self.db.executemany(
                 "DELETE FROM chunks WHERE hash=?", ((h,) for h in known.keys() - found)
+            )
+            # Missions published before recency was recorded are dated by their
+            # newest geometry, which was uploaded no later than the manifest.
+            self.db.execute(
+                "INSERT OR IGNORE INTO sessions "
+                "SELECT m.session, COALESCE(MAX(c.touched), 0) FROM manifests m "
+                "LEFT JOIN chunk_refs r ON r.robot=m.robot AND r.session=m.session "
+                "LEFT JOIN chunks c ON c.hash=r.hash GROUP BY m.session"
             )
 
     @contextmanager
@@ -163,7 +177,8 @@ class ReplicaStore:
 
         The grace interval starts again when a chunk loses a manifest reference
         or is uploaded again. Slow uploaders can renegotiate missing hashes.
-        No current or historical session manifest is retired implicitly.
+        This collection retires no manifest; only an upload that still does
+        not fit afterwards retires history (see `_retire_history`).
         """
         if type(limit) is not int or not 1 <= limit <= 4096:
             raise ValueError("Collection limit must be between 1 and 4096")
@@ -186,6 +201,49 @@ class ReplicaStore:
             "bytes": sum(size for _, size in rows),
             "dry_run": dry_run,
         }
+
+    def _retire_history(self, needed):
+        """Free `needed` bytes by retiring whole missions, oldest first.
+
+        Historical manifests protect their geometry indefinitely, so a store
+        that only collects unreferenced chunks eventually fills with history
+        and rejects every upload of the mission being mapped. The most
+        recently published mission is never retired, nor is one published
+        within the retention interval. A retired mission's exclusive geometry
+        is deleted at once: a grace interval here would keep the live map
+        blocked for as long as it lasted.
+        """
+        rows = self.db.execute(
+            "SELECT m.session, COALESCE(MAX(s.published), 0) AS published "
+            "FROM manifests m LEFT JOIN sessions s ON s.session=m.session "
+            "GROUP BY m.session ORDER BY published, m.session"
+        ).fetchall()
+        cutoff = self.clock() - self.retention_s
+        freed, retired = 0, []
+        for session, published in rows[:-1]:
+            if freed >= needed or published > cutoff:
+                break
+            owned = [
+                row[0]
+                for row in self.db.execute(
+                    "SELECT DISTINCT hash FROM chunk_refs WHERE session=?", (session,)
+                )
+            ]
+            self.db.execute("DELETE FROM chunk_refs WHERE session=?", (session,))
+            self.db.execute("DELETE FROM manifests WHERE session=?", (session,))
+            self.db.execute("DELETE FROM sessions WHERE session=?", (session,))
+            for digest in owned:
+                row = self.db.execute(
+                    "SELECT size FROM chunks WHERE hash=? AND NOT EXISTS "
+                    "(SELECT 1 FROM chunk_refs WHERE chunk_refs.hash=chunks.hash)",
+                    (digest,),
+                ).fetchone()
+                if row:
+                    (self.chunks / digest).unlink(missing_ok=True)
+                    self.db.execute("DELETE FROM chunks WHERE hash=?", (digest,))
+                    freed += row[0]
+            retired.append(session)
+        return {"sessions": retired, "bytes": freed}
 
     def close(self):
         with self.lock:
@@ -217,10 +275,14 @@ class ReplicaStore:
                 "SELECT COALESCE(SUM(size), 0) FROM chunks"
             ).fetchone()[0]
             if used + len(data) > self.max_bytes:
-                reclaimed = self._collect_unreferenced(256)
-                if used - reclaimed["bytes"] + len(data) > self.max_bytes:
+                used -= self._collect_unreferenced(256)["bytes"]
+                if used + len(data) > self.max_bytes:
+                    used -= self._retire_history(used + len(data) - self.max_bytes)[
+                        "bytes"
+                    ]
+                if used + len(data) > self.max_bytes:
                     # Commit collection metadata even when this batch cannot
-                    # free enough room. Publication is never changed.
+                    # free enough room. The current mission is never changed.
                     return None
             with tempfile.NamedTemporaryFile(dir=self.chunks, delete=False) as out:
                 temp = Path(out.name)
@@ -300,6 +362,9 @@ class ReplicaStore:
             self.db.execute(
                 "INSERT OR REPLACE INTO manifests VALUES (?, ?, ?, ?)",
                 (robot, session, revision, body),
+            )
+            self.db.execute(
+                "INSERT OR REPLACE INTO sessions VALUES (?, ?)", (session, self.clock())
             )
             return True
 

@@ -387,9 +387,16 @@ reclaims up to 256 unreferenced chunks whose grace interval has elapsed. The
 interval defaults to one hour (`SWARMDECK_REPLICA_RETENTION_S`) and starts again
 when geometry loses a manifest reference or is uploaded again. Every published
 robot/session manifest protects its referenced chunks, including shared geometry
-and historical missions. A robot uploading over a very slow connection may need
-to renegotiate missing hashes after the grace interval. Pose-only corrections
-reuse geometry and do not make its chunks eligible for collection.
+and historical missions. If the upload still does not fit, the store retires
+whole historical missions, oldest publication first, and deletes the geometry
+only they referenced at once; it never retires the most recently published
+mission or one published within the retention interval. Without this, history
+fills the budget and every chunk of the mission being mapped is rejected with
+HTTP 413, which freezes the 3D replica view at its first revisions (observed on
+Benchbot on 2026-09-17 with 67 missions in the store). A robot uploading over
+a very slow connection may need to renegotiate missing hashes after the grace
+interval. Pose-only corrections reuse geometry and do not make its chunks
+eligible for collection.
 
 Inspect a bounded collection batch without deleting geometry:
 
