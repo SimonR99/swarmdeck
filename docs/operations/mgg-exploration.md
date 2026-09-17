@@ -392,6 +392,19 @@ terrain therefore need not invalidate the entire request before motion starts.
 Local grid repair stays within the current section; it does not replace a
 long graph route with a full-distance grid search.
 
+When the indexed terrain validation of a Navigate or Home section fails only
+because its tail is unmeasured (unknown occupancy, ground or roughness not yet
+observed, or the provisional connector bound), the planner returns the
+validated prefix as the executable section: it ends on measured support, makes
+at least `partial_route_min_progress_m` of progress, and carries a
+continuation so the next section is refined on arrival as more floor is
+measured. Occupied space, steps, drops, clearance, roughness and geofence
+findings anywhere in the section still fail it closed. The adapter ends the
+objective after three consecutive validated sections that bring the closest
+planned endpoint no nearer to the goal (`PREFIX_NO_PROGRESS_LIMIT` in
+`adapters/objective_planning.py`), with the reason
+`MGG objective route came no closer to its goal`.
+
 Continuation retains the exact goal in the stable planning frame. Transforming
 the UI goal happens before planning; the final path is compared in that same
 frame. Route tokens, mission/component authority, and current map checks fence

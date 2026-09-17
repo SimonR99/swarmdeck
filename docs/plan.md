@@ -153,7 +153,9 @@ Each item names its acceptance gate.
       unimplemented; `queryIndexedMap` refuses height refinement and prefix
       truncation whenever speed limits are present, which must be resolved
       first.
-- [ ] **Cold-start Navigate beyond the first ground ring.** Gate: a 3 m goal
+- [ ] **Cold-start Navigate beyond the first ground ring.** Implemented as
+      validated-prefix sections with a continuation (MGG `pin-20260917`,
+      adapter no-progress bound of three sections); live check owed. Gate: a 3 m goal
       straight ahead succeeds for every platform from a fresh start. On
       2026-09-16 with the mask on, robot_0 and robot_3 arrived within 0.22 m,
       while robot_1 (one keyframe) was refused with `provisional terrain
@@ -161,7 +163,10 @@ Each item names its acceptance gate.
       unknown` because the goal lay beyond its first ground ring. Also explain
       robot_1's chronic stall at its start position (2.2 m in the same run
       where the other three explored 35 to 39 m).
-- [ ] **Peers as live obstacles for the global route.** Gate: at a grouped
+- [ ] **Peers as live obstacles for the global route.** Phantom bodies of
+      robots that have left are now retired by visibility (three later
+      qualified rays through the voxel); present neighbours remain an open
+      gate. Gate: at a grouped
       Bistro start, exploration routes avoid neighbouring robots and no robot
       ends in Nav2 `Failed to make progress` against a peer. The capture-time
       peer-body mask keeps robots out of the persistent map, so MGG's route

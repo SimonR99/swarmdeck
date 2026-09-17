@@ -74,6 +74,20 @@ it is not a filesystem quota. The worker forwards its point, context and output
 limits to the native process and checks the advertised effective limits. Worker
 and native CLI resource flags can override their defaults.
 
+## Visibility retirement of endpoints
+
+The planner product forgets dynamic objects by visibility, not by age. A
+stored endpoint is retired when at least `min_clearing_traversals` (default 3,
+`PlannerGridLimits` in `swarmdeck_ros/src/swarmdeck_mapping`) qualified free
+rays from captures observed later than every endpoint in its voxel pass
+through that voxel, and no newer endpoint lands there. A retired endpoint
+leaves the occupied set and the terrain surface samples, and its voxel becomes
+free. Rays observed before the endpoint prove nothing and do not count; a
+single ray counts once per voxel; unqualified captures neither carve nor
+retire. The `SDMGRID1` metadata carries `retired_count`, and every reader
+requires `surface_count + retired_count == point_count`; a grid without
+qualified rays must report zero retirements.
+
 ## Planner map provider
 
 Enable native planner products and select their query provider together:
