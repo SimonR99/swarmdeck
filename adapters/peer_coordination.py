@@ -130,6 +130,12 @@ class PeerCoordinator:
             if "solution_order" not in value:
                 return
             component = value["component_id"]
+            # What revokes a granted reservation is a correction of the robot's
+            # own map, judged on the component transform. The deployment
+            # transform also carries map-from-odometry drift, which moves a
+            # target by centimetres and is no reason to stop a path (Spot lost
+            # its reservation every 30 s to it, 2026-09-17).
+            guard = transform
             if self.deployment_from_map is not None:
                 map_from_planning = np.linalg.solve(
                     np.asarray(value["T_component_navigation"], dtype=float),
@@ -142,7 +148,7 @@ class PeerCoordinator:
                 reservation_changed = (
                     self.token is not None
                     and self.reservation_transform is not None
-                    and transform_change_squared(transform, self.reservation_transform)
+                    and transform_change_squared(guard, self.reservation_transform)
                     > 0.01
                 )
                 component_changed = (
@@ -171,6 +177,7 @@ class PeerCoordinator:
                 **selected,
                 "signature": signature,
                 "T_component_navigation": transform,
+                "reservation_guard": guard,
             }
             self.received_at = self.clock()
         except (ValueError, KeyError, TypeError):
@@ -208,7 +215,7 @@ class PeerCoordinator:
             self.generation, self.token = generation, token
             final = plan.poses[-1]
             T = np.asarray(self.authority["T_component_navigation"])
-            self.reservation_transform = self.authority["T_component_navigation"]
+            self.reservation_transform = self.authority["reservation_guard"]
             self.reservation_signature = self.authority["signature"]
             target = (T @ np.array([final.x, final.y, final.z, 1.0]))[:3]
             cost = sum(

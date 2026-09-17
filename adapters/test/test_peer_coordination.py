@@ -603,6 +603,14 @@ def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch)
     excluded = [m for m in r1_sent if hasattr(m, "poses") and m.poses][-1].poses[0]
     assert (excluded.position.x, excluded.position.y) == pytest.approx((5.0, 2.0))
 
+    # A granted reservation is guarded by the robot's own component transform.
+    # The deployment transform also carries odometry drift, which only moves
+    # the target and must not revoke a path.
+    assert r0.reserve(ahead, 1) == "granted"
+    assert np.allclose(r0.authority["reservation_guard"], np.eye(4))
+    assert not np.allclose(r0.authority["T_component_navigation"], np.eye(4))
+    assert np.allclose(r0.reservation_transform, np.eye(4))
+
     # A frontier on the far side of the street is nobody else's.
     elsewhere = PlannerPath(
         "map",
