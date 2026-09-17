@@ -4,6 +4,10 @@ seed: 20260801
 world: bistro
 
 fleet:
+  # Fleet-wide Explore releases the robots one at a time, head of the group
+  # first: the next leaves once the previous one is clearance_m from where it
+  # stood, or after timeout_s. Parked neighbours are in nobody's map.
+  departure: {clearance_m: 5.0, timeout_s: 30.0}
   robot_count: 4
   robot_prefix: robot_
   robot_type: bunker

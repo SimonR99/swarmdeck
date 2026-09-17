@@ -62,9 +62,7 @@ def test_explore_command_binds_common_run_before_start():
     calls = []
     coordinator = SimpleNamespace(begin_run=lambda *args: calls.append(("run", *args)))
     explorer = SimpleNamespace(
-        coordinator=coordinator,
-        active=False,
-        start=lambda delay_s=0.0: calls.append(("start",)),
+        coordinator=coordinator, active=False, start=lambda: calls.append(("start",))
     )
     bridge = SimpleNamespace(exploration=explorer)
 
@@ -87,25 +85,6 @@ def test_explore_command_binds_common_run_before_start():
     coordinator.run_id = "previous"
     asyncio.run(run())
     assert calls == [("run", "shared", ["r0", "r1"]), ("start",)]
-
-
-def test_fleet_explore_departs_in_robot_id_order():
-    from adapters.session import departure_delay_s
-
-    explorer = SimpleNamespace(departure_stagger_s=8.0)
-    command = {"participants": ["robot_2", "robot_0", "robot_3", "robot_1"]}
-    delays = [
-        departure_delay_s(SimpleNamespace(id=f"robot_{i}"), explorer, command)
-        for i in range(4)
-    ]
-    assert delays == [0.0, 8.0, 16.0, 24.0]
-    # One robot told to explore, an unknown robot, or no stagger: leave now.
-    alone = {"participants": ["robot_3"]}
-    assert departure_delay_s(SimpleNamespace(id="robot_3"), explorer, alone) == 0.0
-    assert departure_delay_s(SimpleNamespace(id="robot_9"), explorer, command) == 0.0
-    assert departure_delay_s(SimpleNamespace(id="robot_1"), explorer, {}) == 0.0
-    still = SimpleNamespace(departure_stagger_s=0.0)
-    assert departure_delay_s(SimpleNamespace(id="robot_1"), still, command) == 0.0
 
 
 @pytest.mark.parametrize("onboard", [False, True])

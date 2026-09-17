@@ -29,6 +29,7 @@ from ..config.settings import (
 )
 from ..detect.review import ReviewStore
 from ..events.logger import events
+from ..fleet.departure import departure_order, release_in_turn
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
 from .broadcast import JsonBroadcaster
@@ -103,6 +104,8 @@ SESSION: dict[str, Any] = {
 _gui_clients: set[WebSocket] = set()
 _gui_broadcaster = JsonBroadcaster(_gui_clients)
 _alerts: dict[str, dict[str, Any]] = {}
+# The one fleet-wide Explore still releasing its robots in turn, if any.
+_departure_task: asyncio.Task | None = None
 # alert_id → wall-clock time until which raise_alert is a no-op (after acknowledge)
 _alert_suppress_until: dict[str, float] = {}
 _camera_frames: dict[str, tuple[bytes, float, int]] = {}
@@ -576,6 +579,14 @@ def detection_position(robot_id: str, position: Any) -> dict[str, float] | None:
 # ----------------------------------------------------------------- reset
 
 
+def cancel_departures() -> None:
+    """Stop releasing robots of an earlier fleet-wide Explore."""
+    global _departure_task
+    if _departure_task is not None and not _departure_task.done():
+        _departure_task.cancel()
+    _departure_task = None
+
+
 async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
     """Put the simulation back to its start state.
 
@@ -592,6 +603,7 @@ async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
     robot whose SLAM did not actually reset will push its old map back within a
     couple of seconds and the operator needs to know why.
     """
+    cancel_departures()
     global _reset_done, _reset_running
 
     from .simulation_reset import request_reset, reset_root
@@ -1440,6 +1452,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
         await registry.send(rid, body_msg)
 
     elif kind == "stop_all":
+        cancel_departures()
         # Whether each robot was actually REACHED, not merely addressed. A stop
         # that went nowhere is the one command an operator must never be allowed
         # to believe succeeded, so the robots it failed to reach are named.
@@ -1479,10 +1492,10 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                 "No connected robot supports exploration",
             )
         else:
-            undelivered = [
-                robot_id
-                for robot_id in targets
-                if not await registry.send(
+            cancel_departures()
+
+            async def send_explore(robot_id: str) -> bool:
+                return await registry.send(
                     robot_id,
                     {
                         "type": "explore",
@@ -1492,10 +1505,44 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
                         **stamps(),
                     },
                 )
-            ]
-            events.log(
-                kind, {"robots": sorted(targets), "undelivered": sorted(undelivered)}
-            )
+
+            departure = (CONFIG.get("fleet") or {}).get("departure") or {}
+            clearance_m = float(departure.get("clearance_m", 0.0))
+            if enabled and len(targets) > 1 and clearance_m > 0.0:
+                # Robots parked together are in nobody's map, so they leave
+                # one at a time, head of the group first. Stop, Stop All, a
+                # reset or another Explore ends the sequence.
+                order = departure_order(
+                    {robot_id: registry.robots[robot_id].pose for robot_id in targets}
+                )
+
+                async def depart() -> None:
+                    undelivered = await release_in_turn(
+                        order,
+                        send_explore,
+                        lambda robot_id: (
+                            registry.robots[robot_id].pose
+                            if robot_id in registry.robots
+                            else None
+                        ),
+                        clearance_m=clearance_m,
+                        timeout_s=float(departure.get("timeout_s", 30.0)),
+                    )
+                    events.log(
+                        kind, {"robots": order, "undelivered": sorted(undelivered)}
+                    )
+
+                global _departure_task
+                _departure_task = asyncio.create_task(depart())
+                undelivered = []
+            else:
+                undelivered = [
+                    robot_id for robot_id in targets if not await send_explore(robot_id)
+                ]
+                events.log(
+                    kind,
+                    {"robots": sorted(targets), "undelivered": sorted(undelivered)},
+                )
             # Stop is the direction worth alerting on. A start that did not
             # arrive shows up immediately as robots that do not move; a stop
             # that did not arrive leaves them driving, which is the same class

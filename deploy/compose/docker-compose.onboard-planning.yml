@@ -18,9 +18,6 @@ services:
       # and component-scoped leases would assign no frontiers. Arbitrate in
       # the frame of the configured start poses instead.
       SWARMDECK_COORDINATION_FRAME: ${SWARMDECK_COORDINATION_FRAME:-deployment}
-      # Fleet Explore departs one robot every this many seconds, in robot-id
-      # order: a robot covers about 5 m in that time and is out of the way.
-      SWARMDECK_EXPLORE_STAGGER_S: ${SWARMDECK_EXPLORE_STAGGER_S:-8}
       SWARMDECK_PLANNING_BACKEND: mgg
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
   mgg:

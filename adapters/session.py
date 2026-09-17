@@ -60,26 +60,6 @@ async def _offload(loop: asyncio.AbstractEventLoop, bridge: Any, name: str) -> A
     return await loop.run_in_executor(None, fn)
 
 
-def departure_delay_s(bridge: Any, exploration: Any, msg: dict[str, Any]) -> float:
-    """This robot's turn in a fleet-wide Explore: its rank times the stagger.
-
-    Every participant receives the same sorted list, so the turns need no
-    negotiation. A command for one robot, or a fleet without a configured
-    stagger, leaves at once.
-    """
-    stagger = getattr(exploration, "departure_stagger_s", 0.0)
-    participants = msg.get("participants")
-    if (
-        not isinstance(stagger, (int, float))
-        or stagger <= 0.0
-        or not isinstance(participants, list)
-    ):
-        return 0.0
-    ordered = sorted(str(value) for value in participants)
-    robot = getattr(bridge, "id", None)
-    return ordered.index(robot) * float(stagger) if robot in ordered else 0.0
-
-
 async def dispatch_command(
     bridge: Any, msg: dict[str, Any], loop: asyncio.AbstractEventLoop
 ) -> None:
@@ -104,7 +84,7 @@ async def dispatch_command(
                     except (ValueError, TypeError) as exc:
                         _emit(bridge, "warning", f"Invalid exploration mission: {exc}")
                         return
-                exploration.start(departure_delay_s(bridge, exploration, msg))
+                exploration.start()
             else:
                 exploration.stop()
             return
