@@ -125,7 +125,7 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
 | 2 | MOLA map products behind the planner map-provider interface, with explicit free, occupied and unknown terrain semantics | Sim only | 2026-09-10 four-robot native free-space production; the native grid is the simulation default and hardware use is unqualified |
 | 3 | Selectable calibrated odometry and capture providers for simulation, SuperOdometry and FAST-LIVO2 | Partial | 2026-09-15 Fast-LIVO2 mission on domain 219; SuperOdometry and FAST-LIVO2 capture contracts remain occupied-only |
 | 4 | Shared graph, grid and local-control planning for Explore, Navigate and Home, with blocked-corridor replanning and speed limits | Partial | 2026-09-16 `c31425e` four-robot Bistro exploration; unified Explore and blocked-corridor feedback are implemented on MGG `swarmdeck` head `c4eff1b` (340 native tests) but not yet pinned or live-tested; speed limits are not implemented |
-| 5 | Qualify peer SLAM and exploration coordination on Bistro and on separate hosts | Partial | verified multi-robot components observed in the replica catalogue; no multi-host, partition or optimizer-loss trial |
+| 5 | Qualify peer SLAM and exploration coordination on Bistro and on separate hosts | Partial | 2026-09-16 live merges are geometrically wrong in Z (about 0.3 m between platforms) and break terrain gates; merges are disabled again on benchbot; no multi-host, partition or optimizer-loss trial |
 | 6 | Qualify per-robot gateways, ARM builds and physical ROS 2 deployment | Not started | no ARM build, packet capture or hardware motion trial is recorded |
 | Parallel | Fixed-pose Gaussian batch reconstruction, then incremental training | Partial | native CUDA smoke completed nine optimizer iterations and converted 540 Gaussians; no real-capture alignment measurement |
 
@@ -170,8 +170,15 @@ Each item names its acceptance gate.
       component on peers and the server, and reduced duplicate coverage versus
       independent MGG. Offline replay (2026-09-16) links all six robot pairs
       with zero false merges after the peer admission change (similarity 0.70,
-      18 inliers, ICP overlap gate 0.40); the live run with a rebuilt
-      `swarmdeck-cslam` image is still owed.
+      18 inliers, ICP overlap gate 0.40). Live on 2026-09-16 the fleet merged
+      within seconds and XY and yaw matched ground truth within 6 mm and 0.01
+      degrees, but vertical placement between platforms with different lidar
+      heights was off by about 0.3 m and pairwise errors grew to 0.45 to
+      0.83 m in XY after 20 m of drift-odometry travel; the merged floors then
+      failed the 0.15 m step gate everywhere and Navigate and Explore stopped
+      working. The deployed override runs the strict no-merge cslam image
+      again. Next: planar or ground-plane-corrected inter-robot constraints
+      for ground robots, then re-measure Z before re-enabling merges.
 - [ ] **Separate hosts, partitions and optimizer loss.** Gate: peers collaborate
       with the server stopped; partition and rejoin do not duplicate commands or
       falsely declare completion. A frontend restart currently requires a fresh
