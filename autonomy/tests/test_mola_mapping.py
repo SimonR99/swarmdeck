@@ -322,12 +322,9 @@ def test_mola_provider_accepts_visibility_retired_endpoints(tmp_path) -> None:
     assert view.stats.point_count == 2
     assert key == SnapshotKey(component, 0, 0, geometry)
     # The retired endpoint's own voxel is the free one the rays carved.
-    assert (
-        view.query(
-            QueryRequest(key, ((0.3, 0.1, 0.5),), (0.1, 0.1, 0.1))
-        ).occupancy
-        == (VoxelOccupancy.FREE,)
-    )
+    assert view.query(
+        QueryRequest(key, ((0.3, 0.1, 0.5),), (0.1, 0.1, 0.1))
+    ).occupancy == (VoxelOccupancy.FREE,)
 
 
 def test_mola_provider_rejects_surface_and_retired_counts_below_points(
