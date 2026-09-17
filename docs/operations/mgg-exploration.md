@@ -17,7 +17,7 @@ is called merely by launching the dashboard or containers.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`004c517b90a0295940d8f851a4922138d63b0e53` (the 59 ported commits over
+`c0c881e2787b719fb955ace7157196453cedbd8f` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
