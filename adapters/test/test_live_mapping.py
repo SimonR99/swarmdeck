@@ -164,7 +164,9 @@ def stable_route_robot():
     return robot
 
 
-def test_stable_route_display_tracks_map_gauge_without_mutating_controller():
+def test_stable_route_display_stays_on_the_ground_without_mutating_controller():
+    from adapters.exploration import PlannerPath
+
     robot = stable_route_robot()
     original = robot._follow_path_display[1]
     result = live_state(robot)
@@ -175,12 +177,53 @@ def test_stable_route_display_tracks_map_gauge_without_mutating_controller():
     assert len(result["planned_path"]) == 200
     assert result["planned_path"][-1] == dict(x=12, y=0, z=0)
     assert result["global_planned_path"] == result["planned_path"]
+    # Odometry drift moves map<-odom while the robot drives. The same route
+    # must not slide across the 2D map with it.
     robot._mapping_authority.current()["T_component_navigation"][0][3] += 0.27
     after = live_state(robot)
-    assert after["planned_path"][-1]["y"] == pytest.approx(0.27)
+    assert after["planned_path"] == result["planned_path"]
+    assert after["global_planned_path"] == result["global_planned_path"]
+    assert after["goal"] == result["goal"]
     assert robot._follow_path_display[1] is original
     assert len(original.poses) == 1201
     assert robot.state()["goal"]["frame_id"] == "r0/odom"
+    # A replacement route was planned against the fresh authority.
+    robot._follow_path_display = (7, PlannerPath("r0/odom", 2, original.poses))
+    replaced = live_state(robot)
+    assert replaced["planned_path"][-1]["y"] == pytest.approx(0.27)
+    assert replaced["goal"]["y"] == pytest.approx(0.27)
+
+
+def test_rolling_route_does_not_slide_while_odometry_drifts():
+    from adapters.exploration import PlannerPath, PlannerPose
+
+    robot = stable_route_robot()
+    global_plan = robot._follow_path_display[1]
+    robot.objective_planner = SimpleNamespace(
+        decorate_state=lambda state: state,
+        global_display_plan=lambda: global_plan,
+    )
+    first = live_state(robot)
+    # Measured live: map<-odom creeps about a centimetre per update while
+    # the robot drives, and every local section is a new plan object.
+    for step in range(1, 6):
+        robot._mapping_authority.current()["T_component_navigation"][0][3] += 0.01
+        robot._follow_path_display = (
+            7,
+            PlannerPath(
+                "r0/odom",
+                step + 1,
+                tuple(PlannerPose(10, y + step, 0, 0, 0, 0, 1) for y in (0.0, 1.0)),
+            ),
+        )
+        shown = live_state(robot)
+        assert shown["global_planned_path"] == first["global_planned_path"]
+        assert shown["goal"] == first["goal"]
+        assert shown["local_planned_path"][-1] == dict(x=1 + step, y=0, z=0)
+        # The 3D envelope is projected through the fresh authority instead.
+        live = shown["live_mapping"]
+        assert live["global_planned_path"][-1]["y"] == pytest.approx(0.01 * step)
+        assert live["goal"]["y"] == pytest.approx(0.01 * step)
 
 
 def test_rolling_home_keeps_global_route_while_local_chunk_advances():
@@ -252,9 +295,9 @@ def test_stable_route_has_fixed_component_geometry_across_rotating_map_gauge():
     fixed_endpoint = in_component(before, "planned_path")
     assert fixed_endpoint[:2] == pytest.approx([10, 12])
 
-    # A SLAM gauge correction changes map<-odom, including rotation. The
-    # controller route remains in odom; both 2D map coordinates and their 3D
-    # component projection must still describe the same physical endpoint.
+    # map<-odom changes, including rotation. The controller route remains in
+    # odom; the 2D route holds its ground anchor, and the 3D envelope must
+    # still project to the same component endpoint through the new authority.
     robot._mapping_authority.current()["T_component_navigation"] = [
         [0, 1, 0, -4],
         [-1, 0, 0, 7],
@@ -262,7 +305,11 @@ def test_stable_route_has_fixed_component_geometry_across_rotating_map_gauge():
         [0, 0, 0, 1],
     ]
     after = live_state(robot)
-    assert after["planned_path"][-1] != before["planned_path"][-1]
+    assert after["planned_path"][-1] == before["planned_path"][-1]
+    assert (
+        after["live_mapping"]["planned_path"][-1]
+        != before["live_mapping"]["planned_path"][-1]
+    )
     assert in_component(after, "planned_path") == pytest.approx(fixed_endpoint)
     assert robot._follow_path_display[1].poses[-1].x == 10
     assert robot._follow_path_display[1].poses[-1].y == 12

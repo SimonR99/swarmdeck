@@ -1,11 +1,19 @@
 """Attach live navigation-frame state without creating another ROS reader."""
 
 
-def _display_navigation(bridge, state, authority):
+def _display_navigation(bridge, state, authority, anchored=True):
     """Render a bounded copy of an owned route in the current UI map frame.
 
     FollowPath keeps its original stable-frame poses. Display transforms come
     from one atomic authority envelope, never separately sampled TF links.
+
+    The 2D map is drawn in the navigation frame, where the ground is fixed and
+    the planning frame drifts. An anchored display therefore holds the
+    navigation<-planning transform of a route's first display until that route
+    is replaced; re-sampling it every tick slides the whole route against the
+    robot's motion as odometry drift accrues. ``anchored=False`` keeps the
+    fresh transform for the live envelope, whose consumers project it back
+    through the same authority. Returns the state and whether the two differ.
     """
     import math
     import numpy as np
@@ -32,6 +40,36 @@ def _display_navigation(bridge, state, authority):
             )
         return transforms[frame]
 
+    planner = getattr(bridge, "objective_planner", None)
+    global_route = getattr(planner, "global_display_plan", None)
+    global_plan = global_route() if callable(global_route) else None
+    retained = getattr(bridge, "_follow_path_display", None)
+    generation = getattr(bridge, "_goal_generation", None)
+    goal = state.get("goal")
+    # One owner per tick keeps the goal marker on the end of its route.
+    if global_plan is not None:
+        owner = global_plan
+    elif retained is not None and retained[0] == generation:
+        owner = retained[1]
+    elif isinstance(goal, dict):
+        owner = (generation, goal.get("frame_id"), goal.get("x"), goal.get("y"))
+    else:
+        owner = None
+    drifted = False
+
+    def display(frame):
+        nonlocal drifted
+        # Always qualify against the fresh authority so display fails closed.
+        fresh = matrix(frame)
+        if not anchored or frame.lstrip("/") == target:
+            return fresh
+        key = (owner, frame.lstrip("/"))
+        held = getattr(bridge, "_display_anchor", None)
+        if held is None or held[0] != key:
+            held = bridge._display_anchor = (key, fresh)
+        drifted = drifted or not np.array_equal(held[1], fresh)
+        return held[1]
+
     def point(value, transform):
         xyz = transform @ np.array([value["x"], value["y"], value.get("z", 0), 1.0])
         result = dict(value, **dict(zip(("x", "y", "z"), map(float, xyz[:3]))))
@@ -48,20 +86,15 @@ def _display_navigation(bridge, state, authority):
             result["frame_id"] = target
         return result
 
-    goal = state.get("goal")
     if isinstance(goal, dict) and goal.get("frame_id", target).lstrip("/") != target:
         try:
-            state["goal"] = point(goal, matrix(goal["frame_id"]))
+            state["goal"] = point(goal, display(goal["frame_id"]))
         except (KeyError, ValueError, TypeError, np.linalg.LinAlgError):
             state["goal"] = None
-    planner = getattr(bridge, "objective_planner", None)
-    global_route = getattr(planner, "global_display_plan", None)
-    global_plan = global_route() if callable(global_route) else None
-    retained = getattr(bridge, "_follow_path_display", None)
     local_points = []
     if (
         retained is not None
-        and retained[0] == getattr(bridge, "_goal_generation", None)
+        and retained[0] == generation
         and state.get("nav_status") == "active"
         and not (
             global_plan is not None
@@ -70,7 +103,7 @@ def _display_navigation(bridge, state, authority):
     ):
         plan = retained[1]
         try:
-            transform = matrix(plan.frame_id)
+            transform = display(plan.frame_id)
             # Bound the display copy before transforming. Controller poses and
             # their exact endpoint remain untouched.
             points = [dict(x=p.x, y=p.y, z=p.z) for p in display_path(plan.poses)]
@@ -80,7 +113,7 @@ def _display_navigation(bridge, state, authority):
         state["planned_path"] = local_points
     if global_plan is not None:
         try:
-            transform = matrix(global_plan.frame_id)
+            transform = display(global_plan.frame_id)
             points = [
                 dict(x=p.x, y=p.y, z=p.z) for p in display_path(global_plan.poses)
             ]
@@ -98,7 +131,7 @@ def _display_navigation(bridge, state, authority):
         # Legacy full FollowPath routes remain both the compatibility and
         # global display path.
         state["global_planned_path"] = local_points
-    return state
+    return state, drifted
 
 
 def live_state(bridge):
@@ -109,13 +142,21 @@ def live_state(bridge):
         state = decorate(state)
     reader = getattr(bridge, "_mapping_authority", None)
     authority = reader.current() if reader is not None else None
+    envelope = None
     # Import lazily: legacy ROS 1 deployments need no planning-frame support.
     if getattr(bridge, "_follow_path_display", None) is not None or (
         isinstance(state.get("goal"), dict)
         and state["goal"].get("frame_id", bridge.map_frame).lstrip("/")
         != bridge.map_frame.lstrip("/")
     ):
-        state = _display_navigation(bridge, state, authority)
+        source = state
+        state, drifted = _display_navigation(bridge, source, authority)
+        if drifted:
+            # The envelope is projected through this same authority, so its
+            # route must use the fresh transform rather than the 2D anchor.
+            envelope = _display_navigation(bridge, source, authority, False)[0]
+    if envelope is None:
+        envelope = state
     state = dict(state, live_mapping=None, peer_slam=None)
     if authority is None:
         return state
@@ -138,8 +179,8 @@ def live_state(bridge):
             **authority,
             "authority_age_s": max(0.0, reader.clock() - reader.received_at),
             "pose": state["pose"],
-            "goal": state.get("goal"),
-            **{name: display_path(state.get(name) or []) for name in PATH_FIELDS},
+            "goal": envelope.get("goal"),
+            **{name: display_path(envelope.get(name) or []) for name in PATH_FIELDS},
         }
         state["live_mapping"] = validate_live_mapping(payload, bridge.id)
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
