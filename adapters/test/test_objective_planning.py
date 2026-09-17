@@ -11,6 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from adapters import objective_planning
 from adapters.objective_planning import MggObjectivePlanning
 
 
@@ -2251,3 +2252,49 @@ def test_stable_planning_frame_requires_qualified_authority(monkeypatch):
     assert "no qualified frame transform" in (
         bridge.node.get_logger().warning.call_args.args[0]
     )
+
+
+def planning_map_unavailable():
+    response = success_path()
+    response.status = Response.BLOCKED
+    response.reason = "odometry or planning map is unavailable"
+    response.path = []
+    return response
+
+
+def test_unavailable_planning_map_waits_instead_of_spending_attempts(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, planning_map_unavailable())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 5.0
+    planner.replan_max_attempts = 2
+    monkeypatch.setattr(objective_planning, "PLANNER_INPUT_RETRY_S", 0.0)
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    # More refusals than the attempt budget: the map returns on the sixth call.
+    client.call_async.side_effect = [
+        completed(planning_map_unavailable()) for _ in range(5)
+    ] + [completed(success_path())]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.follow_path.call_count == 1)
+    assert client.call_async.call_count == 6
+    assert bridge.nav_status == "active"
+    assert planner._blocked_retry_count == 0
+
+
+def test_planning_map_that_never_returns_fails_at_the_deadline(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, planning_map_unavailable())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 0.3
+    planner.replan_max_attempts = 2
+    monkeypatch.setattr(objective_planning, "PLANNER_INPUT_RETRY_S", 0.02)
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    client.call_async.side_effect = lambda *_: completed(planning_map_unavailable())
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert bridge.follow_path.call_count == 0
+    state = planner.decorate_state({"nav_status": "failed"})
+    assert "planning map stayed unavailable" in state["nav_failure_reason"]
+    assert "unreachable" not in state["nav_failure_reason"].lower()

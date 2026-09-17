@@ -16,6 +16,26 @@ from autonomy.live_mapping import navigation_goal, solution_order
 MAX_NAV_FAILURE_REASON_LENGTH = 512
 FULL_ROUTE_ENDPOINT_TOLERANCE_M = 0.001
 GRID_REFINEMENT_DEADLINE_REASON = "grid refinement exceeded its cooperative deadline"
+# Planner responses that mean its inputs are momentarily missing, not that the
+# goal is infeasible. MGG drops its MOLA map the instant a new keyframe changes
+# the authority key and serves again once the rebuilt product is loaded,
+# typically one to three seconds later; a rolling route asks for its next
+# section exactly then, right after the keyframes of the section it just drove.
+PLANNER_INPUT_UNAVAILABLE_REASONS = (
+    "odometry or planning map is unavailable",
+    "MOLA map snapshot is missing or stale",
+    "MOLA map unavailable",
+)
+PLANNER_INPUT_RETRY_S = 0.5
+
+
+def planner_input_unavailable(reason) -> bool:
+    """True when a planner refusal only reports missing input."""
+
+    text = str(reason or "")
+    return any(marker in text for marker in PLANNER_INPUT_UNAVAILABLE_REASONS)
+
+
 # A committed objective is delivered section by section as terrain validates.
 # Native MGG guarantees each section makes useful progress along its route, but
 # a route that keeps leading sideways or doubling back could otherwise continue
@@ -1343,7 +1363,10 @@ class MggObjectivePlanning:
             if (
                 blocked is not None
                 and response.status == blocked
-                and GRID_REFINEMENT_DEADLINE_REASON in reason
+                and (
+                    GRID_REFINEMENT_DEADLINE_REASON in reason
+                    or planner_input_unavailable(reason)
+                )
             ):
                 return "temporary", reason, generation
             return (
@@ -2125,6 +2148,12 @@ class MggObjectivePlanning:
                 overall_deadline=deadline,
             )
             last_outcome = outcome
+            if outcome == "temporary" and planner_input_unavailable(last_error):
+                # Missing planner input is not a failed planning attempt. Keep
+                # motion stopped and ask again, bounded by the recovery deadline
+                # rather than by the attempt budget.
+                attempts -= 1
+                time.sleep(min(PLANNER_INPUT_RETRY_S, self._remaining(deadline)))
             if outcome == "submitted":
                 return
             if outcome == "superseded":
@@ -2142,7 +2171,12 @@ class MggObjectivePlanning:
             if not self.bridge.set_goal_pending_if_current(generation):
                 self._clear_recovery(generation, home_intent)
                 return
-        if last_outcome == "temporary":
+        if last_outcome == "temporary" and planner_input_unavailable(last_error):
+            message = (
+                "MGG planning map stayed unavailable for "
+                f"{self.replan_deadline_s:.0f} s: {last_error}"
+            )
+        elif last_outcome == "temporary":
             message = (
                 f"MGG planning budget remained exhausted after {attempts} retries: "
                 f"{last_error}"
