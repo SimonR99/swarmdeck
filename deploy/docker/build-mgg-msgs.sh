@@ -8,7 +8,7 @@ set -u
 # Contract-only images build just the generated mgg_msgs package from that
 # branch, so every ROS participant ends up with identical service type hashes
 # without compiling the planner itself.
-git clone --branch swarmdeck --single-branch \
+git clone --branch swarmdeck \
   https://github.com/MISTLab/MGGPlanner.git /tmp/mgg-msgs-source
 git -C /tmp/mgg-msgs-source checkout "$revision"
 cd /tmp/mgg-msgs-source/ros2

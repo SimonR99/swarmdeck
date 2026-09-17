@@ -55,7 +55,11 @@ def test_mgg_images_pin_one_branch_revision():
 
     for relative in ("deploy/docker/Dockerfile.mgg", "deploy/docker/build-mgg-msgs.sh"):
         text = (root / relative).read_text()
-        assert f"--branch {MGG_BRANCH} --single-branch" in text, relative
+        assert f"--branch {MGG_BRANCH}" in text, relative
+        # The pinned revision may live on a hotfix branch that has not been
+        # merged into the integration branch yet, so the clone must fetch every
+        # branch for the checkout to find it.
+        assert "--single-branch" not in text, relative
 
     assert not list((root / "deploy/patches").glob("mgg-*.patch"))
 

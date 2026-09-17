@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-rclpy \
     ros-jazzy-tf2-geometry-msgs ros-jazzy-rosidl-default-generators \
     && rm -rf /var/lib/apt/lists/*
-RUN git clone --branch swarmdeck --single-branch https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
+RUN git clone --branch swarmdeck https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
     && git -C /opt/mgg checkout "$MGG_REV"
 WORKDIR /opt/mgg/ros2
 RUN source /opt/ros/jazzy/setup.bash && \
