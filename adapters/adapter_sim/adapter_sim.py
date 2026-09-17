@@ -2219,11 +2219,12 @@ def main() -> None:
     node = create_adapter_node()
     http_url = f"http://{args.host}:{args.port}"
     fleet_cfg: dict = {}
+    start_poses: dict = {}
     try:
         with urllib.request.urlopen(f"{http_url}/api/config", timeout=5) as response:
-            fleet_cfg = (json.loads(response.read()).get("config") or {}).get(
-                "fleet", {}
-            ) or {}
+            deployment_cfg = json.loads(response.read()).get("config") or {}
+        fleet_cfg = deployment_cfg.get("fleet", {}) or {}
+        start_poses = (deployment_cfg.get("map") or {}).get("start_poses") or {}
     except Exception as exc:
         print(f"[adapter_sim] fleet config unavailable ({exc})")
     config_count = fleet_cfg.get("robot_count")
@@ -2276,9 +2277,7 @@ def main() -> None:
                 # frontier reservations can be arbitrated in that frame while
                 # the robots' maps stay separate components.
                 "deployment_start_pose": (
-                    (((fleet_cfg or {}).get("map") or {}).get("start_poses") or {}).get(
-                        f"{args.prefix}{i}"
-                    )
+                    start_poses.get(f"{args.prefix}{i}")
                     if os.environ.get("SWARMDECK_COORDINATION_FRAME", "").lower()
                     == "deployment"
                     else None
