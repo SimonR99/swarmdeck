@@ -9,6 +9,7 @@ callback group without a callback cycle.
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import threading
@@ -25,6 +26,8 @@ from autonomy.indexed_mapping import (
     SnapshotKey,
 )
 from autonomy.map_provider import MapProvider, MapProviderFactory
+
+LOGGER = logging.getLogger("swarmdeck.indexed_map_server")
 
 
 def _stamp_ns(stamp: object) -> int:
@@ -120,6 +123,10 @@ class IndexRegistry:
         return view.query(request)
 
     def _invalidate_root(self, root: Path, detail: str) -> None:
+        # Failing closed refuses every query for this robot until the next
+        # good refresh. The retry backoff bounds how often this is reached,
+        # so say why each time: a silent refusal is undiagnosable live.
+        LOGGER.warning("%s: %s", root.name, detail)
         with self._lock:
             affected = [
                 view

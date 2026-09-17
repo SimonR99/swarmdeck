@@ -25,6 +25,13 @@ PLANNER_INPUT_UNAVAILABLE_REASONS = (
     "odometry or planning map is unavailable",
     "MOLA map snapshot is missing or stale",
     "MOLA map unavailable",
+    # The indexed map server fails closed while one refresh of its product is
+    # rejected, and lags the authority by one poll after every new revision.
+    # Both clear on its next successful refresh; MGG reports them as a stale
+    # revision rather than as a blocked route.
+    "a different snapshot failed indexed publication",
+    "requested snapshot is not current",
+    "source stamp does not match indexed snapshot",
 )
 PLANNER_INPUT_RETRY_S = 0.5
 
@@ -1360,6 +1367,7 @@ class MggObjectivePlanning:
         if response.status != self.service_type.Response.SUCCEEDED:
             reason = response.reason or f"MGG planning status {response.status}"
             blocked = getattr(self.service_type.Response, "BLOCKED", None)
+            stale = getattr(self.service_type.Response, "STALE_REVISION", None)
             if (
                 blocked is not None
                 and response.status == blocked
@@ -1367,6 +1375,12 @@ class MggObjectivePlanning:
                     GRID_REFINEMENT_DEADLINE_REASON in reason
                     or planner_input_unavailable(reason)
                 )
+            ):
+                return "temporary", reason, generation
+            if (
+                stale is not None
+                and response.status == stale
+                and planner_input_unavailable(reason)
             ):
                 return "temporary", reason, generation
             return (

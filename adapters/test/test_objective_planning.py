@@ -2298,3 +2298,40 @@ def test_planning_map_that_never_returns_fails_at_the_deadline(monkeypatch):
     state = planner.decorate_state({"nav_status": "failed"})
     assert "planning map stayed unavailable" in state["nav_failure_reason"]
     assert "unreachable" not in state["nav_failure_reason"].lower()
+
+
+def indexed_map_failed_closed():
+    response = success_path()
+    response.status = Response.STALE_REVISION
+    response.reason = "a different snapshot failed indexed publication"
+    response.path = []
+    return response
+
+
+def test_indexed_map_that_failed_closed_is_waited_out(monkeypatch):
+    bridge, planner, client = rig(monkeypatch, indexed_map_failed_closed())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 5.0
+    planner.replan_max_attempts = 2
+    monkeypatch.setattr(objective_planning, "PLANNER_INPUT_RETRY_S", 0.0)
+    authority = correction_authority()
+    planner.authority_reader = NS(current=lambda: authority)
+    client.call_async.side_effect = [
+        completed(indexed_map_failed_closed()) for _ in range(4)
+    ] + [completed(success_path())]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.follow_path.call_count == 1)
+    assert client.call_async.call_count == 5
+    assert bridge.nav_status == "active"
+
+
+def test_other_stale_revisions_still_fail(monkeypatch):
+    response = indexed_map_failed_closed()
+    response.reason = "component-frame objective uses a stale frame revision"
+    bridge, planner, client = rig(monkeypatch, response)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+
+    assert not planner.navigate({"x": 2, "y": 1})
+    assert client.call_async.call_count == 1
+    assert bridge.follow_path.call_count == 0
