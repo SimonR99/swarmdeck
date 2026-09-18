@@ -462,11 +462,34 @@ def test_sim_tick_is_disabled_by_a_zero_timeout(sim_module, clock):
     handle.cancel_goal_async.assert_not_called()
 
 
-def test_sim_tick_does_not_supervise_a_route_in_another_frame(sim_module, clock):
-    """The sim composes its pose in its map frame only; fail closed elsewhere."""
+def test_sim_tick_supervises_a_route_in_the_odometry_frame(sim_module, clock):
+    """Routes are planned in the odometry frame: the odom -> base_link link is
+    the pose there, with the wheel topic as the fallback map_pose uses."""
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
     bridge.take_reset_report = lambda: None
+    bridge.map_pose = lambda: {"x": 99.0, "y": 99.0, "yaw": 0.0}
     generation, handle = _submit(bridge, _plan(frame="r0/odom"))
+    ticks = int(round(31.0 / 0.2))
+    for tick in range(ticks):
+        clock[0] += 0.2
+        bridge._odom_to_base = {"x": 2.5 - (0.3 if tick % 2 else 0.0), "y": 0.0}
+        bridge.session_state_tick()
+    assert bridge.nav_status == "failed"
+    handle.cancel_goal_async.assert_called_once()
+    assert "no progress along the route" in bridge._nav_failure_reason
+
+    fallback = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
+    fallback._odom_to_base = None
+    fallback._odom_topic_pose = {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    assert fallback._route_progress_pose("r0/odom") == {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    assert fallback._route_progress_pose("other/frame") is None
+
+
+def test_sim_tick_does_not_supervise_a_route_in_another_frame(sim_module, clock):
+    """Neither the map nor the odometry frame: fail closed, warn once."""
+    bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)
+    bridge.take_reset_report = lambda: None
+    generation, handle = _submit(bridge, _plan(frame="r0/other"))
     _rock(bridge, clock, 60.0)
     assert bridge.nav_status == "active"
     handle.cancel_goal_async.assert_not_called()

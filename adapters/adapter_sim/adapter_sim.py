@@ -1436,14 +1436,22 @@ class RobotBridge(
             watchdog.reset()
 
     def _route_progress_pose(self, frame) -> dict[str, float] | None:
-        """The robot's pose in the route's frame, when that is the map frame.
+        """The robot's pose in the route's frame.
 
-        This bridge composes its pose from named TF links rather than a tf2
-        buffer, so a route planned in any other frame is left unsupervised.
+        Routes are planned in the odometry frame (the MGG planning frame) or
+        in the map frame. This bridge composes its pose from named TF links
+        rather than a tf2 buffer: the odometry frame is the ``odom ->
+        base_link`` link itself, with the wheel topic as the same fallback
+        ``map_pose`` uses, and the map frame is that link under the map
+        correction. A route in any other frame is left unsupervised.
         """
-        if frame is None or str(frame).lstrip("/") != self.map_frame.lstrip("/"):
-            return None
-        return self.map_pose()
+        name = str(frame or "").lstrip("/")
+        if name == f"{self.id}/odom":
+            base = self._odom_to_base
+            return base if base is not None else self._odom_topic_pose
+        if name == self.map_frame.lstrip("/"):
+            return self.map_pose()
+        return None
 
     def _fail_route_progress(self, generation: int, reason: str) -> bool:
         """Retire the route as the controller no-progress failure it is.
