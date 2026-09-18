@@ -71,6 +71,11 @@ services:
       # decode and plans failed with "indexed snapshot exceeded coherent-read
       # age". 15 s covers a four-robot cycle and still catches a dead poller.
       SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S: "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
+      # A replaced key stays answerable this long. MGG validates a route under
+      # the key it planned with 1 to 2 s earlier; with products every 2 to 6 s,
+      # 8 of one robot's plans in 180 s lost their key, its retry backoff grew
+      # to 10 s and it explored 6.9 m (benchbot, 2026-09-18).
+      SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S: "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
     volumes:
       - peer_maps:/maps
     command:
@@ -81,6 +86,8 @@ services:
       - "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
       - --max-snapshot-age-s
       - "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
+      - --superseded-grace-s
+      - "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
     depends_on:
       sim:
         condition: service_started

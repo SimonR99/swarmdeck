@@ -329,8 +329,13 @@ the writable side and must publish native planner products first, with
 `SWARMDECK_MOLA_PLANNER_MAPS=true`. The `SWARMDECK_PLANNER_MAP_PROVIDER=mola`
 setting selects the separate mapping query service and is required by the MGG
 launcher in this mode. The query service polls every 0.5 seconds and rejects
-snapshots older than 3 seconds by default (`SWARMDECK_MAP_QUERY_POLL_S` and
-`SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S`).
+snapshots older than 15 seconds by default (`SWARMDECK_MAP_QUERY_POLL_S` and
+`SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S`). It also keeps answering a snapshot
+key for `SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S` (15 seconds,
+`--superseded-grace-s`) after a newer product replaced it, from the retained
+index for that key (at most two per component), because MGG validates a route
+under the key it planned with a second or two earlier; a source invalidation
+drops those retained indexes with the current one.
 
 MOLA mode always configures `/<robot>/mapping/query_batch` for final corridor
 validation, even when `SWARMDECK_INDEXED_MAP_QUERY=0`. That switch controls only

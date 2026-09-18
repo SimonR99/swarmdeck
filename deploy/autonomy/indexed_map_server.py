@@ -74,6 +74,7 @@ class IndexRegistry:
         *,
         snapshot_age_s: float,
         poll_s: float,
+        superseded_grace_s: float = 15.0,
         clock=time.monotonic,
         provider_factory: MapProviderFactory = SnapshotDirectorySource,
     ):
@@ -83,9 +84,14 @@ class IndexRegistry:
             raise ValueError("mission_id must be a canonical UUID") from exc
         if mission != mission_id:
             raise ValueError("mission_id must use canonical UUID spelling")
+        if not math.isfinite(superseded_grace_s) or superseded_grace_s < 0:
+            raise ValueError("superseded_grace_s must be finite and non-negative")
         self.maps_root = maps_root
         self.mission_id = mission
         self.max_snapshot_age_ns = int(snapshot_age_s * 1e9)
+        # A view keeps answering a key it served until this long after that
+        # key was superseded; see IndexedMapView.
+        self.superseded_grace_ns = int(superseded_grace_s * 1e9)
         self.poll_s = poll_s
         self._clock = clock
         self._provider_factory = provider_factory
@@ -226,7 +232,7 @@ class IndexRegistry:
             with self._lock:
                 view = self._views.get(identity)
                 if view is None:
-                    view = IndexedMapView()
+                    view = IndexedMapView(superseded_grace_ns=self.superseded_grace_ns)
                     self._views[identity] = view
                 self._roots[identity] = root
             try:
@@ -297,7 +303,7 @@ class IndexRegistry:
             self._stop.wait(self.poll_s)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--maps-root", type=Path, default=Path("/maps"))
     parser.add_argument("--mission-id", default=os.environ.get("SWARMDECK_MISSION_ID"))
@@ -305,17 +311,41 @@ def main() -> None:
     # See docker-compose.mapping.yml: a serial decode of every peer's new
     # product must fit inside this bound.
     parser.add_argument("--max-snapshot-age-s", type=float, default=15.0)
+    # A string default is parsed like a command-line value, so a malformed
+    # environment value is reported by argparse rather than as a traceback.
+    parser.add_argument(
+        "--superseded-grace-s",
+        type=float,
+        default=os.environ.get("SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S", "15"),
+        help=(
+            "keep answering a snapshot key for this many seconds after a newer "
+            "product replaced it, so a route planned under that key can still "
+            "be validated against the geometry it was planned on; 0 disables"
+        ),
+    )
     parser.add_argument(
         "--map-provider",
         choices=("indexed", "mola"),
         default=os.environ.get("SWARMDECK_PLANNER_MAP_PROVIDER", "indexed"),
         help="planner grid provider; MOLA is explicit opt-in and never falls back",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if not args.mission_id:
         parser.error("--mission-id or SWARMDECK_MISSION_ID is required")
     if args.poll_s <= 0 or args.max_snapshot_age_s <= 0:
         parser.error("poll and source age must be positive")
+    if not math.isfinite(args.superseded_grace_s) or args.superseded_grace_s < 0:
+        parser.error("superseded grace must be finite and non-negative")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
 
     import rclpy
     from mgg_msgs.srv import QueryMapBatch
@@ -329,6 +359,7 @@ def main() -> None:
         args.mission_id,
         snapshot_age_s=args.max_snapshot_age_s,
         poll_s=args.poll_s,
+        superseded_grace_s=args.superseded_grace_s,
         provider_factory=selected_provider,
     )
 

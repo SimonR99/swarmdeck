@@ -10,6 +10,7 @@ be proven.
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import deque
 
 import hashlib
 import json
@@ -294,6 +295,19 @@ class IndexedMapView:
     publishes one new immutable index, while concurrent queries keep using the
     old object. Full-ray expansion is bounded to avoid exhausting an onboard
     process on an unexpectedly dense snapshot.
+
+    A publication that replaces the current key retains the superseded index
+    for a bounded grace. A planner plans for a second or two under the key its
+    map authority advertised and then validates the whole route under that
+    key; a route binds to the geometry it was checked against, and the
+    superseded product's geometry for its own key is unchanged, so a query
+    for a key that was current moments ago is answered from the retained
+    index. The grace is measured from the coherent-read time of the product
+    that superseded it (the same monotonic clock as the request's
+    ``now_monotonic_ns``), and the coherent-read age is not applied to a
+    retained index because it is no longer refreshed. Any invalidation drops
+    the retained history: nothing superseded is served once the source can no
+    longer be validated.
     """
 
     def __init__(
@@ -312,6 +326,8 @@ class IndexedMapView:
         max_step_m: float = 0.20,
         max_drop_m: float = 0.20,
         max_roughness_m: float = 0.08,
+        superseded_keep: int = 2,
+        superseded_grace_ns: int = 15_000_000_000,
     ):
         positive = {
             "resolution_m": resolution_m,
@@ -343,9 +359,19 @@ class IndexedMapView:
         # query's explicit roughness metric.  Roughness is not a geometric step:
         # consumers choose their own platform-specific roughness limit.
         self.max_roughness_m = float(max_roughness_m)
+        self.superseded_keep = _strict_uint(superseded_keep, "superseded_keep")
+        self.superseded_grace_ns = _strict_uint(
+            superseded_grace_ns, "superseded_grace_ns"
+        )
         self._lock = threading.RLock()
         self._chunk_cache: dict[str, np.ndarray] = {}
         self._index: IndexedGrid | None = None
+        # Superseded indexes with the monotonic time each was replaced, oldest
+        # first. Keys are unique: a key republished as current drops its
+        # retained copy.
+        self._superseded: deque[tuple[IndexedGrid, int]] = deque(
+            maxlen=self.superseded_keep
+        )
         self._unavailable_key: SnapshotKey | None = None
         self._unavailable_detail = "no snapshot loaded"
         self._chunk_loads = 0
@@ -355,6 +381,13 @@ class IndexedMapView:
     def key(self) -> SnapshotKey | None:
         with self._lock:
             return self._index.key if self._index is not None else self._unavailable_key
+
+    @property
+    def superseded_keys(self) -> tuple[SnapshotKey, ...]:
+        """Keys of the retained superseded indexes, oldest first."""
+
+        with self._lock:
+            return tuple(grid.key for grid, _ in self._superseded)
 
     @property
     def stats(self) -> IndexStats:
@@ -381,6 +414,9 @@ class IndexedMapView:
                     self._index.key if self._index is not None else None
                 )
             self._unavailable_detail = detail
+            # The superseded history belongs to the same source: once that
+            # source cannot be validated, nothing retained is served either.
+            self._superseded.clear()
 
     def publish(self, grid: IndexedGrid) -> SnapshotKey:
         """Atomically install one verified immutable provider publication."""
@@ -416,12 +452,49 @@ class IndexedMapView:
                 rebuilt = False
             else:
                 rebuilt = True
+                # Retain only an index that was served right up to this
+                # replacement. One refused meanwhile (a source invalidation
+                # or a failed newer build) was not answering its key, and the
+                # moment it stopped being current is not known here.
+                self._retain(current if self._unavailable_key is None else None, grid)
             self._index = grid
             self._unavailable_key = None
             self._unavailable_detail = ""
             if rebuilt:
                 self._rebuilds += 1
         return grid.key
+
+    def _retain(self, current: IndexedGrid | None, grid: IndexedGrid) -> None:
+        """Keep the index ``grid`` replaces, stamped with when it was superseded.
+
+        The superseding time is the new product's coherent-read time: it is at
+        or before the replacement itself, so the grace it starts can only be
+        shorter than the configured bound, and it is on the same monotonic
+        clock as the request's ``now_monotonic_ns``. Called under the lock.
+        """
+
+        now = grid.received_monotonic_ns
+        # The new publication is authoritative for its own key, and an entry
+        # whose grace has already run out will never be served again.
+        kept = [
+            entry
+            for entry in self._superseded
+            if entry[0].key != grid.key and now - entry[1] <= self.superseded_grace_ns
+        ]
+        self._superseded.clear()
+        self._superseded.extend(kept)
+        if current is not None:
+            self._superseded.append((current, now))
+
+    def _retained(self, key: SnapshotKey, now: int) -> IndexedGrid | None:
+        """The retained index for ``key`` while its grace lasts. Under the lock."""
+
+        for grid, superseded_at in self._superseded:
+            if grid.key == key:
+                if now - superseded_at <= self.superseded_grace_ns:
+                    return grid
+                return None
+        return None
 
     def refresh(
         self,
@@ -488,25 +561,39 @@ class IndexedMapView:
         return self.publish(built)
 
     def query(self, request: QueryRequest) -> QueryResult:
+        now = (
+            time.monotonic_ns()
+            if request.now_monotonic_ns is None
+            else request.now_monotonic_ns
+        )
         with self._lock:
             index = self._index
             unavailable_key = self._unavailable_key
             unavailable_detail = self._unavailable_detail
-        if unavailable_key is not None:
-            if unavailable_key == request.key:
-                return QueryResult(
-                    QueryStatus.UNAVAILABLE, unavailable_key, detail=unavailable_detail
-                )
+            retained = self._retained(request.key, now)
+        # Order of checks. The failed key itself is refused first: a retained
+        # copy of a key whose republication failed is not trusted over that
+        # failure. A retained key within its grace is served next, so a newer
+        # build's failure does not refuse geometry that was verified for the
+        # requested key; a request for anything else then meets the existing
+        # fail-closed answers.
+        if unavailable_key is not None and unavailable_key == request.key:
+            return QueryResult(
+                QueryStatus.UNAVAILABLE, unavailable_key, detail=unavailable_detail
+            )
+        if retained is not None:
+            index = retained
+        elif unavailable_key is not None:
             return QueryResult(
                 QueryStatus.STALE,
                 unavailable_key,
                 detail="a different snapshot failed indexed publication",
             )
-        if index is None:
+        elif index is None:
             return QueryResult(
                 QueryStatus.UNAVAILABLE, None, detail="no indexed snapshot"
             )
-        if index.key != request.key:
+        elif index.key != request.key:
             return QueryResult(
                 QueryStatus.STALE, index.key, detail="requested snapshot is not current"
             )
@@ -519,12 +606,10 @@ class IndexedMapView:
                 index.key,
                 detail="source stamp does not match indexed snapshot",
             )
-        now = (
-            time.monotonic_ns()
-            if request.now_monotonic_ns is None
-            else request.now_monotonic_ns
-        )
-        if request.max_snapshot_age_ns is not None:
+        # The coherent-read age proves the current index is still being
+        # refreshed. A retained index is not refreshed any more; its bound is
+        # the time it was superseded plus the grace, checked above.
+        if retained is None and request.max_snapshot_age_ns is not None:
             age = max(0, now - index.received_monotonic_ns)
             if age > request.max_snapshot_age_ns:
                 return QueryResult(

@@ -30,7 +30,7 @@ from autonomy.indexed_mapping import (
     VoxelOccupancy,
 )
 from autonomy.mapping import SubmapStore
-from deploy.autonomy.indexed_map_server import IndexRegistry
+from deploy.autonomy.indexed_map_server import IndexRegistry, parse_args
 
 SESSION = str(uuid.UUID("caa7c022-0c69-43ef-bf06-1922b16b9f5e"))
 QUALIFIED_RAYS = RayEvidence(
@@ -464,3 +464,113 @@ def test_registry_keeps_serving_through_a_pending_publication(
         registry.query("robot_0", QueryRequest(key, samples, (0.1, 0.1, 0.1))).status
         is QueryStatus.OK
     )
+
+
+def test_registry_serves_a_superseded_key_within_the_grace(tmp_path) -> None:
+    peer = tmp_path / SESSION / "robot_0"
+    peer.mkdir(parents=True)
+    (peer / "provider.index").write_text("ready")
+    first = SnapshotKey("provider-component", 1, 2, "a" * 64)
+    second = SnapshotKey("provider-component", 1, 3, "c" * 64)
+    second_ns = 2_000_000_000
+
+    class Provider:
+        def __init__(self, peer_root):
+            self.peer_root = peer_root
+            self.publication_path = peer_root / "provider.index"
+            self.refreshes = 0
+
+        def component_ids(self):
+            return (first.component_id,)
+
+        def signature(self):
+            return (1,)
+
+        def refresh(self, view, component_id):
+            self.refreshes += 1
+            # The first poll publishes an occupied body voxel under the first
+            # key; every later poll publishes it free under the second key.
+            if self.refreshes == 1:
+                key, occupied, free, received = first, {(0, 0, 2)}, set(), 1_000_000_000
+            else:
+                key, occupied, free, received = second, set(), {(0, 0, 2)}, second_ns
+            return view.publish(
+                IndexedGrid(key, "b" * 64, 123, received, occupied, free, {}, 0.2, 1)
+            )
+
+    registry = IndexRegistry(
+        tmp_path,
+        SESSION,
+        snapshot_age_s=3,
+        poll_s=0.1,
+        superseded_grace_s=1.0,
+        provider_factory=Provider,
+    )
+    registry.refresh_once()
+    registry.refresh_once()
+    view = registry._views[("robot_0", first.component_id)]
+    assert view.superseded_grace_ns == 1_000_000_000
+    assert view.superseded_keys == (first,)
+
+    samples = ((0.1, 0.1, 0.5),)
+    body = (0.1, 0.1, 0.1)
+
+    def query(key, now_ns):
+        return registry.query(
+            "robot_0",
+            QueryRequest(
+                key,
+                samples,
+                body,
+                now_monotonic_ns=now_ns,
+                max_snapshot_age_ns=registry.max_snapshot_age_ns,
+            ),
+        )
+
+    retained = query(first, second_ns + 1_000_000_000)
+    assert retained.status is QueryStatus.OK
+    assert retained.key == first
+    assert retained.occupancy == (VoxelOccupancy.OCCUPIED,)
+    current = query(second, second_ns + 1_000_000_000)
+    assert current.status is QueryStatus.OK
+    assert current.key == second
+    assert current.occupancy == (VoxelOccupancy.FREE,)
+    expired = query(first, second_ns + 1_000_000_001)
+    assert expired.status is QueryStatus.STALE
+    assert expired.detail == "requested snapshot is not current"
+
+    # A source-wide invalidation drops the retained key with the current one.
+    registry._invalidate_root(peer, "publication signature failed")
+    assert view.superseded_keys == ()
+    assert query(first, second_ns + 500_000_000).status is QueryStatus.STALE
+    assert query(second, second_ns + 500_000_000).status is QueryStatus.UNAVAILABLE
+
+
+def test_server_superseded_grace_comes_from_flag_or_environment(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S", raising=False)
+    assert parse_args(["--mission-id", SESSION]).superseded_grace_s == 15.0
+
+    monkeypatch.setenv("SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S", "4.5")
+    assert parse_args(["--mission-id", SESSION]).superseded_grace_s == 4.5
+    explicit = parse_args(["--mission-id", SESSION, "--superseded-grace-s", "0"])
+    assert explicit.superseded_grace_s == 0.0
+    assert explicit.max_snapshot_age_s == 15.0
+
+    with pytest.raises(SystemExit):
+        parse_args(["--mission-id", SESSION, "--superseded-grace-s", "-1"])
+    with pytest.raises(SystemExit):
+        parse_args(["--mission-id", SESSION, "--superseded-grace-s", "nan"])
+    monkeypatch.setenv("SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S", "soon")
+    with pytest.raises(SystemExit):
+        parse_args(["--mission-id", SESSION])
+
+    with pytest.raises(ValueError, match="superseded_grace_s"):
+        IndexRegistry(
+            tmp_path, SESSION, snapshot_age_s=3, poll_s=0.1, superseded_grace_s=-1.0
+        )
+    registry = IndexRegistry(
+        tmp_path, SESSION, snapshot_age_s=3, poll_s=0.1, superseded_grace_s=2.5
+    )
+    assert registry.superseded_grace_ns == 2_500_000_000

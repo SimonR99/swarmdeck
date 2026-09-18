@@ -180,6 +180,213 @@ def test_provider_publication_is_immutable_and_keeps_query_semantics() -> None:
     assert expired.status is QueryStatus.UNAVAILABLE
 
 
+KEY_A = SnapshotKey("component", 1, 1, "a" * 64)
+KEY_B = SnapshotKey("component", 1, 2, "b" * 64)
+KEY_C = SnapshotKey("component", 1, 3, "c" * 64)
+KEY_D = SnapshotKey("component", 1, 4, "d" * 64)
+SAMPLE = ((0.1, 0.1, 0.5),)
+BODY = (0.1, 0.1, 0.1)
+GRACE_NS = 1_000
+
+
+def superseded_grid(key, *, received, occupied=True, points=1, stamp=100):
+    """One body voxel, occupied or free, so a result names the index it used."""
+
+    voxels = {(0, 0, 2)}
+    return IndexedGrid(
+        key,
+        key.geometry_revision,
+        stamp,
+        received,
+        voxels if occupied else set(),
+        set() if occupied else voxels,
+        {},
+        0.2,
+        points,
+    )
+
+
+def superseded_view(**overrides):
+    view = IndexedMapView(superseded_grace_ns=GRACE_NS, **overrides)
+    view.publish(superseded_grid(KEY_A, received=100, occupied=True))
+    return view
+
+
+def query_at(view, key, now, **overrides):
+    return view.query(
+        QueryRequest(key, SAMPLE, BODY, now_monotonic_ns=now, **overrides)
+    )
+
+
+def test_superseded_key_keeps_answering_within_the_grace() -> None:
+    view = superseded_view()
+    before = query_at(view, KEY_A, 150)
+    assert before.status is QueryStatus.OK
+    assert before.occupancy == (VoxelOccupancy.OCCUPIED,)
+
+    view.publish(superseded_grid(KEY_B, received=200, occupied=False))
+    assert view.superseded_keys == (KEY_A,)
+
+    # Exactly the grace after the replacing product's coherent read.
+    retained = query_at(view, KEY_A, 200 + GRACE_NS)
+    assert retained == before
+    assert retained.key == KEY_A
+    current = query_at(view, KEY_B, 200 + GRACE_NS)
+    assert current.status is QueryStatus.OK
+    assert current.key == KEY_B
+    assert current.occupancy == (VoxelOccupancy.FREE,)
+
+    # The coherent-read age still governs the current index only: a retained
+    # index is no longer refreshed, its bound is the grace.
+    aged_current = query_at(view, KEY_B, 200 + GRACE_NS, max_snapshot_age_ns=10)
+    assert aged_current.status is QueryStatus.UNAVAILABLE
+    assert aged_current.detail == "indexed snapshot exceeded coherent-read age"
+    aged_retained = query_at(view, KEY_A, 200 + GRACE_NS, max_snapshot_age_ns=10)
+    assert aged_retained == before
+
+    # The source stamp and sample checks apply to a retained index as well.
+    wrong_stamp = query_at(view, KEY_A, 300, source_stamp_ns=101)
+    assert wrong_stamp.status is QueryStatus.STALE
+    assert wrong_stamp.key == KEY_A
+    assert wrong_stamp.detail == "source stamp does not match indexed snapshot"
+    assert query_at(view, KEY_A, 300, source_stamp_ns=100) == before
+    small_view = superseded_view(max_samples=1)
+    small_view.publish(superseded_grid(KEY_B, received=200, occupied=False))
+    too_many = small_view.query(
+        QueryRequest(KEY_A, SAMPLE * 2, BODY, now_monotonic_ns=300)
+    )
+    assert too_many.status is QueryStatus.UNAVAILABLE
+    assert too_many.detail == "sample budget exceeded"
+
+
+def test_superseded_key_is_stale_once_the_grace_has_passed() -> None:
+    view = superseded_view()
+    view.publish(superseded_grid(KEY_B, received=200, occupied=False))
+
+    expired = query_at(view, KEY_A, 201 + GRACE_NS)
+    assert expired.status is QueryStatus.STALE
+    assert expired.key == KEY_B
+    assert expired.detail == "requested snapshot is not current"
+    # A key never published is refused the same way as before.
+    unknown = query_at(view, KEY_C, 300)
+    assert unknown.status is QueryStatus.STALE
+    assert unknown.detail == "requested snapshot is not current"
+
+
+def test_superseded_history_is_bounded_by_count_and_grace() -> None:
+    view = superseded_view(superseded_keep=2)
+    view.publish(superseded_grid(KEY_B, received=200, occupied=False))
+    view.publish(superseded_grid(KEY_C, received=300, occupied=True))
+    assert view.superseded_keys == (KEY_A, KEY_B)
+
+    view.publish(superseded_grid(KEY_D, received=400, occupied=False))
+    assert view.superseded_keys == (KEY_B, KEY_C)
+    gone = query_at(view, KEY_A, 450)
+    assert gone.status is QueryStatus.STALE
+    assert gone.detail == "requested snapshot is not current"
+    assert query_at(view, KEY_B, 450).occupancy == (VoxelOccupancy.FREE,)
+    assert query_at(view, KEY_C, 450).occupancy == (VoxelOccupancy.OCCUPIED,)
+
+    # A publication also drops entries whose grace has already run out, so a
+    # slowly publishing source does not hold dead grids for the count bound.
+    view.publish(superseded_grid(KEY_A, received=400 + GRACE_NS + 1, occupied=True))
+    assert view.superseded_keys == (KEY_D,)
+
+    # A key republished as current drops its retained copy: keys stay unique.
+    view.publish(superseded_grid(KEY_D, received=400 + GRACE_NS + 2, occupied=False))
+    assert view.superseded_keys == (KEY_A,)
+
+    # A same-key liveness refresh replaces nothing and retains nothing.
+    view.publish(superseded_grid(KEY_D, received=400 + GRACE_NS + 3, occupied=False))
+    assert view.superseded_keys == (KEY_A,)
+    assert view.stats.rebuilds == 6
+
+    disabled = IndexedMapView(superseded_grace_ns=GRACE_NS, superseded_keep=0)
+    disabled.publish(superseded_grid(KEY_A, received=100, occupied=True))
+    disabled.publish(superseded_grid(KEY_B, received=200, occupied=False))
+    assert disabled.superseded_keys == ()
+    assert query_at(disabled, KEY_A, 250).status is QueryStatus.STALE
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("superseded_keep", -1),
+        ("superseded_keep", True),
+        ("superseded_grace_ns", -1),
+        ("superseded_grace_ns", 1.5),
+    ],
+)
+def test_superseded_bounds_are_validated(field, value) -> None:
+    with pytest.raises(ValueError, match=field):
+        IndexedMapView(**{field: value})
+
+
+def test_invalidate_drops_the_superseded_history() -> None:
+    view = superseded_view()
+    view.publish(superseded_grid(KEY_B, received=200, occupied=False))
+    assert query_at(view, KEY_A, 250).status is QueryStatus.OK
+
+    view.invalidate("snapshot changed during index build")
+    assert view.superseded_keys == ()
+    refused = query_at(view, KEY_A, 250)
+    assert refused.status is QueryStatus.STALE
+    assert refused.detail == "a different snapshot failed indexed publication"
+    current = query_at(view, KEY_B, 250)
+    assert current.status is QueryStatus.UNAVAILABLE
+    assert current.detail == "snapshot changed during index build"
+
+    # The next good publication starts a fresh history; the index that was
+    # refused meanwhile is not retained because it stopped being served at a
+    # moment this view cannot date.
+    view.publish(superseded_grid(KEY_C, received=300, occupied=True))
+    assert view.superseded_keys == ()
+    assert query_at(view, KEY_B, 350).status is QueryStatus.STALE
+
+
+def test_failed_newer_build_does_not_shadow_a_retained_key() -> None:
+    view = superseded_view()
+    view.publish(superseded_grid(KEY_B, received=200, occupied=False))
+    with pytest.raises(ValueError, match="point budget"):
+        view.publish(superseded_grid(KEY_C, received=300, points=10**9))
+    assert view._unavailable_key == KEY_C
+
+    retained = query_at(view, KEY_A, 200 + GRACE_NS)
+    assert retained.status is QueryStatus.OK
+    assert retained.key == KEY_A
+    assert retained.occupancy == (VoxelOccupancy.OCCUPIED,)
+    failed = query_at(view, KEY_C, 300)
+    assert failed.status is QueryStatus.UNAVAILABLE
+    assert failed.key == KEY_C
+    assert failed.detail == "index point budget exceeded"
+    # The existing fail-closed answers stand for everything else: the current
+    # index while a newer build has failed, and the retained key once its
+    # grace has passed.
+    current = query_at(view, KEY_B, 300)
+    assert current.status is QueryStatus.STALE
+    assert current.key == KEY_C
+    assert current.detail == "a different snapshot failed indexed publication"
+    expired = query_at(view, KEY_A, 201 + GRACE_NS)
+    assert expired.status is QueryStatus.STALE
+    assert expired.detail == "a different snapshot failed indexed publication"
+
+    # A failed republication of a retained key refuses that key: the failure
+    # is not hidden behind the older copy.
+    with pytest.raises(ValueError, match="point budget"):
+        view.publish(superseded_grid(KEY_A, received=310, points=10**9))
+    refused = query_at(view, KEY_A, 320)
+    assert refused.status is QueryStatus.UNAVAILABLE
+    assert refused.detail == "index point budget exceeded"
+
+    # Recovery: the failed key lands. The index refused meanwhile is not
+    # retained; the older retained key keeps its own grace.
+    view.publish(superseded_grid(KEY_C, received=400, occupied=True))
+    assert view.superseded_keys == (KEY_A,)
+    assert query_at(view, KEY_C, 450).status is QueryStatus.OK
+    assert query_at(view, KEY_A, 450).status is QueryStatus.OK
+    assert query_at(view, KEY_B, 450).detail == "requested snapshot is not current"
+
+
 def test_unqualified_sensor_origin_does_not_claim_free_space(tmp_path) -> None:
     store = SubmapStore(tmp_path)
     keyframe = KeyframeId("r0", SESSION, 0)
@@ -229,10 +436,26 @@ def test_chunks_load_once_and_pose_revision_rebuilds_once(tmp_path) -> None:
     assert key1 != key0
     assert view.stats.chunk_loads == 1
     assert view.stats.rebuilds == 2
-    assert (
-        view.query(QueryRequest(key0, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))).status
-        is QueryStatus.STALE
+    # The replaced key keeps answering for the default 15 s grace, measured
+    # from the coherent-read time of the product that replaced it.
+    grace_ns = 15_000_000_000
+    within = view.query(
+        QueryRequest(
+            key0, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1), now_monotonic_ns=20 + grace_ns
+        )
     )
+    assert within.status is QueryStatus.OK
+    assert within.key == key0
+    expired = view.query(
+        QueryRequest(
+            key0,
+            ((0.1, 0.1, 0.5),),
+            (0.1, 0.1, 0.1),
+            now_monotonic_ns=21 + grace_ns,
+        )
+    )
+    assert expired.status is QueryStatus.STALE
+    assert expired.detail == "requested snapshot is not current"
 
 
 def test_exact_source_stamp_and_monotonic_age_fail_closed(tmp_path) -> None:
