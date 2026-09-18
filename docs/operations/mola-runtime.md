@@ -95,13 +95,20 @@ The planner product forgets dynamic objects by visibility, not by age. A
 stored endpoint is retired when at least `min_clearing_traversals` (default 3,
 `PlannerGridLimits` in `swarmdeck_ros/src/swarmdeck_mapping`) qualified free
 rays from captures observed later than every endpoint in its voxel pass
-through that voxel, and no newer endpoint lands there. A retired endpoint
-leaves the occupied set and the terrain surface samples, and its voxel becomes
-free. Rays observed before the endpoint prove nothing and do not count; a
-single ray counts once per voxel; unqualified captures neither carve nor
-retire. The `SDMGRID1` metadata carries `retired_count`, and every reader
-requires `surface_count + retired_count == point_count`; a grid without
-qualified rays must report zero retirements.
+through that voxel, and no newer endpoint lands there. A ray passes through
+the endpoints, rather than over them, only where it is sampled no higher than
+the voxel's highest endpoint plus `clearing_height_tolerance_m` (0.05 m): a
+road surface is a sheet near the bottom of its voxel, and rays from a lidar
+above it that end far ahead cross the road's own ground voxels above that
+sheet, proving nothing about it (see the known-issues row on the retired
+lane). A retired endpoint leaves the occupied set and the terrain surface
+samples, and its voxel becomes free. Rays observed before the endpoint prove
+nothing and do not count; a single ray counts once per voxel; unqualified
+captures neither carve nor retire. The `SDMGRID1` metadata carries
+`retired_count`, and every reader requires
+`surface_count + retired_count == point_count`; a grid without qualified rays
+must report zero retirements. Neither `min_clearing_traversals` nor the
+tolerance is recorded in the metadata.
 
 ## Planner map provider
 

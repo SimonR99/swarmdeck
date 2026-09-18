@@ -97,15 +97,21 @@ struct RayFrame
 /**
  * Visibility evidence held for one occupied voxel.
  *
- * `newest_endpoint_ns` is final before any ray is carved, because every
- * keyframe's endpoints are ingested first. A traversal therefore only needs a
- * single saturating counter: it is admitted when its own capture is strictly
- * later than every endpoint in the voxel, so an endpoint seen again after the
- * clearing rays re-confirms the voxel and silently disqualifies them.
+ * `newest_endpoint_ns` and `highest_endpoint_z` are final before any ray is
+ * carved, because every keyframe's endpoints are ingested first. A traversal
+ * therefore only needs a single saturating counter: it is admitted when its
+ * own capture is strictly later than every endpoint in the voxel and its
+ * sampled point lies no higher than the highest endpoint plus the clearing
+ * height tolerance, so an endpoint seen again after the clearing rays
+ * re-confirms the voxel and silently disqualifies them, and a ray that passed
+ * over the endpoints never counted.
  */
 struct VoxelEvidence
 {
   std::uint64_t newest_endpoint_ns{};
+  // Height of the highest endpoint stored in the voxel; every occupied voxel
+  // ingests at least one finite endpoint before any ray reads this.
+  double highest_endpoint_z{-std::numeric_limits<double>::infinity()};
   std::uint32_t clearing_traversals{};
   bool retired{};
 };
@@ -121,8 +127,12 @@ void validateLimits(const PlannerGridLimits& limits)
       !(std::isfinite(limits.ray_angular_resolution_rad) &&
         limits.ray_angular_resolution_rad > 0) ||
       !(std::isfinite(limits.ray_step_fraction) &&
-        limits.ray_step_fraction > 0 && limits.ray_step_fraction <= 1))
-    throw std::invalid_argument("planner grid limits must be finite and positive");
+        limits.ray_step_fraction > 0 && limits.ray_step_fraction <= 1) ||
+      !(std::isfinite(limits.clearing_height_tolerance_m) &&
+        limits.clearing_height_tolerance_m >= 0))
+    throw std::invalid_argument(
+        "planner grid limits must be finite and positive (the clearing height "
+        "tolerance may be zero)");
 }
 
 void checkTime(const Clock::time_point started, const PlannerGridLimits& limits)
@@ -319,6 +329,7 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
       auto& evidence = occupied[voxel];
       evidence.newest_endpoint_ns =
           std::max(evidence.newest_endpoint_ns, keyframe.observed_at_ns);
+      evidence.highest_endpoint_z = std::max(evidence.highest_endpoint_z, point.z);
       surfaces.push_back({voxel.x, voxel.y, point.z});
       if (occupied.size() > limits.max_voxels)
         throw std::runtime_error("planner occupied voxel budget exceeded");
@@ -412,25 +423,32 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
         const auto& endpoint = candidate.endpoint;
         const auto& origin = frame.origin;
         // A step fraction below one lets consecutive steps of one ray land in
-        // the same voxel. Steps advance monotonically along the ray, so
-        // skipping a repeat of the immediately preceding voxel counts each ray
-        // exactly once per voxel and keeps one stray ray from retiring
-        // anything on its own.
+        // the same voxel. Steps advance monotonically along the ray, so a
+        // voxel is entered once per ray: the free set is decided on entry,
+        // and the clearing count below is taken at most once while the ray
+        // stays in the voxel, which keeps one stray ray from retiring
+        // anything on its own. Every step is still examined, because a ray
+        // descending through a voxel can sample above its endpoints first and
+        // among them next. `occupied` gains nothing while rays are carved, so
+        // the entry iterator stays valid across the steps spent in a voxel.
         PlannerVoxel previous_voxel{};
         bool have_previous = false;
+        auto found = occupied.end();
+        bool counted = false;
         for (std::size_t ordinal = 1; ordinal < steps; ++ordinal)
         {
           const auto scale = static_cast<double>(ordinal) / static_cast<double>(steps);
-          const auto voxel = voxelFor(
-              {origin.x + (endpoint.x - origin.x) * scale,
-               origin.y + (endpoint.y - origin.y) * scale,
-               origin.z + (endpoint.z - origin.z) * scale},
-              limits.resolution_m);
+          const Point3d sample{
+              origin.x + (endpoint.x - origin.x) * scale,
+              origin.y + (endpoint.y - origin.y) * scale,
+              origin.z + (endpoint.z - origin.z) * scale};
+          const auto voxel = voxelFor(sample, limits.resolution_m);
           if (!have_previous || !(voxel == previous_voxel))
           {
             previous_voxel = voxel;
             have_previous = true;
-            const auto found = occupied.find(voxel);
+            counted = false;
+            found = occupied.find(voxel);
             if (found == occupied.end())
             {
               free.emplace(voxel);
@@ -438,13 +456,21 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
                   limits.max_voxels - std::min(limits.max_voxels, occupied.size()))
                 throw std::runtime_error("planner total voxel budget exceeded");
             }
-            // Seeing through an occupied voxel is the only evidence that can
-            // disprove its endpoints. Rays observed no later than the newest
-            // endpoint there prove nothing: the object may have arrived after
-            // them.
-            else if (
-                frame.observed_at_ns > found->second.newest_endpoint_ns &&
-                found->second.clearing_traversals < limits.min_clearing_traversals)
+          }
+          // Seeing through an occupied voxel is the only evidence that can
+          // disprove its endpoints. Rays observed no later than the newest
+          // endpoint there prove nothing: the object may have arrived after
+          // them. A ray sampled above every endpoint in the voxel proves
+          // nothing either: it passed over them, not through them (the road
+          // case in the retirement note below), so it neither counts nor
+          // frees the voxel.
+          if (found != occupied.end() && !counted &&
+              frame.observed_at_ns > found->second.newest_endpoint_ns &&
+              sample.z <= found->second.highest_endpoint_z +
+                              limits.clearing_height_tolerance_m)
+          {
+            counted = true;
+            if (found->second.clearing_traversals < limits.min_clearing_traversals)
               ++found->second.clearing_traversals;
           }
           if ((ordinal & 4095U) == 0) checkTime(started, limits);
@@ -467,9 +493,27 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
   // so a body that stood in front of the sensor when it was captured would
   // otherwise stay in the product forever, both as an occupied voxel and as a
   // terrain surface sample. Repeated qualified free rays observed later than
-  // every endpoint in the voxel are the positive evidence that retires those
-  // endpoints. Unknown space is untouched: a voxel nothing ever saw through
-  // keeps whatever it had.
+  // every endpoint in the voxel, and sampled no higher than the voxel's
+  // highest endpoint plus `clearing_height_tolerance_m`, are the positive
+  // evidence that retires those endpoints.
+  //
+  // The height rule exists for the ground. A road surface is a sheet near
+  // the bottom of its voxel (samples at z = -0.34 in the voxel spanning
+  // [-0.40, -0.20), for example), and rays from a lidar 0.5 m above the road
+  // that end far ahead graze the last quarter of their length within 0.14 m
+  // of the surface: they traverse the road's own ground voxels above the
+  // sheet without touching it. Later keyframes (scene-change keyframes taken
+  // while parked, or keyframes taken further back) supply such rays with a
+  // later observation time, and counting them retired the road ahead in
+  // bands. Measured on benchbot on 2026-09-18: robot_1's three-keyframe
+  // product (`retired 1054`) had a 1.3 m wide strip of the lane 10 to 11.3 m
+  // ahead with no occupied voxel and no surface sample, only free voxels at
+  // z = -0.3 and above, and its 8 m goal there was refused three runs in a
+  // row (`no mapped ground support`, `known rise 0.31 m`). A ray passing
+  // above every endpoint in a voxel proves nothing about those endpoints.
+  //
+  // Unknown space is untouched: a voxel nothing ever saw through keeps
+  // whatever it had.
   std::size_t retired_voxels = 0;
   for (auto& entry : occupied)
   {

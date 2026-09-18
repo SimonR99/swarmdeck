@@ -63,6 +63,13 @@ struct PlannerGridLimits
   // voxel, that must pass through it before its endpoints are retired. One
   // ray is counted once per voxel however many steps it spends there.
   std::size_t min_clearing_traversals{3};
+  // A ray passes through a voxel's endpoints, rather than over them, only
+  // where its sampled point lies no higher than the voxel's highest endpoint
+  // plus this tolerance. A road surface is a sheet near the bottom of its
+  // voxel, and rays from a lidar above it that end far ahead cross the road's
+  // own ground voxels above that sheet; those rays prove nothing about the
+  // road. 0.05 m covers the simulated 0.03 m range noise.
+  double clearing_height_tolerance_m{0.05};
 };
 
 /** Immutable sparse map product. Unknown is represented by voxel absence. */

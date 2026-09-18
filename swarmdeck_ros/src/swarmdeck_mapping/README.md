@@ -71,11 +71,19 @@ occupied voxel and terrain surface samples that obstacle expiry alone cannot
 disprove. The builder drops both once at least `min_clearing_traversals`
 qualified free rays, each observed strictly later than every endpoint in that
 voxel, have passed through it; one ray counts once per voxel however many steps
-it spends there. An endpoint observed after those rays re-confirms the voxel and
-keeps everything in it, including the older endpoints. A retired voxel joins the
-free set because the same rays carved it; a voxel no ray ever crossed stays
-exactly as it was. `min_clearing_traversals` defaults to 3 and lives in
-`PlannerGridLimits` (`include/swarmdeck_mapping/planner_map.hpp`).
+it spends there. A ray passes through the endpoints, not over them, only where
+it is sampled no higher than the voxel's highest endpoint plus
+`clearing_height_tolerance_m`: a road surface is a sheet near the bottom of its
+voxel, and rays from a lidar above it that end far ahead cross the road's own
+ground voxels above that sheet without proving anything about it, so such a
+step neither counts nor frees the voxel. An endpoint observed after those rays
+re-confirms the voxel and keeps everything in it, including the older
+endpoints. A retired voxel joins the free set because the same rays carved it;
+a voxel no ray ever crossed stays exactly as it was. `min_clearing_traversals`
+defaults to 3 and `clearing_height_tolerance_m` to 0.05 m (the simulated range
+noise is 0.03 m); both live in `PlannerGridLimits`
+(`include/swarmdeck_mapping/planner_map.hpp`) and neither is recorded in the
+product.
 
 `SDMGRID1` therefore carries `retired_count` beside `surface_count`, and
 `surface_count + retired_count == point_count` always holds, where `point_count`

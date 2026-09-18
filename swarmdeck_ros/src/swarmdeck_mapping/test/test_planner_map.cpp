@@ -344,6 +344,100 @@ int main()
           contains(unqualified_clearing->occupied, body_voxel),
       "captures without ray evidence retired a body");
 
+  // Height-aware clearing. A road surface is a sheet near the bottom of its
+  // voxel, and rays from a lidar above the road that end far ahead cross the
+  // road's own ground voxels above that sheet: they see nothing of it, and
+  // counting them retired the lane ahead of a parked robot in bands (benchbot,
+  // 2026-09-18). A traversal counts only where the ray is sampled no higher
+  // than the voxel's highest endpoint plus `clearing_height_tolerance_m`.
+  // The road voxel {5, 0, -2} spans x [1.0, 1.2), y [0, 0.2), z [-0.4, -0.2);
+  // its samples top out at z = -0.34, so the default band ends at -0.29. A
+  // horizontal ray keeps its origin height at every step, and steps 0.15 m
+  // apart put at least one step inside a 0.2 m voxel the ray fully crosses
+  // (here two, at x = 1.02 and x = 1.17).
+  const std::vector<PointXYZ> road_points{
+      {1.10F, 0.10F, -0.34F}, {1.06F, 0.06F, -0.35F}, {1.14F, 0.14F, -0.36F}};
+  const PlannerVoxel road_voxel{5, 0, -2};
+  const auto road_captures = [&road_points](
+                                 const PointXYZ& origin, const PointXYZ& endpoint) {
+    std::vector<SubmapInput> captures{capture("road", road_points, 100, false)};
+    std::uint64_t stamp = 200;
+    for (const char* id : {"later_a", "later_b", "later_c"})
+    {
+      captures.push_back({id, {endpoint}, pose(), {origin}, stamp, true});
+      stamp += 100;
+    }
+    return captures;
+  };
+
+  const auto over_road = clearing_grid(
+      road_captures({0.12F, 0.10F, -0.22F}, {3.12F, 0.10F, -0.22F}));
+  require(
+      over_road->qualified_ray_keyframes == 3 &&
+          contains(over_road->free, {4, 0, -2}) &&
+          contains(over_road->free, {6, 0, -2}) &&
+          contains(over_road->occupied, {15, 0, -2}),
+      "rays over the road did not carve the voxels on either side of it");
+  require(
+      over_road->retired_count == 0 && contains(over_road->occupied, road_voxel) &&
+          !contains(over_road->free, road_voxel) &&
+          heightsAt(*over_road, road_voxel.x).size() == 3,
+      "rays passing 0.12 m above a road surface retired or freed it");
+
+  const auto under_road = clearing_grid(
+      road_captures({0.12F, 0.10F, -0.36F}, {3.12F, 0.10F, -0.36F}));
+  require(
+      under_road->retired_count == 3 && !contains(under_road->occupied, road_voxel) &&
+          contains(under_road->free, road_voxel) &&
+          heightsAt(*under_road, road_voxel.x).empty() &&
+          contains(under_road->occupied, {15, 0, -2}),
+      "rays passing 0.02 m below a road surface did not retire it");
+
+  // The tolerance is the allowance above the highest endpoint that still
+  // counts, and the comparison is inclusive.
+  const auto near_road_captures =
+      road_captures({0.12F, 0.10F, -0.30F}, {3.12F, 0.10F, -0.30F});
+  const auto within_tolerance = clearing_grid(near_road_captures);
+  require(
+      within_tolerance->retired_count == 3,
+      "rays 0.04 m above the surface, within the 0.05 m tolerance, did not count");
+  PlannerGridLimits exact_height;
+  exact_height.clearing_height_tolerance_m = 0;
+  const auto above_exact = clearing_grid(near_road_captures, exact_height);
+  require(
+      above_exact->retired_count == 0 && contains(above_exact->occupied, road_voxel) &&
+          !contains(above_exact->free, road_voxel),
+      "clearing_height_tolerance_m is not the height allowance");
+  const auto at_exact = clearing_grid(
+      road_captures({0.12F, 0.10F, -0.34F}, {3.12F, 0.10F, -0.34F}), exact_height);
+  require(
+      at_exact->retired_count == 3,
+      "a ray at exactly the highest endpoint height did not count with zero tolerance");
+  PlannerGridLimits negative_tolerance;
+  negative_tolerance.clearing_height_tolerance_m = -0.01;
+  bool tolerance_rejected = false;
+  try
+  {
+    (void)clearing_grid(near_road_captures, negative_tolerance);
+  }
+  catch (const std::invalid_argument&)
+  {
+    tolerance_rejected = true;
+  }
+  require(tolerance_rejected, "a negative clearing height tolerance was accepted");
+
+  // A ray is examined at every step, not only where it enters a voxel: a
+  // vertical 0.95 m ray takes 7 steps of 0.135714 m, so from z = 0.187143 its
+  // third step lands in the road voxel at z = -0.22 (above the band) and its
+  // fourth at z = -0.355714 (among the samples). The voxel counts once per ray.
+  const auto descending = clearing_grid(
+      road_captures({1.10F, 0.10F, 0.187143F}, {1.10F, 0.10F, -0.762857F}));
+  require(
+      descending->retired_count == 3 && contains(descending->free, road_voxel) &&
+          contains(descending->free, {5, 0, -1}) &&
+          contains(descending->occupied, {5, 0, -4}),
+      "a ray that reached the samples after entering above them did not count");
+
   PlannerGridLimits tiny_ray_budget;
   tiny_ray_budget.max_ray_steps = 1;
   const auto bounded = buildNativePlannerGrid(*snapshot0, tiny_ray_budget);
