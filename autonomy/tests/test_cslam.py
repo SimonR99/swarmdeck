@@ -5,7 +5,12 @@ import numpy as np
 import pytest
 from autonomy.capture_providers import CaptureClock, CaptureGeometry, CaptureProvenance
 from autonomy.contracts import DeskewStatus, IDENTITY_SE3, RayReturnSemantics
-from autonomy.cslam import CslamMapper, publish_snapshot_if_new
+from autonomy.cslam import (
+    FRAME_HISTORY_LIMIT,
+    CslamMapper,
+    FrameState,
+    publish_snapshot_if_new,
+)
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
 from autonomy.replication import ReplicaStore, canonical
 
@@ -278,3 +283,89 @@ def test_solver_noise_below_tolerance_is_not_a_correction(tmp_path):
     msg.anchor_estimates = [value(0, 0, 0.026)]
     assert core.solution(msg)
     assert core.correction_revision == 2
+
+
+def translated(x):
+    pose = np.eye(4)
+    pose[0, 3] = x
+    return pose
+
+
+def test_frame_history_records_the_frame_in_effect_at_each_revision(tmp_path):
+    mission = str(uuid.uuid4())
+    core = CslamMapper(
+        CorrectionAwareMapper(SubmapStore(tmp_path / "map")),
+        "r1",
+        1,
+        mission,
+        {0: "r0", 1: "r1"},
+    )
+    assert core.frame_history == {}
+    core.capture(0, 10, IDENTITY_SE3, [[0, 0, 0], [1, 0, 0]])
+    core.capture(1, 20, translated(2.0), [[0, 0, 0]])
+    assert sorted(core.frame_history) == [1, 2]
+    for revision in (1, 2):
+        frame = core.frame_history[revision]
+        assert isinstance(frame, FrameState)
+        assert frame.component_id == core.envelope()["component_id"]
+        assert frame.epoch == 0
+        np.testing.assert_allclose(frame.T_component_local, np.eye(4))
+        assert frame.correction_revision == 0
+        assert frame.solution_order == (0, -1)
+        np.testing.assert_allclose(frame.T_component_home, np.eye(4))
+
+    # A solution places the home keyframe at x=4 and the anchor at x=1: the
+    # accepted revision carries the correction and the solver's order, while
+    # the entries recorded before it keep the frame they were placed in.
+    msg = NS(
+        success=True,
+        mission_id=mission,
+        solution_clock=2,
+        optimizer_robot_id=0,
+        origin_robot_id=0,
+        estimates=[value(1, 0, 4), value(1, 1, 6)],
+        anchor_estimates=[value(0, 0, 1)],
+    )
+    assert core.solution(msg)
+    assert core.revision == 3
+    corrected = core.frame_history[3]
+    assert corrected.component_id != core.frame_history[2].component_id
+    assert corrected.epoch == 1
+    np.testing.assert_allclose(corrected.T_component_local, translated(4.0))
+    assert corrected.correction_revision == 1
+    assert corrected.solution_order == (2, 0)
+    np.testing.assert_allclose(corrected.T_component_home, translated(4.0))
+    before = core.frame_history[2]
+    np.testing.assert_allclose(before.T_component_local, np.eye(4))
+    assert before.solution_order == (0, -1)
+    assert before.correction_revision == 0
+
+    # A later capture inherits the corrected frame at its own revision.
+    core.capture(2, 30, translated(3.0), [[0, 0, 0]])
+    later = core.frame_history[4]
+    np.testing.assert_allclose(later.T_component_local, translated(4.0))
+    assert later.solution_order == (2, 0)
+    assert later.correction_revision == 1
+    # The recorded matrices are immutable copies, not the live correction.
+    assert isinstance(later.T_component_local, tuple)
+
+
+def test_frame_history_is_bounded_and_drops_the_oldest_revisions(tmp_path):
+    core = CslamMapper(
+        CorrectionAwareMapper(SubmapStore(tmp_path / "map")),
+        "r0",
+        0,
+        str(uuid.uuid4()),
+        {0: "r0"},
+    )
+    assert FRAME_HISTORY_LIMIT == 4096
+    assert core.frame_history_limit == FRAME_HISTORY_LIMIT
+    core.frame_history_limit = 3
+    for seq in range(6):
+        core.capture(seq, 10 * (seq + 1), translated(float(seq)), [[0, 0, 0]])
+    assert core.revision == 6
+    assert sorted(core.frame_history) == [4, 5, 6]
+    core.frame_history_limit = 0
+    core.capture(6, 70, translated(6.0), [[0, 0, 0]])
+    # The current revision is always remembered, whatever the bound.
+    assert sorted(core.frame_history) == [7]

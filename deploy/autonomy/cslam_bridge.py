@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Capture-time normalization and persistent onboard Swarm-SLAM mapping."""
+"""Capture-time normalization and persistent onboard Swarm-SLAM mapping.
+
+The map authority published on ``/<robot>/map_authority`` is product-gated:
+it names the newest MOLA product the worker has published for this peer
+(``<root>/mola/index.json`` with its ``source.json``), never a pose-graph
+revision that has no product yet. Because a product built at revision R
+places its geometry with the correction, solution order and home pose in
+effect at R, the authority carries that revision's frame state from
+``CslamMapper.frame_history`` rather than the current one. Revision
+increments alone are not frame changes, so consumers keep executing routes
+across product transitions.
+"""
 
 import hashlib
 import json
@@ -58,6 +69,11 @@ from autonomy.peer_mask import (
 )
 from autonomy.cslam import CslamMapper, pose_matrix, publish_snapshot_if_new
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
+from autonomy.product_authority import (
+    build_authority,
+    product_authority_key,
+    read_published_product,
+)
 from autonomy.replication import ReplicaClient
 
 DEFAULT_STORED_RAW_CAPTURE_POINTS = 4_096
@@ -159,6 +175,9 @@ class Bridge(Node):
         KeyframeId(self.robot, p["mission_id"], 0)
         root = Path(p["store_root"]) / p["mission_id"] / self.robot
         root.mkdir(parents=True, exist_ok=True)
+        # The peer root: snapshot.json, status.json and graph_solution.json
+        # live here, and the MOLA worker publishes its products under mola/.
+        self.root = root
         # A crashed frontend must not reuse seq=0 against a live peer graph.
         with (root / "frontend-lifetime").open("x") as stream:
             stream.write(
@@ -374,6 +393,12 @@ class Bridge(Node):
         self.graph_solution_file = root / "graph_solution.json"
         self.graph_solution_revision = -1
         self.snapshot_file_revision = -1
+        # Product-gated authority diagnostics: the product revision advertised
+        # on the last tick, and the ticks on which a product existed but no
+        # frame state could be paired with it.
+        self.authority_revision = None
+        self.authority_skipped = 0
+        self._product_memo = {}
 
     def _color_image(self, message):
         accepted = self._remember_color_frame(self.color_images, message, "color")
@@ -928,6 +953,7 @@ class Bridge(Node):
                 self.core.revision,
                 self.snapshot_file_revision,
             )
+        self.authority_revision = None
         if self.core.revision and sensor_input_is_fresh(last_sensor_at):
             try:
                 transform = self.tf.lookup_transform(
@@ -936,49 +962,24 @@ class Bridge(Node):
                 local_navigation = np.asarray(
                     pose_matrix(transform_pose(transform.transform))
                 )
-                component_id = self.latest_envelope["component_id"]
-                manifests = [
-                    manifest
-                    for manifest in self.latest_envelope["snapshot"]["manifests"]
-                    if manifest["graph_revision"]["component_id"] == component_id
-                    and manifest["graph_revision"]["epoch"] == self.core.epoch
-                    and manifest["graph_revision"]["revision"] == self.core.revision
-                ]
-                manifest = manifests[0] if len(manifests) == 1 else None
-                if manifest is not None:
-                    source_stamp_ns = max(
-                        (
-                            int(submap["observed_at_ns"])
-                            for submap in manifest["submaps"]
-                        ),
-                        default=0,
-                    )
-                    authority = {
-                        "robot_id": self.robot,
-                        "mission_id": self.core.mission_id,
-                        "participants": list(self.core.robot_names.values()),
-                        "component_id": component_id,
-                        "solution_order": list(self.core.solution_order),
-                        "correction_revision": self.core.correction_revision,
-                        "map_epoch": manifest["graph_revision"]["epoch"],
-                        "mapping_graph_revision": manifest["graph_revision"][
-                            "revision"
-                        ],
-                        "geometry_revision": manifest["geometry_revision"],
-                        "map_source_stamp": {
-                            "sec": source_stamp_ns // 1_000_000_000,
-                            "nanosec": source_stamp_ns % 1_000_000_000,
-                        },
-                        "navigation_frame": self.navigation_frame,
-                        "T_component_navigation": (
-                            self.core.T_component_local @ local_navigation
-                        ).tolist(),
-                        # MGG may use continuous odometry while the UI remains
-                        # in the SLAM navigation frame. Publish both pairs from
-                        # one snapshot so no consumer composes different times.
-                        "planning_frame": self.odom_frame,
-                        "T_component_planning": self.core.T_component_local.tolist(),
-                        "peer_slam": {
+                # Advertise the newest product the MOLA worker has published,
+                # paired with the frame state of the revision it was built
+                # from; a revision without a product is never advertised.
+                product = read_published_product(self.root, memo=self._product_memo)
+                selected = product_authority_key(self.core, product)
+                if selected is not None:
+                    artifact, frame = selected
+                    authority = build_authority(
+                        artifact,
+                        frame,
+                        robot_id=self.robot,
+                        mission_id=self.core.mission_id,
+                        participants=list(self.core.robot_names.values()),
+                        navigation_frame=self.navigation_frame,
+                        planning_frame=self.odom_frame,
+                        T_local_navigation=local_navigation,
+                        home_keyframe_id=self.core.key(0).stable_id,
+                        peer_slam={
                             "robot_id": self.robot,
                             "mission_id": self.core.mission_id,
                             "keyframes": len(self.core.local_poses),
@@ -986,22 +987,13 @@ class Bridge(Node):
                             "rejected": self.rejected_closures,
                             "by_peer": dict(self.closures_by_peer),
                         },
-                    }
-                    home_key = self.core.key(0)
-                    if home_key in self.core.poses:
-                        T_navigation_component = np.linalg.inv(
-                            self.core.T_component_local @ local_navigation
-                        )
-                        authority["home"] = {
-                            "keyframe_id": home_key.stable_id,
-                            "T_navigation_home": (
-                                T_navigation_component
-                                @ np.asarray(self.core.poses[home_key])
-                            ).tolist(),
-                        }
+                    )
                     self.authority_pub.publish(
                         String(data=json.dumps(authority, allow_nan=False))
                     )
+                    self.authority_revision = artifact.revision
+                elif product is not None:
+                    self.authority_skipped += 1
             except TransformException:
                 pass
         status = {
@@ -1057,6 +1049,16 @@ class Bridge(Node):
             # independent graph revision carried by the snapshot authority.
             "revision": self.core.replica_revision,
             "mapping_graph_revision": self.core.revision,
+            # The product-gated authority: the product revision advertised on
+            # this tick, how far the worker lags the graph, and the ticks on
+            # which a product existed but no frame state could be paired.
+            "authority_revision": self.authority_revision,
+            "product_lag_revisions": (
+                None
+                if self.authority_revision is None
+                else self.core.revision - self.authority_revision
+            ),
+            "authority_skipped": self.authority_skipped,
             "replicated_revision": self.acked_revision,
             "replication_error": self.replica_error,
             "dropped_pairs": self.dropped,

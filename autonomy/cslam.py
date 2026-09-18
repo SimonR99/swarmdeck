@@ -7,7 +7,7 @@ This boundary never invents a transform for an unlocalized peer.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
@@ -22,10 +22,35 @@ from .contracts import (
     GraphSolution,
     IDENTITY_SE3,
     KeyframeId,
+    Matrix4,
     component_id_for_anchor,
     validate_se3,
 )
 from .mapping import CorrectionAwareMapper
+
+# Revisions whose frame state is remembered for the product-gated authority.
+# About one revision per second while driving, so this covers over an hour of
+# MOLA worker lag before an old product can no longer be advertised.
+FRAME_HISTORY_LIMIT = 4096
+
+
+@dataclass(frozen=True)
+class FrameState:
+    """The component frame that was in effect at one pose-graph revision.
+
+    A MOLA product built from revision R places its geometry with the
+    correction, solution order and home pose of R. The authority that
+    advertises that product must carry exactly these, not whatever a later
+    solution has moved the frame to, so every consumer composes the product
+    with the transform it was built under.
+    """
+
+    component_id: str
+    epoch: int
+    T_component_local: Matrix4
+    correction_revision: int
+    solution_order: tuple[int, int]
+    T_component_home: Matrix4 | None
 
 
 def pose_matrix(pose):
@@ -117,6 +142,9 @@ class CslamMapper:
         self.replica_revision = 0
         self.correction_revision = 0
         self.epoch = 0
+        # Frame state per applied revision, oldest first, bounded below.
+        self.frame_history: dict[int, FrameState] = {}
+        self.frame_history_limit = FRAME_HISTORY_LIMIT
         self._envelope = None
         self._envelope_map_revision = -1
 
@@ -265,6 +293,22 @@ class CslamMapper:
         self.mapper.apply_solution(
             GraphSolution(revision, self.anchor, tuple(self.poses), self.poses)
         )
+        self._record_frame(revision)
+
+    def _record_frame(self, revision: ComponentRevision) -> None:
+        """Remember the frame this revision's geometry was placed with."""
+
+        home = self.poses.get(self.key(0))
+        self.frame_history[revision.revision] = FrameState(
+            revision.component_id,
+            revision.epoch,
+            validate_se3(self.T_component_local, "T_component_local"),
+            self.correction_revision,
+            (int(self.solution_order[0]), int(self.solution_order[1])),
+            None if home is None else validate_se3(home, "T_component_home"),
+        )
+        while len(self.frame_history) > max(1, int(self.frame_history_limit)):
+            self.frame_history.pop(next(iter(self.frame_history)))
 
     def envelope(self):
         if self._envelope and self._envelope["revision"] == self.replica_revision:

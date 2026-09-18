@@ -62,6 +62,18 @@ read `snapshot.json`. MGG plans in the configured robot navigation frame, Nav2
 handles local obstacle avoidance, and the adapter owns the final command
 boundary.
 
+The indexed-map key a robot advertises on `/<robot>/map_authority` is always a
+published product. The bridge reads the MOLA worker's `mola/index.json` with
+its `mola/source.json` (a coherent pair: a mismatch means a publication in
+progress and is retried; `snapshot.json` is never read) and advertises the
+newest product, with the correction, solution order and home pose that were in
+effect at the revision that product was built from
+(`CslamMapper.frame_history`, `autonomy/product_authority.py`). A pose-graph
+revision without a product is never advertised, so a consumer that finds the
+key on disk finds geometry placed with the transform the key carries. Revision
+increments alone are not frame changes (invariant 11), so routes keep executing
+across product transitions.
+
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
 `54ca865a41685094d689e5216f2d50be8c0c089e` (the 59 ported commits over
