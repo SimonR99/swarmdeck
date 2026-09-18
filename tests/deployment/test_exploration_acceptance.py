@@ -1,7 +1,10 @@
 import importlib.util
 import asyncio
+import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -113,6 +116,267 @@ def test_waiting_without_dispatch_or_motion_fails():
     assert any(
         reason.startswith("insufficient XY progress") for reason in result["reasons"]
     )
+
+
+def test_baseline_only_evidence_reports_unmeasured_progress_not_zero():
+    module = acceptance_module()
+    evidence = module.new_robot_evidence("robot_0")
+    idle = {"exploration_status": "idle", "nav_status": "idle"}
+    assert (
+        module.record_robot_sample(
+            evidence,
+            live_sample(0.0, path=False),
+            idle,
+            "mission",
+            "component",
+            trial=False,
+        )
+        is None
+    )
+
+    assert evidence["samples"] == 1
+    assert evidence["trial_samples"] == 0
+    assert evidence["initial_navigation_pose"] == (0.0, 0.0)
+    result = module.assess_robot(evidence, 5.0)
+    assert result["passed"] is False
+    assert result["max_displacement_m"] is None
+    assert result["reasons"] == [
+        "no qualified live samples after Explore started (XY progress unmeasured)"
+    ]
+
+
+def test_static_robot_observed_during_the_trial_still_fails_on_progress():
+    module = acceptance_module()
+    evidence = module.new_robot_evidence("robot_0")
+    idle = {"exploration_status": "idle", "nav_status": "idle"}
+    module.record_robot_sample(
+        evidence,
+        live_sample(0.0, path=False),
+        idle,
+        "mission",
+        "component",
+        trial=False,
+    )
+    module.record_robot_sample(
+        evidence, live_sample(0.0), status_sample(), "mission", "component"
+    )
+
+    result = module.assess_robot(evidence, 5.0)
+    assert evidence["trial_samples"] == 1
+    assert result["max_displacement_m"] == 0.0
+    assert result["reasons"] == [
+        "insufficient XY progress (max 0.000 m, minimum 5.000 m)"
+    ]
+
+
+ROBOT_IDS = [f"robot_{index}" for index in range(4)]
+
+
+class FakeServer:
+    """Fleet telemetry that drives while the qualified live channel breaks.
+
+    ``/api/fleet`` advances every robot's pose on each poll once Explore has
+    been started, so the server demonstrably sees motion. The live component
+    endpoint serves the idle baseline and then fails in the requested way for
+    the rest of the trial, which is what an operator saw as ``0.000 m`` for
+    robots that a ground-truth trace showed driving.
+    """
+
+    def __init__(self, live_failure):
+        self.live_failure = live_failure
+        self.exploring = False
+        self.x = 0.0
+        self.live_calls_while_exploring = 0
+        self.socket_messages = []
+
+    def fleet(self):
+        return {
+            "robots": [
+                {
+                    "robot_id": robot_id,
+                    "online": True,
+                    "capabilities": ["explore"],
+                    "mode": "explore" if self.exploring else "idle",
+                    "nav_status": "active" if self.exploring else "idle",
+                    "exploration_status": ("exploring" if self.exploring else "idle"),
+                    "goal": None,
+                    "pose": {"x": self.x, "y": 0.0},
+                    "local_planned_path": [],
+                }
+                for robot_id in ROBOT_IDS
+            ]
+        }
+
+    def live_robot(self, robot_id):
+        robot = {
+            "robot_id": robot_id,
+            "mission_id": "mission",
+            "component_id": "component",
+            "navigation_frame": f"{robot_id}/map_frame",
+            "pose": {"x": 0.0, "y": 0.0},
+        }
+        if self.exploring and self.live_failure == "no_pose":
+            del robot["pose"]
+        return robot
+
+    def request(self, _base_url, path, body=None, timeout=5.0):
+        if path == "/api/sim/reset":
+            return {"version": 1, "phase": "succeeded", "supervisor_available": True}
+        if path == "/api/fleet":
+            if self.exploring:
+                self.x += 1.0
+            return self.fleet()
+        if path == "/api/autonomy/replicas/components":
+            return {
+                "active_session_id": "mission",
+                "components": [
+                    {
+                        "session_id": "mission",
+                        "component_id": "component",
+                        "available": True,
+                        "robot_ids": ROBOT_IDS,
+                    }
+                ],
+            }
+        assert path.startswith("/api/autonomy/replicas/components/live/mission")
+        if self.exploring:
+            self.live_calls_while_exploring += 1
+            if self.live_failure == "404":
+                raise HTTPError(path, 404, "No fresh robot telemetry", None, None)
+        return {
+            "mission_id": "mission",
+            "component_id": "component",
+            "robots": [self.live_robot(robot_id) for robot_id in ROBOT_IDS],
+        }
+
+    async def send(self, raw):
+        message = json.loads(raw)
+        self.socket_messages.append(message["type"])
+        if message["type"] == "stop_all":
+            self.exploring = False
+        elif message["type"] == "start_explore":
+            self.exploring = True
+
+    async def close(self):
+        pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600)
+
+
+def _run_trial(module, monkeypatch, server, capsys):
+    async def connect(*_args, **_kwargs):
+        return server
+
+    monkeypatch.setattr(module, "json_request", server.request)
+    monkeypatch.setattr(module.websockets, "connect", connect)
+    args = SimpleNamespace(
+        base_url="http://unused",
+        duration=1.2,
+        poll=0.1,
+        authority_timeout=2.0,
+        sample_timeout=0.5,
+        min_displacement=5.0,
+        max_authority_transients=20,
+    )
+    passed = asyncio.run(module.run(args))
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    return passed, summary
+
+
+@pytest.mark.parametrize(
+    "live_failure, expected_error",
+    [
+        ("404", "HTTP 404"),
+        ("no_pose", "robot_3: qualified live robot has no navigation pose"),
+    ],
+)
+def test_lost_live_channel_is_not_reported_as_zero_progress(
+    monkeypatch, capsys, live_failure, expected_error
+):
+    module = acceptance_module()
+    server = FakeServer(live_failure)
+
+    passed, summary = _run_trial(module, monkeypatch, server, capsys)
+
+    assert passed is False
+    assert server.socket_messages[:5] == ["stop_all"] + ["start_explore"] * 4
+    assert server.x >= 2.0, "fleet telemetry must have moved during the trial"
+    assert server.live_calls_while_exploring > 0
+    assert summary["outcome"] == "failed"
+    assert summary["stop_all_verified"] is True
+    assert summary["observation_errors"] > 0
+    assert summary["last_observation_error"].startswith(expected_error)
+    assert "observation errors (last: " + expected_error in summary["failure_reason"]
+    assert "insufficient XY progress" not in summary["failure_reason"]
+    assert "0.000 m" not in summary["failure_reason"]
+    for robot_id in ROBOT_IDS:
+        robot = summary["robots"][robot_id]
+        assert robot["initial_navigation_pose"] == [0.0, 0.0]
+        assert robot["samples"] == 1
+        assert robot["trial_samples"] == 0
+        assert robot["max_displacement_m"] is None
+        assert robot["reasons"] == [
+            "no qualified live samples after Explore started "
+            "(XY progress unmeasured)"
+        ]
+        assert "Explore never reported an executing state" not in robot["reasons"]
+
+
+def test_main_prints_trial_exit_after_the_summary(monkeypatch, capsys):
+    module = acceptance_module()
+
+    async def failing_run(_args):
+        print(json.dumps({"outcome": "failed"}))
+        return False
+
+    monkeypatch.setattr(module, "run", failing_run)
+    monkeypatch.setattr(sys, "argv", ["exploration_acceptance.py", "--simulation"])
+    with pytest.raises(SystemExit) as exit_info:
+        module.main()
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert exit_info.value.code == 1
+    assert lines[-1] == "trial_exit=1"
+    assert json.loads(lines[-2]) == {"outcome": "failed"}
+
+
+def test_main_reports_a_crashed_trial_as_a_nonzero_exit(monkeypatch, capsys):
+    module = acceptance_module()
+
+    async def crashing_run(_args):
+        raise KeyError("robots")
+
+    monkeypatch.setattr(module, "run", crashing_run)
+    monkeypatch.setattr(sys, "argv", ["exploration_acceptance.py", "--simulation"])
+    with pytest.raises(SystemExit) as exit_info:
+        module.main()
+
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert exit_info.value.code == 1
+    assert lines[-1] == "trial_exit=1"
+    summary = json.loads(lines[-2])
+    assert summary["outcome"] == "failed"
+    assert summary["failure_reason"] == "KeyError: 'robots'"
+
+
+def test_main_exits_zero_with_trial_exit_line_on_success(monkeypatch, capsys):
+    module = acceptance_module()
+
+    async def passing_run(_args):
+        print(json.dumps({"outcome": "succeeded"}))
+        return True
+
+    monkeypatch.setattr(module, "run", passing_run)
+    monkeypatch.setattr(sys, "argv", ["exploration_acceptance.py", "--simulation"])
+    with pytest.raises(SystemExit) as exit_info:
+        module.main()
+
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip().splitlines()[-1] == "trial_exit=0"
 
 
 def test_recovery_retains_bounded_last_navigation_failure():

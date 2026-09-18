@@ -213,6 +213,7 @@ def new_robot_evidence(robot_id):
         "authority": None,
         "authority_changed": False,
         "samples": 0,
+        "trial_samples": 0,
         "exploration_statuses": [],
         "last_exploration_status": None,
         "last_exploration_reason": None,
@@ -226,8 +227,15 @@ def new_robot_evidence(robot_id):
     }
 
 
-def record_robot_sample(evidence, live, status_robot, mission, component):
-    """Record one qualified sample, returning a reason if it is unusable."""
+def record_robot_sample(
+    evidence, live, status_robot, mission, component, *, trial=True
+):
+    """Record one qualified sample, returning a reason if it is unusable.
+
+    ``trial=False`` marks the pre-Explore baseline: it pins the initial pose
+    but is not motion evidence, so ``trial_samples`` stays at zero until the
+    qualified live channel delivers a sample after Explore started.
+    """
     if (
         not isinstance(live.get("navigation_frame"), str)
         or not live["navigation_frame"].strip()
@@ -247,6 +255,8 @@ def record_robot_sample(evidence, live, status_robot, mission, component):
         return str(error)
 
     evidence["samples"] += 1
+    if trial:
+        evidence["trial_samples"] += 1
     if evidence["initial_navigation_pose"] is None:
         evidence["initial_navigation_pose"] = pose
     evidence["max_displacement_m"] = max(
@@ -279,24 +289,35 @@ def record_robot_sample(evidence, live, status_robot, mission, component):
 def assess_robot(evidence, min_displacement_m):
     """Assess one robot without treating a pose-authority correction as motion."""
     reasons = []
+    observed = evidence["trial_samples"] > 0
     if evidence["authority_changed"]:
         reasons.append("mission/component/navigation authority changed")
     if evidence["samples"] == 0:
         reasons.append("no qualified navigation samples")
-    if evidence["path_samples"] == 0:
+    elif not observed:
+        # Only the pre-Explore baseline was sampled: the qualified live
+        # channel delivered nothing during the trial, so the zero
+        # displacement is an unmeasured value, not evidence that the robot
+        # stood still.
+        reasons.append(
+            "no qualified live samples after Explore started "
+            "(XY progress unmeasured)"
+        )
+    if observed and evidence["path_samples"] == 0:
         reasons.append("no waypoint/path observation")
-    if evidence["max_displacement_m"] < min_displacement_m:
+    if observed and evidence["max_displacement_m"] < min_displacement_m:
         reasons.append(
             f"insufficient XY progress (max {evidence['max_displacement_m']:.3f} m, "
             f"minimum {min_displacement_m:.3f} m)"
         )
-    if not evidence["ever_executing"]:
+    if observed and not evidence["ever_executing"]:
         reasons.append("Explore never reported an executing state")
     return {
         "robot_id": evidence["robot_id"],
         "passed": not reasons,
         "reasons": reasons,
         **{key: value for key, value in evidence.items() if not key.startswith("_")},
+        "max_displacement_m": evidence["max_displacement_m"] if observed else None,
     }
 
 
@@ -453,6 +474,7 @@ async def run(args):
                 baseline_by_id[robot_id],
                 mission,
                 components[robot_id],
+                trial=False,
             )
             if error:
                 baseline_errors.append(f"{robot_id}: {error}")
@@ -502,6 +524,7 @@ async def run(args):
                     )
                     if error:
                         summary["observation_errors"] += 1
+                        summary["last_observation_error"] = f"{robot_id}: {error}"[:512]
             except AuthorityChanged:
                 # A verified inter-robot merge replaces component identities
                 # for every robot it joins. Re-select from the catalogue and
@@ -592,10 +615,22 @@ async def run(args):
     ]
     if summary["outcome"] == "succeeded" and failed:
         summary["outcome"] = "failed"
-        summary["failure_reason"] = "; ".join(
-            f"{robot_id}: {', '.join(assessments[robot_id]['reasons'])}"
-            for robot_id in failed
-        )[:512]
+        # Observation errors are the difference between "the robot did not
+        # move" and "the harness could not see it move"; reserve room for
+        # them so the length cap truncates the per-robot text instead.
+        observation = ""
+        if summary["observation_errors"]:
+            observation = (
+                f"; {summary['observation_errors']} observation errors "
+                f"(last: {summary.get('last_observation_error')})"
+            )[:256]
+        summary["failure_reason"] = (
+            "; ".join(
+                f"{robot_id}: {', '.join(assessments[robot_id]['reasons'])}"
+                for robot_id in failed
+            )[: 512 - len(observation)]
+            + observation
+        )
     if not summary["stop_all_verified"]:
         summary["outcome"] = "failed"
         summary.setdefault("failure_reason", "Stop All did not verify an idle fleet")
@@ -653,7 +688,10 @@ def main():
             )
         )
         passed = False
-    raise SystemExit(0 if passed else 1)
+    code = 0 if passed else 1
+    # The deployment wrapper reads this line; the process exit code follows it.
+    print(f"trial_exit={code}", flush=True)
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":
