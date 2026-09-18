@@ -68,6 +68,9 @@ def test_central_mapping_worker_is_mission_pinned_and_bounded():
     assert env["SWARMDECK_MOLA_MODE"] == "persistent"
     for key, value in BOUNDED_OPTIONS.items():
         assert env[key] == value
+    # The fleet worker builds every robot's product; peers are built
+    # concurrently, one native runtime each.
+    assert env["SWARMDECK_MOLA_PARALLEL_PEERS"] == "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}"
     assert service["image"] == "swarmdeck-mapping:mola-native"
     assert service["command"] == [
         "swarmdeck-mola-worker",
@@ -85,6 +88,8 @@ def test_central_mapping_worker_is_mission_pinned_and_bounded():
         "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}",
         "--keep-generations",
         "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}",
+        "--parallel-peers",
+        "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}",
     ]
 
 
@@ -100,6 +105,8 @@ def test_robot_peer_worker_is_pinned_to_one_robot_and_uses_the_native_runtime():
     assert env["SWARMDECK_MOLA_MODE"] == "persistent"
     for key, value in BOUNDED_OPTIONS.items():
         assert env[key] == value
+    # A hardware peer builds only its own product: one build at a time.
+    assert env["SWARMDECK_MOLA_PARALLEL_PEERS"] == "${SWARMDECK_MOLA_PARALLEL_PEERS:-1}"
     assert service["image"] == "swarmdeck-mapping:mola-native"
     assert service["command"] == [
         "swarmdeck-mola-worker",
@@ -117,6 +124,8 @@ def test_robot_peer_worker_is_pinned_to_one_robot_and_uses_the_native_runtime():
         "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}",
         "--keep-generations",
         "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}",
+        "--parallel-peers",
+        "${SWARMDECK_MOLA_PARALLEL_PEERS:-1}",
     ]
 
 

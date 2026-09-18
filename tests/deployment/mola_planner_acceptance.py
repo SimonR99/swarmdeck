@@ -337,8 +337,9 @@ def _planner_header(peer: Path, artifact: dict[str, object]) -> dict[str, object
     return metadata
 
 
-def _rss_kib(worker: MolaWorker) -> int | None:
-    runtime = getattr(worker, "_runtime", None)
+def _rss_kib(worker: MolaWorker, peer: Path) -> int | None:
+    # The worker keeps one native runtime per peer root.
+    runtime = getattr(worker, "_runtimes", {}).get(peer)
     process = getattr(runtime, "_process", None)
     pid = getattr(process, "pid", None)
     if not isinstance(pid, int):
@@ -512,7 +513,7 @@ def run_replay(binary: Path, maps_root: Path, mission_id: str) -> dict[str, obje
                     )
                     query_elapsed_s += time.perf_counter() - query_started
                     query_statuses.append(queried.status.name)
-                rss = _rss_kib(worker)
+                rss = _rss_kib(worker, peer)
                 if rss is not None:
                     peer_rss = max(peer_rss, rss)
                     max_rss = max(max_rss, rss)

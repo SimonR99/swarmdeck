@@ -26,6 +26,11 @@ services:
       SWARMDECK_MOLA_RETRY_S: "${SWARMDECK_MOLA_RETRY_S:-5}"
       SWARMDECK_MOLA_MAX_OUTPUT_BYTES: "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
       SWARMDECK_MOLA_KEEP_GENERATIONS: "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
+      # Peers are built concurrently, one native runtime each. One build takes
+      # about 1.2 s per 60 keyframes and grows with the keyframe count
+      # (benchbot, 2026-09-18); built in turn, four robots' products came 2 to
+      # 6 s apart at 60 keyframes and would reach 20 s or more later in a run.
+      SWARMDECK_MOLA_PARALLEL_PEERS: "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}"
     volumes:
       - peer_maps:/maps
     command:
@@ -44,6 +49,8 @@ services:
       - "${SWARMDECK_MOLA_MAX_OUTPUT_BYTES:-268435456}"
       - --keep-generations
       - "${SWARMDECK_MOLA_KEEP_GENERATIONS:-2}"
+      - --parallel-peers
+      - "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}"
     restart: unless-stopped
   mapping-query:
     build:

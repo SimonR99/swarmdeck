@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import sys
 import textwrap
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -55,8 +57,20 @@ def write_snapshot(
 
 
 def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
+    """Write a fake ``swarmdeck-mola-import --serve`` next to its logs.
+
+    The worker starts one process per peer, possibly several at once, so
+    every process appends to the shared logs under ``tmp_path``: ``starts.log``
+    (one pid per start, numbered under a lock), ``launches.log``,
+    ``requests.log`` and ``applies.log`` (pid and monotonic start/finish of
+    every apply, which lets a test see two runtimes working at the same
+    time). ``first_failure`` modes keyed on ``process_number`` refer to the
+    first process started, so tests that rely on them start peers in order.
+    """
+
     executable = tmp_path / "fake-mola-runtime"
     executable.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(f"""
+            import fcntl
             import hashlib
             import json
             import os
@@ -69,11 +83,13 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                 sys.argv[index]: int(sys.argv[index + 1])
                 for index in range(2, len(sys.argv), 2)
             }}
-            starts = root / "starts.log"
-            prior = starts.read_text() if starts.exists() else ""
-            process_number = len(prior.splitlines()) + 1
-            with starts.open("a") as stream:
+            with (root / "starts.log").open("a+") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+                stream.seek(0)
+                process_number = len(stream.read().splitlines()) + 1
                 stream.write(str(os.getpid()) + "\\n")
+                stream.flush()
+                fcntl.flock(stream, fcntl.LOCK_UN)
             with (root / "launches.log").open("a") as stream:
                 stream.write(json.dumps(sys.argv[1:]) + "\\n")
             ready = {{
@@ -118,6 +134,15 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                     or {first_failure!r} == "always_death"
                 ):
                     os._exit(7)
+                if (
+                    process_number == 1
+                    and {first_failure!r} == "death_second"
+                    and request_number == 2
+                ):
+                    os._exit(7)
+                started = time.monotonic()
+                if {first_failure!r} == "slow":
+                    time.sleep(0.3)
                 if process_number == 1 and {first_failure!r} == "malformed":
                     print("{{broken", flush=True)
                     continue
@@ -182,6 +207,13 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                     response["planner_output_sha256"] = hashlib.sha256(planner).hexdigest()
                     if {first_failure!r} == "wrong_planner_hash_second" and request_number == 2:
                         response["planner_output_sha256"] = "0" * 64
+                with (root / "applies.log").open("a") as stream:
+                    stream.write(json.dumps({{
+                        "pid": os.getpid(),
+                        "map_id": request["map_id"],
+                        "started": started,
+                        "finished": time.monotonic(),
+                    }}) + "\\n")
                 print(json.dumps(response), flush=True)
             """))
     executable.chmod(0o755)
@@ -191,6 +223,29 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
 def runtime_requests(tmp_path: Path) -> list[dict[str, object]]:
     lines = (tmp_path / "requests.log").read_text().splitlines()
     return [json.loads(line) for line in lines]
+
+
+def peer_applies(tmp_path: Path, peer: Path) -> list[dict[str, object]]:
+    """The apply requests one peer's runtime received, in order."""
+
+    return [
+        request
+        for request in runtime_requests(tmp_path)
+        if str(request.get("snapshot_path", "")).startswith(str(peer))
+    ]
+
+
+def runtime_applies(tmp_path: Path) -> list[dict[str, object]]:
+    lines = (tmp_path / "applies.log").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+def runtime_starts(tmp_path: Path) -> list[int]:
+    return [int(line) for line in (tmp_path / "starts.log").read_text().splitlines()]
+
+
+def runtime_pid(worker, peer: Path) -> int:
+    return worker._runtimes[peer]._process.pid
 
 
 def sha256(raw: bytes) -> str:
@@ -270,7 +325,8 @@ def test_invalid_planner_product_keeps_previous_generation(tmp_path):
         with pytest.raises(WorkerError, match="planner artifact"):
             worker.process_peer(peer)
         assert (peer / "mola/index.json").read_bytes() == previous
-        assert not worker._resident_maps
+        assert not worker._resident_by_peer
+        assert peer not in worker._runtimes
     finally:
         worker.close()
 
@@ -558,24 +614,29 @@ def test_removed_component_is_released_from_native_runtime(tmp_path) -> None:
             "apply",
             "release",
         ]
-        assert requests[-1]["map_id"] not in worker._resident_maps
+        assert requests[-1]["map_id"] not in worker._resident_by_peer[peer]
+        assert len(worker._resident_by_peer[peer]) == 1
     finally:
         worker.close()
 
 
-def test_disappeared_peer_releases_its_native_maps(tmp_path) -> None:
+def test_disappeared_peer_closes_its_native_runtime(tmp_path) -> None:
     peer = tmp_path / "mission" / "robot_0"
     write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
     worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
     try:
         assert worker.run_once() == {}
+        process = worker._runtimes[peer]._process
+        assert process.poll() is None
         (peer / "snapshot.json").unlink()
         assert worker.run_once() == {}
-        assert [request["op"] for request in runtime_requests(tmp_path)] == [
-            "apply",
-            "release",
-        ]
-        assert not worker._resident_maps
+        # The peer's runtime is closed whole rather than asked to release its
+        # maps one by one; no other peer shares it.
+        assert [request["op"] for request in runtime_requests(tmp_path)] == ["apply"]
+        assert process.poll() is not None
+        assert peer not in worker._runtimes
+        assert not worker._resident_by_peer
+        assert peer not in worker._completed
     finally:
         worker.close()
 
@@ -606,7 +667,7 @@ def test_source_race_publishes_build_and_keeps_native_state(tmp_path) -> None:
         index = json.loads((peer / "mola/index.json").read_text())
         assert index["source_snapshot_id"] == "a" * 64
         # The resident native map is the published generation, so it stays.
-        assert worker._resident_maps
+        assert worker._resident_by_peer[peer]
 
         worker._persistent_import = original_import
         newer = (peer / "snapshot.json").read_bytes()
@@ -660,8 +721,8 @@ def test_lost_native_cache_retries_pose_revision_as_coherent_replace(tmp_path) -
     worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
     try:
         assert worker.process_peer(peer).published
-        assert worker._runtime is not None
-        worker._runtime.close()  # Simulate a child lost between polling cycles.
+        # Simulate a child lost between polling cycles.
+        worker._runtimes[peer].close()
         second = manifest(
             "component:a", 2, geometry_revision=first["geometry_revision"]
         )
@@ -764,3 +825,205 @@ def test_persistent_runtime_receives_configured_resource_limits(tmp_path) -> Non
         ]
     finally:
         worker.close()
+
+
+def two_peers(tmp_path: Path) -> list[Path]:
+    peers = [tmp_path / "mission" / f"robot_{index}" for index in range(2)]
+    for index, peer in enumerate(peers):
+        write_snapshot(peer, f"{index + 1:064x}", [manifest("component:a", 1)])
+    return peers
+
+
+def test_parallel_peers_build_different_peers_at_the_same_time(tmp_path) -> None:
+    peers = two_peers(tmp_path)
+    # Both builds must be in flight at once, or the barrier breaks the test.
+    in_flight = threading.Barrier(2, timeout=5)
+    intervals: list[tuple[float, float]] = []
+
+    def slow_import(command, _timeout):
+        started = time.monotonic()
+        in_flight.wait()
+        time.sleep(0.05)
+        Path(command[3]).write_bytes(b"metric-map")
+        intervals.append((started, time.monotonic()))
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=slow_import, parallel_peers=2)
+    assert worker.run_once() == {}
+    assert len(intervals) == 2
+    latest_start = max(started for started, _ in intervals)
+    earliest_finish = min(finished for _, finished in intervals)
+    assert latest_start < earliest_finish
+    for peer in peers:
+        assert (peer / "mola/index.json").is_file()
+        assert peer in worker._completed
+    # Both outcomes were recorded: nothing is rebuilt.
+    assert worker.run_once() == {}
+    assert len(intervals) == 2
+
+
+def test_parallel_peers_one_builds_peers_in_order_on_the_calling_thread(
+    tmp_path,
+) -> None:
+    peers = two_peers(tmp_path)
+    builds: list[tuple[Path, float, float, str]] = []
+
+    def slow_import(command, _timeout):
+        started = time.monotonic()
+        time.sleep(0.05)
+        Path(command[3]).write_bytes(b"metric-map")
+        builds.append(
+            (
+                Path(command[2]).parents[1],
+                started,
+                time.monotonic(),
+                threading.current_thread().name,
+            )
+        )
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=slow_import, parallel_peers=1)
+    assert worker.run_once() == {}
+    assert [peer for peer, _, _, _ in builds] == peers
+    first, second = builds
+    assert first[2] <= second[1]
+    assert {name for _, _, _, name in builds} == {threading.main_thread().name}
+
+
+def test_parallel_peers_use_one_native_runtime_each(tmp_path) -> None:
+    peers = two_peers(tmp_path)
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "slow"),
+        timeout_s=2,
+        parallel_peers=2,
+    )
+    try:
+        assert worker.run_once() == {}
+        applies = runtime_applies(tmp_path)
+        assert len(applies) == 2
+        assert len({item["pid"] for item in applies}) == 2
+        # The two native processes were importing at the same time.
+        latest_start = max(item["started"] for item in applies)
+        earliest_finish = min(item["finished"] for item in applies)
+        assert latest_start < earliest_finish
+        assert sorted(runtime_starts(tmp_path)) == sorted(
+            runtime_pid(worker, peer) for peer in peers
+        )
+        for peer in peers:
+            assert len(worker._resident_by_peer[peer]) == 1
+            assert peer_applies(tmp_path, peer)[0]["mode"] == "replace"
+    finally:
+        worker.close()
+
+
+def test_native_failure_restarts_only_the_failing_peers_runtime(tmp_path) -> None:
+    failing = tmp_path / "mission" / "robot_0"
+    healthy = tmp_path / "mission" / "robot_1"
+    first = manifest("component:a", 1)
+    write_snapshot(failing, "a" * 64, [first])
+    write_snapshot(healthy, "b" * 64, [first])
+    # Peers are built in sorted order with parallel_peers=1, so robot_0's
+    # runtime is process 1: it dies on its second apply request.
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "death_second"),
+        timeout_s=1,
+        retry_s=0,
+        parallel_peers=1,
+    )
+    try:
+        assert worker.run_once() == {}
+        failing_pid = runtime_pid(worker, failing)
+        healthy_pid = runtime_pid(worker, healthy)
+        assert failing_pid != healthy_pid
+        second = manifest(
+            "component:a", 2, geometry_revision=first["geometry_revision"]
+        )
+        write_snapshot(failing, "c" * 64, [second])
+        write_snapshot(healthy, "d" * 64, [second])
+
+        errors = worker.run_once()
+        assert set(errors) == {failing}
+        assert "exited" in errors[failing]
+        assert failing not in worker._runtimes
+        assert failing not in worker._resident_by_peer
+        # The healthy peer kept its runtime and its resident map: its build
+        # was a pose-only correction on the same process.
+        assert runtime_pid(worker, healthy) == healthy_pid
+        assert worker._resident_by_peer[healthy]
+        assert [item["mode"] for item in peer_applies(tmp_path, healthy)] == [
+            "replace",
+            "pose_only",
+        ]
+        healthy_index = json.loads((healthy / "mola/index.json").read_text())
+        assert healthy_index["source_snapshot_id"] == "d" * 64
+        assert len(runtime_starts(tmp_path)) == 2
+
+        # The failing peer alone starts a fresh runtime and rebuilds from chunks.
+        assert worker.run_once() == {}
+        assert runtime_pid(worker, healthy) == healthy_pid
+        assert runtime_pid(worker, failing) not in (failing_pid, healthy_pid)
+        assert [item["mode"] for item in peer_applies(tmp_path, failing)] == [
+            "replace",
+            "pose_only",
+            "replace",
+        ]
+        assert len(runtime_starts(tmp_path)) == 3
+        failing_index = json.loads((failing / "mola/index.json").read_text())
+        assert failing_index["source_snapshot_id"] == "c" * 64
+    finally:
+        worker.close()
+
+
+def test_close_stops_every_peer_runtime(tmp_path) -> None:
+    peers = two_peers(tmp_path)
+    worker = MolaWorker(
+        tmp_path, importer=fake_runtime(tmp_path), timeout_s=1, parallel_peers=2
+    )
+    assert worker.run_once() == {}
+    processes = [worker._runtimes[peer]._process for peer in peers]
+    assert len({process.pid for process in processes}) == 2
+    assert all(process.poll() is None for process in processes)
+    worker.close()
+    assert not worker._runtimes
+    assert not worker._resident_by_peer
+    assert all(process.poll() is not None for process in processes)
+
+
+def test_cli_parses_parallel_peers_flag_and_environment_default(
+    monkeypatch,
+) -> None:
+    created: list[dict[str, object]] = []
+
+    class RecordingWorker:
+        def __init__(self, maps_root, **kwargs):
+            created.append(kwargs)
+
+        def run_forever(self):
+            return None
+
+    monkeypatch.setattr(worker_module, "MolaWorker", RecordingWorker)
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", "12345678-1234-5678-9234-567812345678")
+    monkeypatch.delenv("SWARMDECK_MOLA_PARALLEL_PEERS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker"])
+    worker_module.main()
+    assert created[-1]["parallel_peers"] == 4
+
+    monkeypatch.setenv("SWARMDECK_MOLA_PARALLEL_PEERS", "3")
+    worker_module.main()
+    assert created[-1]["parallel_peers"] == 3
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--parallel-peers", "2"])
+    worker_module.main()
+    assert created[-1]["parallel_peers"] == 2
+
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker", "--parallel-peers", "0"])
+    with pytest.raises(SystemExit):
+        worker_module.main()
+    monkeypatch.setenv("SWARMDECK_MOLA_PARALLEL_PEERS", "0")
+    monkeypatch.setattr(sys, "argv", ["swarmdeck-mola-worker"])
+    with pytest.raises(SystemExit):
+        worker_module.main()
+    assert len(created) == 3
+
+    with pytest.raises(ValueError, match="parallel_peers"):
+        MolaWorker(Path("/maps"), mode="oneshot", parallel_peers=0)

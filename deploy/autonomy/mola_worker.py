@@ -32,11 +32,24 @@ build took about 1.5 s for 90 keyframes; most builds were discarded, products
 were published only 10 to 27 s apart, and 62% of MGG plan requests ran without
 a map. Publishing the older-but-coherent generation keeps a map available
 while the next build catches up.
+
+Peers are built concurrently, each through its own native runtime. Every
+product re-imports every keyframe, so one build takes about 1.2 s per 60
+keyframes and grows linearly with the keyframe count (benchbot, 2026-09-18).
+Building four robots in turn through one runtime made a robot's product
+interval the sum of four builds: 2 to 6 s at 60 keyframes, reaching 20 s or
+more later in a mission, which is how far the planner map then lags the robot.
+``run_once`` decides on the calling thread which peers need a build and runs
+those builds on a thread pool of ``parallel_peers`` workers
+(``--parallel-peers``, default 4). Each build touches only its peer's
+directories and its peer's ``swarmdeck-mola-import --serve`` process, so a
+native failure on one peer restarts that runtime alone.
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -63,6 +76,7 @@ DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_POINTS_PER_MAP = 2_000_000
 DEFAULT_MAX_RESIDENT_POINTS = 8_000_000
 DEFAULT_MAX_MAPS = 256
+DEFAULT_PARALLEL_PEERS = 4
 
 
 class WorkerError(RuntimeError):
@@ -278,6 +292,7 @@ class MolaWorker:
         planner_maps: bool = False,
         mission_id: str | None = None,
         runner: Runner = _default_runner,
+        parallel_peers: int = DEFAULT_PARALLEL_PEERS,
     ):
         if timeout_s <= 0 or poll_s <= 0 or retry_s < 0:
             raise ValueError("worker timing values are invalid")
@@ -289,6 +304,12 @@ class MolaWorker:
             or keep_generations < 1
         ):
             raise ValueError("worker runtime bounds are invalid")
+        if (
+            not isinstance(parallel_peers, int)
+            or isinstance(parallel_peers, bool)
+            or parallel_peers < 1
+        ):
+            raise ValueError("parallel_peers must be a positive integer")
         if mode not in ("persistent", "oneshot"):
             raise ValueError("worker mode must be persistent or oneshot")
         if planner_maps and mode != "persistent":
@@ -309,20 +330,17 @@ class MolaWorker:
             _canonical_mission_id(mission_id) if mission_id is not None else None
         )
         self.runner = runner
-        self._runtime = (
-            PersistentImporter(
-                self.importer,
-                self.timeout_s,
-                max_points_per_map=self.max_points_per_map,
-                max_resident_points=self.max_resident_points,
-                max_maps=self.max_maps,
-                max_output_bytes=self.max_output_bytes,
-            )
-            if mode == "persistent"
-            else None
-        )
-        self._resident_maps: set[str] = set()
+        self.parallel_peers = parallel_peers
+        # Per-peer native state: one ``swarmdeck-mola-import --serve`` client
+        # per peer root, created on the peer's first native build and closed
+        # when the peer disappears or its runtime is invalidated, and the map
+        # ids resident in that runtime. A build reads and writes only its own
+        # peer's entries, so builds of different peers may run on different
+        # threads without a lock; run_once iterates these dicts only while no
+        # build is running.
+        self._runtimes: dict[Path, PersistentImporter] = {}
         self._resident_by_peer: dict[Path, set[str]] = {}
+        # Poll bookkeeping, touched only on the thread that calls run_once.
         self._completed: dict[Path, str] = {}
         self._retry_after: dict[Path, float] = {}
 
@@ -440,9 +458,43 @@ class MolaWorker:
         ):
             raise WorkerError("native response output_sha256 is invalid")
 
+    def _runtime_for(self, peer_root: Path) -> PersistentImporter:
+        """Return the peer's native runtime client, creating it on first use.
+
+        The client starts its ``--serve`` process on the first request, with
+        the same limits for every peer.
+        """
+
+        runtime = self._runtimes.get(peer_root)
+        if runtime is None:
+            runtime = PersistentImporter(
+                self.importer,
+                self.timeout_s,
+                max_points_per_map=self.max_points_per_map,
+                max_resident_points=self.max_resident_points,
+                max_maps=self.max_maps,
+                max_output_bytes=self.max_output_bytes,
+            )
+            self._runtimes[peer_root] = runtime
+        return runtime
+
+    def _invalidate_runtime(self, peer_root: Path) -> None:
+        """Close the peer's native runtime and forget its resident maps.
+
+        Other peers' runtimes are untouched: a native failure or artifact
+        mismatch on one peer must not restart the others. The next build of
+        this peer starts a fresh runtime and rebuilds from immutable chunks.
+        """
+
+        runtime = self._runtimes.pop(peer_root, None)
+        if runtime is not None:
+            runtime.close()
+        self._resident_by_peer.pop(peer_root, None)
+
     def _persistent_import(
         self,
         *,
+        peer_root: Path,
         mode: str,
         map_id: str,
         input_path: Path,
@@ -453,7 +505,7 @@ class MolaWorker:
         snapshot_id: str,
         manifest: dict[str, object],
     ) -> dict[str, object]:
-        assert self._runtime is not None
+        runtime = self._runtime_for(peer_root)
         request = {
             "mode": mode,
             "map_id": map_id,
@@ -465,19 +517,19 @@ class MolaWorker:
         if planner_output_path is not None:
             request["planner_output_path"] = str(planner_output_path)
         try:
-            response = self._runtime.apply(request)
+            response = runtime.apply(request)
         except NativeRequestError as exc:
             if mode != "pose_only" or exc.code != "cache_miss":
                 raise WorkerError(str(exc)) from exc
             mode = "replace"
             request["mode"] = mode
             try:
-                response = self._runtime.apply(request)
+                response = runtime.apply(request)
             except MolaProcessError as retry_exc:
-                self._invalidate_runtime()
+                self._invalidate_runtime(peer_root)
                 raise WorkerError(str(retry_exc)) from retry_exc
         except MolaProcessError as exc:
-            self._invalidate_runtime()
+            self._invalidate_runtime(peer_root)
             raise WorkerError(str(exc)) from exc
         try:
             self._validate_runtime_response(
@@ -489,32 +541,28 @@ class MolaWorker:
                 manifest=manifest,
             )
         except WorkerError:
-            self._invalidate_runtime()
+            self._invalidate_runtime(peer_root)
             raise
-        self._resident_maps.add(map_id)
+        self._resident_by_peer.setdefault(peer_root, set()).add(map_id)
         return response
-
-    def _invalidate_runtime(self) -> None:
-        if self._runtime is not None:
-            self._runtime.close()
-        self._resident_maps.clear()
-        self._resident_by_peer.clear()
 
     def _release_inactive_maps(self, peer_root: Path, active: set[str]) -> None:
         known = self._resident_by_peer.get(peer_root, set())
         inactive = known - active
-        if self._runtime is not None:
+        runtime = self._runtimes.get(peer_root)
+        if runtime is not None and inactive:
             try:
                 for map_id in sorted(inactive):
-                    self._runtime.release(map_id)
+                    runtime.release(map_id)
             except MolaProcessError:
-                # Publication has already committed. A full restart safely
-                # bounds native state if targeted reclamation fails.
-                self._invalidate_runtime()
+                # Publication has already committed. Restarting this peer's
+                # runtime safely bounds its native state if targeted
+                # reclamation fails.
+                self._invalidate_runtime(peer_root)
                 return
-        self._resident_maps.difference_update(inactive)
-        if active & self._resident_maps:
-            self._resident_by_peer[peer_root] = active & self._resident_maps
+        remaining = known & active
+        if remaining:
+            self._resident_by_peer[peer_root] = remaining
         else:
             self._resident_by_peer.pop(peer_root, None)
 
@@ -530,10 +578,14 @@ class MolaWorker:
         generation, so the next pose-only correction for a component with
         unchanged geometry bases on the generation ``index.json`` describes.
         A build that fails part way keeps the previous ``index.json`` and
-        ``source.json`` and invalidates the native runtime wherever native
-        state may have advanced past the published generation (process
+        ``source.json`` and invalidates this peer's native runtime wherever
+        native state may have advanced past the published generation (process
         failures, response or artifact mismatches, disappearing files); the
         next attempt then rebuilds from immutable chunks.
+
+        This method touches only the peer's own directories, its own runtime
+        and its own entries of the per-peer dicts, so ``run_once`` may call it
+        for different peers on different threads at the same time.
         """
 
         peer_root = Path(peer_root)
@@ -602,7 +654,7 @@ class MolaWorker:
                 map_id = self._map_id(peer_root, component_id)
                 request_mode = (
                     "pose_only"
-                    if map_id in self._resident_maps
+                    if map_id in self._resident_by_peer.get(peer_root, ())
                     and prior is not None
                     and prior.get("geometry_fingerprint") == geometry_fingerprint
                     else "replace"
@@ -610,6 +662,7 @@ class MolaWorker:
                 response: dict[str, object] | None = None
                 if self.mode == "persistent":
                     response = self._persistent_import(
+                        peer_root=peer_root,
                         mode=request_mode,
                         map_id=map_id,
                         input_path=input_path,
@@ -620,7 +673,6 @@ class MolaWorker:
                         snapshot_id=snapshot_id,
                         manifest=manifest,
                     )
-                    self._resident_by_peer.setdefault(peer_root, set()).add(map_id)
                 else:
                     self.runner(
                         (
@@ -636,7 +688,7 @@ class MolaWorker:
                     response.get("output_size_bytes") != size
                     or response.get("output_sha256") != digest
                 ):
-                    self._invalidate_runtime()
+                    self._invalidate_runtime(peer_root)
                     raise WorkerError("native artifact does not match its response")
                 final_path = components_root / filename
                 staged.append((output_path, final_path))
@@ -663,7 +715,7 @@ class MolaWorker:
                         or response["planner_output_size_bytes"] != planner_size
                         or response.get("planner_output_sha256") != planner_sha
                     ):
-                        self._invalidate_runtime()
+                        self._invalidate_runtime(peer_root)
                         raise WorkerError(
                             "native planner artifact does not match its response"
                         )
@@ -706,10 +758,10 @@ class MolaWorker:
             self._release_inactive_maps(peer_root, active_map_ids)
             return ProcessResult(True, snapshot_id, len(manifests), source_sha)
         except FileNotFoundError as exc:
-            self._invalidate_runtime()
+            self._invalidate_runtime(peer_root)
             raise WorkerError("snapshot or native artifact disappeared") from exc
         except OSError:
-            self._invalidate_runtime()
+            self._invalidate_runtime(peer_root)
             raise
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -728,16 +780,39 @@ class MolaWorker:
             if not path.with_suffix(".metricmap").exists():
                 path.unlink(missing_ok=True)
 
+    def _attempt(self, peer: Path) -> ProcessResult | str:
+        """Build one peer on the calling thread; a handled failure is its message."""
+
+        try:
+            return self.process_peer(peer)
+        except (WorkerError, OSError, KeyError, TypeError) as exc:
+            return f"{type(exc).__name__}: {exc}"
+
     def run_once(self) -> dict[Path, str]:
-        """Process changed peers once; errors are retained for status/logging."""
+        """Process changed peers once; errors are retained for status/logging.
+
+        Which peers need a build is decided here, on the calling thread. The
+        builds then run concurrently, up to ``parallel_peers`` at a time, each
+        confined to its own peer's directories and native runtime; their
+        outcomes update ``_completed``, ``_retry_after`` and the returned
+        errors back on the calling thread. With ``parallel_peers == 1`` (or a
+        single due peer) the builds run in peer order on the calling thread.
+        """
 
         errors: dict[Path, str] = {}
         now = time.monotonic()
         peers = self.discover()
-        for missing_peer in self._resident_by_peer.keys() - set(peers):
-            self._release_inactive_maps(missing_peer, set())
+        known = (
+            self._runtimes.keys()
+            | self._resident_by_peer.keys()
+            | self._completed.keys()
+            | self._retry_after.keys()
+        )
+        for missing_peer in known - set(peers):
+            self._invalidate_runtime(missing_peer)
             self._completed.pop(missing_peer, None)
             self._retry_after.pop(missing_peer, None)
+        due: list[Path] = []
         for peer in peers:
             source = peer / "snapshot.json"
             try:
@@ -750,16 +825,30 @@ class MolaWorker:
                 continue
             if now < self._retry_after.get(peer, 0):
                 continue
-            try:
-                result = self.process_peer(peer)
+            due.append(peer)
+
+        def record(peer: Path, outcome: ProcessResult | str) -> None:
+            if isinstance(outcome, ProcessResult):
                 # Record the bytes the product was built from, which process_peer
                 # read itself. If snapshot.json moved on meanwhile, the next poll
                 # sees a digest that differs from this one and builds it.
-                self._completed[peer] = result.source_sha256
+                self._completed[peer] = outcome.source_sha256
                 self._retry_after.pop(peer, None)
-            except (WorkerError, OSError, KeyError, TypeError) as exc:
-                errors[peer] = f"{type(exc).__name__}: {exc}"
+            else:
+                errors[peer] = outcome
                 self._retry_after[peer] = now + self.retry_s
+
+        if self.parallel_peers == 1 or len(due) < 2:
+            for peer in due:
+                record(peer, self._attempt(peer))
+            return errors
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(self.parallel_peers, len(due)),
+            thread_name_prefix="swarmdeck-mola-build",
+        ) as pool:
+            futures = [(peer, pool.submit(self._attempt, peer)) for peer in due]
+            for peer, future in futures:
+                record(peer, future.result())
         return errors
 
     def run_forever(self) -> None:
@@ -772,7 +861,21 @@ class MolaWorker:
             self.close()
 
     def close(self) -> None:
-        self._invalidate_runtime()
+        """Close every peer's native runtime."""
+
+        for peer_root in tuple(self._runtimes):
+            self._invalidate_runtime(peer_root)
+        self._resident_by_peer.clear()
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
 
 
 def main() -> None:
@@ -838,6 +941,18 @@ def main() -> None:
         help="native importer lifecycle; oneshot is the explicit compatibility mode",
     )
     parser.add_argument(
+        "--parallel-peers",
+        type=_positive_int,
+        # A string default goes through the type conversion, so an invalid
+        # environment value is rejected like an invalid flag.
+        default=os.getenv("SWARMDECK_MOLA_PARALLEL_PEERS", str(DEFAULT_PARALLEL_PEERS)),
+        help=(
+            "build up to this many peers' products at the same time, one native "
+            "runtime per peer (defaults to SWARMDECK_MOLA_PARALLEL_PEERS or "
+            f"{DEFAULT_PARALLEL_PEERS}; minimum 1)"
+        ),
+    )
+    parser.add_argument(
         "--mission-id",
         default=os.getenv("SWARMDECK_MISSION_ID"),
         help="canonical mission UUID to process (defaults to SWARMDECK_MISSION_ID)",
@@ -866,6 +981,7 @@ def main() -> None:
         mode=args.mode,
         planner_maps=args.planner_maps,
         mission_id=None if args.all_missions else args.mission_id,
+        parallel_peers=args.parallel_peers,
     ).run_forever()
 
 

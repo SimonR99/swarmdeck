@@ -41,7 +41,14 @@ volume are not selected implicitly. Commands are in
 invocations in the archived
 [decentralized autonomy record](../archive/decentralized-autonomy.md).
 
-The default worker maintains one `swarmdeck-mola-import --serve` subprocess.
+The default worker maintains one `swarmdeck-mola-import --serve` subprocess
+per peer, started on the peer's first build and closed when the peer
+disappears or its runtime fails, and builds up to `--parallel-peers` peers at
+the same time (`SWARMDECK_MOLA_PARALLEL_PEERS`, default 4, minimum 1): one
+build takes about 1.2 s per 60 keyframes and grows with the keyframe count
+(benchbot, 2026-09-18), so building four robots in turn through one runtime
+made each robot's product interval the sum of four builds, 2 to 6 s at 60
+keyframes and heading for 20 s or more later in a mission.
 It imports each component independently, then publishes a whole-peer,
 self-described product: the component artifacts, then `mola/source.json` (the
 exact `snapshot.json` bytes the generation was built from), then
@@ -69,8 +76,8 @@ Removing a component releases its resident context.
 | JSONL request / response | 64 KiB each |
 | Submaps / chunks per component | 4,096 / 16,384 |
 | Points per component | 2,000,000 |
-| Runtime points, including a replacement candidate | 8,000,000 |
-| Resident component contexts | 256 |
+| Runtime points, including a replacement candidate (per peer runtime) | 8,000,000 |
+| Resident component contexts (per peer runtime) | 256 |
 | Standalone native serialized artifact | 1 GiB |
 | Deployment native artifact / publication limit | 256 MiB |
 | Deployment import deadline / poll / retry | 30 s / 1 s / 5 s |
