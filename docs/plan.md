@@ -167,7 +167,16 @@ Each item names its acceptance gate.
       is not deadline exhaustion.
 - [ ] **Fleet motion acceptance.** Gate: four-robot startup, Navigate and Home
       succeed against independent simulation truth; cancellation and map
-      corrections stop or replan correctly.
+      corrections stop or replan correctly. Status 2026-09-18: the planner
+      had no map on 62% of plan requests (authority ahead of the MOLA product,
+      builds discarded); after the self-described product, product-gated
+      authority, MGG predecessor retention and concurrent builds, 1 of 42
+      requests was mapless, 3 m goals arrive for all four robots, 8 m goals
+      for the two robots whose goal is on the road, and three of four return
+      legs complete. Still open: routes that descend a 0.16 to 0.19 m kerb
+      against the 0.15 m step limit (the simulated Bunker climbed it), the
+      Scout's straight-ahead goal on the kerb where the road bends, and a
+      return waypoint projected onto a terrace table top.
 - [ ] **Blocked-corridor topological replanning and speed limits.** Gate: a
       failed edge is excluded from a new topological search, and refined paths
       carry speed limits. Implemented in MGG at `494ce66` (branch head `c4eff1b`): Explore now runs
