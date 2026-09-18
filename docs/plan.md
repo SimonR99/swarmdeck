@@ -53,8 +53,14 @@ Adapters capture points in a sensor frame and associate them with the pose at
 the capture timestamp. Local odometry and navigation frames stay robot-owned.
 Peer Swarm-SLAM can establish a verified component frame and correction. The
 same correction identity and map revision flow into the MOLA product and the
-indexed query. MGG plans in the configured robot navigation frame, Nav2 handles
-local obstacle avoidance, and the adapter owns the final command boundary.
+indexed query. The MOLA product is self-described: the worker publishes
+`mola/source.json` (the exact `snapshot.json` bytes it built from) and then
+`mola/index.json`, whose `source_sha256` names those bytes, so a finished build
+is always published even when the bridge has already replaced `snapshot.json`.
+Readers (the indexed map server and MGG's `MolaMap`) verify that pair and never
+read `snapshot.json`. MGG plans in the configured robot navigation frame, Nav2
+handles local obstacle avoidance, and the adapter owns the final command
+boundary.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit

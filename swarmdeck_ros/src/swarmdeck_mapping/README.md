@@ -46,8 +46,12 @@ are bounded to 4 MiB manifests and 8 MiB per geometry chunk.
 
 `deploy/autonomy/mola_worker.py` is the continuous onboard consumer. It watches
 `/maps/<mission>/<robot>/snapshot.json`, invokes the importer once per component,
-and atomically publishes `/maps/<mission>/<robot>/mola/index.json` only after all
-generation-specific products finish. In addition to the MOLA metric map, an
+and, after all generation-specific products finish, publishes
+`/maps/<mission>/<robot>/mola/source.json` (the exact snapshot bytes it built
+from) followed by `/maps/<mission>/<robot>/mola/index.json`, whose
+`source_sha256` names those bytes. Readers verify that pair and never read
+`snapshot.json`, which may already be ahead of the product. In addition to the
+MOLA metric map, an
 optional `planner_output_path` produces a deterministic `SDMGRID1` sparse grid
 from the resident keyframe map. The grid carries corrected occupied endpoints,
 observed-free voxels, exact surface-height samples, and the complete source and

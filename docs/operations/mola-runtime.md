@@ -42,18 +42,26 @@ invocations in the archived
 [decentralized autonomy record](../archive/decentralized-autonomy.md).
 
 The default worker maintains one `swarmdeck-mola-import --serve` subprocess.
-It imports each component independently, then atomically publishes a whole-peer
-`mola/index.json` only when the source still matches. Unchanged component
-artifacts are reused after checking their size and SHA-256. Pose-only revisions
-reuse resident keyframe geometry; replacement and retraction build a coherent
-new map. Published map objects remain immutable.
+It imports each component independently, then publishes a whole-peer,
+self-described product: the component artifacts, then `mola/source.json` (the
+exact `snapshot.json` bytes the generation was built from), then
+`mola/index.json`, whose `source_sha256` and `source_snapshot_id` describe
+`source.json`. A finished build is published even if the bridge replaced
+`snapshot.json` during the build; the next poll builds the newer snapshot.
+Readers (the indexed map server's provider and MGG's `MolaMap`) read
+`index.json` and `source.json`, require the digest and snapshot identity to
+agree, treat a disagreeing pair as mid-replacement and retry, and never read
+`snapshot.json`. Unchanged component artifacts are reused after checking their
+size and SHA-256. Pose-only revisions reuse resident keyframe geometry;
+replacement and retraction build a coherent new map. Published map objects
+remain immutable.
 
 The subprocess protocol has a versioned ready event, correlated requests,
 explicit `replace` and `pose_only` modes, and checked revision/artifact responses.
-Timeout, process death, malformed output, and source races invalidate resident
-state. A later request can rebuild from immutable chunks. There is no silent
-fallback to the legacy importer; `--mode oneshot` selects that compatibility
-path explicitly. Removing a component releases its resident context.
+Timeout, process death, and malformed output invalidate resident state. A later
+request can rebuild from immutable chunks. There is no silent fallback to the
+legacy importer; `--mode oneshot` selects that compatibility path explicitly.
+Removing a component releases its resident context.
 
 | Limit | Default |
 | --- | --- |
@@ -331,9 +339,12 @@ MGG reads the immutable peer snapshot.
 
 `MolaMap` queues the newest authority request on a worker thread. Planner
 callbacks never decode the snapshot or grid. The worker reads
-`snapshot.json`, `mola/index.json`, and the referenced `SDMGRID1` artifact with
-stable-read checks, verifies the mission/component/revision/geometry/source
-stamp identity and SHA-256 chain, then atomically publishes an immutable tree.
+`mola/index.json`, `mola/source.json`, and the referenced `SDMGRID1` artifact
+with stable-read checks, verifies the mission/component/revision/geometry/source
+stamp identity and SHA-256 chain (`sha256(source.json)` must equal the index's
+`source_sha256`; a disagreeing pair is mid-replacement and is retried), then
+atomically publishes an immutable tree. It never reads the bridge's
+`snapshot.json`.
 A changed identity retracts the prior tree while the replacement loads; an
 older load cannot publish over a newer request.
 

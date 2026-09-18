@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -192,6 +193,33 @@ def runtime_requests(tmp_path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in lines]
 
 
+def sha256(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+@pytest.fixture
+def publication_writes(monkeypatch) -> list[tuple[str, bytes, bytes | None]]:
+    """Record every atomic publication write in order.
+
+    Each entry is (file name, payload, source.json bytes already on disk when
+    this write started), so a test can assert that source.json lands before
+    index.json and holds the built snapshot bytes at that moment.
+    """
+
+    writes: list[tuple[str, bytes, bytes | None]] = []
+    original = worker_module._atomic_bytes
+
+    def recording(path: Path, payload: bytes) -> None:
+        source = path.parent / "source.json"
+        writes.append(
+            (path.name, payload, source.read_bytes() if source.exists() else None)
+        )
+        original(path, payload)
+
+    monkeypatch.setattr(worker_module, "_atomic_bytes", recording)
+    return writes
+
+
 def test_planner_products_reuse_unchanged_components_and_prune_pairs(tmp_path):
     peer = tmp_path / "mission" / "robot_0"
     first = manifest("component:a", 0)
@@ -321,20 +349,89 @@ def test_worker_imports_each_component_and_coalesces_same_snapshot(tmp_path) -> 
     assert len(calls) == 2
 
 
-def test_worker_does_not_publish_source_that_changed_during_import(tmp_path) -> None:
+def test_publication_writes_exact_source_bytes_before_index(
+    tmp_path, publication_writes
+) -> None:
     peer = tmp_path / "mission" / "robot_0"
-    first = manifest("component:a", 1)
-    write_snapshot(peer, "a" * 64, [first])
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    # write_snapshot is not canonical JSON, so a re-serialised source.json
+    # would hash differently from the bytes the worker read.
+    built = (peer / "snapshot.json").read_bytes()
+    assert built != json.dumps(json.loads(built), separators=(",", ":")).encode()
+
+    def successful(command, _timeout):
+        Path(command[3]).write_bytes(b"metric-map-v1")
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
+    result = worker.process_peer(peer)
+
+    assert result.published
+    assert result.source_sha256 == sha256(built)
+    assert [name for name, _, _ in publication_writes] == [
+        "source.json",
+        "index.json",
+    ]
+    source_write, index_write = publication_writes
+    assert source_write[1] == built
+    assert source_write[2] is None
+    # source.json was already in place, with the built bytes, when index.json
+    # started its replacement.
+    assert index_write[2] == built
+    assert (peer / "mola/source.json").read_bytes() == built
+    index = json.loads((peer / "mola/index.json").read_text())
+    assert index["source_sha256"] == sha256(built)
+    assert index["source_snapshot_id"] == "a" * 64
+
+
+def test_snapshot_replaced_during_build_publishes_earlier_bytes_then_newer(
+    tmp_path, publication_writes
+) -> None:
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    earlier = (peer / "snapshot.json").read_bytes()
+    calls = 0
 
     def changing_import(command, _timeout):
-        Path(command[3]).write_bytes(b"metric-map")
-        write_snapshot(peer, "b" * 64, [manifest("component:a", 2)])
+        nonlocal calls
+        calls += 1
+        Path(command[3]).write_bytes(b"metric-map-%d" % calls)
+        if calls == 1:
+            # The bridge lands a newer snapshot while the build is running.
+            write_snapshot(peer, "b" * 64, [manifest("component:a", 2)])
 
     worker = MolaWorker(tmp_path, mode="oneshot", runner=changing_import)
-    result = worker.process_peer(peer)
-    assert not result.published
-    assert not (peer / "mola/index.json").exists()
-    assert not list((peer / "mola/components").iterdir())
+    assert worker.run_once() == {}
+    newer = (peer / "snapshot.json").read_bytes()
+    assert newer != earlier
+
+    # The finished build is published as the product of the bytes it read.
+    assert calls == 1
+    assert (peer / "mola/source.json").read_bytes() == earlier
+    assert publication_writes[1][2] == earlier
+    index = json.loads((peer / "mola/index.json").read_text())
+    assert index["source_snapshot_id"] == "a" * 64
+    assert index["source_sha256"] == sha256(earlier)
+    assert index["artifacts"][0]["revision"] == 1
+    assert worker._completed[peer] == sha256(earlier)
+
+    # The next poll sees that the newer snapshot is not what was built.
+    assert worker.run_once() == {}
+    assert calls == 2
+    assert (peer / "mola/source.json").read_bytes() == newer
+    index = json.loads((peer / "mola/index.json").read_text())
+    assert index["source_snapshot_id"] == "b" * 64
+    assert index["source_sha256"] == sha256(newer)
+    assert index["artifacts"][0]["revision"] == 2
+    assert [name for name, _, _ in publication_writes] == [
+        "source.json",
+        "index.json",
+        "source.json",
+        "index.json",
+    ]
+
+    # An unchanged snapshot is not rebuilt.
+    assert worker.run_once() == {}
+    assert calls == 2
 
 
 def test_failed_new_generation_keeps_last_published_index(tmp_path) -> None:
@@ -347,6 +444,7 @@ def test_failed_new_generation_keeps_last_published_index(tmp_path) -> None:
     worker = MolaWorker(tmp_path, mode="oneshot", runner=successful)
     assert worker.process_peer(peer).published
     prior = (peer / "mola/index.json").read_bytes()
+    prior_source = (peer / "mola/source.json").read_bytes()
     write_snapshot(peer, "b" * 64, [manifest("component:a", 2)])
 
     def failed(_command, _timeout):
@@ -356,6 +454,7 @@ def test_failed_new_generation_keeps_last_published_index(tmp_path) -> None:
     with pytest.raises(WorkerError, match="native failure"):
         worker.process_peer(peer)
     assert (peer / "mola/index.json").read_bytes() == prior
+    assert (peer / "mola/source.json").read_bytes() == prior_source
 
 
 def test_worker_rejects_unbounded_or_invalid_snapshot_before_subprocess(
@@ -481,27 +580,45 @@ def test_disappeared_peer_releases_its_native_maps(tmp_path) -> None:
         worker.close()
 
 
-def test_source_race_discards_generation_and_native_state(tmp_path) -> None:
+def test_source_race_publishes_build_and_keeps_native_state(tmp_path) -> None:
     peer = tmp_path / "mission" / "robot_0"
-    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    first = manifest("component:a", 1)
+    write_snapshot(peer, "a" * 64, [first])
+    earlier = (peer / "snapshot.json").read_bytes()
     worker = MolaWorker(tmp_path, importer=fake_runtime(tmp_path), timeout_s=1)
     original_import = worker._persistent_import
 
     def changing_import(**kwargs):
         response = original_import(**kwargs)
-        write_snapshot(peer, "b" * 64, [manifest("component:a", 2)])
+        write_snapshot(
+            peer,
+            "b" * 64,
+            [manifest("component:a", 2, geometry_revision=first["geometry_revision"])],
+        )
         return response
 
     worker._persistent_import = changing_import
     try:
-        assert not worker.process_peer(peer).published
-        assert not (peer / "mola/index.json").exists()
-        assert not worker._resident_maps
+        result = worker.process_peer(peer)
+        assert result.published
+        assert result.source_sha256 == sha256(earlier)
+        assert (peer / "mola/source.json").read_bytes() == earlier
+        index = json.loads((peer / "mola/index.json").read_text())
+        assert index["source_snapshot_id"] == "a" * 64
+        # The resident native map is the published generation, so it stays.
+        assert worker._resident_maps
+
         worker._persistent_import = original_import
+        newer = (peer / "snapshot.json").read_bytes()
         assert worker.process_peer(peer).published
+        assert (peer / "mola/source.json").read_bytes() == newer
+        index = json.loads((peer / "mola/index.json").read_text())
+        assert index["source_snapshot_id"] == "b" * 64
+        # The pose-only correction bases on the generation index.json
+        # described, without a native restart.
         requests = runtime_requests(tmp_path)
-        assert [request["mode"] for request in requests] == ["replace", "replace"]
-        assert len((tmp_path / "starts.log").read_text().splitlines()) == 2
+        assert [request["mode"] for request in requests] == ["replace", "pose_only"]
+        assert len((tmp_path / "starts.log").read_text().splitlines()) == 1
     finally:
         worker.close()
 
@@ -524,10 +641,14 @@ def test_persistent_runtime_failure_is_reaped_and_next_attempt_restarts(
         with pytest.raises(WorkerError):
             worker.process_peer(peer)
         assert not (peer / "mola/index.json").exists()
+        assert not (peer / "mola/source.json").exists()
         assert worker.process_peer(peer).published
         assert len((tmp_path / "starts.log").read_text().splitlines()) == 2
         index = json.loads((peer / "mola/index.json").read_text())
         assert index["source_snapshot_id"] == "a" * 64
+        assert (peer / "mola/source.json").read_bytes() == (
+            peer / "snapshot.json"
+        ).read_bytes()
     finally:
         worker.close()
 

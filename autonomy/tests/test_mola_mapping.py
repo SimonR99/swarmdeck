@@ -84,7 +84,11 @@ def write_publication(
             )
         ).hexdigest()
     source_raw = canonical(snapshot)
+    # The bridge's input, which the worker consumes and the provider never
+    # reads, and the product's own copy of the bytes the worker built from.
     (peer / "snapshot.json").write_bytes(source_raw)
+    (peer / "mola").mkdir(parents=True)
+    (peer / "mola" / "source.json").write_bytes(source_raw)
     revision = manifest["graph_revision"]
     nested_source_id = "c" * 64
     nested_source_sha = "d" * 64
@@ -129,7 +133,7 @@ def write_publication(
     body += struct.pack("<qqd", 0, 0, 0.5)
     grid_raw = GRID_MAGIC + struct.pack("<I", len(metadata_raw)) + metadata_raw + body
     components = peer / "mola" / "components"
-    components.mkdir(parents=True)
+    components.mkdir()
     grid_path = components / "component.sdpg"
     grid_path.write_bytes(grid_raw)
     index = {
@@ -261,20 +265,21 @@ def test_mola_cache_reloads_an_atomically_replaced_artifact(
     assert provider._cache[component][1] is not first_grid
 
 
-def test_mola_refresh_detects_snapshot_replacement_during_final_pair_check(
+def test_mola_refresh_detects_source_replacement_during_final_pair_check(
     tmp_path, monkeypatch
 ) -> None:
     peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
-    snapshot_path = peer / "snapshot.json"
+    source_path = peer / "mola" / "source.json"
     stable_read = mola_mapping._bounded_stable_read_with_identity
-    snapshot_reads = 0
+    source_reads = 0
 
     def replace_after_read(path, maximum, field):
-        nonlocal snapshot_reads
+        nonlocal source_reads
         result = stable_read(path, maximum, field)
-        if field == "snapshot":
-            snapshot_reads += 1
-            if snapshot_reads == 2:
+        if field == "MOLA source":
+            assert path == source_path
+            source_reads += 1
+            if source_reads == 2:
                 path.write_bytes(result[0] + b"\n")
         return result
 
@@ -287,7 +292,7 @@ def test_mola_refresh_detects_snapshot_replacement_during_final_pair_check(
     with pytest.raises(ValueError, match="publication changed while reading"):
         provider.refresh(view, component)
 
-    assert snapshot_path.read_bytes().endswith(b"\n")
+    assert source_path.read_bytes().endswith(b"\n")
     assert view._index is None
     assert view._unavailable_detail == "MOLA publication changed while reading"
 
@@ -390,19 +395,83 @@ def test_mola_provider_rejects_a_grid_without_a_retired_count(tmp_path) -> None:
         provider.refresh(IndexedMapView(), component)
 
 
-def test_mola_provider_invalidates_when_worker_index_is_not_current(tmp_path) -> None:
+def test_mola_provider_serves_product_when_bridge_snapshot_is_ahead(
+    tmp_path,
+) -> None:
+    peer, component, geometry = write_publication(tmp_path, free=(), qualified=0)
+    provider = MolaDirectorySource(peer)
+    view = IndexedMapView()
+    key = provider.refresh(view, component)
+    signature = provider.signature()
+
+    # The bridge lands a newer input while the worker is still building it.
+    # The product describes itself through mola/source.json, so it stays
+    # servable, and its signature does not move either.
+    snapshot_path = peer / "snapshot.json"
+    newer = json.loads(snapshot_path.read_bytes())
+    newer["manifests"][0]["graph_revision"]["revision"] += 1
+    newer["snapshot_id"] = "1" * 64
+    snapshot_path.write_bytes(canonical(newer))
+
+    assert provider.component_ids() == (component,)
+    assert provider.refresh(view, component) == key
+    assert key == SnapshotKey(component, 0, 0, geometry)
+    assert provider.signature() == signature
+    assert (
+        view.query(QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))).status
+        is QueryStatus.OK
+    )
+
+    # The provider does not read snapshot.json at all.
+    snapshot_path.unlink()
+    assert provider.refresh(view, component) == key
+    assert provider.signature() == signature
+
+
+@pytest.mark.parametrize("disagreement", ["bytes", "identity"])
+def test_mola_provider_reports_a_pending_pair_when_source_and_index_disagree(
+    tmp_path, disagreement
+) -> None:
+    from autonomy.map_provider import PublicationPending
+
     peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
     provider = MolaDirectorySource(peer)
     view = IndexedMapView()
     key = provider.refresh(view, component)
-    (peer / "snapshot.json").write_bytes((peer / "snapshot.json").read_bytes() + b"\n")
+    source_path = peer / "mola" / "source.json"
+    index_path = peer / "mola" / "index.json"
+    if disagreement == "bytes":
+        # source.json already replaced, index.json not yet.
+        source_path.write_bytes(source_path.read_bytes() + b"\n")
+        expected = "does not match its published source bytes"
+    else:
+        # Same bytes, but the index claims another snapshot identity.
+        index = json.loads(index_path.read_bytes())
+        index["source_snapshot_id"] = "9" * 64
+        index_path.write_bytes(canonical(index))
+        expected = "does not match its published source identity"
 
-    with pytest.raises(ValueError, match="current snapshot bytes"):
+    with pytest.raises(PublicationPending, match=expected):
+        provider.component_ids()
+    with pytest.raises(PublicationPending, match=expected):
         provider.refresh(view, component)
     assert (
         view.query(QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))).status
         is QueryStatus.UNAVAILABLE
     )
+
+    # Once the pair agrees again, the same provider serves without a restart.
+    if disagreement == "bytes":
+        index = json.loads(index_path.read_bytes())
+        index["source_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        index_path.write_bytes(canonical(index))
+    else:
+        index = json.loads(index_path.read_bytes())
+        index["source_snapshot_id"] = json.loads(source_path.read_bytes())[
+            "snapshot_id"
+        ]
+        index_path.write_bytes(canonical(index))
+    assert provider.refresh(view, component) == key
 
 
 def test_mola_cache_rechecks_planner_source_descriptor(tmp_path) -> None:

@@ -1,4 +1,16 @@
-"""Verified provider for native MOLA planner-grid publications."""
+"""Verified provider for native MOLA planner-grid publications.
+
+The worker publishes a self-described product under ``<peer>/mola/``: the
+component artifacts, then ``source.json`` (the exact snapshot bytes the
+generation was built from), then ``index.json``. This provider reads
+``index.json`` and ``source.json`` and requires ``sha256(source.json) ==
+index.source_sha256`` and ``source.snapshot_id == index.source_snapshot_id``.
+A mismatch means the pair is mid-replacement, reported as
+:class:`PublicationPending` so the registry retries on its next poll. The
+provider never reads ``snapshot.json``: that file is the bridge's newest input
+and may be ahead of the product, and serving the product it does describe is
+the point of the protocol (see ``deploy/autonomy/mola_worker.py``).
+"""
 
 from __future__ import annotations
 
@@ -172,7 +184,9 @@ def _qualified_ray_keyframes(manifest: Mapping[str, object]) -> int:
 
 
 def _snapshot(raw: bytes) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-    value = _json(raw, "snapshot")
+    """Validate the published source, which is a snapshot document by content."""
+
+    value = _json(raw, "MOLA source")
     if value.get("schema") != SCHEMA_VERSION:
         raise ValueError("unsupported snapshot schema")
     manifests = value.get("manifests")
@@ -225,7 +239,8 @@ class MolaDirectorySource:
             ):
                 raise ValueError(f"{field} must be a positive bounded integer")
         self.peer_root = Path(peer_root)
-        self.snapshot_path = self.peer_root / "snapshot.json"
+        # The product's own copy of its source, not the bridge's snapshot.json.
+        self.source_path = self.peer_root / "mola" / "source.json"
         self.publication_path = self.peer_root / "mola" / "index.json"
         self.components_path = self.peer_root / "mola" / "components"
         self.max_index_bytes = max_index_bytes
@@ -244,21 +259,27 @@ class MolaDirectorySource:
         dict[str, dict[str, object]],
         dict[str, dict[str, object]],
     ]:
-        source_raw, source_identity = _bounded_stable_read_with_identity(
-            self.snapshot_path, MAX_INDEX_BYTES, "snapshot"
-        )
+        # index.json is replaced last, so read it first: a source.json that
+        # then disagrees with it is either the older generation still in
+        # place or the newer one already there. Either way the digest check
+        # below reports the pair as pending and the next poll reads again.
         index_raw, index_identity = _bounded_stable_read_with_identity(
             self.publication_path, self.max_index_bytes, "MOLA index"
         )
-        snapshot, manifests = _snapshot(source_raw)
+        source_raw, source_identity = _bounded_stable_read_with_identity(
+            self.source_path, MAX_INDEX_BYTES, "MOLA source"
+        )
         index = _json(index_raw, "MOLA index")
         if index.get("version") != 1:
             raise ValueError("unsupported MOLA index version")
         if index.get("source_sha256") != _sha256(source_raw):
-            raise PublicationPending("MOLA index does not match current snapshot bytes")
+            raise PublicationPending(
+                "MOLA index does not match its published source bytes"
+            )
+        snapshot, manifests = _snapshot(source_raw)
         if index.get("source_snapshot_id") != snapshot.get("snapshot_id"):
             raise PublicationPending(
-                "MOLA index does not match current snapshot identity"
+                "MOLA index does not match its published source identity"
             )
         artifacts = index.get("artifacts")
         if not isinstance(artifacts, list) or len(artifacts) > MAX_COMPONENTS:
@@ -309,7 +330,7 @@ class MolaDirectorySource:
 
     def signature(self) -> tuple[int, ...]:
         values: list[int] = []
-        for path in (self.snapshot_path, self.publication_path):
+        for path in (self.source_path, self.publication_path):
             stat = path.stat()
             values.extend((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
         return tuple(values)
@@ -378,15 +399,15 @@ class MolaDirectorySource:
         source_identity: tuple[int, int, int, int, int],
         index_identity: tuple[int, int, int, int, int],
     ) -> bool:
-        current_source, current_source_identity = _bounded_stable_read_with_identity(
-            self.snapshot_path, MAX_INDEX_BYTES, "snapshot"
-        )
         current_index, current_index_identity = _bounded_stable_read_with_identity(
             self.publication_path, self.max_index_bytes, "MOLA index"
         )
+        current_source, current_source_identity = _bounded_stable_read_with_identity(
+            self.source_path, MAX_INDEX_BYTES, "MOLA source"
+        )
         # Re-stat both after the pair has been read. This closes the window in
-        # which snapshot.json could be replaced while index.json was checked.
-        final_source_identity = _stat_identity(self.snapshot_path.stat())
+        # which source.json could be replaced while index.json was checked.
+        final_source_identity = _stat_identity(self.source_path.stat())
         final_index_identity = _stat_identity(self.publication_path.stat())
         return (
             current_source == source_raw

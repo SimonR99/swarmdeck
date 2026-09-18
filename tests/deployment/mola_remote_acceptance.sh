@@ -104,6 +104,10 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 test "$current" = "$second"
+# The product describes itself: mola/source.json holds the exact bytes the
+# index digest names, so readers never depend on snapshot.json.
+published_source=$(sha256sum "$tmp/maps/$mission/$robot/mola/source.json" | cut -d' ' -f1)
+test "$published_source" = "$second"
 second_geometry=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifacts"][0]["geometry_revision"])' "$tmp/maps/$mission/$robot/mola/index.json")
 test "$first_geometry" = "$second_geometry"
 

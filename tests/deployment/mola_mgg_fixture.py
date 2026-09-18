@@ -3,11 +3,18 @@
 
 Run in the mapping image with an empty writable --output directory. The MGG
 image can then read each case without a mapper, ROS graph or motion controller.
+
+Each case directory is a copy of the peer root: the bridge-side
+``snapshot.json`` and ``geometry/`` the worker consumed, and the self-described
+product under ``mola/`` (``components/``, ``source.json`` holding the exact
+snapshot bytes the product was built from, and ``index.json``). The MGG loader
+reads ``mola/index.json`` and ``mola/source.json`` only.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -39,7 +46,9 @@ def generate(output: Path, binary: Path) -> dict:
     cases = []
 
     def save_case(name, points):
-        snapshot = json.loads((peer / "snapshot.json").read_text())
+        # The probe's expected identity is the product's, which is what the
+        # loader under test reads. snapshot.json may be ahead of it in general.
+        snapshot = json.loads((peer / "mola" / "source.json").read_bytes())
         manifest = next(
             m
             for m in snapshot["manifests"]
@@ -72,13 +81,17 @@ def generate(output: Path, binary: Path) -> dict:
         first = json.loads((peer / "mola/index.json").read_text())
 
         # A new snapshot heartbeat must reuse the unchanged immutable grid.
-        # Its original source-byte digest differs from the new index digest.
+        # Its original source-byte digest differs from the new index digest,
+        # and the published source.json is exactly the bytes that digest names.
         fixture._publish_and_refresh(
             worker, mapper, peer, source, view, component, deadline
         )
         second = json.loads((peer / "mola/index.json").read_text())
         assert first["source_sha256"] != second["source_sha256"]
         assert first["artifacts"][0]["planner"] == second["artifacts"][0]["planner"]
+        published_source = (peer / "mola/source.json").read_bytes()
+        assert hashlib.sha256(published_source).hexdigest() == second["source_sha256"]
+        assert published_source == (peer / "snapshot.json").read_bytes()
         save_case("reused", points)
 
         corrected = fixture._yaw_pose(math.pi / 2, 1.0, 2.0)

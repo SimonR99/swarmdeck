@@ -18,6 +18,7 @@ work.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -265,23 +266,35 @@ def _publish_and_refresh(
 def _replay_manifest(
     peer: Path,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-    raw = (peer / "snapshot.json").read_bytes()
+    """Read the manifests of the published product, as its readers do.
+
+    The product describes itself: ``mola/source.json`` holds the exact snapshot
+    bytes the worker built from and ``mola/index.json`` names their digest.
+    ``snapshot.json`` is the bridge's input and is never read here.
+    """
+
+    raw = (peer / "mola" / "source.json").read_bytes()
+    index = json.loads((peer / "mola" / "index.json").read_bytes())
+    if index.get("source_sha256") != hashlib.sha256(raw).hexdigest():
+        raise ValueError(f"{peer}: worker index does not describe its source.json")
     value = json.loads(raw)
+    if index.get("source_snapshot_id") != value.get("snapshot_id"):
+        raise ValueError(f"{peer}: worker index names another snapshot identity")
     manifests = value.get("manifests")
     if not isinstance(manifests, list):
-        raise ValueError(f"{peer}: snapshot manifests are missing")
+        raise ValueError(f"{peer}: source manifests are missing")
     by_component: dict[str, dict[str, object]] = {}
     for manifest in manifests:
         if not isinstance(manifest, dict):
-            raise ValueError(f"{peer}: snapshot manifest is invalid")
+            raise ValueError(f"{peer}: source manifest is invalid")
         revision = manifest.get("graph_revision")
         if not isinstance(revision, dict) or not isinstance(
             revision.get("component_id"), str
         ):
-            raise ValueError(f"{peer}: snapshot component is invalid")
+            raise ValueError(f"{peer}: source component is invalid")
         component = str(revision["component_id"])
         if component in by_component:
-            raise ValueError(f"{peer}: snapshot repeats {component}")
+            raise ValueError(f"{peer}: source repeats {component}")
         by_component[component] = manifest
     return value, by_component
 

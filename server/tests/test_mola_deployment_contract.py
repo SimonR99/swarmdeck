@@ -137,6 +137,10 @@ def test_remote_acceptance_requires_explicit_source_for_builds():
     assert "--network none" in script
     assert "os.replace(stream.name, path)" in script
     assert "swarmdeck-mola-import --serve" in script
+    # The worker publishes a self-described product: source.json carries the
+    # bytes index.json's source_sha256 names. The acceptance checks that pair.
+    assert 'sha256sum "$tmp/maps/$mission/$robot/mola/source.json"' in script
+    assert 'test "$published_source" = "$second"' in script
 
 
 def test_launcher_smoke_uses_real_config_and_bounded_shutdown():

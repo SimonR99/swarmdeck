@@ -187,7 +187,10 @@ class IndexRegistry:
             try:
                 signature = source.signature()
             except OSError as exc:
-                self._invalidate_root(root, f"snapshot validation failed: {exc}")
+                # The provider stats its own publication files (for MOLA,
+                # mola/source.json and mola/index.json; never the bridge's
+                # snapshot.json), so a missing one is a publication problem.
+                self._invalidate_root(root, f"publication signature failed: {exc}")
                 continue
             if not self._retry_allowed(root, signature, now):
                 preserve_roots.add(root)

@@ -2,9 +2,36 @@
 """Continuously turn coherent onboard map snapshots into MOLA metric maps.
 
 The capture/graph process owns ``snapshot.json`` and immutable chunks. This
-worker only consumes them. Each component is imported independently, then one
-atomic index replacement publishes the complete generation. A source change
-during import discards the generation and is picked up by a later poll.
+worker only consumes them. Each component is imported independently, then the
+complete generation is published as a self-described product under
+``<peer>/mola/``:
+
+1. the component artifacts (``components/*.metricmap`` and, with planner maps,
+   ``components/*.sdpg``), each written once and never modified;
+2. ``source.json``: the exact bytes of the ``snapshot.json`` the generation was
+   built from, written to a temporary file in the same directory and
+   ``os.replace``d;
+3. ``index.json``: atomically replaced last; its ``source_sha256`` and
+   ``source_snapshot_id`` describe ``source.json``.
+
+Readers (``autonomy/mola_mapping.py`` for the indexed map server and the MGG
+planner's ``MolaMap`` loader) read ``index.json`` and then ``source.json`` and
+require ``sha256(source.json bytes) == index.source_sha256`` and
+``source.snapshot_id == index.source_snapshot_id``. A mismatch means the pair
+is mid-replacement and the reader retries briefly. Readers never read
+``snapshot.json``: that file is the bridge's newest input and may be ahead of
+the product.
+
+A completed build is therefore always published, even when ``snapshot.json``
+moved on during the build. The earlier protocol validated ``index.json``
+against the current ``snapshot.json`` bytes, so a build whose source changed
+mid-way had to be discarded together with the native runtime state. On the
+benchbot deployment (2026-09-18) the Swarm-SLAM bridge replaced
+``snapshot.json`` about once per second while a robot drove, while one native
+build took about 1.5 s for 90 keyframes; most builds were discarded, products
+were published only 10 to 27 s apart, and 62% of MGG plan requests ran without
+a map. Publishing the older-but-coherent generation keeps a map available
+while the next build catches up.
 """
 
 from __future__ import annotations
@@ -132,13 +159,6 @@ def _bounded_file_bytes(path: Path, maximum: int, label: str) -> bytes:
     return raw
 
 
-def _source_matches(path: Path, expected: bytes) -> bool:
-    try:
-        return _bounded_file_bytes(path, MAX_SNAPSHOT_BYTES, "snapshot") == expected
-    except (OSError, WorkerError):
-        return False
-
-
 def _read_snapshot(path: Path) -> tuple[bytes, dict[str, object]]:
     raw = _bounded_file_bytes(path, MAX_SNAPSHOT_BYTES, "snapshot")
     try:
@@ -202,9 +222,10 @@ def _sha256_file(path: Path, maximum: int) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def _atomic_json(path: Path, value: object) -> None:
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    """Replace ``path`` with ``payload`` through a fsynced sibling temporary."""
+
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     try:
         with temporary.open("xb") as stream:
             stream.write(payload)
@@ -220,11 +241,21 @@ def _atomic_json(path: Path, value: object) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_json(path: Path, value: object) -> None:
+    _atomic_bytes(
+        path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     published: bool
     snapshot_id: str
     component_count: int
+    # SHA-256 of the snapshot bytes the product was built from, which is also
+    # the published source.json. run_once records it so an unchanged snapshot
+    # is not rebuilt, even when snapshot.json moved on during the build.
+    source_sha256: str
 
 
 class MolaWorker:
@@ -488,6 +519,23 @@ class MolaWorker:
             self._resident_by_peer.pop(peer_root, None)
 
     def process_peer(self, peer_root: Path) -> ProcessResult:
+        """Build and publish one generation from the peer's current snapshot.
+
+        The snapshot bytes are read once at the start; the generation built
+        from them is published whatever ``snapshot.json`` contains by the end
+        (see the module docstring for why). Publication order is artifacts,
+        then ``source.json`` holding those exact bytes, then ``index.json``.
+
+        After a published build the resident native state is the published
+        generation, so the next pose-only correction for a component with
+        unchanged geometry bases on the generation ``index.json`` describes.
+        A build that fails part way keeps the previous ``index.json`` and
+        ``source.json`` and invalidates the native runtime wherever native
+        state may have advanced past the published generation (process
+        failures, response or artifact mismatches, disappearing files); the
+        next attempt then rebuilds from immutable chunks.
+        """
+
         peer_root = Path(peer_root)
         source = peer_root / "snapshot.json"
         chunks = peer_root / "geometry" / "chunks"
@@ -629,19 +677,16 @@ class MolaWorker:
                         "source_snapshot_id": snapshot_id,
                     }
 
-            # The bridge replaces snapshot.json atomically. Byte equality is a
-            # stronger guard than revision alone and catches same-ID corruption.
-            if not _source_matches(source, raw):
-                # Some staged requests may already have advanced native state.
-                # Restarting prevents a discarded generation from becoming the
-                # base for the next pose-only correction.
-                self._invalidate_runtime()
-                return ProcessResult(False, snapshot_id, len(manifests))
             for staged_path, final_path in staged:
                 os.replace(staged_path, final_path)
-            if not _source_matches(source, raw):
-                self._invalidate_runtime()
-                return ProcessResult(False, snapshot_id, len(manifests))
+            # The product describes itself: source.json carries the exact
+            # snapshot bytes this generation was built from (raw, not
+            # re-serialised, so its digest is source_sha256), and index.json
+            # follows. A reader that sees a source/index pair whose digests
+            # disagree is between the two replacements and retries; it never
+            # consults snapshot.json, which the bridge may already have
+            # replaced with a newer input while this build ran.
+            _atomic_bytes(mola_root / "source.json", raw)
             index = {
                 "version": 1,
                 "source_snapshot_id": snapshot_id,
@@ -649,19 +694,7 @@ class MolaWorker:
                 "generated_at_ns": time.time_ns(),
                 "artifacts": artifacts,
             }
-            index_path = mola_root / "index.json"
-            _atomic_json(index_path, index)
-            # No cross-process transaction can cover both source and index.
-            # Recheck immediately and retract only our own index on a race.
-            if not _source_matches(source, raw):
-                try:
-                    current = json.loads(index_path.read_text())
-                    if current.get("source_sha256") == source_sha:
-                        index_path.unlink()
-                except (FileNotFoundError, json.JSONDecodeError, OSError):
-                    pass
-                self._invalidate_runtime()
-                return ProcessResult(False, snapshot_id, len(manifests))
+            _atomic_json(mola_root / "index.json", index)
             self._prune(
                 components_root,
                 {mola_root / str(item["path"]) for item in artifacts},
@@ -671,7 +704,7 @@ class MolaWorker:
                 for manifest in manifests
             }
             self._release_inactive_maps(peer_root, active_map_ids)
-            return ProcessResult(True, snapshot_id, len(manifests))
+            return ProcessResult(True, snapshot_id, len(manifests), source_sha)
         except FileNotFoundError as exc:
             self._invalidate_runtime()
             raise WorkerError("snapshot or native artifact disappeared") from exc
@@ -719,10 +752,11 @@ class MolaWorker:
                 continue
             try:
                 result = self.process_peer(peer)
-                if result.published:
-                    self._completed[peer] = source_sha
-                else:
-                    self._retry_after.pop(peer, None)
+                # Record the bytes the product was built from, which process_peer
+                # read itself. If snapshot.json moved on meanwhile, the next poll
+                # sees a digest that differs from this one and builds it.
+                self._completed[peer] = result.source_sha256
+                self._retry_after.pop(peer, None)
             except (WorkerError, OSError, KeyError, TypeError) as exc:
                 errors[peer] = f"{type(exc).__name__}: {exc}"
                 self._retry_after[peer] = now + self.retry_s
