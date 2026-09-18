@@ -302,7 +302,9 @@ def main() -> None:
     parser.add_argument("--maps-root", type=Path, default=Path("/maps"))
     parser.add_argument("--mission-id", default=os.environ.get("SWARMDECK_MISSION_ID"))
     parser.add_argument("--poll-s", type=float, default=0.5)
-    parser.add_argument("--max-snapshot-age-s", type=float, default=3.0)
+    # See docker-compose.mapping.yml: a serial decode of every peer's new
+    # product must fit inside this bound.
+    parser.add_argument("--max-snapshot-age-s", type=float, default=15.0)
     parser.add_argument(
         "--map-provider",
         choices=("indexed", "mola"),

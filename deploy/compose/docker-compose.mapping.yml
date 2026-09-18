@@ -57,7 +57,13 @@ services:
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_PLANNER_MAP_PROVIDER: "${SWARMDECK_PLANNER_MAP_PROVIDER:-mola}"
       SWARMDECK_MAP_QUERY_POLL_S: "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
-      SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S: "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-3}"
+      # The served product is refused once its last coherent read is older
+      # than this. The poll thread decodes every peer's new product in turn,
+      # about 1 s per 15 MB grid (measured 2026-09-18, four robots publishing
+      # every 2 to 6 s), so a 3 s bound expired other robots' views during a
+      # decode and plans failed with "indexed snapshot exceeded coherent-read
+      # age". 15 s covers a four-robot cycle and still catches a dead poller.
+      SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S: "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
     volumes:
       - peer_maps:/maps
     command:
@@ -67,7 +73,7 @@ services:
       - --poll-s
       - "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
       - --max-snapshot-age-s
-      - "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-3}"
+      - "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
     depends_on:
       sim:
         condition: service_started
