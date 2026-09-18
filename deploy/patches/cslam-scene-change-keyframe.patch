@@ -1,15 +1,16 @@
 --- a/cslam/cslam/lidar_handler_node.py
 +++ b/cslam/cslam/lidar_handler_node.py
-@@ -59,6 +59,8 @@
+@@ -59,6 +59,9 @@
          self.nb_local_keyframes = 0
          self.previous_keyframe = None
          self.previous_odom = None
 +        self.previous_scene_signature = None
 +        self.previous_keyframe_stamp = None
++        self.scene_keyframes_since_motion = 0
  
          if self.params["evaluation.enable_logs"]:
              self.log_publisher = self.node.create_publisher(
-@@ -147,6 +149,52 @@
+@@ -147,6 +150,58 @@
          """
          return (odom0.pose.pose.position.x - odom1.pose.pose.position.x)**2 + (odom0.pose.pose.position.y - odom1.pose.pose.position.y)**2 + (odom0.pose.pose.position.z - odom1.pose.pose.position.z)**2
  
@@ -21,8 +22,14 @@
 +                                1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
 +
 +    @staticmethod
-+    def scene_signature(points, bins, yaw=0.0):
++    def scene_signature(points, bins, yaw=0.0, max_range_m=float("inf")):
 +        """Minimum planar range per azimuth bin, inf where a bin is empty.
++
++        Returns beyond `max_range_m` are left out: what this rule is for is
++        the ground and the bodies right next to a parked robot, and a fleet
++        driving through a 30 m field of view would otherwise change a few
++        sectors every scan (a parked Spot took a keyframe every 5 s for two
++        hours and its map outgrew the planner's point budget, 2026-09-18).
 +
 +        Bins are laid out in the odometry frame: `yaw` is the robot's heading
 +        in that frame and the sensor-frame azimuths are rotated by it before
@@ -36,7 +43,7 @@
 +            return signature
 +        xy = np.asarray(points, dtype=float)[:, :2]
 +        ranges = np.hypot(xy[:, 0], xy[:, 1])
-+        finite = np.isfinite(ranges) & (ranges > 0.0)
++        finite = np.isfinite(ranges) & (ranges > 0.0) & (ranges <= max_range_m)
 +        if not finite.any():
 +            return signature
 +        azimuth = np.arctan2(xy[finite, 1], xy[finite, 0]) + yaw
@@ -62,7 +69,7 @@
      def generate_new_keyframe(self, msg):
          """Check if we should generate a new keyframe
  
-@@ -156,15 +204,44 @@
+@@ -156,15 +211,52 @@
          Returns:
              bool: flag indicating if a new keyframe should be created.
          """
@@ -74,7 +81,8 @@
 +                signature = self.scene_signature(
 +                    icp_utils.ros_pointcloud_to_points(msg[0]),
 +                    int(self.params["frontend.keyframe_scene_change_bins"]),
-+                    self.odom_yaw(msg[1]))
++                    self.odom_yaw(msg[1]),
++                    self.params["frontend.keyframe_scene_change_max_range_m"])
 +            except Exception:
 +                signature = None
          if self.previous_odom is None:
@@ -87,14 +95,20 @@
              self.previous_odom = msg[1]
 +            self.previous_scene_signature = signature
 +            self.previous_keyframe_stamp = stamp
++            self.scene_keyframes_since_motion = 0
              return True
 -        else:
 -            return False
 +        # A stationary robot never earns a keyframe by distance, so it would
 +        # keep planning on a view that a neighbour has since driven out of.
 +        # Take one more keyframe when the scene itself changed, rate limited.
++        # A parked robot earns a bounded number of these until it moves
++        # again: every keyframe rebuilds the planner product, and a scene
++        # that keeps changing is other robots driving past, not new ground.
 +        if (signature is not None
 +                and self.previous_keyframe_stamp is not None
++                and self.scene_keyframes_since_motion <
++                int(self.params["frontend.keyframe_scene_change_max_stationary"])
 +                and stamp - self.previous_keyframe_stamp >=
 +                self.params["frontend.keyframe_scene_change_min_period_s"]
 +                and self.scene_changed(
@@ -104,12 +118,13 @@
 +            self.previous_odom = msg[1]
 +            self.previous_scene_signature = signature
 +            self.previous_keyframe_stamp = stamp
++            self.scene_keyframes_since_motion += 1
 +            return True
 +        return False
  
      def process_new_sensor_data(self):
          """ Process new sensor data
-@@ -221,6 +298,10 @@
+@@ -221,6 +313,12 @@
                          ('frontend.registration_min_inliers', 60),
                          ('frontend.registration_min_overlap', 0.0),
                          ('frontend.keyframe_generation_ratio_distance', 0.5),
@@ -117,17 +132,21 @@
 +                        ('frontend.keyframe_scene_change_range_m', 0.5),
 +                        ('frontend.keyframe_scene_change_bins', 72),
 +                        ('frontend.keyframe_scene_change_min_period_s', 5.0),
++                        ('frontend.keyframe_scene_change_max_range_m', 8.0),
++                        ('frontend.keyframe_scene_change_max_stationary', 3),
                          ('frontend.pointcloud_odom_approx_time_sync_s', 0.1),
                          ('robot_id', 0),           
                          ('evaluation.enable_logs', False),  
-@@ -246,6 +327,12 @@
+@@ -246,6 +344,14 @@
          'frontend.registration_min_overlap').value
      params['frontend.keyframe_generation_ratio_distance'] = node.get_parameter(
          'frontend.keyframe_generation_ratio_distance').value
 +    for name in ('keyframe_scene_change_fraction',
 +                 'keyframe_scene_change_range_m',
 +                 'keyframe_scene_change_bins',
-+                 'keyframe_scene_change_min_period_s'):
++                 'keyframe_scene_change_min_period_s',
++                 'keyframe_scene_change_max_range_m',
++                 'keyframe_scene_change_max_stationary'):
 +        params['frontend.' + name] = node.get_parameter(
 +            'frontend.' + name).value
      params['frontend.pointcloud_odom_approx_time_sync_s'] = node.get_parameter(

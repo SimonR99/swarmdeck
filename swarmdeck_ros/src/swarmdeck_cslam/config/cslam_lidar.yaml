@@ -209,6 +209,14 @@
       keyframe_scene_change_range_m: 0.5
       keyframe_scene_change_bins: 72
       keyframe_scene_change_min_period_s: 5.0
+      # Only returns within this range count, and a parked robot earns at
+      # most this many scene keyframes until it moves again. Measured
+      # 2026-09-18: a parked Spot took one every 5 s for two hours (1380
+      # keyframes, 1368 of them under 0.2 m apart) while the other robots
+      # drove through its 30 m field of view; its map outgrew the planner's
+      # point budget and it could not navigate at all.
+      keyframe_scene_change_max_range_m: 8.0
+      keyframe_scene_change_max_stationary: 3
       # Gazebo does not hardware-sync the cloud and odometry.
       pointcloud_odom_approx_time_sync_s: 0.1
       use_vertex_cover_selection: true

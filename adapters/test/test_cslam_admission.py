@@ -294,12 +294,14 @@ def test_odom_yaw_reads_the_heading_out_of_the_odometry_quaternion():
 
 def test_generate_new_keyframe_aligns_the_signature_with_the_odometry_heading():
     added = "\n".join(added_lines(SCENE_PATCH.read_text()))
-    assert "def scene_signature(points, bins, yaw=0.0):" in added
+    assert (
+        'def scene_signature(points, bins, yaw=0.0, max_range_m=float("inf")):' in added
+    )
     assert "np.arctan2(xy[finite, 1], xy[finite, 0]) + yaw" in added
     # The call site must pass the heading of the same odometry message the
     # distance rule reads, or the alignment is only a default argument.
     call = added.index("signature = self.scene_signature(")
-    assert "self.odom_yaw(msg[1]))" in added[call : call + 300]
+    assert "self.odom_yaw(msg[1])," in added[call : call + 300]
 
 
 def test_inter_robot_closures_default_off_in_the_peer_launch():
@@ -314,3 +316,39 @@ def test_zero_budget_is_an_explicit_inter_robot_off_switch():
     assert 'if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:' in added
     assert "return" in added
     assert "git apply /tmp/cslam-inter-robot-switch.patch" in DOCKERFILE.read_text()
+
+
+def test_scene_signature_ignores_returns_beyond_its_range():
+    import numpy as np
+
+    scene_signature, scene_changed, _ = _scene_functions()
+    # The robot's own surroundings fill half the circle at 2 m; the other
+    # half is open street where the fleet drives 15 to 25 m away.
+    near = [(2.0 * np.cos(a), 2.0 * np.sin(a), 0.0) for a in np.linspace(0.1, 3.0, 40)]
+    far = [(20.0, -5.0, 0.0), (18.0, -9.0, 0.0), (8.0, -22.0, 0.0), (-7.0, -25.0, 0.0)]
+    with_fleet = scene_signature(near + far, 72, 0.0, 8.0)
+    without = scene_signature(near, 72, 0.0, 8.0)
+    assert np.array_equal(with_fleet, without)
+    # Without the range those four bodies occupy four otherwise empty sectors,
+    # enough for the rule (3.6 of 72) each time one of them moves on.
+    assert scene_changed(
+        scene_signature(near, 72), scene_signature(near + far, 72), 0.5, 0.05
+    )
+
+
+def test_a_parked_robot_earns_a_bounded_number_of_scene_keyframes():
+    added = "\n".join(added_lines(SCENE_PATCH.read_text()))
+    # Initialised once, and reset when the distance rule fires: the robot
+    # really moved, so the allowance starts again.
+    assert added.count("self.scene_keyframes_since_motion = 0") == 2
+    assert (
+        'self.scene_keyframes_since_motion <\n                int(self.params["frontend.keyframe_scene_change_max_stationary"])'
+        in added
+    )
+    assert "self.scene_keyframes_since_motion += 1" in added
+    assert "keyframe_scene_change_max_range_m" in added
+    yaml_text = (
+        REPO / "swarmdeck_ros/src/swarmdeck_cslam/config/cslam_lidar.yaml"
+    ).read_text()
+    assert "keyframe_scene_change_max_range_m: 8.0" in yaml_text
+    assert "keyframe_scene_change_max_stationary: 3" in yaml_text

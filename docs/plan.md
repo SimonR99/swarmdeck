@@ -58,7 +58,7 @@ local obstacle avoidance, and the adapter owns the final command boundary.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`7be661d631389c77a5b2c1b54ece18bcb03fe447` (the 59 ported commits over
+`54ca865a41685094d689e5216f2d50be8c0c089e` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
