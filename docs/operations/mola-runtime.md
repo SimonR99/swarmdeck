@@ -345,8 +345,14 @@ stamp identity and SHA-256 chain (`sha256(source.json)` must equal the index's
 `source_sha256`; a disagreeing pair is mid-replacement and is retried), then
 atomically publishes an immutable tree. It never reads the bridge's
 `snapshot.json`.
-A changed identity retracts the prior tree while the replacement loads; an
-older load cannot publish over a newer request.
+A request for another component or epoch, or with a moved authority
+transform, retracts the prior tree while the replacement loads. A compatible
+successor (a newer revision of the same component under the same transform)
+keeps the prior tree in service until its product is decoded, and if the product
+on disk still carries the previous revision when the load budget runs out the
+prior tree stays in service with its validity clock refreshed
+(`retainedPredecessorCount()`); an older load cannot publish over a newer
+request.
 
 The product is ternary. Occupied voxels and qualified observed-free voxels are
 stored explicitly; unknown space is absent. Occupied wins if an observation

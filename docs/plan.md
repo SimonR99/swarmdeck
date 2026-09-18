@@ -76,8 +76,8 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`54ca865a41685094d689e5216f2d50be8c0c089e` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement and validated-prefix navigation), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+`ce97882b97c476a34b16a081668a4baedb1f8fbd` (the 59 ported commits over
+upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, and the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
