@@ -188,6 +188,23 @@
       # moved by more than `range_m` (or appeared or vanished), at most once per
       # `min_period_s`. A Bunker 2 m away spans about 28 degrees, six of the 72
       # sectors, so 0.05 (four sectors) catches it. A fraction of 0 disables it.
+      #
+      # The sectors are laid out in the odometry frame (the patch rotates each
+      # scan's azimuths by the odometry yaw before binning), not in the sensor
+      # frame. Measured 2026-09-17 on Benchbot (mission a72b1c3d, robot_3): with
+      # sensor-frame sectors a robot dithering inside 0.7 m by 0.4 m under a
+      # stuck local controller, yaw swinging 5 to 39 degrees, took a keyframe
+      # every 5.0 to 5.8 s for 160 s (27 of 51 keyframe steps under 0.2 m). On
+      # one of its stored keyframes a pure 5 degree yaw already moved four
+      # sectors by more than 0.5 m; translations up to 0.25 m moved at most
+      # three, so aligning with the heading is what makes the rule quiet while
+      # the robot rocks. A rocking amplitude above
+      # `keyframe_generation_ratio_distance` still earns a keyframe per swing
+      # from the distance rule, which compares against the last keyframe's
+      # position only and has no rotation term: robot_2's 121 keyframes in
+      # three minutes of recovery motion on 2026-09-16 predate this rule and
+      # can only have come from there (about 30 m of odometry path for 0.6 m
+      # of displacement).
       keyframe_scene_change_fraction: 0.05
       keyframe_scene_change_range_m: 0.5
       keyframe_scene_change_bins: 72

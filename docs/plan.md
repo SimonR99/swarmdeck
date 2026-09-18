@@ -188,8 +188,19 @@ Each item names its acceptance gate.
       Limiting reverse to 0.15 m/s made one grouped start pass and did not
       cure the next; Explore from dispersed poses passes (25 to 33 m each).
       Also find out why a route MGG admits beside that kerb is not drivable.
-      Also explain robot_2's burst of 121 keyframes in three minutes of
-      near-stationary recovery motion.
+      Keyframe bursts during recovery motion are explained (2026-09-17):
+      robot_2's 121 keyframes in three minutes on 2026-09-16 predate the
+      scene-change rule and come from the distance rule alone, which
+      compares against the last keyframe's position only, has no rotation
+      term, and so pays one keyframe per swing whenever recovery rocks the
+      robot by more than 0.25 m. With the scene-change rule live, robot_3 in
+      mission `a72b1c3d` added a keyframe every 5.0 to 5.8 s for 160 s while
+      dithering inside 0.7 m by 0.4 m with 5 to 39 degree yaw swings (27 of
+      51 steps under 0.2 m): the azimuth signature was binned in the sensor
+      frame, and on a stored keyframe a pure 5 degree yaw moved four of 72
+      sectors by more than 0.5 m. The patch now bins in the odometry frame
+      (yaw-aligned); verify on the next rebuilt cslam image that a rocking
+      robot's keyframe count tracks its distance again.
 - [ ] **Moving obstacles and blind corners.** Gate: controlled trials where the
       local controller stops or avoids, then resumes or requests a valid
       replacement corridor.

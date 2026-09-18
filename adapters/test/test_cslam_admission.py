@@ -135,17 +135,61 @@ SCENE_PATCH = REPO / "deploy/patches/cslam-scene-change-keyframe.patch"
 
 
 def _scene_functions():
-    """Load the two pure helpers straight out of the patch's added lines."""
+    """Load the pure helpers straight out of the patch's added lines.
+
+    Returns `(scene_signature, scene_changed, odom_yaw)`.
+    """
     import numpy as np
 
     lines = added_lines(SCENE_PATCH.read_text())
-    start = next(i for i, l in enumerate(lines) if "def scene_signature" in l) - 1
+    start = next(i for i, l in enumerate(lines) if "def odom_yaw" in l) - 1
     # The helpers end where the patch starts editing generate_new_keyframe.
     end = next(i for i, l in enumerate(lines) if "stamp = msg[1].header.stamp" in l)
     body = "\n".join(l[4:] if l.startswith("    ") else l for l in lines[start:end])
     namespace = {"np": np}
     exec(body.replace("@staticmethod\n", ""), namespace)
-    return namespace["scene_signature"], namespace["scene_changed"]
+    return (
+        namespace["scene_signature"],
+        namespace["scene_changed"],
+        namespace["odom_yaw"],
+    )
+
+
+def _rotated(points, yaw):
+    """The same returns seen from a sensor turned by `yaw` about the vertical."""
+    import numpy as np
+
+    c, s = np.cos(yaw), np.sin(yaw)
+    rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    # A robot that turns by +yaw sees the world rotated by -yaw in its own frame.
+    return points @ rotation
+
+
+def _cluttered_room():
+    """A far wall with a few near obstacles, the range profile of a bistro.
+
+    Adjacent sectors differ by metres wherever a table leg or a pillar sits in
+    front of the wall, which is what made a small yaw look like a new scene.
+    """
+    import numpy as np
+
+    # Returns every quarter degree, offset so none sits on a sector boundary.
+    angles = np.linspace(-np.pi, np.pi, 1440, endpoint=False) + np.radians(0.125)
+    wall = np.stack([15 * np.cos(angles), 15 * np.sin(angles), 0 * angles], axis=1)
+    pieces = [wall]
+    for centre, radius in ((0.4, 1.5), (1.9, 2.5), (-2.4, 3.0), (-1.0, 4.0)):
+        span = np.abs((angles - centre + np.pi) % (2 * np.pi) - np.pi) < np.radians(4)
+        pieces.append(
+            np.stack(
+                [
+                    radius * np.cos(angles[span]),
+                    radius * np.sin(angles[span]),
+                    0 * angles[span],
+                ],
+                axis=1,
+            )
+        )
+    return np.vstack(pieces)
 
 
 def test_scene_change_patch_declares_and_reads_its_parameters(frontend):
@@ -170,7 +214,7 @@ def test_scene_change_patch_declares_and_reads_its_parameters(frontend):
 def test_a_neighbour_leaving_changes_the_scene_but_noise_does_not():
     import numpy as np
 
-    signature, changed = _scene_functions()
+    signature, changed, _ = _scene_functions()
     angles = np.linspace(-np.pi, np.pi, 720, endpoint=False)
     wall = np.stack([15 * np.cos(angles), 15 * np.sin(angles), 0 * angles], axis=1)
     # A neighbour two metres ahead: its returns are masked, so those sectors
@@ -187,6 +231,75 @@ def test_a_neighbour_leaving_changes_the_scene_but_noise_does_not():
     assert not changed(before, signature(noisy, 72), 0.5, 0.05)
     assert not changed(None, after, 0.5, 0.05)
     assert not changed(before, after, 0.5, 0.0)  # disabled
+
+
+def test_turning_in_place_is_not_a_scene_change():
+    """The signature is binned in the odometry frame, not the sensor frame.
+
+    Measured 2026-09-17 on Benchbot (mission a72b1c3d, robot_3): a robot
+    dithering inside 0.7 m by 0.4 m with its yaw swinging by 5 to 39 degrees
+    took a keyframe every 5.0 to 5.8 s, the scene-change minimum period, for
+    160 s; 27 of its 51 keyframe steps were under 0.2 m. On one of its stored
+    keyframes a pure 5 degree yaw already moved four of 72 sectors by more than
+    0.5 m in the sensor frame, which is the 0.05 fraction.
+    """
+    import numpy as np
+
+    signature, changed, _ = _scene_functions()
+    room = _cluttered_room()
+    reference = signature(room, 72)
+    for yaw in (np.radians(5), 0.5, -0.5, np.radians(170), np.radians(-190)):
+        seen = _rotated(room, yaw)
+        # In the sensor frame the same room passes as a scene change...
+        assert changed(reference, signature(seen, 72), 0.5, 0.05), yaw
+        # ...aligned with the heading it is the same signature, sector for
+        # sector, including the sectors that wrapped past the +-pi seam.
+        aligned = signature(seen, 72, yaw)
+        assert np.allclose(aligned, reference, atol=1e-9), yaw
+        assert not changed(reference, aligned, 0.5, 0.05), yaw
+
+
+def test_a_neighbour_leaving_is_still_seen_after_the_robot_has_turned():
+    import numpy as np
+
+    signature, changed, _ = _scene_functions()
+    room = _cluttered_room()
+    angles = np.arctan2(room[:, 1], room[:, 0])
+    # The neighbour's masked body hid the floor three metres ahead; the robot
+    # then turned by half a radian before the neighbour drove off.
+    ahead = np.abs(angles) < np.radians(14)
+    floor = np.stack(
+        [3 * np.cos(angles[ahead]), 3 * np.sin(angles[ahead]), 0 * angles[ahead]],
+        axis=1,
+    )
+    before = signature(room, 72, 0.0)
+    after = signature(_rotated(np.vstack([room, floor]), 0.5), 72, 0.5)
+    assert changed(before, after, 0.5, 0.05)
+
+
+def test_odom_yaw_reads_the_heading_out_of_the_odometry_quaternion():
+    from types import SimpleNamespace
+    import numpy as np
+
+    _, _, odom_yaw = _scene_functions()
+    for heading in (0.0, 0.5, -0.5, 3.0, -3.0):
+        orientation = SimpleNamespace(
+            x=0.0, y=0.0, z=np.sin(heading / 2), w=np.cos(heading / 2)
+        )
+        odom = SimpleNamespace(
+            pose=SimpleNamespace(pose=SimpleNamespace(orientation=orientation))
+        )
+        assert odom_yaw(odom) == pytest.approx(heading)
+
+
+def test_generate_new_keyframe_aligns_the_signature_with_the_odometry_heading():
+    added = "\n".join(added_lines(SCENE_PATCH.read_text()))
+    assert "def scene_signature(points, bins, yaw=0.0):" in added
+    assert "np.arctan2(xy[finite, 1], xy[finite, 0]) + yaw" in added
+    # The call site must pass the heading of the same odometry message the
+    # distance rule reads, or the alignment is only a default argument.
+    call = added.index("signature = self.scene_signature(")
+    assert "self.odom_yaw(msg[1]))" in added[call : call + 300]
 
 
 def test_inter_robot_closures_default_off_in_the_peer_launch():

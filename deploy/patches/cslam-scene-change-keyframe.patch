@@ -9,13 +9,28 @@
  
          if self.params["evaluation.enable_logs"]:
              self.log_publisher = self.node.create_publisher(
-@@ -147,6 +149,37 @@
+@@ -147,6 +149,52 @@
          """
          return (odom0.pose.pose.position.x - odom1.pose.pose.position.x)**2 + (odom0.pose.pose.position.y - odom1.pose.pose.position.y)**2 + (odom0.pose.pose.position.z - odom1.pose.pose.position.z)**2
  
 +    @staticmethod
-+    def scene_signature(points, bins):
-+        """Minimum planar range per azimuth bin, inf where a bin is empty."""
++    def odom_yaw(odom):
++        """Heading of an odometry message about the vertical axis, radians."""
++        q = odom.pose.pose.orientation
++        return float(np.arctan2(2.0 * (q.w * q.z + q.x * q.y),
++                                1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
++
++    @staticmethod
++    def scene_signature(points, bins, yaw=0.0):
++        """Minimum planar range per azimuth bin, inf where a bin is empty.
++
++        Bins are laid out in the odometry frame: `yaw` is the robot's heading
++        in that frame and the sensor-frame azimuths are rotated by it before
++        binning, so turning in place under a 360 degree lidar leaves the
++        signature alone. Measured on a Bistro keyframe, a 5 degree yaw in the
++        sensor frame already moved four of 72 sectors by more than 0.5 m, and
++        a robot dithering in yaw took a keyframe every `min_period_s`.
++        """
 +        signature = np.full(bins, np.inf)
 +        if points is None or len(points) == 0:
 +            return signature
@@ -24,8 +39,8 @@
 +        finite = np.isfinite(ranges) & (ranges > 0.0)
 +        if not finite.any():
 +            return signature
-+        azimuth = np.arctan2(xy[finite, 1], xy[finite, 0])
-+        index = ((azimuth + np.pi) / (2.0 * np.pi) * bins).astype(int) % bins
++        azimuth = np.arctan2(xy[finite, 1], xy[finite, 0]) + yaw
++        index = np.floor((azimuth + np.pi) / (2.0 * np.pi) * bins).astype(int) % bins
 +        np.minimum.at(signature, index, ranges[finite])
 +        return signature
 +
@@ -47,7 +62,7 @@
      def generate_new_keyframe(self, msg):
          """Check if we should generate a new keyframe
  
-@@ -156,15 +189,43 @@
+@@ -156,15 +204,44 @@
          Returns:
              bool: flag indicating if a new keyframe should be created.
          """
@@ -58,7 +73,8 @@
 +            try:
 +                signature = self.scene_signature(
 +                    icp_utils.ros_pointcloud_to_points(msg[0]),
-+                    int(self.params["frontend.keyframe_scene_change_bins"]))
++                    int(self.params["frontend.keyframe_scene_change_bins"]),
++                    self.odom_yaw(msg[1]))
 +            except Exception:
 +                signature = None
          if self.previous_odom is None:
@@ -93,7 +109,7 @@
  
      def process_new_sensor_data(self):
          """ Process new sensor data
-@@ -221,6 +282,10 @@
+@@ -221,6 +298,10 @@
                          ('frontend.registration_min_inliers', 60),
                          ('frontend.registration_min_overlap', 0.0),
                          ('frontend.keyframe_generation_ratio_distance', 0.5),
@@ -104,7 +120,7 @@
                          ('frontend.pointcloud_odom_approx_time_sync_s', 0.1),
                          ('robot_id', 0),           
                          ('evaluation.enable_logs', False),  
-@@ -246,6 +311,12 @@
+@@ -246,6 +327,12 @@
          'frontend.registration_min_overlap').value
      params['frontend.keyframe_generation_ratio_distance'] = node.get_parameter(
          'frontend.keyframe_generation_ratio_distance').value
