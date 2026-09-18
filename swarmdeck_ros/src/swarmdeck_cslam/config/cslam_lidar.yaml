@@ -216,7 +216,14 @@
       # drove through its 30 m field of view; its map outgrew the planner's
       # point budget and it could not navigate at all.
       keyframe_scene_change_max_range_m: 8.0
-      keyframe_scene_change_max_stationary: 3
+      # Twelve, not three: at the grouped start the neighbours leave one after
+      # another and each departure changes the 8 m scene a few times. With
+      # three, robot_1's map at the start froze with the lane behind the
+      # departed robot_0 unobserved (the Bunker's top is at the observer's
+      # lidar height, so it shadows the whole lane while it stands ahead),
+      # and its first goals were refused for want of mapped ground
+      # (2026-09-18). The 8 m range keeps distant traffic from spending them.
+      keyframe_scene_change_max_stationary: 12
       # Gazebo does not hardware-sync the cloud and odometry.
       pointcloud_odom_approx_time_sync_s: 0.1
       use_vertex_cover_selection: true
