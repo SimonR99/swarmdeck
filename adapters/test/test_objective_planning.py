@@ -1166,16 +1166,17 @@ def test_stop_while_recovery_service_future_is_pending_wins(monkeypatch):
     assert bridge.nav_status == "idle"
 
 
-def test_recovery_retries_when_indexed_snapshot_changes_during_planning(monkeypatch):
+def test_recovery_keeps_a_plan_when_a_newer_product_of_the_same_epoch_lands(
+    monkeypatch,
+):
+    # A product transition (new revision and geometry, same epoch, same frame)
+    # during planning does not discard the plan: the map server keeps
+    # answering the key it was validated against.
     bridge, planner, client, authority = return_home_rig(monkeypatch)
     response_a = success_path()
     response_a.path[-1] = pose(-2.0, 1.0)
     response_a.indexed_map_validated = True
     response_a.geometry_revision = "a" * 64
-    response_b = success_path()
-    response_b.path[-1] = pose(-2.0, 1.0)
-    response_b.indexed_map_validated = True
-    response_b.geometry_revision = "b" * 64
 
     class SnapshotChangingFuture:
         changed = False
@@ -1184,27 +1185,28 @@ def test_recovery_retries_when_indexed_snapshot_changes_during_planning(monkeypa
             if not self.changed:
                 self.changed = True
                 authority[0] = correction_authority(
-                    revision=2, x=0.30, geometry="b" * 64
+                    revision=2, x=0.30, geometry="b" * 64, mapping_graph_revision=1
                 )
             return True
 
         def result(self):
             return response_a
 
-    ready_b = Future()
-    ready_b.set_result(response_b)
-    client.call_async.side_effect = [SnapshotChangingFuture(), ready_b]
+    client.call_async.side_effect = [SnapshotChangingFuture()]
     authority[0] = correction_authority(revision=2, x=0.30)
+    before = client.call_async.call_count
 
     planner._check_active_authority()
 
-    assert wait_until(lambda: client.call_async.call_count == 3)
     assert wait_until(lambda: planner._active_route is not None)
-    assert client.call_async.call_args.args[0].geometry_revision == "b" * 64
+    assert client.call_async.call_count == before + 1
+    assert client.call_async.call_args.args[0].geometry_revision == "a" * 64
     assert bridge.nav_status == "active"
 
 
-def test_pre_submit_authority_validation_blocks_snapshot_churn(monkeypatch):
+def test_pre_submit_validation_accepts_a_product_transition(monkeypatch):
+    # A newer product of the same epoch landing between the plan and its
+    # dispatch is not a frame change: the route goes out once.
     response = success_path()
     response.indexed_map_validated = True
     response.geometry_revision = "a" * 64
@@ -1215,14 +1217,38 @@ def test_pre_submit_authority_validation_blocks_snapshot_churn(monkeypatch):
     original_follow = bridge.follow_path.side_effect
 
     def churn_before_submit(plan, **kwargs):
-        authority[0] = correction_authority(geometry="b" * 64)
+        authority[0] = correction_authority(geometry="b" * 64, mapping_graph_revision=1)
+        return original_follow(plan, **kwargs)
+
+    bridge.follow_path.side_effect = churn_before_submit
+
+    assert planner.navigate({"x": 1.0, "y": 2.0})
+    assert wait_until(lambda: bridge.nav_status == "active")
+    assert bridge.follow_path.call_count == 1
+    assert client.call_async.call_count == 1
+
+
+def test_pre_submit_authority_validation_blocks_epoch_churn(monkeypatch):
+    response = success_path()
+    response.indexed_map_validated = True
+    response.geometry_revision = "a" * 64
+    bridge, planner, client = rig(monkeypatch, response)
+    authority = [correction_authority()]
+    planner.authority_reader = NS(current=lambda: authority[0])
+    planner.replan_backoff_s = 0.0
+    original_follow = bridge.follow_path.side_effect
+    epoch = [0]
+
+    def churn_before_submit(plan, **kwargs):
+        epoch[0] += 1
+        authority[0] = correction_authority(geometry="b" * 64, map_epoch=epoch[0])
         return original_follow(plan, **kwargs)
 
     bridge.follow_path.side_effect = churn_before_submit
 
     assert planner.navigate({"x": 1.0, "y": 2.0})
     assert wait_until(lambda: bridge.nav_status == "failed")
-    # Continuous publication churn is bounded; an unchecked route is never sent.
+    # Continuous epoch churn is bounded; an unchecked route is never sent.
     assert bridge.follow_path.call_count == 1
     assert client.call_async.call_count == 4
 

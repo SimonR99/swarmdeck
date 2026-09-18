@@ -427,6 +427,26 @@ class MggObjectivePlanning:
         return authority
 
     @staticmethod
+    def _snapshot_frame_compatible(planned, current) -> bool:
+        """Whether a plan made under ``planned`` still holds under ``current``.
+
+        The indexed map key advances whenever the peer publishes a product
+        (every 2 to 6 s per robot while the fleet drives). A newer revision of
+        the same epoch is a product transition, not a frame change: the route
+        was validated against geometry the map server keeps answering for a
+        grace period, and a moved frame is caught separately by the binding
+        (component and transform). Only a missing key or another epoch makes
+        the plan stale. Measured 2026-09-18: failing on every transition made
+        exploration crawl (retry backoff to 10 s per plan).
+        """
+
+        if planned == current:
+            return True
+        if not isinstance(planned, tuple) or not isinstance(current, tuple):
+            return False
+        return planned[0] == current[0]
+
+    @staticmethod
     def _mapping_snapshot(authority: dict) -> tuple | None:
         keys = {
             "map_epoch",
@@ -1115,7 +1135,12 @@ class MggObjectivePlanning:
                 home_intent is not None
                 and self._authority_home_identity(current_authority) != home_intent
             )
-            or (mapping_snapshot is not None and current_snapshot != mapping_snapshot)
+            or (
+                mapping_snapshot is not None
+                and not self._snapshot_frame_compatible(
+                    mapping_snapshot, current_snapshot
+                )
+            )
         ):
             return "replan", "map authority changed while MGG refined the objective"
 
@@ -1432,7 +1457,8 @@ class MggObjectivePlanning:
         except ValueError:
             current_snapshot = object()
         if self._route_authority_changed(authority_binding, current_authority) or (
-            indexed_map_validated and current_snapshot != mapping_snapshot
+            indexed_map_validated
+            and not self._snapshot_frame_compatible(mapping_snapshot, current_snapshot)
         ):
             return (
                 "authority_changed",
@@ -2009,9 +2035,8 @@ class MggObjectivePlanning:
         try:
             if self._route_authority_changed(binding, authority):
                 return False
-            return (
-                not indexed_map_validated
-                or self._mapping_snapshot(authority or {}) == snapshot
+            return not indexed_map_validated or self._snapshot_frame_compatible(
+                snapshot, self._mapping_snapshot(authority or {})
             )
         except ValueError:
             return False
