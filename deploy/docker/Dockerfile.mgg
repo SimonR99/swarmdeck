@@ -2,7 +2,7 @@ FROM ros:jazzy-perception
 SHELL ["/bin/bash", "-c"]
 # SwarmDeck's planner work lives on the `swarmdeck` branch of MGGPlanner, which
 # carries the changes this deployment used to apply as a patch series.
-ARG MGG_REV=a9b4edd48de7a4cb8317f18a5d472b3b3198de04
+ARG MGG_REV=3486391ed40b0e38a5847e5c2cc2db408b324e3a
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
     libeigen3-dev libboost-dev libyaml-cpp-dev libssl-dev nlohmann-json3-dev ros-jazzy-octomap \
