@@ -252,6 +252,7 @@ class Bridge(Node):
         # argue with. It stays off unless a profile enables it: masking needs a
         # peer pose in a frame shared with this capture at the capture stamp,
         # which simulation publishes and a hardware fleet does not guarantee.
+        self.captures_held_unmaskable = 0
         self.peer_mask = None
         self.peer_mask_margin_m = float(p["peer_mask_margin_m"])
         self.peer_mask_tolerance_s = float(p["peer_mask_pose_tolerance_s"])
@@ -708,6 +709,13 @@ class Bridge(Node):
         # provenance, and every MOLA product that derives free-space evidence
         # from it. Masked points are dropped endpoints, not free space.
         if self.peer_mask is not None:
+            if not self.peer_mask.can_place_self(stamp_ns):
+                # The mask cannot place the neighbours yet, which happens in
+                # the first moments after a reset. A keyframe taken from an
+                # unmasked capture keeps every parked neighbour in the map
+                # for as long as it stays, so this capture is not published.
+                self.captures_held_unmaskable += 1
+                return
             xyz = self.peer_mask.apply(xyz, stamp_ns)
         header = Header(stamp=cloud.header.stamp, frame_id=self.base)
         out = point_cloud2.create_cloud_xyz32(header, xyz)
@@ -1017,6 +1025,7 @@ class Bridge(Node):
             "peer_body_mask": self.peer_mask is not None,
             "peer_body_mask_margin_m": self.peer_mask_margin_m,
             "peer_body_mask_pose_tolerance_s": self.peer_mask_tolerance_s,
+            "peer_body_mask_captures_held": self.captures_held_unmaskable,
             **(
                 idle_mask_counters()
                 if self.peer_mask is None

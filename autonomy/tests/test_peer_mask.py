@@ -299,6 +299,15 @@ def test_a_peer_that_never_reported_a_pose_is_skipped_and_counted():
     assert mask.counters()["peer_body_mask_peers_skipped_stale"] == 1
 
 
+def test_the_bridge_can_ask_whether_a_capture_can_be_masked_at_all():
+    mask = two_robot_mask()
+    mask.add_pose("robot_1", ns(10.0), pose(x=2.0))
+    assert not mask.can_place_self(ns(10.0))
+    mask.add_pose("robot_0", ns(10.0), pose())
+    assert mask.can_place_self(ns(10.0))
+    assert not mask.can_place_self(ns(12.0))
+
+
 def test_without_our_own_pose_the_whole_capture_is_left_alone():
     mask = two_robot_mask()
     mask.add_pose("robot_1", ns(10.0), pose(x=2.0))

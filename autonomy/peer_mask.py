@@ -264,6 +264,19 @@ class PeerBodyMask:
         with self._lock:
             self.pose_rejections += 1
 
+    def can_place_self(self, stamp_ns) -> bool:
+        """Whether this robot's own pose is known at `stamp_ns`.
+
+        Without it no peer can be placed in the capture's frame. The bridge
+        holds such captures back: they occur in the first moments after a
+        reset, and a keyframe taken then bakes every parked neighbour into the
+        map for as long as that neighbour stays (Spot's first goal, 2026-09-18).
+        """
+
+        return (
+            self._history[self.robot].sample_at(stamp_ns, self.tolerance_ns) is not None
+        )
+
     def apply(self, points_base, stamp_ns):
         """Drop returns inside another robot at this capture's stamp.
 
