@@ -182,7 +182,9 @@
       augment_free_voxels_time: 1
       free_frustum_before_planning: false
       use_ray_model_for_volumetric_gain: true
-      path_length_penalty: 0.07
+      # exp(-penalty * route length): 0.25 keeps 8 percent of a leaf's gain
+      # through a 10 m route and 47 percent through 3 m (see the Bistro config).
+      path_length_penalty: 0.25
       path_direction_penalty: 0.3
       hanging_vertex_penalty: 5.0
       exp_gain_voxel_size: 0.5
@@ -192,9 +194,13 @@
       nonuniform_ray_cast: true
       ray_cast_step_size_multiplier: 1.0
       freespace_cloud_enable: false
-      leafs_only_for_volumetric_gain: false
+      # Gain is what the planner spends its time on: with clustering at 0.2 m
+      # on a 0.5 m lattice nothing clustered and a 700-vertex lattice cost
+      # 4.0 s per request in simulation (2026-09-17). Leaves are where
+      # exploration goes next.
+      leafs_only_for_volumetric_gain: true
       cluster_vertices_for_gain: true
-      clustering_radius: 0.2
+      clustering_radius: 1.0
       build_grid_local_graph: true
       max_ground_height: 0.3
       robot_height: 0.2
