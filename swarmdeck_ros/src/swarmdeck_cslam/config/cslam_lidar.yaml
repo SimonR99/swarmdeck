@@ -222,7 +222,13 @@
       # keyframes, 1368 of them under 0.2 m apart) while the other robots
       # drove through its 30 m field of view; its map outgrew the planner's
       # point budget and it could not navigate at all.
-      keyframe_scene_change_max_range_m: 8.0
+      # 20 m, not 8: a neighbour that leaves the signature range never earns
+      # the keyframe that would re-observe the ground it hid. robot_0 parked
+      # 10.7 m ahead of a parked robot_1, out of the 8 m range, and robot_1
+      # kept the 1.3 m hole where robot_0 stood at its last keyframe until it
+      # moved itself (2026-09-18). At 20 m a Bunker still crosses one 5
+      # degree sector as it moves, and the stationary cap bounds the cost.
+      keyframe_scene_change_max_range_m: 20.0
       # Twelve, not three: at the grouped start the neighbours leave one after
       # another and each departure changes the 8 m scene a few times. With
       # three, robot_1's map at the start froze with the lane behind the
