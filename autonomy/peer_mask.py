@@ -40,6 +40,11 @@ import numpy as np
 # Sampled poses older than this are never a timestamp join, whatever tolerance
 # a caller asks for. It bounds the damage from a misconfigured tolerance.
 MAX_PEER_POSE_TOLERANCE_S = 1.0
+# A neighbour with a pose sample this close to a capture stamp is tracked: the
+# capture is held rather than published with that neighbour unmasked. A
+# neighbour silent for longer is treated as absent. `sample_at` clamps every
+# lookup to MAX_PEER_POSE_TOLERANCE_S, so this cannot exceed it.
+PEER_TRACKING_GAP_S = 1.0
 
 # How far back a pose history keeps samples. The ARGoS lidar is 10 Hz while
 # poses arrive per 100 Hz simulation tick, and a scan may carry a stamp up to
@@ -263,6 +268,33 @@ class PeerBodyMask:
 
         with self._lock:
             self.pose_rejections += 1
+
+    def can_place_peers(self, stamp_ns) -> bool:
+        """Whether every tracked neighbour can be placed at `stamp_ns`.
+
+        A neighbour is tracked when it reported a pose within
+        `PEER_TRACKING_GAP_S` of the stamp; one that has been silent longer
+        is treated as absent, so a dead relay cannot block every capture. A
+        tracked neighbour whose nearest sample is outside the join tolerance
+        cannot be masked, and the bridge holds such a capture back: on
+        2026-09-18 one such capture per robot (`peers_skipped_stale` of 1)
+        left a moving Bunker in robot_1's map as a 0.3 m rise that refused
+        every 8 m goal across that spot until the robot drove there and the
+        free-space rays retired it.
+        """
+
+        if not self.can_place_self(stamp_ns):
+            return False
+        tracking_ns = int(PEER_TRACKING_GAP_S * 1e9)
+        for name in self.bodies:
+            if name == self.robot:
+                continue
+            history = self._history[name]
+            if history.sample_at(stamp_ns, self.tolerance_ns) is not None:
+                continue
+            if history.sample_at(stamp_ns, tracking_ns) is not None:
+                return False
+        return True
 
     def can_place_self(self, stamp_ns) -> bool:
         """Whether this robot's own pose is known at `stamp_ns`.

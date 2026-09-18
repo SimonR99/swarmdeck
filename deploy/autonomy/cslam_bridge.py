@@ -734,11 +734,14 @@ class Bridge(Node):
         # provenance, and every MOLA product that derives free-space evidence
         # from it. Masked points are dropped endpoints, not free space.
         if self.peer_mask is not None:
-            if not self.peer_mask.can_place_self(stamp_ns):
-                # The mask cannot place the neighbours yet, which happens in
-                # the first moments after a reset. A keyframe taken from an
-                # unmasked capture keeps every parked neighbour in the map
-                # for as long as it stays, so this capture is not published.
+            if not self.peer_mask.can_place_peers(stamp_ns):
+                # The mask cannot place this robot (the first moments after a
+                # reset) or a tracked neighbour (a pose relay gap) at this
+                # stamp. A keyframe taken from an unmasked capture keeps a
+                # parked neighbour in the map for as long as it stays, and a
+                # moving one as a phantom rise until free-space rays retire
+                # it, so this capture is not published. The next scan comes
+                # 50 ms later.
                 self.captures_held_unmaskable += 1
                 return
             xyz = self.peer_mask.apply(xyz, stamp_ns)

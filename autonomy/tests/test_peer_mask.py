@@ -558,3 +558,31 @@ def test_blank_compose_values_fall_back_to_the_mask_defaults(monkeypatch):
     assert params["peer_pose_topic_template"] == "/{robot}/ground_truth"
     assert params["peer_pose_frame"] == "world"
     assert params["peer_mask_margin_m"] == pytest.approx(0.15)
+
+
+def test_a_tracked_peer_without_a_pose_at_the_stamp_holds_the_capture():
+    mask = two_robot_mask()
+    mask.add_pose("robot_0", ns(10.0), pose())
+    mask.add_pose("robot_0", ns(10.5), pose())
+    # The neighbour reported 0.4 s before the capture: tracked, but outside
+    # the join tolerance, so the capture cannot be masked and must be held.
+    mask.add_pose("robot_1", ns(10.1), pose(x=2.0))
+    assert not mask.can_place_peers(ns(10.5))
+    mask.add_pose("robot_1", ns(10.5), pose(x=2.0))
+    assert mask.can_place_peers(ns(10.5))
+
+
+def test_a_silent_peer_does_not_hold_captures():
+    mask = two_robot_mask()
+    mask.add_pose("robot_0", ns(10.0), pose())
+    # Nothing from the neighbour within the tracking gap: absent, not stale.
+    assert mask.can_place_peers(ns(10.0))
+    mask.add_pose("robot_0", ns(13.0), pose())
+    mask.add_pose("robot_1", ns(10.0), pose(x=2.0))
+    assert mask.can_place_peers(ns(13.0))
+
+
+def test_placing_peers_needs_our_own_pose_first():
+    mask = two_robot_mask()
+    mask.add_pose("robot_1", ns(10.0), pose(x=2.0))
+    assert not mask.can_place_peers(ns(10.0))
