@@ -36,3 +36,11 @@ rates:
   camera_period_s: 0.2
 
 drive_timeout_s: 0.45
+
+# Route progress watchdog (adapters/route_progress.py). Nav2's progress checker
+# measures displacement and is satisfied by a robot rocking on a step it cannot
+# climb; this cancels a FollowPath goal as a no-progress failure when the closest
+# route point has not advanced route_progress_min_m within
+# route_progress_timeout_s. 0 disables it.
+route_progress_timeout_s: 30.0
+route_progress_min_m: 0.5

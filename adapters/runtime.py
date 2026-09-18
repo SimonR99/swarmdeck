@@ -38,6 +38,13 @@ TRANSPORT_DEFAULTS: dict[str, Any] = {
     "drive_timeout_s": 0.45,
     "link_timeout_s": 1.5,
     "upload_timeout_s": 25.0,
+    # Route progress watchdog (adapters/route_progress.py): cancel a FollowPath
+    # goal as a no-progress failure when the closest route point has not
+    # advanced by route_progress_min_m within route_progress_timeout_s. Nav2's
+    # own checker measures displacement and misses a robot rocking on a step.
+    # A timeout of 0 disables it.
+    "route_progress_timeout_s": 30.0,
+    "route_progress_min_m": 0.5,
     "rates": {
         "state_hz": 5.0,
         "map_period_s": 2.0,
@@ -575,6 +582,20 @@ class AdapterLinkMixin:
         self.apply_pending_drive()
         self.drive_watchdog()
         self.link_watchdog()
+        self.route_progress_watchdog()
+
+    def route_progress_watchdog(self) -> None:
+        """Cancel a FollowPath goal whose progress along the route stalled."""
+        if not callable(getattr(self, "_fail_route_progress", None)):
+            return  # This bridge has no full-path controller to supervise.
+        from adapters.route_progress import route_progress_tick
+
+        try:
+            route_progress_tick(self)
+        except Exception as exc:
+            # A supervisor must never take the ROS timer, and with it the
+            # deadman watchdogs, down with it.
+            self._log_warning(f"[{self.id}] route progress watchdog failed: {exc}")
 
     def drive_watchdog(self) -> None:
         if self.mode != "teleop" or self._last_drive_at == 0.0:

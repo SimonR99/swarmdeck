@@ -2642,3 +2642,138 @@ def test_upload_colored_cloud_keeps_xyz_rgb_snapshot_together(mod, monkeypatch):
     request = upload.call_args.args[0]
     assert "format=xyzrgb32" in request.full_url
     assert mod.zlib.decompress(request.data) == points.tobytes() + rgb.tobytes()
+
+
+# ------------------------------------------------------ route progress watchdog
+#
+# Nav2's SimpleProgressChecker measures displacement, so a robot rocking on a
+# step it cannot climb never produces `Failed to make progress`. The shared
+# watchdog (adapters/route_progress.py) runs from the hardware bridge's 20 Hz
+# watchdog timer and measures progress along the FollowPath route instead.
+
+
+def _route_bridge(mod):
+    bridge = _bridge(
+        mod,
+        {"actions": {"navigate_to_pose": "", "follow_path": "follow_path"}},
+    )
+    bridge.path_client.server_is_ready.return_value = True
+    bridge._pending_drive = None
+    bridge.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    bridge.map_pose = lambda: dict(bridge.pose)
+    return bridge
+
+
+def _route_plan(frame="map"):
+    from adapters.exploration import PlannerPath, PlannerPose
+
+    return PlannerPath(
+        frame,
+        1,
+        tuple(PlannerPose(0.5 * i, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) for i in range(21)),
+    )
+
+
+def _submit_route(bridge, plan, expected_generation=None):
+    handle = MagicMock()
+    handle.accepted = True
+    handle.get_result_async.return_value = MagicMock()
+    bridge.path_client.send_goal_async.return_value = _ImmediateFuture(handle)
+    with patch("adapters.exploration.follow_path_goal", return_value=MagicMock()):
+        generation = bridge.follow_path(plan, expected_generation=expected_generation)
+    assert type(generation) is int
+    assert bridge._goal_handle is handle
+    return generation, handle
+
+
+def _rock_hardware(bridge, clock, seconds, at=2.5):
+    for tick in range(int(round(seconds / 0.2))):
+        clock[0] += 0.2
+        bridge._last_link_at = clock[0]
+        bridge.pose = {"x": at - (0.3 if tick % 2 else 0.0), "y": 0.0, "yaw": 0.0}
+        bridge._watchdogs()
+
+
+def test_hardware_watchdog_cancels_a_stalled_route_as_no_progress(mod, monkeypatch):
+    """The hardware loop runs the same watchdog from its 20 Hz ROS timer."""
+    from adapters.exploration import is_physical_no_progress_failure
+
+    bridge = _route_bridge(mod)
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    generation, handle = _submit_route(bridge, _route_plan())
+    assert bridge._nav_execution_enabled
+
+    _rock_hardware(bridge, clock, 29.6)
+    assert bridge.nav_status == "active"
+    handle.cancel_goal_async.assert_not_called()
+
+    _rock_hardware(bridge, clock, 1.0)
+
+    assert bridge.nav_status == "failed"
+    assert is_physical_no_progress_failure(bridge._nav_failure_reason)
+    handle.cancel_goal_async.assert_called_once()
+    assert bridge._goal_generation == generation, "recovery keeps goal ownership"
+    assert not bridge._nav_execution_enabled, "Nav2 output is no longer relayed"
+    zero = bridge.pub_cmd.publish.call_args.args[0]
+    assert (zero.linear.x, zero.angular.z) == (0.0, 0.0)
+
+    # The cancelled goal's late result cannot relabel the failure.
+    from action_msgs.msg import GoalStatus
+
+    outcome = SimpleNamespace(status=GoalStatus.STATUS_CANCELED, result=None)
+    bridge._on_goal_result(_ImmediateFuture(outcome), generation, handle)
+    assert bridge.nav_status == "failed"
+    assert is_physical_no_progress_failure(bridge._nav_failure_reason)
+
+
+def test_hardware_watchdog_reads_the_route_frame_through_tf(mod, monkeypatch):
+    """A route in another frame is followed through tf2, not the map pose."""
+    bridge = _route_bridge(mod)
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    transform = SimpleNamespace(
+        transform=SimpleNamespace(translation=SimpleNamespace(x=2.5, y=0.0))
+    )
+    bridge.tf_buffer.lookup_transform.return_value = transform
+    generation, handle = _submit_route(bridge, _route_plan(frame="robot_0/odom"))
+
+    for tick in range(int(31.0 / 0.2)):
+        clock[0] += 0.2
+        bridge._last_link_at = clock[0]
+        transform.transform.translation.x = 2.5 if tick % 2 else 2.2
+        bridge._watchdogs()
+
+    assert bridge.nav_status == "failed"
+    handle.cancel_goal_async.assert_called_once()
+    frame_lookups = [
+        call.args[0] for call in bridge.tf_buffer.lookup_transform.call_args_list
+    ]
+    assert "robot_0/odom" in frame_lookups
+
+    # Without TF for that frame the route is simply not supervised.
+    bridge = _route_bridge(mod)
+    bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no such frame")
+    generation, handle = _submit_route(bridge, _route_plan(frame="robot_0/odom"))
+    _rock_hardware(bridge, clock, 60.0)
+    assert bridge.nav_status == "active"
+    handle.cancel_goal_async.assert_not_called()
+
+
+def test_hardware_watchdog_is_reset_by_cancel_and_disabled_by_config(mod, monkeypatch):
+    bridge = _route_bridge(mod)
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    generation, handle = _submit_route(bridge, _route_plan())
+    _rock_hardware(bridge, clock, 25.0)
+    bridge.cancel_goal()
+    _rock_hardware(bridge, clock, 60.0)
+    assert bridge.nav_status == "cancelled"
+    assert bridge._nav_failure_reason is None
+
+    bridge = _route_bridge(mod)
+    bridge.cfg = mod.deep_merge(bridge.cfg, {"route_progress_timeout_s": 0})
+    generation, handle = _submit_route(bridge, _route_plan())
+    _rock_hardware(bridge, clock, 120.0)
+    assert bridge.nav_status == "active"
+    handle.cancel_goal_async.assert_not_called()

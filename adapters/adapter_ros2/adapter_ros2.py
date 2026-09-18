@@ -262,6 +262,9 @@ class HardwareBridge(
         self._goal_lock = threading.RLock()
         self._nav_execution_enabled = False
         self._nav_enable_on_accept = False
+        # The FollowPath handle the route progress watchdog cancelled. Its late
+        # CANCELED result must not overwrite the failure recorded for it.
+        self._route_stalled_handle = None
         # When Spot's lateral velocity is zero, an arbitrary (x, y) body goal
         # is not executable as one holonomic trajectory. Keep the map target
         # across a short rotate/drive/rotate sequence instead.
@@ -1478,6 +1481,7 @@ class HardwareBridge(
                     self.nav_status, self.mode = "active", "idle"
                 return False
             self._follow_path_display = (generation, plan)
+            self._reset_route_watchdog()
             future.add_done_callback(
                 lambda f, g=generation: self._on_goal_response(f, g)
             )
@@ -1847,7 +1851,7 @@ class HardwareBridge(
             try:
                 result = handle.get_result_async()
                 result.add_done_callback(
-                    lambda f, g=generation: self._on_goal_result(f, g)
+                    lambda f, g=generation, h=handle: self._on_goal_result(f, g, h)
                 )
             except Exception as exc:
                 try:
@@ -1868,8 +1872,17 @@ class HardwareBridge(
                 return
             self._nav_execution_enabled = self._nav_enable_on_accept
 
-    def _on_goal_result(self, future, generation: int) -> None:
+    def _on_goal_result(self, future, generation: int, handle=None) -> None:
         with self._goal_lock:
+            if handle is not None and handle is getattr(
+                self, "_route_stalled_handle", None
+            ):
+                # The route progress watchdog already recorded this goal's
+                # failure and cancelled it. Its generation is still current,
+                # possibly with a replacement route in flight, so this late
+                # result must not relabel the outcome.
+                self._route_stalled_handle = None
+                return
             if generation != self._goal_generation:
                 return
             self._finish_goal_result(future, generation)
@@ -1967,6 +1980,72 @@ class HardwareBridge(
         self._trajectory_step = ""
         self._trajectory_step_count = 0
         self._trajectory_step_error = None
+        self._reset_route_watchdog()
+
+    # -- route progress watchdog ------------------------------------------
+    #
+    # Nav2's SimpleProgressChecker measures displacement, so a robot rocking on
+    # a step it cannot climb never produces `Failed to make progress`. The
+    # shared watchdog in adapters/route_progress.py measures progress along
+    # the FollowPath route instead and reports the same kind of failure.
+
+    def _reset_route_watchdog(self) -> None:
+        watchdog = getattr(self, "_route_watchdog", None)
+        if watchdog is not None:
+            watchdog.reset()
+
+    def _route_progress_pose(self, frame) -> dict[str, float] | None:
+        """The robot's XY pose in the route's frame, via tf2, or None."""
+        if frame is None:
+            return None
+        target = str(frame).lstrip("/")
+        if target == str(self.map_frame).lstrip("/"):
+            return self.map_pose()
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                target, self.base_frame, rclpy.time.Time()
+            )
+            pose = {
+                "x": float(tf.transform.translation.x),
+                "y": float(tf.transform.translation.y),
+            }
+        except Exception:
+            return None
+        return pose
+
+    def _fail_route_progress(self, generation: int, reason: str) -> bool:
+        """Retire the route as the controller no-progress failure it is.
+
+        The goal generation stays current, exactly as after Nav2's own
+        ``Failed to make progress`` abort, so the exploration and objective
+        recovery paths keep their ownership of it and can submit a replacement
+        route. The cancelled handle is remembered so its late result cannot
+        relabel this failure. The velocity relay closes with the failure, and
+        a zero command stops the driver that received the last relayed one.
+        """
+        with self._goal_lock:
+            if generation != self._goal_generation or self.nav_status != "active":
+                return False
+            handle = self._goal_handle
+            if handle is None:
+                return False
+            try:
+                handle.cancel_goal_async()
+            except Exception:
+                pass
+            self._route_stalled_handle = handle
+            self.node.get_logger().warn(
+                f"[{self.id}] {reason}; cancelling the route as a controller "
+                "no-progress failure"
+            )
+            self._finish_goal("failed", reason=reason)
+            if self.pub_cmd is not None:
+                zero = Twist()
+                zero.linear.x = 0.0
+                zero.linear.y = 0.0
+                zero.angular.z = 0.0
+                self.pub_cmd.publish(zero)
+            return True
 
     def cancel_goal(self) -> int:
         with self._goal_lock:
@@ -1997,6 +2076,7 @@ class HardwareBridge(
             self._trajectory_step = ""
             self._trajectory_step_count = 0
             self._trajectory_step_error = None
+            self._reset_route_watchdog()
         # Clearpath's ROS 2 Trajectory server never checks cancel/preempt
         # (the ROS 1 path that called spot_wrapper.stop() is commented out).
         # A zero cmd_vel preempts the SDK trajectory immediately. Also enqueue

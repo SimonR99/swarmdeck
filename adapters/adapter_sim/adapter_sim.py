@@ -68,6 +68,7 @@ from adapters.runtime import (
 )
 from adapters.session import run_adapter_session
 from adapters.navigation_result import navigation_failure_reason
+from adapters.route_progress import route_progress_tick
 from adapters.keyframe_producer import (
     DEFAULT_MAX_YAW_RATE,
     KeyframeUploader,
@@ -437,6 +438,9 @@ class RobotBridge(
         self._goal_request_generation = None
         self._cancel_events: dict[int, threading.Event] = {}
         self._nav_quiet_unknown = False
+        # The FollowPath handle the route progress watchdog cancelled. Its late
+        # CANCELED result must not overwrite the failure recorded for it.
+        self._route_stalled_handle = None
         self._last_drive_at = 0.0
         # Wedge escape — see ESCAPE_SPEED. `_escape_from` is the pose the failed
         # goal ended at, which is what the retreat is measured against.
@@ -1274,6 +1278,7 @@ class RobotBridge(
             }
             self.planned_path = [{"x": pose.x, "y": pose.y} for pose in plan.poses]
             self._follow_path_display = (generation, plan)
+            self._reset_route_watchdog()
             self.nav_status, self.mode = "active", "nav"
             future.add_done_callback(lambda done: self._goal_response(done, generation))
             return generation
@@ -1307,7 +1312,7 @@ class RobotBridge(
                     try:
                         result = handle.get_result_async()
                         result.add_done_callback(
-                            lambda done: self._goal_result(done, generation)
+                            lambda done: self._goal_result(done, generation, handle)
                         )
                     except Exception:
                         self._nav_quiet_unknown = True
@@ -1325,7 +1330,7 @@ class RobotBridge(
             try:
                 result = handle.get_result_async()
                 result.add_done_callback(
-                    lambda done: self._goal_result(done, generation)
+                    lambda done: self._goal_result(done, generation, handle)
                 )
             except Exception:
                 self._nav_quiet_unknown = True
@@ -1335,8 +1340,28 @@ class RobotBridge(
                     pass
                 self._finish_goal("failed", generation)
 
-    def _goal_result(self, future, generation: int) -> None:
+    def _goal_result(self, future, generation: int, handle=None) -> None:
         with self._goal_lock:
+            if handle is not None and handle is getattr(
+                self, "_route_stalled_handle", None
+            ):
+                # The route progress watchdog already recorded this goal's
+                # failure and cancelled it. Its generation is still current,
+                # possibly with a replacement route in flight, so only settle
+                # the cancellation rather than relabel the outcome.
+                self._route_stalled_handle = None
+                try:
+                    status = future.result().status
+                except Exception:
+                    self._nav_quiet_unknown = True
+                    return
+                if status not in {
+                    GoalStatus.STATUS_SUCCEEDED,
+                    GoalStatus.STATUS_CANCELED,
+                    GoalStatus.STATUS_ABORTED,
+                }:
+                    self._nav_quiet_unknown = True
+                return
             if generation != self._goal_generation:
                 try:
                     status = future.result().status
@@ -1393,8 +1418,60 @@ class RobotBridge(
         self.planned_path = []
         self.nav_status, self.mode = status, "idle"
         self._nav_failure_reason = reason if status == "failed" else None
+        self._reset_route_watchdog()
         if status == "failed" and not self._nav_quiet_unknown:
             self._arm_escape()
+
+    # -- route progress watchdog ------------------------------------------
+    #
+    # Nav2's SimpleProgressChecker measures displacement, and a robot rocking
+    # 0.3 m back and forth on a 7 cm ridge satisfies it forever (measured in
+    # the Bistro world, 2026-09-17: three minutes with nav_status active and
+    # no failure raised, so no recovery ever ran). The shared watchdog in
+    # adapters/route_progress.py measures progress along the route instead.
+
+    def _reset_route_watchdog(self) -> None:
+        watchdog = getattr(self, "_route_watchdog", None)
+        if watchdog is not None:
+            watchdog.reset()
+
+    def _route_progress_pose(self, frame) -> dict[str, float] | None:
+        """The robot's pose in the route's frame, when that is the map frame.
+
+        This bridge composes its pose from named TF links rather than a tf2
+        buffer, so a route planned in any other frame is left unsupervised.
+        """
+        if frame is None or str(frame).lstrip("/") != self.map_frame.lstrip("/"):
+            return None
+        return self.map_pose()
+
+    def _fail_route_progress(self, generation: int, reason: str) -> bool:
+        """Retire the route as the controller no-progress failure it is.
+
+        The goal generation stays current, exactly as after Nav2's own
+        ``Failed to make progress`` abort, so the exploration and objective
+        recovery paths keep their ownership of it and can submit a replacement
+        route. The cancelled handle is remembered so its late result cannot
+        relabel this failure.
+        """
+        with self._goal_lock:
+            if generation != self._goal_generation or self.nav_status != "active":
+                return False
+            handle = self._goal_handle
+            if handle is None:
+                return False
+            try:
+                handle.cancel_goal_async()
+            except Exception:
+                self._nav_quiet_unknown = True
+            self._route_stalled_handle = handle
+            self.node.get_logger().warn(
+                f"[{self.id}] {reason}; cancelling the route as a controller "
+                "no-progress failure"
+            )
+            self.pub_cmd.publish(Twist())
+            self._finish_goal("failed", generation, reason=reason)
+            return True
 
     # -- Nav2 bringup recovery ------------------------------------------
 
@@ -1551,6 +1628,7 @@ class RobotBridge(
                 quiet.set()
             self._goal_handle = None
             self._nav_failure_reason = None
+            self._reset_route_watchdog()
             for old, event in list(self._cancel_events.items()):
                 if event.is_set():
                     self._cancel_events.pop(old, None)
@@ -2006,7 +2084,20 @@ class RobotBridge(
     def session_state_tick(self) -> dict | None:
         self.drive_watchdog()
         self.escape_tick()
+        self.route_progress_watchdog()
         return self.take_reset_report()
+
+    def route_progress_watchdog(self) -> bool:
+        """Cancel a FollowPath goal whose progress along the route stalled."""
+        try:
+            return route_progress_tick(self)
+        except Exception as exc:
+            # A supervisor must never take the state loop, and with it the
+            # operator link, down with it.
+            self.node.get_logger().warn(
+                f"[{self.id}] route progress watchdog failed: {exc}"
+            )
+            return False
 
     async def session_maps_tick(self, now: float, send, loop) -> None:
         startup = self._slam_startup

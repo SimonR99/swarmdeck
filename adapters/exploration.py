@@ -15,11 +15,20 @@ import time
 
 
 def is_physical_no_progress_failure(reason) -> bool:
-    """Recognize the controller's explicit progress-checker terminal result."""
+    """Recognize a terminal result proving execution was physically blocked.
+
+    Either the controller's explicit progress-checker result, or the adapter's
+    own route progress watchdog (``adapters.route_progress``), which catches a
+    robot rocking on an obstacle without ever leaving Nav2's movement radius.
+    """
 
     return bool(
         isinstance(reason, str)
-        and re.search(r"\bfailed to make progress\b", reason, re.IGNORECASE)
+        and re.search(
+            r"\bfailed to make progress\b|\bno progress along the route\b",
+            reason,
+            re.IGNORECASE,
+        )
     )
 
 
