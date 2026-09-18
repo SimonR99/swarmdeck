@@ -134,7 +134,7 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
 | 1 | Persistent native MOLA map ownership and a loadable MOLA framework module | Done | 2026-09-10 workstation correction benchmark; 2026-09-15 Bistro replay |
 | 2 | MOLA map products behind the planner map-provider interface, with explicit free, occupied and unknown terrain semantics | Sim only | 2026-09-10 four-robot native free-space production; the native grid is the simulation default and hardware use is unqualified |
 | 3 | Selectable calibrated odometry and capture providers for simulation, SuperOdometry and FAST-LIVO2 | Partial | 2026-09-15 Fast-LIVO2 mission on domain 219; SuperOdometry and FAST-LIVO2 capture contracts remain occupied-only |
-| 4 | Shared graph, grid and local-control planning for Explore, Navigate and Home, with blocked-corridor replanning and speed limits | Partial | 2026-09-17 `80bbd00` with MGG head `c309c1a`: all four robots explored 18 to 36 m with the shared Explore stages and no navigation failure; speed limits are not implemented |
+| 4 | Shared graph, grid and local-control planning for Explore, Navigate and Home, with blocked-corridor replanning and speed limits | Partial | 2026-09-18 `e7affc8` with MGG head `3486391`: three consecutive grouped-start Fleet Explore trials passed for all four robots (15 to 40 m each) with server-sequenced departures, peer bodies as transient discs, a 0.9 s planner and the route-progress watchdog; speed limits are not implemented |
 | 5 | Qualify peer SLAM and exploration coordination on Bistro and on separate hosts | Partial | 2026-09-16 live merges are geometrically wrong in Z (about 0.3 m between platforms) and break terrain gates; merges are disabled again on benchbot; no multi-host, partition or optimizer-loss trial |
 | 6 | Qualify per-robot gateways, ARM builds and physical ROS 2 deployment | Not started | no ARM build, packet capture or hardware motion trial is recorded |
 | Parallel | Fixed-pose Gaussian batch reconstruction, then incremental training | Partial | native CUDA smoke completed nine optimizer iterations and converted 540 Gaussians; no real-capture alignment measurement |
@@ -171,7 +171,12 @@ Each item names its acceptance gate.
       2026-09-17 from a fresh grouped start: 16 of 18 goals at 3 m and five
       headings per robot arrived within 0.32 m; both refusals named a goal on a
       0.30 m and a 0.67 m rise.
-- [ ] **Peers as live obstacles for the global route.** Phantom bodies of
+- [x] **Peers as live obstacles for the global route.** Done 2026-09-17: each
+      robot reports its position in the surveyed deployment frame and its
+      peers' planners hold a 0.7 m transient disc around it (MGG `004c517`);
+      with server-sequenced departures and the route watchdog, three grouped
+      starts in a row passed on 2026-09-18. Earlier notes follow.
+      Original gate text: Phantom bodies of
       robots that have left are now retired by visibility (three later
       qualified rays through the voxel); present neighbours remain an open
       gate. Gate: at a grouped
