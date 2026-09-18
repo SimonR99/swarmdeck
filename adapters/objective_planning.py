@@ -36,6 +36,16 @@ PLANNER_INPUT_UNAVAILABLE_REASONS = (
 PLANNER_INPUT_RETRY_S = 0.5
 
 
+def bounded_pause(pause_s: float, remaining_s: float) -> float:
+    """A pause that never exceeds the recovery deadline and is never negative.
+
+    A planning call can outlive the deadline it was started under, leaving a
+    negative remainder; ``time.sleep`` raises on that ("sleep length must be
+    non-negative", seen live 2026-09-18) and the recovery ended as a failure.
+    """
+    return max(0.0, min(pause_s, remaining_s))
+
+
 def planner_input_unavailable(reason) -> bool:
     """True when a planner refusal only reports missing input."""
 
@@ -2109,7 +2119,7 @@ class MggObjectivePlanning:
                 # Unavailable input is not a failed planning attempt. Keep
                 # motion stopped and wait, bounded by the original deadline.
                 last_error = "no fresh map authority was available"
-                time.sleep(min(0.05, self._remaining(deadline)))
+                time.sleep(bounded_pause(0.05, self._remaining(deadline)))
                 continue
             if binding is not None and not self._authority_identity_matches(
                 binding, authority
@@ -2167,7 +2177,9 @@ class MggObjectivePlanning:
                 # motion stopped and ask again, bounded by the recovery deadline
                 # rather than by the attempt budget.
                 attempts -= 1
-                time.sleep(min(PLANNER_INPUT_RETRY_S, self._remaining(deadline)))
+                time.sleep(
+                    bounded_pause(PLANNER_INPUT_RETRY_S, self._remaining(deadline))
+                )
             if outcome == "submitted":
                 return
             if outcome == "superseded":

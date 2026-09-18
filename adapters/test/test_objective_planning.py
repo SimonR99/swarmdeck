@@ -2335,3 +2335,12 @@ def test_other_stale_revisions_still_fail(monkeypatch):
     assert not planner.navigate({"x": 2, "y": 1})
     assert client.call_async.call_count == 1
     assert bridge.follow_path.call_count == 0
+
+
+def test_recovery_pauses_are_bounded_and_never_negative():
+    """A planning call that outlives the deadline leaves a negative remainder;
+    the paced retry clamps it rather than raising from time.sleep."""
+    assert objective_planning.bounded_pause(0.5, 3.0) == 0.5
+    assert objective_planning.bounded_pause(0.5, 0.2) == pytest.approx(0.2)
+    assert objective_planning.bounded_pause(0.5, 0.0) == 0.0
+    assert objective_planning.bounded_pause(0.5, -0.2) == 0.0
