@@ -1020,7 +1020,7 @@ class MggObjectivePlanning:
             remaining = wake_at - time.monotonic()
             if remaining <= 0.0:
                 break
-            time.sleep(min(0.02, remaining))
+            time.sleep(bounded_pause(0.02, remaining))
         return self._owns_continuation(generation, route_id, home_intent)
 
     def _refine_route_once(
@@ -2244,7 +2244,7 @@ class MggObjectivePlanning:
         while time.monotonic() < wake_at:
             if not self._owns_recovery(generation, home_intent):
                 return False
-            time.sleep(min(0.02, wake_at - time.monotonic()))
+            time.sleep(bounded_pause(0.02, wake_at - time.monotonic()))
         return self._owns_recovery(generation, home_intent)
 
     def _finish_recovery_failure(self, generation, message) -> None:
