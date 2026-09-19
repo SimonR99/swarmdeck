@@ -76,8 +76,8 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`a9ff937f15feadfb588e4fcc87dd6d20da50aacb` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a Return Home connector from within 10 m of the graph, and footprint ground heights for goals whose own cell is unobserved), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+`8929eb80237316fee804fc44cfc13331829db3fe` (the 59 ported commits over
+upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a start connector from within 10 m of the graph for Navigate and Return Home, footprint ground heights for goals whose own cell is unobserved, a separate drop limit, a breadcrumb chain that skips unmappable breadcrumbs, and refusal of empty sections), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
@@ -127,7 +127,9 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     query is the safety gate; 20 cm voxel centres alone cannot enforce a 10 cm
     platform step limit.
 17. Simulation terrain step settings are 0.15 m for Bunker and Scout and 0.30 m
-    for Spot. These are simulator parameters, not hardware guarantees.
+    for Spot, with a 0.25 m drop limit for Bunker and Scout (a platform drives
+    down a kerb it could not climb). These are simulator parameters, not
+    hardware guarantees.
 18. Simulation ground truth is used only for scoring, never as an inter-robot
     alignment source or a planner input. The one exception is the
     simulation-only peer-body mask, which reads every robot's ground-truth pose

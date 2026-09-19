@@ -11,6 +11,9 @@ from launch import LaunchDescription
 
 MOLA_MAP_RESOLUTION_M = 0.2
 GRID_REFINEMENT_RESOLUTION_M = 0.5
+# Largest kerb a simulated ground platform may drive down; the climb limit
+# stays the platform's own.
+SIM_DROP_LIMIT_M = 0.25
 MAX_INITIAL_GROUND_REACH_M = 5.0
 
 
@@ -136,6 +139,12 @@ def generate_launch_description():
                 + 0.15
                 + 0.025,
                 "PlanningParams.max_step_height": step_height,
+                # A drop is not a climb. Bistro curbstones stand 0.16 to 0.19 m
+                # above the gutter and the map measures 0.17 to 0.21 m; robots
+                # pushed onto a sidewalk by the local controller could never
+                # plan the way back down against the climb limit (2026-09-18).
+                # Spot's climb limit already covers its drops.
+                "PlanningParams.max_drop_height": max(step_height, SIM_DROP_LIMIT_M),
                 # MOLA has only qualified lidar geometry. Its initial edge must
                 # cross the sensor's ground blind radius to measured support.
                 # Cloud mode retains the camera-aware legacy reach.
