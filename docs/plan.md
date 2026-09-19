@@ -76,7 +76,7 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`2bb56bad6d3a2c1f654f1ae04fe5db724163d204` (the 59 ported commits over
+`4181c5848becf1a506d147ef4cbf8dead43e1e0e` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a start connector from within 10 m of the graph for Navigate and Return Home, footprint ground heights for goals whose own cell is unobserved, a separate drop limit, a breadcrumb chain that skips unmappable breadcrumbs, refusal of empty sections, and the full-map raster global stage below), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
@@ -85,9 +85,10 @@ service type hashes match across images.
 Navigate and Return Home run through three tiers. The global stage plans over
 the whole MOLA product: MGG rasterizes the product once per snapshot into a
 2.5D traversability raster (`global_raster_cell_m` 0.5 m cells; per cell the
-ground is the lowest measured surface, an obstacle is matter above the larger
-of the climb and drop limits and below the body height, inflated by the body
-radius, and a cell without a surface is unknown) and runs an 8-connected A*
+ground is the lowest measured surface, an obstacle is matter above the drop
+limit and below the body height, inflated by the body radius, relief between
+the climb and drop limits is a step cell crossed only at the inflation cost,
+and a cell without a surface is unknown) and runs an 8-connected A*
 from the robot to the goal with the platform's asymmetric climb and drop
 limits between cells, the live peer discs, and the blocked-corridor marks as
 a penalty; unobserved cells are crossed at `global_raster_unknown_cost_factor`
