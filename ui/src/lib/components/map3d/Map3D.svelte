@@ -44,6 +44,7 @@
     type LiveReplicaSelection
   } from './liveReplicaFrame';
   import { Map3DScene } from './Map3DScene';
+  import { isDeploymentComposite } from '../replicas/replicaCatalogue';
   import type { MapRobot } from '../map2d/mapLayers';
   import type { Map3DRenderMode, Map3DColorMode } from './types';
 
@@ -82,6 +83,12 @@
   const tacticalReplica = $derived(replicaTactical.selection);
   const liveTactical = $derived(
     Boolean(tacticalReplica && replicaTactical.preference === 'auto')
+  );
+  // The server-composed deployment composite is labelled as such: it places
+  // each robot's own component by its surveyed start pose and is not a
+  // verified merge.
+  const compositeTactical = $derived(
+    Boolean(tacticalReplica && isDeploymentComposite(tacticalReplica.componentId))
   );
 
   // Cloud & Terrain State
@@ -314,10 +321,14 @@
   );
 
   function replicaPublicationLabel(view: ReplicaTacticalCloud['view']) {
+    if (isDeploymentComposite(view.component_id)) return 'deployment composite';
     return view.scope === 'fleet' ? 'fleet snapshot' : `replica r${view.revision}`;
   }
 
   function replicaPublicationTitle(view: ReplicaTacticalCloud['view']) {
+    if (isDeploymentComposite(view.component_id) && view.snapshot_id) {
+      return `Composite of ${view.sources?.length ?? 0} robot components placed by surveyed start poses; not a verified merge (${view.snapshot_id.slice(0, 12)})`;
+    }
     return view.scope === 'fleet' && view.snapshot_id
       ? `Aggregate snapshot ${view.snapshot_id.slice(0, 12)}`
       : undefined;
@@ -1012,7 +1023,13 @@
         <div class="min-w-0">
           <div class="font-semibold text-accent">
             {#if liveTactical && replicaCloud?.view.solution_order_known}
-              Live {tacticalReplica.scope === 'fleet' ? 'fleet' : 'onboard'} map
+              {#if compositeTactical}
+                Live fleet composite (deployment frame)
+              {:else}
+                Live {tacticalReplica.scope === 'fleet' ? 'fleet' : 'onboard'} map
+              {/if}
+            {:else if compositeTactical}
+              Fleet composite (deployment frame) · read-only
             {:else}
               {tacticalReplica.scope === 'fleet' ? 'Fleet component' : 'Onboard component'} · read-only
             {/if}

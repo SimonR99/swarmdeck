@@ -45,7 +45,9 @@
     if (!enabled || !catalogue) return;
     const local = mapStore.viewMode === 'local' && Boolean(mapStore.viewRobot);
     const preferred = preferredRobotId();
-    const entry = automaticCatalogueEntry(catalogue, preferred, !local, local ? 1 : 2);
+    // The deployment composite is a Global fallback only: a local view reads
+    // one robot's own replica, which the composite id cannot address.
+    const entry = automaticCatalogueEntry(catalogue, preferred, !local, local ? 1 : 2, !local);
     if (!entry) {
       const currentEntry = current && catalogue.components.find(
         (candidate) => componentKey(current) === `${candidate.session_id}\u0000${candidate.component_id}`

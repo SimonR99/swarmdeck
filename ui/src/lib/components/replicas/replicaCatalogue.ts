@@ -25,6 +25,19 @@ export interface ReplicaCatalogueEntry {
   detail: string;
   solution_order: [number, number] | null;
   sources: ReplicaCatalogueSource[];
+  /**
+   * The server-composed `deployment:<session>` entry: every replicated
+   * single-robot component placed in the surveyed deployment frame. A display
+   * and goal-entry composition, never a verified merge, so it ranks below any
+   * real component and does not count as merged membership.
+   */
+  composite: boolean;
+}
+
+const DEPLOYMENT_COMPOSITE_PREFIX = 'deployment:';
+
+export function isDeploymentComposite(componentId: string | null | undefined): boolean {
+  return typeof componentId === 'string' && componentId.startsWith(DEPLOYMENT_COMPOSITE_PREFIX);
 }
 
 export interface ReplicaCatalogue {
@@ -77,6 +90,9 @@ function entry(value: unknown): ReplicaCatalogueEntry {
     (!Array.isArray(solutionOrder) || solutionOrder.length !== 2 ||
       !Number.isSafeInteger(solutionOrder[0]) || !Number.isSafeInteger(solutionOrder[1]))
   ) invalid('component solution_order is invalid');
+  if (item.composite !== undefined && typeof item.composite !== 'boolean') {
+    invalid('component composite is invalid');
+  }
   return {
     session_id: text(item.session_id, 'session_id'),
     component_id: text(item.component_id, 'component_id'),
@@ -89,7 +105,8 @@ function entry(value: unknown): ReplicaCatalogueEntry {
     status,
     detail: typeof item.detail === 'string' ? item.detail : '',
     solution_order: solutionOrder as [number, number] | null,
-    sources: item.sources.map(source)
+    sources: item.sources.map(source),
+    composite: item.composite === true
   };
 }
 
@@ -112,17 +129,21 @@ export function parseReplicaCatalogue(value: unknown): ReplicaCatalogue {
  * Pick a current component only when the server identified the mission. A
  * preferred robot narrows the choice to a component that actually contains
  * that robot; ties are deterministic and never combine disconnected frames.
+ * A verified component always outranks the deployment composite, which the
+ * Global view falls back to only while no verified multi-robot component
+ * exists; a local (single robot) view never uses the composite.
  */
 export function automaticCatalogueEntry(
   catalogue: ReplicaCatalogue,
   preferredRobotId?: string | null,
   fallbackToSingle = false,
-  minimumRobotCount = 1
+  minimumRobotCount = 1,
+  allowComposite = true
 ): ReplicaCatalogueEntry | null {
   if (!catalogue.active_session_id) return null;
   let candidates = catalogue.components
     .filter((item) => item.available && item.status === 'ready' && item.session_id === catalogue.active_session_id &&
-      item.robot_ids.length >= minimumRobotCount)
+      item.robot_ids.length >= minimumRobotCount && (allowComposite || !item.composite))
   if (preferredRobotId) {
     const matching = candidates.filter((item) => item.robot_ids.includes(preferredRobotId));
     if (matching.length) candidates = matching;
@@ -130,11 +151,16 @@ export function automaticCatalogueEntry(
   }
   if (!candidates.length) return null;
   return [...candidates].sort((a, b) =>
-    b.robot_ids.length - a.robot_ids.length || a.component_id.localeCompare(b.component_id)
+    Number(a.composite) - Number(b.composite) ||
+    b.robot_ids.length - a.robot_ids.length ||
+    a.component_id.localeCompare(b.component_id)
   )[0];
 }
 
-/** Members of the active component selected by the Global view's rules. */
+/**
+ * Members of the active component selected by the Global view's rules. The
+ * deployment composite is not a merge, so it never counts as membership.
+ */
 export function activeMergedRobotIds(
   catalogue: ReplicaCatalogue,
   preferredRobotId?: string | null,
@@ -145,7 +171,8 @@ export function activeMergedRobotIds(
     .filter((entry) =>
       entry.session_id === catalogue.active_session_id &&
       entry.available &&
-      entry.status === 'ready'
+      entry.status === 'ready' &&
+      !entry.composite
     )
     .map((entry) => ({
       componentId: entry.component_id,
@@ -232,6 +259,9 @@ export function catalogueSelection(
 
 export function catalogueLabel(entry: ReplicaCatalogueEntry): string {
   const robots = entry.robot_ids.join(', ') || 'no robot sources';
+  if (entry.composite) {
+    return `${entry.session_id.slice(0, 8)} · deployment composite · ${robots}`;
+  }
   const component = entry.component_id.startsWith('component:')
     ? entry.component_id.slice('component:'.length)
     : entry.component_id;

@@ -145,6 +145,26 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     transient keep-out disc; it expires with the reports and is never stored
     in a map.
 
+    The same surveyed frame also carries the server's deployment composite
+    (`deployment:<session>`, frame `deployment`, served beside the real
+    components at `/api/autonomy/replicas/components`): every replicated
+    single-robot component of the active mission, each placed by
+    `T_world_component = T_world_navigation(robot) @ inv(T_component_navigation(robot))`,
+    where the first factor is the map service's transform for that robot (the
+    surveyed start pose the 2D fleet map uses) and the second comes from the
+    robot's live mapping authority. It is a display and goal-entry composition
+    in the deployment frame, not a verified merge: no closure, no shared
+    solution and no geometry is exchanged between members, chunks pass through
+    untouched, and a robot without both a surveyed placement and a live
+    authority is simply left out. The composite reports the pre-optimizer
+    frame revision `(0, -1)`; each member's own frame revision still fences
+    its live overlay, and a goal clicked in the composite is dispatched to the
+    target robot in its own component and frame revision (the click converted
+    with the inverse placement), so the robot applies the same stale-frame
+    checks as for any component goal. The Global 3D view falls back to the
+    composite only while no verified multi-robot component exists, and it
+    never counts as merged membership.
+
 ## Status
 
 | Priority | Deliverable | State | Evidence |

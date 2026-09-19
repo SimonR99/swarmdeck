@@ -7,6 +7,7 @@ import {
   activeMergedRobotIds,
   automaticCatalogueEntry,
   automaticSelectionIsCoherent,
+  isDeploymentComposite,
   parseReplicaCatalogue
 } from '../src/lib/components/replicas/replicaCatalogue.ts';
 
@@ -35,10 +36,23 @@ function body() {
   };
 }
 
+function composite(robotIds: string[]) {
+  return {
+    ...body().components[0],
+    component_id: `deployment:${session}`,
+    frame_id: 'deployment',
+    robot_ids: robotIds,
+    source_count: robotIds.length,
+    solution_order: null,
+    composite: true
+  };
+}
+
 test('catalogue validates entries and turns them into fleet selections', () => {
   const catalogue = parseReplicaCatalogue(body());
   assert.equal(catalogue.components.length, 1);
   assert.equal(catalogue.active_session_id, session);
+  assert.equal(catalogue.components[0].composite, false);
   const selected = catalogueSelection(catalogue.components[0]);
   assert.deepEqual(selected, {
     scope: 'fleet', robotId: 'fleet', sessionId: session, componentId: 'component:merged'
@@ -82,6 +96,89 @@ test('automatic selection stays within the server-declared mission and preferred
   });
   assert.equal(automaticCatalogueEntry(single, 'robot-z', true)?.component_id, 'component:single');
   assert.equal(automaticCatalogueEntry(single, 'robot-a', true, 2), null);
+});
+
+test('deployment composite is parsed, labelled and recognised by its id', () => {
+  const catalogue = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [composite(['robot-a', 'robot-b'])]
+  });
+  const [entry] = catalogue.components;
+  assert.equal(entry.composite, true);
+  assert.equal(isDeploymentComposite(entry.component_id), true);
+  assert.equal(isDeploymentComposite('component:merged'), false);
+  assert.equal(isDeploymentComposite(null), false);
+  assert.match(catalogueLabel(entry), /12345678 · deployment composite · robot-a, robot-b/);
+  const malformed = { version: 1, active_session_id: session, components: [{ ...composite(['robot-a']), composite: 'yes' }] };
+  assert.throws(() => parseReplicaCatalogue(malformed), /composite is invalid/);
+});
+
+test('Global selection falls back to the composite only when no verified multi-robot component exists', () => {
+  const singles = [
+    { ...body().components[0], component_id: 'component:a', robot_ids: ['robot-a'], solution_order: null },
+    { ...body().components[0], component_id: 'component:b', robot_ids: ['robot-b'], solution_order: null }
+  ];
+  const unmerged = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [...singles, composite(['robot-a', 'robot-b'])]
+  });
+  // Global view (two or more robots): the composite is the only candidate.
+  assert.equal(automaticCatalogueEntry(unmerged, 'robot-a', true, 2)?.component_id, `deployment:${session}`);
+  assert.equal(automaticCatalogueEntry(unmerged, null, true, 2)?.component_id, `deployment:${session}`);
+  // A local view never addresses the composite; it reads the robot's own component.
+  assert.equal(automaticCatalogueEntry(unmerged, 'robot-a', false, 1)?.component_id, 'component:a');
+  assert.equal(automaticCatalogueEntry(unmerged, 'robot-a', false, 1, false)?.component_id, 'component:a');
+  assert.equal(automaticCatalogueEntry(unmerged, 'robot-a', true, 2, false), null);
+
+  // A verified multi-robot component outranks the composite, even a larger one.
+  const merged = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      composite(['robot-a', 'robot-b', 'robot-c']),
+      { ...body().components[0], component_id: 'component:merged', robot_ids: ['robot-a', 'robot-b'] },
+      { ...body().components[0], component_id: 'component:c', robot_ids: ['robot-c'], solution_order: null }
+    ]
+  });
+  assert.equal(automaticCatalogueEntry(merged, 'robot-a', true, 2)?.component_id, 'component:merged');
+  assert.equal(automaticCatalogueEntry(merged, null, true, 2)?.component_id, 'component:merged');
+  // The preferred robot still narrows the choice to a component containing it.
+  assert.equal(automaticCatalogueEntry(merged, 'robot-c', true, 2)?.component_id, `deployment:${session}`);
+
+  // An unavailable composite is never selected.
+  const conflict = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [...singles, { ...composite(['robot-a', 'robot-b']), available: false, status: 'conflict' }]
+  });
+  assert.equal(automaticCatalogueEntry(conflict, 'robot-a', true, 2), null);
+});
+
+test('merged count never counts the deployment composite as membership', () => {
+  const catalogue = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      { ...body().components[0], component_id: 'component:a', robot_ids: ['robot-a'], solution_order: null },
+      { ...body().components[0], component_id: 'component:b', robot_ids: ['robot-b'], solution_order: null },
+      composite(['robot-a', 'robot-b'])
+    ]
+  });
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a'), []);
+  assert.deepEqual(activeMergedRobotIds(catalogue, 'robot-a', {
+    scope: 'fleet', robotId: 'fleet', sessionId: session, componentId: `deployment:${session}`
+  }), []);
+  const merged = parseReplicaCatalogue({
+    version: 1,
+    active_session_id: session,
+    components: [
+      { ...body().components[0], component_id: 'component:merged', robot_ids: ['robot-a', 'robot-b'] },
+      composite(['robot-a', 'robot-b', 'robot-c'])
+    ]
+  });
+  assert.deepEqual(activeMergedRobotIds(merged, 'robot-c'), ['robot-a', 'robot-b']);
 });
 
 test('merged count uses the verified active component rather than legacy or historical robots', () => {
