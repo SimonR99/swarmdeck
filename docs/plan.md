@@ -228,9 +228,16 @@ Each item names its acceptance gate.
       Scout's straight-ahead goal on the kerb where the road bends, and a
       return waypoint projected onto a terrace table top. 2026-09-19: the
       operator saw long goals planned as one waypoint and a straight line
-      (the topological stage's optimistic connector); MGG `5470174` adds the
-      full-map raster global stage described above, not yet measured on
-      benchbot.
+      (the topological stage's optimistic connector); MGG `5470174` to
+      `4181c58` add the full-map raster global stage described above. Three
+      cycles the same day (one per image, acceptance log): returns went 1, 2,
+      then 4 of 4 (36 to 51 m, all four robots back within 0.6 m of their
+      starts) as each cycle's measured cause was removed (a body box
+      straddling a kerb refused as occupied, an inflation ring refusing a
+      goal, a lidar ring gap as a clearance hazard, routes laid along kerb
+      lines); 3 m goals 2, 4, 3 of 4; the 8 m sweep's second row lands on
+      parked neighbours or buildings by construction. Not yet stable: one
+      more cycle on `6c1a1cc` (blind-ring support) is owed.
 - [ ] **Blocked-corridor topological replanning and speed limits.** Gate: a
       failed edge is excluded from a new topological search, and refined paths
       carry speed limits. Implemented in MGG at `494ce66` (branch head `c4eff1b`): Explore now runs
