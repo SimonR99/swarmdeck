@@ -350,5 +350,5 @@ def test_a_parked_robot_earns_a_bounded_number_of_scene_keyframes():
     yaml_text = (
         REPO / "swarmdeck_ros/src/swarmdeck_cslam/config/cslam_lidar.yaml"
     ).read_text()
-    assert "keyframe_scene_change_max_range_m: 20.0" in yaml_text
+    assert "keyframe_scene_change_max_range_m: 8.0" in yaml_text
     assert "keyframe_scene_change_max_stationary: 12" in yaml_text
