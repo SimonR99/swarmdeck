@@ -42,10 +42,6 @@ from .mapping import (
     decode_xyzrgba_f32_u8,
 )
 
-# Measurement tolerance on the terrain band above the fitted ground within
-# which occupied matter under the body counts as relief (IndexedMapView.query).
-TERRAIN_BAND_TOLERANCE_M = 0.01
-
 
 class QueryStatus(IntEnum):
     OK = 0
@@ -322,12 +318,7 @@ class IndexedMapView:
         max_voxels: int = 2_000_000,
         max_ray_steps: int = 4_000_000,
         max_build_s: float = 8.0,
-        # One query validates a bounded section (about 40 samples at 0.2 m,
-        # each a body box plus a terrain fit). The server answers the fleet
-        # from one thread on a host that also builds four products, so the
-        # budget leaves room for contention: at 0.25 s a return leg was
-        # refused outright as the exploration cycle ended (2026-09-19).
-        max_query_s: float = 1.0,
+        max_query_s: float = 0.25,
         max_samples: int = 4096,
         max_query_voxels: int = 1_000_000,
         terrain_radius_m: float = 0.35,
@@ -706,20 +697,7 @@ class IndexedMapView:
             # The fitted surface beneath this body is support, not a collision. At
             # map resolution, omit its voxel layer from the body volume; low
             # obstacles that share that voxel are intentionally unresolved.
-            # Above that layer, an occupied voxel whose measured surface lies
-            # within the platform's terrain band over the fitted ground is
-            # relief the body drives over, not a collision: a kerb lip, a speed
-            # bump, and the second floor a LiDAR-inertial map lays up to 0.2 m
-            # above the first where keyframe heights disagree (benchbot,
-            # 2026-09-19: a Bunker's return legs along a flat road were
-            # refused as occupied by such a floor). The band is the larger of
-            # the climb and drop limits: this test asks whether the body can
-            # occupy the volume the route gives it, not which way it travels;
-            # the planner's footprint rise checks and the step and drop
-            # checks below judge climbs. Matter whose surface rises above the
-            # band stays a collision.
             collision_cells = cells
-            rolls_over = None
             if terrain is not None:
                 support_top = terrain[0] + index.resolution_m
                 collision_cells = [
@@ -727,36 +705,10 @@ class IndexedMapView:
                     for cell in cells
                     if (cell[2] + 0.5) * index.resolution_m > support_top
                 ]
-                rolls_over = self._terrain_band_test(
-                    index,
-                    terrain[0] + max(max_step_m, max_drop_m) + TERRAIN_BAND_TOLERANCE_M,
-                )
-            else:
-                # No fit (fewer than three observed columns under the body,
-                # as inside a lidar's blind ring), yet a column may still
-                # hold a ground return. A ground robot's box reaches below
-                # its wheels' contact, so that return would be a collision
-                # and every blind sample "occupied" (benchbot 2026-09-19: the
-                # Scout's 3 m goal). Each column's own highest surface under
-                # the support ceiling is its support layer instead; the
-                # sample stays unknown, never free, without a fit.
-                support_ceiling = min(
-                    float(sample[2]) - 1e-9,
-                    float(sample[2] - half[2]) + 0.5 * index.resolution_m,
-                )
-                collision_cells = [
-                    cell
-                    for cell in cells
-                    if not self._column_support_below(index, cell, support_ceiling)
-                ]
-            if any(
-                cell in index.occupied and not (rolls_over and rolls_over(cell))
-                for cell in collision_cells
-            ):
+            if any(cell in index.occupied for cell in collision_cells):
                 state = VoxelOccupancy.OCCUPIED
             elif collision_cells and all(
-                cell in index.free or (rolls_over and rolls_over(cell))
-                for cell in collision_cells
+                cell in index.free for cell in collision_cells
             ):
                 state = VoxelOccupancy.FREE
             else:
@@ -804,52 +756,6 @@ class IndexedMapView:
             tuple(step),
             tuple(drop),
         )
-
-    @staticmethod
-    def _column_support_below(
-        index: IndexedGrid, cell: tuple[int, int, int], support_ceiling: float
-    ) -> bool:
-        """Is this voxel in, or under, its column's own support layer?
-
-        The support layer is the voxel of the highest surface at or below
-        ``support_ceiling`` (the body's bottom, with half a voxel of margin).
-        Used when no terrain fit exists, so that a lone ground return under
-        the body is support rather than a collision.
-        """
-
-        zs = index.columns.get((cell[0], cell[1]))
-        if not zs:
-            return False
-        ordinal = bisect_right(zs, support_ceiling)
-        if ordinal == 0:
-            return False
-        support_top = zs[ordinal - 1] + index.resolution_m
-        return (cell[2] + 0.5) * index.resolution_m <= support_top
-
-    @staticmethod
-    def _terrain_band_test(index: IndexedGrid, band_top: float):
-        """A predicate: does this occupied voxel's measured surface lie under ``band_top``?
-
-        The surface is the highest point recorded in the voxel's column within
-        the voxel's height span; a voxel without one (an occupied voxel the
-        column list does not describe) is never terrain.
-        """
-
-        resolution = index.resolution_m
-
-        def rolls_over(cell: tuple[int, int, int]) -> bool:
-            zs = index.columns.get((cell[0], cell[1]))
-            if not zs:
-                return False
-            low = cell[2] * resolution
-            high = low + resolution
-            ordinal = bisect_right(zs, high - 1e-9)
-            if ordinal == 0:
-                return False
-            surface = zs[ordinal - 1]
-            return surface >= low - 1e-9 and surface <= band_top
-
-        return rolls_over
 
     def _terrain(
         self, index: IndexedGrid, sample: np.ndarray, half_body: np.ndarray

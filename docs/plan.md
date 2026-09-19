@@ -76,33 +76,17 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`4181c5848becf1a506d147ef4cbf8dead43e1e0e` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a start connector from within 10 m of the graph for Navigate and Return Home, footprint ground heights for goals whose own cell is unobserved, a separate drop limit, a breadcrumb chain that skips unmappable breadcrumbs, refusal of empty sections, and the full-map raster global stage below), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
-changes are made in that repository and the pin is advanced.
+`ccda9ce93cd1bca3fba52d863052108076936989` (the 59 ported commits over
+upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, and indexed queries that finish on their captured key), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+changes are made in that repository and the pin is advanced. `ccda9ce` is a
+revert: on 2026-09-19 a full-map raster global stage, a separate drop limit
+with footprint asymmetry, breadcrumb skipping, empty-section refusal and
+Navigate/Return Home graph connectors were added, trialled on benchbot and
+rolled back the same day at the operator's verdict (robots driving into
+obstacles, nonsensical targets, redundant components); the tree is
+`0e189ed` again.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
-
-Navigate and Return Home run through three tiers. The global stage plans over
-the whole MOLA product: MGG rasterizes the product once per snapshot into a
-2.5D traversability raster (`global_raster_cell_m` 0.5 m cells; per cell the
-ground is the lowest measured surface, an obstacle is matter above the drop
-limit and below the body height, inflated by the body radius, relief between
-the climb and drop limits is a step cell crossed only at the inflation cost,
-and a cell without a surface is unknown) and runs an 8-connected A*
-from the robot to the goal with the platform's asymmetric climb and drop
-limits between cells, the live peer discs, and the blocked-corridor marks as
-a penalty; unobserved cells are crossed at `global_raster_unknown_cost_factor`
-(3) times their length, carrying the last known ground, so the route prefers
-observed ground and still reaches a goal beyond the map, and cells within the
-body radius of an obstacle at `global_raster_inflation_cost_factor` (3), so a
-robot parked beside a wall keeps its route and the refinement's footprint
-checks decide. The result is one
-waypoint per cell, drawn as the global path. The rolling grid stage refines
-the next `objective_route_horizon_m` window of that route on the exact voxels
-(sections, validated prefixes, continuation), and Nav2's controller follows
-the refined section with its own obstacle avoidance. The topological graph
-(breadcrumbs plus frontier vertices) is the fallback when the raster stage
-refuses, and Explore still routes over it.
 
 ## Invariants
 
@@ -228,16 +212,14 @@ Each item names its acceptance gate.
       Scout's straight-ahead goal on the kerb where the road bends, and a
       return waypoint projected onto a terrace table top. 2026-09-19: the
       operator saw long goals planned as one waypoint and a straight line
-      (the topological stage's optimistic connector); MGG `5470174` to
-      `4181c58` add the full-map raster global stage described above. Three
-      cycles the same day (one per image, acceptance log): returns went 1, 2,
-      then 4 of 4 (36 to 51 m, all four robots back within 0.6 m of their
-      starts) as each cycle's measured cause was removed (a body box
-      straddling a kerb refused as occupied, an inflation ring refusing a
-      goal, a lidar ring gap as a clearance hazard, routes laid along kerb
-      lines); 3 m goals 2, 4, 3 of 4; the 8 m sweep's second row lands on
-      parked neighbours or buildings by construction. Not yet stable: one
-      more cycle on `6c1a1cc` (blind-ring support) is owed.
+      (the topological stage's optimistic connector). A full-map raster
+      global stage and index-server terrain special cases were added, ran
+      three benchbot cycles (acceptance log: returns 1, 2, then 4 of 4) and
+      were rolled back the same day at the operator's verdict: the robots
+      drove into obstacles, the planner produced nonsensical targets, and
+      the stages were redundant with MGG's own graph. MGG is `0e189ed`
+      again (as `ccda9ce`); the open question is why the ported MGG's global
+      graph is sparse where upstream's spans the explored lattice.
 - [ ] **Blocked-corridor topological replanning and speed limits.** Gate: a
       failed edge is excluded from a new topological search, and refined paths
       carry speed limits. Implemented in MGG at `494ce66` (branch head `c4eff1b`): Explore now runs

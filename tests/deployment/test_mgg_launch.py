@@ -210,13 +210,6 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
         0.15,
         0.30,
     ]
-    # A drop is not a climb: the simulated ground platforms may drive down a
-    # 0.25 m kerb, Spot's own climb limit already covers its drops.
-    assert [params["PlanningParams.max_drop_height"] for params in overrides] == [
-        0.25,
-        0.25,
-        0.30,
-    ]
     assert [params["PlanningParams.edge_length_max"] for params in overrides] == [
         1.2,
         1.2,
