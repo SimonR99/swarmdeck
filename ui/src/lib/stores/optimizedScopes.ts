@@ -61,6 +61,33 @@ export function selectGlobalOptimizedScope(
   return rankGlobalOptimizedScopes(scopes)[0];
 }
 
+/**
+ * Robots that the fleet map on show does not place: every robot of a
+ * single-robot `component:*` scope, except the members of `shownScope` when
+ * that is a deployment composite (the raster places them by their surveyed
+ * poses, so they are on the map even though nothing merged them). Order is
+ * the scope listing's order, each robot once.
+ */
+export function unmergedRobotIds(
+  scopes: readonly OptimizedScope[],
+  shownScope: string | null
+): string[] {
+  const placed = new Set<string>();
+  if (shownScope !== null && isDeploymentScope(shownScope)) {
+    for (const entry of scopes) {
+      if (entry.scope === shownScope) entry.robots.forEach((robot) => placed.add(robot));
+    }
+  }
+  const ids: string[] = [];
+  for (const entry of scopes) {
+    if (!isComponentScope(entry.scope) || entry.robots.length >= 2) continue;
+    for (const robot of entry.robots) {
+      if (!placed.has(robot) && !ids.includes(robot)) ids.push(robot);
+    }
+  }
+  return ids;
+}
+
 /** How the operator sees a scope: the composite by its role, not its session id. */
 export function optimizedScopeLabel(scope: string): string {
   return isDeploymentScope(scope) ? 'deployment composite' : scope;

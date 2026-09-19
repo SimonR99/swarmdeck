@@ -4,6 +4,7 @@ import {
   optimizedScopeLabel,
   rankGlobalOptimizedScopes,
   selectGlobalOptimizedScope,
+  unmergedRobotIds,
   type OptimizedScope
 } from '../src/lib/stores/optimizedScopes.ts';
 
@@ -53,6 +54,24 @@ test('components are ordered by robots, then grid area, then name, unchanged', (
     ranked.map((entry) => entry.scope),
     ['component:0', 'component:3', 'component:1', 'component:2']
   );
+});
+
+test('the unmerged hint skips the members of a displayed deployment composite', () => {
+  const scopes = [
+    scope('robot:robot_0', ['robot_0']),
+    scope('component:0', ['robot_0']),
+    scope('component:1', ['robot_1']),
+    scope('component:2', ['robot_2']),
+    scope('component:3', ['robot_3', 'robot_4']),
+    scope(`deployment:${session}`, ['robot_0', 'robot_1'])
+  ];
+  // No fleet map on show, or a verified component on show: every lone robot.
+  assert.deepEqual(unmergedRobotIds(scopes, null), ['robot_0', 'robot_1', 'robot_2']);
+  assert.deepEqual(unmergedRobotIds(scopes, 'component:3'), ['robot_0', 'robot_1', 'robot_2']);
+  // The composite on show places robot_0 and robot_1; robot_2 is still off it.
+  assert.deepEqual(unmergedRobotIds(scopes, `deployment:${session}`), ['robot_2']);
+  // A composite that is not listed places nobody.
+  assert.deepEqual(unmergedRobotIds(scopes, 'deployment:other'), ['robot_0', 'robot_1', 'robot_2']);
 });
 
 test('the composite is named by its role, other scopes verbatim', () => {

@@ -4,6 +4,7 @@ import {
   isComponentScope,
   optimizedScopeLabel,
   selectGlobalOptimizedScope,
+  unmergedRobotIds,
   type OptimizedScope
 } from './optimizedScopes';
 import { fleet } from '$lib/stores/fleet.svelte';
@@ -498,14 +499,16 @@ export const mapStore = {
       ? null
       : optimizedScopeLabel(state.globalOptimizedScope);
   },
+  /**
+   * Robots absent from the fleet map on show. A robot in a single-robot
+   * component is missing from a verified merged grid, but not from the
+   * deployment composite raster, which places every member by its surveyed
+   * pose; while that raster is displayed its members are on the map.
+   */
   get unmergedRobots(): string[] {
-    const ids = new Set<string>();
-    for (const scope of this.unmergedScopes) {
-      for (const robot of scope.robots) {
-        if (fleet.isEnabled(robot)) ids.add(robot);
-      }
-    }
-    return Array.from(ids);
+    return unmergedRobotIds(state.optimizedScopes, state.globalOptimizedScope).filter((robot) =>
+      fleet.isEnabled(robot)
+    );
   },
 
   get viewMode() {
