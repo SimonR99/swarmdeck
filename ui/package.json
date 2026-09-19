@@ -13,7 +13,7 @@
     "test:replicas": "node --experimental-strip-types --test tests/replicaPreview.test.ts tests/replicaTactical.test.ts tests/replicaCatalogue.test.ts tests/liveReplicaFrame.test.ts",
     "test:replica-acceptance": "node --experimental-strip-types --test tests/liveReplicaAcceptance.test.ts",
     "test:replica-http": "node --experimental-strip-types --test tests/replicaCatalogue.http.test.ts",
-    "test:map3d": "node --experimental-strip-types --test tests/cloudSnapshot.test.ts tests/terrainData.test.ts tests/mapFrames.test.ts tests/robotPresence.test.ts tests/voxelTerrain.test.ts tests/mapstore.test.mjs tests/mapViewport.test.ts"
+    "test:map3d": "node --experimental-strip-types --test tests/cloudSnapshot.test.ts tests/terrainData.test.ts tests/mapFrames.test.ts tests/robotPresence.test.ts tests/voxelTerrain.test.ts tests/mapstore.test.mjs tests/mapViewport.test.ts tests/optimizedScopes.test.ts"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.4",

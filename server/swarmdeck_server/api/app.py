@@ -33,6 +33,7 @@ from ..fleet.departure import departure_order, release_in_turn
 from ..fleet.registry import registry
 from ..mapsvc.service import GridMeta, MapService, map_service
 from .broadcast import JsonBroadcaster
+from .deployment_raster import deployment_raster_loop
 
 # Compatibility exports for callers that historically imported map transport
 # constants/helpers from ``api.app``. The route implementation now lives in
@@ -73,6 +74,9 @@ async def lifespan(_: FastAPI):
         # MapService.registration_worker. Without this task the transforms in
         # `auto` mode would never be recomputed at all.
         asyncio.create_task(map_service.registration_worker()),
+        # The 2D map's fleet-wide raster of the replicated keyframes, rebuilt
+        # off-loop whenever the deployment composite changes.
+        asyncio.create_task(deployment_raster_loop()),
     ]
     from ..mapsvc import graph_bridge
 

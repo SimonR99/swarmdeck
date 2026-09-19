@@ -70,14 +70,22 @@ def reseal(envelope):
 
 
 def peer(
-    tmp_path, robot, session, *, anchor_robot=None, order=None, revision=1, epoch=0
+    tmp_path,
+    robot,
+    session,
+    *,
+    anchor_robot=None,
+    order=None,
+    revision=1,
+    epoch=0,
+    points=((1.0, 0.0, 0.0),),
 ):
     store = SubmapStore(tmp_path / f"{robot}-{uuid4()}")
     key = KeyframeId(robot, session, 0)
     anchor = KeyframeId(anchor_robot or robot, session, 0)
     store.add_submap(
         SubmapId.from_keyframe(key),
-        [[1.0, 0.0, 0.0]],
+        [list(point) for point in points],
         keyframe_poses_local={key: IDENTITY_SE3},
         sensor_origins_local=(),
         observed_at_ns=100,

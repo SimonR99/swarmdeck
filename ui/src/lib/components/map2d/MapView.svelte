@@ -814,7 +814,9 @@
                    {mapStore.mapSource === 'optimized'
                      ? 'bg-surface-2 text-fg'
                      : 'text-fg-muted hover:bg-surface-2'}"
-            title="Keyframe occupancy posed by the collaborative solver. Falls back to Robot SLAM until that grid exists."
+            title={mapStore.globalOptimizedLabel
+              ? `Keyframe occupancy posed by the collaborative solver. Showing: ${mapStore.globalOptimizedLabel}.`
+              : 'Keyframe occupancy posed by the collaborative solver. Falls back to Robot SLAM until that grid exists.'}
             onclick={() => void mapStore.setMapSource('optimized')}
           >
             Optimised

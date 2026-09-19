@@ -1,5 +1,11 @@
 import { inflate } from 'pako';
 import { mapSnapshotInfo } from './mapSnapshot';
+import {
+  isComponentScope,
+  optimizedScopeLabel,
+  selectGlobalOptimizedScope,
+  type OptimizedScope
+} from './optimizedScopes';
 import { fleet } from '$lib/stores/fleet.svelte';
 import type {
   CostmapKind,
@@ -11,16 +17,7 @@ import type {
   SlamGraph
 } from '$lib/types/protocol';
 
-/** One entry from GET /api/map/optimized: a grid the collaborative solver posed. */
-export interface OptimizedScope {
-  /** `robot:<id>` or `component:<n>`. Opaque; the server does not parse it. */
-  scope: string;
-  robots: string[];
-  resolution: number;
-  width: number;
-  height: number;
-  origin: { x: number; y: number };
-}
+export type { OptimizedScope } from './optimizedScopes';
 
 /**
  * Occupancy grid, held as an offscreen canvas. The displayed grid is either
@@ -66,6 +63,9 @@ const state = $state({
   // Optimised before the solver has published a grid falls back to the
   // robot's own SLAM map; overlays must then use that map's frame, not world.
   showingOptimizedGrid: false,
+  // The scope name behind the global optimized canvas while it is shown: a
+  // verified `component:<n>` or the `deployment:<session>` composite raster.
+  globalOptimizedScope: null as string | null,
   optimizedScopes: [] as OptimizedScope[],
   viewRobot: null as string | null,
   // What the OPERATOR asked for, as opposed to what the backend recommends.
@@ -286,6 +286,7 @@ function clearGrid() {
   state.seq = 0;
   state.ready = false;
   state.showingOptimizedGrid = false;
+  state.globalOptimizedScope = null;
 }
 
 /** Convert an int8 occupancy buffer to RGBA pixels, recording occupancy. */
@@ -484,8 +485,18 @@ export const mapStore = {
   /** Components holding no other robot: invisible on the merged map by design. */
   get unmergedScopes() {
     return state.optimizedScopes.filter(
-      (scope) => scope.scope.startsWith('component:') && scope.robots.length < 2
+      (scope) => isComponentScope(scope.scope) && scope.robots.length < 2
     );
+  },
+  /** The scope name behind the global optimized canvas, or null. */
+  get globalOptimizedScope() {
+    return state.globalOptimizedScope;
+  },
+  /** Operator wording for that scope: "deployment composite" for the raster. */
+  get globalOptimizedLabel(): string | null {
+    return state.globalOptimizedScope === null
+      ? null
+      : optimizedScopeLabel(state.globalOptimizedScope);
   },
   get unmergedRobots(): string[] {
     const ids = new Set<string>();
@@ -651,16 +662,13 @@ export const mapStore = {
     }
   },
 
-  /** Fetch the largest verified collaborative component for the global view. */
+  /**
+   * Fetch the best fleet-wide optimized grid for the global view: the largest
+   * verified collaborative component, else the deployment composite raster
+   * (see `rankGlobalOptimizedScopes`).
+   */
   async loadGlobalOptimized(): Promise<boolean> {
-    const scope = state.optimizedScopes
-      .filter((entry) => entry.scope.startsWith('component:') && entry.robots.length >= 2)
-      .sort(
-        (a, b) =>
-          b.robots.length - a.robots.length ||
-          b.width * b.height - a.width * a.height ||
-          a.scope.localeCompare(b.scope)
-      )[0];
+    const scope = selectGlobalOptimizedScope(state.optimizedScopes);
     if (!scope || state.viewMode !== 'global' || state.mapSource !== 'optimized') {
       return false;
     }
@@ -695,6 +703,7 @@ export const mapStore = {
       state.info = info;
       state.seq = state.globalSeq;
       state.showingOptimizedGrid = true;
+      state.globalOptimizedScope = scope.scope;
       state.ready = true;
       state.revision++;
       for (const robot of fleet.robots) {
@@ -709,6 +718,7 @@ export const mapStore = {
         state.mapSource === 'optimized'
       ) {
         state.showingOptimizedGrid = false;
+        state.globalOptimizedScope = null;
       }
       return false;
     }
@@ -725,6 +735,7 @@ export const mapStore = {
       // fallback and keep the ordinary merged SLAM map usable.
     }
     state.showingOptimizedGrid = false;
+    state.globalOptimizedScope = null;
     const generation = loadGeneration;
     try {
       const response = await fetch('/api/map', { cache: 'no-store' });
@@ -1168,6 +1179,7 @@ export const mapStore = {
       state.info = info;
       state.seq = state.robotSeqs[robotId!] ?? info.seq;
       state.showingOptimizedGrid = Boolean(scope);
+      state.globalOptimizedScope = null;
       state.ready = true;
       state.revision++;
       await this.loadNetworkSnapshot(robotId!, generation);
@@ -1262,6 +1274,7 @@ export const mapStore = {
     state.viewMode = 'global';
     state.viewRobot = null;
     state.showingOptimizedGrid = false;
+    state.globalOptimizedScope = null;
     autoView = null;
     autoPending = null;
     globalInfo = null;

@@ -44,11 +44,63 @@ CLOUD_SCALE = 0.01
 # publishing are dropped by _prune_optimized_maps -- without that, a retired
 # component id would be served from here forever, because a scope only ever
 # arrives and nothing else could tell a live one from a dead one.
+#
+# One more scope shape lives here beside the back-end's: ``deployment:<session>``
+# is rasterized by this server from the replicated Swarm-SLAM keyframes (see
+# ``api.deployment_raster``), so the SLAM back-end's scope list never names it
+# and pruning leaves it alone; its owner retires it when the mission changes.
 _optimized: dict[
     str,
     tuple[GridMeta, np.ndarray, tuple[str, ...], dict[str, dict[str, float]] | None],
 ] = {}
 _optimized_lock = threading.Lock()
+
+# Must equal ``replica_views.DEPLOYMENT_PREFIX``; spelled here to keep this
+# module free of the replica catalogue's imports.
+DEPLOYMENT_SCOPE_PREFIX = "deployment:"
+
+
+def is_deployment_scope(scope: str) -> bool:
+    return scope.startswith(DEPLOYMENT_SCOPE_PREFIX)
+
+
+def publish_optimized_map(
+    scope: str,
+    meta: GridMeta,
+    cells: np.ndarray,
+    robots: tuple[str, ...],
+    transforms: dict[str, dict[str, float]] | None,
+) -> None:
+    """Store one scoped grid produced by this server rather than uploaded.
+
+    The same shape ``post_optimized_map`` stores, with the same rule that a
+    transform may only name a robot of the scope.
+    """
+    cells = np.asarray(cells, dtype=np.int8)
+    if cells.shape != (meta.height, meta.width):
+        raise ValueError("grid cells shape does not match metadata")
+    if transforms is not None and not set(transforms).issubset(robots):
+        raise ValueError("transform robot outside map scope")
+    with _optimized_lock:
+        _optimized[scope] = (meta, cells, tuple(robots), transforms)
+
+
+def retire_deployment_scopes(keep: str | None = None) -> list[str]:
+    """Drop every deployment raster except ``keep``; returns what was dropped."""
+    with _optimized_lock:
+        dead = sorted(
+            scope
+            for scope in _optimized
+            if is_deployment_scope(scope) and scope != keep
+        )
+        for scope in dead:
+            del _optimized[scope]
+    return dead
+
+
+def has_optimized_map(scope: str) -> bool:
+    with _optimized_lock:
+        return scope in _optimized
 
 
 @dataclass
@@ -628,13 +680,17 @@ def _prune_optimized_maps(scopes: Any) -> list[str]:
     be served from ``/api/map/optimized`` forever.
 
     A back-end that sends no ``scopes`` key (an older one) prunes nothing, so
-    this cannot empty the store by accident.
+    this cannot empty the store by accident. ``deployment:<session>`` scopes
+    are this server's own product, unknown to the back-end, and are kept until
+    ``retire_deployment_scopes`` or a reset drops them.
     """
     if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
         return []
     live = set(scopes)
     with _optimized_lock:
-        dead = sorted(set(_optimized) - live)
+        dead = sorted(
+            scope for scope in set(_optimized) - live if not is_deployment_scope(scope)
+        )
         for scope in dead:
             del _optimized[scope]
     return dead
