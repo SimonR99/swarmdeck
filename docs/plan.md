@@ -76,7 +76,7 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`54701745b9d5fcf62ca7d948de62b652a7af6673` (the 59 ported commits over
+`2bb56bad6d3a2c1f654f1ae04fe5db724163d204` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a start connector from within 10 m of the graph for Navigate and Return Home, footprint ground heights for goals whose own cell is unobserved, a separate drop limit, a breadcrumb chain that skips unmappable breadcrumbs, refusal of empty sections, and the full-map raster global stage below), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
@@ -92,7 +92,10 @@ from the robot to the goal with the platform's asymmetric climb and drop
 limits between cells, the live peer discs, and the blocked-corridor marks as
 a penalty; unobserved cells are crossed at `global_raster_unknown_cost_factor`
 (3) times their length, carrying the last known ground, so the route prefers
-observed ground and still reaches a goal beyond the map. The result is one
+observed ground and still reaches a goal beyond the map, and cells within the
+body radius of an obstacle at `global_raster_inflation_cost_factor` (3), so a
+robot parked beside a wall keeps its route and the refinement's footprint
+checks decide. The result is one
 waypoint per cell, drawn as the global path. The rolling grid stage refines
 the next `objective_route_horizon_m` window of that route on the exact voxels
 (sections, validated prefixes, continuation), and Nav2's controller follows
