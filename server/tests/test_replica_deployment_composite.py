@@ -195,11 +195,23 @@ def test_composite_needs_two_placed_members(setup):
     )
 
 
-def test_composite_excludes_a_member_whose_live_frame_revision_differs(setup):
-    client = setup["client"]
+def test_composite_keeps_a_member_whose_replica_runs_ahead_of_its_authority(setup):
+    # The replica follows every pose-moving solver result; the authority names
+    # the frame of the last published product. A robot with loop closures is
+    # ahead most of the time and must not vanish from the fleet map.
+    client, session = setup["client"], setup["session"]
     setup["registry"].robots["robot_1"].live_mapping["solution_order"] = [3, 0]
     entries = client.get("/api/autonomy/replicas/components").json()["components"]
-    assert not any(entry.get("composite") for entry in entries)
+    composite = next(entry for entry in entries if entry.get("composite"))
+    assert composite["component_id"] == composite_id(session)
+    view = client.get(
+        f"/api/autonomy/replicas/components/view/{session}",
+        params={"component_id": composite_id(session)},
+    ).json()
+    member = next(m for m in view["members"] if m["robot_id"] == "robot_1")
+    # The member record carries the authority's frame revision, the fence
+    # the live overlay and goal dispatch apply to that robot.
+    assert member["solution_order"] == [3, 0]
 
 
 def test_composite_view_places_each_submap_with_the_world_component_product(setup):

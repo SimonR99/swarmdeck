@@ -1,5 +1,4 @@
 import {
-  MAX_CACHE_BYTES,
   ReplicaChunkCache,
   parseXYZF32,
   parseXYZRGBAF32U8,
@@ -9,7 +8,18 @@ import {
   type PreviewChunk
 } from '../replicas/replicaPreview.ts';
 
-export const MAX_TACTICAL_SOURCE_POINTS = 300_000;
+/**
+ * The live map is the fleet's whole replicated geometry, not a preview: a
+ * four-robot Bistro composite is about 4 M points in 80 MB of chunks after a
+ * three-minute exploration (benchbot 2026-09-19). Under the preview budgets
+ * (64 MB, 300,000 points) `selectPreviewRefs` dropped whole keyframes and the
+ * sampler kept one point in thirteen, so the 3D view showed a thin subset of
+ * the same map the 2D raster drew in full. These budgets hold the whole
+ * composite of a session like that; a dedicated GPU renders them at frame
+ * rate, integrated graphics at a lower one.
+ */
+export const MAX_TACTICAL_CACHE_BYTES = 256 * 1024 * 1024;
+export const MAX_TACTICAL_SOURCE_POINTS = 6_000_000;
 const MAX_DOWNLOADS = 3;
 
 export type ReplicaSelectionScope = 'robot' | 'fleet';
@@ -212,7 +222,7 @@ export class ReplicaTacticalLoader {
   private readonly maxBytes: number;
   private readonly colors = new Map<string, Uint8Array>();
 
-  constructor(maxBytes = MAX_CACHE_BYTES, maxSourcePoints = MAX_TACTICAL_SOURCE_POINTS) {
+  constructor(maxBytes = MAX_TACTICAL_CACHE_BYTES, maxSourcePoints = MAX_TACTICAL_SOURCE_POINTS) {
     this.cache = new ReplicaChunkCache(maxBytes);
     this.maxBytes = maxBytes;
     this.maxSourcePoints = maxSourcePoints;

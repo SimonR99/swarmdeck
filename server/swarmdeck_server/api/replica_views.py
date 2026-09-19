@@ -221,9 +221,20 @@ def deployment_members(
 
     A component published by more than one robot is a verified merge and is
     never composed: the UI prefers it on its own, and two publishers could
-    disagree on where the deployment frame places it. A member's replicated
-    view must also carry the same solution order as its live authority, since
-    ``T_component_navigation`` is only meaningful for that frame revision.
+    disagree on where the deployment frame places it.
+
+    The member's replica may carry a newer solution order than its live
+    authority: the authority names the frame of the last published MOLA
+    product (every 10 to 27 s), the replica follows every solver result that
+    moves a pose, and a robot with intra-robot loop closures runs ahead of
+    its product most of the time. Requiring the two to agree dropped the
+    robot with the largest map from the fleet composite (benchbot
+    2026-09-19: robot_0 at replica order 1166 was absent from both the 3D
+    view and the 2D raster). The composite is a display placement, so the
+    member is placed with the authority's ``T_component_navigation`` and its
+    geometry may sit off by the solver's correction since that product; the
+    live overlay and goal dispatch still fence the robot's own frame
+    revision through the member record.
     """
     members = []
     for robot_id in sorted(placements):
@@ -237,8 +248,6 @@ def deployment_members(
         except (LookupError, TypeError, ValueError):
             continue
         if view.get("solution_order_known") is not True:
-            continue
-        if view_solution_order(view) != placement["solution_order"]:
             continue
         members.append((robot_id, placement, view))
     return members
