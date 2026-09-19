@@ -2352,6 +2352,34 @@ def test_indexed_map_that_failed_closed_is_waited_out(monkeypatch):
     assert bridge.nav_status == "active"
 
 
+def index_query_over_budget():
+    response = success_path()
+    response.status = Response.BLOCKED
+    response.reason = "query time budget exceeded"
+    response.path = []
+    return response
+
+
+def test_index_query_budget_is_a_missing_answer_not_a_blocked_route(monkeypatch):
+    # The index server gave up one validation under load (benchbot,
+    # 2026-09-19: a 31 m return leg failed at once). The next answer is in
+    # time and the objective proceeds.
+    bridge, planner, client = rig(monkeypatch, index_query_over_budget())
+    planner.replan_backoff_s = 0.0
+    planner.replan_deadline_s = 5.0
+    planner.replan_max_attempts = 2
+    monkeypatch.setattr(objective_planning, "PLANNER_INPUT_RETRY_S", 0.0)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    client.call_async.side_effect = [
+        completed(index_query_over_budget()) for _ in range(3)
+    ] + [completed(success_path())]
+
+    assert planner.navigate({"x": 2, "y": 1})
+    assert wait_until(lambda: bridge.follow_path.call_count == 1)
+    assert client.call_async.call_count == 4
+    assert bridge.nav_status == "active"
+
+
 def test_other_stale_revisions_still_fail(monkeypatch):
     response = indexed_map_failed_closed()
     response.reason = "component-frame objective uses a stale frame revision"

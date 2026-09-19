@@ -32,6 +32,10 @@ PLANNER_INPUT_UNAVAILABLE_REASONS = (
     "a different snapshot failed indexed publication",
     "requested snapshot is not current",
     "source stamp does not match indexed snapshot",
+    # The index server answers the fleet from one thread and gives up a
+    # validation past its time budget under load; the next answer is normally
+    # in time, so this is a missing answer, not a blocked route.
+    "query time budget exceeded",
 )
 PLANNER_INPUT_RETRY_S = 0.5
 

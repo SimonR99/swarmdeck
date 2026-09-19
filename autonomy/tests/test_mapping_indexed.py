@@ -747,6 +747,73 @@ def test_query_rejects_invalid_platform_terrain_limits(value) -> None:
         )
 
 
+def test_matter_within_the_terrain_band_is_relief_not_a_collision(tmp_path) -> None:
+    # A road at z = 0 with a second floor 0.25 m above it under the body: the
+    # layer a LiDAR-inertial map lays where keyframe heights disagree, or a
+    # kerb lip. The body (0.3 by 0.3 by 0.6 m) stands at z = 0.4, so its box
+    # spans 0.1 to 0.7 m and that floor's voxel (0.2 to 0.4 m) is above the
+    # support layer. A platform that climbs 0.3 m drives over it, so does one
+    # that climbs 0.15 m but may drop 0.3 m (the band is the larger limit);
+    # one limited to 0.15 m both ways collides with it. A wall return at
+    # 0.5 m is a collision for all. The body's upper voxels are not ray-proven free, so the
+    # climber's first sample is unknown (a horizon), never occupied (a wall).
+    floor = [
+        [x, y, 0.0]
+        for x in (-0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 1.1)
+        for y in (-0.3, -0.1, 0.1, 0.3, 0.5)
+    ]
+    second_floor = [[x, y, 0.25] for x in (0.1, 0.3) for y in (0.1, 0.3)]
+    points = floor + second_floor + [[0.9, 0.1, 0.5]]
+    store, keyframe = make_store(tmp_path, points)
+    component = component_id_for_anchor(keyframe)
+    view = IndexedMapView()
+    key = view.refresh(store.snapshot(), component, store.get_chunk)
+    samples = ((0.1, 0.1, 0.4), (0.9, 0.1, 0.4))
+
+    climber = view.query(
+        QueryRequest(
+            key,
+            samples,
+            (0.3, 0.3, 0.6),
+            max_step_m=0.3,
+            source_stamp_ns=100,
+            stop_at_unknown=False,
+        )
+    )
+    assert climber.status is QueryStatus.OK
+    assert climber.occupancy[0] != VoxelOccupancy.OCCUPIED
+    assert climber.occupancy[1] == VoxelOccupancy.OCCUPIED
+    assert climber.ground_z[0] == pytest.approx(0.0, abs=0.05)
+
+    dropper = view.query(
+        QueryRequest(
+            key,
+            samples,
+            (0.3, 0.3, 0.6),
+            max_step_m=0.15,
+            max_drop_m=0.3,
+            source_stamp_ns=100,
+            stop_at_unknown=False,
+        )
+    )
+    assert dropper.occupancy[0] != VoxelOccupancy.OCCUPIED
+    assert dropper.occupancy[1] == VoxelOccupancy.OCCUPIED
+
+    stepper = view.query(
+        QueryRequest(
+            key,
+            samples,
+            (0.3, 0.3, 0.6),
+            max_step_m=0.15,
+            max_drop_m=0.15,
+            source_stamp_ns=100,
+            stop_at_unknown=False,
+        )
+    )
+    assert stepper.occupancy[0] == VoxelOccupancy.OCCUPIED
+    assert stepper.occupancy[1] == VoxelOccupancy.OCCUPIED
+
+
 def test_stacked_surfaces_select_support_beneath_each_robot(tmp_path):
     levels = [
         [x, y, z]
