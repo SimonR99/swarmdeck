@@ -76,11 +76,29 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`8929eb80237316fee804fc44cfc13331829db3fe` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a start connector from within 10 m of the graph for Navigate and Return Home, footprint ground heights for goals whose own cell is unobserved, a separate drop limit, a breadcrumb chain that skips unmappable breadcrumbs, and refusal of empty sections), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
+`54701745b9d5fcf62ca7d948de62b652a7af6673` (the 59 ported commits over
+upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, a start connector from within 10 m of the graph for Navigate and Return Home, footprint ground heights for goals whose own cell is unobserved, a separate drop limit, a breadcrumb chain that skips unmappable breadcrumbs, refusal of empty sections, and the full-map raster global stage below), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
+
+Navigate and Return Home run through three tiers. The global stage plans over
+the whole MOLA product: MGG rasterizes the product once per snapshot into a
+2.5D traversability raster (`global_raster_cell_m` 0.5 m cells; per cell the
+ground is the lowest measured surface, an obstacle is matter above the larger
+of the climb and drop limits and below the body height, inflated by the body
+radius, and a cell without a surface is unknown) and runs an 8-connected A*
+from the robot to the goal with the platform's asymmetric climb and drop
+limits between cells, the live peer discs, and the blocked-corridor marks as
+a penalty; unobserved cells are crossed at `global_raster_unknown_cost_factor`
+(3) times their length, carrying the last known ground, so the route prefers
+observed ground and still reaches a goal beyond the map. The result is one
+waypoint per cell, drawn as the global path. The rolling grid stage refines
+the next `objective_route_horizon_m` window of that route on the exact voxels
+(sections, validated prefixes, continuation), and Nav2's controller follows
+the refined section with its own obstacle avoidance. The topological graph
+(breadcrumbs plus frontier vertices) is the fallback when the raster stage
+refuses, and Explore still routes over it.
 
 ## Invariants
 
@@ -204,7 +222,11 @@ Each item names its acceptance gate.
       legs complete. Still open: routes that descend a 0.16 to 0.19 m kerb
       against the 0.15 m step limit (the simulated Bunker climbed it), the
       Scout's straight-ahead goal on the kerb where the road bends, and a
-      return waypoint projected onto a terrace table top.
+      return waypoint projected onto a terrace table top. 2026-09-19: the
+      operator saw long goals planned as one waypoint and a straight line
+      (the topological stage's optimistic connector); MGG `5470174` adds the
+      full-map raster global stage described above, not yet measured on
+      benchbot.
 - [ ] **Blocked-corridor topological replanning and speed limits.** Gate: a
       failed edge is excluded from a new topological search, and refined paths
       carry speed limits. Implemented in MGG at `494ce66` (branch head `c4eff1b`): Explore now runs
