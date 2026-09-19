@@ -731,6 +731,24 @@ class IndexedMapView:
                     index,
                     terrain[0] + max(max_step_m, max_drop_m) + TERRAIN_BAND_TOLERANCE_M,
                 )
+            else:
+                # No fit (fewer than three observed columns under the body,
+                # as inside a lidar's blind ring), yet a column may still
+                # hold a ground return. A ground robot's box reaches below
+                # its wheels' contact, so that return would be a collision
+                # and every blind sample "occupied" (benchbot 2026-09-19: the
+                # Scout's 3 m goal). Each column's own highest surface under
+                # the support ceiling is its support layer instead; the
+                # sample stays unknown, never free, without a fit.
+                support_ceiling = min(
+                    float(sample[2]) - 1e-9,
+                    float(sample[2] - half[2]) + 0.5 * index.resolution_m,
+                )
+                collision_cells = [
+                    cell
+                    for cell in cells
+                    if not self._column_support_below(index, cell, support_ceiling)
+                ]
             if any(
                 cell in index.occupied and not (rolls_over and rolls_over(cell))
                 for cell in collision_cells
@@ -786,6 +804,27 @@ class IndexedMapView:
             tuple(step),
             tuple(drop),
         )
+
+    @staticmethod
+    def _column_support_below(
+        index: IndexedGrid, cell: tuple[int, int, int], support_ceiling: float
+    ) -> bool:
+        """Is this voxel in, or under, its column's own support layer?
+
+        The support layer is the voxel of the highest surface at or below
+        ``support_ceiling`` (the body's bottom, with half a voxel of margin).
+        Used when no terrain fit exists, so that a lone ground return under
+        the body is support rather than a collision.
+        """
+
+        zs = index.columns.get((cell[0], cell[1]))
+        if not zs:
+            return False
+        ordinal = bisect_right(zs, support_ceiling)
+        if ordinal == 0:
+            return False
+        support_top = zs[ordinal - 1] + index.resolution_m
+        return (cell[2] + 0.5) * index.resolution_m <= support_top
 
     @staticmethod
     def _terrain_band_test(index: IndexedGrid, band_top: float):

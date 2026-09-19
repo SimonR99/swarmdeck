@@ -814,6 +814,42 @@ def test_matter_within_the_terrain_band_is_relief_not_a_collision(tmp_path) -> N
     assert stepper.occupancy[1] == VoxelOccupancy.OCCUPIED
 
 
+def test_a_lone_ground_return_without_a_fit_is_support_not_a_collision(tmp_path):
+    # Inside a lidar's blind ring the ground is observed in one or two
+    # columns, too few for a terrain fit, and a low body's box reaches below
+    # its wheels' contact. The single road return under the body is support:
+    # the sample is unknown (a horizon), never occupied. A return at body
+    # height is still a collision.
+    sparse = [[0.1, 0.1, 0.0], [0.3, 0.1, 0.0]]
+    store, keyframe = make_store(tmp_path, sparse, origin=())
+    component = component_id_for_anchor(keyframe)
+    view = IndexedMapView()
+    key = view.refresh(store.snapshot(), component, store.get_chunk)
+    # Body 0.66 by 0.63 by 0.3 m at 0.12 m: the box spans -0.03 to 0.27 m.
+    blind = view.query(
+        QueryRequest(key, ((0.2, 0.1, 0.12),), (0.66, 0.63, 0.3), stop_at_unknown=False)
+    )
+    assert blind.status is QueryStatus.OK
+    assert blind.occupancy == (VoxelOccupancy.UNKNOWN,)
+    assert math.isnan(blind.ground_z[0])
+
+    wall_store, wall_keyframe = make_store(
+        tmp_path / "wall", sparse + [[0.2, 0.1, 0.25]], origin=()
+    )
+    wall_view = IndexedMapView()
+    wall_key = wall_view.refresh(
+        wall_store.snapshot(),
+        component_id_for_anchor(wall_keyframe),
+        wall_store.get_chunk,
+    )
+    hit = wall_view.query(
+        QueryRequest(
+            wall_key, ((0.2, 0.1, 0.12),), (0.66, 0.63, 0.3), stop_at_unknown=False
+        )
+    )
+    assert hit.occupancy == (VoxelOccupancy.OCCUPIED,)
+
+
 def test_stacked_surfaces_select_support_beneath_each_robot(tmp_path):
     levels = [
         [x, y, z]
