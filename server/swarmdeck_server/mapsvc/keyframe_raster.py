@@ -11,10 +11,17 @@ Rule, per cell of ``cell_m`` (0.2 m by default):
   ``numpy.percentile``) of the z of the points that fall in the cell, with z
   read at 1 mm resolution (``Z_QUANTUM``) by the grouping sort;
 * the cell is OCCUPIED when it holds at least one point between
-  ``ground + 0.15 m`` and ``ground + 2.0 m``, the band a ground robot must not
-  drive into. The 0.15 m step keeps kerb tops, speed bumps and the road
-  surface texture out of the obstacle class; the 2.0 m ceiling keeps tree
-  canopies and awnings out;
+  ``ground + 0.30 m`` and ``ground + 2.0 m``: walls, furniture, vehicles,
+  the things the operator reads as obstacles. The 0.30 m floor of the band
+  keeps out kerb tops (0.12 to 0.19 m on the Bistro street), speed bumps,
+  the road's texture, and the floor's own scatter in a fleet map: the four
+  platforms' floors sit up to 0.18 m apart away from the start once inter-
+  robot closures merge them, and the simulated Spot's floor moves 0.1 to
+  0.2 m with its posture, so at 0.15 m the road itself was drawn occupied
+  (concentric arcs at the start, dark bands along the street; operator
+  screenshot 2026-09-19). The 2.0 m ceiling keeps tree canopies and awnings
+  out. A 0.2 m planter is below the band and drawn free: this raster is a
+  display, the robots plan on their own terrain products;
 * the cell is FREE when it holds points but none in that band;
 * the cell is UNKNOWN when no point falls in it.
 
@@ -55,7 +62,7 @@ OCCUPIED = np.int8(100)
 DEFAULT_CELL_M = 0.2
 DEFAULT_MARGIN_M = 1.0
 GROUND_PERCENTILE = 10.0
-OBSTACLE_MIN_M = 0.15
+OBSTACLE_MIN_M = 0.30
 OBSTACLE_MAX_M = 2.0
 # 4M int8 cells: 4 MB of grid, and a PNG the browser decodes in well under a
 # second. At 0.2 m that is a 400 m by 400 m site.

@@ -174,7 +174,7 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     never counts as merged membership. The server also rasterizes the
     composite for the 2D map (`deployment:<session>` in `/api/map/optimized`,
     0.2 m cells, ground at the 10th percentile of z, occupied between
-    ground + 0.15 m and ground + 2.0 m): a display raster of the replicated
+    ground + 0.30 m and ground + 2.0 m): a display raster of the replicated
     keyframes in the surveyed deployment frame, ranked after any verified
     multi-robot component, while slam_toolbox's grids remain the `slam`
     source and no planner reads it.

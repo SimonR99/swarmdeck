@@ -20,14 +20,14 @@ def column(x: float, y: float, zs) -> np.ndarray:
 
 
 def test_ground_is_the_tenth_percentile_not_the_minimum():
-    # Cell A: ten road returns and one at 0.3 m; ground 0, the 0.3 m point is
-    # inside the band, occupied. Cell B: one stray low return and ten at 0.3 m;
-    # the 10th percentile (linear, as numpy) lands on 0.3, so nothing rises
-    # above ground + 0.15 and the cell is free. A minimum-based ground would
+    # Cell A: ten road returns and one at 0.5 m; ground 0, the 0.5 m point is
+    # inside the band, occupied. Cell B: one stray low return and ten at 0.5 m;
+    # the 10th percentile (linear, as numpy) lands on 0.5, so nothing rises
+    # above ground + 0.30 and the cell is free. A minimum-based ground would
     # have called B occupied.
-    a = column(0.1, 0.1, [0.0] * 10 + [0.3])
-    b = column(1.1, 0.1, [0.0] + [0.3] * 10)
-    assert np.percentile(b[:, 2], 10) == pytest.approx(0.3)
+    a = column(0.1, 0.1, [0.0] * 10 + [0.5])
+    b = column(1.1, 0.1, [0.0] + [0.5] * 10)
+    assert np.percentile(b[:, 2], 10) == pytest.approx(0.5)
     raster = kr.rasterize_points(np.vstack([a, b]), margin_m=0.0)
     assert cell_of(raster, 0.1, 0.1) == 100
     assert cell_of(raster, 1.1, 0.1) == 0
@@ -42,9 +42,9 @@ def test_ground_percentile_interpolates_like_numpy():
     zs = [0.0, 0.02, 0.04, 0.06, 0.08, 0.1]
     ground = np.percentile(zs + [1.0], 10)
     assert ground == pytest.approx(0.012)
-    # A point 0.149 m above the interpolated ground is a kerb; 0.151 m is a wall.
-    kerb = column(0.1, 0.1, zs + [ground + 0.149])
-    wall = column(1.1, 0.1, zs + [ground + 0.151])
+    # A point 0.299 m above the interpolated ground is relief; 0.301 m is a wall.
+    kerb = column(0.1, 0.1, zs + [ground + 0.299])
+    wall = column(1.1, 0.1, zs + [ground + 0.301])
     raster = kr.rasterize_points(np.vstack([kerb, wall]), margin_m=0.0)
     assert cell_of(raster, 0.1, 0.1) == 0
     assert cell_of(raster, 1.1, 0.1) == 100
@@ -53,14 +53,15 @@ def test_ground_percentile_interpolates_like_numpy():
 @pytest.mark.parametrize(
     "height,expected",
     [
-        (0.10, 0),  # kerb top: below the step band
-        (0.15, 100),  # band is inclusive at the step
+        (0.10, 0),  # kerb top: below the band
+        (0.19, 0),  # a Bistro kerb, or the fleet's floor scatter
+        (0.30, 100),  # band is inclusive at its floor
         (1.0, 100),  # a wall
         (2.0, 100),  # band is inclusive at the ceiling
         (2.1, 0),  # canopy above the robots
     ],
 )
-def test_obstacle_band_is_ground_plus_015_to_ground_plus_2(height, expected):
+def test_obstacle_band_is_ground_plus_030_to_ground_plus_2(height, expected):
     ground = 3.0  # an elevated site, so the band is relative, not absolute
     points = column(0.1, 0.1, [ground] * 9 + [ground + height])
     raster = kr.rasterize_points(points, margin_m=0.0)
