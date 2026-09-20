@@ -76,7 +76,7 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`7558a9808200101c85f76a43e8792d42cfd794e7` (the 59 ported commits over
+`0da45b34728fe35f21ed515d5636218643d049cd` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, and refusal of a validated prefix that makes no progress), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced. `ccda9ce` is a
 revert: on 2026-09-19 a full-map raster global stage, a separate drop limit
@@ -96,7 +96,11 @@ routes over the global graph to the best-gain global frontier
 complete; plus one terrain measurement margin (0.02 m,
 `footprint_step_measurement_tolerance_m`) applied wherever the step limit
 is compared, including the limit sent to the indexed query, so a 0.165 m
-Bistro curb passes the 0.15 m simulated step.
+Bistro curb passes the 0.15 m simulated step; and `0da45b3`, which raises
+the authority tilt the MOLA loader tolerates from 0.02 rad to 0.05 rad,
+because an inter-robot merge leaves a robot's optimized frame tilted by
+about a degree (robot_0 measured 1.174 degrees on 2026-09-20) and every plan
+of that robot was refused with "footprint cell grid unavailable".
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
 
