@@ -175,18 +175,24 @@ def test_identical_solver_results_do_not_rename_the_component_frame(tmp_path):
         estimates=[value(0, 0, 0)],
         anchor_estimates=[value(0, 0, 0)],
     )
+    # The first accepted solution is adopted whatever it moves: it names the
+    # frame every publisher of a merged component shares, and the anchor
+    # robot's own poses never move in its own frame.
+    assert core.solution(msg)
+    assert core.solution_order == (1, 0)
+    assert core.correction_revision == 1
     revision = core.revision
     initial = core.envelope()
     # The solver reports every few seconds whether or not anything moved. A
     # goal is only accepted for the advertised solution order, and the replica
     # cannot follow one revision per report, so an unchanged result must leave
     # the order, the map revision and the replica revision alone.
-    for clock in (1, 2, 3):
+    for clock in (2, 3):
         msg.solution_clock = clock
         assert not core.solution(msg)
-        assert core.solution_order == (0, -1)
+        assert core.solution_order == (1, 0)
         assert core.revision == revision
-        assert core.correction_revision == 0
+        assert core.correction_revision == 1
         assert core.envelope() == initial
 
     # The clock is still remembered: a replayed result is not processed again.
@@ -194,14 +200,14 @@ def test_identical_solver_results_do_not_rename_the_component_frame(tmp_path):
     msg.estimates = [value(0, 0, 1)]
     msg.anchor_estimates = [value(0, 0, 1)]
     assert not core.solution(msg)
-    assert core.correction_revision == 0
+    assert core.correction_revision == 1
 
     msg.solution_clock = 4
     assert core.solution(msg)
     assert core.solution_order == (4, 0)
     assert core.revision == revision + 1
     assert core.envelope()["revision"] == initial["revision"] + 1
-    assert core.correction_revision == 1
+    assert core.correction_revision == 2
 
 
 def test_snapshot_publication_ignores_replica_only_updates(tmp_path):
@@ -306,9 +312,15 @@ def test_adoption_thresholds_match_the_benchbot_measurement():
 
 
 def test_millimetre_refinements_are_not_adopted(tmp_path):
-    core = timed_core(tmp_path, Ticker())
+    ticker = Ticker()
+    core = timed_core(tmp_path, ticker)
     mission = core.mission_id
-    assert not core.solution(result(mission, 1, 0.0))
+    # The first accepted solution is adopted whatever it moves (it names the
+    # shared frame); the interval then starts.
+    assert core.solution(result(mission, 1, 0.0))
+    assert core.solution_order == (1, 0)
+    assert core.correction_revision == 1
+    ticker.advance(60.0)
     frame = frame_of(core)
 
     # Millimetres, and a few centimetres below the tolerance: the solver
@@ -319,8 +331,8 @@ def test_millimetre_refinements_are_not_adopted(tmp_path):
         assert core.solver_order == (clock, 0)
         assert core.deferred_solution is None
         assert frame_of(core) == frame
-    assert core.solution_order == (0, -1)
-    assert core.correction_revision == 0
+    assert core.solution_order == (1, 0)
+    assert core.correction_revision == 1
 
     # A replay of a remembered clock is not processed again.
     assert not core.solution(result(mission, 3, 1.0))
@@ -329,7 +341,7 @@ def test_millimetre_refinements_are_not_adopted(tmp_path):
     # Six centimetres is a correction.
     assert core.solution(result(mission, 5, 0.06))
     assert core.solution_order == (5, 0)
-    assert core.correction_revision == 1
+    assert core.correction_revision == 2
     assert core.revision == frame[2] + 1
     assert core.envelope()["revision"] == frame[3] + 1
     assert core.poses[core.key(0)][0][3] == pytest.approx(0.06)

@@ -325,7 +325,15 @@ class CslamMapper:
         # anchor or a keyframe this frame has never placed is a merge, which
         # is always adopted at once.
         translation = rotation = 0.0
-        large = anchor != self.anchor
+        # The first accepted solution is adopted whatever it moves: the
+        # solution order names the frame every publisher of a merged
+        # component shares, and a publisher left at the pre-optimizer
+        # sentinel keeps the merged view unavailable ("Waiting for a common
+        # accepted Swarm-SLAM solution"). The anchor robot's own poses do not
+        # move in its own frame, so under the change tolerance alone it
+        # would never adopt (benchbot 2026-09-19, mission bd4362c4: robot_0
+        # at [0, -1] with solver clock 13 while the others were at 10 and 11).
+        large = anchor != self.anchor or self.solution_order[1] == -1
         for key, pose in poses.items():
             if key not in self.poses:
                 large = True

@@ -134,35 +134,43 @@ def test_optimized_counts_adopted_deferred_and_unchanged_separately(
     assert counters(bridge) == (1, 0, 0, 0, 0)
     assert core.solver_order == (0, -1)
 
-    # Accepted and unchanged: the solver clock advances, the frame does not.
+    # The first accepted solution is adopted whatever it moves: it names the
+    # frame every publisher of a merged component shares.
     optimized(bridge, result(core.mission_id, 1, 0.0))
-    assert counters(bridge) == (2, 1, 1, 0, 0)
+    assert counters(bridge) == (2, 1, 0, 0, 1)
     assert core.solver_order == (1, 0)
-    assert core.solution_order == (0, -1)
+    assert core.solution_order == (1, 0)
 
     # A replayed clock is not accepted again.
     optimized(bridge, result(core.mission_id, 1, 0.0))
-    assert counters(bridge) == (3, 1, 1, 0, 0)
+    assert counters(bridge) == (3, 1, 0, 0, 1)
+
+    # Accepted and unchanged, after the interval: the solver clock advances,
+    # the frame does not.
+    now[0] += 60.0
+    optimized(bridge, result(core.mission_id, 2, 0.0))
+    assert counters(bridge) == (4, 2, 1, 0, 1)
+    assert core.solution_order == (1, 0)
 
     # Adopted.
-    optimized(bridge, result(core.mission_id, 2, 0.06))
-    assert counters(bridge) == (4, 2, 1, 0, 1)
-    assert core.solution_order == (2, 0)
-    assert core.correction_revision == 1
+    optimized(bridge, result(core.mission_id, 3, 0.06))
+    assert counters(bridge) == (5, 3, 1, 0, 2)
+    assert core.solution_order == (3, 0)
+    assert core.correction_revision == 2
 
     # A refinement inside the interval: accepted and deferred, not adopted.
     now[0] += 3.0
-    optimized(bridge, result(core.mission_id, 3, 0.12))
-    assert counters(bridge) == (5, 3, 1, 1, 1)
-    assert core.solver_order == (3, 0)
-    assert core.solution_order == (2, 0)
+    optimized(bridge, result(core.mission_id, 4, 0.12))
+    assert counters(bridge) == (6, 4, 1, 1, 2)
+    assert core.solver_order == (4, 0)
+    assert core.solution_order == (3, 0)
     assert core.deferred_solution is not None
 
     # After the interval the next report is adopted with the refinement.
     now[0] += 7.0
-    optimized(bridge, result(core.mission_id, 4, 0.12))
-    assert counters(bridge) == (6, 4, 1, 1, 2)
-    assert core.solution_order == (4, 0)
+    optimized(bridge, result(core.mission_id, 5, 0.12))
+    assert counters(bridge) == (7, 5, 1, 1, 3)
+    assert core.solution_order == (5, 0)
     assert core.deferred_solution is None
 
 
