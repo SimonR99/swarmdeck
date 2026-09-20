@@ -76,7 +76,7 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`7c6b11eb62c121416b5aab93e627b3f6c34e72ba` (the 59 ported commits over
+`5e9f2d001decee8ce5099ea6daed4546308a9054` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, and refusal of a validated prefix that makes no progress), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced. `ccda9ce` is a
 revert: on 2026-09-19 a full-map raster global stage, a separate drop limit
@@ -106,7 +106,20 @@ odometry is older than `odometry_stale_s` (5 s), because the planner's
 state is its last odometry message and a plan from where the robot was
 is completed by the controller at once where the robot is (the
 suspected shape of the intermittent 2.5 Hz replan loop), and names the
-distance and the odometry age in the route-window refusal.
+distance and the odometry age in the route-window refusal; `b39b801`,
+which never lets an older odometry message overwrite a newer state (the
+subscription is reentrant and every callback waits on the planner mutex);
+and `5e9f2d0`, which restores the two remaining roadmap mechanisms of the
+original `rrg.cpp`: the global graph expansion timer
+(`expandGlobalGraphTimerCallback`, rrg.cpp:2535-2672: every 0.5 s, up to
+0.1 s of sampling around clusters of unvisited global vertices, new
+collision-free vertices wired in with `expandGraph` and typed frontier by
+their gain) and the odometry ingestion of `timerCallback`
+(rrg.cpp:5247-5290: every 0.5 m the robot's state joins the graph wired to
+every reachable neighbour, every 1 m event E1 marks the roadmap within 3 m
+visited). A roadmap edge stops at unknown space as upstream had it, and a
+reference path that is not the lattice's own is projected to the common
+driving height before it enters the roadmap.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
 
