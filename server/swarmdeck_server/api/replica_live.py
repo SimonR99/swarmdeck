@@ -80,6 +80,19 @@ async def component(session_id, component_id):
         raise HTTPException(409, "Component publication is not ready") from exc
 
 
+def robot_frame_revision(view, robot_id):
+    """The solution order this robot's own publication of the view carries.
+
+    A live merge's publishers lag one another by a few solver reports; a
+    robot's telemetry is fenced against its own accepted solution, not the
+    newest one in the view.
+    """
+    orders = view.get("solution_orders") or {}
+    if robot_id in orders and orders[robot_id] is not None:
+        return tuple(solution_order(orders[robot_id]))
+    return view_solution_order(view)
+
+
 def view_solution_order(view):
     """Catalogue uses None for the valid pre-optimizer (0, -1) sentinel.
 
@@ -193,7 +206,11 @@ async def live_component(session_id: str, component_id: str):
             for robot in registry.robots.values()
             if (
                 value := live_robot(
-                    robot, session_id, component_id, frame_revision, now
+                    robot,
+                    session_id,
+                    component_id,
+                    robot_frame_revision(view, robot.robot_id),
+                    now,
                 )
             )
             is not None
@@ -234,7 +251,7 @@ async def set_live_goal(session_id: str, command: LiveGoal):
             robot,
             session_id,
             command.component_id,
-            frame_revision,
+            robot_frame_revision(view, robot.robot_id),
             time.monotonic(),
         )
     )

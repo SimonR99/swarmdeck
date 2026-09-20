@@ -395,9 +395,27 @@ class ComponentCatalogue:
             raise ValueError("Component publishers disagree on the coordinate frame")
         orders = {source["solution_order"] for source in sources}
         order_known = all(source["solution_order_known"] for source in sources)
-        if len(sources) > 1 and (not order_known or None in orders or len(orders) != 1):
+        if len(sources) > 1 and (not order_known or None in orders):
             raise LookupError("Waiting for a common accepted Swarm-SLAM solution")
-        order = next(iter(orders))
+        # Publishers of a live merge rarely carry the same accepted solution at
+        # the same moment: the optimizer reports every few seconds and each
+        # peer republishes on its own cadence (benchbot 2026-09-19, four
+        # robots exploring under inter-robot closures: orders 91, 94, 96 and
+        # 103 across the four replicas, the view unavailable in 20 of 20
+        # samples). Solutions of one optimizer that differ only in their
+        # clock are the same frame a few reports apart: each owner's submaps
+        # are taken from that owner's own publication, so the geometry is
+        # consistent per robot and the cross-robot offset is the solver's step
+        # between those reports. Solutions from different optimizers are not
+        # one frame and keep the view waiting. The view reports the newest
+        # order, and each publisher's own order under ``solution_orders`` for
+        # the per-robot frame fences.
+        if len(sources) > 1 and len({order[1] for order in orders}) != 1:
+            raise LookupError("Waiting for a common accepted Swarm-SLAM solution")
+        order = max(orders) if orders else None
+        solution_orders = {
+            source["robot_id"]: source["solution_order"] for source in sources
+        }
         source_count = sum(
             len(source["components"][key[1]]["submaps"])
             + len(source["components"][key[1]]["tombstones"])
@@ -476,6 +494,8 @@ class ComponentCatalogue:
             "generated_at_ns": max(source["generated_at_ns"] for source in sources),
             "solution_order": order,
             "solution_order_known": order_known,
+            "solution_orders": solution_orders,
+            "solution_agreed": len(orders) <= 1,
             "components": [component],
             "selected": component,
             "chunks": [chunks[name] for name in sorted(chunks)],

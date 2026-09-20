@@ -197,7 +197,32 @@ def test_merge_uses_common_solution_not_local_epochs_or_revisions(tmp_path):
     assert view["solution_order"] == (7, 0)
 
 
-@pytest.mark.parametrize("order", [[8, 0], [7, 1], [0, -1], None])
+def test_publishers_lagging_by_solver_reports_still_assemble_one_view(tmp_path):
+    # robot_1 replicated solution 8 of optimizer 0 while robot_0 still
+    # carries 7: the same frame a report apart. The view assembles, reports
+    # the newest order, and keeps each publisher's own order for its fence.
+    session = str(uuid4())
+    first, _ = peer(tmp_path, "robot_0", session, order=[7, 0], revision=140)
+    second, _ = peer(
+        tmp_path,
+        "robot_1",
+        session,
+        anchor_robot="robot_0",
+        order=[8, 0],
+        revision=22,
+    )
+    catalogue = ComponentCatalogue([first, second])
+    (entry,) = catalogue.index()["components"]
+    assert entry["available"] and entry["status"] == "ready"
+    view = catalogue.view(session, entry["component_id"])
+    assert view["solution_order"] == (8, 0)
+    assert view["solution_order_known"] is True
+    assert view["solution_agreed"] is False
+    assert view["solution_orders"] == {"robot_0": (7, 0), "robot_1": (8, 0)}
+    assert len(view["selected"]["submaps"]) == 2
+
+
+@pytest.mark.parametrize("order", [[7, 1], [0, -1], None])
 def test_incompatible_or_unknown_solution_keeps_merged_view_unavailable(
     tmp_path, order
 ):
