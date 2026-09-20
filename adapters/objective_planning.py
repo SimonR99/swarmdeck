@@ -1000,9 +1000,16 @@ class MggObjectivePlanning:
                             return
                         self._clear_rolling_locked()
                     if self._window_replan_exhausted(message):
+                        with self._active_lock:
+                            standing = self._window_replan_xy
+                        where = (
+                            f" at ({standing[0]:.2f}, {standing[1]:.2f})"
+                            if standing is not None
+                            else ""
+                        )
                         self._fail_if_current(
                             "MGG section completed without motion "
-                            f"{WINDOW_REPLAN_LIMIT} times in a row: {message}",
+                            f"{WINDOW_REPLAN_LIMIT} times in a row{where}: {message}",
                             generation,
                         )
                         return
