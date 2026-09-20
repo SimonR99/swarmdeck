@@ -1041,21 +1041,29 @@ export const mapStore = {
    * refetches its scope only when that scope's `seq` has advanced.
    */
   async refreshGlobalOptimizedView() {
-    if (
-      state.viewMode !== 'global' ||
-      state.mapSource !== 'optimized' ||
-      state.globalOptimizedScope === null ||
-      !globalInfo
-    ) {
+    if (state.viewMode !== 'global' || state.mapSource !== 'optimized' || !globalInfo) {
       return;
     }
     if (globalRefreshInFlight) return;
     globalRefreshInFlight = true;
     try {
       const shown = state.globalOptimizedScope;
-      const before = state.optimizedScopes.find((entry) => entry.scope === shown)?.seq;
+      const before =
+        shown === null
+          ? undefined
+          : state.optimizedScopes.find((entry) => entry.scope === shown)?.seq;
       await this.loadOptimizedScopes();
       if (state.viewMode !== 'global' || state.globalOptimizedScope !== shown) return;
+      if (shown === null) {
+        // The view fell back to the merged SLAM map because no fleet raster
+        // existed when it loaded (a map reset drops every raster and the
+        // server rebuilds the fleet's a few seconds later). Take the raster
+        // as soon as the index offers one.
+        if (selectGlobalOptimizedScope(state.optimizedScopes)) {
+          await this.loadGlobalOptimized();
+        }
+        return;
+      }
       const after = state.optimizedScopes.find((entry) => entry.scope === shown)?.seq;
       if (after === undefined || after === before) return;
       await this.loadGlobalOptimized();
