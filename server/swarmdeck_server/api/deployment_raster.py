@@ -261,7 +261,9 @@ class DeploymentRasterRefresher:
                     member["robot_id"]: se2_of(member["T_world_navigation"])
                     for member in view["members"]
                 }
-        except (OverflowError, ValueError, KeyError, TypeError) as exc:
+        except (OverflowError, ValueError, LookupError, TypeError) as exc:
+            # A merge in progress raises LookupError until every publisher
+            # carries the same accepted solution; the last raster stays.
             return self._skip(scope, (session_id, "catalogue"), str(exc), retired)
 
         key = (session_id, str(view["snapshot_id"]))
