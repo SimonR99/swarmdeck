@@ -107,6 +107,35 @@ def view_solution_order(view):
     )
 
 
+def compatible_solution_orders(first, second):
+    """Whether two solution orders name one component frame.
+
+    Equal orders do. So do two real solutions of the same optimizer robot
+    (``order[1]``) that differ only in their clock: they are the same frame a
+    few solver reports apart (the rule ``replica_components._assemble``
+    applies to the publishers of a merged view). The pre-optimizer sentinel
+    ``(0, -1)`` on one side only, or two optimizers, are not one frame.
+
+    The live overlay needs the tolerance because a robot's mapping authority
+    is product-gated: it names the frame of the last MOLA product its worker
+    published, which lags the solver by tens of reports while the fleet
+    explores under inter-robot closures (benchbot 2026-09-19, mission
+    1a8cc114: authorities at [413, 0] and [403, 0] against replicas at
+    [443, 0]), and an equality fence hid exactly the lagging robots from the
+    3D view. The displayed pose is placed with the authority's own
+    ``T_component_navigation``, so it sits off the drawn map by the solver's
+    step between the two orders. Goal dispatch still converts a click with
+    the robot's own authority and sends the displayed order; the robot fences
+    the goal on its own frame revision and refuses one it does not hold.
+    """
+    first, second = tuple(first), tuple(second)
+    if first == second:
+        return True
+    if first[1] == -1 or second[1] == -1:
+        return False
+    return first[1] == second[1]
+
+
 def composite_member(view, robot_id):
     """A composite member's placement record, or None for a non-member."""
     if not view.get("composite"):
@@ -151,6 +180,12 @@ def composite_live_robot(robot, view, session_id, now):
 
 
 def live_robot(robot, session_id, component_id, expected_solution_order, now):
+    """The robot's fresh live state in this component, or None.
+
+    ``expected_solution_order`` is the order of the robot's own publication
+    of the displayed view; the authority may trail it by solver reports
+    (``compatible_solution_orders``).
+    """
     value = robot.live_mapping
     if (
         value is None
@@ -158,7 +193,9 @@ def live_robot(robot, session_id, component_id, expected_solution_order, now):
         or not registry.has_sink(robot.robot_id)
         or value["mission_id"] != session_id
         or value["component_id"] != component_id
-        or tuple(value["solution_order"]) != expected_solution_order
+        or not compatible_solution_orders(
+            value["solution_order"], expected_solution_order
+        )
     ):
         return None
     age = value["authority_age_s"] + max(0.0, now - robot.live_mapping_received_at)

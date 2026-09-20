@@ -46,6 +46,7 @@ def setup(monkeypatch):
         def __init__(self):
             self.snapshot_id = "view-snapshot"
             self.solution_order = None
+            self.solution_orders = None
 
         def view(self, session, component):
             if component != "component":
@@ -57,6 +58,8 @@ def setup(monkeypatch):
             }
             if hasattr(self, "solution_order"):
                 result["solution_order"] = self.solution_order
+            if self.solution_orders is not None:
+                result["solution_orders"] = self.solution_orders
             return result
 
     catalogue = Catalogue()
@@ -207,6 +210,108 @@ def test_changed_frame_revision_rejects_old_overlay_and_goal(setup):
     assert response.status_code == 409
     assert response.json()["detail"] == "Displayed component frame is stale"
     sink.send_json.assert_not_called()
+
+
+def test_authority_lagging_its_replica_by_solver_reports_is_listed(setup):
+    # The authority is product-gated and names the last published product's
+    # frame; the replica follows the solver. Benchbot 2026-09-19 (mission
+    # 1a8cc114): robot_0's authority at [413, 0] against its replica at
+    # [443, 0] hid it from the 3D view. One optimizer, a later clock: the same
+    # frame a few reports apart.
+    client, registry, _, catalogue = setup
+    catalogue.solution_order = [443, 0]
+    registry.robots["r0"].live_mapping["solution_order"] = [413, 0]
+    response = client.get(BASE, params={"component_id": "component"})
+    assert response.status_code == 200
+    value = response.json()
+    assert value["solution_order"] == [443, 0]
+    (robot,) = value["robots"]
+    assert robot["robot_id"] == "r0"
+    # The robot reports its own authority's order; its pose is placed with
+    # that authority's transform, a few solver steps behind the drawn map.
+    assert robot["solution_order"] == [413, 0]
+
+
+def test_authority_lagging_its_own_publication_of_a_merged_view_is_listed(setup):
+    # A merged view reports the newest publisher's order and each publisher's
+    # own order under solution_orders; the authority trails the robot's own
+    # publication, which trails the view.
+    client, registry, _, catalogue = setup
+    catalogue.solution_order = [450, 0]
+    catalogue.solution_orders = {"r0": [443, 0], "r1": [450, 0]}
+    registry.robots["r0"].live_mapping["solution_order"] = [413, 0]
+    response = client.get(BASE, params={"component_id": "component"})
+    assert response.status_code == 200
+    assert [robot["robot_id"] for robot in response.json()["robots"]] == ["r0"]
+
+
+def test_equal_real_solution_orders_are_listed(setup):
+    client, registry, _, catalogue = setup
+    catalogue.solution_order = [443, 0]
+    registry.robots["r0"].live_mapping["solution_order"] = [443, 0]
+    response = client.get(BASE, params={"component_id": "component"})
+    assert response.status_code == 200
+    assert response.json()["robots"][0]["solution_order"] == [443, 0]
+
+
+@pytest.mark.parametrize(
+    "view_order,authority_order",
+    [
+        ([443, 0], [443, 1]),
+        ([443, 0], [413, 1]),
+        ([443, 0], [0, -1]),
+        (None, [443, 0]),
+    ],
+)
+def test_authority_in_another_optimizer_or_before_the_solver_is_not_listed(
+    setup, view_order, authority_order
+):
+    # Another optimizer's solution, or the pre-optimizer sentinel on one side
+    # only (the catalogue writes it as None), is not the displayed frame.
+    client, registry, _, catalogue = setup
+    catalogue.solution_order = view_order
+    registry.robots["r0"].live_mapping["solution_order"] = authority_order
+    assert client.get(BASE, params={"component_id": "component"}).status_code == 404
+
+
+def test_goal_for_a_lagging_authority_is_dispatched_in_the_displayed_frame(setup):
+    # The server converts the click with the robot's own authority transform
+    # and sends the displayed order; the robot fences the goal on its own
+    # frame revision (adapters/objective_planning._goal_solution_order_error).
+    client, registry, sink, catalogue = setup
+    catalogue.solution_order = [443, 0]
+    registry.robots["r0"].live_mapping["solution_order"] = [413, 0]
+    response = client.post(
+        BASE + "/goal",
+        json=dict(
+            robot_id="r0",
+            component_id="component",
+            solution_order=[443, 0],
+            goal=dict(x=1, y=2),
+        ),
+    )
+    assert response.status_code == 200
+    sent = sink.send_json.call_args.args[0]["goal"]
+    assert sent["solution_order"] == [443, 0]
+    assert sent["component_goal"] == dict(x=1.0, y=2.0, z=0.0, yaw=0.0)
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        ((0, -1), (0, -1), True),
+        ((443, 0), (443, 0), True),
+        ((413, 0), (443, 0), True),
+        ((443, 0), (413, 0), True),
+        ([413, 0], (443, 0), True),
+        ((443, 0), (443, 1), False),
+        ((413, 0), (443, 1), False),
+        ((0, -1), (443, 0), False),
+        ((443, 0), (0, -1), False),
+    ],
+)
+def test_compatible_solution_orders(first, second, expected):
+    assert replica_live.compatible_solution_orders(first, second) is expected
 
 
 def test_missing_frame_revision_is_not_treated_as_initial_sentinel(setup):
