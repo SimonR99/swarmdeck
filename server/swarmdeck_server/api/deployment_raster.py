@@ -218,7 +218,9 @@ class DeploymentRasterRefresher:
             return self._skip(scope, (session_id, "catalogue"), str(exc), [])
         merged = verified_component(catalogue, session_id)
         if merged is not None:
-            scope = f"component:{merged}"
+            # The catalogue's component ids already carry the ``component:``
+            # prefix the back-end's scopes use.
+            scope = merged if merged.startswith("component:") else f"component:{merged}"
         else:
             scope = replica_views.deployment_component_id(session_id)
         retired = map_routes.retire_server_scopes(keep=scope)

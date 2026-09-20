@@ -275,17 +275,17 @@ def test_a_verified_merge_is_rasterized_under_its_component_id(setup, tmp_path):
     assert frames["robot_1"][0] == shared
     report = refresher.refresh(session, placements(session), frames)
     assert report["status"] == "built"
-    assert report["scope"] == f"component:{shared}"
+    assert report["scope"] == shared and shared.startswith("component:")
     assert report["robots"] == ["robot_0", "robot_1"]
     assert report["retired"] == [scope_of(session)]
-    meta, cells, robots, transforms = map_routes._optimized[f"component:{shared}"]
+    meta, cells, robots, transforms = map_routes._optimized[shared]
     assert robots == ("robot_0", "robot_1")
     assert transforms["robot_0"] == {"x": 0.0, "y": 0.0, "yaw": 0.0}
     assert transforms["robot_1"] == {"x": 4.0, "y": -1.0, "yaw": 0.0}
     assert scope_of(session) not in map_routes._optimized
     # The back-end's scope list still never prunes it.
     assert map_routes._prune_optimized_maps(["robot:x"]) == []
-    assert f"component:{shared}" in map_routes._optimized
+    assert shared in map_routes._optimized
 
 
 def test_slam_scope_list_never_prunes_the_deployment_scope():
