@@ -128,6 +128,28 @@
       # is the scarce resource, so it is a budget, not a firehose.
       inter_robot_loop_closure_budget: 5
       inter_robot_detection_period_sec: 5
+      # Accepted inter-robot closures a robot pair may hold before its
+      # candidates are withdrawn from selection, added by
+      # `deploy/patches/cslam-inter-robot-pair-cap.patch`. Upstream has no
+      # such limit: the budget above rations the candidates verified per
+      # detection period, not the closures a pair accumulates, so an
+      # already-linked pair keeps being re-registered for as long as the
+      # robots see each other. Measured on benchbot 2026-09-19 with closures
+      # on, four robots exploring: 707 accepted inter-robot closures per peer
+      # in 20 minutes (270 in an earlier 12-minute mission, per pair 0-1: 77,
+      # 0-2: 29, 0-3: 52, 1-2: 18, 1-3: 37, 2-3: 57), the optimizer publishing
+      # a new solution every 2 to 3 s, cslam's lidar handler and detection
+      # nodes at about 2.6 cores per peer (host load average 25 on 16 cores),
+      # MGG objective requests timing out, and 39 of 58 plan rejections
+      # snapshot churn even with the consumer-side adoption thresholds
+      # (`autonomy/cslam.py`). Those 270 closures bought no better than 5 cm
+      # of inter-platform floor placement: a handful per pair is enough. The
+      # count is per unordered pair and includes closures reported from
+      # either side; selections already in flight when a pair reaches the
+      # cap still complete, so a pair can end a few above it. 0 means no cap.
+      # Trap: a pair capped early keeps its early placement; raise the cap
+      # for long missions where robots meet again far from the start.
+      inter_robot_closure_pair_cap: 8
       max_queue_size: 10
       # ScanContext similarity a candidate must clear before it is even sent for
       # geometric verification, and the ONLY gate on intra-robot candidates too.

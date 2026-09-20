@@ -1,0 +1,114 @@
+--- a/cslam/cslam/loop_closure_detection_node.py
++++ b/cslam/cslam/loop_closure_detection_node.py
+@@ -24,6 +24,7 @@
+                         ('frontend.netvlad.pca_checkpoint', ''), ('frontend.nn_checkpoint', 'models/resnet18_64.pth'),
+                         ('robot_id', 0), ('max_nb_robots', 10),
+                         ('frontend.inter_robot_loop_closure_budget', 5),
++                        ('frontend.inter_robot_closure_pair_cap', 8),
+                         ('frontend.inter_robot_detection_period_sec', 5),
+                         ('frontend.nb_best_matches', 10), ('frontend.image_crop_size', 376),
+                         ('frontend.intra_loop_min_inbetween_keyframes', 10),
+@@ -59,6 +60,8 @@
+         self.params['max_nb_robots'] = self.get_parameter('max_nb_robots').value
+         self.params['frontend.inter_robot_loop_closure_budget'] = self.get_parameter(
+             'frontend.inter_robot_loop_closure_budget').value
++        self.params['frontend.inter_robot_closure_pair_cap'] = self.get_parameter(
++            'frontend.inter_robot_closure_pair_cap').value
+         self.params['frontend.enable_intra_robot_loop_closures'] = self.get_parameter(
+             'frontend.enable_intra_robot_loop_closures').value
+         self.params['frontend.inter_robot_detection_period_sec'] = self.get_parameter(
+--- a/cslam/cslam/global_descriptor_loop_closure_detection.py
++++ b/cslam/cslam/global_descriptor_loop_closure_detection.py
+@@ -125,6 +125,12 @@
+             clock=Clock()
+         )  # Note: It is important to use the system clock instead of ROS clock for timers since we are within a TimerAction
+ 
++        # Accepted inter-robot loop closures per unordered robot pair, for
++        # frontend.inter_robot_closure_pair_cap. Every robot hears every
++        # accepted closure on /cslam/inter_robot_loop_closure, so the count
++        # is the same on the broker as on the pair itself.
++        self.inter_robot_closures_per_pair = {}
++
+         if self.params["evaluation.enable_logs"]:
+             self.log_publisher = self.node.create_publisher(
+                 KeyValue, 'cslam/log_info', 100)
+@@ -306,6 +312,54 @@
+                 msg.keyframe1_id = kf_match
+                 self.local_match_publisher.publish(msg)
+ 
++    def robot_pair(self, robot0_id, robot1_id):
++        """ Unordered robot pair key
++
++        Args:
++            robot0_id (int): robot ID
++            robot1_id (int): robot ID
++
++        Returns:
++            tuple(int, int): the two IDs in ascending order
++        """
++        return (min(robot0_id, robot1_id), max(robot0_id, robot1_id))
++
++    def is_pair_capped(self, robot0_id, robot1_id):
++        """ Check whether a robot pair already holds enough accepted
++            inter-robot loop closures. A cap of zero or less means no cap.
++
++        Args:
++            robot0_id (int): robot ID
++            robot1_id (int): robot ID
++
++        Returns:
++            bool: no further candidates are wanted for this pair
++        """
++        cap = self.params["frontend.inter_robot_closure_pair_cap"]
++        if cap <= 0:
++            return False
++        return self.inter_robot_closures_per_pair.get(
++            self.robot_pair(robot0_id, robot1_id), 0) >= cap
++
++    def drop_capped_pair_candidates(self):
++        """ Withdraw the candidates of every capped robot pair from selection
++
++        Every accepted closure costs a registration, a pose graph
++        optimization and a solution broadcast, and a pair that is already
++        linked gains nothing from another one. The selector's in-range dict
++        is keyed by robot and the broker selects for every pair of the
++        fleet, so a robot cannot be marked out of range without also losing
++        its uncapped pairs. Dropping the candidates as already considered is
++        exact per pair; matches that arrive later on a capped pair are
++        dropped again at the next detection.
++        """
++        capped = [
++            e for e in self.lcm.candidate_selector.candidate_edges.values()
++            if self.is_pair_capped(e.robot0_id, e.robot1_id)
++        ]
++        if len(capped) > 0:
++            self.lcm.candidate_selector.remove_candidate_edges(capped)
++
+     def detect_inter(self):
+         """ Detect inter-robot loop closures
+ 
+@@ -316,6 +370,7 @@
+         # selector does not treat zero as "select nothing", so say so here.
+         if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:
+             return
++        self.drop_capped_pair_candidates()
+         neighbors_is_in_range, neighbors_in_range_list = self.neighbor_manager.check_neighbors_in_range(
+         )
+         #self.node.get_logger().info('Neighbors in range: ' +  str(neighbors_in_range_list))
+@@ -466,6 +521,16 @@
+             self.lcm.candidate_selector.candidate_edges_to_fixed(
+                 [self.inter_robot_loop_closure_msg_to_edge(msg)])
+ 
++            pair = self.robot_pair(msg.robot0_id, msg.robot1_id)
++            self.inter_robot_closures_per_pair[
++                pair] = self.inter_robot_closures_per_pair.get(pair, 0) + 1
++            cap = self.params["frontend.inter_robot_closure_pair_cap"]
++            if cap > 0 and self.inter_robot_closures_per_pair[pair] == cap:
++                self.node.get_logger().info(
++                    'Inter-robot loop closure cap reached for robots ' +
++                    str(pair) + ': ' + str(cap) +
++                    ' accepted, no further candidates will be selected')
++
+             if self.params["evaluation.enable_logs"]:
+                 self.log_total_successful_matches += 1
+                 self.log_publisher.publish(

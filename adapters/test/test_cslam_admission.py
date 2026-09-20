@@ -125,6 +125,7 @@ def test_config_sets_no_frontend_key_the_patch_chain_leaves_undeclared(frontend)
     invented = {
         "frontend.registration_min_overlap",
         "frontend.keyframe_min_subscribers",
+        "frontend.inter_robot_closure_pair_cap",
     }
     for key in invented:
         if key.split(".", 1)[1] in frontend:
@@ -316,6 +317,151 @@ def test_zero_budget_is_an_explicit_inter_robot_off_switch():
     assert 'if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:' in added
     assert "return" in added
     assert "git apply /tmp/cslam-inter-robot-switch.patch" in DOCKERFILE.read_text()
+
+
+PAIR_CAP_PATCH = REPO / "deploy/patches/cslam-inter-robot-pair-cap.patch"
+# The sparsest pair of the measured 12-minute mission (1-2) still accepted 18
+# closures, and the whole run's 270 bought no better than 5 cm of floor
+# placement. A cap at or above that would not cap anything within a mission.
+MEASURED_SPARSEST_PAIR_CLOSURES = 18
+
+
+def test_pair_cap_patch_declares_reads_counts_and_prunes(frontend):
+    patch = PAIR_CAP_PATCH.read_text()
+    added = "\n".join(added_lines(patch))
+    # Declared next to the budget, with the shipped default, and read like it.
+    assert "('frontend.inter_robot_closure_pair_cap', 8)," in added
+    assert (
+        "self.params['frontend.inter_robot_closure_pair_cap'] = self.get_parameter("
+        in added
+    )
+    # Counted per unordered pair where every accepted closure is seen.
+    assert "pair = self.robot_pair(msg.robot0_id, msg.robot1_id)" in added
+    assert "return (min(robot0_id, robot1_id), max(robot0_id, robot1_id))" in added
+    # Zero or less is no cap, and the pair is logged once, at equality.
+    assert "if cap <= 0:\n            return False" in added
+    assert "self.inter_robot_closures_per_pair[pair] == cap:" in added
+    # Withdrawn through the selector's own API, which also marks the keyframe
+    # pairs as considered so they are not proposed again.
+    assert "self.lcm.candidate_selector.remove_candidate_edges(capped)" in added
+    # The prune sits right after the switch patch's early return (its context
+    # lines), so the patch depends on the switch and the image must apply it
+    # after it.
+    lines = patch.splitlines()
+    prune = lines.index("+        self.drop_capped_pair_candidates()")
+    assert lines[prune - 2 : prune] == [
+        '         if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:',
+        "             return",
+    ]
+    text = DOCKERFILE.read_text()
+    assert "COPY deploy/patches/cslam-inter-robot-pair-cap.patch" in text
+    assert text.index("git apply /tmp/cslam-inter-robot-switch.patch") < text.index(
+        "git apply /tmp/cslam-inter-robot-pair-cap.patch"
+    )
+    cap = frontend["inter_robot_closure_pair_cap"]
+    assert isinstance(cap, int) and 0 < cap < MEASURED_SPARSEST_PAIR_CLOSURES, cap
+
+
+class _FakeSelector:
+    """The two selector members the patch touches, with upstream's semantics."""
+
+    def __init__(self, edges):
+        self.candidate_edges = {self._key(e): e for e in edges}
+        self.already_considered_matches = set()
+
+    @staticmethod
+    def _key(e):
+        return (e.robot0_id, e.robot0_keyframe_id, e.robot1_id, e.robot1_keyframe_id)
+
+    def remove_candidate_edges(self, edges, failed=False):
+        for k in list(self.candidate_edges):
+            if self.candidate_edges[k] in edges:
+                del self.candidate_edges[k]
+        for e in edges:
+            self.already_considered_matches.add(self._key(e))
+
+
+def _pair_cap_class():
+    """Build a class from the patch's own added lines.
+
+    The three helpers are whole methods; the counting hunk is the body added
+    inside `receive_inter_robot_loop_closure`'s success branch, wrapped here
+    in a method of its own.
+    """
+    lines = added_lines(PAIR_CAP_PATCH.read_text())
+    start = next(i for i, l in enumerate(lines) if l.startswith("    def robot_pair("))
+    end = next(i for i, l in enumerate(lines) if "remove_candidate_edges(capped)" in l)
+    helpers = "\n".join(l[4:] for l in lines[start : end + 1])
+    first = next(i for i, l in enumerate(lines) if "pair = self.robot_pair(msg" in l)
+    last = next(
+        i for i, l in enumerate(lines) if "no further candidates will be selected" in l
+    )
+    counting = "def receive_inter_robot_loop_closure(self, msg):\n" + "\n".join(
+        l[8:] for l in lines[first : last + 1]
+    )
+    namespace = {}
+    exec(helpers + "\n" + counting, namespace)
+    return type(
+        "PairCap",
+        (),
+        {k: v for k, v in namespace.items() if callable(v) and not k.startswith("__")},
+    )
+
+
+def test_pair_cap_withdraws_only_the_capped_pair_and_logs_once():
+    from types import SimpleNamespace
+
+    Edge = SimpleNamespace
+    cap = 3
+    edges = [
+        Edge(robot0_id=a, robot0_keyframe_id=k, robot1_id=b, robot1_keyframe_id=k + 100)
+        for a, b in ((0, 1), (0, 2), (1, 2))
+        for k in range(4)
+    ]
+    selector = _FakeSelector(edges)
+    logs = []
+    obj = _pair_cap_class()()
+    obj.params = {"frontend.inter_robot_closure_pair_cap": cap}
+    obj.node = SimpleNamespace(get_logger=lambda: SimpleNamespace(info=logs.append))
+    obj.lcm = SimpleNamespace(candidate_selector=selector)
+    obj.inter_robot_closures_per_pair = {}
+    closure = lambda r0, k, r1: SimpleNamespace(  # noqa: E731
+        robot0_id=r0, robot0_keyframe_id=k, robot1_id=r1, robot1_keyframe_id=k + 100
+    )
+    # Closures on (0,1) from either side count for the one unordered pair.
+    obj.receive_inter_robot_loop_closure(closure(0, 0, 1))
+    obj.receive_inter_robot_loop_closure(closure(1, 1, 0))
+    assert not obj.is_pair_capped(0, 1)
+    obj.drop_capped_pair_candidates()
+    assert len(selector.candidate_edges) == 12  # below the cap, nothing withdrawn
+    obj.receive_inter_robot_loop_closure(closure(0, 2, 1))
+    assert obj.inter_robot_closures_per_pair == {(0, 1): cap}
+    assert obj.is_pair_capped(0, 1) and obj.is_pair_capped(1, 0)
+    assert not obj.is_pair_capped(0, 2) and not obj.is_pair_capped(1, 2)
+    assert [m for m in logs if "cap reached for robots (0, 1)" in m] == logs
+    assert len(logs) == 1
+    # Over the cap: counted, not logged again.
+    obj.receive_inter_robot_loop_closure(closure(0, 3, 1))
+    assert obj.inter_robot_closures_per_pair[(0, 1)] == cap + 1
+    assert len(logs) == 1
+    # The prune withdraws every (0,1) candidate, marks it considered, and
+    # leaves the other pairs alone.
+    obj.drop_capped_pair_candidates()
+    assert not any(k[0] == 0 and k[2] == 1 for k in selector.candidate_edges)
+    assert len(selector.candidate_edges) == 8
+    assert len(selector.already_considered_matches) == 4
+    # Zero or less: no cap, nothing withdrawn, nothing logged.
+    obj.params["frontend.inter_robot_closure_pair_cap"] = 0
+    selector.candidate_edges[(0, 9, 1, 109)] = Edge(
+        robot0_id=0, robot0_keyframe_id=9, robot1_id=1, robot1_keyframe_id=109
+    )
+    assert not obj.is_pair_capped(0, 1)
+    obj.drop_capped_pair_candidates()
+    assert (0, 9, 1, 109) in selector.candidate_edges
+    obj.params["frontend.inter_robot_closure_pair_cap"] = -1
+    obj.receive_inter_robot_loop_closure(closure(2, 0, 3))
+    assert obj.inter_robot_closures_per_pair[(2, 3)] == 1
+    assert len(logs) == 1
 
 
 def test_scene_signature_ignores_returns_beyond_its_range():
