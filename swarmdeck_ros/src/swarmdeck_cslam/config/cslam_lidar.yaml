@@ -273,16 +273,19 @@
       # Publishes the inter-robot transforms as TF, which is what lets each
       # adapter report poses already in the common frame.
       enable_broadcast_tf_frames: true
-      # Attitude prior on every pose of the aggregate graph (patch
-      # cslam-upright-prior): ground robots on a planar site keep their body Z
-      # within this sigma of the navigation Z. Without it an inter-robot
-      # closure's pitch or roll error tilts a whole robot's frame (0.7 to 1.5
-      # degrees on 2026-09-20), and a 1.5 degree tilt puts the shared floor
-      # 0.5 m off at 20 m from the frame origin, read by the planner as
-      # occupied or unknown ground. 0 disables. The same 0.01 rad as the
-      # odometry rotation sigma: one keyframe on a curb may lean, the chain
-      # may not.
+      # Attitude prior (patch cslam-upright-prior): every pose whose odometry
+      # reports it level keeps its body Z within this sigma of the navigation
+      # Z. Without it an inter-robot closure's pitch or roll error tilts a
+      # whole robot's frame (0.7 to 1.5 degrees on 2026-09-20), and a 1.5
+      # degree tilt puts the shared floor 0.5 m off at 20 m from the frame
+      # origin, read by the planner as occupied or unknown ground. 0 disables.
+      # The same 0.01 rad as the odometry rotation sigma.
       upright_prior_sigma_rad: 0.01
+      # A pose the odometry (gravity-aligned roll and pitch) reports tilted
+      # beyond this gets no prior: on a ramp or a kerb its attitude follows
+      # the odometry factors to its level neighbours, so slopes are kept and
+      # a closure still cannot tilt the chain.
+      upright_prior_level_max_rad: 0.05
 
     evaluation:
       enable_logs: false

@@ -517,6 +517,15 @@ def test_upright_prior_patch_declares_reads_and_adds_attitude_factors():
     assert "for (const auto &key_value : *aggregate_pose_graph_.second)" in added
     assert "emplace_shared<gtsam::Pose3AttitudeFactor>(" in added
     assert "key_value.key, up, upright_noise, up);" in added
+    # A pose whose odometry reports it tilted beyond the level bound (a ramp,
+    # a kerb) gets no prior, so slopes are kept.
+    assert (
+        'declare_parameter<double>("backend.upright_prior_level_max_rad", 0.05);'
+        in added
+    )
+    assert "const double level_cos = std::cos(upright_prior_level_max_rad_);" in added
+    assert "odometry_pose.rotation().rotate(gtsam::Point3(0.0, 0.0, 1.0));" in added
+    assert "if (body_up.z() < level_cos)" in added
     # Applied last, after the pair cap, and switched on for the fleet.
     dockerfile = DOCKERFILE.read_text()
     assert dockerfile.index(
@@ -526,3 +535,4 @@ def test_upright_prior_patch_declares_reads_and_adds_attitude_factors():
         REPO / "swarmdeck_ros/src/swarmdeck_cslam/config/cslam_lidar.yaml"
     ).read_text()
     assert "upright_prior_sigma_rad: 0.01" in config
+    assert "upright_prior_level_max_rad: 0.05" in config
