@@ -1007,6 +1007,17 @@ class MggObjectivePlanning:
                             if standing is not None
                             else ""
                         )
+                        # The controller's own goal: whether it was handed the
+                        # section MGG cached, or a path ending where it stood.
+                        sent = getattr(self.bridge, "goal", None)
+                        if isinstance(sent, dict):
+                            try:
+                                where += (
+                                    f", last dispatched goal "
+                                    f"({float(sent['x']):.2f}, {float(sent['y']):.2f})"
+                                )
+                            except (KeyError, TypeError, ValueError):
+                                pass
                         self._fail_if_current(
                             "MGG section completed without motion "
                             f"{WINDOW_REPLAN_LIMIT} times in a row{where}: {message}",

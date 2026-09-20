@@ -76,7 +76,7 @@ across product transitions.
 
 MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`5e9f2d001decee8ce5099ea6daed4546308a9054` (the 59 ported commits over
+`04066332dcac06a14b369a084ee31d797b5b966a` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, and refusal of a validated prefix that makes no progress), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
 changes are made in that repository and the pin is advanced. `ccda9ce` is a
 revert: on 2026-09-19 a full-map raster global stage, a separate drop limit
@@ -119,7 +119,10 @@ their gain) and the odometry ingestion of `timerCallback`
 every reachable neighbour, every 1 m event E1 marks the roadmap within 3 m
 visited). A roadmap edge stops at unknown space as upstream had it, and a
 reference path that is not the lattice's own is projected to the common
-driving height before it enters the roadmap.
+driving height before it enters the roadmap. `0406633` straightens explicit
+and global-frontier routes with the same shortcut exploration paths get
+(upstream's improveFreePath on every homing route, rrg.cpp:4164), so a
+return no longer retraces the wobble of the trail that built the roadmap.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
 
