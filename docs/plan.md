@@ -123,6 +123,9 @@ driving height before it enters the roadmap. `0406633` (as `5934234`, which logs
 and global-frontier routes with the same shortcut exploration paths get
 (upstream's improveFreePath on every homing route, rrg.cpp:4164), so a
 return no longer retraces the wobble of the trail that built the roadmap.
+`7004cd4` refuses a section whose proxy stepped back onto the robot (every
+reach met measured terrain) instead of emitting it empty: that empty
+section, completed at once by the controller, was the 2.5 Hz replan loop.
 `deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
 service type hashes match across images.
 
