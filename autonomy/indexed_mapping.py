@@ -314,7 +314,13 @@ class IndexedMapView:
         self,
         *,
         resolution_m: float = 0.2,
-        max_points: int = 1_000_000,
+        # The component point budget: one number with the MOLA worker's
+        # ``DEFAULT_MAX_POINTS_PER_MAP`` and the reader's ``MAX_POINTS``
+        # (``autonomy/mola_mapping.py``). A view budget below the product's
+        # refuses every product past it: the Scout's return was refused with
+        # ``index refresh failed: index point budget exceeded`` after 100 m
+        # of driving (benchbot 2026-09-19) while this stayed at 1,000,000.
+        max_points: int = 2_000_000,
         max_voxels: int = 2_000_000,
         max_ray_steps: int = 4_000_000,
         max_build_s: float = 8.0,
