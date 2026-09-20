@@ -53,12 +53,15 @@ def generate_launch_description():
         os.environ.get("SWARMDECK_PEER_BODY_MASK", "false").strip().lower() == "true"
     )
     config = "/cslam_ws/install/swarmdeck_cslam/share/swarmdeck_cslam/config/cslam_lidar.yaml"
-    # Inter-robot closures merge the fleet into one component, but on a mixed
-    # fleet the vertical placement between platforms is off by about 0.3 m, and
-    # the merged floors then fail the terrain step gate everywhere. Until the
-    # inter-robot constraints are planar or ground-plane corrected, a budget of
-    # zero keeps every robot in its own component; intra-robot closures are
-    # unaffected. Set SWARMDECK_INTER_ROBOT_CLOSURES=true to re-enable them.
+    # Inter-robot closures merge the fleet into one component. They were
+    # switched off on 2026-09-16 over a suspected 0.3 m vertical bias between
+    # platforms; re-measured on 2026-09-19 the floors of a Spot, two Bunkers
+    # and a Scout coincide within 3 to 6 cm in the merged frame (the 0.3 m was
+    # the base-frame height difference), and what broke navigation under
+    # merges was solver adoption churn and a planner grid point budget, both
+    # fixed on their own. The default stays off for deployments that have not
+    # measured their own fleet; SWARMDECK_INTER_ROBOT_CLOSURES=true enables
+    # them (benchbot runs with them on).
     inter_robot_closures = (
         os.environ.get("SWARMDECK_INTER_ROBOT_CLOSURES", "false").strip().lower()
         == "true"
