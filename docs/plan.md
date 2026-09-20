@@ -363,8 +363,32 @@ Each item names its acceptance gate.
       anchor above their apt layers so those layers keep coming from cache;
       this only works on hosts that already hold the cache. Either mirror the
       exact June packages or qualify MOLA 3.2 and nav2 1.3.13.
+- [ ] **Per-robot map clear without a fleet restart (robot map epoch).** Gate:
+      "Reset map" for one robot on a running fleet leaves the other three
+      robots' maps, closures and missions untouched, gives that robot a fresh
+      map from where it stands within a minute, and its old keyframes are
+      gone from every peer's pose graph, the server's replicas and the fleet
+      raster. Asked for by the operator on 2026-09-20: the button today clears
+      only the server's rendered products (the sources live on the peers, so
+      the same map comes back), and a real clear is the mission reset, which
+      restarts everything. Design: every cslam message a robot sends carries
+      its map epoch beside the mission id (the solution-version patch already
+      carries the mission id); a peer that sees a robot's epoch advance drops
+      that robot's stored graph copy, every inter-robot closure with it, its
+      descriptors in loop-closure detection and its pair-cap counters. The
+      resetting robot restarts its own cslam nodes, bridge, MOLA worker and
+      MGG node with epoch + 1 (on benchbot a restart of that robot's peer
+      container and MGG launch by the reset supervisor; on hardware by the
+      robot's own supervisor): a new replica run id (`KeyframeId.run_id`),
+      products under the new epoch (the index server already keys by epoch),
+      a fresh planner map and global graph anchored where the robot stands,
+      costmaps cleared. The server tombstones the robot's earlier run in the
+      replica store and resets its map-service state; the raster loop rebuilds
+      on its own. Return Home after a clear means the clear point, the new
+      epoch's first keyframe, unless a surveyed start pose is configured.
 - [ ] **Frontend restart persistence.** Gate: an explicit persistence or epoch
-      solution for a restarted Swarm-SLAM frontend.
+      solution for a restarted Swarm-SLAM frontend. Subsumed by the robot map
+      epoch above once that lands.
 
 ## Validation
 
