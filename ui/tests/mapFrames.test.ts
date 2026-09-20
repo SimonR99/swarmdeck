@@ -8,6 +8,7 @@ import {
 import {
   globalMapMembers,
   hasQualifiedRasterFrame,
+  overlayFrameOnGlobalGrid,
   projectRobotToRaster,
   RasterRobotProjectionCache
 } from '../src/lib/components/map2d/mapFrames.ts';
@@ -165,3 +166,21 @@ test('nothing known about the global map places nobody on it', () => {
     []
   );
 });
+
+test('a costmap on an optimized global raster uses that raster frame, not the surveyed start pose', () => {
+  const rasterFrames = { robot_2: { x: -0.02, y: -2.0, yaw: 0.0015 } };
+  const statusTransforms = { robot_2: { x: -13.2, y: 4.0, yaw: -1.5708 } };
+  // The raster header places robot_2 (and so its costmap) with a near-zero yaw.
+  assert.deepEqual(
+    overlayFrameOnGlobalGrid('robot_2', rasterFrames, statusTransforms),
+    rasterFrames.robot_2
+  );
+  // Only the legacy merged map, which carries no raster frames, uses the status
+  // transforms.
+  assert.deepEqual(
+    overlayFrameOnGlobalGrid('robot_2', undefined, statusTransforms),
+    statusTransforms.robot_2
+  );
+  assert.equal(overlayFrameOnGlobalGrid('robot_9', rasterFrames, statusTransforms), undefined);
+});
+

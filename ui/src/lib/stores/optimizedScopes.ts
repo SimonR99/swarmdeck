@@ -11,6 +11,8 @@ export interface OptimizedScope {
   width: number;
   height: number;
   origin: { x: number; y: number };
+  /** Publications of this scope so far; a rebuild advances it, geometry aside. */
+  seq?: number;
 }
 
 const COMPONENT_PREFIX = 'component:';

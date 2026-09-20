@@ -105,6 +105,7 @@ export interface CostmapLayerEntry {
 const costmapLayers = new Map<string, CostmapLayerEntry>();
 let statusLoading = false;
 let localRefreshInFlight = false;
+let globalRefreshInFlight = false;
 let globalInfo: MapInfo | null = null;
 let loadGeneration = 0;
 let pendingSlamRefresh: ReturnType<typeof setTimeout> | null = null;
@@ -1031,6 +1032,38 @@ export const mapStore = {
       is only ever written by this client, after it fetches -- so this polls.
       The cadence matches the adapter's map_period_s of 2 s; faster would just
       re-fetch an unchanged raster. */
+  /**
+   * The server rebuilds a fleet raster (deployment composite or verified
+   * component) every few seconds under the same scope name, and nothing on the
+   * websocket announces it: the merged SLAM map's graph events belong to the
+   * central service, which the peer deployment leaves idle. So the global
+   * optimized view polls the index at the same cadence as the local view and
+   * refetches its scope only when that scope's `seq` has advanced.
+   */
+  async refreshGlobalOptimizedView() {
+    if (
+      state.viewMode !== 'global' ||
+      state.mapSource !== 'optimized' ||
+      state.globalOptimizedScope === null ||
+      !globalInfo
+    ) {
+      return;
+    }
+    if (globalRefreshInFlight) return;
+    globalRefreshInFlight = true;
+    try {
+      const shown = state.globalOptimizedScope;
+      const before = state.optimizedScopes.find((entry) => entry.scope === shown)?.seq;
+      await this.loadOptimizedScopes();
+      if (state.viewMode !== 'global' || state.globalOptimizedScope !== shown) return;
+      const after = state.optimizedScopes.find((entry) => entry.scope === shown)?.seq;
+      if (after === undefined || after === before) return;
+      await this.loadGlobalOptimized();
+    } finally {
+      globalRefreshInFlight = false;
+    }
+  },
+
   async refreshLocalView() {
     if (state.viewMode !== 'local' || !state.viewRobot) return;
     if (localRefreshInFlight) return;

@@ -277,7 +277,9 @@ class DeploymentRasterRefresher:
             points, gathered = composite_world_points(
                 view, self._chunk_points, max_points=self.max_points
             )
-            raster: KeyframeRaster = self.rasterize(points)
+            raster: KeyframeRaster = self.rasterize(
+                points, rays=(gathered["origins"], gathered["spans"])
+            )
         except (OverflowError, ValueError) as exc:
             return self._skip(scope, key, str(exc), retired)
 

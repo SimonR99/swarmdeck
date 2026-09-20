@@ -31,6 +31,23 @@ export function globalMapMembers(membership: GlobalMapMembership): string[] {
   return globalMembers ? [...globalMembers] : [];
 }
 
+/**
+ * The rigid transform that places a robot-local overlay (its Nav2 costmap, in
+ * its own map frame) on the global canvas. A server-rasterized optimized grid
+ * carries every member's frame in `X-Map-Transforms`, the same transform the
+ * robots themselves are projected with; only the legacy SLAM merged map,
+ * which sends no such header, falls back to the status transforms, which are
+ * the surveyed start poses in the deployment frame and rotate an overlay by a
+ * whole start yaw when applied to a component raster.
+ */
+export function overlayFrameOnGlobalGrid(
+  robotId: string,
+  rasterFrames: FrameTransforms,
+  statusTransforms: Record<string, Pose> | undefined
+): Pose | undefined {
+  return rasterFrames?.[robotId] ?? statusTransforms?.[robotId];
+}
+
 export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransforms): boolean {
   return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
 }

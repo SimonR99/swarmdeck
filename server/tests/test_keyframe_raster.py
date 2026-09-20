@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -166,10 +168,67 @@ def test_composite_points_are_placed_by_each_submap_transform():
 
     points, stats = kr.composite_world_points(view, chunk_points, max_points=3)
     assert points.tolist() == [[10.0, 21.0, 2.0], [5.0, 6.0, 7.0]]
-    assert stats == {"chunks": 3, "missing_chunks": 1, "declared": 3}
+    assert {k: stats[k] for k in ("chunks", "missing_chunks", "declared")} == {
+        "chunks": 3,
+        "missing_chunks": 1,
+        "declared": 3,
+    }
+    # One origin and row span per keyframe that contributed points.
+    assert stats["origins"].tolist() == [[10.0, 20.0, 2.0], [0.0, 0.0, 0.0]]
+    assert stats["spans"].tolist() == [[0, 1], [1, 2]]
     assert reads == ["a", "b", "gone"]
 
     reads.clear()
     with pytest.raises(OverflowError, match="budget"):
         kr.composite_world_points(view, chunk_points, max_points=2)
     assert reads == []
+
+
+def test_keyframe_rays_sweep_free_space_up_to_the_return_and_no_further():
+    # One keyframe at the origin, 0.5 m up, whose returns are a ground ring at
+    # 6 m (in the height band) and a canopy ring at 3 m (out of it), plus a
+    # wall at 2 m east (a ground return and one 0.5 m up in the same cell). Without rays only the return cells are
+    # known; with them the ring's interior is swept free, the wall cell stays
+    # occupied, and nothing beyond the ring is claimed.
+    bearings = np.linspace(-math.pi, math.pi, 720, endpoint=False)
+    ground = np.column_stack(
+        [6.0 * np.cos(bearings), 6.0 * np.sin(bearings), np.zeros(720)]
+    )
+    canopy = np.column_stack(
+        [3.0 * np.cos(bearings), 3.0 * np.sin(bearings), np.full(720, 3.0)]
+    )
+    wall = np.array([[2.0, 0.0, 0.0], [2.0, 0.0, 0.5]])
+    points = np.vstack([ground, canopy, wall])
+    rays = (np.array([[0.0, 0.0, 0.5]]), np.array([[0, len(points)]]))
+
+    without = kr.rasterize_points(points, cell_m=0.2, margin_m=0.0)
+    swept = kr.rasterize_points(points, cell_m=0.2, margin_m=0.0, rays=rays)
+    meta = swept.meta
+
+    def cell(x, y):
+        col = int(math.floor((x - meta.origin_x) / meta.resolution))
+        row = int(math.floor((y - meta.origin_y) / meta.resolution))
+        return swept.cells[row, col], without.cells[row, col]
+
+    # Open ground 1 m and 4 m out (between the canopy ring and the ground ring)
+    # is unknown from returns alone and free once swept.
+    assert cell(0.0, 1.0) == (kr.FREE, kr.UNKNOWN)
+    assert cell(0.0, -4.0) == (kr.FREE, kr.UNKNOWN)
+    assert cell(-4.2, 0.0) == (kr.FREE, kr.UNKNOWN)
+    # The wall return keeps its cell occupied under the sweep.
+    assert cell(2.0, 0.0) == (kr.OCCUPIED, kr.OCCUPIED)
+    # The ground ring itself is free (a return below the obstacle band), and
+    # the canopy ring is free too: its returns are above the band and, at
+    # 3 m up, outside the 1 m ray band, so they claim no sweep of their own.
+    assert cell(6.0, 0.0)[0] == kr.FREE
+    assert swept.known_cells > without.known_cells * 5
+    # Non-finite rows would shift the spans: rays are dropped, not misapplied.
+    nan = np.vstack([points, [[np.nan, 0.0, 0.0]]])
+    same = kr.rasterize_points(
+        nan, cell_m=0.2, margin_m=0.0, rays=(rays[0], np.array([[0, len(nan)]]))
+    )
+    assert same.known_cells == without.known_cells
+    with pytest.raises(ValueError, match="rays"):
+        kr.rasterize_points(
+            points, cell_m=0.2, margin_m=0.0, rays=(np.zeros((1, 2)), np.zeros((1, 2)))
+        )

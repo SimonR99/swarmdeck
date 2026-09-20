@@ -6,6 +6,7 @@ make pointer handling, map selection, and reset controls harder to navigate.
 The functions intentionally receive the current viewport and layer toggles;
 they remain stateless apart from the trail history supplied by the component. */
 
+import { overlayFrameOnGlobalGrid } from './mapFrames.ts';
 import { fleet } from '$lib/stores/fleet.svelte';
 import { mapStore } from '$lib/stores/mapstore.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
@@ -417,10 +418,14 @@ export function drawCostmap(
   ctx.imageSmoothingEnabled = view.scale < 1;
 
   // Global grids use the collaborative frame and need T_world_map for a
-  // robot-local costmap. Both local grid sources (raw SLAM and optimized
-  // robot:<id>) use the selected robot's map frame already.
+  // robot-local costmap: the displayed raster's own frame for that robot,
+  // as the robots are placed, else the legacy merged map's status
+  // transforms. Both local grid sources (raw SLAM and optimized robot:<id>)
+  // use the selected robot's map frame already.
   const useRobotTransform = mapStore.viewMode === 'global';
-  const tf = useRobotTransform ? mapStore.status?.transforms[robotId] : undefined;
+  const tf = useRobotTransform
+    ? overlayFrameOnGlobalGrid(robotId, mapStore.info?.transforms, mapStore.status?.transforms)
+    : undefined;
   if (tf) {
     const originGrid = mapStore.viewToGrid(tf.x, tf.y);
     if (originGrid) {

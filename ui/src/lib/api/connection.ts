@@ -447,7 +447,10 @@ export function startConnection() {
   // path and would otherwise sit frozen until the operator reselected the
   // robot. Poll it at the adapter's own map cadence; refreshLocalView is a
   // no-op unless a robot view is actually on screen.
-  localMapTimer = setInterval(() => void mapStore.refreshLocalView(), 2000) as unknown as number;
+  localMapTimer = setInterval(() => {
+    void mapStore.refreshLocalView();
+    void mapStore.refreshGlobalOptimizedView();
+  }, 2000) as unknown as number;
 }
 
 export function teardown() {

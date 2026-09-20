@@ -63,6 +63,10 @@ DEPLOYMENT_SCOPE_PREFIX = "deployment:"
 # ``component:<id>`` name the back-end would use. The back-end's scope list
 # never names them, so pruning leaves them alone; their owner retires them.
 _server_scopes: set[str] = set()
+# Publications per scope, so the UI's index poll can tell a rebuilt raster from
+# the one it shows without comparing pixels: the geometry of a component
+# raster is the same before and after a rebuild, only its content moves.
+_optimized_seq: dict[str, int] = {}
 
 
 def is_deployment_scope(scope: str) -> bool:
@@ -93,6 +97,7 @@ def publish_optimized_map(
     with _optimized_lock:
         _optimized[scope] = (meta, cells, tuple(robots), transforms)
         _server_scopes.add(scope)
+        _optimized_seq[scope] = _optimized_seq.get(scope, 0) + 1
 
 
 def retire_server_scopes(keep: str | None = None) -> list[str]:
@@ -104,6 +109,7 @@ def retire_server_scopes(keep: str | None = None) -> list[str]:
         for scope in dead:
             del _optimized[scope]
             _server_scopes.discard(scope)
+            _optimized_seq.pop(scope, None)
     return dead
 
 
@@ -921,7 +927,9 @@ async def post_optimized_map(request: Request) -> Any:
             robots,
             transforms,
         )
-    return {"ok": True, "scope": scope, "cells": int(cells.size)}
+        _optimized_seq[scope] = _optimized_seq.get(scope, 0) + 1
+        seq = _optimized_seq[scope]
+    return {"ok": True, "scope": scope, "cells": int(cells.size), "seq": seq}
 
 
 async def get_optimized_index() -> dict[str, Any]:
@@ -935,6 +943,7 @@ async def get_optimized_index() -> dict[str, Any]:
                 "width": meta.width,
                 "height": meta.height,
                 "origin": {"x": meta.origin_x, "y": meta.origin_y},
+                "seq": _optimized_seq.get(scope, 0),
             }
             for scope, (meta, _cells, robots, _transforms) in sorted(_optimized.items())
         ]
@@ -944,6 +953,7 @@ async def get_optimized_index() -> dict[str, Any]:
 async def get_optimized_map(scope: str) -> Response:
     with _optimized_lock:
         entry = _optimized.get(scope)
+        seq = _optimized_seq.get(scope, 0)
     if entry is None:
         return JSONResponse(
             {"error": f"no optimized map for {scope!r}"}, status_code=404
@@ -957,6 +967,7 @@ async def get_optimized_map(scope: str) -> Response:
         headers=_map_headers(
             {
                 **meta.as_dict(),
+                "seq": seq,
                 **({"transforms": transforms} if transforms is not None else {}),
             }
         ),
@@ -1006,3 +1017,4 @@ def reset_optimized_maps() -> None:
     with _optimized_lock:
         _optimized.clear()
         _server_scopes.clear()
+        _optimized_seq.clear()

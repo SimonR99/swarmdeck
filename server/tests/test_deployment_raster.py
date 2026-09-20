@@ -354,10 +354,12 @@ def test_routes_list_and_serve_the_deployment_scope(setup):
             "width": meta.width,
             "height": meta.height,
             "origin": {"x": meta.origin_x, "y": meta.origin_y},
+            "seq": 1,
         }
         response = client.get(f"/api/map/optimized/{scope_of(session)}")
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/png"
+        assert response.headers["X-Map-Seq"] == "1"
         assert int(response.headers["X-Map-Width"]) == meta.width
         assert int(response.headers["X-Map-Height"]) == meta.height
         assert float(response.headers["X-Map-Resolution"]) == meta.resolution
@@ -378,3 +380,24 @@ def test_routes_list_and_serve_the_deployment_scope(setup):
         assert pixel(5.0, 2.5) == output.UNKNOWN_RGB
         assert pixel(9.9, 5.5) == output.FREE_RGB
         assert cells[0, 0] == -1
+
+
+def test_rebuilt_raster_advances_its_sequence(setup):
+    """A rebuild keeps the scope's geometry; only ``seq`` tells the UI to refetch."""
+    from swarmdeck_server.api.app import app
+
+    session, refresher = setup["session"], setup["refresher"]
+    assert refresher.refresh(session, placements(session))["status"] == "built"
+    scope = scope_of(session)
+    meta, cells, robots, transforms = map_routes._optimized[scope]
+    map_routes.publish_optimized_map(scope, meta, cells, robots, transforms)
+    with TestClient(app) as client:
+        (entry,) = [
+            m
+            for m in client.get("/api/map/optimized").json()["maps"]
+            if m["scope"] == scope
+        ]
+        assert entry["seq"] == 2
+        assert client.get(f"/api/map/optimized/{scope}").headers["X-Map-Seq"] == "2"
+    assert map_routes.retire_server_scopes(keep=None) == [scope]
+    assert scope not in map_routes._optimized_seq

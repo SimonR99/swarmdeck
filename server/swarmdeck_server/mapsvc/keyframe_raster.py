@@ -22,8 +22,18 @@ Rule, per cell of ``cell_m`` (0.2 m by default):
   screenshot 2026-09-19). The 2.0 m ceiling keeps tree canopies and awnings
   out. A 0.2 m planter is below the band and drawn free: this raster is a
   display, the robots plan on their own terrain products;
-* the cell is FREE when it holds points but none in that band;
-* the cell is UNKNOWN when no point falls in it.
+* the cell is FREE when it holds points but none in that band, and also when
+  a keyframe's rays swept it (``rays``): each replicated keyframe carries a
+  4096-point subsample of its scan, so far ground has few returns and a
+  raster of returns alone left most of a street unknown while every robot's
+  own map showed it free (1418 m2 known against 2175 m2 for one robot's
+  local map, 2026-09-20). Per keyframe, the returns within
+  ``RAY_BAND_M`` of the keyframe height (the band a ground robot occupies)
+  are grouped into ``RAY_SECTORS`` bearings, and the cells from the origin to
+  one cell short of each sector's farthest return are swept free, as a laser
+  scan is written into an occupancy grid. A swept cell that holds an
+  obstacle return stays OCCUPIED; sweeping never overrides a return;
+* the cell is UNKNOWN when no point falls in it and no ray swept it.
 
 The cell values follow the ROS occupancy convention every other grid here
 uses (``-1`` unknown, ``0`` free, ``100`` occupied) and the cells are stored
@@ -72,6 +82,10 @@ MAX_COARSENING_DOUBLINGS = 4
 # range and 2^31 cells fit one int64.
 Z_QUANTUM = 0.001
 Z_BITS = 32
+# Free-space sweeps: returns within this height of the keyframe origin claim
+# free space along their bearing, one sector per degree.
+RAY_BAND_M = 1.0
+RAY_SECTORS = 360
 
 
 @dataclass(frozen=True)
@@ -84,6 +98,93 @@ class KeyframeRaster:
     coarsened: int
 
 
+def swept_free_cells(
+    points: np.ndarray,
+    origins: np.ndarray,
+    spans: np.ndarray,
+    *,
+    origin_x: float,
+    origin_y: float,
+    cell: float,
+    width: int,
+    height: int,
+    band_m: float = RAY_BAND_M,
+    sectors: int = RAY_SECTORS,
+) -> np.ndarray:
+    """Boolean mask (height x width, flat) of the cells the keyframes' rays sweep.
+
+    ``origins`` is K x 3 (one keyframe origin each) and ``spans`` K x 2, the
+    ``[start, end)`` rows of ``points`` that keyframe returned. For every
+    keyframe the returns within ``band_m`` of its height are binned by
+    bearing into ``sectors`` and the farthest return of each sector, less one
+    cell, bounds a visibility polygon; every cell of the window around the
+    keyframe whose centre lies inside that polygon is swept. The window's
+    bearings and ranges are a lookup table computed once per raster (the
+    origin is taken at its cell's centre, a tenth of a cell of error), so a
+    keyframe costs one comparison per window cell.
+    """
+    mask = np.zeros(width * height, dtype=bool)
+    if len(origins) == 0:
+        return mask
+    # Pass 1: the farthest in-band return per sector of every keyframe.
+    farthest_all = np.zeros((len(origins), sectors), dtype=np.float64)
+    for k in range(len(origins)):
+        start, end = int(spans[k, 0]), int(spans[k, 1])
+        if end <= start:
+            continue
+        ox, oy, oz = (float(v) for v in origins[k])
+        local = points[start:end]
+        local = local[np.abs(local[:, 2] - oz) <= band_m]
+        if len(local) == 0:
+            continue
+        dx, dy = local[:, 0] - ox, local[:, 1] - oy
+        radius = np.hypot(dx, dy) - cell
+        keep = radius > 0.0
+        if not keep.any():
+            continue
+        bearing = np.floor(
+            (np.arctan2(dy[keep], dx[keep]) + math.pi) / (2.0 * math.pi) * sectors
+        ).astype(np.int64)
+        np.clip(bearing, 0, sectors - 1, out=bearing)
+        order = np.argsort(bearing, kind="stable")
+        sorted_bearing = bearing[order]
+        starts = np.concatenate(([0], np.flatnonzero(np.diff(sorted_bearing)) + 1))
+        farthest_all[k, sorted_bearing[starts]] = np.maximum.reduceat(
+            radius[keep][order], starts
+        )
+    reach = float(farthest_all.max())
+    if reach <= 0.0:
+        return mask
+    # Pass 2: the window lookup table, then one comparison per cell and keyframe.
+    half = int(math.ceil(reach / cell))
+    offsets = np.arange(-half, half + 1)
+    wx, wy = np.meshgrid(offsets, offsets)  # wy varies by row
+    window_range = np.hypot(wx, wy) * cell
+    window_sector = np.floor(
+        (np.arctan2(wy, wx) + math.pi) / (2.0 * math.pi) * sectors
+    ).astype(np.int64)
+    np.clip(window_sector, 0, sectors - 1, out=window_sector)
+    grid = mask.reshape(height, width)
+    for k in range(len(origins)):
+        farthest = farthest_all[k]
+        if not farthest.any():
+            continue
+        col0 = int(math.floor((float(origins[k, 0]) - origin_x) / cell))
+        row0 = int(math.floor((float(origins[k, 1]) - origin_y) / cell))
+        inside = window_range <= farthest[window_sector]
+        # Clip the window to the grid.
+        c_lo, c_hi = max(0, col0 - half), min(width, col0 + half + 1)
+        r_lo, r_hi = max(0, row0 - half), min(height, row0 + half + 1)
+        if c_lo >= c_hi or r_lo >= r_hi:
+            continue
+        sub = inside[
+            r_lo - (row0 - half) : r_hi - (row0 - half),
+            c_lo - (col0 - half) : c_hi - (col0 - half),
+        ]
+        grid[r_lo:r_hi, c_lo:c_hi] |= sub
+    return mask
+
+
 def rasterize_points(
     points: np.ndarray,
     *,
@@ -93,8 +194,13 @@ def rasterize_points(
     ground_percentile: float = GROUND_PERCENTILE,
     obstacle_min_m: float = OBSTACLE_MIN_M,
     obstacle_max_m: float = OBSTACLE_MAX_M,
+    rays: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> KeyframeRaster:
-    """Apply the module rule to ``points`` (N x 3, world frame)."""
+    """Apply the module rule to ``points`` (N x 3, world frame).
+
+    ``rays`` is ``(origins, spans)`` as ``composite_world_points`` gathers
+    them; with it the keyframes' rays sweep free space (``swept_free_cells``).
+    """
     if not math.isfinite(cell_m) or cell_m <= 0.0:
         raise ValueError("cell size must be finite and positive")
     if not math.isfinite(margin_m) or margin_m < 0.0:
@@ -114,7 +220,11 @@ def rasterize_points(
     cloud = np.asarray(points, dtype=np.float64)
     if cloud.ndim != 2 or cloud.shape[1] != 3:
         raise ValueError("points must have shape Nx3")
-    cloud = cloud[np.isfinite(cloud).all(axis=1)]
+    finite = np.isfinite(cloud).all(axis=1)
+    if rays is not None and not finite.all():
+        # Spans index the rows as gathered; a dropped row would shift them.
+        rays = None
+    cloud = cloud[finite]
     if len(cloud) == 0:
         raise ValueError("no finite points to rasterize")
 
@@ -175,13 +285,33 @@ def rasterize_points(
 
     cells = np.full((height, width), UNKNOWN, dtype=np.int8)
     flat = cells.reshape(-1)
+    if rays is not None:
+        origins = np.asarray(rays[0], dtype=np.float64)
+        spans = np.asarray(rays[1], dtype=np.int64)
+        if (
+            origins.ndim != 2
+            or origins.shape[1] != 3
+            or spans.shape != (len(origins), 2)
+        ):
+            raise ValueError("rays must be (K x 3 origins, K x 2 spans)")
+        swept = swept_free_cells(
+            cloud,
+            origins,
+            spans,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            cell=cell,
+            width=width,
+            height=height,
+        )
+        flat[swept] = FREE
     flat[cells_idx] = FREE
     flat[cells_idx[occupied]] = OCCUPIED
     return KeyframeRaster(
         meta=GridMeta(cell, width, height, origin_x, origin_y),
         cells=cells,
         points=int(len(cloud)),
-        known_cells=int(len(cells_idx)),
+        known_cells=int((flat != UNKNOWN).sum()),
         occupied_cells=int(occupied.sum()),
         coarsened=coarsened,
     )
@@ -213,13 +343,17 @@ def composite_world_points(
             f"composite declares {declared} points, above the {max_points} budget"
         )
     parts: list[np.ndarray] = []
+    origins: list[np.ndarray] = []
+    spans: list[tuple[int, int]] = []
     chunks = 0
     missing = 0
+    gathered = 0
     for submap in submaps:
         transform = np.asarray(submap["T_component_submap"], dtype=np.float64)
         if transform.shape != (4, 4):
             raise ValueError("submap transform must be a 4x4 matrix")
         rotation, translation = transform[:3, :3], transform[:3, 3]
+        first = gathered
         for chunk in submap["chunks"]:
             chunks += 1
             local = chunk_points(chunk)
@@ -230,5 +364,25 @@ def composite_world_points(
                 parts.append(
                     np.asarray(local, dtype=np.float64) @ rotation.T + translation
                 )
+                gathered += len(local)
+        if gathered > first:
+            origins.append(translation)
+            spans.append((first, gathered))
     points = np.concatenate(parts) if parts else np.zeros((0, 3), dtype=np.float64)
-    return points, {"chunks": chunks, "missing_chunks": missing, "declared": declared}
+    return points, {
+        "chunks": chunks,
+        "missing_chunks": missing,
+        "declared": declared,
+        # One origin and ``[start, end)`` row span per keyframe that
+        # contributed points: what ``rasterize_points`` sweeps free space with.
+        "origins": (
+            np.asarray(origins, dtype=np.float64)
+            if origins
+            else np.zeros((0, 3), dtype=np.float64)
+        ),
+        "spans": (
+            np.asarray(spans, dtype=np.int64)
+            if spans
+            else np.zeros((0, 2), dtype=np.int64)
+        ),
+    }
