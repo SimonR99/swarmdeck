@@ -715,11 +715,14 @@ class IndexedMapView:
             if terrain is not None:
                 support_top = terrain[0] + index.resolution_m
                 climbable_top = terrain[0] + max_step_m
+                # A micron of slack: the fitted height carries float32
+                # rounding (0.4 arrives as 0.4000000060), and a voxel that
+                # begins exactly at the limit must count.
                 collision_cells = [
                     cell
                     for cell in cells
                     if (cell[2] + 0.5) * index.resolution_m > support_top
-                    and cell[2] * index.resolution_m >= climbable_top - 1e-9
+                    and cell[2] * index.resolution_m >= climbable_top - 1e-6
                 ]
             if any(cell in index.occupied for cell in collision_cells):
                 state = VoxelOccupancy.OCCUPIED
