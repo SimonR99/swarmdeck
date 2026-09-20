@@ -39,6 +39,7 @@
   import { review } from '$lib/stores/review.svelte';
   import { detectionCatalog } from '$lib/stores/detection.svelte';
   import { actions } from '$lib/api/connection';
+  import { postGlobalRasterGoal, usesLiveComponentGoal } from './globalGoal';
   import { robotDisplayName } from '$lib/robotDisplayName';
   import ReplicaCatalogueSelector from '$lib/components/replicas/ReplicaCatalogueSelector.svelte';
   import ReplicaCatalogueAuto from '$lib/components/replicas/ReplicaCatalogueAuto.svelte';
@@ -586,6 +587,26 @@
     const world = mapStore.gridToWorld(g.gx, g.gy);
     if (!world) return;
     const targets = qualifiedNavigateTargets();
+    const scope = mapStore.globalOptimizedScope;
+    if (usesLiveComponentGoal(mapStore.viewMode, scope)) {
+      // A verified component raster: the click is a component-frame point,
+      // fenced by the displayed solution order like a 3D pick.
+      for (const id of targets) {
+        void postGlobalRasterGoal(id, scope, world).catch((reason) => {
+          session.addAlert({
+            id: `raster_goal_${id}`,
+            level: 'warn',
+            kind: 'fault',
+            robot_id: id,
+            message: `Goal on the merged map refused: ${reason instanceof Error ? reason.message : String(reason)}`,
+            t_wall: Date.now() / 1000,
+            acknowledged: false
+          });
+        });
+      }
+      if (targets.length) navigation.finishGoal(world);
+      return;
+    }
     for (const id of targets) actions.setGoal(id, world, mapStore.info?.transforms?.[id]);
     if (targets.length) navigation.finishGoal(world);
   }
