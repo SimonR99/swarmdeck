@@ -2,6 +2,35 @@ import type { Point, Pose, RobotState } from '../../types/protocol.ts';
 
 export type FrameTransforms = Record<string, Pose> | undefined;
 
+/** What the global view knows about who belongs on the grid it displays. */
+export interface GlobalMapMembership {
+  /** True while the global canvas shows a server-rasterized optimized grid. */
+  showingOptimizedGrid: boolean;
+  /** `robots` of that grid's catalogue entry (GET /api/map/optimized), when listed. */
+  optimizedRobots?: readonly string[] | null;
+  /** `X-Map-Transforms` of the displayed raster, keyed by robot id. */
+  transforms: FrameTransforms;
+  /** The SLAM merged map's membership from GET /api/map/status. */
+  globalMembers?: readonly string[] | null;
+}
+
+/**
+ * Robot ids that belong on the global canvas. While an optimized raster is on
+ * show, the merged SLAM map's membership says nothing about it (the central
+ * SLAM service can be idle with an empty merged grid while the composite or a
+ * merged component is displayed), so the members are the robots the displayed
+ * scope lists in the catalogue, else every robot the raster's transform header
+ * placed. Otherwise the SLAM merged map's own members, as before.
+ */
+export function globalMapMembers(membership: GlobalMapMembership): string[] {
+  const { showingOptimizedGrid, optimizedRobots, transforms, globalMembers } = membership;
+  if (showingOptimizedGrid) {
+    if (optimizedRobots && optimizedRobots.length > 0) return [...optimizedRobots];
+    return Object.keys(transforms ?? {});
+  }
+  return globalMembers ? [...globalMembers] : [];
+}
+
 export function hasQualifiedRasterFrame(robot: RobotState, frames: FrameTransforms): boolean {
   return !robot.navigation_transform || Boolean(frames?.[robot.robot_id]);
 }

@@ -1,7 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { rebaseViewport } from './mapViewport';
-  import { hasQualifiedRasterFrame, RasterRobotProjectionCache } from './mapFrames';
+  import {
+    globalMapMembers,
+    hasQualifiedRasterFrame,
+    RasterRobotProjectionCache
+  } from './mapFrames';
   import {
     Box,
     Compass,
@@ -134,14 +138,20 @@
       const shown = robot ? project(robot) : null;
       return shown ? [shown] : [];
     }
-    const members = mapStore.status?.global_members;
-    if (members && members.length > 0) {
-      return fleet.robots
-        .filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id))
-        .map(project)
-        .filter((robot): robot is (typeof fleet.robots)[number] => robot !== null);
-    }
-    return [];
+    // The displayed raster decides who is on it: the optimized scope's robots
+    // (the composite or a merged component may be shown while the SLAM merged
+    // map reports no members at all), else the SLAM merged map's membership.
+    const members = globalMapMembers({
+      showingOptimizedGrid: mapStore.showingOptimizedGrid,
+      optimizedRobots: mapStore.globalOptimizedRobots,
+      transforms: mapStore.info?.transforms,
+      globalMembers: mapStore.status?.global_members
+    });
+    if (members.length === 0) return [];
+    return fleet.robots
+      .filter((robot) => members.includes(robot.robot_id) && fleet.isEnabled(robot.robot_id))
+      .map(project)
+      .filter((robot): robot is (typeof fleet.robots)[number] => robot !== null);
   }
 
   function centreOnFleet() {

@@ -493,6 +493,15 @@ export const mapStore = {
   get globalOptimizedScope() {
     return state.globalOptimizedScope;
   },
+  /**
+   * `robots` the catalogue lists for the scope behind the global optimized
+   * canvas, or undefined when none is on show or the index no longer has it.
+   */
+  get globalOptimizedRobots(): readonly string[] | undefined {
+    const scope = state.globalOptimizedScope;
+    if (scope === null) return undefined;
+    return state.optimizedScopes.find((entry) => entry.scope === scope)?.robots;
+  },
   /** Operator wording for that scope: "deployment composite" for the raster. */
   get globalOptimizedLabel(): string | null {
     return state.globalOptimizedScope === null

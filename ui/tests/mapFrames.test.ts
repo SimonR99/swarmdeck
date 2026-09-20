@@ -6,6 +6,7 @@ import {
   routePositions
 } from '../src/lib/components/map3d/mapFrames.ts';
 import {
+  globalMapMembers,
   hasQualifiedRasterFrame,
   projectRobotToRaster,
   RasterRobotProjectionCache
@@ -90,4 +91,77 @@ test('missing raster provenance blocks projection and navigation qualification',
   const legacy = { ...robot, navigation_transform: undefined };
   assert.equal(projectRobotToRaster(legacy, undefined), legacy);
   assert.equal(hasQualifiedRasterFrame(legacy, undefined), true);
+});
+
+const rasterFrames = { robot_0: { x: 0, y: 0, yaw: 0 }, robot_1: { x: 4, y: -2, yaw: 1.2 } };
+
+test('an optimized raster on show is populated by its catalogue scope, not the SLAM merge', () => {
+  // Measured on benchbot: the composite raster is displayed while the central
+  // SLAM service is idle and reports no merged-map members at all.
+  assert.deepEqual(
+    globalMapMembers({
+      showingOptimizedGrid: true,
+      optimizedRobots: ['robot_0', 'robot_1'],
+      transforms: rasterFrames,
+      globalMembers: []
+    }),
+    ['robot_0', 'robot_1']
+  );
+  // The catalogue entry wins over both the transform header and the SLAM list.
+  assert.deepEqual(
+    globalMapMembers({
+      showingOptimizedGrid: true,
+      optimizedRobots: ['robot_0', 'robot_1'],
+      transforms: { ...rasterFrames, robot_2: { x: 1, y: 1, yaw: 0 } },
+      globalMembers: ['robot_2']
+    }),
+    ['robot_0', 'robot_1']
+  );
+});
+
+test('an optimized raster whose scope the index no longer lists falls back to its transform header', () => {
+  assert.deepEqual(
+    globalMapMembers({
+      showingOptimizedGrid: true,
+      optimizedRobots: undefined,
+      transforms: rasterFrames,
+      globalMembers: []
+    }),
+    ['robot_0', 'robot_1']
+  );
+  // A listed scope with no robots is as good as unlisted.
+  assert.deepEqual(
+    globalMapMembers({
+      showingOptimizedGrid: true,
+      optimizedRobots: [],
+      transforms: rasterFrames,
+      globalMembers: ['robot_2']
+    }),
+    ['robot_0', 'robot_1']
+  );
+});
+
+test('the SLAM merged grid keeps its own membership', () => {
+  assert.deepEqual(
+    globalMapMembers({
+      showingOptimizedGrid: false,
+      optimizedRobots: ['robot_0', 'robot_1'],
+      transforms: rasterFrames,
+      globalMembers: ['robot_1', 'robot_2']
+    }),
+    ['robot_1', 'robot_2']
+  );
+  assert.deepEqual(
+    globalMapMembers({ showingOptimizedGrid: false, transforms: undefined, globalMembers: [] }),
+    []
+  );
+});
+
+test('nothing known about the global map places nobody on it', () => {
+  assert.deepEqual(globalMapMembers({ showingOptimizedGrid: false, transforms: undefined }), []);
+  assert.deepEqual(globalMapMembers({ showingOptimizedGrid: true, transforms: undefined }), []);
+  assert.deepEqual(
+    globalMapMembers({ showingOptimizedGrid: true, optimizedRobots: null, transforms: {}, globalMembers: null }),
+    []
+  );
 });
