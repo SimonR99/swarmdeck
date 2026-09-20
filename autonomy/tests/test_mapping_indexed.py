@@ -958,7 +958,10 @@ def test_vlp16_history_accepts_body_corridor_and_rejects_wall_and_unknown(
 
     snapshot = store.snapshot()
     component = component_id_for_anchor(KeyframeId("r0", SESSION, 0))
-    view = IndexedMapView(max_build_s=5.0)
+    # The Bunker's own step limit: the body volume starts above what the
+    # platform can climb, and a 0.4 m body under a 0.2 m limit at 0.2 m voxels
+    # would have no layer left to see a wall in.
+    view = IndexedMapView(max_build_s=5.0, max_step_m=0.15)
     key = view.refresh(snapshot, component, store.get_chunk)
     bunker_body = (1.023, 0.778, 0.4)
     traversable = tuple((float(x), 0.0, 0.2) for x in np.arange(0.0, 1.61, 0.2))
@@ -1042,3 +1045,76 @@ def test_keyframe_retraction_removes_indexed_submap(tmp_path) -> None:
     assert view.query(
         QueryRequest(retracted_key, ((2.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
     ).occupancy == (VoxelOccupancy.UNKNOWN,)
+
+
+def test_kerb_top_within_the_step_limit_is_support_not_a_collision() -> None:
+    # A gutter at 0.0 with a kerb whose top (0.19 m) occupies the voxel above
+    # the ground layer across the +x half of the footprint. The robot stands
+    # on the gutter with its body box reaching over the kerb top. Within the
+    # step limit that voxel is terrain, not an obstacle; a 0.45 m block in the
+    # same place is one.
+    key = SnapshotKey("platform", 0, 0, "a" * 64)
+    resolution = 0.2
+    columns = {
+        (x, y): ((0.0,) if x < 2 else (0.0, 0.19))
+        for x in range(-3, 6)
+        for y in range(-3, 4)
+    }
+    kerb_voxels = {(x, y, 0) for x in range(2, 6) for y in range(-3, 4)}
+    ground_voxels = {(x, y, -1) for x in range(-3, 6) for y in range(-3, 4)}
+    free_voxels = {
+        (x, y, z) for x in range(-3, 6) for y in range(-3, 4) for z in range(1, 5)
+    } | {(x, y, 0) for x in range(-3, 2) for y in range(-3, 4)}
+    view = IndexedMapView(max_step_m=0.15, max_drop_m=0.25)
+    view.publish(
+        IndexedGrid(
+            key,
+            "b" * 64,
+            1,
+            1,
+            kerb_voxels | ground_voxels,
+            free_voxels,
+            columns,
+            resolution,
+            18,
+        )
+    )
+    body = (1.0, 0.8, 0.45)
+    standing = view.query(
+        QueryRequest(
+            key,
+            ((0.1, 0.1, 0.225),),
+            body,
+            stop_at_unknown=False,
+            max_step_m=0.15,
+            max_drop_m=0.25,
+        )
+    )
+    assert standing.occupancy == (int(VoxelOccupancy.FREE),)
+    assert standing.step == (False,)
+    # A block reaching 0.45 m (voxels 0 and 1 above the ground) is a collision.
+    block = {(x, y, 1) for x in range(2, 6) for y in range(-3, 4)}
+    view.publish(
+        IndexedGrid(
+            SnapshotKey("platform", 0, 1, "c" * 64),
+            "d" * 64,
+            2,
+            2,
+            kerb_voxels | ground_voxels | block,
+            free_voxels - block,
+            columns,
+            resolution,
+            18,
+        )
+    )
+    blocked = view.query(
+        QueryRequest(
+            SnapshotKey("platform", 0, 1, "c" * 64),
+            ((0.1, 0.1, 0.225),),
+            body,
+            stop_at_unknown=False,
+            max_step_m=0.15,
+            max_drop_m=0.25,
+        )
+    )
+    assert blocked.occupancy == (int(VoxelOccupancy.OCCUPIED),)

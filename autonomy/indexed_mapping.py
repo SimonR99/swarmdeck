@@ -700,16 +700,26 @@ class IndexedMapView:
                 for z in range(int(lo[2]), int(hi[2]) + 1)
             ]
             terrain = self._terrain(index, sample, half)
-            # The fitted surface beneath this body is support, not a collision. At
-            # map resolution, omit its voxel layer from the body volume; low
-            # obstacles that share that voxel are intentionally unresolved.
+            # The fitted surface beneath this body is support, not a collision,
+            # and so is terrain the platform's step limit admits: a kerb top one
+            # voxel above the gutter, half a metre from a robot standing beside
+            # it, sat inside the body's axis-aligned box and was reported as an
+            # obstacle at the robot's own cell (the Bunker on the Bistro gutter,
+            # 2026-09-20). The body volume omits the surface's voxel layer and
+            # every voxel that begins below the step limit above the surface;
+            # the step, drop and roughness tests own what that band contains,
+            # and a low obstacle inside it is unresolved at map resolution. A
+            # voxel that begins at or above the limit still counts, so a wall
+            # in front of a low body is seen in the layer above the band.
             collision_cells = cells
             if terrain is not None:
                 support_top = terrain[0] + index.resolution_m
+                climbable_top = terrain[0] + max_step_m
                 collision_cells = [
                     cell
                     for cell in cells
                     if (cell[2] + 0.5) * index.resolution_m > support_top
+                    and cell[2] * index.resolution_m >= climbable_top - 1e-9
                 ]
             if any(cell in index.occupied for cell in collision_cells):
                 state = VoxelOccupancy.OCCUPIED
