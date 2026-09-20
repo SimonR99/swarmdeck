@@ -1654,6 +1654,76 @@ def test_blocked_home_refinement_replans_the_global_route(monkeypatch):
     assert planner._blocked_retry_count == 0
 
 
+def window_blocked_response():
+    blocked = rolling_home_response(partial=False, path_x=[])
+    blocked.status = RefineRouteResponse.BLOCKED
+    blocked.reason = "robot is outside the completed objective route window"
+    return blocked
+
+
+def window_replan_rig(monkeypatch, pose_of_call):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -1.5, -2.0],
+    )
+    bridge, planner, client = rig(
+        monkeypatch,
+        initial,
+        refine_responses=[window_blocked_response() for _ in range(4)],
+    )
+    client.call_async.side_effect = [completed(initial) for _ in range(5)]
+    calls = []
+
+    def state():
+        calls.append(len(calls))
+        return {"pose": pose_of_call(len(calls))}
+
+    bridge.state.side_effect = state
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    planner.replan_backoff_s = 0.0
+    assert planner.return_home()
+    return bridge, planner, client
+
+
+def complete_section(bridge, planner):
+    assert wait_until(lambda: planner._continuation_thread is None)
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+
+def test_route_window_replans_without_motion_end_the_objective(monkeypatch):
+    bridge, planner, client = window_replan_rig(
+        monkeypatch, lambda _call: {"x": 0.0, "y": 1.0, "yaw": 0.0}
+    )
+
+    for cycle in (1, 2):
+        complete_section(bridge, planner)
+        assert wait_until(lambda: bridge.follow_path.call_count == cycle + 1)
+    complete_section(bridge, planner)
+
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert bridge.follow_path.call_count == 3
+    assert client.call_async.call_count == 3
+    assert "completed without motion 3 times in a row" in planner._nav_failure_reason
+    assert planner._objective_kind is None
+
+
+def test_route_window_replans_with_motion_keep_replanning(monkeypatch):
+    bridge, planner, client = window_replan_rig(
+        monkeypatch, lambda call: {"x": 0.5 * call, "y": 1.0, "yaw": 0.0}
+    )
+
+    for cycle in (1, 2, 3):
+        complete_section(bridge, planner)
+        assert wait_until(lambda: bridge.follow_path.call_count == cycle + 1)
+
+    assert bridge.nav_status == "active"
+    assert client.call_async.call_count == 4
+    assert planner._nav_failure_reason is None
+    assert planner._window_replans == 1
+
+
 def test_indexed_home_refinement_rejects_evidence_downgrade(monkeypatch):
     initial = rolling_home_response(
         partial=True,

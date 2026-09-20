@@ -65,6 +65,15 @@ def planner_input_unavailable(reason) -> bool:
 # ends the objective rather than looping.
 PREFIX_NO_PROGRESS_LIMIT = 3
 PREFIX_PROGRESS_EPSILON_M = 0.05
+# A continuation the planner answers with "robot is outside the completed
+# objective route window" is replanned from scratch. When the controller has
+# completed the section without the robot moving (a section that ended where
+# it stood), every replan produces the same section and the loop ran 2.5
+# times a second for 120 s (benchbot 2026-09-19 and 2026-09-20, robot_0 and
+# robot_1 at 8 m goals). This many such replans in a row, with the robot
+# displaced less than the epsilon between them, end the objective instead.
+WINDOW_REPLAN_LIMIT = 3
+WINDOW_REPLAN_EPSILON_M = 0.3
 
 
 @dataclass(frozen=True)
@@ -179,6 +188,8 @@ class MggObjectivePlanning:
         self._rolling_authority_binding = None
         self._rolling_best_remaining_m = None
         self._rolling_no_progress_sections = 0
+        self._window_replans = 0
+        self._window_replan_xy = None
         self._continuation_generation = None
         self._continuation_deadline = None
         self._continuation_thread = None
@@ -285,6 +296,8 @@ class MggObjectivePlanning:
             self._objective_goal = deepcopy(copied_goal)
             self._indexed_map_validated = False
             self._home_intent = None
+            self._window_replans = 0
+            self._window_replan_xy = None
             self._clear_rolling_locked()
             self._recovery_generation = None
             self._recovery_binding = None
@@ -986,6 +999,13 @@ class MggObjectivePlanning:
                         ):
                             return
                         self._clear_rolling_locked()
+                    if self._window_replan_exhausted(message):
+                        self._fail_if_current(
+                            "MGG section completed without motion "
+                            f"{WINDOW_REPLAN_LIMIT} times in a row: {message}",
+                            generation,
+                        )
+                        return
                     if self._start_recovery(
                         generation,
                         home_intent,
@@ -1004,6 +1024,28 @@ class MggObjectivePlanning:
             with self._active_lock:
                 if self._continuation_thread is worker:
                     self._continuation_thread = None
+
+    def _window_replan_exhausted(self, message: str) -> bool:
+        """Count a route-window replan; True once they repeat without motion."""
+
+        if "outside the completed objective route window" not in str(message):
+            return False
+        try:
+            pose = self.bridge.state().get("pose") or {}
+            xy = (float(pose["x"]), float(pose["y"]))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            xy = None
+        with self._active_lock:
+            previous = self._window_replan_xy
+            moved = (
+                xy is None
+                or previous is None
+                or math.hypot(xy[0] - previous[0], xy[1] - previous[1])
+                >= WINDOW_REPLAN_EPSILON_M
+            )
+            self._window_replans = 1 if moved else self._window_replans + 1
+            self._window_replan_xy = xy
+            return self._window_replans >= WINDOW_REPLAN_LIMIT
 
     def _owns_continuation_locked(self, generation, route_id, home_intent) -> bool:
         return (
