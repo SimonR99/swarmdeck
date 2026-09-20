@@ -225,16 +225,87 @@ def test_scope_survives_a_missing_composite_and_retires_with_the_mission(setup):
     assert refresher.refresh(None, {})["status"] == "no mission"
 
 
+def test_a_verified_merge_is_rasterized_under_its_component_id(setup, tmp_path):
+    # Inter-robot closures merged the two robots: both now publish one
+    # component anchored at robot_0's first keyframe. That verified component
+    # is the fleet map, under the back-end's own ``component:<id>`` name (the
+    # 2D view ranks it first), placed in the component frame with each
+    # robot's live T_component_navigation; the composite raster is retired.
+    session, refresher, store = setup["session"], setup["refresher"], setup["store"]
+    registry = setup["registry"]
+    first = refresher.refresh(
+        session, placements(session), deployment_raster.component_frames(session)
+    )
+    assert first["status"] == "built" and first["scope"] == scope_of(session)
+
+    # Both robots republish one component anchored at robot_0's first
+    # keyframe with the same accepted solution order, as a merge does.
+    for robot_id, points, revision in (
+        ("robot_0", ROBOT_0_POINTS, 2),
+        ("robot_1", ROBOT_1_POINTS, 3),
+    ):
+        source, chunks = peer(
+            tmp_path / f"merged-{robot_id}",
+            robot_id,
+            session,
+            anchor_robot="robot_0",
+            order=[7, 0],
+            revision=revision,
+            points=points.tolist(),
+        )
+        for name, raw in chunks.items():
+            store.put_chunk(name, raw)
+        assert store.publish(source)
+    shared = source["snapshot"]["manifests"][0]["graph_revision"]["component_id"]
+    assert shared == setup["components"]["robot_0"]
+    shift = [
+        [1.0, 0.0, 0.0, 4.0],
+        [0.0, 1.0, 0.0, -1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    for robot_id, transform in (("robot_0", IDENTITY_SE3), ("robot_1", shift)):
+        payload = live_payload(robot_id, shared, session, transform)
+        payload["solution_order"] = [7, 0]
+        registry.update_state(
+            dict(robot_id=robot_id, pose=dict(x=1, y=1), live_mapping=payload)
+        )
+
+    frames = deployment_raster.component_frames(session)
+    assert frames["robot_1"][0] == shared
+    report = refresher.refresh(session, placements(session), frames)
+    assert report["status"] == "built"
+    assert report["scope"] == f"component:{shared}"
+    assert report["robots"] == ["robot_0", "robot_1"]
+    assert report["retired"] == [scope_of(session)]
+    meta, cells, robots, transforms = map_routes._optimized[f"component:{shared}"]
+    assert robots == ("robot_0", "robot_1")
+    assert transforms["robot_0"] == {"x": 0.0, "y": 0.0, "yaw": 0.0}
+    assert transforms["robot_1"] == {"x": 4.0, "y": -1.0, "yaw": 0.0}
+    assert scope_of(session) not in map_routes._optimized
+    # The back-end's scope list still never prunes it.
+    assert map_routes._prune_optimized_maps(["robot:x"]) == []
+    assert f"component:{shared}" in map_routes._optimized
+
+
 def test_slam_scope_list_never_prunes_the_deployment_scope():
     meta = GridMeta(0.2, 2, 2, 0.0, 0.0)
     cells = np.zeros((2, 2), dtype=np.int8)
     scope = scope_of(str(uuid4()))
     map_routes.reset_optimized_maps()
     map_routes.publish_optimized_map(scope, meta, cells, ("robot_0",), None)
-    map_routes.publish_optimized_map("component:1", meta, cells, ("robot_1",), None)
+    # A verified component this server rasterized shares the back-end's
+    # naming and is kept like the composite; a back-end-posted grid the
+    # back-end no longer lists is pruned.
+    map_routes.publish_optimized_map(
+        "component:2", meta, cells, ("robot_1", "robot_2"), None
+    )
+    with map_routes._optimized_lock:
+        map_routes._optimized["component:1"] = (meta, cells, ("robot_1",), None)
     assert map_routes._prune_optimized_maps(["robot:a"]) == ["component:1"]
-    assert list(map_routes._optimized) == [scope]
-    assert map_routes.retire_deployment_scopes(keep=None) == [scope]
+    assert sorted(map_routes._optimized) == sorted([scope, "component:2"])
+    assert map_routes.retire_server_scopes(keep="component:2") == [scope]
+    assert map_routes.retire_deployment_scopes(keep=None) == ["component:2"]
     assert map_routes._optimized == {}
     assert map_routes.DEPLOYMENT_SCOPE_PREFIX == replica_views.DEPLOYMENT_PREFIX
     with pytest.raises(ValueError, match="outside"):
@@ -262,7 +333,7 @@ def test_tick_reads_placements_then_builds_off_loop(setup, caplog):
         report = asyncio.run(refresher.tick())
     assert report["status"] == "built"
     assert scope_of(session) in map_routes._optimized
-    (line,) = [r.message for r in caplog.records if "Deployment raster" in r.message]
+    (line,) = [r.message for r in caplog.records if "Fleet raster" in r.message]
     assert "2 robots" in line and "cells" in line and "ms" in line
 
 

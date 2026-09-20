@@ -58,10 +58,19 @@ _optimized_lock = threading.Lock()
 # Must equal ``replica_views.DEPLOYMENT_PREFIX``; spelled here to keep this
 # module free of the replica catalogue's imports.
 DEPLOYMENT_SCOPE_PREFIX = "deployment:"
+# Scopes this server rasterized itself (``api.deployment_raster``): the
+# deployment composite, or a verified component under the same
+# ``component:<id>`` name the back-end would use. The back-end's scope list
+# never names them, so pruning leaves them alone; their owner retires them.
+_server_scopes: set[str] = set()
 
 
 def is_deployment_scope(scope: str) -> bool:
     return scope.startswith(DEPLOYMENT_SCOPE_PREFIX)
+
+
+def is_server_scope(scope: str) -> bool:
+    return is_deployment_scope(scope) or scope in _server_scopes
 
 
 def publish_optimized_map(
@@ -83,19 +92,23 @@ def publish_optimized_map(
         raise ValueError("transform robot outside map scope")
     with _optimized_lock:
         _optimized[scope] = (meta, cells, tuple(robots), transforms)
+        _server_scopes.add(scope)
 
 
-def retire_deployment_scopes(keep: str | None = None) -> list[str]:
-    """Drop every deployment raster except ``keep``; returns what was dropped."""
+def retire_server_scopes(keep: str | None = None) -> list[str]:
+    """Drop every server-made raster except ``keep``; returns what was dropped."""
     with _optimized_lock:
         dead = sorted(
-            scope
-            for scope in _optimized
-            if is_deployment_scope(scope) and scope != keep
+            scope for scope in _optimized if is_server_scope(scope) and scope != keep
         )
         for scope in dead:
             del _optimized[scope]
+            _server_scopes.discard(scope)
     return dead
+
+
+def retire_deployment_scopes(keep: str | None = None) -> list[str]:
+    return retire_server_scopes(keep)
 
 
 def has_optimized_map(scope: str) -> bool:
@@ -689,7 +702,7 @@ def _prune_optimized_maps(scopes: Any) -> list[str]:
     live = set(scopes)
     with _optimized_lock:
         dead = sorted(
-            scope for scope in set(_optimized) - live if not is_deployment_scope(scope)
+            scope for scope in set(_optimized) - live if not is_server_scope(scope)
         )
         for scope in dead:
             del _optimized[scope]
@@ -992,3 +1005,4 @@ def reset_optimized_maps() -> None:
     """Drop every scoped grid. Used when the session or the graph resets."""
     with _optimized_lock:
         _optimized.clear()
+        _server_scopes.clear()

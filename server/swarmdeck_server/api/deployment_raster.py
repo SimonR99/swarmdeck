@@ -1,13 +1,16 @@
-"""Keep a 2D raster of the deployment composite in the optimized-map store.
+"""Keep a 2D raster of the fleet map in the optimized-map store.
 
-The Global 3D view renders the deployment composite (``replica_views``): every
-replicated single-robot component of the active mission placed in the surveyed
-deployment frame. With inter-robot closures off it is the only fleet-wide map
-there is, and the 2D map's "optimized" source (``/api/map/optimized``) had
-nothing to show because no ``component:<n>`` scope holds two robots. This
-module rasterizes that same composite (``mapsvc.keyframe_raster``) and stores
-it as the scope ``deployment:<session>`` beside the back-end's grids, so both
-interfaces show the same merged geometry.
+The Global 3D view renders the fleet map from the replicated keyframes: the
+verified multi-robot component when inter-robot closures have merged the
+robots, else the deployment composite (``replica_views``: every replicated
+single-robot component placed in the surveyed deployment frame). The 2D map's
+"optimized" source (``/api/map/optimized``) had nothing to show for either:
+the central SLAM service that posts ``component:<n>`` grids ingests no
+keyframes in a peer deployment. This module rasterizes the same geometry the
+3D view draws (``mapsvc.keyframe_raster``) and stores it beside the back-end's
+grids: a verified component as ``component:<id>`` (which the 2D view ranks
+first, as a merge), the composite as ``deployment:<session>``. Both
+interfaces then show one map.
 
 Lifecycle: ``deployment_raster_loop`` in ``api.app`` calls ``tick`` every
 ``REFRESH_INTERVAL_S``. Registry and map-service placements are read on the
@@ -103,6 +106,44 @@ def active_session_id() -> str | None:
     return os.environ.get("SWARMDECK_MISSION_ID") or None
 
 
+def component_frames(session_id: str | None) -> dict[str, tuple[str, Any]]:
+    """Each robot's live component and its navigation frame in that component."""
+    if not session_id:
+        return {}
+    frames: dict[str, tuple[str, Any]] = {}
+    for robot in list(replica_views.registry.robots.values()):
+        live = robot.live_mapping
+        if live is None or live["mission_id"] != session_id:
+            continue
+        try:
+            transform = replica_views.validate_se3(
+                live["T_component_navigation"], "T_component_navigation"
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        frames[robot.robot_id] = (str(live["component_id"]), transform)
+    return frames
+
+
+def verified_component(catalogue, session_id: str) -> str | None:
+    """The largest component two or more robots publish, or None.
+
+    A component with several publishers is a verified inter-robot merge: the
+    Global 3D view prefers it, and so does the 2D raster.
+    """
+    best: tuple[int, int, str] | None = None
+    for (session, component_id), sources in catalogue.groups.items():
+        if session != session_id or replica_views.is_deployment_component(component_id):
+            continue
+        robots = {source["robot_id"] for source in sources}
+        if len(robots) < 2:
+            continue
+        rank = (len(robots), len(sources), component_id)
+        if best is None or rank > best:
+            best = rank
+    return None if best is None else best[2]
+
+
 class DeploymentRasterRefresher:
     def __init__(
         self,
@@ -128,7 +169,8 @@ class DeploymentRasterRefresher:
         """One refresh: placements on the loop, everything else in a thread."""
         session_id = active_session_id()
         placements = replica_views.deployment_placements(session_id)
-        return await asyncio.to_thread(self.refresh, session_id, placements)
+        frames = component_frames(session_id)
+        return await asyncio.to_thread(self.refresh, session_id, placements, frames)
 
     # ---------------------------------------------------------------- thread
 
@@ -147,32 +189,78 @@ class DeploymentRasterRefresher:
         return points
 
     def refresh(
-        self, session_id: str | None, placements: Mapping[str, Mapping[str, Any]]
+        self,
+        session_id: str | None,
+        placements: Mapping[str, Mapping[str, Any]],
+        frames: Mapping[str, tuple[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Rebuild the active mission's raster when its composite changed.
+        """Rebuild the active mission's raster when its source changed.
 
+        ``frames`` maps each robot to ``(component_id, T_component_navigation)``
+        from its live authority, for a verified component's transforms.
         Returns a small report (``status`` plus counts) for logs and tests.
         """
-        scope = (
-            replica_views.deployment_component_id(session_id) if session_id else None
-        )
-        retired = map_routes.retire_deployment_scopes(keep=scope)
-        if retired:
-            log.info("Retired deployment raster(s) %s", ", ".join(retired))
-            self.chunks.clear()
-        if scope is None:
+        frames = frames or {}
+        if not session_id:
+            retired = map_routes.retire_server_scopes(keep=None)
+            if retired:
+                log.info("Retired fleet raster(s) %s", ", ".join(retired))
+                self.chunks.clear()
             self.built = None
             return {"status": "no mission", "retired": retired}
-        if len(placements) < 2:
-            return {"status": "no composite", "scope": scope, "retired": retired}
 
+        # A verified merge (a component two or more robots publish) is the
+        # fleet map; the composite is what there is without one.
         try:
             catalogue = replica_views.current_catalogue(session_id)
-            view = replica_views.deployment_view(catalogue, session_id, placements)
+        except (OverflowError, ValueError, KeyError, TypeError) as exc:
+            scope = replica_views.deployment_component_id(session_id)
+            return self._skip(scope, (session_id, "catalogue"), str(exc), [])
+        merged = verified_component(catalogue, session_id)
+        if merged is not None:
+            scope = f"component:{merged}"
+        else:
+            scope = replica_views.deployment_component_id(session_id)
+        retired = map_routes.retire_server_scopes(keep=scope)
+        if retired:
+            log.info("Retired fleet raster(s) %s", ", ".join(retired))
+            self.chunks.clear()
+
+        try:
+            if merged is not None:
+                view = catalogue.view(session_id, merged)
+                robots = tuple(
+                    sorted(
+                        robot
+                        for robot, (component, _) in frames.items()
+                        if component == merged
+                    )
+                )
+                transforms = {robot: se2_of(frames[robot][1]) for robot in robots}
+            else:
+                if len(placements) < 2:
+                    return {
+                        "status": "no composite",
+                        "scope": scope,
+                        "retired": retired,
+                    }
+                view = replica_views.deployment_view(catalogue, session_id, placements)
+                if view is None:
+                    return {
+                        "status": "no composite",
+                        "scope": scope,
+                        "retired": retired,
+                    }
+                # ``members`` carries each placement's T_world_navigation: the
+                # same transform ``robot_state`` applies to that robot's
+                # telemetry, so the 2D overlay's re-projection is the identity.
+                robots = tuple(member["robot_id"] for member in view["members"])
+                transforms = {
+                    member["robot_id"]: se2_of(member["T_world_navigation"])
+                    for member in view["members"]
+                }
         except (OverflowError, ValueError, KeyError, TypeError) as exc:
             return self._skip(scope, (session_id, "catalogue"), str(exc), retired)
-        if view is None:
-            return {"status": "no composite", "scope": scope, "retired": retired}
 
         key = (session_id, str(view["snapshot_id"]))
         if key == self.built and map_routes.has_optimized_map(scope):
@@ -189,14 +277,6 @@ class DeploymentRasterRefresher:
         except (OverflowError, ValueError) as exc:
             return self._skip(scope, key, str(exc), retired)
 
-        # ``members`` carries each placement's T_world_navigation: the same
-        # transform ``robot_state`` applies to that robot's telemetry, so the
-        # 2D overlay's re-projection onto this raster is the identity.
-        robots = tuple(member["robot_id"] for member in view["members"])
-        transforms = {
-            member["robot_id"]: se2_of(member["T_world_navigation"])
-            for member in view["members"]
-        }
         map_routes.publish_optimized_map(
             scope, raster.meta, raster.cells, robots, transforms
         )
@@ -204,7 +284,7 @@ class DeploymentRasterRefresher:
         self.failed = None
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         log.info(
-            "Deployment raster %s: %d robots, %d chunks (%d missing), %d points, "
+            "Fleet raster %s: %d robots, %d chunks (%d missing), %d points, "
             "%dx%d cells at %.2f m (%d known, %d occupied, coarsened %d), %.0f ms",
             scope,
             len(robots),
@@ -237,7 +317,7 @@ class DeploymentRasterRefresher:
     ) -> dict[str, Any]:
         # One warning per failing publication, not one per tick.
         if key != self.failed:
-            log.warning("Deployment raster %s skipped: %s", scope, detail)
+            log.warning("Fleet raster %s skipped: %s", scope, detail)
             self.failed = key
         return {
             "status": "skipped",
