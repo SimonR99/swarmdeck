@@ -1,6 +1,7 @@
 #pragma once
 
 #include <swarmdeck_mapping/mola_submap_bridge.hpp>
+#include <swarmdeck_mapping/point_budget.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +14,6 @@ namespace swarmdeck_mapping
 {
 inline constexpr std::size_t kMaxPlannerMetadataBytes = 64 * 1024;
 inline constexpr std::size_t kMaxPlannerArtifactBytes = 256 * 1024 * 1024;
-inline constexpr std::size_t kMaxPlannerProductPoints = 2'000'000;
 inline constexpr std::size_t kMaxPlannerProductVoxels = 2'000'000;
 inline constexpr std::size_t kMaxPlannerProductRaySteps = 4'000'000;
 
@@ -52,7 +52,14 @@ struct PlannerSurfaceSample
 struct PlannerGridLimits
 {
   double resolution_m{0.2};
-  std::size_t max_points{1'000'000};
+  // The component point budget. `PersistentMolaRuntime` sets it from
+  // `RuntimeLimits::max_points_per_map`, the same number its loader enforces,
+  // so a map the loader admits always gets a planner grid (see
+  // point_budget.hpp). Measured in the grid build on a 20-core workstation
+  // (RelWithDebInfo, 2026-09-19): 2.3 ms per 4096-point keyframe, 0.71 s at
+  // 1,003,520 points, 1.50 s at 2,048,000 and 4.70 s at 8,192,000, the
+  // last within `max_build_s` here but not on a slower host.
+  std::size_t max_points{kMaxPointsPerMap};
   std::size_t max_voxels{2'000'000};
   // Maximum work admitted from a deterministic, conservative subset of rays.
   std::size_t max_ray_steps{4'000'000};
@@ -102,10 +109,17 @@ struct PlannerGridArtifact
 std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
     const NativeGeometrySnapshot& snapshot, const PlannerGridLimits& limits = {});
 
-/** Atomically writes deterministic SDMGRID1 bytes and refuses replacement. */
+/**
+ * Atomically writes deterministic SDMGRID1 bytes and refuses replacement.
+ *
+ * `max_points` is the product's point budget; the runtime passes the same
+ * `max_points_per_map` its loader and grid build use, so no product the build
+ * accepted is refused here.
+ */
 PlannerGridArtifact writeNativePlannerGrid(
     const NativePlannerGrid& grid, const std::filesystem::path& output,
     std::size_t max_bytes = kMaxPlannerArtifactBytes,
-    std::size_t max_metadata_bytes = kMaxPlannerMetadataBytes);
+    std::size_t max_metadata_bytes = kMaxPlannerMetadataBytes,
+    std::size_t max_points = kMaxPointsPerMap);
 
 }  // namespace swarmdeck_mapping

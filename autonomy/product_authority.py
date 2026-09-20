@@ -39,6 +39,11 @@ MAX_PRODUCT_BYTES = 4 * 1024 * 1024
 MAX_PRODUCT_COMPONENTS = 256
 DEFAULT_READ_ATTEMPTS = 3
 READ_RETRY_PAUSE_S = 0.005
+# ``<peer>/mola/worker.json``: the worker's last build attempt for the peer
+# (``deploy/autonomy/mola_worker.py``, ``WORKER_STATUS_VERSION``).
+MAX_WORKER_STATUS_BYTES = 64 * 1024
+WORKER_STATUS_VERSION = 1
+MAX_WORKER_ERROR_CHARS = 2000
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -61,6 +66,23 @@ class PublishedProduct:
     snapshot_id: str
     generated_at_ns: int
     artifacts: tuple[ProductArtifact, ...]
+
+
+@dataclass(frozen=True)
+class WorkerStatus:
+    """The worker's last build attempt for a peer (``mola/worker.json``).
+
+    ``error`` is empty after a published build and the failure message
+    otherwise: a component that has outgrown the point budget reports, for
+    example, ``native runtime invalid_request: manifest exceeds point count
+    limit of 2000000 points`` while its product stays at the last revision
+    that fit. ``source_sha256`` names the ``snapshot.json`` bytes the attempt
+    read (empty when they could not be read).
+    """
+
+    updated_at_ns: int
+    source_sha256: str
+    error: str
 
 
 def _uint(value: object, field: str) -> int:
@@ -273,6 +295,35 @@ def _read_published_product(
             return None
         return PublishedProduct(snapshot_id, generated_at_ns, artifacts)
     return None
+
+
+def read_worker_status(
+    peer_root: str | Path, *, max_bytes: int = MAX_WORKER_STATUS_BYTES
+) -> WorkerStatus | None:
+    """Return the worker's last attempt for ``peer_root``, or None.
+
+    None means no worker has reported for this peer (the file is absent), or
+    what is there is not a bounded, valid version 1 status. Both leave the
+    bridge's ``product_error`` unknown rather than clear.
+    """
+
+    raw = _bounded_bytes(Path(peer_root) / "mola" / "worker.json", max_bytes)
+    if raw is None:
+        return None
+    try:
+        status = _json(raw, "worker status")
+        if status.get("version") != WORKER_STATUS_VERSION:
+            raise ValueError("unsupported worker status version")
+        updated_at_ns = _uint(status.get("updated_at_ns"), "worker updated_at_ns")
+        source_sha = status.get("source_sha256")
+        if source_sha != "":
+            source_sha = _sha(source_sha, "worker source_sha256")
+        error = status.get("error")
+        if not isinstance(error, str):
+            raise ValueError("worker error must be a string")
+    except ValueError:
+        return None
+    return WorkerStatus(updated_at_ns, source_sha, error[:MAX_WORKER_ERROR_CHARS])
 
 
 def product_authority_key(

@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -69,6 +70,92 @@ std::string writeChunk(const std::filesystem::path& directory, const float x)
   std::ofstream output(directory / digest, std::ios::binary);
   output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   return digest;
+}
+
+// A chunk of `count` floor points along a 41 m line from `x_offset`; the
+// line keeps the voxel count small so only the point budget is exercised.
+std::string writeChunkPoints(
+    const std::filesystem::path& directory, const std::size_t count,
+    const float x_offset)
+{
+  std::vector<std::uint8_t> bytes{'S', 'D', 'X', 'Y', 'Z', '1', 0, 0};
+  for (std::size_t shift = 0; shift < 64; shift += 8)
+    bytes.push_back(static_cast<std::uint8_t>(
+        (static_cast<std::uint64_t>(count) >> shift) & 0xffU));
+  bytes.reserve(16 + 12 * count);
+  for (std::size_t index = 0; index < count; ++index)
+  {
+    const float x = x_offset + 0.01F * static_cast<float>(index % 4096);
+    for (const float value : {x, 0.0F, 0.0F})
+    {
+      std::uint32_t bits = 0;
+      std::memcpy(&bits, &value, sizeof(bits));
+      for (std::size_t shift = 0; shift < 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(bits >> shift));
+    }
+  }
+  const auto digest = sha256(std::string(
+      reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+  std::ofstream output(directory / digest, std::ios::binary);
+  output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  return digest;
+}
+
+// One submap whose chunks are `(digest, point_count)` pairs.
+std::string writeChunkedSnapshot(
+    const std::filesystem::path& path,
+    const std::vector<std::pair<std::string, std::size_t>>& chunks,
+    const char snapshot_digit)
+{
+  json chunk_list = json::array();
+  json digests = json::array();
+  for (const auto& [digest, count] : chunks)
+  {
+    chunk_list.push_back(
+        {{"sha256", digest},
+         {"encoding", "application/vnd.swarmdeck.xyz-f32.v1"},
+         {"size_bytes", 16 + 12 * count},
+         {"bounds", json::array({json::array({0, 0, 0}), json::array({100, 1, 1})})},
+         {"point_count", count}});
+    digests.push_back(digest);
+  }
+  const std::string stable_id = "robot/session/submap/0";
+  const json geometry_members =
+      json::array({json::array({stable_id, 0, digests})});
+  const json graph{{"component_id", "component:test"}, {"epoch", 1}, {"revision", 0}};
+  const json submap{
+      {"submap_id", {{"robot_id", "robot"}, {"session_id", "session"}, {"seq", 0}}},
+      {"geometry_revision", 0},
+      {"pose_revision", graph},
+      {"T_component_submap", pose(0)},
+      {"keyframes", json::array({"robot/session/keyframe/0"})},
+      {"chunks", chunk_list},
+      {"bounds", json::array({json::array({0, 0, 0}), json::array({100, 1, 1})})},
+      {"resolution_m", 0.2},
+      {"observed_at_ns", 100},
+      {"sensor_origins", json::array({json::array({0, 0, 0.5})})},
+      {"ray_evidence",
+       {{"return_semantics", "first_return"},
+        {"deskew", "deskewed"},
+        {"origin_association", "single_capture"}}}};
+  const json manifest{
+      {"map_id", "onboard"},
+      {"layer_id", "persistent_geometry"},
+      {"frame_id", "component_test"},
+      {"graph_revision", graph},
+      {"geometry_revision", sha256(geometry_members.dump())},
+      {"submaps", json::array({submap})},
+      {"chunks", chunk_list},
+      {"tombstones", json::array()}};
+  const json snapshot{
+      {"schema", "swarmdeck.autonomy.v1"},
+      {"snapshot_id", std::string(64, snapshot_digit)},
+      {"generated_at_ns", 100},
+      {"manifests", json::array({manifest})}};
+  std::ofstream output(path, std::ios::binary);
+  output << snapshot.dump();
+  output.close();
+  return swarmdeck_mapping::boundedFileSha256(path);
 }
 
 std::string writeSnapshot(
@@ -446,6 +533,57 @@ int main()
           error.code() == swarmdeck_mapping::RuntimeErrorCode::InvalidRequest;
     }
     require(selection_rejected, "duplicate selected component was accepted");
+
+    // The runtime's point budget is the planner grid's budget. Until
+    // 2026-09-19 the grid build used its own 1,000,000 default whatever
+    // `--max-points-per-map` said, so a component between the two budgets
+    // loaded, serialized its metric map, and then failed the planner grid on
+    // every build (benchbot mission 1a8cc114, robot_0 at 1,222,612 points).
+    static_assert(
+        swarmdeck_mapping::RuntimeLimits{}.max_points_per_map ==
+                swarmdeck_mapping::kMaxPointsPerMap &&
+            swarmdeck_mapping::PlannerGridLimits{}.max_points ==
+                swarmdeck_mapping::kMaxPointsPerMap,
+        "the loader and the planner grid must default to one point budget");
+    const auto big_a = writeChunkPoints(root / "chunks", 550'000, 0.0F);
+    const auto big_b = writeChunkPoints(root / "chunks", 550'000, 50.0F);
+    const auto big_sha = writeChunkedSnapshot(
+        root / "big.json", {{big_a, 550'000}, {big_b, 550'000}}, '3');
+    swarmdeck_mapping::RuntimeLimits generous;
+    generous.max_points_per_map = 1'200'000;
+    generous.max_resident_points = 2'400'000;
+    swarmdeck_mapping::PersistentMolaRuntime generous_runtime(generous);
+    require(
+        generous_runtime.plannerGridLimits().max_points == 1'200'000,
+        "the planner grid budget does not follow max_points_per_map");
+    const auto big = generous_runtime.apply(
+        {"request-big", "peer/big", swarmdeck_mapping::ApplyMode::Replace,
+         root / "big.json", big_sha, root / "chunks", root / "big.metricmap", {},
+         root / "big.sdmgrid"});
+    require(
+        big.point_count == 1'100'000 && big.planner_output_size_bytes > 0 &&
+            std::filesystem::exists(root / "big.sdmgrid"),
+        "a component above the old grid default produced no planner grid");
+    swarmdeck_mapping::RuntimeLimits strict;
+    strict.max_points_per_map = 1'000'000;
+    swarmdeck_mapping::PersistentMolaRuntime strict_runtime(strict);
+    std::string refusal;
+    try
+    {
+      strict_runtime.apply(
+          {"request-strict", "peer/strict", swarmdeck_mapping::ApplyMode::Replace,
+           root / "big.json", big_sha, root / "chunks", root / "strict.metricmap",
+           {}, root / "strict.sdmgrid"});
+    }
+    catch (const swarmdeck_mapping::RuntimeError& error)
+    {
+      refusal = error.what();
+    }
+    require(
+        refusal.find("point count limit of 1000000 points") != std::string::npos &&
+            !std::filesystem::exists(root / "strict.metricmap") &&
+            !std::filesystem::exists(root / "strict.sdmgrid"),
+        "a component over the budget was not refused by the loader with its limit");
     std::filesystem::remove_all(root);
     return 0;
   }

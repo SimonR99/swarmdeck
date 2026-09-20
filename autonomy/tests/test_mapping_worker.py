@@ -143,6 +143,23 @@ def fake_runtime(tmp_path: Path, first_failure: str | None = None) -> Path:
                 started = time.monotonic()
                 if {first_failure!r} == "slow":
                     time.sleep(0.3)
+                if {first_failure!r} == "budget" and (root / "over-budget").exists():
+                    # The native loader's refusal of a component above the
+                    # point budget, verbatim.
+                    print(json.dumps({{
+                        "protocol": 1,
+                        "type": "response",
+                        "request_id": request["request_id"],
+                        "ok": False,
+                        "op": "apply",
+                        "error": {{
+                            "code": "invalid_request",
+                            "message": (
+                                "manifest exceeds point count limit of 2000000 points"
+                            ),
+                        }},
+                    }}), flush=True)
+                    continue
                 if process_number == 1 and {first_failure!r} == "malformed":
                     print("{{broken", flush=True)
                     continue
@@ -265,10 +282,12 @@ def publication_writes(monkeypatch) -> list[tuple[str, bytes, bytes | None]]:
     original = worker_module._atomic_bytes
 
     def recording(path: Path, payload: bytes) -> None:
-        source = path.parent / "source.json"
-        writes.append(
-            (path.name, payload, source.read_bytes() if source.exists() else None)
-        )
+        # worker.json is the worker's own status, not part of the product.
+        if path.name != "worker.json":
+            source = path.parent / "source.json"
+            writes.append(
+                (path.name, payload, source.read_bytes() if source.exists() else None)
+            )
         original(path, payload)
 
     monkeypatch.setattr(worker_module, "_atomic_bytes", recording)
@@ -825,6 +844,150 @@ def test_persistent_runtime_receives_configured_resource_limits(tmp_path) -> Non
         ]
     finally:
         worker.close()
+
+
+def _cpp_constant(path: Path, name: str) -> int:
+    """The integer a C++ header assigns to ``name`` (digit separators allowed)."""
+
+    import re
+
+    match = re.search(name + r"\s*=\s*([0-9']+)", path.read_text())
+    assert match is not None, f"{name} not found in {path}"
+    return int(match.group(1).replace("'", ""))
+
+
+def test_point_budget_is_one_number_for_worker_native_runtime_and_reader() -> None:
+    """The loader, the planner grid, the product and its reader share a budget.
+
+    Until 2026-09-19 the grid build had its own 1,000,000 default while the
+    worker forwarded 2,000,000 to the loader, so a component between the two
+    loaded and then failed the planner grid on every build (benchbot mission
+    1a8cc114). The native runtime now derives every point limit from
+    ``--max-points-per-map``; this pins the defaults the worker, the native
+    headers and the Python product reader each carry to one value.
+    """
+
+    import autonomy.mola_mapping as mola_mapping
+
+    mapping = Path(__file__).parents[2] / "swarmdeck_ros/src/swarmdeck_mapping"
+    include = mapping / "include/swarmdeck_mapping"
+    shared = _cpp_constant(include / "point_budget.hpp", "kMaxPointsPerMap")
+    assert shared == worker_module.DEFAULT_MAX_POINTS_PER_MAP == 2_000_000
+    assert mola_mapping.MAX_POINTS == shared
+    # The header defaults are spelled through the shared constant, not a
+    # second literal.
+    runtime_header = (include / "persistent_mola_runtime.hpp").read_text()
+    assert "max_points_per_map{kMaxPointsPerMap}" in runtime_header
+    assert "max_resident_points{4 * kMaxPointsPerMap}" in runtime_header
+    planner_header = (include / "planner_map.hpp").read_text()
+    assert "max_points{kMaxPointsPerMap}" in planner_header
+    assert "std::size_t max_points = kMaxPointsPerMap" in planner_header
+    assert "kMaxPlannerProductPoints" not in planner_header
+    # The runtime builds and writes every planner product with its own budget.
+    runtime_source = (mapping / "src/persistent_mola_runtime.cpp").read_text()
+    assert "buildNativePlannerGrid(candidate, plannerGridLimits())" in runtime_source
+    assert "limits_.max_points_per_map);" in runtime_source
+    # A replacement holds the old and the new geometry of a component at once.
+    assert (
+        worker_module.DEFAULT_MAX_RESIDENT_POINTS
+        >= 2 * worker_module.DEFAULT_MAX_POINTS_PER_MAP
+    )
+
+
+def test_worker_status_reports_the_last_attempt_and_logs_a_failure_once(
+    tmp_path, capsys
+) -> None:
+    """A component over the budget is reported, once, and cleared on recovery.
+
+    On benchbot (mission 1a8cc114) the native refusal repeated on every retry,
+    198 and 216 identical log lines per robot, while nothing outside the
+    worker's log said the product had stopped growing. The outcome of every
+    attempt now lands in ``mola/worker.json`` (which the bridge reports as
+    ``product_error``), and the log carries a failure when it appears or
+    changes and once more when the peer publishes again.
+    """
+
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    (tmp_path / "over-budget").touch()
+    worker = MolaWorker(
+        tmp_path,
+        importer=fake_runtime(tmp_path, "budget"),
+        timeout_s=1,
+        retry_s=0,
+        parallel_peers=1,
+    )
+    refusal = "manifest exceeds point count limit of 2000000 points"
+
+    def worker_status() -> dict[str, object]:
+        return json.loads((peer / "mola/worker.json").read_text())
+
+    try:
+        errors = worker.run_once()
+        assert set(errors) == {peer} and refusal in errors[peer]
+        status = worker_status()
+        assert status["version"] == 1
+        assert status["error"] == errors[peer]
+        assert (
+            status["source_sha256"]
+            == hashlib.sha256((peer / "snapshot.json").read_bytes()).hexdigest()
+        )
+        assert not (peer / "mola/index.json").exists()
+        # Retries of the same snapshot and new revisions with the same refusal
+        # keep the status current but add no log line.
+        assert worker.run_once() == errors
+        write_snapshot(peer, "b" * 64, [manifest("component:a", 2)])
+        assert worker.run_once() == errors
+        assert (
+            worker_status()["source_sha256"]
+            == hashlib.sha256((peer / "snapshot.json").read_bytes()).hexdigest()
+        )
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert lines == [f"swarmdeck-mola-worker: {peer}: {errors[peer]}"]
+
+        # The component fits again (a raised budget, or a rebuilt map): the
+        # product is published, the status clears, and the recovery is logged.
+        (tmp_path / "over-budget").unlink()
+        write_snapshot(peer, "c" * 64, [manifest("component:a", 3)])
+        assert worker.run_once() == {}
+        status = worker_status()
+        assert status["error"] == ""
+        assert (
+            status["source_sha256"]
+            == hashlib.sha256((peer / "snapshot.json").read_bytes()).hexdigest()
+        )
+        assert (
+            json.loads((peer / "mola/index.json").read_text())["source_snapshot_id"]
+            == "c" * 64
+        )
+        assert worker.run_once() == {}
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert lines == [f"swarmdeck-mola-worker: {peer}: published again"]
+        # A different failure is a new line.
+        (tmp_path / "over-budget").touch()
+        write_snapshot(peer, "d" * 64, [manifest("component:a", 4)])
+        errors = worker.run_once()
+        assert refusal in errors[peer]
+        assert worker_status()["error"] == errors[peer]
+        assert capsys.readouterr().out.count(errors[peer]) == 1
+    finally:
+        worker.close()
+
+
+def test_worker_status_records_an_unreadable_snapshot(tmp_path) -> None:
+    peer = tmp_path / "mission" / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    (peer / "snapshot.json").write_bytes(b"x" * (worker_module.MAX_SNAPSHOT_BYTES + 1))
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=lambda *_: None)
+    errors = worker.run_once()
+    assert set(errors) == {peer} and "byte limit" in errors[peer]
+    status = json.loads((peer / "mola/worker.json").read_text())
+    assert status == {
+        "version": 1,
+        "updated_at_ns": status["updated_at_ns"],
+        "source_sha256": "",
+        "error": errors[peer],
+    }
 
 
 def two_peers(tmp_path: Path) -> list[Path]:

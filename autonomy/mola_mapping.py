@@ -33,7 +33,13 @@ GRID_SCHEMA = "swarmdeck.mola_planner_grid.v1"
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_GRID_BYTES = 256 * 1024 * 1024
 MAX_METADATA_BYTES = 64 * 1024
-MAX_POINTS = 1_000_000
+# The component point budget, the same number the worker builds with
+# (``deploy/autonomy/mola_worker.py``, ``DEFAULT_MAX_POINTS_PER_MAP``, and
+# ``swarmdeck_mapping/point_budget.hpp``). A product above this cap is
+# rejected here, so it must not fall behind the worker's budget. The decode
+# below is one Python loop per record: 0.66 s per 1,000,000 surface samples
+# and 2.5 s per 2,000,000 on a 20-core workstation (2026-09-19).
+MAX_POINTS = 2_000_000
 MAX_VOXELS = 2_000_000
 MAX_RAY_STEPS = 4_000_000
 MAX_COMPONENTS = 256

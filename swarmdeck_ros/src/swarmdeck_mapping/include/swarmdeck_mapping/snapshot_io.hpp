@@ -1,6 +1,7 @@
 #pragma once
 
 #include <swarmdeck_mapping/mola_submap_bridge.hpp>
+#include <swarmdeck_mapping/point_budget.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +14,6 @@ namespace swarmdeck_mapping
 inline constexpr std::size_t kMaxSnapshotBytes = 4 * 1024 * 1024;
 inline constexpr std::size_t kMaxSubmapsPerMap = 4096;
 inline constexpr std::size_t kMaxChunksPerMap = 16384;
-inline constexpr std::size_t kMaxPointsPerMap = 2'000'000;
 inline constexpr std::size_t kMaxSensorOriginsPerSubmap = 16;
 
 struct ChunkDescriptor

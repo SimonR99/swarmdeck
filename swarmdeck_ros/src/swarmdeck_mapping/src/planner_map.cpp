@@ -282,6 +282,13 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
   const auto poses = snapshot.geometry_map->keyframePoses();
   if (poses.size() != snapshot.keyframes.size())
     throw std::invalid_argument("MOLA keyframe provenance membership mismatch");
+  // The map's own count is checked against the provenance below; refusing
+  // here, before any work, names the numbers the operator needs.
+  if (snapshot.geometry_map->point_count() > limits.max_points)
+    throw std::runtime_error(
+        "planner grid point budget exceeded: " +
+        std::to_string(snapshot.geometry_map->point_count()) + " points, budget " +
+        std::to_string(limits.max_points));
 
   const auto started = Clock::now();
   OccupiedVoxels occupied;
@@ -575,9 +582,10 @@ std::shared_ptr<const NativePlannerGrid> buildNativePlannerGrid(
 
 PlannerGridArtifact writeNativePlannerGrid(
     const NativePlannerGrid& grid, const std::filesystem::path& output,
-    const std::size_t max_bytes, const std::size_t max_metadata_bytes)
+    const std::size_t max_bytes, const std::size_t max_metadata_bytes,
+    const std::size_t max_points)
 {
-  if (max_bytes == 0 || max_metadata_bytes == 0)
+  if (max_bytes == 0 || max_metadata_bytes == 0 || max_points == 0)
     throw std::invalid_argument("planner artifact limits must be positive");
   if (output.empty()) throw std::invalid_argument("planner artifact path is empty");
   if (std::filesystem::exists(output))
@@ -601,8 +609,12 @@ PlannerGridArtifact writeNativePlannerGrid(
       grid.surfaces.size() != grid.point_count - grid.retired_count)
     throw std::invalid_argument(
         "planner surface and retired counts do not match point count");
-  if (grid.point_count > kMaxPlannerProductPoints ||
-      grid.occupied.size() > kMaxPlannerProductVoxels ||
+  if (grid.point_count > max_points)
+    throw std::invalid_argument(
+        "planner grid point count exceeds the product budget: " +
+        std::to_string(grid.point_count) + " points, budget " +
+        std::to_string(max_points));
+  if (grid.occupied.size() > kMaxPlannerProductVoxels ||
       grid.free.size() > kMaxPlannerProductVoxels ||
       grid.free.size() >
           kMaxPlannerProductVoxels -

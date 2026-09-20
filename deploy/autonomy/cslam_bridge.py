@@ -74,6 +74,7 @@ from autonomy.product_authority import (
     build_authority,
     product_authority_key,
     read_published_product,
+    read_worker_status,
 )
 from autonomy.replication import ReplicaClient
 
@@ -1011,6 +1012,10 @@ class Bridge(Node):
                     self.authority_skipped += 1
             except TransformException:
                 pass
+        # The MOLA worker's last build attempt for this peer. Its product stays
+        # at the last revision that fit once the component outgrows the point
+        # budget; the failure is only visible here and in the worker's log.
+        worker_status = read_worker_status(self.root)
         status = {
             "robot_id": self.robot,
             "mission_id": self.core.mission_id,
@@ -1094,6 +1099,12 @@ class Bridge(Node):
                 else self.core.revision - self.authority_revision
             ),
             "authority_skipped": self.authority_skipped,
+            # The worker's last build outcome (`mola/worker.json`): null until
+            # a worker has reported, "" after a published build, otherwise the
+            # failure, such as the point budget (`manifest exceeds point count
+            # limit of 2000000 points`), with `product_lag_revisions` then
+            # growing while the last product that fit stays in service.
+            "product_error": None if worker_status is None else worker_status.error,
             "replicated_revision": self.acked_revision,
             "replication_error": self.replica_error,
             "dropped_pairs": self.dropped,

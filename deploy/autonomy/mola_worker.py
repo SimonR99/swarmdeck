@@ -22,6 +22,12 @@ is mid-replacement and the reader retries briefly. Readers never read
 ``snapshot.json``: that file is the bridge's newest input and may be ahead of
 the product.
 
+``mola/worker.json`` is not part of the product: it records the outcome of
+this worker's last build attempt for the peer (``error`` empty after a
+published build), so a component that has outgrown the point budget, whose
+product then stays at the last revision that fit, is reported by the bridge
+in ``status.json`` as ``product_error`` instead of only in this log.
+
 A completed build is therefore always published, even when ``snapshot.json``
 moved on during the build. The earlier protocol validated ``index.json``
 against the current ``snapshot.json`` bytes, so a build whose source changed
@@ -73,10 +79,28 @@ except ModuleNotFoundError:  # Imported as deploy.autonomy.mola_worker in tests.
 SCHEMA = "swarmdeck.autonomy.v1"
 MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024 * 1024
+# The one point budget of a component. The native runtime derives its
+# snapshot loader, planner grid build and SDMGRID1 product limits from this
+# number (``swarmdeck_mapping/point_budget.hpp``, ``kMaxPointsPerMap``), and
+# the product's readers cap the point count independently:
+# ``autonomy/mola_mapping.py`` (``MAX_POINTS``) and MGG's ``MolaMap``
+# (``map.mola.max_voxels``, clamped to 2,000,000, bounds ``surface_count``).
+# Raising it past a reader's cap makes that reader reject every product. At
+# 4,096 endpoints per keyframe the budget holds 488 keyframes; a component
+# that outgrows it keeps its last product and reports the failure in
+# ``mola/worker.json`` (see ``WORKER_STATUS_VERSION``).
 DEFAULT_MAX_POINTS_PER_MAP = 2_000_000
-DEFAULT_MAX_RESIDENT_POINTS = 8_000_000
+# A replacement holds a component's old and new geometry at once.
+DEFAULT_MAX_RESIDENT_POINTS = 4 * DEFAULT_MAX_POINTS_PER_MAP
 DEFAULT_MAX_MAPS = 256
 DEFAULT_PARALLEL_PEERS = 4
+# ``<peer>/mola/worker.json``: the outcome of this worker's last build attempt
+# for the peer, written after every attempt. ``error`` is empty after a
+# published build and the failure message otherwise; ``source_sha256`` names
+# the ``snapshot.json`` bytes the attempt read. The bridge folds ``error``
+# into the peer's ``status.json`` as ``product_error``.
+WORKER_STATUS_VERSION = 1
+WORKER_STATUS_MAX_ERROR_CHARS = 2000
 
 
 class WorkerError(RuntimeError):
@@ -343,6 +367,13 @@ class MolaWorker:
         # Poll bookkeeping, touched only on the thread that calls run_once.
         self._completed: dict[Path, str] = {}
         self._retry_after: dict[Path, float] = {}
+        # The failure last logged per peer. A failing build is retried every
+        # ``retry_s`` and the same message would otherwise repeat on every
+        # retry (198 and 216 identical lines per robot on benchbot, mission
+        # 1a8cc114); it is logged when it first appears, when it changes, and
+        # once more when the peer publishes again. ``mola/worker.json``
+        # carries the current state continuously.
+        self._logged_errors: dict[Path, str] = {}
 
     def discover(self) -> tuple[Path, ...]:
         """Return peer roots matching /maps/<mission>/<robot>/snapshot.json."""
@@ -788,15 +819,54 @@ class MolaWorker:
         except (WorkerError, OSError, KeyError, TypeError) as exc:
             return f"{type(exc).__name__}: {exc}"
 
+    @staticmethod
+    def _write_worker_status(peer: Path, source_sha: str, error: str) -> None:
+        """Record the last attempt's outcome in ``<peer>/mola/worker.json``.
+
+        The bridge reports ``error`` as ``product_error`` in the peer's
+        ``status.json``, so a component that outgrows the point budget (its
+        product frozen at the last revision that fit) is visible to the
+        operator rather than only in this process's log. A peer whose
+        directory is gone is not worth a failure of its own.
+        """
+
+        mola_root = peer / "mola"
+        status = {
+            "version": WORKER_STATUS_VERSION,
+            "updated_at_ns": time.time_ns(),
+            "source_sha256": source_sha,
+            "error": error[:WORKER_STATUS_MAX_ERROR_CHARS],
+        }
+        try:
+            mola_root.mkdir(exist_ok=True)
+            _atomic_json(mola_root / "worker.json", status)
+        except OSError:
+            pass
+
+    def _log_outcome(self, peer: Path, error: str | None) -> None:
+        """Log a peer's failure when it appears or changes, and its recovery."""
+
+        previous = self._logged_errors.get(peer)
+        if error is None:
+            if previous is not None:
+                self._logged_errors.pop(peer, None)
+                print(f"swarmdeck-mola-worker: {peer}: published again", flush=True)
+            return
+        if error != previous:
+            self._logged_errors[peer] = error
+            print(f"swarmdeck-mola-worker: {peer}: {error}", flush=True)
+
     def run_once(self) -> dict[Path, str]:
         """Process changed peers once; errors are retained for status/logging.
 
         Which peers need a build is decided here, on the calling thread. The
         builds then run concurrently, up to ``parallel_peers`` at a time, each
         confined to its own peer's directories and native runtime; their
-        outcomes update ``_completed``, ``_retry_after`` and the returned
-        errors back on the calling thread. With ``parallel_peers == 1`` (or a
-        single due peer) the builds run in peer order on the calling thread.
+        outcomes update ``_completed``, ``_retry_after``, ``mola/worker.json``
+        and the returned errors back on the calling thread. With
+        ``parallel_peers == 1`` (or a single due peer) the builds run in peer
+        order on the calling thread. Every failure is returned; it is logged
+        only when it differs from what was last logged for that peer.
         """
 
         errors: dict[Path, str] = {}
@@ -807,12 +877,14 @@ class MolaWorker:
             | self._resident_by_peer.keys()
             | self._completed.keys()
             | self._retry_after.keys()
+            | self._logged_errors.keys()
         )
         for missing_peer in known - set(peers):
             self._invalidate_runtime(missing_peer)
             self._completed.pop(missing_peer, None)
             self._retry_after.pop(missing_peer, None)
-        due: list[Path] = []
+            self._logged_errors.pop(missing_peer, None)
+        due: list[tuple[Path, str]] = []
         for peer in peers:
             source = peer / "snapshot.json"
             try:
@@ -820,42 +892,50 @@ class MolaWorker:
                 source_sha = hashlib.sha256(raw).hexdigest()
             except (OSError, WorkerError) as exc:
                 errors[peer] = str(exc)
+                self._write_worker_status(peer, "", errors[peer])
+                self._log_outcome(peer, errors[peer])
                 continue
             if self._completed.get(peer) == source_sha:
                 continue
             if now < self._retry_after.get(peer, 0):
                 continue
-            due.append(peer)
+            due.append((peer, source_sha))
 
-        def record(peer: Path, outcome: ProcessResult | str) -> None:
+        def record(peer: Path, source_sha: str, outcome: ProcessResult | str) -> None:
             if isinstance(outcome, ProcessResult):
                 # Record the bytes the product was built from, which process_peer
                 # read itself. If snapshot.json moved on meanwhile, the next poll
                 # sees a digest that differs from this one and builds it.
                 self._completed[peer] = outcome.source_sha256
                 self._retry_after.pop(peer, None)
+                self._write_worker_status(peer, outcome.source_sha256, "")
+                self._log_outcome(peer, None)
             else:
                 errors[peer] = outcome
                 self._retry_after[peer] = now + self.retry_s
+                self._write_worker_status(peer, source_sha, outcome)
+                self._log_outcome(peer, outcome)
 
         if self.parallel_peers == 1 or len(due) < 2:
-            for peer in due:
-                record(peer, self._attempt(peer))
+            for peer, source_sha in due:
+                record(peer, source_sha, self._attempt(peer))
             return errors
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(self.parallel_peers, len(due)),
             thread_name_prefix="swarmdeck-mola-build",
         ) as pool:
-            futures = [(peer, pool.submit(self._attempt, peer)) for peer in due]
-            for peer, future in futures:
-                record(peer, future.result())
+            futures = [
+                (peer, source_sha, pool.submit(self._attempt, peer))
+                for peer, source_sha in due
+            ]
+            for peer, source_sha, future in futures:
+                record(peer, source_sha, future.result())
         return errors
 
     def run_forever(self) -> None:
         try:
             while True:
-                for peer, error in self.run_once().items():
-                    print(f"swarmdeck-mola-worker: {peer}: {error}", flush=True)
+                self.run_once()
                 time.sleep(self.poll_s)
         finally:
             self.close()

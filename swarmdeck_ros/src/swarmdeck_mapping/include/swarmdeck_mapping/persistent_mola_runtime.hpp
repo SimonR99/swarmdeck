@@ -56,8 +56,11 @@ struct RuntimeLimits
   std::size_t max_maps{256};
   std::size_t max_submaps_per_map{kMaxSubmapsPerMap};
   std::size_t max_chunks_per_map{kMaxChunksPerMap};
-  std::size_t max_points_per_map{2'000'000};
-  std::size_t max_resident_points{8'000'000};
+  // One budget for the loader, the planner grid build and the SDMGRID1
+  // product; see point_budget.hpp.
+  std::size_t max_points_per_map{kMaxPointsPerMap};
+  // A replacement holds the old and the new map of a component at once.
+  std::size_t max_resident_points{4 * kMaxPointsPerMap};
   std::size_t max_output_bytes{1024ULL * 1024ULL * 1024ULL};
   std::size_t max_planner_output_bytes{kMaxPlannerArtifactBytes};
 };
@@ -117,6 +120,8 @@ class PersistentMolaRuntime
       const std::string& map_id) const;
   [[nodiscard]] std::vector<std::string> mapIds() const;
   [[nodiscard]] RuntimeLimits limits() const noexcept { return limits_; }
+  /** The grid limits every planner product of this runtime is built with. */
+  [[nodiscard]] PlannerGridLimits plannerGridLimits() const noexcept;
 
  private:
   struct Context

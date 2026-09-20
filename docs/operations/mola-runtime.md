@@ -75,7 +75,7 @@ Removing a component releases its resident context.
 | Snapshot JSON | 4 MiB |
 | JSONL request / response | 64 KiB each |
 | Submaps / chunks per component | 4,096 / 16,384 |
-| Points per component | 2,000,000 |
+| Points per component (loader, planner grid build and SDMGRID1 product alike) | 2,000,000 |
 | Runtime points, including a replacement candidate (per peer runtime) | 8,000,000 |
 | Resident component contexts (per peer runtime) | 256 |
 | Standalone native serialized artifact | 1 GiB |
@@ -88,6 +88,29 @@ The artifact byte limit is checked after serialization and before publication;
 it is not a filesystem quota. The worker forwards its point, context and output
 limits to the native process and checks the advertised effective limits. Worker
 and native CLI resource flags can override their defaults.
+
+The point budget is one number. `kMaxPointsPerMap`
+(`swarmdeck_mapping/point_budget.hpp`) is the default of the worker's
+`--max-points-per-map` (`DEFAULT_MAX_POINTS_PER_MAP`), and the runtime derives
+its snapshot loader, its planner grid build (`PlannerGridLimits::max_points`,
+through `plannerGridLimits()`) and its SDMGRID1 writer from that one value.
+Until 2026-09-19 the grid build carried its own 1,000,000 default, so a
+component between 1,000,000 and 2,000,000 points loaded and then failed every
+planner build (see the known-issues row). The product's readers cap the point
+count on their own and must move with the budget: `autonomy/mola_mapping.py`
+(`MAX_POINTS`, 2,000,000) and MGG's `MolaMap`, whose `map.mola.max_voxels`
+(clamped to 2,000,000 in `planner_node.cpp`) also bounds `surface_count`. A
+product above a reader's cap is rejected by that reader, which for MGG means
+no map at all rather than a stale one. `autonomy/tests/test_mapping_worker.py`
+pins the worker, header and reader values to each other.
+
+A component that outgrows the budget keeps its last product. The worker then
+writes `<peer>/mola/worker.json` after every attempt (`version`,
+`updated_at_ns`, `source_sha256` of the `snapshot.json` bytes it read, and
+`error`, empty after a published build), the bridge reports that `error` in
+`status.json` as `product_error` (null until a worker has reported) next to
+`product_lag_revisions`, and the worker logs a failure when it first appears
+or changes and once more when the peer publishes again, not on every retry.
 
 ## Visibility retirement of endpoints
 
@@ -163,7 +186,7 @@ Turning on MOLA does not make unqualified Bistro unknown cells traversable.
 | Native planner limit | Default |
 | --- | --- |
 | Voxel resolution | 0.2 m |
-| Points / combined occupied and free voxels | 1,000,000 / 2,000,000 |
+| Points (the runtime's `max_points_per_map`) / combined occupied and free voxels | 2,000,000 / 2,000,000 |
 | Selected ray steps / initial angular bins | 4,000,000 / 5° |
 | Ray sample spacing | 0.75 × voxel resolution |
 | Build deadline | 8 s |
@@ -183,12 +206,19 @@ measured worst-case latency promises.
 Measured replay and correction timings are in the
 [acceptance log](acceptance-log.md).
 
-The separate one-million-point limit is still a hard publication limit. A map
-whose captures each retain the configured maximum of 4,096 endpoints reaches it
-at 245 captures (the 245th exceeds the limit); turns and accepted keyframes can
-reach that count before distance alone suggests it. Long-duration qualification
-must measure this next capacity boundary rather than treating bounded ray
-selection as unbounded map growth.
+The point budget is still a hard publication limit. A map whose captures each
+retain the configured maximum of 4,096 endpoints reaches 2,000,000 points at
+489 captures (the 489th exceeds it), about eight minutes of driving at one
+keyframe per second; turns and accepted keyframes can reach that count before
+distance alone suggests it. The product spends 24 bytes per point (each is a
+surface sample), so the budget is bounded by its readers rather than by the
+build: on a 20-core workstation (RelWithDebInfo, 2026-09-19) the grid build
+costs 2.3 ms per 4,096-point keyframe (0.71 s at 1,003,520 points, 1.50 s at
+2,048,000, 4.70 s at 8,192,000, against the 8 s build deadline; benchbot's
+four-core allowance is about twice slower), while the Python reader decodes
+2,000,000 samples in 2.5 s and MGG loads the file within a 2 s deadline.
+Long-duration qualification must measure this capacity boundary rather than
+treating bounded ray selection as unbounded map growth.
 
 ## MOLA framework module
 

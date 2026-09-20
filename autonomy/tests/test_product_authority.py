@@ -20,9 +20,11 @@ import autonomy.product_authority as product_authority
 from autonomy.product_authority import (
     ProductArtifact,
     PublishedProduct,
+    WorkerStatus,
     build_authority,
     product_authority_key,
     read_published_product,
+    read_worker_status,
 )
 
 
@@ -319,6 +321,76 @@ def test_memo_skips_rereading_an_unchanged_pair(tmp_path, monkeypatch):
     # The pure call has no memo and reads every time.
     assert read_published_product(tmp_path, attempts=1) is None
     assert reads == ["index.json", "source.json"] * 4
+
+
+def write_worker_status(root, **fields):
+    (root / "mola").mkdir(exist_ok=True)
+    status = {
+        "version": 1,
+        "updated_at_ns": 1_700_000_000_000_000_000,
+        "source_sha256": "a" * 64,
+        "error": "",
+    }
+    status.update(fields)
+    (root / "mola/worker.json").write_text(json.dumps(status))
+
+
+def test_worker_status_is_the_workers_last_attempt(tmp_path):
+    """``mola/worker.json`` reaches ``status.json`` as ``product_error``.
+
+    A component over the point budget keeps its last product while the worker
+    refuses every rebuild; the refusal is only in the worker's log otherwise.
+    """
+
+    assert read_worker_status(tmp_path) is None
+    write_worker_status(tmp_path)
+    status = read_worker_status(tmp_path)
+    assert status == WorkerStatus(1_700_000_000_000_000_000, "a" * 64, "")
+    refusal = (
+        "WorkerError: native runtime invalid_request: manifest exceeds point "
+        "count limit of 2000000 points"
+    )
+    write_worker_status(tmp_path, error=refusal, source_sha256="b" * 64)
+    status = read_worker_status(tmp_path)
+    assert status is not None and status.error == refusal
+    assert status.source_sha256 == "b" * 64
+    # An unreadable snapshot leaves the attempted source empty.
+    write_worker_status(
+        tmp_path, error="snapshot exceeds 4194304 byte limit", source_sha256=""
+    )
+    status = read_worker_status(tmp_path)
+    assert status is not None and status.source_sha256 == ""
+    # The error is bounded to what the worker itself writes.
+    write_worker_status(tmp_path, error="x" * 5000)
+    status = read_worker_status(tmp_path)
+    assert status is not None and len(status.error) == 2000
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"version": 2},
+        {"updated_at_ns": -1},
+        {"updated_at_ns": "1"},
+        {"source_sha256": "not-a-digest"},
+        {"error": None},
+        {"error": 3},
+    ],
+)
+def test_invalid_worker_status_is_unknown(tmp_path, fields):
+    write_worker_status(tmp_path, **fields)
+    assert read_worker_status(tmp_path) is None
+
+
+def test_oversized_or_malformed_worker_status_is_unknown(tmp_path):
+    (tmp_path / "mola").mkdir()
+    (tmp_path / "mola/worker.json").write_text("{not json")
+    assert read_worker_status(tmp_path) is None
+    (tmp_path / "mola/worker.json").write_text("[]")
+    assert read_worker_status(tmp_path) is None
+    write_worker_status(tmp_path)
+    assert read_worker_status(tmp_path, max_bytes=16) is None
+    assert read_worker_status(tmp_path) is not None
 
 
 def artifact(component: str, epoch: int, revision: int) -> ProductArtifact:

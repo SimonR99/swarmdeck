@@ -331,7 +331,9 @@ ParsedComponentSnapshot parseComponentSnapshot(
       const auto size = uintValue(chunk.at("size_bytes"), "chunk size");
       const auto count = uintValue(chunk.at("point_count"), "chunk point count");
       if (count > max_points - point_count)
-        throw std::invalid_argument("manifest exceeds point count limit");
+        throw std::invalid_argument(
+            "manifest exceeds point count limit of " + std::to_string(max_points) +
+            " points");
       point_count += static_cast<std::size_t>(count);
       ++chunk_count;
       const auto digest = chunk.at("sha256").get<std::string>();
@@ -414,7 +416,10 @@ std::vector<SubmapInput> loadGeometry(
     const std::size_t max_points)
 {
   if (snapshot.declared_point_count > max_points)
-    throw std::invalid_argument("snapshot exceeds point count limit");
+    throw std::invalid_argument(
+        "snapshot exceeds point count limit: " +
+        std::to_string(snapshot.declared_point_count) + " points, limit " +
+        std::to_string(max_points));
   std::vector<SubmapInput> result;
   result.reserve(snapshot.submaps.size());
   std::size_t loaded = 0;

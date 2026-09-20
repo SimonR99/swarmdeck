@@ -168,6 +168,17 @@ PersistentMolaRuntime::PersistentMolaRuntime(RuntimeLimits limits) : limits_(lim
     throw std::invalid_argument("runtime limits must be positive");
 }
 
+PlannerGridLimits PersistentMolaRuntime::plannerGridLimits() const noexcept
+{
+  // The grid build carried its own point default until 2026-09-19, half the
+  // loader's, so a map the loader admitted could still fail to produce a
+  // planner grid on every build (benchbot mission 1a8cc114). The loader's
+  // budget is the only point budget.
+  PlannerGridLimits limits;
+  limits.max_points = limits_.max_points_per_map;
+  return limits;
+}
+
 ApplyReport PersistentMolaRuntime::apply(const ApplyRequest& request)
 try
 {
@@ -290,7 +301,7 @@ try
         std::shared_ptr<const NativePlannerGrid> planner;
         try
         {
-          planner = buildNativePlannerGrid(candidate);
+          planner = buildNativePlannerGrid(candidate, plannerGridLimits());
         }
         catch (const std::invalid_argument& error)
         {
@@ -304,7 +315,8 @@ try
         {
           planner_artifact = writeNativePlannerGrid(
               *planner, request.planner_output_path,
-              limits_.max_planner_output_bytes);
+              limits_.max_planner_output_bytes, kMaxPlannerMetadataBytes,
+              limits_.max_points_per_map);
         }
         catch (const std::invalid_argument& error)
         {

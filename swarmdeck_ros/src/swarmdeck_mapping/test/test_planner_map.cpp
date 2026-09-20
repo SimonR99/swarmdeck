@@ -6,6 +6,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -100,6 +101,50 @@ std::uint32_t readU32(const std::string& bytes, const std::size_t offset)
                   static_cast<unsigned char>(bytes.at(offset + index)))
               << (8 * index);
   return result;
+}
+
+// `count` qualified keyframes of 4,096 floor endpoints each (the capture's
+// configured maximum), one every 0.5 m along x, as a driving robot stores
+// them. 245 of these hold 1,003,520 points: the count that froze robot_0's
+// product on benchbot (mission 1a8cc114, 2026-09-19).
+std::vector<SubmapInput> keyframeSweep(const std::size_t count)
+{
+  std::vector<SubmapInput> result;
+  result.reserve(count);
+  for (std::size_t index = 0; index < count; ++index)
+  {
+    std::vector<PointXYZ> points;
+    points.reserve(4096);
+    for (int row = 0; row < 64; ++row)
+      for (int column = 0; column < 64; ++column)
+        points.push_back(
+            {0.5F + 0.1F * static_cast<float>(column),
+             -3.2F + 0.1F * static_cast<float>(row), 0.0F});
+    SubmapInput submap{
+        "sweep-" + std::to_string(index), std::move(points),
+        pose(0.5 * static_cast<double>(index)), {{0.0F, 0.0F, 0.5F}},
+        1'000'000'000ULL * (index + 1), true};
+    result.push_back(std::move(submap));
+  }
+  return result;
+}
+
+bool throwsWith(
+    const std::function<void()>& action, const std::string& detail, const bool invalid)
+{
+  try
+  {
+    action();
+    return false;
+  }
+  catch (const std::invalid_argument& error)
+  {
+    return invalid && std::string(error.what()).find(detail) != std::string::npos;
+  }
+  catch (const std::runtime_error& error)
+  {
+    return !invalid && std::string(error.what()).find(detail) != std::string::npos;
+  }
 }
 }  // namespace
 
@@ -502,6 +547,52 @@ int main()
   const auto root = std::filesystem::temp_directory_path() /
                     ("swarmdeck-planner-grid-test-" + std::to_string(::getpid()));
   std::filesystem::create_directories(root);
+
+  // One point budget. The grid build and the product share the loader's
+  // `kMaxPointsPerMap`; until 2026-09-19 the build had its own 1,000,000
+  // default, so a map of 245 full keyframes loaded but never produced a grid.
+  static_assert(
+      PlannerGridLimits{}.max_points == kMaxPointsPerMap,
+      "the planner grid point budget must be the shared component budget");
+  static_assert(kMaxPointsPerMap > 1'000'000, "the shared budget was not raised");
+  MolaSubmapBridge sweep_bridge;
+  sweep_bridge.replaceGeometrySnapshot(
+      keyframeSweep(245), version(0, '6'), "{}", identity('6'));
+  const auto sweep = buildNativePlannerGrid(*sweep_bridge.currentSnapshot());
+  require(
+      sweep->point_count == 1'003'520 &&
+          sweep->surfaces.size() + sweep->retired_count == sweep->point_count &&
+          sweep->qualified_ray_keyframes == 245,
+      "245 full keyframes did not build with the default point budget");
+  const auto sweep_artifact = writeNativePlannerGrid(*sweep, root / "sweep.sdmgrid");
+  require(
+      sweep_artifact.size_bytes > 24 * sweep->surfaces.size(),
+      "245 full keyframes did not write with the default product budget");
+  require(
+      throwsWith(
+          [&] {
+            (void)writeNativePlannerGrid(
+                *sweep, root / "never.sdmgrid", kMaxPlannerArtifactBytes,
+                kMaxPlannerMetadataBytes, 1'000'000);
+          },
+          "product budget: 1003520 points, budget 1000000", true),
+      "the product point budget is not the writer's max_points");
+  MolaSubmapBridge over_bridge;
+  over_bridge.replaceGeometrySnapshot(
+      keyframeSweep(489), version(0, '7'), "{}", identity('7'));
+  require(
+      throwsWith(
+          [&] { (void)buildNativePlannerGrid(*over_bridge.currentSnapshot()); },
+          "planner grid point budget exceeded: 2002944 points, budget 2000000",
+          false),
+      "a map over the shared budget was not refused with its numbers");
+  PlannerGridLimits raised;
+  raised.max_points = 2'002'944;
+  require(
+      buildNativePlannerGrid(*over_bridge.currentSnapshot(), raised)->point_count ==
+          2'002'944,
+      "a raised point budget did not admit the map");
+
   const auto first = writeNativePlannerGrid(*terrain_grid, root / "first.sdmgrid");
   const auto second = writeNativePlannerGrid(*terrain_grid, root / "second.sdmgrid");
   require(first.sha256 == second.sha256, "planner grid export is nondeterministic");

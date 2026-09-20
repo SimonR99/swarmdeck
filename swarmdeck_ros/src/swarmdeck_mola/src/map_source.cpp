@@ -68,7 +68,10 @@ void SwarmDeckMapSource::initialize(const mola::Yaml& config)
   swarmdeck_mapping::RuntimeLimits limits;
   // Keep the previous component until a coherent replacement is ready.
   limits.max_maps = 2;
-  const auto points = params.getOrDefault<int>("max_points", 2'000'000);
+  // The runtime derives its loader, planner grid and product budgets from
+  // this one number (swarmdeck_mapping/point_budget.hpp).
+  const auto points = params.getOrDefault<int>(
+      "max_points", static_cast<int>(swarmdeck_mapping::kMaxPointsPerMap));
   if (points < 1 || points > 20'000'000)
     throw std::invalid_argument("max_points must be in [1, 20000000]");
   limits.max_points_per_map = static_cast<std::size_t>(points);
