@@ -13,6 +13,8 @@ import json
 import math
 import os
 from pathlib import Path
+import time
+from typing import Callable
 import numpy as np
 
 from .capture_providers import CaptureProvenance, CaptureProvider, capture_provider
@@ -71,24 +73,70 @@ def pose_matrix(pose):
     return validate_se3(T)
 
 
-SOLUTION_CHANGE_TRANSLATION_M = 0.005
-SOLUTION_CHANGE_ROTATION_RAD = math.radians(0.05)
+# A solver result is adopted (a new correction revision, a rewritten snapshot,
+# a MOLA rebuild, and a frame change for every consumer) only when it moves
+# some pose beyond these. Measured on benchbot on 2026-09-19 (mission
+# 1a8cc114, inter-robot closures on, four robots exploring for 243 s): the
+# optimizer reported every 2 to 3 s and each report moved some pose by a few
+# millimetres, so under the earlier 5 mm / 0.05 degree tolerances 24 of 36
+# plan rejections were frame churn and three of four robots stalled, while
+# the 270 closures of the whole run improved the inter-platform floor
+# placement by no more than 5 cm. A millimetre refinement is not worth a
+# frame change.
+SOLUTION_CHANGE_TRANSLATION_M = 0.05
+SOLUTION_CHANGE_ROTATION_RAD = math.radians(0.5)
+# A result that moves a pose this far (a merge, a loop closure that moves
+# poses by decimetres) is adopted at once. A smaller move beyond the change
+# tolerance is adopted at most once per interval, so a stream of centimetre
+# refinements costs consumers one frame change per interval, not one per
+# report. Deferred refinements are not lost: every result is compared with
+# the currently adopted poses, so they accumulate until they cross the large
+# threshold or the interval passes.
+SOLUTION_LARGE_CHANGE_TRANSLATION_M = 0.25
+SOLUTION_LARGE_CHANGE_ROTATION_RAD = math.radians(2.0)
+SOLUTION_ADOPTION_MIN_INTERVAL_S = 10.0
+
+
+def pose_displacement(pose, previous) -> tuple[float, float]:
+    """Translation (m) and rotation (rad) from one SE(3) pose to another.
+
+    Both are infinite when either matrix is not a finite 4x4, so a malformed
+    pose always counts as a large move.
+    """
+
+    current = np.asarray(pose, dtype=float)
+    reference = np.asarray(previous, dtype=float)
+    if current.shape != (4, 4) or reference.shape != (4, 4):
+        return math.inf, math.inf
+    if not np.isfinite(current).all() or not np.isfinite(reference).all():
+        return math.inf, math.inf
+    translation = float(np.linalg.norm(current[:3, 3] - reference[:3, 3]))
+    relative = reference[:3, :3].T @ current[:3, :3]
+    cosine = (float(np.trace(relative)) - 1.0) / 2.0
+    rotation = float(math.acos(max(-1.0, min(1.0, cosine))))
+    return translation, rotation
 
 
 def pose_moved(pose, previous, translation_m, rotation_rad) -> bool:
     """True when two SE(3) poses differ beyond the given tolerances."""
 
-    current = np.asarray(pose, dtype=float)
-    reference = np.asarray(previous, dtype=float)
-    if current.shape != (4, 4) or reference.shape != (4, 4):
-        return True
-    if not np.isfinite(current).all() or not np.isfinite(reference).all():
-        return True
-    translation = float(np.linalg.norm(current[:3, 3] - reference[:3, 3]))
-    relative = reference[:3, :3].T @ current[:3, :3]
-    cosine = (float(np.trace(relative)) - 1.0) / 2.0
-    rotation = float(math.acos(max(-1.0, min(1.0, cosine))))
+    translation, rotation = pose_displacement(pose, previous)
     return translation > translation_m or rotation > rotation_rad
+
+
+@dataclass(frozen=True)
+class DeferredSolution:
+    """The newest accepted solver result that the adoption interval held back.
+
+    Its poses are not kept. The next result is compared with the currently
+    adopted poses, so the refinement this one carried is part of whatever is
+    adopted next; this record only says how far the adopted frame lags the
+    solver, for diagnostics.
+    """
+
+    order: tuple[int, int]
+    translation_m: float
+    rotation_rad: float
 
 
 def publish_snapshot_if_new(
@@ -118,25 +166,43 @@ class CslamMapper:
         mission_id: str,
         robot_names: dict[int, str],
         capture_provider_name: str | CaptureProvider | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.mapper = mapper
         self.robot_id, self.robot_index = robot_id, robot_index
         # A solver re-optimizes on every accepted closure and on a timer, and
         # its poses move by numerical noise each time. Only a movement beyond
         # these tolerances is a correction that replaces map geometry; smaller
-        # deltas advance the replica publication as causal state and leave the
-        # MOLA product untouched, so an idle merged fleet does not rebuild its
-        # planning map every solver cycle. Deltas accumulate against the last
-        # applied poses, so a slow drift is still applied once it exceeds them.
+        # deltas leave the frame, the revision and the MOLA product untouched,
+        # so an idle merged fleet does not rebuild its planning map every
+        # solver cycle. Deltas accumulate against the last adopted poses, so a
+        # slow drift is still adopted once it exceeds them.
         self.solution_change_translation_m = SOLUTION_CHANGE_TRANSLATION_M
         self.solution_change_rotation_rad = SOLUTION_CHANGE_ROTATION_RAD
+        # A move beyond the change tolerance but below these is a refinement,
+        # adopted at most once per interval; beyond them it is adopted at
+        # once. The interval runs on the wall clock (the same clock as the
+        # bridge's sensor liveness): the cost it bounds is the consumers'
+        # rebuild and replan time, which is real time whatever the simulation
+        # rate.
+        self.solution_large_change_translation_m = SOLUTION_LARGE_CHANGE_TRANSLATION_M
+        self.solution_large_change_rotation_rad = SOLUTION_LARGE_CHANGE_ROTATION_RAD
+        self.solution_adoption_min_interval_s = SOLUTION_ADOPTION_MIN_INTERVAL_S
+        self.clock = clock
+        # Clock reading of the last adoption; None until the first one, which
+        # is never held back.
+        self.last_adoption_at: float | None = None
+        # The newest accepted result held back by the interval, or None when
+        # the newest accepted result was adopted or moved nothing.
+        self.deferred_solution: DeferredSolution | None = None
         self.mission_id, self.robot_names = mission_id, robot_names
         self.capture_provider = capture_provider(capture_provider_name)
         self.anchor = KeyframeId(robot_id, mission_id, 0)
         self.poses, self.local_poses, self.capture_digests = {}, {}, {}
         self.T_component_local = np.eye(4)
         self.solution_order = (0, -1)
-        # Newest solver clock accepted, whether or not it moved a pose.
+        # Newest solver clock accepted, whether or not it was adopted.
         self.solver_order = (0, -1)
         self.revision = 0
         self.replica_revision = 0
@@ -254,17 +320,23 @@ class CslamMapper:
             for key, local in self.local_poses.items()
         }
         poses[anchor] = anchor_pose
-        changed = anchor != self.anchor or any(
-            key not in self.poses
-            or pose_moved(
-                pose,
-                self.poses[key],
-                self.solution_change_translation_m,
-                self.solution_change_rotation_rad,
-            )
-            for key, pose in poses.items()
-        )
+        # The largest move of any pose against the currently adopted poses
+        # (not the last report), so deferred refinements accumulate. A new
+        # anchor or a keyframe this frame has never placed is a merge, which
+        # is always adopted at once.
+        translation = rotation = 0.0
+        large = anchor != self.anchor
+        for key, pose in poses.items():
+            if key not in self.poses:
+                large = True
+                continue
+            moved_m, moved_rad = pose_displacement(pose, self.poses[key])
+            translation, rotation = max(translation, moved_m), max(rotation, moved_rad)
         self.solver_order = order
+        changed = large or (
+            translation > self.solution_change_translation_m
+            or rotation > self.solution_change_rotation_rad
+        )
         if not changed:
             # The advertised solution order names the component frame, and
             # every goal is checked against it. A result that moves no pose
@@ -274,13 +346,39 @@ class CslamMapper:
             # this robot as a stale frame (robot at [1597, 0], replica at
             # [88, 0] after four idle hours, 2026-09-17). Remember the clock
             # for ordering only.
+            self.deferred_solution = None
             return False
+        large = large or (
+            translation > self.solution_large_change_translation_m
+            or rotation > self.solution_large_change_rotation_rad
+        )
+        now = float(self.clock())
+        if (
+            not large
+            and self.last_adoption_at is not None
+            and now - self.last_adoption_at < self.solution_adoption_min_interval_s
+        ):
+            # A refinement within the interval of the last adoption. Every
+            # adoption is a frame change for every consumer (routes
+            # re-validated, plans refused as `requested snapshot is not
+            # current`, MOLA rebuilt), and a stream of centimetre refinements
+            # every 2 to 3 s stalled three of four robots on 2026-09-19. Like
+            # a no-motion result this remembers the clock for ordering only;
+            # the poses are not kept, because the next result after the
+            # interval carries the whole correction against the adopted
+            # poses. Nothing adopts a held result on its own: the solver
+            # reports on a timer, so the adopted frame lags it by at most
+            # the interval and one report.
+            self.deferred_solution = DeferredSolution(order, translation, rotation)
+            return False
+        self.deferred_solution = None
         self.solution_order = order
         if anchor != self.anchor:
             self.epoch += 1
         self.anchor, self.poses = anchor, poses
         self.T_component_local = correction
         self.correction_revision += 1
+        self.last_adoption_at = now
         self._apply()
         return True
 

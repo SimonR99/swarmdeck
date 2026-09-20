@@ -14,6 +14,7 @@ across product transitions.
 
 import hashlib
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -320,7 +321,7 @@ class Bridge(Node):
         ) = 0
         self.solution_results_received = self.solution_results_accepted = (
             self.solution_results_unchanged
-        ) = 0
+        ) = self.solution_results_deferred = 0
         self.closure_candidates = self.verified_closures = 0
         self.rejected_closures = 0
         self.closures_by_peer = {}
@@ -887,15 +888,26 @@ class Bridge(Node):
                 self.dropped += 1
 
     def optimized(self, msg):
+        """Feed one optimizer result to the core and count what became of it.
+
+        The core accepts a result when it is newer than any it has seen
+        (``solver_order`` advances); it adopts one only when the poses moved
+        beyond the change tolerance and the adoption interval allows. An
+        accepted result is therefore exactly one of adopted, deferred (held
+        by the interval, ``core.deferred_solution``) or unchanged.
+        """
+
         self.solution_results_received += 1
-        previous_order = self.core.solution_order
-        corrected = self.core.solution(msg)
-        accepted = self.core.solution_order != previous_order
-        if accepted:
-            self.solution_results_accepted += 1
-        if corrected:
+        previous_order = self.core.solver_order
+        adopted = self.core.solution(msg)
+        if self.core.solver_order == previous_order:
+            return
+        self.solution_results_accepted += 1
+        if adopted:
             self.solution_count += 1
-        elif accepted:
+        elif self.core.deferred_solution is not None:
+            self.solution_results_deferred += 1
+        else:
             self.solution_results_unchanged += 1
 
     def inter_robot_closure(self, msg):
@@ -1036,17 +1048,37 @@ class Bridge(Node):
             "color_projection_rejections": self.color_projection_rejections,
             "colored_captures": self.colored_captures,
             # `solutions` is retained for compatibility and has always counted
-            # pose-changing corrections rather than native optimizer messages.
+            # adopted corrections rather than native optimizer messages.
+            # Accepted results split into adopted (`solutions`), deferred
+            # (moved a pose beyond the change tolerance but held by the
+            # adoption interval) and unchanged.
             "solutions": self.solution_count,
             "solution_results_received": self.solution_results_received,
             "solution_results_accepted": self.solution_results_accepted,
             "solution_results_unchanged": self.solution_results_unchanged,
+            "solution_results_deferred": self.solution_results_deferred,
+            # The newest accepted result held back by the interval: how far
+            # the adopted frame lags the solver, and by which order.
+            "deferred_solution": (
+                None
+                if self.core.deferred_solution is None
+                else {
+                    "order": list(self.core.deferred_solution.order),
+                    "translation_m": self.core.deferred_solution.translation_m,
+                    "rotation_deg": math.degrees(
+                        self.core.deferred_solution.rotation_rad
+                    ),
+                }
+            ),
             "inter_robot_closure_candidates": self.closure_candidates,
             "inter_robot_closures_verified": self.verified_closures,
             "inter_robot_closures_rejected": self.rejected_closures,
             "inter_robot_closures_by_peer": dict(sorted(self.closures_by_peer.items())),
             "corrections_applied": self.solution_count,
+            # The adopted frame's order, and the newest solver clock seen;
+            # they differ after a result that was deferred or moved nothing.
             "last_solution_order": list(self.core.solution_order),
+            "last_solver_order": list(self.core.solver_order),
             # `revision` remains the replica publication sequence so it stays
             # comparable with `replicated_revision`. Map consumers use the
             # independent graph revision carried by the snapshot authority.

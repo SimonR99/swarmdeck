@@ -217,6 +217,7 @@ def main() -> None:
     verify_capture_time_color_transform()
     verify_consume_uses_paired_odom_capture_stamp()
     mission = str(uuid.uuid4())
+    now = [100.0]
     with tempfile.TemporaryDirectory(prefix="cslam-diagnostics-") as directory:
         core = CslamMapper(
             CorrectionAwareMapper(SubmapStore(Path(directory))),
@@ -224,6 +225,7 @@ def main() -> None:
             0,
             mission,
             {0: "robot_0"},
+            clock=lambda: now[0],
         )
         core.capture(0, 1, IDENTITY_SE3, [[1.0, 0.0, 0.0]])
         bridge = NS(
@@ -231,6 +233,7 @@ def main() -> None:
             solution_results_received=0,
             solution_results_accepted=0,
             solution_results_unchanged=0,
+            solution_results_deferred=0,
             solution_count=0,
             closure_candidates=0,
             verified_closures=0,
@@ -254,23 +257,27 @@ def main() -> None:
         assert bridge.solution_results_received == 1
         assert bridge.solution_results_accepted == 0
         assert bridge.solution_results_unchanged == 0
+        assert bridge.solution_results_deferred == 0
         assert bridge.solution_count == 0
-        assert core.solution_order == (0, -1)
+        assert core.solver_order == (0, -1)
 
+        # Accepted and unchanged: the solver clock is remembered for
+        # ordering, the adopted frame keeps its order.
         unchanged = result(mission, 1, 0.0)
         Bridge.optimized(bridge, unchanged)
         assert bridge.solution_results_received == 2
         assert bridge.solution_results_accepted == 1
         assert bridge.solution_results_unchanged == 1
         assert bridge.solution_count == 0
-        assert core.solution_order == (1, 0)
+        assert core.solver_order == (1, 0)
+        assert core.solution_order == (0, -1)
 
         Bridge.optimized(bridge, unchanged)
         assert bridge.solution_results_received == 3
         assert bridge.solution_results_accepted == 1
         assert bridge.solution_results_unchanged == 1
         assert bridge.solution_count == 0
-        assert core.solution_order == (1, 0)
+        assert core.solver_order == (1, 0)
 
         changed = result(mission, 2, 1.0)
         Bridge.optimized(bridge, changed)
@@ -281,9 +288,30 @@ def main() -> None:
         assert core.solution_order == (2, 0)
         assert core.correction_revision == 1
 
+        # A 6 cm refinement three seconds after an adoption is held by the
+        # adoption interval: accepted and deferred, not adopted.
+        now[0] += 3.0
+        Bridge.optimized(bridge, result(mission, 3, 1.06))
+        assert bridge.solution_results_received == 5
+        assert bridge.solution_results_accepted == 3
+        assert bridge.solution_results_unchanged == 1
+        assert bridge.solution_results_deferred == 1
+        assert bridge.solution_count == 1
+        assert core.solver_order == (3, 0)
+        assert core.solution_order == (2, 0)
+        assert core.deferred_solution is not None
+
+        now[0] += 7.0
+        Bridge.optimized(bridge, result(mission, 4, 1.06))
+        assert bridge.solution_results_accepted == 4
+        assert bridge.solution_results_deferred == 1
+        assert bridge.solution_count == 2
+        assert core.solution_order == (4, 0)
+        assert core.deferred_solution is None
+
     print(
-        "PASS: wrong-mission/stale results rejected; accepted unchanged and "
-        "pose-changing results counted separately"
+        "PASS: wrong-mission/stale results rejected; accepted unchanged, "
+        "deferred and adopted results counted separately"
     )
 
 
