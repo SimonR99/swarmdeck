@@ -319,11 +319,15 @@ async def set_live_goal(session_id: str, command: LiveGoal):
             deployment_goal=original,
         )
     else:
+        # The click was converted with the robot's own authority transform,
+        # so it is a goal in the frame of the authority's solution order (a
+        # few solver reports behind the displayed view while the product
+        # lags); the robot fences the goal on exactly that order.
         goal.update(
             frame_id=live["navigation_frame"],
             mission_id=session_id,
             component_id=command.component_id,
-            solution_order=list(command.solution_order),
+            solution_order=list(live["solution_order"]),
             component_goal=original,
         )
     registry.attend(robot.robot_id)

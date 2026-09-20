@@ -274,10 +274,10 @@ def test_authority_in_another_optimizer_or_before_the_solver_is_not_listed(
     assert client.get(BASE, params={"component_id": "component"}).status_code == 404
 
 
-def test_goal_for_a_lagging_authority_is_dispatched_in_the_displayed_frame(setup):
+def test_goal_for_a_lagging_authority_is_dispatched_in_its_own_frame(setup):
     # The server converts the click with the robot's own authority transform
-    # and sends the displayed order; the robot fences the goal on its own
-    # frame revision (adapters/objective_planning._goal_solution_order_error).
+    # and sends that authority's order, so the robot's own fence
+    # (adapters/objective_planning._goal_solution_order_error) admits it.
     client, registry, sink, catalogue = setup
     catalogue.solution_order = [443, 0]
     registry.robots["r0"].live_mapping["solution_order"] = [413, 0]
@@ -292,7 +292,7 @@ def test_goal_for_a_lagging_authority_is_dispatched_in_the_displayed_frame(setup
     )
     assert response.status_code == 200
     sent = sink.send_json.call_args.args[0]["goal"]
-    assert sent["solution_order"] == [443, 0]
+    assert sent["solution_order"] == [413, 0]
     assert sent["component_goal"] == dict(x=1.0, y=2.0, z=0.0, yaw=0.0)
 
 
