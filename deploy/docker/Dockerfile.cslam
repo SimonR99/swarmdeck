@@ -123,6 +123,12 @@ COPY deploy/patches/cslam-inter-robot-switch.patch /tmp/cslam-inter-robot-switch
 # pair kept being re-registered (707 closures per peer in 20 minutes). The cap
 # hunks sit right after the switch's early return, so it applies after it.
 COPY deploy/patches/cslam-inter-robot-pair-cap.patch /tmp/cslam-inter-robot-pair-cap.patch
+# Inter-robot closures carry a fraction of a degree of pitch and roll error
+# and the optimizer rotates a whole robot's chain to absorb it (0.7 to 1.5
+# degrees measured on 2026-09-20), which puts the shared floor 0.5 m off at
+# 20 m. An attitude prior on every pose keeps the solution upright; the
+# sigma is backend.upright_prior_sigma_rad, off at zero.
+COPY deploy/patches/cslam-upright-prior.patch /tmp/cslam-upright-prior.patch
 RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-keyframe-readiness.patch \
@@ -130,7 +136,8 @@ RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-registration-overlap.patch \
     && git apply /tmp/cslam-scene-change-keyframe.patch \
     && git apply /tmp/cslam-inter-robot-switch.patch \
-    && git apply /tmp/cslam-inter-robot-pair-cap.patch
+    && git apply /tmp/cslam-inter-robot-pair-cap.patch \
+    && git apply /tmp/cslam-upright-prior.patch
 
 # Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \

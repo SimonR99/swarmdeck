@@ -498,3 +498,31 @@ def test_a_parked_robot_earns_a_bounded_number_of_scene_keyframes():
     ).read_text()
     assert "keyframe_scene_change_max_range_m: 8.0" in yaml_text
     assert "keyframe_scene_change_max_stationary: 12" in yaml_text
+
+
+UPRIGHT_PATCH = REPO / "deploy/patches/cslam-upright-prior.patch"
+
+
+def test_upright_prior_patch_declares_reads_and_adds_attitude_factors():
+    patch = UPRIGHT_PATCH.read_text()
+    added = "\n".join(added_lines(patch))
+    # Declared with the other backend parameters, off by default, read once.
+    assert 'declare_parameter<double>("backend.upright_prior_sigma_rad", 0.0);' in added
+    assert 'get_parameter("backend.upright_prior_sigma_rad",' in added
+    # One two-dimensional attitude factor per pose of the aggregate graph,
+    # body Z to navigation Z, added only when the sigma is positive.
+    assert "#include <gtsam/navigation/AttitudeFactor.h>" in added
+    assert "if (upright_prior_sigma_rad_ > 0.0)" in added
+    assert "gtsam::noiseModel::Isotropic::Sigma(2, upright_prior_sigma_rad_)" in added
+    assert "for (const auto &key_value : *aggregate_pose_graph_.second)" in added
+    assert "emplace_shared<gtsam::Pose3AttitudeFactor>(" in added
+    assert "key_value.key, up, upright_noise, up);" in added
+    # Applied last, after the pair cap, and switched on for the fleet.
+    dockerfile = DOCKERFILE.read_text()
+    assert dockerfile.index(
+        "git apply /tmp/cslam-upright-prior.patch"
+    ) > dockerfile.index("git apply /tmp/cslam-inter-robot-pair-cap.patch")
+    config = (
+        REPO / "swarmdeck_ros/src/swarmdeck_cslam/config/cslam_lidar.yaml"
+    ).read_text()
+    assert "upright_prior_sigma_rad: 0.01" in config

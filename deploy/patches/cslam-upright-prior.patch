@@ -1,0 +1,65 @@
+--- a/cslam/src/back_end/pose_graph_manager_node.cpp
++++ b/cslam/src/back_end/pose_graph_manager_node.cpp
+@@ -22,6 +22,7 @@
+   node->declare_parameter<int>("backend.pose_graph_optimization_loop_period_ms", 100);
+   node->declare_parameter<int>("backend.max_waiting_time_sec", 100);
+   node->declare_parameter<bool>("backend.enable_broadcast_tf_frames", true);
++  node->declare_parameter<double>("backend.upright_prior_sigma_rad", 0.0);
+   node->declare_parameter<double>("neighbor_management.heartbeat_period_sec", 1.0);
+   node->declare_parameter<bool>("evaluation.enable_logs", false);
+   node->declare_parameter<std::string>("evaluation.log_folder", "");
+--- a/cslam/include/cslam/back_end/decentralized_pgo.h
++++ b/cslam/include/cslam/back_end/decentralized_pgo.h
+@@ -11,6 +11,7 @@
+ #include <gtsam/nonlinear/NonlinearFactorGraph.h>
+ #include <gtsam/nonlinear/Values.h>
+ #include <gtsam/slam/BetweenFactor.h>
++#include <gtsam/navigation/AttitudeFactor.h>
+ 
+ #include <cslam_common_interfaces/msg/keyframe_odom.hpp>
+ #include <cslam_common_interfaces/msg/optimization_result.hpp>
+@@ -297,6 +298,7 @@
+ 
+         gtsam::SharedNoiseModel default_noise_model_;
+         float rotation_default_noise_std_, translation_default_noise_std_;
++        double upright_prior_sigma_rad_;
+ 
+         gtsam::NonlinearFactorGraph::shared_ptr pose_graph_;
+         gtsam::Values::shared_ptr current_pose_estimates_;
+--- a/cslam/src/back_end/decentralized_pgo.cpp
++++ b/cslam/src/back_end/decentralized_pgo.cpp
+@@ -18,6 +18,8 @@
+                        pose_graph_optimization_loop_period_ms_);
+   node_->get_parameter("backend.enable_broadcast_tf_frames",
+                        enable_broadcast_tf_frames_);
++  node_->get_parameter("backend.upright_prior_sigma_rad",
++                       upright_prior_sigma_rad_);
+   node_->get_parameter("neighbor_management.heartbeat_period_sec", heartbeat_period_sec_);
+   node->get_parameter("evaluation.enable_logs",
+                       enable_logs_);
+@@ -869,6 +871,25 @@
+       first_symbol, current_pose_estimates_->at<gtsam::Pose3>(first_symbol),
+       default_noise_model_);
+ 
++  // Upright prior for ground robots on a planar site. Inter-robot closures
++  // from scan registration carry a fraction of a degree of pitch and roll
++  // error; without a prior the optimizer rotates a whole robot's chain to
++  // absorb it, and a 1.5 degree tilt of a robot's frame puts the shared map's
++  // floor 0.5 m off at 20 m from the frame origin, which the planner reads
++  // as steps, drops or occupied ground. Each pose keeps its body Z axis
++  // within sigma of the navigation Z axis; yaw and translation stay free.
++  if (upright_prior_sigma_rad_ > 0.0)
++  {
++    const auto upright_noise =
++        gtsam::noiseModel::Isotropic::Sigma(2, upright_prior_sigma_rad_);
++    const gtsam::Unit3 up(0.0, 0.0, 1.0);
++    for (const auto &key_value : *aggregate_pose_graph_.second)
++    {
++      aggregate_pose_graph_.first->emplace_shared<gtsam::Pose3AttitudeFactor>(
++          key_value.key, up, upright_noise, up);
++    }
++  }
++
+   if (enable_logs_){
+     logger_->log_initial_global_pose_graph(aggregate_pose_graph_.first, aggregate_pose_graph_.second);
+   }
