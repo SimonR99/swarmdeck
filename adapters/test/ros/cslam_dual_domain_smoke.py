@@ -22,6 +22,7 @@ import uuid
 import numpy as np
 import rclpy
 from cslam_common_interfaces.msg import KeyframeOdom, KeyframePointCloud
+from autonomy.map_epochs import claim_map_epoch, robot_run_id
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -73,6 +74,9 @@ def main() -> None:
     mission = str(uuid.uuid4())
     with tempfile.TemporaryDirectory(prefix="cslam-dual-domain-") as directory:
         root = Path(directory)
+        maps_root = root / "maps"
+        map_epoch = claim_map_epoch(maps_root, mission, robot)
+        run_id = robot_run_id(mission, robot, map_epoch)
         log_path = root / "bridge.log"
         environment = {
             **os.environ,
@@ -94,6 +98,10 @@ def main() -> None:
             "-p",
             f"mission_id:={mission}",
             "-p",
+            f"map_epoch:={map_epoch}",
+            "-p",
+            f"run_id:={run_id}",
+            "-p",
             "sensor_namespace:=''",
             "-p",
             "base_frame:=base_link",
@@ -114,7 +122,7 @@ def main() -> None:
             "-p",
             "tf_static_topic:=/tf_static",
             "-p",
-            f"store_root:={root / 'maps'}",
+            f"store_root:={maps_root}",
         ]
         with log_path.open("w") as log:
             process = subprocess.Popen(
@@ -294,8 +302,26 @@ def main() -> None:
                 Header(stamp=stamp, frame_id="base_link"),
                 np.asarray([[9.0, 0.0, 0.0]], dtype=np.float32),
             )
-            key_cloud.publish(KeyframePointCloud(id=0, pointcloud=slam_cloud))
-            key_odom.publish(KeyframeOdom(id=0, odom=normalized_odometry[-1]))
+            key_cloud.publish(
+                KeyframePointCloud(
+                    id=0,
+                    pointcloud=slam_cloud,
+                    mission_id=mission,
+                    publisher_robot_id=0,
+                    map_epoch=map_epoch,
+                    robot_map_epochs=[map_epoch],
+                )
+            )
+            key_odom.publish(
+                KeyframeOdom(
+                    id=0,
+                    odom=normalized_odometry[-1],
+                    mission_id=mission,
+                    publisher_robot_id=0,
+                    map_epoch=map_epoch,
+                    robot_map_epochs=[map_epoch],
+                )
+            )
 
             own_intention = f'{{ "robot_id": "{robot}", "exact": "intention" }}'
             remote_intention = '{ "robot_id": "remote", "exact": "intention" }'
@@ -356,6 +382,12 @@ def main() -> None:
             require(
                 published_authority["robot_id"] == robot,
                 "local authority payload is invalid",
+            )
+            require(
+                published_authority["mission_id"] == mission
+                and published_authority["robot_map_epoch"] == map_epoch
+                and published_authority["run_id"] == run_id,
+                "local authority did not retain the claimed robot map lifetime",
             )
             require(
                 published_authority.get("planning_frame") == f"{robot}/odom",

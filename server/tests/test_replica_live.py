@@ -8,14 +8,20 @@ from fastapi.testclient import TestClient
 
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.live_mapping import validate_live_mapping
+from autonomy.map_epochs import robot_run_id
 from swarmdeck_server.api import replica_live, replica_views
 from swarmdeck_server.fleet.registry import Registry
+
+MISSION = "00000000-0000-4000-8000-000000000001"
+RUN = robot_run_id(MISSION, "r0", 0)
 
 
 def payload():
     return dict(
         robot_id="r0",
-        mission_id="mission",
+        mission_id=MISSION,
+        robot_map_epoch=0,
+        run_id=RUN,
         component_id="component",
         navigation_frame="r0/map",
         solution_order=[0, -1],
@@ -40,7 +46,7 @@ def setup(monkeypatch):
         dict(robot_id="r0", pose=dict(x=900, y=800), live_mapping=payload())
     )
     monkeypatch.setattr(replica_live, "registry", registry)
-    monkeypatch.setenv("SWARMDECK_MISSION_ID", "mission")
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", MISSION)
 
     class Catalogue:
         def __init__(self):
@@ -70,7 +76,7 @@ def setup(monkeypatch):
         yield client, registry, sink, catalogue
 
 
-BASE = "/api/autonomy/replicas/components/live/mission"
+BASE = f"/api/autonomy/replicas/components/live/{MISSION}"
 
 
 def test_live_overlay_uses_raw_navigation_pose_and_authority_age(setup):
@@ -91,7 +97,7 @@ def test_live_api_exposes_qualified_home_schema(setup):
     client, registry, _, _ = setup
     value = payload()
     value["home"] = {
-        "keyframe_id": "r0/mission/0",
+        "keyframe_id": f"r0/{RUN}/0",
         "T_navigation_home": [
             [1, 0, 0, 4],
             [0, 1, 0, -2],
@@ -105,7 +111,7 @@ def test_live_api_exposes_qualified_home_schema(setup):
 
     assert response.status_code == 200
     home = response.json()["robots"][0]["home"]
-    assert home["keyframe_id"] == "r0/mission/0"
+    assert home["keyframe_id"] == f"r0/{RUN}/0"
     assert [row[3] for row in home["T_navigation_home"][:3]] == [4, -2, 0.3]
 
 
@@ -114,7 +120,7 @@ def test_wrong_component_home_authority_is_not_exposed(setup):
     value = payload()
     value["component_id"] = "other"
     value["home"] = {
-        "keyframe_id": "r0/mission/0",
+        "keyframe_id": f"r0/{RUN}/0",
         "T_navigation_home": IDENTITY_SE3,
     }
     registry.robots["r0"].live_mapping = validate_live_mapping(value, "r0")

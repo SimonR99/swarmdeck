@@ -1,18 +1,22 @@
 FROM ros:jazzy-perception
 SHELL ["/bin/bash", "-c"]
-# SwarmDeck's planner work lives on the `swarmdeck` branch of MGGPlanner, which
-# carries the changes this deployment used to apply as a patch series.
+# Match ROS interface generators and dependency versions in contract-only images.
+COPY deploy/docker/use-ros-snapshot.sh deploy/docker/ros-snapshot-key.asc /tmp/
+RUN bash /tmp/use-ros-snapshot.sh
+# Pin the planner branch and apply the checked-in motion reliability corrections.
 ARG MGG_REV=7004cd47c9197a44ab89d4ee1d7023418c957141
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git python3-colcon-common-extensions python3-yaml \
     libeigen3-dev libboost-dev libyaml-cpp-dev libssl-dev nlohmann-json3-dev ros-jazzy-octomap \
     ros-jazzy-octomap-msgs ros-jazzy-octomap-ros ros-jazzy-tf2-ros \
-    ros-jazzy-nav2-msgs \
+    ros-jazzy-nav2-msgs ros-jazzy-slam-toolbox \
     ros-jazzy-rclpy \
     ros-jazzy-tf2-geometry-msgs ros-jazzy-rosidl-default-generators \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --branch swarmdeck https://github.com/MISTLab/MGGPlanner.git /opt/mgg \
     && git -C /opt/mgg checkout "$MGG_REV"
+COPY deploy/patches/mgg-motion-reliability.patch /tmp/
+RUN git -C /opt/mgg apply /tmp/mgg-motion-reliability.patch
 WORKDIR /opt/mgg/ros2
 RUN source /opt/ros/jazzy/setup.bash && \
     CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-up-to mgg_ros mgg_pci \
@@ -21,4 +25,4 @@ COPY deploy/mgg /app/deploy/mgg
 COPY adapters/protocol /app/adapters/protocol
 COPY swarmdeck_ros/src/swarmdeck_sim /app/swarmdeck_ros/src/swarmdeck_sim
 COPY configs /app/configs
-CMD ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/mgg/ros2/install/setup.bash && ros2 launch /app/deploy/mgg/fleet.launch.py"]
+CMD ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/mgg/ros2/install/setup.bash && exec python3 /app/deploy/mgg/supervisor.py"]

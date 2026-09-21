@@ -18,6 +18,10 @@
 
 FROM ros:jazzy-ros-base
 
+# Keep peer message dependencies on the same signed Jazzy snapshot as sim/MGG.
+COPY deploy/docker/use-ros-snapshot.sh deploy/docker/ros-snapshot-key.asc /tmp/
+RUN bash /tmp/use-ros-snapshot.sh
+
 ARG BUILD_JOBS=4
 ARG TEASER_REF=52a9c52ee7d4c838c5e8a75458c33178be5bfb70
 
@@ -129,6 +133,9 @@ COPY deploy/patches/cslam-inter-robot-pair-cap.patch /tmp/cslam-inter-robot-pair
 # 20 m. An attitude prior on every pose keeps the solution upright; the
 # sigma is backend.upright_prior_sigma_rad, off at zero.
 COPY deploy/patches/cslam-upright-prior.patch /tmp/cslam-upright-prior.patch
+# Per-robot epoch fencing extends the versioned wire contract after all prior
+# graph and loop-closure changes.
+COPY deploy/patches/cslam-map-epoch.patch /tmp/cslam-map-epoch.patch
 RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-keyframe-readiness.patch \
@@ -137,7 +144,8 @@ RUN cd src && git apply --check /tmp/cslam-solution-version.patch \
     && git apply /tmp/cslam-scene-change-keyframe.patch \
     && git apply /tmp/cslam-inter-robot-switch.patch \
     && git apply /tmp/cslam-inter-robot-pair-cap.patch \
-    && git apply /tmp/cslam-upright-prior.patch
+    && git apply /tmp/cslam-upright-prior.patch \
+    && git apply /tmp/cslam-map-epoch.patch
 
 # Native compilation verifies the versioned peer message contract.
 RUN . /opt/ros/jazzy/setup.sh \

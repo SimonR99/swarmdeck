@@ -14,6 +14,7 @@ the lidar odometry. Pointing it at the wheel topic would hand the pose graph the
 one channel that cannot observe slip.
 """
 
+import os
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -30,6 +31,10 @@ def setup(context, *args, **kwargs):
     count = int(LaunchConfiguration("robots").perform(context))
     prefix = LaunchConfiguration("prefix").perform(context)
     use_sim = LaunchConfiguration("use_sim_time").perform(context)
+    if count <= 0:
+        raise ValueError("robots must be positive")
+    mission = LaunchConfiguration("mission_id").perform(context)
+    root = LaunchConfiguration("map_store").perform(context)
     return [
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -45,6 +50,8 @@ def setup(context, *args, **kwargs):
                 "robot_id": str(i),
                 "max_nb_robots": str(count),
                 "use_sim_time": use_sim,
+                "mission_id": mission,
+                "map_store": root,
             }.items(),
         )
         for i in range(count)
@@ -84,6 +91,13 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("robots", default_value="4"),
             DeclareLaunchArgument("prefix", default_value="robot_"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
+            DeclareLaunchArgument(
+                "mission_id", default_value=os.environ.get("SWARMDECK_MISSION_ID", "")
+            ),
+            DeclareLaunchArgument(
+                "map_store",
+                default_value=os.environ.get("SWARMDECK_MAP_STORE", "/maps"),
+            ),
             OpaqueFunction(function=setup),
         ]
     )

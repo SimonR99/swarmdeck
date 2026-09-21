@@ -1,11 +1,9 @@
 FROM ros:humble-ros-base
 
-# Cache anchor, not the pin. BuildKit keys every later RUN on the ARGs declared
-# above it, and the apt layer below must keep coming from Docker's cache: a fresh
-# install pulls newer Jazzy nav2 and slam_toolbox builds that break the
-# navigation bring-up. This reproduces the scope the cached layer was built
-# with; the real MGG pin is declared again just before its use.
-ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+# Hardware remains on Humble. Its signed snapshot is independent of Jazzy's
+# navigation qualification; no historical Docker cache is needed.
+COPY deploy/docker/use-ros-snapshot.sh deploy/docker/ros-snapshot-key.asc /tmp/
+RUN bash /tmp/use-ros-snapshot.sh
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       gir1.2-gstreamer-1.0 \
@@ -19,6 +17,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       python3-numpy \
       python3-opencv \
       python3-pip \
+      python3-venv \
       python3-yaml \
       python3-colcon-common-extensions \
       git \
@@ -44,7 +43,15 @@ ENV AMENT_PREFIX_PATH="/opt/swarmdeck-mgg-msgs:${AMENT_PREFIX_PATH}" \
 WORKDIR /app
 COPY adapters /app/adapters
 COPY autonomy /app/autonomy
-RUN pip3 install --no-cache-dir /app/adapters/protocol
+# Jammy's system pip leaks apt setuptools into PEP 517 build isolation. Build
+# with a temporary venv so the pyproject backend wins without replacing ROS's
+# system Python tooling, then install only the protocol wheel into the runtime.
+RUN python3 -m venv /tmp/protocol-build \
+    && /tmp/protocol-build/bin/pip wheel --no-cache-dir --no-deps \
+         --wheel-dir /tmp/protocol-build/wheels /app/adapters/protocol \
+    && pip3 install --no-cache-dir /tmp/protocol-build/wheels/swarmdeck_protocol-*.whl \
+    && python3 -I -c "import swarmdeck_protocol" \
+    && rm -rf /tmp/protocol-build
 ENV PYTHONPATH="/app/adapters/protocol:/app:/app/swarmdeck/adapters/protocol:/app/swarmdeck:${PYTHONPATH:-}"
 
 CMD ["python3", "/app/adapters/adapter_ros2/adapter_ros2.py", "--help"]

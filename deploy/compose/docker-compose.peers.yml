@@ -16,6 +16,7 @@ x-peer: &peer
     SWARMDECK_USE_SIM_TIME: "true"
     SWARMDECK_CAPTURE_PROVIDER: "${SWARMDECK_CAPTURE_PROVIDER:-unknown}"
     SWARMDECK_COLOR_FRAME_CONVENTION: body
+    SWARMDECK_SIM_RESET_DIR: /run/swarmdeck-reset
     # Simulation only. The ARGoS bridge publishes every robot's pose in the
     # shared `world` frame, so a capture can drop the returns that landed on a
     # neighbour's chassis. Hardware has no such shared-frame peer pose and
@@ -33,11 +34,12 @@ x-peer: &peer
     - ../../autonomy:/app/autonomy:ro
     - ../autonomy:/app/deploy/autonomy:ro
     - peer_maps:/maps
+    - ../../sessions/simulation-reset:/run/swarmdeck-reset:ro
   command: ["bash", "-c", "source /opt/ros/jazzy/setup.bash && source /cslam_ws/install/setup.bash && exec ros2 launch /app/deploy/autonomy/peer.launch.py"]
   depends_on:
     sim:
       condition: service_started
-  restart: "no"
+  restart: unless-stopped
 services:
   peer0:
     <<: *peer

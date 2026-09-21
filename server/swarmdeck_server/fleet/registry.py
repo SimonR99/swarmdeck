@@ -76,6 +76,7 @@ class Robot:
     peer_slam: dict[str, Any] | None = None
     live_mapping_received_at: float = 0.0
     objective_continuation: dict[str, Any] | None = None
+    command_generation: int = 0
 
     last_seen: float = field(default_factory=time.monotonic)
     last_attended: float = field(default_factory=time.monotonic)
@@ -106,6 +107,7 @@ class Robot:
             "exploration_status": self.exploration_status,
             "exploration_reason": self.exploration_reason,
             "peer_slam": self.peer_slam if self.online else None,
+            "live_mapping": self.live_mapping if self.online else None,
             "fleet_exploration_status": (
                 self.fleet_exploration_status if self.online else "unknown"
             ),
@@ -134,9 +136,11 @@ class Robot:
 
 
 class Registry:
-    def __init__(self) -> None:
+    def __init__(self, *, epoch_store=None, command_guard=None) -> None:
         self.robots: dict[str, Robot] = {}
         self._sinks: dict[str, Any] = {}  # robot_id -> adapter websocket
+        self.epoch_store = epoch_store
+        self.command_guard = command_guard
 
     def hello(self, msg: dict[str, Any], sink: Any, peer: str = "") -> Robot:
         rid = msg["robot_id"]
@@ -169,6 +173,27 @@ class Registry:
         r = self.robots.get(msg.get("robot_id", ""))
         if not r:
             return None
+        mission = os.environ.get("SWARMDECK_MISSION_ID")
+        floor = (
+            self.epoch_store().map_epoch(r.robot_id, mission)
+            if self.epoch_store and mission
+            else None
+        )
+        if floor is not None:
+            from autonomy.map_epochs import robot_run_id
+
+            live = msg.get("live_mapping")
+            peer = msg.get("peer_slam")
+            authority = live if isinstance(live, dict) else peer
+            if (
+                not isinstance(authority, dict)
+                or authority.get("mission_id") != mission
+                or authority.get("robot_map_epoch") != floor
+                or authority.get("run_id") != robot_run_id(mission, r.robot_id, floor)
+            ):
+                # An old socket can remain alive throughout the restart. Do
+                # not let any of its goals, paths, home or authority reappear.
+                return None
         r.last_seen = time.monotonic()
         try:
             r.peer_slam = peer_status(
@@ -198,7 +223,20 @@ class Registry:
             }
         if "pose" in msg:
             r.pose = msg["pose"]
-        if r.home_pose is None and isinstance(msg.get("home_pose"), dict):
+        if r.home_pose is None and floor is not None and r.live_mapping:
+            home = r.live_mapping.get("home")
+            if home:
+                pose = home["T_navigation_home"]
+                r.home_pose = {
+                    "x": pose[0][3],
+                    "y": pose[1][3],
+                    "yaw": math.atan2(pose[1][0], pose[0][0]),
+                }
+        if (
+            r.home_pose is None
+            and floor is None
+            and isinstance(msg.get("home_pose"), dict)
+        ):
             try:
                 home = {key: float(msg["home_pose"][key]) for key in ("x", "y", "yaw")}
                 if all(math.isfinite(v) for v in home.values()):
@@ -317,11 +355,32 @@ class Registry:
         return self.robots.pop(robot_id, None) is not None
 
     async def send(self, robot_id: str, msg: dict[str, Any]) -> bool:
+        moving = (
+            msg.get("type") in {"navigate_to", "plan_objective", "body_command"}
+            or (msg.get("type") == "explore" and msg.get("enabled"))
+            or (
+                msg.get("type") == "drive" and (msg.get("linear") or msg.get("angular"))
+            )
+        )
+        if moving and self.command_guard and self.command_guard(robot_id):
+            return False
         sink = self._sinks.get(robot_id)
         if sink is None:
             return False
+        robot = self.robots.get(robot_id)
+        generation = robot.command_generation if robot else None
+        if moving and robot and robot.live_mapping:
+            live = robot.live_mapping
+            msg = {
+                **msg,
+                "mission_id": live["mission_id"],
+                "robot_map_epoch": live["robot_map_epoch"],
+                "map_run_id": live["run_id"],
+            }
         try:
             await sink.send_json(msg)
+            if moving and robot and robot.command_generation != generation:
+                return False
             return True
         except Exception:
             # The adapter may have reconnected while this send was waiting.
@@ -349,4 +408,16 @@ class Registry:
         return [r.to_state() for r in self.robots.values()]
 
 
-registry = Registry()
+def _epoch_store():
+    from ..api.autonomy_routes import store
+
+    return store()
+
+
+def _command_guard(robot_id):
+    from ..api.map_routes import robot_command_error
+
+    return robot_command_error(robot_id)
+
+
+registry = Registry(epoch_store=_epoch_store, command_guard=_command_guard)

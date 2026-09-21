@@ -4,10 +4,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from adapters.test.ros.return_home_evidence import AUTHORITY_FIELDS, analyze
+from autonomy.map_epochs import robot_run_id
 
 BASE = datetime(2026, 9, 10, 10, 0, tzinfo=timezone.utc)
 MISSION = "126bed69-9327-4d8f-a4b2-075fa7569d8e"
 ROBOT = "robot_0"
+RUN = robot_run_id(MISSION, ROBOT, 0)
 
 
 def _iso(seconds: float) -> str:
@@ -27,6 +29,8 @@ def _authority() -> dict:
     return {
         "robot_id": ROBOT,
         "mission_id": MISSION,
+        "robot_map_epoch": 0,
+        "run_id": RUN,
         "component_id": "component:test",
         "map_epoch": 0,
         "mapping_graph_revision": 8,
@@ -37,7 +41,7 @@ def _authority() -> dict:
         "T_component_navigation": _matrix(),
         "anchor": {"robot_id": ROBOT},
         "home": {
-            "keyframe_id": f"{ROBOT}/{MISSION}/0",
+            "keyframe_id": f"{ROBOT}/{RUN}/0",
             "T_navigation_home": _matrix(),
         },
         "solution_order": [8, ROBOT],
@@ -156,7 +160,7 @@ def _evidence() -> dict:
                 "payload_sha256": "b" * 64,
                 "metadata": {
                     "schema": "swarmdeck.keyframe-metadata.v1",
-                    "keyframe_id": f"{ROBOT}/{MISSION}/0",
+                    "keyframe_id": f"{ROBOT}/{RUN}/0",
                     "stamp_ns": 10_000_000_000,
                     "odom_frame": f"{ROBOT}/odom",
                     "T_odom_keyframe": _matrix(),
@@ -213,7 +217,7 @@ def test_home_must_match_recorded_mission_keyframe_zero():
     evidence = _evidence()
     evidence["robots"][ROBOT]["keyframe_events"][0]["metadata"][
         "keyframe_id"
-    ] = f"{ROBOT}/{MISSION}/19"
+    ] = f"{ROBOT}/{RUN}/19"
     result = analyze(_observer(), evidence, ROBOT)
     assert result["status"] == "inconclusive"
     assert any("keyframe-0" in reason for reason in result["reasons"])

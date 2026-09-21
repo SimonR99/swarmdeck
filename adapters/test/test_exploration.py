@@ -8,6 +8,7 @@ import sys
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 import time
+from threading import RLock
 
 import pytest
 
@@ -47,6 +48,9 @@ def test_exploration_uses_configured_stable_planning_frame(monkeypatch):
 
 def rig():
     bridge = Mock()
+    bridge.onboard_mapping = False
+    bridge._goal_lock = RLock()
+    bridge.objective_planner = None
     # Explicit callables avoid Python 3.14's executor shutdown waiting forever
     # on a dynamically-created Mock child after dispatch_command offloads it.
     bridge.navigate_to = Mock()

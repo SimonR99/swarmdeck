@@ -78,7 +78,8 @@ MGG is built from the `swarmdeck` branch of
 [MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
 `7004cd47c9197a44ab89d4ee1d7023418c957141` (the 59 ported commits over
 upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, and refusal of a validated prefix that makes no progress), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
-changes are made in that repository and the pin is advanced. `ccda9ce` is a
+motion corrections are applied from `deploy/patches/mgg-motion-reliability.patch`
+without changing this pin or the sibling upstream checkout. `ccda9ce` is a
 revert: on 2026-09-19 a full-map raster global stage, a separate drop limit
 with footprint asymmetry, breadcrumb skipping, empty-section refusal and
 Navigate/Return Home graph connectors were added, trialled on benchbot and
@@ -242,25 +243,30 @@ Each item names its acceptance gate.
       is not deadline exhaustion.
 - [ ] **Fleet motion acceptance.** Gate: four-robot startup, Navigate and Home
       succeed against independent simulation truth; cancellation and map
-      corrections stop or replan correctly. Status 2026-09-18: the planner
-      had no map on 62% of plan requests (authority ahead of the MOLA product,
-      builds discarded); after the self-described product, product-gated
-      authority, MGG predecessor retention and concurrent builds, 1 of 42
-      requests was mapless, 3 m goals arrive for all four robots, 8 m goals
-      for the two robots whose goal is on the road, and three of four return
-      legs complete. Still open: routes that descend a 0.16 to 0.19 m kerb
-      against the 0.15 m step limit (the simulated Bunker climbed it), the
-      Scout's straight-ahead goal on the kerb where the road bends, and a
-      return waypoint projected onto a terrace table top. 2026-09-19: the
-      operator saw long goals planned as one waypoint and a straight line
-      (the topological stage's optimistic connector). A full-map raster
-      global stage and index-server terrain special cases were added, ran
-      three benchbot cycles (acceptance log: returns 1, 2, then 4 of 4) and
-      were rolled back the same day at the operator's verdict: the robots
-      drove into obstacles, the planner produced nonsensical targets, and
-      the stages were redundant with MGG's own graph. MGG is `0e189ed`
-      again (as `ccda9ce`); the open question is why the ported MGG's global
-      graph is sparse where upstream's spans the explored lattice.
+      corrections stop or replan correctly. The 2026-09-21 checked-in MGG patch
+      fixes unobserved-goal driving height, finds useful measured endpoints on
+      sparse partial corridors, resumes from the endpoint actually emitted,
+      and admits bounded, fully checked breadcrumb connectors under the same
+      qualified simulation-ground policy used for motion. It does not raise
+      step, drop, occupancy, geofence or provisional-distance limits.
+      Benchbot: one cycle passed 3 m Navigate for all four; the final cycle
+      passed R0/R2/R3 while R1 refused an over-bound provisional connector.
+      Final 8 m road goals passed for R0/R1; Scout stopped after a measured
+      0.581 m rise and Spot refused a measured 1.266–1.573 m drop.
+      The subsequent four Home legs ended 0.225–0.251 m from their initial
+      independent truth positions. Scout's live-envelope check was inconclusive
+      at 0.621 m despite a 0.241 m physical return error; do not report that
+      harness result as a pass. Final 180 s Explore passed for all four
+      (30.2 / 23.7 / 29.6 / 30.9 m navigation-frame displacement), with one
+      transient HTTP 404, no authority changes, and Stop All verified.
+      After Explore, long Home passed for R1/R3/R0 in 71.9/112.3/111.1 s,
+      with independent return errors of 0.240/0.368/0.283 m. Scout refused
+      immediately outside the 1 m graph tolerance, still 29.916 m from its
+      original physical position: its breadcrumb drain had blocked and later
+      exploration paths could not attach to the global graph. That long-Home
+      attachment failure remains open, as do repeated cold-start connector
+      refusal and terrain/road-boundary cases. Do not relax safety limits to
+      turn these refusals into nominal passes.
 - [ ] **Blocked-corridor topological replanning and speed limits.** Gate: a
       failed edge is excluded from a new topological search, and refined paths
       carry speed limits. Implemented in MGG at `494ce66` (branch head `c4eff1b`): Explore now runs
@@ -336,8 +342,9 @@ Each item names its acceptance gate.
       for ground robots, then re-measure Z before re-enabling merges.
 - [ ] **Separate hosts, partitions and optimizer loss.** Gate: peers collaborate
       with the server stopped; partition and rejoin do not duplicate commands or
-      falsely declare completion. A frontend restart currently requires a fresh
-      fleet mission and domain; transparent restart is not implemented.
+      falsely declare completion. A supported simulation frontend restart now
+      advances only that robot's durable map epoch; partition/rejoin and
+      multi-host recovery remain unqualified.
 - [ ] **Hardware capture provenance.** Gate: SuperOdometry and FAST-LIVO2
       capture contracts attest first returns, deskew and one endpoint per ray,
       verified against recorded data. Until then those paths stay occupied-only.
@@ -354,41 +361,43 @@ Each item names its acceptance gate.
 - [ ] **Gaussian reconstruction from real captures.** Gate: measured alignment,
       held-out image quality, memory, training and rendering budgets, correction
       replacement and cancellation.
-- [ ] **Reproducible Jazzy images.** Gate: every image builds on a clean host
-      without Docker cache. On 2026-09-16 the ROS apt repository served only
-      MOLA 3.2.0 (the mapping image pins 2.9.0) and a fresh apt layer gave the
-      simulation image nav2 1.3.13 and September slam_toolbox and tf2 builds,
-      under which the navigation lifecycle bring-up never answers. The mapping,
-      sim and robot-ros2 Dockerfiles now carry an `ARG MGG_REV=902e868` cache
-      anchor above their apt layers so those layers keep coming from cache;
-      this only works on hosts that already hold the cache. Either mirror the
-      exact June packages or qualify MOLA 3.2 and nav2 1.3.13.
-- [ ] **Per-robot map clear without a fleet restart (robot map epoch).** Gate:
-      "Reset map" for one robot on a running fleet leaves the other three
-      robots' maps, closures and missions untouched, gives that robot a fresh
-      map from where it stands within a minute, and its old keyframes are
-      gone from every peer's pose graph, the server's replicas and the fleet
-      raster. Asked for by the operator on 2026-09-20: the button today clears
-      only the server's rendered products (the sources live on the peers, so
-      the same map comes back), and a real clear is the mission reset, which
-      restarts everything. Design: every cslam message a robot sends carries
-      its map epoch beside the mission id (the solution-version patch already
-      carries the mission id); a peer that sees a robot's epoch advance drops
-      that robot's stored graph copy, every inter-robot closure with it, its
-      descriptors in loop-closure detection and its pair-cap counters. The
-      resetting robot restarts its own cslam nodes, bridge, MOLA worker and
-      MGG node with epoch + 1 (on benchbot a restart of that robot's peer
-      container and MGG launch by the reset supervisor; on hardware by the
-      robot's own supervisor): a new replica run id (`KeyframeId.run_id`),
-      products under the new epoch (the index server already keys by epoch),
-      a fresh planner map and global graph anchored where the robot stands,
-      costmaps cleared. The server tombstones the robot's earlier run in the
-      replica store and resets its map-service state; the raster loop rebuilds
-      on its own. Return Home after a clear means the clear point, the new
-      epoch's first keyframe, unless a surveyed start pose is configured.
-- [ ] **Frontend restart persistence.** Gate: an explicit persistence or epoch
-      solution for a restarted Swarm-SLAM frontend. Subsumed by the robot map
-      epoch above once that lands.
+- [x] **Reproducible Jazzy images.** The ROS dependency layers no longer depend
+      on historical Docker cache anchors. `use-ros-snapshot.sh` selects the
+      signed Jazzy 2026-06-18 snapshot, removes mutable ROS apt sources, and
+      permits downgrade of newer ROS packages inherited from the base image.
+      Fresh sim, mapping, MGG and cslam builds passed on Benchbot amd64 with
+      MOLA 2.9.0, Nav2 1.3.12, slam_toolbox 2.8.5 and tf2 0.36.21. Native
+      lifecycle bring-up, lost-reply reconciliation and SIGINT shutdown passed.
+      Humble uses its signed 2026-07-02 snapshot. Ubuntu updates, base-image
+      tags and Python dependencies are not a bit-for-bit hermetic OS lock;
+      hardware and ARM image qualification remain separate gates.
+- [x] **Per-robot map clear without a fleet restart (robot map epoch).**
+      `POST /api/map/reset/{robot}?request_id=<UUID>` quiesces the target and
+      restarts its peer frontend, bridge, MOLA worker and MGG state under a
+      fresh durable epoch, then clears costmaps and waits for fresh authority.
+      Only the target's old geometry, descriptors, graph references, closures
+      and pair-cap state are retired; unrelated peers keep their own maps,
+      runs and fleet mission. Native messages, in-flight optimizer results,
+      replica uploads, indexed queries and moving commands are epoch-fenced.
+      `KeyframeId.session_id` carries the robot run UUID; the replica envelope's
+      `session_id` remains the fleet mission. Return Home uses the new run's
+      initial keyframe at the reset location, unless a surveyed home is set.
+      Benchbot manual clears completed in 20.4–24.1 s, including a genuinely
+      merged four-peer component. Old target anchors disappeared from all
+      three peers; their own keyframes remained. Replayed stale replicas
+      received HTTP 409, UUID retries returned the original completed result,
+      and the actual UI disabled Reset while pending and restored it on done.
+      Reset during active Explore also passed: R0 alone advanced its epoch
+      and returned ready/idle in 24.1 s; independent truth measured at most
+      1.65 cm XY displacement from quiescence through ten seconds after done.
+      The supported path is the native four-robot simulation supervisor;
+      hardware without a qualified robot-local supervisor fails closed.
+- [x] **Frontend restart persistence.** The durable epoch solution is active.
+      A direct restart of one merged simulation peer advanced epoch 1 to 2
+      and restored navigation-ready authority in 16.4 s without changing the
+      mission or the other peers' runs. Retired epoch watermarks survive
+      process restart; abandoned destructive source operations are not replayed
+      ambiguously under the same request.
 
 ## Validation
 

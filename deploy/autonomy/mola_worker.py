@@ -66,6 +66,12 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+from autonomy.map_epochs import (
+    map_epoch_lock,
+    read_map_epoch,
+    snapshot_epoch_dependencies,
+    assert_map_epoch_dependencies,
+)
 
 try:
     from mola_process import MolaProcessError, NativeRequestError, PersistentImporter
@@ -364,6 +370,7 @@ class MolaWorker:
         # build is running.
         self._runtimes: dict[Path, PersistentImporter] = {}
         self._resident_by_peer: dict[Path, set[str]] = {}
+        self._peer_runs: dict[Path, str | None] = {}
         # Poll bookkeeping, touched only on the thread that calls run_once.
         self._completed: dict[Path, str] = {}
         self._retry_after: dict[Path, float] = {}
@@ -621,10 +628,31 @@ class MolaWorker:
 
         peer_root = Path(peer_root)
         source = peer_root / "snapshot.json"
-        chunks = peer_root / "geometry" / "chunks"
-        if not chunks.is_dir():
-            raise WorkerError("geometry/chunks directory is missing")
-        raw, snapshot = _read_snapshot(source)
+        with map_epoch_lock(peer_root):
+            lifetime = read_map_epoch(peer_root)
+            chunks = (peer_root / "geometry" / "chunks").resolve()
+            if not chunks.is_dir():
+                raise WorkerError("geometry/chunks directory is missing")
+            raw, snapshot = _read_snapshot(source)
+            dependencies = snapshot_epoch_dependencies(snapshot)
+            assert_map_epoch_dependencies(peer_root, dependencies)
+        run_id = None if lifetime is None else lifetime["run_id"]
+        if self._peer_runs.get(peer_root) != run_id:
+            self._invalidate_runtime(peer_root)
+            self._peer_runs[peer_root] = run_id
+        if lifetime is not None:
+            if snapshot.get("run_id") != run_id:
+                raise WorkerError("snapshot belongs to a retired robot map epoch")
+            for manifest in snapshot["manifests"]:
+                for submap in manifest["submaps"]:
+                    for key in submap["keyframes"]:
+                        if (
+                            key["robot_id"] == lifetime["robot_id"]
+                            and key["session_id"] != run_id
+                        ):
+                            raise WorkerError(
+                                "snapshot belongs to a retired robot map epoch"
+                            )
         source_sha = hashlib.sha256(raw).hexdigest()
         snapshot_id = str(snapshot["snapshot_id"])
         manifests = snapshot["manifests"]
@@ -760,24 +788,28 @@ class MolaWorker:
                         "source_snapshot_id": snapshot_id,
                     }
 
-            for staged_path, final_path in staged:
-                os.replace(staged_path, final_path)
-            # The product describes itself: source.json carries the exact
-            # snapshot bytes this generation was built from (raw, not
-            # re-serialised, so its digest is source_sha256), and index.json
-            # follows. A reader that sees a source/index pair whose digests
-            # disagree is between the two replacements and retries; it never
-            # consults snapshot.json, which the bridge may already have
-            # replaced with a newer input while this build ran.
-            _atomic_bytes(mola_root / "source.json", raw)
-            index = {
-                "version": 1,
-                "source_snapshot_id": snapshot_id,
-                "source_sha256": source_sha,
-                "generated_at_ns": time.time_ns(),
-                "artifacts": artifacts,
-            }
-            _atomic_json(mola_root / "index.json", index)
+            with map_epoch_lock(peer_root):
+                if read_map_epoch(peer_root) != lifetime:
+                    self._invalidate_runtime(peer_root)
+                    raise WorkerError("robot map epoch advanced during native build")
+                try:
+                    assert_map_epoch_dependencies(peer_root, dependencies)
+                except (OSError, ValueError):
+                    self._invalidate_runtime(peer_root)
+                    raise WorkerError("peer map epoch advanced during native build")
+                for staged_path, final_path in staged:
+                    os.replace(staged_path, final_path)
+                # A newer graph revision may supersede this build, but a new
+                # robot lifetime may never receive an old build's geometry.
+                _atomic_bytes(mola_root / "source.json", raw)
+                index = {
+                    "version": 1,
+                    "source_snapshot_id": snapshot_id,
+                    "source_sha256": source_sha,
+                    "generated_at_ns": time.time_ns(),
+                    "artifacts": artifacts,
+                }
+                _atomic_json(mola_root / "index.json", index)
             self._prune(
                 components_root,
                 {mola_root / str(item["path"]) for item in artifacts},
@@ -816,7 +848,7 @@ class MolaWorker:
 
         try:
             return self.process_peer(peer)
-        except (WorkerError, OSError, KeyError, TypeError) as exc:
+        except (WorkerError, OSError, KeyError, TypeError, ValueError) as exc:
             return f"{type(exc).__name__}: {exc}"
 
     @staticmethod
@@ -884,6 +916,7 @@ class MolaWorker:
             self._completed.pop(missing_peer, None)
             self._retry_after.pop(missing_peer, None)
             self._logged_errors.pop(missing_peer, None)
+            self._peer_runs.pop(missing_peer, None)
         due: list[tuple[Path, str]] = []
         for peer in peers:
             source = peer / "snapshot.json"

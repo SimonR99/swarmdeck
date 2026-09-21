@@ -11,14 +11,18 @@ from adapters.test.ros.onboard_return_home_observer import (
     load_authority,
     summarize_return_home,
 )
+from autonomy.map_epochs import robot_run_id
 
 MISSION = "88492d31-5c28-4de9-bbbd-8bfb1a74014d"
+RUN = robot_run_id(MISSION, "robot_3", 0)
 
 
 def authority():
     return {
         "robot_id": "robot_3",
         "mission_id": MISSION,
+        "robot_map_epoch": 0,
+        "run_id": RUN,
         "component_id": "component:test",
         "navigation_frame": "robot_3/map_frame",
         "correction_revision": 2,
@@ -26,7 +30,7 @@ def authority():
         "mapping_graph_revision": 8,
         "geometry_revision": "a" * 64,
         "home": {
-            "keyframe_id": f"robot_3/{MISSION}/keyframe/0",
+            "keyframe_id": f"robot_3/{RUN}/0",
             "T_navigation_home": [
                 [1, 0, 0, -0.25],
                 [0, 1, 0, 0.5],
@@ -82,7 +86,7 @@ def test_loads_fresh_plain_json_authority(tmp_path):
     assert age < 1.0
     assert home["x"] == -0.25
     assert home["y"] == 0.5
-    assert home["landmark_id"].endswith("/keyframe/0")
+    assert home["landmark_id"] == f"robot_3/{RUN}/0"
 
     os.utime(fixture, (time.time() - 20, time.time() - 20))
     with pytest.raises(ValueError, match="old"):

@@ -11,7 +11,9 @@ import asyncio
 import base64
 import json
 from dataclasses import dataclass
+from functools import wraps
 import math
+import os
 import threading
 import time
 import zlib
@@ -67,6 +69,75 @@ _server_scopes: set[str] = set()
 # the one it shows without comparing pixels: the geometry of a component
 # raster is the same before and after a rebuild, only its content moves.
 _optimized_seq: dict[str, int] = {}
+_raster_generation = 0
+_robot_epoch_locks: dict[str, asyncio.Lock] = {}
+
+
+def robot_epoch_lock(robot_id: str) -> asyncio.Lock:
+    return _robot_epoch_locks.setdefault(robot_id, asyncio.Lock())
+
+
+def raster_generation() -> int:
+    with _optimized_lock:
+        return _raster_generation
+
+
+def epoch_upload(handler):
+    """Recheck a fully received adapter upload against the durable reset fence."""
+
+    @wraps(handler)
+    async def upload(request):
+        mission = os.environ.get("SWARMDECK_MISSION_ID")
+        if not mission:
+            return await handler(request)
+        from autonomy.map_epochs import robot_run_id
+        from .autonomy_routes import bounded_body, store
+
+        robot = request.query_params.get("robot_id", "")
+        if not robot:
+            return JSONResponse({"error": "robot_id required"}, status_code=400)
+        try:
+            epoch = int(request.headers["x-map-epoch"])
+            run = robot_run_id(mission, robot, epoch)
+            if (
+                request.headers["x-mission-id"] != mission
+                or request.headers["x-run-id"] != run
+                or store().map_epoch(robot, mission) != epoch
+            ):
+                raise ValueError("stale map run")
+        except (KeyError, ValueError, TypeError):
+            return JSONResponse(
+                {"error": "map epoch is missing or stale"}, status_code=409
+            )
+        # Bound the compressed body before it is cached for the existing
+        # handler. Slow old HTTP bodies cannot hold a restart hostage.
+        try:
+            request._body = await bounded_body(request, MAX_UPLOAD_BYTES)
+        except OverflowError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=413)
+        async with robot_epoch_lock(robot):
+            if store().map_epoch(robot, mission) != epoch:
+                return JSONResponse({"error": "map epoch is stale"}, status_code=409)
+            return await handler(request)
+
+    return upload
+
+
+def legacy_graph_upload(handler):
+    """Peer missions derive global products only from fenced peer replicas."""
+
+    @wraps(handler)
+    async def upload(request):
+        if os.environ.get("SWARMDECK_MISSION_ID"):
+            return JSONResponse(
+                {
+                    "error": "central graph ingress is unavailable in a peer mapping mission"
+                },
+                status_code=409,
+            )
+        return await handler(request)
+
+    return upload
 
 
 def is_deployment_scope(scope: str) -> bool:
@@ -83,7 +154,9 @@ def publish_optimized_map(
     cells: np.ndarray,
     robots: tuple[str, ...],
     transforms: dict[str, dict[str, float]] | None,
-) -> None:
+    *,
+    expected_generation: int | None = None,
+) -> bool:
     """Store one scoped grid produced by this server rather than uploaded.
 
     The same shape ``post_optimized_map`` stores, with the same rule that a
@@ -95,9 +168,15 @@ def publish_optimized_map(
     if transforms is not None and not set(transforms).issubset(robots):
         raise ValueError("transform robot outside map scope")
     with _optimized_lock:
+        if (
+            expected_generation is not None
+            and expected_generation != _raster_generation
+        ):
+            return False
         _optimized[scope] = (meta, cells, tuple(robots), transforms)
         _server_scopes.add(scope)
         _optimized_seq[scope] = _optimized_seq.get(scope, 0) + 1
+        return True
 
 
 def retire_server_scopes(keep: str | None = None) -> list[str]:
@@ -210,25 +289,195 @@ async def get_map_info() -> dict[str, Any]:
     return {"type": "map_info", "info": map_service.map_info()}
 
 
-def _robots_blocking_map_reset(robot_id: str | None = None) -> list[str]:
-    """Robots whose current command state makes a map reset unsafe."""
-    robots = (
-        [registry.robots[robot_id]]
-        if robot_id in registry.robots
-        else list(registry.robots.values()) if robot_id is None else []
+def robot_command_error(robot_id: str) -> str | None:
+    """Fence all command transports while the target's restart is unfinished."""
+    from autonomy.live_mapping import LIVE_MAPPING_MAX_AGE_S
+    from .autonomy_routes import store
+    from .simulation_reset import reset_root, robot_reset_status
+
+    mission = os.environ.get("SWARMDECK_MISSION_ID")
+    if not mission:
+        return None
+    root = reset_root()
+    if root is not None:
+        status = robot_reset_status(root, robot_id)
+        if status.get("mission_id") == mission and status.get("phase") in {
+            "accepted",
+            "stopping",
+            "starting",
+            "verifying",
+            "failed",
+        }:
+            return status.get("error") or "robot map reset is in progress"
+    floor = store().map_epoch(robot_id, mission)
+    if floor is None:
+        return "robot mapping authority is missing or stale"
+    robot = registry.robots.get(robot_id)
+    live = robot.live_mapping if robot else None
+    if (
+        not live
+        or live.get("mission_id") != mission
+        or live.get("robot_map_epoch") != floor
+        or not robot.online
+        or live["authority_age_s"]
+        + max(0.0, time.monotonic() - robot.live_mapping_received_at)
+        > LIVE_MAPPING_MAX_AGE_S
+    ):
+        return "robot mapping authority is missing or stale"
+    return None
+
+
+async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> None:
+    """Drop only this robot's command and map state after the durable fence."""
+    from .app import CONFIG, broadcast
+    from ..bus import stamps
+
+    global _raster_generation
+    robot = registry.robots.get(robot_id)
+    if robot is not None:
+        robot.command_generation += 1
+        robot.live_mapping = None
+        robot.peer_slam = None
+        robot.navigation_ready = False
+        robot.objective_continuation = None
+        robot.goal = None
+        robot.global_planned_path = []
+        robot.local_planned_path = []
+        robot.planned_path = []
+        robot.nav_status = "cancelled"
+        robot.mode = "idle"
+        robot.exploration_status = "stopped"
+        # A surveyed deployment start is intentional; an inferred home belongs
+        # to the retired run and must come from the new first keyframe.
+        if robot_id not in ((CONFIG.get("map") or {}).get("start_poses") or {}):
+            robot.home_pose = None
+    with _optimized_lock:
+        _raster_generation += 1
+        dead = [
+            scope
+            for scope, (_, _, robots, _) in _optimized.items()
+            if is_server_scope(scope)
+            or robot_id in robots
+            or scope == f"robot:{robot_id}"
+        ]
+        for scope in dead:
+            _optimized.pop(scope, None)
+            _optimized_seq.pop(scope, None)
+            _server_scopes.discard(scope)
+    await registry.send(robot_id, {"type": "stop", **stamps()})
+    await map_service.reset_robot_async(robot_id)
+    reset_costmaps(robot_id)
+    await broadcast({"type": "costmap_clear", "robot_id": robot_id})
+    await broadcast({"type": "network_clear", "robot_id": robot_id})
+    await broadcast(
+        {
+            "type": "robot_map_reset",
+            "robot_id": robot_id,
+            "mission_id": mission_id,
+            "map_epoch": map_epoch,
+        }
     )
-    return sorted(
+    patch = map_service.take_patch()
+    if patch is not None:
+        await broadcast(patch)
+
+
+async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Response:
+    """Request a real, target-only peer/planner restart; never a display-only clear."""
+    from .autonomy_routes import store
+    from .simulation_reset import request_robot_reset, reset_root
+
+    root = reset_root()
+    mission = os.environ.get("SWARMDECK_MISSION_ID")
+    if root is None or not mission:
+        return JSONResponse(
+            {
+                "phase": "failed",
+                "ok": False,
+                "error": "robot map reset supervisor is unavailable",
+            },
+            status_code=503,
+        )
+    if robot_id not in registry.robots:
+        return JSONResponse({"error": "Unknown robot"}, status_code=404)
+    if request_id is None:
+        return JSONResponse({"error": "request_id is required"}, status_code=400)
+    try:
+        async with robot_epoch_lock(robot_id):
+            advanced = []
+
+            def reserve():
+                current = store().map_epoch(robot_id, mission)
+                peer = registry.robots[robot_id].peer_slam or {}
+                known = peer.get("robot_map_epoch", 0)
+                epoch = max(current if current is not None else 0, known) + 1
+                store().reserve_map_epoch(robot_id, mission, epoch)
+                advanced.append(epoch)
+                return epoch
+
+            result = await asyncio.to_thread(
+                request_robot_reset, root, robot_id, mission, request_id, reserve
+            )
+            if advanced:
+                await retire_robot_epoch(robot_id, mission, advanced[0])
+        result["status_url"] = (
+            f"/api/map/reset/{robot_id}?request_id={result['request_id']}"
+        )
+        code = (
+            200
+            if result.get("phase") == "done"
+            else 503 if result.get("phase") == "failed" else 202
+        )
+        return JSONResponse(
+            result, status_code=code, headers={"Cache-Control": "no-store"}
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except OSError as exc:
+        return JSONResponse(
+            {"phase": "failed", "ok": False, "error": str(exc)}, status_code=503
+        )
+
+
+async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> Response:
+    from .simulation_reset import reset_root, robot_reset_status
+
+    root = reset_root()
+    if root is None:
+        return JSONResponse(
+            {
+                "phase": "failed",
+                "ok": False,
+                "error": "robot map reset supervisor is unavailable",
+            },
+            status_code=503,
+        )
+    try:
+        return JSONResponse(
+            robot_reset_status(root, robot_id, request_id),
+            headers={"Cache-Control": "no-store"},
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def reset_all_maps() -> Response:
+    if os.environ.get("SWARMDECK_MISSION_ID"):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "reset all maps is unsupported for peer mapping; use the full mission reset",
+            },
+            status_code=409,
+        )
+    from .app import broadcast
+    from ..mapsvc import graph_bridge
+
+    blocked = sorted(
         robot.robot_id
-        for robot in robots
+        for robot in registry.robots.values()
         if robot.nav_status == "active" or robot.goal is not None
     )
-
-
-async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Response:
-    """Reset backend map products and publish the matching patch."""
-    from .app import broadcast
-
-    blocked = _robots_blocking_map_reset(robot_id)
     if blocked:
         return JSONResponse(
             {
@@ -237,95 +486,19 @@ async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Respons
             },
             status_code=409,
         )
-
-    graph_delete: dict[str, Any] | None = None
-    # Graph mode owns the keyframes that produced the fused grid, so ask it to
-    # remove the selected robot before clearing the server-side projections.
-    # The old implementation rejected this request because the server cannot
-    # subtract pixels from an already-fused grid; deleting graph inputs and
-    # re-rendering the survivors is the exact operation the UI means.
-    if (
-        robot_id is not None
-        and map_service.merge_mode == "graph"
-        and (
-            robot_id in map_service.slam_graphs
-            or robot_id in map_service.common_poses
-            or robot_id in map_service.cslam_frames
-        )
-    ):
-        from ..mapsvc import graph_bridge
-
-        code, graph_delete = await asyncio.to_thread(
-            graph_bridge.delete_robot, robot_id
-        )
-        if code < 200 or code >= 300:
-            return JSONResponse(
-                {
-                    "error": graph_delete.get(
-                        "error", "pose-graph keyframe deletion failed"
-                    )
-                },
-                status_code=code,
-            )
-
-    # The legacy collaborative backend supplies one already-fused grid and has
-    # no scoped graph-deletion endpoint. Its explicit fleet reset remains the
-    # only truthful operation.
-    if (
-        robot_id is not None
-        and map_service.merge_mode == "cslam"
-        and map_service.global_grid is not None
-    ):
-        return JSONResponse(
-            {
-                "error": "targeted reset unavailable for a fused collaborative map; reset all maps"
-            },
-            status_code=409,
-        )
-
-    reset = await map_service.reset_robot_async(robot_id)
-    if robot_id is None:
-        from ..mapsvc import graph_bridge
-
-        # The scoped grids are rendered from the pose graph, so they die with
-        # it. Without this they outlived every reset -- reset_optimized_maps
-        # existed for exactly this and was never called from anywhere.
-        reset_optimized_maps()
-        await asyncio.to_thread(graph_bridge.post_reset)
-    elif graph_delete is not None:
-        # Every scoped raster and the fused global raster describes the old
-        # graph until its queued re-solve publishes replacement products.
-        reset_optimized_maps()
-        with map_service._state_lock:
-            map_service.global_grid = None
-            map_service.global_map_seq += 1
-        map_service._remerge()
-    reset_costmaps(robot_id)
-    await broadcast({"type": "costmap_clear", "robot_id": robot_id})
-    await broadcast({"type": "network_clear", "robot_id": robot_id})
+    reset = await map_service.reset_robot_async()
+    reset_optimized_maps()
+    await asyncio.to_thread(graph_bridge.post_reset)
+    reset_costmaps()
+    await broadcast({"type": "costmap_clear", "robot_id": None})
+    await broadcast({"type": "network_clear", "robot_id": None})
     patch = map_service.take_patch()
     if patch is not None:
         await broadcast(patch)
-    events.log("map_reset", {"scope": scope, "robot_id": robot_id, "robots": reset})
+    events.log("map_reset", {"scope": "all", "robots": reset})
     return JSONResponse(
-        {
-            "ok": True,
-            "scope": scope,
-            "robots": reset,
-            "keyframes": graph_delete,
-            "info": map_service.map_info(),
-        }
+        {"ok": True, "scope": "all", "robots": reset, "info": map_service.map_info()}
     )
-
-
-async def reset_robot_map(robot_id: str) -> Response:
-    """Clear one robot's backend map products without restarting its SLAM."""
-    return await _publish_map_reset("robot", robot_id)
-
-
-async def reset_all_maps() -> Response:
-    """Clear every backend map product, provided the fleet is stationary."""
-    return await _publish_map_reset("all")
 
 
 async def get_local_map(robot_id: str) -> Response:
@@ -425,6 +598,7 @@ def _inflate(body: bytes) -> bytes:
     return raw
 
 
+@epoch_upload
 async def post_map(request: Request) -> Any:
     """Adapter occupancy grid upload (zlib int8, row-major)."""
     rid = request.query_params.get("robot_id", "")
@@ -453,6 +627,7 @@ async def post_map(request: Request) -> Any:
     return {"ok": True, "cells": int(cells.size)}
 
 
+@epoch_upload
 async def post_costmap(request: Request) -> Any:
     """Store one normalized Nav2 costmap for the dashboard overlay.
 
@@ -516,6 +691,7 @@ async def post_costmap(request: Request) -> Any:
     return {"ok": True, "kind": kind, "seq": entry.seq, "cells": int(cells.size)}
 
 
+@legacy_graph_upload
 async def post_global_map(request: Request) -> Any:
     """Adopt a collaborative backend's already-merged common-frame grid."""
     try:
@@ -547,6 +723,7 @@ async def post_global_map(request: Request) -> Any:
     return {"ok": True, "cells": int(cells.size)}
 
 
+@epoch_upload
 async def post_cloud(request: Request) -> Any:
     """Adapter 3D map cloud upload (zlib int16 xyz triples)."""
     rid = request.query_params.get("robot_id", "")
@@ -589,6 +766,7 @@ async def post_cloud(request: Request) -> Any:
     return {"ok": True, "points": int(len(points))}
 
 
+@epoch_upload
 async def post_scan(request: Request) -> Any:
     """Adapter lidar scan upload for robots without an OccupancyGrid."""
     rid = request.query_params.get("robot_id", "")
@@ -621,6 +799,7 @@ async def post_scan(request: Request) -> Any:
     return {"ok": True, "points": int(len(points))}
 
 
+@legacy_graph_upload
 async def post_keyframe(request: Request) -> Any:
     """Adapter keyframe upload. Validates identity, forwards the opaque body.
 
@@ -658,6 +837,7 @@ async def post_keyframe(request: Request) -> Any:
     return {"ok": True, "seq": header.get("seq"), **result}
 
 
+@legacy_graph_upload
 async def post_slam_update(request: Request) -> Any:
     """Pose-graph back-end snapshot: membership, T_world_map, common poses."""
     try:
@@ -880,6 +1060,7 @@ async def get_cloud(request: Request | None = None) -> Response:
         )
 
 
+@legacy_graph_upload
 async def post_optimized_map(request: Request) -> Any:
     """Accept one scoped optimized grid from the SLAM back-end.
 

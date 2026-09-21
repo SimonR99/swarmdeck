@@ -32,6 +32,41 @@ def mapping_authority_mode(value: str | None = None) -> str:
     return mode
 
 
+def map_upload_headers(bridge):
+    """Capture one fresh robot lifetime before serializing an overlay upload."""
+    headers = {"Content-Type": "application/octet-stream"}
+    if not bool(getattr(bridge, "onboard_mapping", False)):
+        return headers
+    reader = getattr(bridge, "_mapping_authority", None)
+    authority = None if reader is None else reader.current()
+    if authority is None:
+        return None
+    headers.update(
+        {
+            "X-Mission-Id": authority["mission_id"],
+            "X-Map-Epoch": str(authority["robot_map_epoch"]),
+            "X-Run-Id": authority["run_id"],
+        }
+    )
+    return headers
+
+
+def map_source_is_current(bridge, msg) -> bool:
+    """Reject queued pre-reset ROS publications before they become upload caches."""
+    if not bool(getattr(bridge, "onboard_mapping", False)):
+        return True
+    reader = getattr(bridge, "_mapping_authority", None)
+    if reader is None or reader.robot_map_epoch <= 0:
+        return True
+    cutoff = reader.source_reset_stamp_ns
+    if cutoff is None:
+        return False
+    stamp = getattr(getattr(msg, "header", None), "stamp", None)
+    if stamp is None:
+        return False
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec) > cutoff
+
+
 def capture_provider_name(value: str | None = None) -> str:
     """Return the explicitly selected onboard capture provider.
 

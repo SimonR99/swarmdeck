@@ -236,12 +236,12 @@ def test_superseded_key_keeps_answering_within_the_grace() -> None:
     assert current.key == KEY_B
     assert current.occupancy == (VoxelOccupancy.FREE,)
 
-    # The coherent-read age still governs the current index only: a retained
-    # index is no longer refreshed, its bound is the grace.
-    aged_current = query_at(view, KEY_B, 200 + GRACE_NS, max_snapshot_age_ns=10)
+    # A predecessor still live at supersession gets the grace even though its
+    # coherent-read age would exceed the bound by the time this query arrives.
+    aged_current = query_at(view, KEY_B, 200 + GRACE_NS, max_snapshot_age_ns=100)
     assert aged_current.status is QueryStatus.UNAVAILABLE
     assert aged_current.detail == "indexed snapshot exceeded coherent-read age"
-    aged_retained = query_at(view, KEY_A, 200 + GRACE_NS, max_snapshot_age_ns=10)
+    aged_retained = query_at(view, KEY_A, 200 + GRACE_NS, max_snapshot_age_ns=100)
     assert aged_retained == before
 
     # The source stamp and sample checks apply to a retained index as well.

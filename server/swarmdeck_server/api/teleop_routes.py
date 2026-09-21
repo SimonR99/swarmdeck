@@ -38,6 +38,11 @@ async def post_robot_drive(robot_id: str, request: Request) -> Any:
     robot = app.registry.robots.get(robot_id)
     if not robot:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
+    from .map_routes import robot_command_error
+
+    error = robot_command_error(robot_id) if linear or angular else None
+    if error:
+        return JSONResponse({"error": error}, status_code=409)
 
     sent = await app.registry.send(
         robot_id,
@@ -93,6 +98,11 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
     robot = app.registry.robots.get(robot_id)
     if not robot:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
+    from .map_routes import robot_command_error
+
+    error = robot_command_error(robot_id)
+    if error:
+        return JSONResponse({"error": error}, status_code=409)
 
     if not app.registry.can(robot_id, "navigate"):
         return JSONResponse(
@@ -244,6 +254,11 @@ async def post_robot_body(robot_id: str, request: Request) -> Any:
     robot = app.registry.robots.get(robot_id)
     if not robot:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
+    from .map_routes import robot_command_error
+
+    error = robot_command_error(robot_id)
+    if error:
+        return JSONResponse({"error": error}, status_code=409)
 
     msg: dict[str, Any] = {"type": "body_command", "action": action, **app.stamps()}
     if "height" in body:

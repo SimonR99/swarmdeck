@@ -30,6 +30,8 @@ from autonomy.indexed_mapping import (
     VoxelOccupancy,
 )
 from autonomy.mapping import SubmapStore
+from autonomy.map_epochs import claim_map_epoch, robot_run_id, write_peer_epochs
+from autonomy.map_epochs import read_map_epoch
 from deploy.autonomy.indexed_map_server import IndexRegistry, parse_args
 
 SESSION = str(uuid.UUID("caa7c022-0c69-43ef-bf06-1922b16b9f5e"))
@@ -400,6 +402,168 @@ def test_registry_backoff_is_per_source_and_resets_on_snapshot_replacement(
         ).status
         is QueryStatus.OK
     )
+
+
+def test_peer_epoch_advance_fences_inflight_and_retained_merged_geometry(
+    tmp_path, monkeypatch
+) -> None:
+    owner = "robot_0"
+    peer = tmp_path / SESSION / owner
+    epoch = claim_map_epoch(tmp_path, SESSION, owner)
+    write_peer_epochs(peer, SESSION, {owner: epoch, "robot_1": 0})
+    owner_claim = read_map_epoch(peer)
+    (peer / "provider.index").write_text("ready")
+    merged = SnapshotKey("component", 1, 2, "a" * 64)
+    independent = SnapshotKey("component", 1, 3, "b" * 64)
+
+    class Provider:
+        def __init__(self, peer_root):
+            self.publication_path = peer_root / "provider.index"
+
+        def signature(self):
+            return (1,)
+
+        def component_ids(self):
+            return (merged.component_id,)
+
+        def refresh(self, view, component_id):
+            return view.publish(
+                IndexedGrid(
+                    merged,
+                    "c" * 64,
+                    123,
+                    100,
+                    {(0, 0, 2)},
+                    set(),
+                    {},
+                    0.2,
+                    1,
+                    robot_map_epochs={owner: epoch, "robot_1": 0},
+                )
+            )
+
+    registry = IndexRegistry(
+        tmp_path,
+        SESSION,
+        snapshot_age_s=3,
+        poll_s=0.1,
+        provider_factory=Provider,
+    )
+    registry.refresh_once()
+    request = QueryRequest(
+        merged, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1), now_monotonic_ns=101
+    )
+    assert registry.query(owner, request).occupancy == (VoxelOccupancy.OCCUPIED,)
+    view = registry._views[(owner, merged.component_id)]
+    terrain = view._terrain
+
+    def advance_peer_epoch(*args):
+        result = terrain(*args)
+        write_peer_epochs(peer, SESSION, {owner: epoch, "robot_1": 1})
+        return result
+
+    monkeypatch.setattr(view, "_terrain", advance_peer_epoch)
+    assert registry.query(owner, request).status is QueryStatus.UNAVAILABLE
+    assert read_map_epoch(peer) == owner_claim
+    monkeypatch.setattr(view, "_terrain", terrain)
+
+    # A successor no longer depending on the reset peer can be served, but
+    # the old merged key cannot regain validity through retained-key grace.
+    view.publish(
+        IndexedGrid(
+            independent,
+            "d" * 64,
+            124,
+            102,
+            set(),
+            {(0, 0, 2)},
+            {},
+            0.2,
+            1,
+            robot_map_epochs={owner: epoch},
+        )
+    )
+    assert registry.query(owner, request).status is QueryStatus.UNAVAILABLE
+    assert registry.query(
+        owner,
+        QueryRequest(
+            independent, request.samples, request.body_size_xyz, now_monotonic_ns=103
+        ),
+    ).occupancy == (VoxelOccupancy.FREE,)
+
+
+def test_robot_reset_fences_inflight_and_replayed_index_without_touching_peer(
+    tmp_path, monkeypatch
+) -> None:
+    keys = {}
+    snapshots = {}
+    for robot in ("robot_0", "robot_1"):
+        epoch = claim_map_epoch(tmp_path, SESSION, robot)
+        run_id = robot_run_id(SESSION, robot, epoch)
+        peer = tmp_path / SESSION / robot
+        store = SubmapStore(peer / "geometry")
+        keyframe = KeyframeId(robot, run_id, 0)
+        store.add_submap(
+            SubmapId.from_keyframe(keyframe),
+            [[0.1, 0.1, 0.5]],
+            keyframe_poses_local={keyframe: IDENTITY_SE3},
+            sensor_origins_local=(),
+            resolution_m=0.2,
+            observed_at_ns=123,
+        )
+        snapshot = store.snapshot()
+        value = {
+            **snapshot.to_dict(),
+            "run_id": run_id,
+            "robot_map_epoch": epoch,
+            "robot_id": robot,
+            "mission_id": SESSION,
+            "participant_robot_ids": [robot],
+            "robot_map_epochs": {robot: epoch},
+        }
+        write_peer_epochs(peer, SESSION, {robot: epoch})
+        snapshots[robot] = json.dumps(value)
+        (peer / "snapshot.json").write_text(snapshots[robot])
+        keys[robot] = SnapshotKey(
+            component_id_for_anchor(keyframe),
+            0,
+            0,
+            snapshot.manifests[0].geometry_revision,
+        )
+    registry = IndexRegistry(tmp_path, SESSION, snapshot_age_s=3, poll_s=0.1)
+    registry.refresh_once()
+    requests = {
+        robot: QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+        for robot, key in keys.items()
+    }
+    for robot in keys:
+        assert registry.query(robot, requests[robot]).status is QueryStatus.OK
+    peer_before = registry.query("robot_1", requests["robot_1"])
+    old_view = registry._views[("robot_0", keys["robot_0"].component_id)]
+    query = old_view.query
+
+    def reset_during_query(request):
+        result = query(request)
+        claim_map_epoch(tmp_path, SESSION, "robot_0")
+        return result
+
+    monkeypatch.setattr(old_view, "query", reset_during_query)
+    assert (
+        registry.query("robot_0", requests["robot_0"]).status is QueryStatus.UNAVAILABLE
+    )
+    # The next request is fenced before the next polling refresh too.
+    assert (
+        registry.query("robot_0", requests["robot_0"]).status is QueryStatus.UNAVAILABLE
+    )
+    assert registry.query("robot_1", requests["robot_1"]) == peer_before
+
+    # Even an old writer putting the complete snapshot back cannot revive it.
+    (tmp_path / SESSION / "robot_0" / "snapshot.json").write_text(snapshots["robot_0"])
+    registry.refresh_once()
+    assert (
+        registry.query("robot_0", requests["robot_0"]).status is QueryStatus.UNAVAILABLE
+    )
+    assert registry.query("robot_1", requests["robot_1"]) == peer_before
 
 
 @pytest.mark.parametrize("pending_in", ["component_ids", "refresh"])

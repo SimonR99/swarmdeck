@@ -15,12 +15,16 @@ from adapters.mapping_authority import (
     snapshot_values,
 )
 from autonomy.cslam import pose_matrix
+from autonomy.map_epochs import robot_run_id
 
 
 def authority():
+    mission = str(uuid4())
     return dict(
         robot_id="r0",
-        mission_id=str(uuid4()),
+        mission_id=mission,
+        robot_map_epoch=0,
+        run_id=robot_run_id(mission, "r0", 0),
         navigation_frame="map",
         component_id="component:test",
         map_epoch=1,
@@ -296,3 +300,63 @@ def test_mission_filter_is_exact_and_unconfigured_readers_pin_first(monkeypatch)
     assert accepts_authority_update(first, None, expected_mission_id("r0"))
     assert not accepts_authority_update(other, None, expected_mission_id("r0"))
     assert not accepts_authority_update(other, first)
+
+
+def test_reset_notice_cancels_only_its_robot_and_fences_delayed_authority(monkeypatch):
+    from adapters.onboard_mapping import map_source_is_current, map_upload_headers
+
+    monkeypatch.delenv("SWARMDECK_MISSION_ID", raising=False)
+    monkeypatch.setitem(sys.modules, "std_msgs.msg", NS(String=object))
+    monkeypatch.setitem(sys.modules, "mgg_msgs.msg", None)
+    node = NS(create_subscription=lambda *_args: None)
+    target = NS(
+        id="r0", node=node, map_frame="map", onboard_mapping=True, nav_status="active"
+    )
+    target.cancel_goal = lambda: setattr(target, "nav_status", "cancelled")
+    target.drive = lambda *_: None
+    reader = target._mapping_authority = MappingAuthority(target)
+    old = authority()
+    for field in (
+        "map_epoch",
+        "mapping_graph_revision",
+        "geometry_revision",
+        "map_source_stamp",
+    ):
+        old.pop(field)
+    reader.receive(NS(data=json.dumps(old)))
+    assert reader.current() == old
+    notice = {
+        "robot_id": "r0",
+        "mission_id": old["mission_id"],
+        "robot_map_epoch": 1,
+        "run_id": robot_run_id(old["mission_id"], "r0", 1),
+        "state": "resetting",
+    }
+    reader.receive(
+        NS(
+            data=json.dumps(
+                {
+                    **notice,
+                    "robot_id": "r1",
+                    "run_id": robot_run_id(old["mission_id"], "r1", 1),
+                }
+            )
+        )
+    )
+    assert target.nav_status == "active"
+    assert reader.current() == old
+    reader.receive(NS(data=json.dumps(notice)))
+    assert target.nav_status == "cancelled"
+    assert reader.current() is None
+    assert map_upload_headers(target) is None
+    reader.receive(NS(data=json.dumps(old)))
+    assert reader.current() is None
+    fresh = {**old, **notice, "source_reset_stamp": {"sec": 12, "nanosec": 5}}
+    fresh.pop("state")
+    reader.receive(NS(data=json.dumps(fresh)))
+    assert reader.current() == fresh
+    assert map_upload_headers(target)["X-Run-Id"] == notice["run_id"]
+    assert not map_source_is_current(target, NS(header=NS(stamp=NS(sec=12, nanosec=5))))
+    assert map_source_is_current(target, NS(header=NS(stamp=NS(sec=12, nanosec=6))))
+    reader.receive(NS(data=json.dumps(old)))
+    assert reader.current() == fresh

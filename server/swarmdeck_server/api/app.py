@@ -947,23 +947,18 @@ async def get_map_info() -> dict[str, Any]:
     return await handler()
 
 
-def _robots_blocking_map_reset(robot_id: str | None = None) -> list[str]:
-    from .map_routes import _robots_blocking_map_reset as handler
-
-    return handler(robot_id)
-
-
-async def _publish_map_reset(scope: str, robot_id: str | None = None) -> Response:
-    from .map_routes import _publish_map_reset as handler
-
-    return await handler(scope, robot_id)
-
-
 @app.post("/api/map/reset/{robot_id}")
-async def reset_robot_map(robot_id: str) -> Response:
+async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Response:
     from .map_routes import reset_robot_map as handler
 
-    return await handler(robot_id)
+    return await handler(robot_id, request_id)
+
+
+@app.get("/api/map/reset/{robot_id}")
+async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> Response:
+    from .map_routes import get_robot_map_reset as handler
+
+    return await handler(robot_id, request_id)
 
 
 @app.post("/api/map/reset")
@@ -1211,6 +1206,13 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
     events.log(kind, {k: v for k, v in msg.items() if k != "type"})
     if rid:
         registry.attend(rid)
+    if rid and kind in {"set_goal", "return_home", "body_command", "start_explore"}:
+        from .map_routes import robot_command_error
+
+        error = robot_command_error(rid)
+        if error:
+            await raise_alert(f"map_reset_{rid}", "warn", "fault", error, rid)
+            return
 
     if (
         rid
@@ -1497,8 +1499,15 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             )
         else:
             cancel_departures()
+            generations = {
+                robot_id: registry.robots[robot_id].command_generation
+                for robot_id in targets
+            }
 
             async def send_explore(robot_id: str) -> bool:
+                robot = registry.robots.get(robot_id)
+                if robot is None or robot.command_generation != generations[robot_id]:
+                    return False
                 return await registry.send(
                     robot_id,
                     {
@@ -1690,6 +1699,8 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
         events.log("adapter_connect", {"robot_id": robot_id, "adapter": r.adapter})
 
     elif kind == "robot_state":
+        if registry._sinks.get(msg.get("robot_id")) is not ws:
+            return False
         robot = registry.update_state(msg)
         network = msg.get("network")
         pose = msg.get("pose")
@@ -1838,6 +1849,8 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
                 _reset_done.set()
 
     elif kind == "slam_graph":
+        if os.environ.get("SWARMDECK_MISSION_ID"):
+            return False
         # Optional (protocol 2). A robot running a collaborative back end
         # reports its own view of the shared pose graph; adapters that do
         # not run one simply never send this and nothing downstream

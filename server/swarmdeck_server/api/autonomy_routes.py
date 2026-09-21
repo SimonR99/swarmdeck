@@ -91,7 +91,22 @@ async def manifest(robot_id: str, session_id: str):
 async def publish(request: Request):
     try:
         envelope = json.loads(await bounded_body(request, MAX_MANIFEST_BYTES))
-        changed = await asyncio.to_thread(store().publish, envelope)
+        from .map_routes import retire_robot_epoch, robot_epoch_lock
+
+        async with robot_epoch_lock(envelope["robot_id"]):
+            previous_epoch = await asyncio.to_thread(
+                store().map_epoch, envelope["robot_id"], envelope["session_id"]
+            )
+            changed = await asyncio.to_thread(store().publish, envelope)
+            if (
+                changed
+                and previous_epoch is not None
+                and envelope["map_epoch"] > previous_epoch
+                and envelope["session_id"] == os.environ.get("SWARMDECK_MISSION_ID")
+            ):
+                await retire_robot_epoch(
+                    envelope["robot_id"], envelope["session_id"], envelope["map_epoch"]
+                )
         return {"ok": True, "changed": changed, "revision": envelope["revision"]}
     except MissingChunks as exc:
         return JSONResponse({"error": str(exc), "missing": exc.hashes}, status_code=409)

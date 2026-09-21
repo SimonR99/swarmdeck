@@ -274,6 +274,9 @@ async def set_live_goal(session_id: str, command: LiveGoal):
     robot = registry.robots.get(command.robot_id)
     if robot is None:
         raise HTTPException(404, "Unknown robot")
+    error = registry.command_guard(robot.robot_id) if registry.command_guard else None
+    if error:
+        raise HTTPException(409, error)
     if not all(
         registry.can(robot.robot_id, cap) for cap in ("navigate", "plan_objective")
     ):

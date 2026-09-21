@@ -401,3 +401,26 @@ def test_rebuilt_raster_advances_its_sequence(setup):
         assert client.get(f"/api/map/optimized/{scope}").headers["X-Map-Seq"] == "2"
     assert map_routes.retire_server_scopes(keep=None) == [scope]
     assert scope not in map_routes._optimized_seq
+
+
+def test_reset_during_rasterization_cannot_publish_the_retired_source(
+    setup, monkeypatch
+):
+    session = setup["session"]
+    rasterize = deployment_raster.rasterize_points
+
+    def reset_while_building(points, **kwargs):
+        result = rasterize(points, **kwargs)
+        setup["store"].reserve_map_epoch("robot_0", session, 1)
+        monkeypatch.setattr(
+            map_routes, "_raster_generation", map_routes.raster_generation() + 1
+        )
+        map_routes.retire_server_scopes()
+        return result
+
+    refresher = deployment_raster.DeploymentRasterRefresher(
+        rasterize=reset_while_building
+    )
+    report = refresher.refresh(session, placements(session))
+    assert report["status"] == "superseded"
+    assert scope_of(session) not in map_routes._optimized

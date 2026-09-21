@@ -43,6 +43,8 @@ SCHEMA = "swarmdeck.simulation-evidence.v1"
 AUTHORITY_FIELDS = (
     "robot_id",
     "mission_id",
+    "robot_map_epoch",
+    "run_id",
     "component_id",
     "map_epoch",
     "mapping_graph_revision",

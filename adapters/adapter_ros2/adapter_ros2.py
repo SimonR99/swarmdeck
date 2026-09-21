@@ -44,6 +44,7 @@ import math
 import signal
 import sys
 import threading
+from contextlib import nullcontext
 import time
 import urllib.parse
 import urllib.request
@@ -106,7 +107,12 @@ from adapters.navigation_result import navigation_failure_reason
 from adapters.keyframe_producer import KeyframeUploader, pose7_from_xy_yaw
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
-from adapters.onboard_mapping import mapping_authority_mode, publish_onboard_map
+from adapters.onboard_mapping import (
+    mapping_authority_mode,
+    publish_onboard_map,
+    map_upload_headers,
+    map_source_is_current,
+)
 from ros2_defaults import DEFAULTS
 
 # Transport quantisation for registered-cloud uploads. One centimetre keeps a
@@ -585,10 +591,13 @@ class HardwareBridge(
     # ------------------------------------------------------------- ROS inputs
 
     def _on_map(self, msg: OccupancyGrid) -> None:
-        self.grid = msg
-        self._grid_dirty = True
-        # Runs in the ROS callback, independently of the websocket session.
-        publish_onboard_map(self, msg)
+        with getattr(self, "_goal_lock", nullcontext()):
+            if not map_source_is_current(self, msg):
+                return
+            self.grid = msg
+            self._grid_dirty = True
+            # Runs independently of the websocket session.
+            publish_onboard_map(self, msg)
 
     def _warn_costmap(self, kind: str, reason: str) -> None:
         now = time.monotonic()
@@ -601,6 +610,8 @@ class HardwareBridge(
 
     def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
         """Capture Nav2's planner view without changing navigation inputs."""
+        if not map_source_is_current(self, msg):
+            return
         source = str(
             getattr(getattr(msg, "header", None), "frame_id", "") or ""
         ).lstrip("/")
@@ -633,9 +644,12 @@ class HardwareBridge(
         except (TypeError, ValueError) as exc:
             self._warn_costmap(kind, str(exc))
             return
-        with self._costmap_lock:
-            self._costmaps[kind] = snapshot
-            self._costmap_dirty.add(kind)
+        with getattr(self, "_goal_lock", nullcontext()):
+            if not map_source_is_current(self, msg):
+                return
+            with self._costmap_lock:
+                self._costmaps[kind] = snapshot
+                self._costmap_dirty.add(kind)
 
     def _on_map_cloud(self, msg: PointCloud2) -> None:
         """Normalize one cloud into ``map_frame`` before producing map data.
@@ -651,6 +665,8 @@ class HardwareBridge(
         A cloud with no header remains the legacy/test-double case and is
         assumed to already be registered.
         """
+        if not map_source_is_current(self, msg):
+            return
         points = self._cloud_xyz(msg)
         if not len(points):
             return
@@ -693,23 +709,31 @@ class HardwareBridge(
             0.1, float(self.cfg.get("rates", {}).get("cloud_period_s", 4.0))
         )
         if now - self._last_cloud_prepare_at >= cloud_period:
-            self._last_cloud_prepare_at = now
             cloud_keys = np.round(points / MAP_CLOUD_3D_VOXEL).astype(np.int32)
             cloud_keep = unique_row_index(cloud_keys)
-            self._cloud_points = points[cloud_keep]
-            self._cloud_rgb = self._colorize_map(self._cloud_points, header)
-            self._cloud_snapshot = (self._cloud_points, self._cloud_rgb)
-            self._cloud_dirty = True
+            cloud_points = points[cloud_keep]
+            cloud_rgb = self._colorize_map(cloud_points, header)
+            with getattr(self, "_goal_lock", nullcontext()):
+                if not map_source_is_current(self, msg):
+                    return
+                self._last_cloud_prepare_at = now
+                self._cloud_points = cloud_points
+                self._cloud_rgb = cloud_rgb
+                self._cloud_snapshot = (cloud_points, cloud_rgb)
+                self._cloud_dirty = True
 
         min_z, max_z = map_cloud_height_limits(self.cfg.get("map_cloud_height_band"))
         xy = points[(points[:, 2] >= min_z) & (points[:, 2] <= max_z)][:, :2]
         if not len(xy):
-            self._scan_points = np.zeros((0, 2), dtype=np.float32)
-            self._scan_dirty = True
+            with getattr(self, "_goal_lock", nullcontext()):
+                if not map_source_is_current(self, msg):
+                    return
+                self._scan_points = np.zeros((0, 2), dtype=np.float32)
+                self._scan_dirty = True
             return
         keys = np.round(xy / MAP_CLOUD_VOXEL).astype(np.int32)
         keep = unique_row_index(keys)
-        self._scan_points = xy[keep]
+        scan_points = xy[keep]
         # Pair the points with the pose they were captured AT. upload_scan used
         # to read the pose at upload time, up to map_period_s later, and the
         # backend raytraces free space from that origin — so at 0.5 m/s with a
@@ -723,14 +747,19 @@ class HardwareBridge(
                 2.0 * (qw * qz + qx * qy),
                 1.0 - 2.0 * (qy * qy + qz * qz),
             )
-            self._scan_origin = {
+            scan_origin = {
                 "x": float(pose[0]),
                 "y": float(pose[1]),
                 "yaw": float(scan_yaw),
             }
         else:
-            self._scan_origin = self.map_pose()
-        self._scan_dirty = True
+            scan_origin = self.map_pose()
+        with getattr(self, "_goal_lock", nullcontext()):
+            if not map_source_is_current(self, msg):
+                return
+            self._scan_points = scan_points
+            self._scan_origin = scan_origin
+            self._scan_dirty = True
         try:
             if pose is not None:
                 stamp = self._stamp_seconds(getattr(msg, "header", None)) or time.time()
@@ -2135,6 +2164,9 @@ class HardwareBridge(
 
     def upload_map(self) -> dict[str, Any] | None:
         """Push the occupancy grid; return the `map_meta` to send afterwards."""
+        headers = map_upload_headers(self)
+        if headers is None:
+            return None
         if not self._grid_dirty or self.grid is None:
             return None
         self._grid_dirty = False
@@ -2150,9 +2182,7 @@ class HardwareBridge(
         )
         try:
             urllib.request.urlopen(
-                urllib.request.Request(
-                    url, data=body, headers={"Content-Type": "application/octet-stream"}
-                ),
+                urllib.request.Request(url, data=body, headers=headers),
                 timeout=float(self.cfg["upload_timeout_s"]),
             ).read()
         except Exception as exc:
@@ -2172,6 +2202,9 @@ class HardwareBridge(
 
     def upload_costmaps(self) -> None:
         """Push the newest global/local Nav2 snapshots to the read-only overlay."""
+        headers = map_upload_headers(self)
+        if headers is None:
+            return
         with self._costmap_lock:
             pending = [
                 (kind, self._costmaps[kind])
@@ -2198,7 +2231,7 @@ class HardwareBridge(
                     urllib.request.Request(
                         url,
                         data=body,
-                        headers={"Content-Type": "application/octet-stream"},
+                        headers=headers,
                     ),
                     timeout=float(self.cfg.get("upload_timeout_s", 25.0)),
                 ).read()
@@ -2212,6 +2245,9 @@ class HardwareBridge(
 
     def upload_scan(self) -> None:
         """Upload registered XY returns for server-side occupancy raytracing."""
+        headers = map_upload_headers(self)
+        if headers is None:
+            return
         if not self._scan_dirty or self._scan_points is None:
             return
         self._scan_dirty = False
@@ -2246,7 +2282,7 @@ class HardwareBridge(
                 urllib.request.Request(
                     url,
                     data=zlib.compress(quantised.tobytes()),
-                    headers={"Content-Type": "application/octet-stream"},
+                    headers=headers,
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
             ).read()
@@ -2261,6 +2297,9 @@ class HardwareBridge(
 
     def upload_cloud(self) -> None:
         """Upload a voxel-reduced XYZ scan for the optional 3D map view."""
+        headers = map_upload_headers(self)
+        if headers is None:
+            return
         points, rgb = getattr(self, "_cloud_snapshot", None) or (
             self._cloud_points,
             getattr(self, "_cloud_rgb", None),
@@ -2285,7 +2324,7 @@ class HardwareBridge(
                 urllib.request.Request(
                     url,
                     data=zlib.compress(body, 1),
-                    headers={"Content-Type": "application/octet-stream"},
+                    headers=headers,
                 ),
                 timeout=float(self.cfg["upload_timeout_s"]),
             ).read()

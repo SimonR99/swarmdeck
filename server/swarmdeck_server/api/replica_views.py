@@ -70,8 +70,9 @@ def current_catalogue(session_id: str | None):
     # live-overlay reads normalize and hash the same immutable manifests twice.
     with state.lock:
         versions = replica_store.snapshot_versions(session_id)
+        tombstones = replica_store.tombstones(session_id)
         previous = state.catalogues.get(session_id)
-        if previous is not None and previous[0] == versions:
+        if previous is not None and previous[0] == (versions, tombstones):
             state.catalogues.move_to_end(session_id)
             return previous[1]
 
@@ -79,12 +80,13 @@ def current_catalogue(session_id: str | None):
         # A publication may have advanced during the first version read. Associate
         # the cache with the actual coherent snapshot used to construct the view.
         versions = tuple(
-            (e["robot_id"], e["session_id"], e["revision"]) for e in snapshots
+            (e["robot_id"], e["session_id"], e["revision"], e["map_epoch"], e["run_id"])
+            for e in snapshots
         )
 
         def normalize(envelope):
             owner = (envelope["session_id"], envelope["robot_id"])
-            revision = envelope["revision"]
+            revision = (envelope["revision"], envelope["map_epoch"], envelope["run_id"])
             cached = state.normalized.get(owner)
             if cached is not None and cached[0] == revision:
                 state.normalized.move_to_end(owner)
@@ -96,15 +98,18 @@ def current_catalogue(session_id: str | None):
                 state.normalized.popitem(last=False)
             return source
 
-        catalogue = ComponentCatalogue(snapshots, normalizer=normalize)
-        state.catalogues[session_id] = (versions, catalogue)
+        tombstones = replica_store.tombstones(session_id)
+        catalogue = ComponentCatalogue(
+            snapshots, normalizer=normalize, tombstones=tombstones
+        )
+        state.catalogues[session_id] = ((versions, tombstones), catalogue)
         state.catalogues.move_to_end(session_id)
         while len(state.catalogues) > 2:
             state.catalogues.popitem(last=False)
         retained_revisions = {
-            ((source_session, robot_id), revision)
-            for cached_versions, _ in state.catalogues.values()
-            for robot_id, source_session, revision in cached_versions
+            ((source_session, robot_id), (revision, epoch, run))
+            for (cached_versions, _), _ in state.catalogues.values()
+            for robot_id, source_session, revision, epoch, run in cached_versions
         }
         for owner, cached in tuple(state.normalized.items()):
             if (owner, cached[0]) not in retained_revisions:
@@ -528,7 +533,7 @@ def _submap_id(value: Any) -> str:
 
 
 def build_view(
-    envelope: Mapping[str, Any], *, component_id: str | None = None
+    envelope: Mapping[str, Any], *, component_id: str | None = None, tombstones=()
 ) -> dict[str, Any]:
     """Build a bounded, component-separated inspection payload.
 
@@ -544,6 +549,11 @@ def build_view(
     if not isinstance(manifests, list):
         raise ValueError("replica snapshot manifests are invalid")
     components: dict[str, dict[str, Any]] = {}
+    retired = tuple(
+        f"{robot}/{run}/"
+        for robot, session, run in tombstones
+        if session == envelope.get("session_id")
+    )
     for manifest in manifests:
         if not isinstance(manifest, Mapping):
             raise ValueError("replica manifest is invalid")
@@ -568,6 +578,8 @@ def build_view(
         for submap in manifest.get("submaps", []):
             if not isinstance(submap, Mapping):
                 raise ValueError("replica submap is invalid")
+            if retired and _submap_id(submap.get("submap_id")).startswith(retired):
+                continue
             transform = validate_se3(
                 submap.get("T_component_submap"), "T_component_submap"
             )
@@ -610,9 +622,9 @@ def build_view(
     for component in selected_components:
         for submap in component["submaps"]:
             for chunk in submap["chunks"]:
-                digest = chunk.get("sha256")
-                if digest:
-                    chunks.setdefault(digest, chunk)
+                chunk_digest = chunk.get("sha256")
+                if chunk_digest:
+                    chunks.setdefault(chunk_digest, chunk)
     # ``generated_at_ns`` and ``observed_at_ns`` are mapper/ROS timestamps.
     # Treating either as wall time makes a simulation clock (or another host's
     # clock) look fresh or ancient.  Producers may opt in to a wall timestamp
@@ -634,7 +646,11 @@ def build_view(
         "solution_order_known": (
             "solution_order" in envelope and envelope["solution_order"] is not None
         ),
-        "snapshot_id": snapshot.get("snapshot_id"),
+        "snapshot_id": (
+            digest([snapshot.get("snapshot_id"), sorted(retired)])
+            if retired
+            else snapshot.get("snapshot_id")
+        ),
         "generated_at_ns": snapshot.get("generated_at_ns"),
         "component_id": selected,
         "components": ordered,
@@ -658,7 +674,11 @@ async def replica_view(robot_id: str, session_id: str, component_id: str | None 
         envelope = await asyncio.to_thread(store().get, robot_id, session_id)
         if envelope is None:
             return JSONResponse({"error": "replica not found"}, status_code=404)
-        return build_view(envelope, component_id=component_id)
+        return build_view(
+            envelope,
+            component_id=component_id,
+            tombstones=await asyncio.to_thread(store().tombstones, session_id),
+        )
     except KeyError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     except (TypeError, ValueError) as exc:

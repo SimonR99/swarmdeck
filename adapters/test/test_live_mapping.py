@@ -5,12 +5,18 @@ import numpy as np
 
 from adapters.live_mapping import live_state
 from autonomy.contracts import IDENTITY_SE3
+from autonomy.map_epochs import robot_run_id
+
+MISSION = "00000000-0000-0000-0000-000000000001"
+RUN = robot_run_id(MISSION, "r0", 0)
 
 
 def bridge():
     authority = dict(
         robot_id="r0",
-        mission_id="mission",
+        mission_id=MISSION,
+        robot_map_epoch=0,
+        run_id=RUN,
         component_id="component",
         navigation_frame="r0/map",
         solution_order=[0, -1],
@@ -40,7 +46,7 @@ def test_navigation_state_is_qualified_without_mutating_original():
 def test_qualified_home_survives_live_mapping_validation():
     robot = bridge()
     robot._mapping_authority.current()["home"] = {
-        "keyframe_id": "r0/mission/0",
+        "keyframe_id": f"r0/{RUN}/0",
         "T_navigation_home": [
             [1, 0, 0, 4],
             [0, 1, 0, -2],
@@ -51,14 +57,14 @@ def test_qualified_home_survives_live_mapping_validation():
 
     home = live_state(robot)["live_mapping"]["home"]
 
-    assert home["keyframe_id"] == "r0/mission/0"
+    assert home["keyframe_id"] == f"r0/{RUN}/0"
     assert home["T_navigation_home"][0][3] == 4
 
 
 def test_malformed_home_rejects_the_live_authority():
     robot = bridge()
     robot._mapping_authority.current()["home"] = {
-        "keyframe_id": "r0/mission/0",
+        "keyframe_id": f"r0/{RUN}/0",
         "T_navigation_home": [[1]],
     }
 
@@ -68,11 +74,11 @@ def test_malformed_home_rejects_the_live_authority():
 @pytest.mark.parametrize(
     "keyframe_id",
     (
-        "other/mission/0",
-        "r0/other-mission/0",
-        "r0/mission/-1",
-        "r0/mission/01",
-        "r0/mission/not-a-sequence",
+        f"other/{RUN}/0",
+        f"r0/{MISSION}/0",
+        f"r0/{RUN}/-1",
+        f"r0/{RUN}/01",
+        f"r0/{RUN}/not-a-sequence",
     ),
 )
 def test_home_keyframe_must_match_live_robot_and_mission(keyframe_id):

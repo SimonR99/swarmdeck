@@ -118,6 +118,33 @@ def write_product(
     return source_raw, index
 
 
+def test_cached_product_expires_only_when_a_contributing_peer_epoch_advances(tmp_path):
+    from autonomy.map_epochs import claim_map_epoch, robot_run_id, write_peer_epochs
+
+    mission = str(uuid.uuid4())
+    epoch = claim_map_epoch(tmp_path, mission, "r0")
+    root = tmp_path / mission / "r0"
+    epochs = {"r0": 0, "r1": 0, "r2": 0}
+    write_peer_epochs(root, mission, epochs)
+    value = snapshot(manifest("component:merged", 0, 7))
+    value.update(
+        mission_id=mission,
+        robot_id="r0",
+        robot_map_epoch=epoch,
+        run_id=robot_run_id(mission, "r0", epoch),
+        robot_map_epochs=epochs,
+        participant_robot_ids=["r0", "r1"],
+    )
+    write_product(root, value)
+    memo = {}
+    initial = read_published_product(root, memo=memo)
+    assert initial is not None
+    write_peer_epochs(root, mission, {**epochs, "r2": 1})
+    assert read_published_product(root, memo=memo) is initial
+    write_peer_epochs(root, mission, {**epochs, "r1": 1, "r2": 1})
+    assert read_published_product(root, memo=memo) is None
+
+
 def frame(component: str, epoch: int = 0, x: float = 0.0, order=(0, -1)):
     pose = np.eye(4)
     pose[0, 3] = x
@@ -454,6 +481,8 @@ def authority_for(core, peer, local_navigation):
         state,
         robot_id=core.robot_id,
         mission_id=core.mission_id,
+        robot_map_epoch=core.map_epoch,
+        run_id=core.run_id,
         participants=list(core.robot_names.values()),
         navigation_frame="r0/map_frame",
         planning_frame="r0/odom",
@@ -480,6 +509,9 @@ def test_authority_carries_the_frame_the_product_was_built_under(tmp_path):
     msg = NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0],
+        participant_robot_ids=[0],
         solution_clock=9,
         optimizer_robot_id=0,
         origin_robot_id=0,
@@ -514,7 +546,7 @@ def test_authority_carries_the_frame_the_product_was_built_under(tmp_path):
         assert authority["navigation_frame"] == "r0/map_frame"
         assert authority["planning_frame"] == "r0/odom"
         assert authority["peer_slam"] == {"keyframes": 4}
-        assert authority["home"]["keyframe_id"] == f"r0/{mission}/0"
+        assert authority["home"]["keyframe_id"] == core.key(0).stable_id
         json.dumps(authority, allow_nan=False)
 
     # The product built at revision 2 predates the solution: identity

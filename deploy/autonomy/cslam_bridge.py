@@ -44,6 +44,7 @@ from cslam_common_interfaces.msg import (
     KeyframePointCloud,
     KeyframeOdom,
     OptimizationResult,
+    RobotHeartbeat,
 )
 
 from autonomy.contracts import (
@@ -70,6 +71,13 @@ from autonomy.peer_mask import (
 )
 from autonomy.cslam import CslamMapper, pose_matrix, publish_snapshot_if_new
 from autonomy.mapping import CorrectionAwareMapper, SubmapStore
+from autonomy.map_epochs import (
+    map_epoch_lock,
+    read_map_epoch,
+    robot_run_id,
+    read_peer_epochs,
+    write_peer_epochs,
+)
 from autonomy.product_authority import (
     build_authority,
     product_authority_key,
@@ -126,6 +134,8 @@ class Bridge(Node):
             "robot_index": 0,
             "robot_names": '["robot_0"]',
             "mission_id": "",
+            "map_epoch": 0,
+            "run_id": "",
             "sensor_namespace": "robot_0",
             "base_frame": "robot_0/base_link",
             "odom_frame": "robot_0/odom",
@@ -174,17 +184,19 @@ class Bridge(Node):
         names = dict(enumerate(json.loads(p["robot_names"])))
         if names[p["robot_index"]] != self.robot:
             raise ValueError("robot_names and robot_index disagree")
-        KeyframeId(self.robot, p["mission_id"], 0)
+        run_id = robot_run_id(p["mission_id"], self.robot, int(p["map_epoch"]))
+        if p["run_id"] != run_id:
+            raise ValueError("bridge run_id does not match its map epoch")
         root = Path(p["store_root"]) / p["mission_id"] / self.robot
         root.mkdir(parents=True, exist_ok=True)
         # The peer root: snapshot.json, status.json and graph_solution.json
         # live here, and the MOLA worker publishes its products under mola/.
         self.root = root
-        # A crashed frontend must not reuse seq=0 against a live peer graph.
-        with (root / "frontend-lifetime").open("x") as stream:
-            stream.write(
-                "Start a fresh fleet mission and ROS domain after a frontend restart.\n"
-            )
+        reset_root = os.environ.get("SWARMDECK_SIM_RESET_DIR", "")
+        self.reset_root = Path(reset_root) if reset_root else None
+        record = read_map_epoch(root)
+        if record is None or record["run_id"] != run_id:
+            raise ValueError("peer launch must durably claim the map epoch")
         self.core = CslamMapper(
             CorrectionAwareMapper(SubmapStore(root / "geometry")),
             self.robot,
@@ -192,7 +204,16 @@ class Bridge(Node):
             p["mission_id"],
             names,
             p["capture_provider"],
+            map_epoch=int(p["map_epoch"]),
         )
+        known = read_peer_epochs(root)
+        if known is not None:
+            if known["mission_id"] != self.core.mission_id:
+                raise ValueError("peer epoch watermark belongs to another mission")
+            for index, name in names.items():
+                if index != self.core.robot_index and name in known["robot_map_epochs"]:
+                    self.core.observe_epoch(index, known["robot_map_epochs"][name])
+        self._persist_peer_epochs()
         self.closed = Event()
         self._shared_lock = Lock()
         self.sensor_context = None
@@ -358,6 +379,10 @@ class Bridge(Node):
         self.create_subscription(
             OptimizationResult, "cslam/optimized_estimates", self.optimized, 100
         )
+        for index in names:
+            self.create_subscription(
+                RobotHeartbeat, f"/r{index}/cslam/heartbeat", self.peer_heartbeat, 10
+            )
         # Verification outcomes are published on a fleet-global topic. Keep
         # bounded counters in the local status file so an absent descriptor
         # exchange can be distinguished from geometric rejection and from a
@@ -775,11 +800,21 @@ class Bridge(Node):
             self.last_sensor_at = time.monotonic()
 
     def key_cloud(self, msg):
+        if (
+            msg.mission_id != self.core.mission_id
+            or msg.map_epoch != self.core.map_epoch
+        ):
+            return
         self.clouds[msg.id] = msg.pointcloud
         self.pending_capture_since.setdefault(msg.id, time.monotonic())
         self.consume(msg.id)
 
     def key_odom(self, msg):
+        if (
+            msg.mission_id != self.core.mission_id
+            or msg.map_epoch != self.core.map_epoch
+        ):
+            return
         self.odoms[msg.id] = msg.odom
         self.pending_capture_since.setdefault(msg.id, time.monotonic())
         self.consume(msg.id)
@@ -871,6 +906,9 @@ class Bridge(Node):
                             {
                                 "schema": "swarmdeck.keyframe-metadata.v1",
                                 "keyframe_id": keyframe.stable_id,
+                                "mission_id": self.core.mission_id,
+                                "robot_map_epoch": self.core.map_epoch,
+                                "run_id": self.core.run_id,
                                 "stamp_ns": stamp,
                                 "odom_frame": self.odom_frame,
                                 "T_odom_keyframe": self.core.local_poses[keyframe],
@@ -900,7 +938,10 @@ class Bridge(Node):
 
         self.solution_results_received += 1
         previous_order = self.core.solver_order
+        previous_epochs = self.core.peer_epoch_revision
         adopted = self.core.solution(msg)
+        if self.core.peer_epoch_revision != previous_epochs:
+            self._persist_peer_epochs()
         if self.core.solver_order == previous_order:
             return
         self.solution_results_accepted += 1
@@ -911,7 +952,40 @@ class Bridge(Node):
         else:
             self.solution_results_unchanged += 1
 
+    def _persist_peer_epochs(self):
+        with map_epoch_lock(self.root):
+            current = read_map_epoch(self.root)
+            if current is None or current["run_id"] != self.core.run_id:
+                return
+            write_peer_epochs(
+                self.root,
+                self.core.mission_id,
+                {
+                    self.core.robot_names[index]: epoch
+                    for index, epoch in self.core.robot_map_epochs.items()
+                },
+            )
+
+    def peer_heartbeat(self, msg):
+        if msg.mission_id != self.core.mission_id:
+            return
+        index, epoch = int(msg.robot_id), int(msg.map_epoch)
+        previous = self.core.robot_map_epochs.get(index)
+        if previous is None or not self.core.observe_epoch(index, epoch):
+            return
+        if epoch > previous:
+            self._persist_peer_epochs()
+            peer = self.core.robot_names[index]
+            removed = self.closures_by_peer.pop(peer, 0)
+            self.verified_closures = max(0, self.verified_closures - removed)
+            self._product_memo.clear()
+
     def inter_robot_closure(self, msg):
+        previous_epochs = self.core.peer_epoch_revision
+        if not self.core.accepts_epoch_vector(msg):
+            return
+        if self.core.peer_epoch_revision != previous_epochs:
+            self._persist_peer_epochs()
         try:
             first, second = int(msg.robot0_id), int(msg.robot1_id)
         except (AttributeError, TypeError, ValueError):
@@ -929,7 +1003,39 @@ class Bridge(Node):
         else:
             self.rejected_closures += 1
 
+    def source_reset_stamp(self):
+        """Read the supervisor's real source-reset ACK, never infer from a launch."""
+        if self.core.map_epoch == 0:
+            return {}
+        if self.reset_root is None:
+            return None
+        try:
+            status = json.loads(
+                (
+                    self.reset_root / "robots" / self.robot / "mgg-status.json"
+                ).read_text()
+            )
+            stamp = status["source_reset_stamp"]
+            if (
+                status["source_reset_run_id"] != self.core.run_id
+                or type(stamp["sec"]) is not int
+                or type(stamp["nanosec"]) is not int
+                or stamp["sec"] < 0
+                or not 0 <= stamp["nanosec"] < 1_000_000_000
+            ):
+                return None
+            return stamp
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
     def snapshot(self):
+        with map_epoch_lock(self.root):
+            record = read_map_epoch(self.root)
+            if record is None or record["run_id"] != self.core.run_id:
+                return
+            self._snapshot()
+
+    def _snapshot(self):
         with self._shared_lock:
             last_sensor_at = self.last_sensor_at
             normalized_count = self.normalized_count
@@ -965,12 +1071,27 @@ class Bridge(Node):
         if self.core.revision:
             self.snapshot_file_revision = publish_snapshot_if_new(
                 self.snapshot_file,
-                self.latest_envelope["snapshot"],
+                {
+                    **self.latest_envelope["snapshot"],
+                    "mission_id": self.core.mission_id,
+                    "robot_id": self.robot,
+                    "robot_map_epoch": self.core.map_epoch,
+                    "run_id": self.core.run_id,
+                    "robot_map_epochs": self.latest_envelope["robot_map_epochs"],
+                    "participant_robot_ids": self.latest_envelope[
+                        "participant_robot_ids"
+                    ],
+                },
                 self.core.revision,
                 self.snapshot_file_revision,
             )
         self.authority_revision = None
-        if self.core.revision and sensor_input_is_fresh(last_sensor_at):
+        source_reset_stamp = self.source_reset_stamp()
+        if (
+            self.core.revision
+            and sensor_input_is_fresh(last_sensor_at)
+            and source_reset_stamp is not None
+        ):
             try:
                 transform = self.tf.lookup_transform(
                     self.odom_frame, self.navigation_frame, Time()
@@ -991,6 +1112,8 @@ class Bridge(Node):
                         robot_id=self.robot,
                         mission_id=self.core.mission_id,
                         participants=list(self.core.robot_names.values()),
+                        robot_map_epoch=self.core.map_epoch,
+                        run_id=self.core.run_id,
                         navigation_frame=self.navigation_frame,
                         planning_frame=self.odom_frame,
                         T_local_navigation=local_navigation,
@@ -998,12 +1121,16 @@ class Bridge(Node):
                         peer_slam={
                             "robot_id": self.robot,
                             "mission_id": self.core.mission_id,
+                            "robot_map_epoch": self.core.map_epoch,
+                            "run_id": self.core.run_id,
                             "keyframes": len(self.core.local_poses),
                             "verified": self.verified_closures,
                             "rejected": self.rejected_closures,
                             "by_peer": dict(self.closures_by_peer),
                         },
                     )
+                    if source_reset_stamp:
+                        authority["source_reset_stamp"] = source_reset_stamp
                     self.authority_pub.publish(
                         String(data=json.dumps(authority, allow_nan=False))
                     )
@@ -1012,6 +1139,20 @@ class Bridge(Node):
                     self.authority_skipped += 1
             except TransformException:
                 pass
+        if self.authority_revision is None:
+            self.authority_pub.publish(
+                String(
+                    data=json.dumps(
+                        {
+                            "robot_id": self.robot,
+                            "mission_id": self.core.mission_id,
+                            "robot_map_epoch": self.core.map_epoch,
+                            "run_id": self.core.run_id,
+                            "state": "resetting",
+                        }
+                    )
+                )
+            )
         # The MOLA worker's last build attempt for this peer. Its product stays
         # at the last revision that fit once the component outgrows the point
         # budget; the failure is only visible here and in the worker's log.
@@ -1019,6 +1160,8 @@ class Bridge(Node):
         status = {
             "robot_id": self.robot,
             "mission_id": self.core.mission_id,
+            "robot_map_epoch": self.core.map_epoch,
+            "run_id": self.core.run_id,
             "normalized_scans": normalized_count,
             "keyframes": self.capture_count,
             "qualified_raw_captures": self.qualified_capture_count,

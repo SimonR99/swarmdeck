@@ -27,6 +27,7 @@ from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
 from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
 from cslam_common_interfaces.msg import InterRobotLoopClosure, OptimizationResult
+from autonomy.map_epochs import read_map_epoch
 
 
 def _rotation_matrix(x, y, z, w):
@@ -104,6 +105,18 @@ def main():
     mission = str(uuid.uuid4())
     robots = ["fixture_0", "fixture_1"]
     directory = Path(tempfile.mkdtemp(prefix="cslam-peer-smoke-"))
+    claimed_epochs = {}
+
+    def current_run_message(msg):
+        return (
+            msg.mission_id == mission
+            and len(claimed_epochs) == len(robots)
+            and msg.publisher_robot_id in claimed_epochs
+            and msg.map_epoch == claimed_epochs[msg.publisher_robot_id]
+            and list(msg.robot_map_epochs)
+            == [claimed_epochs[index] for index in range(len(robots))]
+        )
+
     rng = np.random.default_rng(831)
     # Asymmetric surfaces provide nondegenerate local registration features.
     points = np.vstack(
@@ -141,7 +154,9 @@ def main():
     node.create_subscription(
         InterRobotLoopClosure,
         "/cslam/inter_robot_loop_closure",
-        lambda msg: closures.append(msg) if msg.success else None,
+        lambda msg: (
+            closures.append(msg) if msg.success and current_run_message(msg) else None
+        ),
         100,
     )
     for index in range(2):
@@ -149,7 +164,9 @@ def main():
         def solution(msg, recipient=index):
             if (
                 msg.success
-                and msg.mission_id == mission
+                and current_run_message(msg)
+                and set(msg.participant_robot_ids) == set(range(len(robots)))
+                and msg.optimizer_robot_id == msg.publisher_robot_id
                 and msg.estimates
                 and msg.anchor_estimates
             ):
@@ -157,6 +174,7 @@ def main():
                     int(msg.solution_clock),
                     int(msg.optimizer_robot_id),
                     int(msg.origin_robot_id),
+                    tuple(msg.robot_map_epochs),
                 )
                 group = solution_groups.setdefault(group_key, {})
                 group[recipient] = msg
@@ -182,6 +200,7 @@ def main():
                 "SWARMDECK_PEER_NAMES": json.dumps(robots),
                 "SWARMDECK_PEER_INDEX": str(index),
                 "SWARMDECK_USE_SIM_TIME": "false",
+                "SWARMDECK_INTER_ROBOT_CLOSURES": "true",
                 "SWARMDECK_SERVER_URL": "",
                 "SWARMDECK_MAP_STORE": str(directory / "maps"),
                 "SWARMDECK_NAVIGATION_FRAME": f"{robot}/odom",
@@ -202,6 +221,11 @@ def main():
             now = time.monotonic()
             if any(process.poll() is not None for process in processes):
                 raise RuntimeError(f"peer exited; inspect {directory}")
+            for index, robot in enumerate(robots):
+                if index not in claimed_epochs:
+                    claim = read_map_epoch(directory / "maps" / mission / robot)
+                    if claim is not None:
+                        claimed_epochs[index] = claim["map_epoch"]
             if now - published >= 0.2:
                 stamp = node.get_clock().now().to_msg()
                 for index, robot in enumerate(robots):

@@ -1,8 +1,10 @@
 import importlib.util
 from pathlib import Path
+from uuid import uuid4
 
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.live_mapping import validate_live_mapping
+from autonomy.map_epochs import robot_run_id
 
 
 def acceptance_module():
@@ -14,9 +16,13 @@ def acceptance_module():
 
 
 def test_harness_reads_the_validated_live_home_contract():
+    mission = str(uuid4())
+    run_id = robot_run_id(mission, "robot_0", 0)
     value = {
         "robot_id": "robot_0",
-        "mission_id": "mission",
+        "mission_id": mission,
+        "robot_map_epoch": 0,
+        "run_id": run_id,
         "component_id": "component",
         "navigation_frame": "robot_0/map_frame",
         "solution_order": [0, -1],
@@ -28,7 +34,7 @@ def test_harness_reads_the_validated_live_home_contract():
         "global_planned_path": [],
         "local_planned_path": [],
         "home": {
-            "keyframe_id": "robot_0/mission/0",
+            "keyframe_id": f"robot_0/{run_id}/0",
             "T_navigation_home": [
                 [1, 0, 0, 4],
                 [0, 1, 0, -2],

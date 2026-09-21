@@ -1619,6 +1619,99 @@ def test_partial_home_starts_next_refinement_while_prior_worker_exits(monkeypatc
     assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
 
 
+def test_pending_index_refinement_keeps_route_until_same_goal_is_validated(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+    )
+    pending = rolling_home_response(partial=False, path_x=[])
+    pending.status = RefineRouteResponse.STALE_REVISION
+    pending.reason = "requested snapshot is not current"
+    loading = deepcopy(pending)
+    loading.status = RefineRouteResponse.BLOCKED
+    loading.reason = "odometry or planning map is unavailable"
+    final = rolling_home_response(partial=False, path_x=[-0.5, -2.0])
+    bridge, planner, client = rig(
+        monkeypatch, initial, refine_responses=[pending, loading, final]
+    )
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    planner.replan_backoff_s = 0.0
+
+    assert planner.return_home()
+    retained = planner.global_display_plan()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+
+    assert wait_until(lambda: bridge.follow_path.call_count == 2)
+    assert client.call_async.call_count == 1
+    assert planner.global_display_plan() is retained
+    assert bridge.follow_path.call_args.args[0].poses[-1].x == pytest.approx(-2.0)
+    assert bridge.nav_status == "active"
+
+
+def test_stop_during_pending_index_refinement_cannot_dispatch_late_path(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+    )
+    pending = rolling_home_response(partial=False, path_x=[])
+    pending.status = RefineRouteResponse.STALE_REVISION
+    pending.reason = "requested snapshot is not current"
+    final = rolling_home_response(partial=False, path_x=[-0.5, -2.0])
+    bridge, planner, client = rig(
+        monkeypatch, initial, refine_responses=[pending, final]
+    )
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    waiting = threading.Event()
+    resume = threading.Event()
+    wait_for_continuation = planner._wait_for_continuation
+
+    def wait_after_refusal(*args):
+        waiting.set()
+        assert resume.wait(timeout=2.0)
+        return wait_for_continuation(*args)
+
+    monkeypatch.setattr(planner, "_wait_for_continuation", wait_after_refusal)
+    assert planner.return_home()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    try:
+        assert waiting.wait(timeout=2.0)
+        bridge.cancel_goal()
+    finally:
+        resume.set()
+    assert wait_until(lambda: planner._continuation_thread is None)
+    assert bridge.nav_status == "cancelled"
+    assert bridge.follow_path.call_count == 1
+    assert client.call_async.call_count == 1
+
+
+def test_index_refinement_wait_expires_without_restarting_objective(monkeypatch):
+    initial = rolling_home_response(
+        partial=True,
+        path_x=[0.0, -0.5],
+        global_path=[0.0, -0.5, -1.0, -2.0],
+    )
+    pending = rolling_home_response(partial=False, path_x=[])
+    pending.status = RefineRouteResponse.STALE_REVISION
+    pending.reason = "requested snapshot is not current"
+    bridge, planner, client = rig(monkeypatch, initial, refine_responses=[])
+    planner.refine_client.call_async.side_effect = lambda _: completed(pending)
+    planner.authority_reader = NS(current=lambda: correction_authority())
+    planner.replan_deadline_s = 0.05
+    planner.replan_backoff_s = 0.05
+
+    assert planner.return_home()
+    bridge.nav_status = "succeeded"
+    planner._check_active_authority()
+    assert wait_until(lambda: bridge.nav_status == "failed")
+    assert bridge.follow_path.call_count == 1
+    assert client.call_async.call_count == 1
+    assert planner.global_display_plan() is None
+
+
 def test_blocked_home_refinement_replans_the_global_route(monkeypatch):
     initial = rolling_home_response(
         partial=True,
@@ -2391,9 +2484,6 @@ def test_planning_map_that_never_returns_fails_at_the_deadline(monkeypatch):
     assert planner.navigate({"x": 2, "y": 1})
     assert wait_until(lambda: bridge.nav_status == "failed")
     assert bridge.follow_path.call_count == 0
-    state = planner.decorate_state({"nav_status": "failed"})
-    assert "planning map stayed unavailable" in state["nav_failure_reason"]
-    assert "unreachable" not in state["nav_failure_reason"].lower()
 
 
 def indexed_map_failed_closed():

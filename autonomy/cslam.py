@@ -1,7 +1,8 @@
 """Swarm-SLAM solution adapter; the optimizer remains on each robot.
 
-A mission uses a fresh ROS domain and frontend lifetime. Upstream keyframe IDs
-have no restart epoch, so restarting a frontend requires a new fleet mission.
+A fleet mission remains stable across independent robot map lifetimes. The
+durable robot epoch gives restarted frontends new keyframe run identities;
+component graph epochs continue to describe changes of solved anchor frame.
 This boundary never invents a transform for an unlocalized peer.
 """
 
@@ -29,6 +30,7 @@ from .contracts import (
     validate_se3,
 )
 from .mapping import CorrectionAwareMapper
+from .map_epochs import robot_run_id
 
 # Revisions whose frame state is remembered for the product-gated authority.
 # About one revision per second while driving, so this covers over an hour of
@@ -168,6 +170,7 @@ class CslamMapper:
         capture_provider_name: str | CaptureProvider | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
+        map_epoch: int = 0,
     ):
         self.mapper = mapper
         self.robot_id, self.robot_index = robot_id, robot_index
@@ -198,7 +201,13 @@ class CslamMapper:
         self.deferred_solution: DeferredSolution | None = None
         self.mission_id, self.robot_names = mission_id, robot_names
         self.capture_provider = capture_provider(capture_provider_name)
-        self.anchor = KeyframeId(robot_id, mission_id, 0)
+        self.map_epoch = map_epoch
+        self.run_id = robot_run_id(mission_id, robot_id, map_epoch)
+        self.robot_map_epochs = {index: 0 for index in robot_names}
+        self.robot_map_epochs[robot_index] = map_epoch
+        self.solution_participants = {robot_index}
+        self.peer_epoch_revision = 0
+        self.anchor = KeyframeId(robot_id, self.run_id, 0)
         self.poses, self.local_poses, self.capture_digests = {}, {}, {}
         self.T_component_local = np.eye(4)
         self.solution_order = (0, -1)
@@ -215,7 +224,58 @@ class CslamMapper:
         self._envelope_map_revision = -1
 
     def key(self, seq):
-        return KeyframeId(self.robot_id, self.mission_id, seq)
+        return KeyframeId(self.robot_id, self.run_id, seq)
+
+    def observe_epoch(self, robot_index: int, map_epoch: int) -> bool:
+        """Fence a peer lifetime without discarding this robot's own captures."""
+        if (
+            robot_index not in self.robot_map_epochs
+            or type(map_epoch) is not int
+            or map_epoch < self.robot_map_epochs[robot_index]
+            or (robot_index == self.robot_index and map_epoch != self.map_epoch)
+        ):
+            return False
+        if map_epoch == self.robot_map_epochs[robot_index]:
+            return True
+        self.robot_map_epochs[robot_index] = map_epoch
+        self.peer_epoch_revision += 1
+        self.deferred_solution = None
+        self.replica_revision += 1
+        self._envelope = None
+        if robot_index in self.solution_participants:
+            # A solution depends on every contributing graph, not just its
+            # anchor. Retain own captures but retire every product/frame that
+            # was solved with the old participant before accepting another.
+            self.solution_participants = {self.robot_index}
+            self.anchor = self.key(0)
+            self.poses = dict(self.local_poses)
+            self.T_component_local = np.eye(4)
+            self.epoch += 1
+            self.frame_history.clear()
+            self.solution_order = (0, -1)
+            self.solver_order = (0, -1)
+            self.last_adoption_at = None
+            self.correction_revision += 1
+            if self.local_poses:
+                self._apply()
+        return True
+
+    def accepts_epoch_vector(self, message) -> bool:
+        if message.mission_id != self.mission_id:
+            return False
+        epochs = list(message.robot_map_epochs)
+        if len(epochs) != len(self.robot_map_epochs):
+            return False
+        if int(epochs[self.robot_index]) != self.map_epoch:
+            return False
+        if any(
+            type(epoch) is not int or epoch < self.robot_map_epochs[index]
+            for index, epoch in enumerate(epochs)
+        ):
+            return False
+        for index, epoch in enumerate(epochs):
+            self.observe_epoch(index, epoch)
+        return True
 
     def capture(
         self,
@@ -288,6 +348,16 @@ class CslamMapper:
     def solution(self, message):
         if not message.success or message.mission_id != self.mission_id:
             return False
+        participants = set(message.participant_robot_ids)
+        if (
+            not participants
+            or not participants.issubset(self.robot_names)
+            or self.robot_index not in participants
+            or message.origin_robot_id not in participants
+        ):
+            return False
+        if not self.accepts_epoch_vector(message):
+            return False
         order = (int(message.solution_clock), int(message.optimizer_robot_id))
         if order <= max(self.solution_order, self.solver_order):
             return False
@@ -300,7 +370,13 @@ class CslamMapper:
         origin = int(message.origin_robot_id)
         if value.key.robot_id != origin or value.key.keyframe_id != 0:
             raise ValueError("Optimizer supplied an inconsistent anchor")
-        anchor = KeyframeId(self.robot_names[origin], self.mission_id, 0)
+        anchor = KeyframeId(
+            self.robot_names[origin],
+            robot_run_id(
+                self.mission_id, self.robot_names[origin], self.robot_map_epochs[origin]
+            ),
+            0,
+        )
         anchor_pose = pose_matrix(value.pose)
         updates = {}
         for value in message.estimates:
@@ -333,7 +409,11 @@ class CslamMapper:
         # move in its own frame, so under the change tolerance alone it
         # would never adopt (benchbot 2026-09-19, mission bd4362c4: robot_0
         # at [0, -1] with solver clock 13 while the others were at 10 and 11).
-        large = anchor != self.anchor or self.solution_order[1] == -1
+        large = (
+            anchor != self.anchor
+            or participants != self.solution_participants
+            or self.solution_order[1] == -1
+        )
         for key, pose in poses.items():
             if key not in self.poses:
                 large = True
@@ -384,6 +464,7 @@ class CslamMapper:
         if anchor != self.anchor:
             self.epoch += 1
         self.anchor, self.poses = anchor, poses
+        self.solution_participants = participants
         self.T_component_local = correction
         self.correction_revision += 1
         self.last_adoption_at = now
@@ -434,6 +515,16 @@ class CslamMapper:
             "version": 1,
             "robot_id": self.robot_id,
             "session_id": self.mission_id,
+            "map_epoch": self.map_epoch,
+            "run_id": self.run_id,
+            "anchor": asdict(self.anchor),
+            "participant_robot_ids": [
+                self.robot_names[index] for index in sorted(self.solution_participants)
+            ],
+            "robot_map_epochs": {
+                self.robot_names[index]: epoch
+                for index, epoch in self.robot_map_epochs.items()
+            },
             "revision": self.replica_revision,
             "solution_order": list(self.solution_order),
             "component_id": component_id_for_anchor(self.anchor),

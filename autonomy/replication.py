@@ -20,6 +20,8 @@ import time
 from urllib import error, request
 from uuid import UUID
 
+from .map_epochs import robot_run_id
+
 MAX_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
@@ -56,6 +58,54 @@ def identity(robot_id: str, session_id: str) -> None:
 def chunk_hash(value: str) -> None:
     if not isinstance(value, str) or not _HASH.fullmatch(value):
         raise ValueError("Invalid chunk hash")
+
+
+def envelope_epochs(envelope: dict) -> dict[str, int]:
+    """Validate robot lifetimes without confusing them with graph revisions."""
+    robot, session = envelope["robot_id"], envelope["session_id"]
+    identity(robot, session)
+    epoch, run = envelope["map_epoch"], envelope["run_id"]
+    if run != robot_run_id(session, robot, epoch):
+        raise ValueError("Replica run_id does not match its robot map epoch")
+    epochs = envelope["robot_map_epochs"]
+    if not isinstance(epochs, dict) or epochs.get(robot) != epoch:
+        raise ValueError("Replica robot map epochs do not include the publisher")
+    for owner, value in epochs.items():
+        robot_run_id(session, owner, value)
+    participants = envelope["participant_robot_ids"]
+    if (
+        not isinstance(participants, list)
+        or not participants
+        or any(not isinstance(owner, str) for owner in participants)
+        or len(set(participants)) != len(participants)
+        or robot not in participants
+        or not set(participants).issubset(epochs)
+    ):
+        raise ValueError("Invalid replica participant robot IDs")
+    references = set(snapshot_runs(envelope["snapshot"]))
+    references.update(snapshot_runs(envelope.get("anchor", {})))
+    for owner, referenced_run in references:
+        if owner not in participants or referenced_run != robot_run_id(
+            session, owner, epochs[owner]
+        ):
+            raise ValueError("Snapshot references an undeclared robot map run")
+    return epochs
+
+
+def snapshot_runs(value):
+    """Yield active keyframe/submap identities, including component anchors."""
+    if isinstance(value, dict):
+        if "robot_id" in value and "run_id" in value:
+            yield value["robot_id"], value["run_id"]
+        # SubmapId historically calls its keyframe namespace session_id.
+        if "robot_id" in value and "session_id" in value and "seq" in value:
+            yield value["robot_id"], value["session_id"]
+        for key, child in value.items():
+            if key != "tombstones":
+                yield from snapshot_runs(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from snapshot_runs(child)
 
 
 class ReplicaStore:
@@ -117,6 +167,31 @@ class ReplicaStore:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS sessions (session TEXT PRIMARY KEY, published REAL NOT NULL)"
             )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS map_epochs (robot TEXT, session TEXT, "
+                "epoch INTEGER NOT NULL, run TEXT NOT NULL, PRIMARY KEY(robot, session))"
+            )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS run_tombstones (robot TEXT, session TEXT, "
+                "run TEXT, PRIMARY KEY(robot, session, run))"
+            )
+            # Legacy manifests have no independently fenced robot lifetime.
+            # Retire them rather than interpreting their mission UUID as a run.
+            for robot, session, body in self.db.execute(
+                "SELECT robot, session, body FROM manifests"
+            ).fetchall():
+                value = json.loads(body)
+                if "map_epoch" not in value or "run_id" not in value:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO run_tombstones VALUES (?, ?, ?)",
+                        (robot, session, value.get("run_id", session)),
+                    )
+                    self._remove_source(robot, session)
+                else:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO map_epochs VALUES (?, ?, ?, ?)",
+                        (robot, session, value["map_epoch"], value["run_id"]),
+                    )
             if not indexed:
                 for robot, session, body in self.db.execute(
                     "SELECT robot, session, body FROM manifests"
@@ -171,6 +246,111 @@ class ReplicaStore:
             "INSERT OR IGNORE INTO chunk_refs VALUES (?, ?, ?)",
             ((robot, session, digest) for digest in current - old),
         )
+
+    def _remove_source(self, robot, session):
+        self.db.execute(
+            "UPDATE chunks SET touched=? WHERE hash IN "
+            "(SELECT hash FROM chunk_refs WHERE robot=? AND session=?)",
+            (self.clock(), robot, session),
+        )
+        self.db.execute(
+            "DELETE FROM chunk_refs WHERE robot=? AND session=?", (robot, session)
+        )
+        self.db.execute(
+            "DELETE FROM manifests WHERE robot=? AND session=?", (robot, session)
+        )
+
+    def map_epoch(self, robot_id: str, session_id: str) -> int | None:
+        identity(robot_id, session_id)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT epoch FROM map_epochs WHERE robot=? AND session=?",
+                (robot_id, session_id),
+            ).fetchone()
+        return row[0] if row else None
+
+    def _advance_epoch(self, robot, session, epoch):
+        run = robot_run_id(session, robot, epoch)
+        row = self.db.execute(
+            "SELECT epoch, run FROM map_epochs WHERE robot=? AND session=?",
+            (robot, session),
+        ).fetchone()
+        if row is not None:
+            if epoch < row[0]:
+                raise RevisionConflict("Stale robot map epoch")
+            if epoch == row[0]:
+                if run != row[1]:
+                    raise RevisionConflict("Conflicting robot map run")
+                return False
+            self.db.execute(
+                "INSERT OR IGNORE INTO run_tombstones VALUES (?, ?, ?)",
+                (robot, session, row[1]),
+            )
+        if epoch > 0:
+            # A robot may have been seen only through another peer's relay,
+            # without ever committing its own source on this server.
+            for publisher, body in self.db.execute(
+                "SELECT robot, body FROM manifests WHERE session=?", (session,)
+            ).fetchall():
+                source = json.loads(body)
+                retired_runs = {
+                    referenced_run
+                    for owner, referenced_run in snapshot_runs(source["snapshot"])
+                    if owner == robot and referenced_run != run
+                }
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO run_tombstones VALUES (?, ?, ?)",
+                    ((robot, session, retired_run) for retired_run in retired_runs),
+                )
+                if publisher == robot or not retired_runs:
+                    continue
+                keep, retired_hashes = set(), set()
+                for manifest in source["snapshot"].get("manifests", []):
+                    for submap in manifest.get("submaps", []):
+                        key = submap.get("submap_id", {})
+                        target = (
+                            retired_hashes
+                            if (
+                                key.get("robot_id") == robot
+                                and key.get("session_id", key.get("run_id"))
+                                in retired_runs
+                            )
+                            else keep
+                        )
+                        target.update(
+                            chunk["sha256"] for chunk in submap.get("chunks", [])
+                        )
+                self.db.executemany(
+                    "DELETE FROM chunk_refs WHERE robot=? AND session=? AND hash=?",
+                    ((publisher, session, digest) for digest in retired_hashes - keep),
+                )
+        self._remove_source(robot, session)
+        self.db.execute(
+            "INSERT OR REPLACE INTO map_epochs VALUES (?, ?, ?, ?)",
+            (robot, session, epoch, run),
+        )
+        return True
+
+    def reserve_map_epoch(self, robot_id: str, session_id: str, map_epoch: int) -> bool:
+        """Atomically retire this robot's source and fence every earlier run."""
+        identity(robot_id, session_id)
+        robot_run_id(session_id, robot_id, map_epoch)
+        with self._write():
+            return self._advance_epoch(robot_id, session_id, map_epoch)
+
+    def tombstones(self, session_id: str | None = None):
+        where, args = (
+            ("", ()) if session_id is None else (" WHERE session=?", (session_id,))
+        )
+        with self.lock:
+            return tuple(
+                self.db.execute(
+                    "SELECT robot, session, run FROM run_tombstones"
+                    + where
+                    + " ORDER BY robot, session, run",
+                    args,
+                ).fetchall()
+            )
 
     def collect_unreferenced(self, *, limit: int = 256, dry_run: bool = False) -> dict:
         """Reclaim one bounded batch, preserving all published robot sessions.
@@ -336,6 +516,7 @@ class ReplicaStore:
             raise ValueError("Manifest must be an object")
         robot, session = envelope["robot_id"], envelope["session_id"]
         identity(robot, session)
+        epochs = envelope_epochs(envelope)
         revision = envelope["revision"]
         chunks = envelope["chunks"]
         if (
@@ -362,6 +543,13 @@ class ReplicaStore:
         if len(body) > MAX_MANIFEST_BYTES:
             raise ValueError("Manifest too large")
         with self._write():
+            self._advance_epoch(robot, session, envelope["map_epoch"])
+            for owner in envelope["participant_robot_ids"]:
+                current = self.map_epoch(owner, session)
+                if current is not None and epochs[owner] < current:
+                    raise RevisionConflict(
+                        "Snapshot references a stale robot map epoch"
+                    )
             previous = self.get(robot, session)
             if previous:
                 if revision < previous["revision"]:
@@ -408,9 +596,20 @@ class ReplicaStore:
     def index(self):
         with self.lock:
             rows = self.db.execute(
-                "SELECT robot, session, revision FROM manifests ORDER BY robot, session"
+                "SELECT m.robot, m.session, m.revision, e.epoch, e.run "
+                "FROM manifests m JOIN map_epochs e USING(robot, session) "
+                "ORDER BY m.robot, m.session"
             ).fetchall()
-        return [{"robot_id": r, "session_id": s, "revision": v} for r, s, v in rows]
+        return [
+            {
+                "robot_id": r,
+                "session_id": s,
+                "revision": v,
+                "map_epoch": e,
+                "run_id": run,
+            }
+            for r, s, v, e, run in rows
+        ]
 
     def snapshots(self, session_id: str | None = None):
         """Read a bounded, consistent set of replica manifests for display.
@@ -453,9 +652,10 @@ class ReplicaStore:
         )
         with self.lock:
             rows = self.db.execute(
-                "SELECT robot, session, revision FROM manifests"
+                "SELECT m.robot, m.session, m.revision, e.epoch, e.run "
+                "FROM manifests m JOIN map_epochs e USING(robot, session)"
                 + where
-                + " ORDER BY robot, session LIMIT 129",
+                + " ORDER BY m.robot, m.session LIMIT 129",
                 args,
             ).fetchall()
         if len(rows) > 128:

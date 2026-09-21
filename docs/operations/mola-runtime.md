@@ -403,6 +403,15 @@ prior tree stays in service with its validity clock refreshed
 (`retainedPredecessorCount()`); an older load cannot publish over a newer
 request.
 
+That native loader clock is not an extension of indexed-query authorization.
+The Python product reader retains a compatible `PublicationPending` predecessor
+only under its original coherent-read deadline; corrupt or incompatible
+artifacts are not retained. The index server checks durable epoch identity for
+the owner and every actual geometry participant before and after a query.
+A captured key cannot authorize a retired robot run, even while its bytes
+remain available. Adapter continuation retries preserve the existing token,
+deadline and authority fences rather than creating a fresh objective.
+
 The product is ternary. Occupied voxels and qualified observed-free voxels are
 stored explicitly; unknown space is absent. Occupied wins if an observation
 would overlap free space. A missing, stale, invalid, or not-yet-loaded product

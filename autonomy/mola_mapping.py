@@ -27,6 +27,11 @@ from typing import Mapping
 from .contracts import SCHEMA_VERSION
 from .indexed_mapping import IndexedGrid, IndexedMapView, SnapshotKey
 from .map_provider import PublicationPending
+from .map_epochs import (
+    assert_map_epoch_dependencies,
+    read_map_epoch,
+    snapshot_epoch_dependencies,
+)
 
 GRID_MAGIC = b"SDMGRID1"
 GRID_SCHEMA = "swarmdeck.mola_planner_grid.v1"
@@ -253,6 +258,7 @@ class MolaDirectorySource:
         self.max_grid_bytes = max_grid_bytes
         self._clock_ns = clock_ns
         self._cache: dict[str, tuple[tuple[object, ...], IndexedGrid]] = {}
+        self._map_epoch: dict | None = None
 
     def _publication(
         self,
@@ -283,6 +289,11 @@ class MolaDirectorySource:
                 "MOLA index does not match its published source bytes"
             )
         snapshot, manifests = _snapshot(source_raw)
+        epoch = read_map_epoch(self.peer_root)
+        if epoch is None and self._map_epoch is not None:
+            raise ValueError("robot map lifetime claim disappeared")
+        if epoch is not None and snapshot.get("run_id") != epoch["run_id"]:
+            raise ValueError("MOLA source belongs to another robot map lifetime")
         if index.get("source_snapshot_id") != snapshot.get("snapshot_id"):
             raise PublicationPending(
                 "MOLA index does not match its published source identity"
@@ -343,15 +354,24 @@ class MolaDirectorySource:
 
     def refresh(self, view: IndexedMapView, component_id: str) -> SnapshotKey:
         try:
+            epoch = read_map_epoch(self.peer_root)
+            if epoch is None and self._map_epoch is not None:
+                raise ValueError("robot map lifetime claim disappeared")
+            if epoch != self._map_epoch:
+                view.invalidate("robot map lifetime changed")
+                self._cache.clear()
+                self._map_epoch = epoch
             (
                 source_raw,
                 index_raw,
                 source_identity,
                 index_identity,
-                _,
+                snapshot,
                 manifests,
                 artifacts,
             ) = self._publication()
+            dependencies = snapshot_epoch_dependencies(snapshot)
+            assert_map_epoch_dependencies(self.peer_root, dependencies)
             manifest = manifests.get(component_id)
             item = artifacts.get(component_id)
             if manifest is None or item is None:
@@ -367,6 +387,7 @@ class MolaDirectorySource:
                 planner.get("source_sha256"),
                 _worker_manifest_digest(manifest),
                 artifact_identity,
+                tuple(sorted(dependencies.items())),
             )
             cached = self._cache.get(component_id)
             grid = (
@@ -376,7 +397,7 @@ class MolaDirectorySource:
             )
             if grid is None:
                 raw = self._planner_bytes(path, expected_size, digest)
-                grid = self._decode_grid(raw, planner, manifest)
+                grid = self._decode_grid(raw, planner, manifest, dependencies)
                 self._cache[component_id] = (cache_identity, grid)
             if (
                 not self._publication_unchanged(
@@ -388,12 +409,27 @@ class MolaDirectorySource:
                 or self._artifact_identity(path, expected_size) != artifact_identity
             ):
                 raise PublicationPending("MOLA publication changed while reading")
+            if read_map_epoch(self.peer_root) != epoch:
+                raise ValueError("robot map lifetime changed while reading")
+            assert_map_epoch_dependencies(self.peer_root, dependencies)
             return view.publish(
                 grid.refreshed(
                     source_stamp_ns=grid.source_stamp_ns,
                     received_monotonic_ns=self._clock_ns(),
                 )
             )
+        except PublicationPending:
+            # The previous immutable grid is still verified for its own key.
+            # The registry retries this publication on its next poll; do not
+            # erase the current/retained indexes or refresh their liveness.
+            try:
+                epoch = read_map_epoch(self.peer_root)
+            except (OSError, ValueError):
+                view.invalidate("robot map lifetime claim is invalid")
+                raise
+            if epoch != self._map_epoch:
+                view.invalidate("robot map lifetime changed while reading")
+            raise
         except Exception as exc:
             view.invalidate(str(exc))
             raise
@@ -462,6 +498,7 @@ class MolaDirectorySource:
         raw: bytes,
         planner: Mapping[str, object],
         manifest: Mapping[str, object],
+        dependencies: Mapping[str, int],
     ) -> IndexedGrid:
         if len(raw) < len(GRID_MAGIC) + _COUNT.size or raw[:8] != GRID_MAGIC:
             raise ValueError("planner grid magic is invalid")
@@ -645,6 +682,7 @@ class MolaDirectorySource:
             columns,
             float(resolution),
             point_count,
+            dependencies,
         )
 
     @staticmethod

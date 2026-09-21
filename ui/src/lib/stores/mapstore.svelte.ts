@@ -46,6 +46,7 @@ const state = $state({
   seq: 0,
   globalSeq: 0,
   robotSeqs: {} as Record<string, number>,
+  robotMapEpochs: {} as Record<string, string>,
   revision: 0, // bumped on every change so views can react
   ready: false,
   status: null as MapStatus | null,
@@ -572,6 +573,24 @@ export const mapStore = {
     state.revision++;
   },
 
+  get robotMapEpochs() {
+    return state.robotMapEpochs;
+  },
+  applyRobotMapReset(robotId: string, missionId: string, epoch: number) {
+    const identity = `${missionId}:${epoch}`;
+    if (state.robotMapEpochs[robotId] === identity) return;
+    state.robotMapEpochs = { ...state.robotMapEpochs, [robotId]: identity };
+    clearNetworkLayer(robotId);
+    clearCostmapLayer(robotId);
+    delete state.slamGraphs[robotId];
+    delete state.robotSeqs[robotId];
+    state.optimizedScopes = state.optimizedScopes.filter(scope => !scope.robots.includes(robotId));
+    if (state.viewMode === 'global' || state.viewRobot === robotId) {
+      void this.reloadCurrentView();
+    }
+    state.revision++;
+  },
+
   /** Full read-only Nav2 planner-cost overlay. */
   applyCostmap(patch: CostmapPatch) {
     if (patch.kind !== 'global' && patch.kind !== 'local') return;
@@ -1095,7 +1114,7 @@ export const mapStore = {
     state.revision++;
 
     if (state.viewMode === 'local' && state.viewRobot) {
-      clearNetworkLayer();
+      clearNetworkLayer(state.viewRobot);
       await this.selectRobotView(state.viewRobot, true);
       return;
     }
@@ -1324,6 +1343,7 @@ export const mapStore = {
     state.ready = false;
     state.status = null;
     state.statusUpdatedAt = 0;
+    state.robotMapEpochs = {};
     state.viewMode = 'global';
     state.viewRobot = null;
     state.showingOptimizedGrid = false;

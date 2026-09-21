@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import threading
+from contextlib import nullcontext
 import time
 import urllib.parse
 import urllib.request
@@ -34,7 +35,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action import FollowPath, NavigateToPose
-from nav2_msgs.srv import ClearEntireCostmap, ManageLifecycleNodes
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -79,7 +80,12 @@ from adapters.keyframe_producer import (
 )
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from adapters.map_downlink import NavMapClient, apply_to_occupancy_grid
-from adapters.onboard_mapping import mapping_authority_mode, publish_onboard_map
+from adapters.onboard_mapping import (
+    mapping_authority_mode,
+    publish_onboard_map,
+    map_upload_headers,
+    map_source_is_current,
+)
 
 from sim_cslam import (
     CSLAM_GRID,
@@ -241,27 +247,10 @@ ESCAPE_STALL_DISTANCE = 0.05
 
 # ------------------------------------------------------- Nav2 bringup recovery
 #
-# Nav2's lifecycle manager brings its nodes up in order and ABORTS THE WHOLE
-# SEQUENCE if any one of them fails to answer. The confirmation call has a
-# 2 s timeout compiled into `nav2_util::ServiceClient` — there is no parameter
-# for it — and starting four Nav2 stacks, four SLAM instances, Gazebo and the
-# detector at once is enough to miss it. Measured on robot_2:
-#
-#   Configuring planner_server
-#   ERROR  Failed to change state for node: planner_server. Exception:
-#          planner_server/get_state service client: async_send_request failed.
-#   ERROR  Failed to bring up all requested nodes. Aborting bringup.
-#
-# 2.07 s after the configure began. The transition itself had SUCCEEDED —
-# planner_server sat at `inactive` — only the manager's confirmation timed out,
-# and it then abandoned a robot that was fine. Everything after it in the list
-# stayed `unconfigured`, including `bt_navigator`, so the NavigateToPose action
-# server never existed and every goal failed instantly with "Nav2 action server
-# is not ready" until someone re-ran the bringup by hand.
-#
-# Which robot loses the race is down to scheduling, so this cannot be fixed by
-# ordering or by waiting longer at launch. Re-issuing STARTUP is idempotent and
-# is exactly what recovered robot_2 live, so the adapter does it itself.
+# Simulation launches the bounded, state-aware navigation_startup owner, not
+# Nav2's lifecycle manager. Recovery must reach that same owner: a manager
+# service request here would never answer. It confirms actual lifecycle state
+# before every transition, preserving nodes already active after a lost reply.
 
 # Long enough that a healthy stack finishes its own bringup untouched — measured
 # at 8-12 s from process start on this machine — with margin for a loaded one.
@@ -269,6 +258,9 @@ NAV_READY_GRACE_S = 30.0
 # A re-bringup that did not take is nearly always a node still starting, so
 # leave real time between attempts rather than hammering the service.
 NAV_RECOVER_INTERVAL_S = 30.0
+# The owner has a 60 s shared bringup deadline; allow its initial startup to
+# finish before a queued recovery, plus the recovery's own bounded attempt.
+NAV_RECOVER_TIMEOUT_S = 125.0
 
 # A direct, one-shot repair for SLAM Toolbox's own lifecycle manager timing out
 # during the crowded fleet startup. This is separate from Nav2 recovery below:
@@ -756,10 +748,13 @@ class RobotBridge(
         return self._compose(correction, base)
 
     def _on_map(self, msg: OccupancyGrid) -> None:
-        self.grid = msg
-        self._grid_dirty = True
-        # Runs in the ROS callback, independently of the websocket session.
-        publish_onboard_map(self, msg)
+        with getattr(self, "_goal_lock", nullcontext()):
+            if not map_source_is_current(self, msg):
+                return
+            self.grid = msg
+            self._grid_dirty = True
+            # Runs independently of the websocket session.
+            publish_onboard_map(self, msg)
 
     def _warn_costmap(self, kind: str, reason: str) -> None:
         now = time.monotonic()
@@ -772,6 +767,8 @@ class RobotBridge(
 
     def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
         """Capture Nav2's planner view without changing navigation inputs."""
+        if not map_source_is_current(self, msg):
+            return
         source = str(
             getattr(getattr(msg, "header", None), "frame_id", "") or ""
         ).lstrip("/")
@@ -795,9 +792,12 @@ class RobotBridge(
         except (TypeError, ValueError) as exc:
             self._warn_costmap(kind, str(exc))
             return
-        with self._costmap_lock:
-            self._costmaps[kind] = snapshot
-            self._costmap_dirty.add(kind)
+        with getattr(self, "_goal_lock", nullcontext()):
+            if not map_source_is_current(self, msg):
+                return
+            with self._costmap_lock:
+                self._costmaps[kind] = snapshot
+                self._costmap_dirty.add(kind)
 
     def _pose7(self) -> np.ndarray:
         pose = self.map_pose()
@@ -982,8 +982,11 @@ class RobotBridge(
         }
 
     def _on_cloud(self, msg: PointCloud2) -> None:
-        self._cloud = msg
-        self._cloud_dirty = True
+        with getattr(self, "_goal_lock", nullcontext()):
+            if not map_source_is_current(self, msg):
+                return
+            self._cloud = msg
+            self._cloud_dirty = True
 
     def upload_cloud(self) -> None:
         """Voxel-downsample the 3D map and push it, quantised to 1 cm.
@@ -1002,6 +1005,9 @@ class RobotBridge(
             self._upload_lock.release()
 
     def _upload_cloud_locked(self) -> None:
+        headers = map_upload_headers(self)
+        if headers is None:
+            return
         if not self._cloud_dirty or self._cloud is None:
             return
         self._cloud_dirty = False
@@ -1025,7 +1031,7 @@ class RobotBridge(
                     f"{self.http_url}/api/adapter/cloud?robot_id={self.id}"
                     f"&scale={CLOUD_SCALE}{format_query}",
                     data=zlib.compress(body, 1),
-                    headers={"Content-Type": "application/octet-stream"},
+                    headers=headers,
                 ),
                 timeout=self._cfg_timeout("upload_timeout_s"),
             ).read()
@@ -1495,20 +1501,14 @@ class RobotBridge(
         )
 
     def recover_nav_if_down(self) -> bool:
-        """Re-run Nav2's bringup if its action server never appeared.
+        """Ask the launched lifecycle owner to recover missing action servers.
 
-        Runs on a worker thread — `_call` polls a future that only the spin
-        thread can complete. Returns whether a bringup was issued, not whether
-        Nav2 came up: the manager reports success as soon as it has walked the
-        list, and the next cycle's readiness check is the real verdict.
-
-        Deliberately driven by the action server's absence rather than by
-        querying lifecycle states. That is the thing the adapter actually needs
-        in order to navigate, it costs nothing to check, and it stays true if a
-        future Nav2 reorganises which nodes exist.
+        Runs on a worker thread while the ROS thread completes service futures.
+        A successful response means every managed node was observed active;
+        action discovery is checked again on the next health cycle.
         """
         now = time.monotonic()
-        if self.nav_client.server_is_ready():
+        if self.nav_client.server_is_ready() and self.path_client.server_is_ready():
             self._nav_down_since = 0.0
             return False
         if self._nav_down_since == 0.0:
@@ -1529,33 +1529,24 @@ class RobotBridge(
             f"[{self.id}] Nav2 action server absent for "
             f"{now - self._nav_down_since:.0f} s; re-running lifecycle bringup"
         )
-        # STARTUP, and only STARTUP. It walks the node list issuing CONFIGURE
-        # then ACTIVATE, which is exactly right for the state the race leaves —
-        # a prefix the manager got to before it aborted, and an unconfigured
-        # suffix it never reached. Verified live on robot_2: five nodes went to
-        # `active` and it drove its next goal.
-        #
-        # RESET first was tried and removed. Nav2's manager is all-or-nothing in
-        # BOTH directions — RESET deactivates in reverse and aborts on the first
-        # node already below `inactive`, just as STARTUP aborts on the first
-        # already above it — so a stack in mixed state (one node down among
-        # healthy ones) cannot be repaired through this service at all, and
-        # adding the call bought nothing for the state that can. A robot in that
-        # condition needs its launch restarted, and the repeated warning below is
-        # how an operator finds out.
-        request = ManageLifecycleNodes.Request()
-        request.command = ManageLifecycleNodes.Request.STARTUP
-        answered = self._call(
-            f"/{self.id}/lifecycle_manager_navigation/manage_nodes",
-            ManageLifecycleNodes,
-            request,
-        )
-        if not answered:
-            self.node.get_logger().error(
-                f"[{self.id}] lifecycle bringup did not answer; "
-                f"navigation stays unavailable"
+        trigger = _srv_type("std_srvs.srv", "Trigger")
+        try:
+            if trigger is None:
+                raise RuntimeError("std_srvs.srv.Trigger is not installed")
+            response = self._lifecycle_service_response(
+                f"/{self.id}/navigation_startup/recover",
+                trigger,
+                trigger.Request(),
+                now + NAV_RECOVER_TIMEOUT_S,
             )
-        return answered
+            if not response.success:
+                raise RuntimeError(response.message)
+        except (TimeoutError, RuntimeError) as exc:
+            self.node.get_logger().error(
+                f"[{self.id}] navigation recovery failed: {exc}"
+            )
+            return False
+        return True
 
     # -- wedge escape --------------------------------------------------
 
@@ -1784,7 +1775,9 @@ class RobotBridge(
             return False
         return True
 
-    def _slam_service_response(self, name: str, srv_type, request, not_after: float):
+    def _lifecycle_service_response(
+        self, name: str, srv_type, request, not_after: float
+    ):
         """Call one lifecycle service within a shared startup deadline.
 
         This intentionally does not log per-attempt failures. The bounded
@@ -1828,7 +1821,7 @@ class RobotBridge(
         get_state = _srv_type("lifecycle_msgs.srv", "GetState")
         if get_state is None:
             raise RuntimeError("lifecycle_msgs.srv.GetState is not installed")
-        response = self._slam_service_response(
+        response = self._lifecycle_service_response(
             f"/{self.id}/slam_toolbox/get_state",
             get_state,
             get_state.Request(),
@@ -1842,7 +1835,7 @@ class RobotBridge(
             raise RuntimeError("lifecycle_msgs.srv.ChangeState is not installed")
         request = change_state.Request()
         request.transition.id = int(transition)
-        response = self._slam_service_response(
+        response = self._lifecycle_service_response(
             f"/{self.id}/slam_toolbox/change_state",
             change_state,
             request,
@@ -2150,6 +2143,9 @@ class RobotBridge(
             self._upload_lock.release()
 
     def _upload_map_locked(self) -> None:
+        headers = map_upload_headers(self)
+        if headers is None:
+            return
         if not self._grid_dirty or self.grid is None:
             return
         self._grid_dirty = False
@@ -2163,9 +2159,7 @@ class RobotBridge(
         )
         try:
             urllib.request.urlopen(
-                urllib.request.Request(
-                    url, data=body, headers={"Content-Type": "application/octet-stream"}
-                ),
+                urllib.request.Request(url, data=body, headers=headers),
                 timeout=self._cfg_timeout("upload_timeout_s"),
             ).read()
         except Exception as exc:
@@ -2173,6 +2167,9 @@ class RobotBridge(
 
     def upload_costmaps(self) -> None:
         """Push the newest global/local Nav2 snapshots to the read-only overlay."""
+        headers = map_upload_headers(self)
+        if headers is None:
+            return
         if not self._upload_lock.acquire(blocking=False):
             return
         try:
@@ -2202,7 +2199,7 @@ class RobotBridge(
                         urllib.request.Request(
                             url,
                             data=body,
-                            headers={"Content-Type": "application/octet-stream"},
+                            headers=headers,
                         ),
                         timeout=self._cfg_timeout("upload_timeout_s"),
                     ).read()

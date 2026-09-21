@@ -16,22 +16,20 @@ from autonomy.live_mapping import navigation_goal, solution_order
 MAX_NAV_FAILURE_REASON_LENGTH = 512
 FULL_ROUTE_ENDPOINT_TOLERANCE_M = 0.001
 GRID_REFINEMENT_DEADLINE_REASON = "grid refinement exceeded its cooperative deadline"
-# Planner responses that mean its inputs are momentarily missing, not that the
-# goal is infeasible. MGG drops its MOLA map the instant a new keyframe changes
-# the authority key and serves again once the rebuilt product is loaded,
-# typically one to three seconds later; a rolling route asks for its next
-# section exactly then, right after the keyframes of the section it just drove.
+# Missing planner input is not evidence that the destination or retained graph
+# corridor is blocked. A newly published product can reach MGG before the
+# indexed server finishes loading it; wait with motion stopped and keep the
+# same objective, bounded by its existing recovery/refinement deadline.
 PLANNER_INPUT_UNAVAILABLE_REASONS = (
     "odometry or planning map is unavailable",
     "MOLA map snapshot is missing or stale",
     "MOLA map unavailable",
-    # The indexed map server fails closed while one refresh of its product is
-    # rejected, and lags the authority by one poll after every new revision.
-    # Both clear on its next successful refresh; MGG reports them as a stale
-    # revision rather than as a blocked route.
+    # A rejected publication or a product arriving before its indexed view.
     "a different snapshot failed indexed publication",
     "requested snapshot is not current",
     "source stamp does not match indexed snapshot",
+    "current planning or mapping snapshot does not match",
+    "MOLA map snapshot changed during planning",
     # The index server answers the fleet from one thread and gives up a
     # validation past its time budget under load; the next answer is normally
     # in time, so this is a missing answer, not a blocked route.
@@ -1038,7 +1036,7 @@ class MggObjectivePlanning:
                         )
                     return
                 if outcome == "retry":
-                    message = "MGG objective refinement deadline expired"
+                    message = f"MGG objective refinement deadline expired: {message}"
                 self._fail_if_current(message, generation)
                 return
         finally:
@@ -1174,6 +1172,8 @@ class MggObjectivePlanning:
                 getattr(service.Response, "BLOCKED", object()),
                 getattr(service.Response, "STALE_REVISION", object()),
             }:
+                if planner_input_unavailable(reason):
+                    return "retry", reason
                 return "replan", reason
             return "failed", reason
         if response.component_id != request.component_id:

@@ -62,6 +62,8 @@ services:
     environment:
       ROS_DOMAIN_ID: "42"
       CSLAM_ROBOTS: "${CSLAM_ROBOTS:-4}"
+      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set the shared fleet mission UUID}"
+      SWARMDECK_MAP_STORE: /maps
       # Long enough for Gazebo, the per-robot SLAM stacks and icp_odometry to be
       # publishing. cslam's own sync will drop anything that arrives early.
       CSLAM_DELAY: "${CSLAM_DELAY:-90}"
@@ -76,3 +78,8 @@ services:
         echo "[cslam] launching for ${CSLAM_ROBOTS} robots" &&
         ros2 launch swarmdeck_cslam cslam_fleet.launch.py robots:=${CSLAM_ROBOTS}
     restart: unless-stopped
+    volumes:
+      - cslam_maps:/maps
+
+volumes:
+  cslam_maps:

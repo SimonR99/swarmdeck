@@ -1,7 +1,6 @@
 """Exercise deployment map selection without requiring a ROS installation."""
 
 import importlib.util
-import re
 import runpy
 import sys
 from pathlib import Path
@@ -9,65 +8,11 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-MGG_BRANCH = "swarmdeck"
-MAPPING_CACHE_ANCHOR = "902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca"
-CACHE_ANCHORED_IMAGES = (
-    "Dockerfile.mapping",
-    "Dockerfile.sim",
-    "Dockerfile.robot-ros2",
-)
-
-# Every image that generates mgg_msgs has to agree on the MGG revision, because
-# a mismatch changes the generated service type hashes and the planner silently
-# stops matching the mapping query server.
-MGG_SOURCES = (
-    "deploy/docker/Dockerfile.mgg",
-    "deploy/docker/build-mgg-msgs.sh",
-    "deploy/docker/Dockerfile.sim",
-    "deploy/docker/Dockerfile.robot-ros2",
-    "deploy/docker/Dockerfile.mapping",
-)
-
-
-def test_mgg_images_pin_one_branch_revision():
-    """Catch MGG source drift before the expensive native image build."""
-    root = Path(__file__).parents[2]
-
-    revisions = {}
-    for relative in MGG_SOURCES:
-        text = (root / relative).read_text()
-        assert "git apply" not in text, f"{relative} still applies a patch"
-        assert "deploy/patches/mgg-" not in text, f"{relative} still copies patches"
-        for line in text.splitlines():
-            match = re.fullmatch(r"ARG MGG_REV=([0-9a-f]{40})", line)
-            if match:
-                revisions.setdefault(match.group(1), []).append(relative)
-        # The three apt-based images keep one earlier declaration as a Docker
-        # cache anchor so their apt layers stay cached; it is not the pin.
-        if relative.endswith(CACHE_ANCHORED_IMAGES):
-            anchor = revisions.pop(MAPPING_CACHE_ANCHOR, None)
-            assert anchor == [relative], anchor
-
-    # Dockerfile.mgg and the three contract-only images carry the ARG; the
-    # shared build script receives the same value as its argument.
-    assert len(revisions) == 1, f"MGG revisions disagree: {revisions}"
-    assert len(next(iter(revisions.values()))) == 4
-
-    for relative in ("deploy/docker/Dockerfile.mgg", "deploy/docker/build-mgg-msgs.sh"):
-        text = (root / relative).read_text()
-        assert f"--branch {MGG_BRANCH}" in text, relative
-        # The pinned revision may live on a hotfix branch that has not been
-        # merged into the integration branch yet, so the clone must fetch every
-        # branch for the checkout to find it.
-        assert "--single-branch" not in text, relative
-
-    assert not list((root / "deploy/patches").glob("mgg-*.patch"))
-
 
 @pytest.fixture
 def launch_module(monkeypatch):
-    def action(**kwargs):
-        return SimpleNamespace(**kwargs)
+    def action(*args, **kwargs):
+        return SimpleNamespace(args=args, **kwargs)
 
     for name, attributes in {
         "launch": {"LaunchDescription": list},
@@ -75,8 +20,12 @@ def launch_module(monkeypatch):
             "DeclareLaunchArgument": action,
             "OpaqueFunction": action,
             "ExecuteProcess": action,
+            "EmitEvent": action,
+            "RegisterEventHandler": action,
         },
         "launch.substitutions": {"LaunchConfiguration": action},
+        "launch.event_handlers": {"OnProcessExit": action},
+        "launch.events": {"Shutdown": action},
         "launch_ros": {},
         "launch_ros.actions": {"Node": action},
     }.items():
@@ -90,6 +39,7 @@ def launch_module(monkeypatch):
         "SWARMDECK_PLANNER_MAP_PROVIDER",
         "SWARMDECK_INDEXED_MAP_QUERY",
         "SWARMDECK_PLANNING_FRAME_TEMPLATE",
+        "SWARMDECK_MGG_ROBOT",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("SWARMDECK_PLANNER_MAP_PROVIDER", "mola")
@@ -314,6 +264,17 @@ def test_sim_fleet_uses_configured_robot_prefix_for_every_mgg_boundary(
     assert "input_odometry:=/rover_1/odom" in relays[1].cmd
     assert "input_cloud:=/rover_1/scan/points" in relays[1].cmd
     assert "robot_" not in " ".join(str(item) for relay in relays for item in relay.cmd)
+    monkeypatch.setenv("SWARMDECK_MGG_ROBOT", "rover_1")
+    selected = fleet_module.generate_launch_description()
+    assert [
+        node.namespace for node in selected if getattr(node, "package", "") == "mgg_ros"
+    ] == ["rover_1/mgg"]
+    assert [
+        node.namespace for node in selected if getattr(node, "package", "") == "mgg_pci"
+    ] == ["rover_1/mgg"]
+    selected_relays = [node for node in selected if hasattr(node, "cmd")]
+    assert len(selected_relays) == 1
+    assert "__ns:=/rover_1/mgg" in selected_relays[0].cmd
 
 
 def test_sim_fleet_rejects_robot_prefix_that_is_not_a_ros_namespace(

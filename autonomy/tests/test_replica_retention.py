@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from autonomy.replication import ReplicaStore
+from autonomy.map_epochs import robot_run_id
 
 
 def manifest(session, data, revision=1, robot="r0"):
@@ -17,6 +18,10 @@ def manifest(session, data, revision=1, robot="r0"):
         "version": 1,
         "robot_id": robot,
         "session_id": session,
+        "map_epoch": 0,
+        "run_id": robot_run_id(session, robot, 0),
+        "robot_map_epochs": {robot: 0},
+        "participant_robot_ids": [robot],
         "revision": revision,
         "snapshot": {},
         "chunks": [{"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}],

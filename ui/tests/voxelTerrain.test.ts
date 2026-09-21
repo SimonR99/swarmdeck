@@ -90,3 +90,19 @@ test('Gaussian fallback shows points only until a real reconstruction is availab
     terrain.dispose();
   }
 });
+
+test('retiring one robot removes its points and ground while preserving the other robot', () => {
+  const terrain = new VoxelTerrain();
+  try {
+    terrain.build(cloud(), ['#ff0000', '#00ff00']);
+    terrain.removeOwner(0, 'low');
+    terrain.setRenderMode('points');
+    const positions = terrain.pointsMesh!.geometry.getAttribute('position');
+    assert.equal(positions.count, 2);
+    assert.equal(positions.getX(0), Math.fround(0.16));
+    assert.equal(positions.getX(1), Math.fround(0.16));
+    assert.equal(terrain.getGroundZ(0.16, 0.01), Math.fround(0.31));
+  } finally {
+    terrain.dispose();
+  }
+});

@@ -21,6 +21,7 @@ try:
         ensure_deployment_env,
         next_domain,
         protocol_lock,
+        prepare_reset_directories,
         read_deployment_env,
         validate_domain,
         write_deployment_env,
@@ -31,6 +32,7 @@ except ImportError:  # Direct execution from deploy/.
         ensure_deployment_env,
         next_domain,
         protocol_lock,
+        prepare_reset_directories,
         read_deployment_env,
         validate_domain,
         write_deployment_env,
@@ -543,13 +545,19 @@ def start_supervisor(spec: dict, environment: dict[str, str]) -> None:
         spec["project"],
         "--expected-robots",
         str(spec["robot_count"]),
+        "--backend",
+        spec["backend"],
+        "--server-url",
+        environment.get("SWARMDECK_RESET_SERVER_URL", "http://127.0.0.1:8080"),
     ]
     for compose_file in spec["compose_files"]:
         arguments.extend(("--compose-file", compose_file))
     for service in spec["reset_services"]:
         arguments.extend(("--service", service))
+    for robot in spec["robot_names"]:
+        arguments.extend(("--robot-id", robot))
     arguments.extend(peer_maps_prune_arguments(spec, environment))
-    RESET_ROOT.mkdir(parents=True, exist_ok=True)
+    prepare_reset_directories(RESET_ROOT, spec["robot_names"])
     log = (RESET_ROOT / "supervisor.log").open("ab")
     try:
         process = subprocess.Popen(

@@ -77,6 +77,30 @@ Unchanged planner artifacts reuse their decoded grid without rereading or
 hashing the file. The cache checks file identity and the current publication;
 changed files undergo the full bounded read, hash, and validation again.
 
+The Python reader keeps a compatible predecessor during `PublicationPending`
+only until its original coherent-read deadline; repeatedly seeing a pending
+successor cannot renew that age. Corrupt or incompatible products fail closed.
+Indexed queries check durable epochs for both the owner and actual geometry
+participants before and after execution. Rolling objective continuation waits
+out a transient publication gap with the same token, deadline and authority
+fences; an expired continuation is not resurrected.
+
+The pinned MGG source is supplemented by
+`deploy/patches/mgg-motion-reliability.patch`: exact unobserved goals inherit a
+checked driving plane before footprint validation, sparse partial corridors
+end on useful measured support, and continuation starts from the path endpoint
+actually emitted. The Home backbone uses bounded, fully checked breadcrumb
+connectors only under the explicitly qualified simulation-ground policy.
+Known occupancy, steps, drops and geofences remain refusals.
+
+ROS apt dependencies come from signed snapshots rather than historical Docker
+cache layers: Jazzy 2026-06-18 and Humble 2026-07-02. The helper also downgrades
+newer ROS packages inherited from a base image. HTTP transport is intentional
+because the snapshot endpoint's TLS certificate does not match; apt still
+verifies the vendored signing key, release signatures and package hashes.
+Ubuntu security updates and mutable base/Python dependencies mean this is not
+a bit-for-bit OS lock.
+
 Use `make docker-ps`, `curl -fsS http://localhost:8090/health`, and the UI
 status panels to check the services. For an onboard run, confirm the
 mission, component, graph revision, geometry revision, navigation frame, and
@@ -104,6 +128,15 @@ The server stores replicas, events, keyframes, and catalogue metadata for the
 operator. It receives peer and MOLA revisions as replicas without becoming the
 authority for an onboard planner. Browser overlays are therefore diagnostic
 unless their component and frame metadata are valid.
+
+Each peer frontend launch claims a durable robot map epoch within the same
+fleet mission. Its run UUID is the keyframe `session_id`, distinct from the
+replica envelope's mission `session_id`. The target-only Reset map operation
+retires the old run across peers and server replicas, preserves unrelated
+peers, and anchors a fresh Home at the reset location. Moving commands carry
+mission, robot epoch and `map_run_id` fences; stop/cancel remain unconditional.
+See [reset operations](simulation-reset.md) for UUID replay, the 60 s deadline,
+automatic frontend restart and the unsupported-hardware boundary.
 
 The UI keeps map transforms when a raster grows, rejects stale or malformed
 patches, projects poses with their full SE(3) XYZ values in 3D, and samples

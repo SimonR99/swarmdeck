@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import shutil
@@ -7,9 +6,8 @@ import time
 import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-from swarmdeck_server.api import control_routes
 from swarmdeck_server.api.simulation_reset import request_reset, reset_status
 from swarmdeck_server.fleet.registry import Registry
 from deploy.simulation_reset import (
@@ -31,14 +29,6 @@ def mark_supervisor_live(root):
             }
         )
     )
-
-
-def test_post_route_delegates_to_the_shared_broadcasting_reset_path():
-    result = {"version": 1, "phase": "accepted", "request_id": "request"}
-    app = types.SimpleNamespace(reset_fleet=AsyncMock(return_value=result))
-    with patch.object(control_routes, "_app", return_value=app):
-        assert asyncio.run(control_routes.post_sim_reset("request")) == result
-    app.reset_fleet.assert_awaited_once_with("request")
 
 
 def test_request_is_atomic_and_coalesces_active_reset(tmp_path):

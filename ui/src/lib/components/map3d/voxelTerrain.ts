@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { CloudBounds, Map3DColorMode, Map3DRenderMode } from './types';
-import type { TerrainData } from './terrainData';
+import { prepareTerrain, type Quality, type TerrainData } from './terrainData.ts';
 
 export class VoxelTerrain {
   public group = new THREE.Group();
@@ -83,6 +83,27 @@ export class VoxelTerrain {
     }
     this.setRenderMode(this.renderMode);
     return this.bounds;
+  }
+  /** Remove a retired robot's geometry without blanking the other owners. */
+  public removeOwner(owner: number, quality: Quality) {
+    const data = this.data;
+    if (!data || !data.owners.includes(owner)) return;
+    let count = 0;
+    for (const value of data.owners) if (value !== owner) count++;
+    const positions = new Float32Array(count * 3);
+    const owners = new Uint8Array(count);
+    const rgb = data.rgb ? new Uint8Array(count * 3) : undefined;
+    for (let source = 0, target = 0; source < data.owners.length; source++) {
+      if (data.owners[source] === owner) continue;
+      positions.set(data.xyz.subarray(source * 3, source * 3 + 3), target * 3);
+      owners[target] = data.owners[source];
+      if (rgb && data.rgb) rgb.set(data.rgb.subarray(source * 3, source * 3 + 3), target * 3);
+      target++;
+    }
+    this.build(
+      prepareTerrain({ positions, owners, rgb, quality }),
+      this.palette.map(color => `#${color.getHexString()}`)
+    );
   }
   private ensureGeometry() {
     const d = this.data;

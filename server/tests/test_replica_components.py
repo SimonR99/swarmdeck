@@ -22,6 +22,7 @@ from autonomy.contracts import (
 )
 from autonomy.mapping import SubmapStore
 from autonomy.replication import ReplicaStore
+from autonomy.map_epochs import robot_run_id
 from swarmdeck_server.api import autonomy_routes, replica_views
 from swarmdeck_server.api.replica_components import ComponentCatalogue, _chunk
 
@@ -78,11 +79,18 @@ def peer(
     order=None,
     revision=1,
     epoch=0,
+    map_epoch=0,
+    anchor_epoch=0,
     points=((1.0, 0.0, 0.0),),
 ):
     store = SubmapStore(tmp_path / f"{robot}-{uuid4()}")
-    key = KeyframeId(robot, session, 0)
-    anchor = KeyframeId(anchor_robot or robot, session, 0)
+    key = KeyframeId(robot, robot_run_id(session, robot, map_epoch), 0)
+    anchor_robot = anchor_robot or robot
+    if anchor_robot == robot:
+        anchor_epoch = map_epoch
+    anchor = KeyframeId(
+        anchor_robot, robot_run_id(session, anchor_robot, anchor_epoch), 0
+    )
     store.add_submap(
         SubmapId.from_keyframe(key),
         [list(point) for point in points],
@@ -109,6 +117,15 @@ def peer(
         "version": 1,
         "robot_id": robot,
         "session_id": session,
+        "map_epoch": map_epoch,
+        "run_id": robot_run_id(session, robot, map_epoch),
+        "robot_map_epochs": {anchor_robot: anchor_epoch, robot: map_epoch},
+        "participant_robot_ids": sorted({anchor_robot, robot}),
+        "anchor": {
+            "robot_id": anchor.robot_id,
+            "session_id": anchor.session_id,
+            "seq": 0,
+        },
         "revision": revision,
         "solution_order": order or [0, -1],
         "snapshot": snapshot,
@@ -264,6 +281,10 @@ def test_missions_never_share_components(tmp_path):
 
 
 def add_relay(destination, source):
+    destination["robot_map_epochs"].update(source["robot_map_epochs"])
+    destination["participant_robot_ids"] = sorted(
+        set(destination["participant_robot_ids"]) | set(source["participant_robot_ids"])
+    )
     selected(destination)["submaps"].extend(copy.deepcopy(selected(source)["submaps"]))
     for submap in selected(destination)["submaps"]:
         submap["pose_revision"] = selected(destination)["graph_revision"]
@@ -687,3 +708,50 @@ def test_component_source_work_is_bounded(tmp_path, monkeypatch):
 
     assert not entry["available"]
     assert "source record budget" in entry["detail"]
+
+
+def test_reset_tombstone_hides_relay_geometry_without_removing_other_robot(
+    tmp_path, monkeypatch
+):
+    session = str(uuid4())
+    owner, owner_chunks = peer(tmp_path, "robot_0", session, order=[7, 0])
+    relay, relay_chunks = peer(
+        tmp_path, "robot_1", session, anchor_robot="robot_0", order=[7, 0]
+    )
+    add_relay(relay, owner)
+    replica = ReplicaStore(tmp_path / "replicas")
+    for name, body in (owner_chunks | relay_chunks).items():
+        replica.put_chunk(name, body)
+    replica.publish(owner)
+    replica.publish(relay)
+    monkeypatch.setattr(replica_views, "store", lambda: replica)
+    component = selected(owner)["graph_revision"]["component_id"]
+    original = replica_views.current_catalogue(session).view(session, component)
+    assert len(original["selected"]["submaps"]) == 2
+    replica.reserve_map_epoch("robot_0", session, 1)
+    remaining = replica_views.current_catalogue(session).view(session, component)
+    assert [item["submap_id"] for item in remaining["selected"]["submaps"]] == [
+        stable_id(selected(relay)["submaps"][0]["submap_id"])
+    ]
+    assert replica.get("robot_1", session) == relay
+    replica.close()
+
+
+def test_restarted_robot_revision_does_not_reuse_cached_snapshot(tmp_path, monkeypatch):
+    session = str(uuid4())
+    old, chunks = peer(tmp_path, "robot_0", session, revision=1)
+    fresh, fresh_chunks = peer(tmp_path, "robot_0", session, revision=1, map_epoch=1)
+    replica = ReplicaStore(tmp_path / "replicas")
+    for name, body in (chunks | fresh_chunks).items():
+        replica.put_chunk(name, body)
+    replica.publish(old)
+    monkeypatch.setattr(replica_views, "store", lambda: replica)
+    before = replica_views.current_catalogue(session)
+    replica.publish(fresh)
+    after = replica_views.current_catalogue(session)
+    assert (
+        before.index()["components"][0]["component_id"]
+        != after.index()["components"][0]["component_id"]
+    )
+    assert after.index()["source_errors"] == []
+    replica.close()

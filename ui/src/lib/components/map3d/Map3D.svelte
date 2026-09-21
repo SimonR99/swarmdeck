@@ -259,6 +259,34 @@
   const replicaLoader = new ReplicaTacticalLoader();
   const replicaRevision = new ReplicaRevisionTracker();
   let replicaNeedsRebuild = false;
+  let renderedOwnerIds: string[] = [];
+  const seenMapEpochs = new Map<string, string>();
+  $effect(() => {
+    const epochs = mapStore.robotMapEpochs;
+    for (const [robotId, epoch] of Object.entries(epochs)) {
+      if (seenMapEpochs.get(robotId) === epoch) continue;
+      seenMapEpochs.set(robotId, epoch);
+      const owner = renderedOwnerIds.indexOf(robotId);
+      generation++;
+      pending?.abort();
+      pending = null;
+      if (owner >= 0) {
+        scene?.terrain.removeOwner(owner, quality);
+        scene?.gaussians.clear();
+      }
+      points = scene?.terrain.pointCount ?? 0;
+      voxels = scene?.terrain.voxelCount ?? 0;
+      robotsOnCloud = robotsOnCloud.filter(id => id !== robotId);
+      replicaRevision.clear();
+      replicaNeedsRebuild = true;
+      cloudEtag = '';
+      gaussianEtag = '';
+      liveReplica = null;
+      scene?.layers.invalidate();
+      scene?.render();
+      void fetchCloud();
+    }
+  });
   let gaussianEtag = '';
   let firstCloud = true;
 
@@ -364,6 +392,7 @@
 
   function displayTerrain(data: TerrainData, names: string[], rgbPresent: boolean, resetView: boolean) {
     if (!scene) return;
+    renderedOwnerIds = names;
     hasRgb = rgbPresent;
     if (!hasRgb && colorMode === 'camera') setColorMode('elevation');
     const bounds = scene.terrain.build(data, names.map((id) => fleet.colorOf(id)));

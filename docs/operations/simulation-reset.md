@@ -1,9 +1,52 @@
 # Epoch-safe simulation reset
 
-Onboard Swarm-SLAM frontends cannot restart inside the same mission. Their
-upstream keyframe identifiers contain a robot index and sequence number but no
-process epoch, so restarting at sequence zero would collide with the old graph.
-The dashboard reset therefore uses a host-side supervisor when
+There are two reset boundaries: a robot map epoch and the whole simulated
+mission. A frontend restart no longer reuses old keyframe identities.
+
+## Reset one robot's map
+
+The dashboard's **Reset map** action calls
+`POST /api/map/reset/{robot}?request_id=<canonical UUID>`. The native
+four-robot simulation supervisor stops the target's active motion, restarts
+only its peer frontend/bridge/MOLA source and MGG state under a fresh durable
+`robot_map_epoch`, clears its costmaps, and waits for fresh mapping authority
+and navigation readiness. The physical simulation and fleet mission continue.
+Unrelated peers retain their own runs and captured geometry; every reference
+to the target's retired run is removed, including inter-robot closures,
+descriptors, graph anchors and pair-cap state.
+
+POST returns 202 while pending and 200 for a completed replay of the same UUID.
+GET on the same URL reports progress and terminal failure. A failed or
+unavailable POST returns 503. Completion has a 60 s deadline; do not infer
+success merely from a new epoch or an online container. Benchbot manual trials
+completed in 20.4–24.1 s, including retirement from a merged four-peer graph
+and reset during active Explore. The latter returned the target ready/idle
+with at most 1.65 cm independent XY displacement from quiescence through ten
+seconds after completion.
+The UI keeps the action disabled until the request is terminal.
+
+The run UUID is derived from mission, robot and epoch. It occupies
+`KeyframeId.session_id`; the outer replica `session_id` remains the fleet
+mission. Old replica uploads return 409 before requesting chunks, and moving
+commands and indexed queries are fenced against retired epochs. A direct
+frontend restart also claims a fresh epoch and reconciles its local planner;
+it does not require a fleet reset. Home after either operation means the new
+run's initial keyframe where the robot was stopped, unless a surveyed home
+was configured.
+
+The supervisor owns persistent DDS reset clients and records source ACKs.
+Cancellation and costmap clearing are bounded idempotent operations;
+destructive source Reset is never blindly retried after an ambiguous reply.
+A durable completed ACK can be reused after restart, but an abandoned
+`starting` or `failed` source operation requires a fresh request UUID and epoch.
+Mixed host/container UIDs use only the narrowly shared epoch/reset directories
+with non-sticky mode 0777 and 0644 lock/state files; parent directories are not
+recursively chmodded. Hardware without a qualified robot-local supervisor is
+explicitly unavailable rather than falling back to a rendered-map clear.
+
+## Reset the entire simulation
+
+The simulation reset uses a host-side supervisor when
 `SWARMDECK_SIM_RESET_DIR` is configured on the server.
 
 The server writes a bounded request to the shared reset directory and returns

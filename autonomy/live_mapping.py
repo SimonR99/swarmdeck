@@ -10,6 +10,7 @@ import math
 from collections.abc import Mapping
 
 from .contracts import validate_se3
+from .map_epochs import robot_run_id
 
 LIVE_MAPPING_MAX_AGE_S = 3.0
 PATH_FIELDS = ("planned_path", "global_planned_path", "local_planned_path")
@@ -74,6 +75,18 @@ def validate_live_mapping(value, robot_id):
         if not isinstance(item, str) or not item or len(item) > 512:
             raise ValueError(f"invalid {field}")
         result[field] = item
+    result["robot_map_epoch"] = value["robot_map_epoch"]
+    result["run_id"] = robot_run_id(
+        result["mission_id"], robot_id, result["robot_map_epoch"]
+    )
+    if result["run_id"] != value["run_id"]:
+        raise ValueError("live map run differs from its robot epoch")
+    for field in ("map_epoch", "mapping_graph_revision"):
+        if field in value:
+            number = value[field]
+            if type(number) is not int or not 0 <= number < 2**63:
+                raise ValueError(f"invalid {field}")
+            result[field] = number
     result["solution_order"] = solution_order(value["solution_order"])
     result["T_component_navigation"] = validate_se3(value["T_component_navigation"])
     home = value.get("home")
@@ -87,7 +100,7 @@ def validate_live_mapping(value, robot_id):
             or len(keyframe_id) > 512
         ):
             raise ValueError("invalid Home keyframe identity")
-        prefix = f"{robot_id}/{result['mission_id']}/"
+        prefix = f"{robot_id}/{result['run_id']}/"
         sequence = keyframe_id.removeprefix(prefix)
         if (
             not keyframe_id.startswith(prefix)

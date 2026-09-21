@@ -16,6 +16,8 @@ RECORDER_SCHEMA = "swarmdeck.simulation-evidence.v1"
 AUTHORITY_FIELDS = (
     "robot_id",
     "mission_id",
+    "robot_map_epoch",
+    "run_id",
     "component_id",
     "map_epoch",
     "mapping_graph_revision",
@@ -132,6 +134,8 @@ def _material_authority_change(
     for field in (
         "robot_id",
         "mission_id",
+        "robot_map_epoch",
+        "run_id",
         "component_id",
         "correction_revision",
         "navigation_frame",
@@ -167,6 +171,8 @@ def _same_home_identity(original: dict[str, Any], updated: dict[str, Any]) -> bo
         for field in (
             "robot_id",
             "mission_id",
+            "robot_map_epoch",
+            "run_id",
             "component_id",
             "map_epoch",
             "navigation_frame",
@@ -307,17 +313,25 @@ def analyze(
             "component_id"
         ):
             failed.append("authority component_id is missing")
-        for field in ("correction_revision", "map_epoch", "mapping_graph_revision"):
+        for field in (
+            "correction_revision",
+            "map_epoch",
+            "robot_map_epoch",
+            "mapping_graph_revision",
+        ):
             value = authority.get(field)
             if type(value) is not int or value < 0:
                 failed.append(f"authority {field} is invalid")
         home = authority.get("home")
-        expected_home_id = f"{robot_id}/{mission_id}/0" if mission_id else None
+        run_id = authority.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            failed.append("authority run_id is missing")
+        expected_home_id = f"{robot_id}/{run_id}/0" if run_id else None
         if not isinstance(home, dict):
             failed.append("authority home is missing")
         else:
             if home.get("keyframe_id") != expected_home_id:
-                failed.append("authority home is not this mission's keyframe 0")
+                failed.append("authority home is not this robot map run's keyframe 0")
             if not _matrix4(home.get("T_navigation_home")):
                 failed.append("authority home transform is invalid")
         if not _matrix4(authority.get("T_component_navigation")):
@@ -555,7 +569,8 @@ def analyze(
         and _projection(authority_match[1]) == _projection(authority)
     )
 
-    expected_home_id = f"{robot_id}/{mission_id}/0" if mission_id else None
+    run_id = authority.get("run_id") if authority is not None else None
+    expected_home_id = f"{robot_id}/{run_id}/0" if run_id else None
     home_event = None
     keyframe_events = source.get("keyframe_events")
     if not isinstance(keyframe_events, list):

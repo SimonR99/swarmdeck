@@ -153,7 +153,8 @@ def test_targeted_map_reset_discards_only_one_robots_accumulated_products():
     assert np.any(svc.merged == 0)
 
 
-def test_map_reset_api_refuses_navigation_then_resets_target_only():
+def test_map_reset_without_supervisor_never_clears_target(monkeypatch):
+    monkeypatch.delenv("SWARMDECK_SIM_RESET_DIR", raising=False)
     app_registry.robots.clear()
     app_registry._sinks.clear()
     meta = GridMeta(0.1, 10, 10, -0.5, -0.5)
@@ -169,17 +170,10 @@ def test_map_reset_api_refuses_navigation_then_resets_target_only():
         robot.goal = {"x": 1.0, "y": 0.0}
 
         with TestClient(app) as c:
-            blocked = c.post("/api/map/reset/botman")
-            assert blocked.status_code == 409
-            assert blocked.json()["robots"] == ["botman"]
+            refused = c.post("/api/map/reset/botman")
+            assert refused.status_code == 503
+            assert refused.json()["ok"] is False
             assert "botman" in map_service.robot_grids
-
-            robot.nav_status = "idle"
-            robot.goal = None
-            reset = c.post("/api/map/reset/botman")
-            assert reset.status_code == 200
-            assert reset.json()["robots"] == ["botman"]
-            assert "botman" not in map_service.robot_grids
             assert "tars" in map_service.robot_grids
     finally:
         app_registry.robots.clear()

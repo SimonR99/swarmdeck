@@ -33,112 +33,108 @@ every robot and run a router reachable by all of them; a shared DDS domain works
 on one machine but does not survive a real network.
 """
 
+import os
+from pathlib import Path
+from uuid import UUID
+
+from autonomy.map_epochs import claim_map_epoch
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
-def generate_launch_description() -> LaunchDescription:
-    # cslam's OWN namespace, which must be `r<robot_id>`. This is not a
-    # preference: the C++ pose_graph_manager builds its inter-robot topic names
-    # as `/r{id}/cslam/...` from `robot_id` alone, while the Python front-end
-    # nodes inherit the launch namespace. Put the Python half under
-    # `/robot_0` and you get two complete sets of topics — `/robot_0/cslam/...`
-    # and `/r0/cslam/...` — that look healthy, log nothing, and never meet.
-    # Every node initialises, no descriptor is ever exchanged.
-    ns = LaunchConfiguration("namespace")
-    # Where the FLEET publishes, which is a different namespace entirely
-    # (`robot_0`). The two are bridged by giving cslam absolute input topics.
-    sensor_ns = LaunchConfiguration("sensor_namespace")
-    robot_id = LaunchConfiguration("robot_id")
-    max_robots = LaunchConfiguration("max_nb_robots")
-    use_sim = LaunchConfiguration("use_sim_time")
-
+def setup(context):
+    get = lambda name: LaunchConfiguration(name).perform(context)
+    robot_id = int(get("robot_id"))
+    count = int(get("max_nb_robots"))
+    namespace = get("namespace")
+    if not 0 <= robot_id < count or namespace != f"r{robot_id}":
+        raise ValueError(
+            "cslam requires namespace r<robot_id> and contiguous fleet indices"
+        )
+    robot = get("sensor_namespace").strip("/")
+    mission = get("mission_id")
+    if str(UUID(mission)) != mission:
+        raise ValueError("mission_id must be the canonical fleet mission UUID")
+    root = Path(get("map_store"))
+    epoch = claim_map_epoch(root, mission, robot)
     config = PathJoinSubstitution(
         [FindPackageShare("swarmdeck_cslam"), "config", "cslam_lidar.yaml"]
     )
     common = [
         config,
         {
-            "use_sim_time": use_sim,
+            "use_sim_time": get("use_sim_time") == "true",
             "robot_id": robot_id,
-            "max_nb_robots": max_robots,
-            # Absolute, so they resolve to the fleet's namespace rather than
-            # cslam's. Overrides the relative names in cslam_lidar.yaml.
-            "frontend.odom_topic": ["/", sensor_ns, "/odom_icp"],
-            "frontend.pointcloud_topic": ["/", sensor_ns, "/scan/points"],
+            "max_nb_robots": count,
+            "swarmdeck.mission_id": mission,
+            "swarmdeck.map_epoch": epoch,
+            "swarmdeck.epoch_state_path": str(root / mission / robot / "peer-epochs"),
+            "frontend.odom_topic": f"/{robot}/odom_icp",
+            "frontend.pointcloud_topic": f"/{robot}/scan/points",
         },
     ]
-    tf_remap = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    # Native inter-robot topic names hard-code r<index>; sensor names remain
+    # absolute robot names. A frontend exit terminates the launch, never respawns
+    # an individual producer with a reused keyframe sequence.
+    nodes = [
+        Node(
+            package="cslam",
+            executable=executable,
+            name=name,
+            namespace=namespace,
+            parameters=common,
+            remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
+            output="screen",
+        )
+        for executable, name in (
+            ("lidar_handler_node.py", "cslam_map_manager"),
+            ("loop_closure_detection_node.py", "cslam_loop_closure_detection"),
+            ("pose_graph_manager", "cslam_pose_graph_manager"),
+        )
+    ]
+    exits = [
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=node,
+                on_exit=[
+                    EmitEvent(
+                        event=Shutdown(
+                            reason="frontend exited; fresh map epoch required"
+                        )
+                    )
+                ],
+            )
+        )
+        for node in nodes
+    ]
+    return [*exits, *nodes]
 
+
+def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
-            DeclareLaunchArgument(
-                "namespace",
-                default_value="r0",
-                description="cslam's own namespace. MUST be r<robot_id> — the C++ "
-                "back end hardcodes that pattern for its inter-robot "
-                "topics and will silently never meet the Python nodes "
-                "otherwise.",
-            ),
-            DeclareLaunchArgument(
-                "sensor_namespace",
-                default_value="robot_0",
-                description="Where the fleet publishes odom_icp and scan/points.",
-            ),
-            DeclareLaunchArgument(
-                "robot_id",
-                default_value="0",
-                description="cslam requires integer ids starting at 0 and below "
-                "max_nb_robots. SwarmDeck's robot_N naming maps "
-                "straight onto it.",
-            ),
+            DeclareLaunchArgument("namespace", default_value="r0"),
+            DeclareLaunchArgument("sensor_namespace", default_value="robot_0"),
+            DeclareLaunchArgument("robot_id", default_value="0"),
             DeclareLaunchArgument("max_nb_robots", default_value="4"),
             DeclareLaunchArgument("use_sim_time", default_value="true"),
-            GroupAction(
-                [
-                    PushRosNamespace(ns),
-                    # Keyframe selection and lidar descriptors: what gets
-                    # exchanged between robots. Sparse by design — the paper's
-                    # contribution is sending few descriptors, not many clouds.
-                    #
-                    # `lidar_handler_node.py`, NOT `map_manager`: the C++
-                    # `map_manager` is the stereo/RGB-D front end. Both exist in
-                    # the package and both start cleanly, so picking the wrong
-                    # one gives a healthy-looking stack that never produces a
-                    # lidar descriptor. Confirmed against upstream's own
-                    # cslam_experiments/launch/cslam/cslam_lidar.launch.py.
-                    Node(
-                        package="cslam",
-                        executable="lidar_handler_node.py",
-                        name="cslam_map_manager",
-                        parameters=common,
-                        remappings=tf_remap,
-                        output="screen",
-                    ),
-                    # Decides which candidate inter-robot matches are worth
-                    # verifying, and verifies them geometrically (TEASER++).
-                    Node(
-                        package="cslam",
-                        executable="loop_closure_detection_node.py",
-                        name="cslam_loop_closure_detection",
-                        parameters=common,
-                        remappings=tf_remap,
-                        output="screen",
-                    ),
-                    # The joint GTSAM back end. This is the part that makes one
-                    # robot's observations correct another's drift.
-                    Node(
-                        package="cslam",
-                        executable="pose_graph_manager",
-                        name="cslam_pose_graph_manager",
-                        parameters=common,
-                        remappings=tf_remap,
-                        output="screen",
-                    ),
-                ]
+            DeclareLaunchArgument(
+                "mission_id", default_value=os.environ.get("SWARMDECK_MISSION_ID", "")
             ),
+            DeclareLaunchArgument(
+                "map_store",
+                default_value=os.environ.get("SWARMDECK_MAP_STORE", "/maps"),
+            ),
+            OpaqueFunction(function=setup),
         ]
     )

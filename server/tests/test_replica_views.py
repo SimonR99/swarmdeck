@@ -4,6 +4,7 @@ import hashlib
 from uuid import uuid4
 
 from autonomy.replication import ReplicaStore
+from autonomy.map_epochs import robot_run_id
 from swarmdeck_server.api import replica_views
 
 
@@ -12,7 +13,7 @@ def _envelope(session: str, *, revision: int = 1, pose_x: float = 2.0):
     digest = hashlib.sha256(payload).hexdigest()
     identity = {
         "robot_id": "robot_0",
-        "session_id": session,
+        "session_id": robot_run_id(session, "robot_0", 0),
         "seq": 0,
     }
 
@@ -68,6 +69,10 @@ def _envelope(session: str, *, revision: int = 1, pose_x: float = 2.0):
             "version": 1,
             "robot_id": "robot_0",
             "session_id": session,
+            "map_epoch": 0,
+            "run_id": robot_run_id(session, "robot_0", 0),
+            "robot_map_epochs": {"robot_0": 0},
+            "participant_robot_ids": ["robot_0"],
             "revision": revision,
             "snapshot": {
                 "snapshot_id": f"snapshot-{revision}",

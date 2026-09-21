@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from functools import partial
 import hashlib
 import json
 import math
@@ -26,6 +28,13 @@ from autonomy.indexed_mapping import (
     QueryStatus,
     SnapshotKey,
     VoxelOccupancy,
+)
+from autonomy.map_provider import PublicationPending
+from autonomy.map_epochs import (
+    assert_map_epoch_dependencies,
+    claim_map_epoch,
+    robot_run_id,
+    write_peer_epochs,
 )
 from autonomy.mapping import SubmapStore
 from autonomy.mola_mapping import (
@@ -216,7 +225,7 @@ def test_mola_cache_rehashes_same_size_corruption_with_retained_mtime(
     peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
     provider = MolaDirectorySource(peer)
     view = IndexedMapView()
-    provider.refresh(view, component)
+    key = provider.refresh(view, component)
     grid_path = peer / "mola" / "components" / "component.sdpg"
     before = grid_path.stat()
     raw = bytearray(grid_path.read_bytes())
@@ -232,8 +241,10 @@ def test_mola_cache_rehashes_same_size_corruption_with_retained_mtime(
     assert after.st_ctime_ns != before.st_ctime_ns
     with pytest.raises(ValueError, match="integrity check failed"):
         provider.refresh(view, component)
-    assert view._index is not None
-    assert view._unavailable_key == view._index.key
+    assert (
+        view.query(QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))).status
+        is QueryStatus.UNAVAILABLE
+    )
 
 
 def test_mola_cache_reloads_an_atomically_replaced_artifact(
@@ -265,10 +276,23 @@ def test_mola_cache_reloads_an_atomically_replaced_artifact(
     assert provider._cache[component][1] is not first_grid
 
 
-def test_mola_refresh_detects_source_replacement_during_final_pair_check(
+def test_mola_source_replacement_during_refresh_keeps_prior_geometry(
     tmp_path, monkeypatch
 ) -> None:
     peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    provider = MolaDirectorySource(peer, clock_ns=lambda: 100)
+    view = IndexedMapView()
+    key = provider.refresh(view, component)
+    request = QueryRequest(
+        key,
+        ((0.1, 0.1, 0.5), (5.0, 5.0, 5.0)),
+        (0.1, 0.1, 0.1),
+        now_monotonic_ns=101,
+        max_snapshot_age_ns=10,
+    )
+    before = view.query(request)
+    assert before.occupancy == (VoxelOccupancy.OCCUPIED, VoxelOccupancy.UNKNOWN)
+    assert provider.component_ids() == (component,)
     source_path = peer / "mola" / "source.json"
     stable_read = mola_mapping._bounded_stable_read_with_identity
     source_reads = 0
@@ -286,15 +310,34 @@ def test_mola_refresh_detects_source_replacement_during_final_pair_check(
     monkeypatch.setattr(
         mola_mapping, "_bounded_stable_read_with_identity", replace_after_read
     )
-    provider = MolaDirectorySource(peer)
-    view = IndexedMapView()
 
-    with pytest.raises(ValueError, match="publication changed while reading"):
+    with pytest.raises(PublicationPending):
         provider.refresh(view, component)
 
     assert source_path.read_bytes().endswith(b"\n")
-    assert view._index is None
-    assert view._unavailable_detail == "MOLA publication changed while reading"
+    assert view.query(request) == before
+    expired_request = replace(request, now_monotonic_ns=111)
+    assert view.query(expired_request).status is QueryStatus.UNAVAILABLE
+
+    # A later verified successor must not give this expired predecessor a
+    # fresh retention grace. It was not live when the new key replaced it.
+    successor = replace(
+        view._index,
+        key=SnapshotKey(component, key.epoch, key.graph_revision + 1, "b" * 64),
+        manifest_digest="c" * 64,
+        received_monotonic_ns=112,
+    )
+    view.publish(successor)
+    assert (
+        view.query(replace(expired_request, now_monotonic_ns=113)).status
+        is QueryStatus.UNAVAILABLE
+    )
+    assert (
+        view.query(
+            replace(expired_request, key=successor.key, now_monotonic_ns=113)
+        ).status
+        is QueryStatus.OK
+    )
 
 
 def test_mola_provider_rejects_free_space_without_qualified_rays(tmp_path) -> None:
@@ -432,10 +475,8 @@ def test_mola_provider_serves_product_when_bridge_snapshot_is_ahead(
 def test_mola_provider_reports_a_pending_pair_when_source_and_index_disagree(
     tmp_path, disagreement
 ) -> None:
-    from autonomy.map_provider import PublicationPending
-
     peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
-    provider = MolaDirectorySource(peer)
+    provider = MolaDirectorySource(peer, clock_ns=lambda: 100)
     view = IndexedMapView()
     key = provider.refresh(view, component)
     source_path = peer / "mola" / "source.json"
@@ -455,10 +496,34 @@ def test_mola_provider_reports_a_pending_pair_when_source_and_index_disagree(
         provider.component_ids()
     with pytest.raises(PublicationPending, match=expected):
         provider.refresh(view, component)
+    request = QueryRequest(
+        key,
+        ((0.1, 0.1, 0.5),),
+        (0.1, 0.1, 0.1),
+        now_monotonic_ns=110,
+        max_snapshot_age_ns=10,
+    )
+    result = view.query(request)
+    assert result.status is QueryStatus.OK
+    assert result.occupancy == (VoxelOccupancy.OCCUPIED,)
+    # A pending publication is not a liveness refresh or a new map: the old
+    # key expires on its original coherent-read bound and a cold view has none.
     assert (
-        view.query(QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))).status
+        view.query(
+            QueryRequest(
+                key,
+                request.samples,
+                request.body_size_xyz,
+                now_monotonic_ns=111,
+                max_snapshot_age_ns=10,
+            )
+        ).status
         is QueryStatus.UNAVAILABLE
     )
+    cold_view = IndexedMapView()
+    with pytest.raises(PublicationPending):
+        provider.refresh(cold_view, component)
+    assert cold_view.query(request).status is QueryStatus.UNAVAILABLE
 
     # Once the pair agrees again, the same provider serves without a restart.
     if disagreement == "bytes":
@@ -472,6 +537,60 @@ def test_mola_provider_reports_a_pending_pair_when_source_and_index_disagree(
         ]
         index_path.write_bytes(canonical(index))
     assert provider.refresh(view, component) == key
+
+
+@pytest.mark.parametrize("reset_robot", ["robot_0", "robot_1"])
+def test_pending_mola_product_cannot_preserve_a_retired_robot_lifetime(
+    tmp_path, reset_robot
+) -> None:
+    peer, component, _ = write_publication(tmp_path, free=(), qualified=0)
+    source_path = peer / "mola" / "source.json"
+    index_path = peer / "mola" / "index.json"
+    source = json.loads(source_path.read_bytes())
+    index = json.loads(index_path.read_bytes())
+    epoch = claim_map_epoch(tmp_path, SESSION, "robot_0")
+    source.update(
+        run_id=robot_run_id(SESSION, "robot_0", epoch),
+        robot_map_epoch=epoch,
+        robot_id="robot_0",
+        mission_id=SESSION,
+        participant_robot_ids=["robot_0", "robot_1"],
+        robot_map_epochs={"robot_0": epoch, "robot_1": 0},
+    )
+    write_peer_epochs(peer, SESSION, {"robot_0": epoch, "robot_1": 0})
+    raw = canonical(source)
+    index["source_sha256"] = hashlib.sha256(raw).hexdigest()
+    source_path.write_bytes(raw)
+    index_path.write_bytes(canonical(index))
+    provider = MolaDirectorySource(peer)
+    view = IndexedMapView(
+        dependency_validator=partial(assert_map_epoch_dependencies, peer)
+    )
+    key = provider.refresh(view, component)
+    request = QueryRequest(key, ((0.1, 0.1, 0.5),), (0.1, 0.1, 0.1))
+    assert view.query(request).status is QueryStatus.OK
+
+    if reset_robot == "robot_0":
+        claim_map_epoch(tmp_path, SESSION, "robot_0")
+    else:
+        # No remote filesystem is present: the accepted heartbeat watermark
+        # fences a merged product even though its owner's claim is unchanged.
+        write_peer_epochs(peer, SESSION, {"robot_0": epoch, "robot_1": 1})
+    # An old writer racing reset may expose a partial pair. It must not gain
+    # the same-lifetime publication grace for the cleared map.
+    source_path.write_bytes(raw + b"\n")
+    index_path.write_bytes(canonical(index))
+    with pytest.raises(PublicationPending):
+        provider.refresh(view, component)
+    assert view.query(request).status is QueryStatus.UNAVAILABLE
+
+    # A fully coherent old pair is not the new run's product either.
+    source_path.write_bytes(raw)
+    with pytest.raises(ValueError):
+        provider.refresh(view, component)
+    assert view.query(request).status is QueryStatus.UNAVAILABLE
+    with pytest.raises(ValueError):
+        MolaDirectorySource(peer).refresh(IndexedMapView(), component)
 
 
 def test_mola_cache_rechecks_planner_source_descriptor(tmp_path) -> None:

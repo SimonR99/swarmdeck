@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 import yaml
 from launch import LaunchDescription
+from launch.actions import EmitEvent, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 
 MOLA_MAP_RESOLUTION_M = 0.2
 GRID_REFINEMENT_RESOLUTION_M = 0.5
@@ -102,6 +105,9 @@ def generate_launch_description():
     params = "/opt/mgg/ros2/src/mgg_argos/config/bistro.yaml"
     for i, platform in enumerate(platforms):
         robot = f"{prefix}{i}"
+        selected = os.environ.get("SWARMDECK_MGG_ROBOT")
+        if selected and robot != selected:
+            continue
         spec = robot_spec(platform)
         step_height = spec.max_step_height
         legacy_edge_length_max = 2.5 if platform == "spot" else 1.2
@@ -159,4 +165,17 @@ def generate_launch_description():
             sim_depth=True,
             camera_offset=[spec.camera_x, spec.camera_z],
         )
-    return LaunchDescription(nodes)
+    if not nodes:
+        raise ValueError("SWARMDECK_MGG_ROBOT is not in the simulation fleet")
+    exits = [
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=node,
+                on_exit=[
+                    EmitEvent(event=Shutdown(reason="robot planner child exited"))
+                ],
+            )
+        )
+        for node in nodes
+    ]
+    return LaunchDescription([*exits, *nodes])

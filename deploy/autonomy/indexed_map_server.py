@@ -9,6 +9,7 @@ callback group without a callback cycle.
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import logging
 import math
 import os
@@ -30,6 +31,7 @@ from autonomy.map_provider import (
     MapProviderFactory,
     PublicationPending,
 )
+from autonomy.map_epochs import assert_map_epoch_dependencies, read_map_epoch
 
 LOGGER = logging.getLogger("swarmdeck.indexed_map_server")
 
@@ -99,6 +101,7 @@ class IndexRegistry:
         self._views: dict[tuple[str, str], IndexedMapView] = {}
         self._roots: dict[tuple[str, str], Path] = {}
         self._providers: dict[Path, MapProvider] = {}
+        self._map_epochs: dict[Path, dict | None] = {}
         # A failed source is retried exponentially, while a changed snapshot
         # identity gets an immediate attempt. Keep this keyed by root rather
         # than component so one bad publication cannot spin all its views.
@@ -128,9 +131,25 @@ class IndexRegistry:
             if robot in self._ambiguous:
                 return _unavailable("multiple missions expose the same robot map")
             view = self._views.get((robot, request.key.component_id))
-        if view is None:
+            root = self._roots.get((robot, request.key.component_id))
+            epoch = self._map_epochs.get(root)
+        if view is None or root is None:
             return _unavailable("component index is unavailable")
-        return view.query(request)
+        # Reset is a lifetime fence, not a product transition. Check on the
+        # request path as well as the polling thread so an old immutable view
+        # cannot answer during the interval before the next refresh.
+        try:
+            if read_map_epoch(root) != epoch:
+                view.invalidate("robot map lifetime changed")
+                return _unavailable("robot map lifetime changed")
+            result = view.query(request)
+            if read_map_epoch(root) != epoch:
+                view.invalidate("robot map lifetime changed during query")
+                return _unavailable("robot map lifetime changed during query")
+            return result
+        except (OSError, ValueError) as exc:
+            view.invalidate(f"robot map lifetime claim is invalid: {exc}")
+            return _unavailable("robot map lifetime claim is invalid")
 
     def _invalidate_root(self, root: Path, detail: str) -> None:
         # Failing closed refuses every query for this robot until the next
@@ -176,6 +195,27 @@ class IndexRegistry:
         roots = tuple(sorted(path for path in mission_root.glob("*") if path.is_dir()))
         sources: list[tuple[Path, MapProvider]] = []
         for root in roots:
+            try:
+                epoch = read_map_epoch(root)
+                previous = self._map_epochs.get(root)
+                if previous is not None and epoch is None:
+                    raise ValueError("robot map lifetime claim disappeared")
+            except (OSError, ValueError) as exc:
+                self._invalidate_root(
+                    root, f"robot map lifetime claim is invalid: {exc}"
+                )
+                continue
+            if epoch != previous:
+                self._invalidate_root(root, "robot map lifetime changed")
+                with self._lock:
+                    for identity in tuple(self._views):
+                        if self._roots.get(identity) == root:
+                            self._views.pop(identity)
+                            self._roots.pop(identity, None)
+                    self._providers.pop(root, None)
+                    self._failed_sources.pop(root, None)
+            with self._lock:
+                self._map_epochs[root] = epoch
             source = self._providers.get(root)
             if source is None:
                 source = self._provider_factory(root)
@@ -232,7 +272,12 @@ class IndexRegistry:
             with self._lock:
                 view = self._views.get(identity)
                 if view is None:
-                    view = IndexedMapView(superseded_grace_ns=self.superseded_grace_ns)
+                    view = IndexedMapView(
+                        superseded_grace_ns=self.superseded_grace_ns,
+                        dependency_validator=partial(
+                            assert_map_epoch_dependencies, root
+                        ),
+                    )
                     self._views[identity] = view
                 self._roots[identity] = root
             try:

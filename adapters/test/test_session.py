@@ -220,3 +220,59 @@ def test_receive_loop_processes_stop_while_claimed_objective_is_planning():
 
     asyncio.run(run())
     assert submitted == []
+
+
+def test_command_queued_before_reset_cannot_move_after_new_epoch_is_ready():
+    from concurrent.futures import ThreadPoolExecutor
+    from autonomy.map_epochs import robot_run_id
+
+    mission = "00000000-0000-0000-0000-000000000001"
+    state = {"epoch": 0, "ready": True, "goal": None}
+    release = threading.Event()
+
+    def authority():
+        if not state["ready"]:
+            return None
+        return {
+            "mission_id": mission,
+            "robot_map_epoch": state["epoch"],
+            "run_id": robot_run_id(mission, "r0", state["epoch"]),
+        }
+
+    def command(epoch):
+        return {
+            "type": "navigate_to",
+            "goal": {"x": 2, "y": 0},
+            "mission_id": mission,
+            "robot_map_epoch": epoch,
+            "map_run_id": robot_run_id(mission, "r0", epoch),
+        }
+
+    bridge = SimpleNamespace(
+        onboard_mapping=True,
+        _goal_lock=threading.RLock(),
+        _mapping_authority=SimpleNamespace(current=authority),
+        navigate_to=lambda goal: state.update(goal=goal),
+        stop=lambda: state.update(goal=None),
+    )
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        blocked = loop.run_in_executor(None, release.wait)
+        pending = asyncio.create_task(dispatch_command(bridge, command(0), loop))
+        try:
+            await asyncio.sleep(0)
+            state["epoch"] = 1
+        finally:
+            release.set()
+        await blocked
+        await pending
+        assert state["goal"] is None
+        await dispatch_command(bridge, command(1), loop)
+        assert state["goal"] == {"x": 2, "y": 0}
+        state["ready"] = False
+        await dispatch_command(bridge, {"type": "stop"}, loop)
+        assert state["goal"] is None
+
+    asyncio.run(run())

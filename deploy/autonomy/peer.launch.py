@@ -1,6 +1,6 @@
 """One onboard peer. No dashboard service participates in discovery or solving.
 
-Required environment: SWARMDECK_MISSION_ID (fresh UUID), ROS_DOMAIN_ID (shared
+Required environment: SWARMDECK_MISSION_ID (fleet UUID), ROS_DOMAIN_ID (shared
 peer domain), SWARMDECK_PEER_NAMES (JSON array), SWARMDECK_PEER_INDEX.
 SWARMDECK_SENSOR_DOMAIN_ID may select a separate robot-local sensor domain.
 Robot-specific sensor topics and frames are explicit overrides for hardware.
@@ -22,6 +22,25 @@ from launch.actions import EmitEvent, RegisterEventHandler, TimerAction
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch_ros.actions import Node
+
+from autonomy.map_epochs import claim_map_epoch, robot_run_id
+
+
+def reset_minimum(mission, robot):
+    root = os.environ.get("SWARMDECK_SIM_RESET_DIR")
+    if not root:
+        return 0
+    try:
+        request = json.loads(
+            (Path(root) / "robots" / robot / "request.json").read_text()
+        )
+    except FileNotFoundError:
+        return 0
+    if request.get("mission_id") != mission or request.get("robot_id") != robot:
+        return 0
+    minimum = request.get("map_epoch")
+    robot_run_id(mission, robot, minimum)
+    return minimum
 
 
 def generate_launch_description():
@@ -69,6 +88,11 @@ def generate_launch_description():
     inter_robot_overrides = (
         {} if inter_robot_closures else {"frontend.inter_robot_loop_closure_budget": 0}
     )
+    store_root = Path(os.environ.get("SWARMDECK_MAP_STORE", "/maps"))
+    map_epoch = claim_map_epoch(
+        store_root, mission, robot, minimum=reset_minimum(mission, robot)
+    )
+    run_id = robot_run_id(mission, robot, map_epoch)
     common = [
         config,
         {
@@ -76,6 +100,10 @@ def generate_launch_description():
             "max_nb_robots": len(names),
             "use_sim_time": sim_time,
             "swarmdeck.mission_id": mission,
+            "swarmdeck.map_epoch": map_epoch,
+            "swarmdeck.epoch_state_path": str(
+                store_root / mission / robot / "peer-epochs"
+            ),
             "frontend.odom_topic": f"/r{index}/normalized_odom",
             "frontend.pointcloud_topic": f"/r{index}/normalized_cloud",
             "frontend.keyframe_min_subscribers": 2,
@@ -98,6 +126,8 @@ def generate_launch_description():
                 "robot_index": index,
                 "robot_names": json.dumps(names),
                 "mission_id": mission,
+                "map_epoch": map_epoch,
+                "run_id": run_id,
                 "sensor_namespace": ns,
                 "sensor_domain_id": sensor_domain,
                 "use_sim_time": sim_time,
@@ -144,7 +174,7 @@ def generate_launch_description():
                     "SWARMDECK_TF_STATIC_TOPIC", f"/{ns}/tf_static"
                 ),
                 "server_url": os.environ.get("SWARMDECK_SERVER_URL", ""),
-                "store_root": os.environ.get("SWARMDECK_MAP_STORE", "/maps"),
+                "store_root": str(store_root),
             }
         ],
         remappings=[
@@ -180,7 +210,7 @@ def generate_launch_description():
                 on_exit=[
                     EmitEvent(
                         event=Shutdown(
-                            reason="peer authority exited; new mission required"
+                            reason="peer authority exited; fresh map epoch required"
                         )
                     )
                 ],

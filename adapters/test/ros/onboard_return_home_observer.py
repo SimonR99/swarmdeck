@@ -69,6 +69,7 @@ def authority_home(
         matrix = [[float(value) for value in row] for row in home["T_navigation_home"]]
         correction_revision = int(authority["correction_revision"])
         map_epoch = int(authority["map_epoch"])
+        robot_map_epoch = int(authority["robot_map_epoch"])
         graph_revision = int(authority["mapping_graph_revision"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("authority revision or home transform is invalid") from exc
@@ -76,9 +77,12 @@ def authority_home(
         len(matrix) != 4
         or any(len(row) != 4 for row in matrix)
         or not all(math.isfinite(value) for row in matrix for value in row)
-        or min(correction_revision, map_epoch, graph_revision) < 0
+        or min(correction_revision, map_epoch, robot_map_epoch, graph_revision) < 0
     ):
         raise ValueError("authority revision or home transform is invalid")
+    run_id = authority.get("run_id")
+    if not isinstance(run_id, str) or home["keyframe_id"] != f"{robot_id}/{run_id}/0":
+        raise ValueError("authority home does not belong to this robot map run")
     return {
         "x": matrix[0][3],
         "y": matrix[1][3],
@@ -86,6 +90,8 @@ def authority_home(
         "yaw": math.atan2(matrix[1][0], matrix[0][0]),
         "landmark_id": home["keyframe_id"],
         "mission_id": authority.get("mission_id"),
+        "robot_map_epoch": robot_map_epoch,
+        "run_id": run_id,
         "component_id": authority["component_id"],
         "correction_revision": correction_revision,
         "map_epoch": map_epoch,

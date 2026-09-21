@@ -10,35 +10,55 @@ import os
 import re
 import subprocess
 import time
+import sys
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Lock, Thread
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+# Also support direct host execution by deploy/simulation_launch.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from autonomy.map_epochs import robot_run_id
+from deploy.mgg.reset_protocol import (
+    open_lock,
+    prepare_directory,
+    prepare_reset_directories,
+)
 
 SUPERVISOR_STALE_NS = 15_000_000_000
 MIN_DOMAIN_ID = 1
 MAX_DOMAIN_ID = 232
 
 
-def atomic_text(path: Path, value: str) -> None:
+def atomic_text(path: Path, value: str, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    temporary.write_text(value)
-    if path.exists():
+    with temporary.open("w") as stream:
+        stream.write(value)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if mode is not None:
+        temporary.chmod(mode)
+    elif path.exists():
         temporary.chmod(path.stat().st_mode & 0o777)
     os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def atomic_json(path: Path, value: dict) -> None:
-    atomic_text(path, json.dumps(value, sort_keys=True))
+    atomic_text(path, json.dumps(value, sort_keys=True), mode=0o644)
 
 
 @contextmanager
 def protocol_lock(root: Path):
     """Serialize the two-file request/status protocol across host processes."""
-    root.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(root / "protocol.lock", os.O_RDONLY | os.O_CREAT, 0o666)
+    prepare_directory(root)
+    descriptor = open_lock(root / "protocol.lock")
     with os.fdopen(descriptor) as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
@@ -145,12 +165,24 @@ class Supervisor:
         expected_robots: int = 0,
         prune_volume: str = "",
         prune_image: str = "",
+        robot_ids: list[str] | None = None,
+        backend: str = "unavailable",
     ):
         self.prune_volume, self.prune_image = prune_volume, prune_image
         self.root, self.env_file = root, env_file
         self.compose_command, self.services = command, services
         self.server_url, self.expected_robots = server_url.rstrip("/"), expected_robots
         self._status_lock = Lock()
+        self.backend = backend
+        self.robot_services = {
+            robot: f"peer{index}" for index, robot in enumerate(robot_ids or [])
+        }
+        required = {"mgg", "mapping", "mapping-query", *self.robot_services.values()}
+        if backend != "mola" or not required.issubset(services):
+            self.robot_services = {}
+        # Publish the complete writable protocol tree before advertising a
+        # heartbeat: a root server must never win creation of requests/ first.
+        prepare_reset_directories(root, list(self.robot_services))
 
     def status(self, request: dict, phase: str, **fields) -> None:
         with self._status_lock:
@@ -168,7 +200,16 @@ class Supervisor:
     def supervisor_heartbeat(self) -> None:
         atomic_json(
             self.root / "supervisor.json",
-            {"version": 1, "pid": os.getpid(), "updated_at_ns": time.time_ns()},
+            {
+                "version": 1,
+                "pid": os.getpid(),
+                "updated_at_ns": time.time_ns(),
+                "backend": self.backend,
+                "supported_robot_ids": list(self.robot_services),
+                "mission_id": read_deployment_env(self.env_file).get(
+                    "SWARMDECK_MISSION_ID"
+                ),
+            },
         )
 
     def run_command(
@@ -387,6 +428,282 @@ class Supervisor:
         self.run(request)
         return True
 
+    def robot_status(self, request: dict, previous: dict, phase: str, **fields) -> dict:
+        result = {
+            **request,
+            **previous,
+            "version": 1,
+            "phase": phase,
+            "updated_at_ns": time.time_ns(),
+            "ok": None,
+            "error": None,
+            **fields,
+        }
+        directory = self.root / "robots" / request["robot_id"]
+        with protocol_lock(directory):
+            # Journal first: loss of the convenience status file cannot replay
+            # an already completed reset, even after a later request.
+            atomic_json(
+                directory / "requests" / f"{request['request_id']}.json", result
+            )
+            atomic_json(directory / "status.json", result)
+        return result
+
+    @staticmethod
+    def remaining(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("robot map reset exceeded its 60 second deadline")
+        return remaining
+
+    def robot_command(self, arguments: list[str], environment: dict, deadline: float):
+        return subprocess.run(
+            [*self.compose_command, "--env-file", str(self.env_file), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=self.remaining(deadline),
+        )
+
+    def planner_state(self, request: dict, state: str, deadline: float) -> None:
+        directory = self.root / "robots" / request["robot_id"]
+        atomic_json(
+            directory / "mgg-request.json",
+            {
+                "version": 1,
+                "request_id": request["request_id"],
+                "robot_id": request["robot_id"],
+                "mission_id": request["mission_id"],
+                "state": state,
+                "map_epoch": request["map_epoch"],
+            },
+        )
+        while self.remaining(deadline):
+            try:
+                result = json.loads((directory / "mgg-status.json").read_text())
+                if (
+                    result.get("request_id") == request["request_id"]
+                    and result.get("mission_id") == request["mission_id"]
+                    and result.get("state") == "failed"
+                ):
+                    raise RuntimeError(
+                        result.get("error") or "robot planner reset failed"
+                    )
+                if (
+                    result.get("request_id") == request["request_id"]
+                    and result.get("mission_id") == request["mission_id"]
+                    and result.get("state") == state
+                    and 0 <= time.time_ns() - result["updated_at_ns"] < 3_000_000_000
+                    and (state == "stopped" or type(result.get("pid")) is int)
+                    and (
+                        state == "stopped"
+                        or (
+                            type(result.get("map_epoch")) is int
+                            and result["map_epoch"] >= request["map_epoch"]
+                            and result.get("run_id")
+                            == robot_run_id(
+                                request["mission_id"],
+                                request["robot_id"],
+                                result["map_epoch"],
+                            )
+                            and result.get("source_reset_run_id") == result["run_id"]
+                        )
+                    )
+                ):
+                    return
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            time.sleep(min(0.1, self.remaining(deadline)))
+
+    def robot_ros(
+        self, request: dict, operation: str, environment: dict, deadline: float
+    ):
+        # argv is passed through bash's positional parameters, not interpolated
+        # into shell code. The same installed interfaces serve every robot.
+        result = self.robot_command(
+            [
+                "exec",
+                "-T",
+                "mgg",
+                "bash",
+                "-lc",
+                "source /opt/ros/jazzy/setup.bash && "
+                "source /opt/mgg/ros2/install/setup.bash && "
+                'exec python3 /app/deploy/mgg/robot_reset.py "$@"',
+                "robot-reset",
+                operation,
+                "--robot",
+                request["robot_id"],
+                "--mission",
+                request["mission_id"],
+                "--minimum",
+                str(request["map_epoch"]),
+                "--timeout",
+                str(max(0.1, self.remaining(deadline) - 0.5)),
+            ],
+            environment,
+            deadline,
+        )
+        return json.loads(result.stdout.splitlines()[-1])
+
+    def run_robot(self, request: dict, status: dict) -> None:
+        try:
+            if request["robot_id"] not in self.robot_services:
+                raise RuntimeError(
+                    f"robot-local reset unavailable for {request['robot_id']} "
+                    f"on backend {self.backend}"
+                )
+            current = read_deployment_env(self.env_file)
+            if request["mission_id"] != current.get("SWARMDECK_MISSION_ID"):
+                raise ValueError(
+                    "robot reset mission no longer matches the running fleet"
+                )
+            environment = dict(os.environ)
+            environment.update(current)
+            deadline = (
+                time.monotonic()
+                + (status["deadline_at_ns"] - time.time_ns()) / 1_000_000_000
+            )
+            self.remaining(deadline)
+            service = self.robot_services[request["robot_id"]]
+            if status["phase"] == "accepted":
+                status = self.robot_status(request, status, "stopping")
+            if status["phase"] == "stopping":
+                # End only this robot's planner publishers before cancelling
+                # its old Nav2 actions; no missing PCI service can block recovery.
+                self.planner_state(request, "stopped", deadline)
+                if not status.get("quiesced"):
+                    self.robot_ros(request, "quiesce", environment, deadline)
+                    status = self.robot_status(
+                        request, status, "stopping", quiesced=True
+                    )
+                self.robot_command(
+                    ["stop", "--timeout", "5", service], environment, deadline
+                )
+                status = self.robot_status(request, status, "starting")
+            if status["phase"] == "starting":
+                # Idempotent across supervisor crashes. Unlike restart or
+                # force-recreate, up will not kill a peer already started by
+                # this request and therefore cannot claim a duplicate epoch.
+                self.robot_command(
+                    ["up", "-d", "--no-deps", service], environment, deadline
+                )
+                self.planner_state(request, "running", deadline)
+                status = self.robot_status(request, status, "verifying")
+            if status["phase"] == "verifying":
+                fresh = self.robot_ros(request, "verify", environment, deadline)
+                epoch = fresh["map_epoch"]
+                if epoch < request["map_epoch"] or fresh["run_id"] != robot_run_id(
+                    request["mission_id"], request["robot_id"], epoch
+                ):
+                    raise ValueError("readiness probe returned a stale robot run")
+                status = self.robot_status(request, status, "verifying", **fresh)
+                while self.remaining(deadline):
+                    try:
+                        with urllib.request.urlopen(
+                            f"{self.server_url}/api/fleet",
+                            timeout=min(2, self.remaining(deadline)),
+                        ) as response:
+                            body = json.loads(response.read())
+                        robot = next(
+                            (
+                                r
+                                for r in body.get("robots", [])
+                                if r.get("robot_id") == request["robot_id"]
+                            ),
+                            {},
+                        )
+                        frame = robot.get("live_mapping") or {}
+                        if (
+                            robot.get("online") is True
+                            and robot.get("navigation_ready") is True
+                            and frame.get("mission_id") == request["mission_id"]
+                            and frame.get("robot_map_epoch") == epoch
+                            and frame.get("run_id") == fresh["run_id"]
+                            and frame.get("mapping_graph_revision", 0) > 0
+                        ):
+                            self.robot_status(request, status, "done", ok=True)
+                            return
+                    except (OSError, ValueError):
+                        pass
+                    time.sleep(min(0.2, self.remaining(deadline)))
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+            subprocess.SubprocessError,
+        ) as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            if isinstance(exc, subprocess.CalledProcessError):
+                error += f": {exc.stderr or exc.stdout}"
+            self.robot_status(request, status, "failed", ok=False, error=error[-4000:])
+
+    def poll_robots(self) -> bool:
+        robots = self.root / "robots"
+        if not robots.exists():
+            return False
+        handled = False
+        for directory in sorted(robots.iterdir()):
+            if not directory.is_dir() or not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*", directory.name
+            ):
+                continue
+            with protocol_lock(directory):
+                try:
+                    request = json.loads((directory / "request.json").read_text())
+                    if (
+                        request["version"] != 1
+                        or request["robot_id"] != directory.name
+                        or str(UUID(request["request_id"])) != request["request_id"]
+                        or type(request["requested_at_ns"]) is not int
+                    ):
+                        continue
+                    robot_run_id(
+                        request["mission_id"], request["robot_id"], request["map_epoch"]
+                    )
+                    journal = directory / "requests" / f"{request['request_id']}.json"
+                    try:
+                        status = json.loads(journal.read_text())
+                    except FileNotFoundError:
+                        status = {
+                            **request,
+                            "phase": "accepted",
+                            "ok": None,
+                            "deadline_at_ns": min(
+                                request["requested_at_ns"], time.time_ns()
+                            )
+                            + 60_000_000_000,
+                        }
+                    status.setdefault(
+                        "deadline_at_ns",
+                        min(request["requested_at_ns"], time.time_ns())
+                        + 60_000_000_000,
+                    )
+                    if status["phase"] in {"done", "failed"}:
+                        atomic_json(directory / "status.json", status)
+                        continue
+                    # Bind retries to the original payload as well as its ID.
+                    request = {
+                        key: status[key]
+                        for key in (
+                            "version",
+                            "request_id",
+                            "robot_id",
+                            "mission_id",
+                            "map_epoch",
+                            "requested_at_ns",
+                        )
+                    }
+                    atomic_json(journal, status)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+            self.run_robot(request, status)
+            handled = True
+        return handled
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -398,6 +715,8 @@ def main() -> None:
     parser.add_argument("--poll", type=float, default=0.5)
     parser.add_argument("--server-url", default="http://127.0.0.1:8080")
     parser.add_argument("--expected-robots", type=int, default=0)
+    parser.add_argument("--backend", default="unavailable")
+    parser.add_argument("--robot-id", action="append", default=[])
     parser.add_argument(
         "--prune-maps-volume",
         default="",
@@ -435,6 +754,13 @@ def main() -> None:
         command.extend(("-f", path))
     if args.expected_robots < 0:
         parser.error("expected robots must be nonnegative")
+    if any(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", robot) is None
+        for robot in args.robot_id
+    ):
+        parser.error("robot IDs must be simple ROS namespaces")
+    if len(set(args.robot_id)) != len(args.robot_id):
+        parser.error("robot IDs must be unique")
     try:
         ensure_deployment_env(args.env_file)
     except (OSError, ValueError) as exc:
@@ -448,24 +774,37 @@ def main() -> None:
         args.expected_robots,
         args.prune_maps_volume,
         args.prune_maps_image,
+        args.robot_id,
+        args.backend,
     )
-    args.root.mkdir(parents=True, exist_ok=True)
     # A second supervisor could otherwise claim a request after a stale timeout
     # while the first one is still changing the same Compose project.
-    descriptor = os.open(args.root / "supervisor.lock", os.O_RDONLY | os.O_CREAT, 0o666)
+    descriptor = open_lock(args.root / "supervisor.lock")
     with os.fdopen(descriptor) as supervisor_lock:
         try:
             fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             parser.error(f"another supervisor already owns {args.root}")
             raise AssertionError("unreachable") from exc
-        recover_active = True
-        while True:
-            supervisor.supervisor_heartbeat()
-            supervisor.poll_once(recover_active=recover_active)
-            recover_active = False
-            supervisor.supervisor_heartbeat()
-            time.sleep(max(0.1, args.poll))
+        stopped = Event()
+
+        def heartbeat():
+            while not stopped.wait(2.0):
+                supervisor.supervisor_heartbeat()
+
+        supervisor.supervisor_heartbeat()
+        thread = Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            recover_active = True
+            while True:
+                supervisor.poll_once(recover_active=recover_active)
+                supervisor.poll_robots()
+                recover_active = False
+                time.sleep(max(0.1, args.poll))
+        finally:
+            stopped.set()
+            thread.join(timeout=3)
 
 
 if __name__ == "__main__":

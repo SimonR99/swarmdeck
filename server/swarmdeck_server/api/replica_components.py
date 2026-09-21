@@ -20,7 +20,13 @@ from autonomy.contracts import (
     SubmapId,
     SubmapRevision,
 )
-from autonomy.replication import MAX_CHUNK_BYTES, canonical, chunk_hash, identity
+from autonomy.replication import (
+    MAX_CHUNK_BYTES,
+    canonical,
+    chunk_hash,
+    identity,
+    envelope_epochs,
+)
 
 MAX_ENVELOPES = 128
 MAX_SUBMAPS = 16_384
@@ -230,6 +236,7 @@ def _normalize_envelope(envelope: dict) -> dict:
         raise ValueError("Invalid replica envelope")
     robot_id, session_id = envelope["robot_id"], envelope["session_id"]
     identity(robot_id, session_id)
+    envelope_epochs(envelope)
     revision = uint(envelope["revision"], "replica revision")
     order_known = (
         "solution_order" in envelope and envelope["solution_order"] is not None
@@ -333,6 +340,8 @@ def _normalize_envelope(envelope: dict) -> dict:
     return {
         "robot_id": robot_id,
         "session_id": session_id,
+        "map_epoch": envelope["map_epoch"],
+        "run_id": envelope["run_id"],
         "revision": revision,
         "snapshot_id": snapshot.snapshot_id,
         "generated_at_ns": snapshot.generated_at_ns,
@@ -345,7 +354,9 @@ def _normalize_envelope(envelope: dict) -> dict:
 class ComponentCatalogue:
     """One immutable database snapshot, with lazy component view assembly."""
 
-    def __init__(self, envelopes: list[dict], *, normalizer=_normalize_envelope):
+    def __init__(
+        self, envelopes: list[dict], *, normalizer=_normalize_envelope, tombstones=()
+    ):
         if not isinstance(envelopes, list) or len(envelopes) > MAX_ENVELOPES:
             raise ValueError("Replica source budget exceeded")
         self.groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
@@ -354,6 +365,7 @@ class ComponentCatalogue:
         self.source_errors: list[dict] = []
         self.direct: dict[tuple[str, str], tuple[str, dict]] = {}
         self._views: dict[tuple[str, str], dict] = {}
+        retired = {(session, f"{robot}/{run}/") for robot, session, run in tombstones}
 
         for envelope in envelopes:
             if not isinstance(envelope, dict):
@@ -375,6 +387,28 @@ class ComponentCatalogue:
                     {"session_id": session_id, "robot_id": robot_id, "detail": str(exc)}
                 )
                 continue
+            prefixes = tuple(
+                prefix for session, prefix in retired if session == session_id
+            )
+            if prefixes:
+                # Keep other robots' immutable publications, but never expose a
+                # retired run through a relay after its direct owner disappears.
+                components = {
+                    component_id: {
+                        **component,
+                        "submaps": tuple(
+                            (owner, value)
+                            for owner, value in component["submaps"]
+                            if not value["submap_id"].startswith(prefixes)
+                        ),
+                    }
+                    for component_id, component in source["components"].items()
+                }
+                source = {
+                    **source,
+                    "components": components,
+                    "snapshot_id": digest([source["snapshot_id"], sorted(prefixes)]),
+                }
             for component_id, component in source["components"].items():
                 key = (session_id, component_id)
                 self.groups[key].append(source)

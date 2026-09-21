@@ -97,6 +97,14 @@
 
   const trails = new Map<string, { x: number; y: number }[]>();
   const overlayCache = new RasterRobotProjectionCache();
+  const seenMapEpochs = new Map<string, string>();
+  $effect(() => {
+    for (const [robotId, epoch] of Object.entries(mapStore.robotMapEpochs)) {
+      if (seenMapEpochs.get(robotId) === epoch) continue;
+      seenMapEpochs.set(robotId, epoch);
+      trails.delete(robotId);
+    }
+  });
   const pointers = new Map<number, { x: number; y: number }>();
   let dragged = false;
   let lastRenderedInfo: MapInfo | null = null;
@@ -204,8 +212,8 @@
     const confirmed = window.confirm(
       `Reset the accumulated map for ${label}?\n\n` +
         (robotId
-          ? "This deletes that robot's live and saved optimisation keyframes. Robot-side SLAM keeps running and can build a new map."
-          : 'This deletes every live and saved optimisation keyframe. Robot-side SLAM keeps running and can build new maps.')
+          ? "This stops this robot and restarts its mapping and planner from where it stands. Its old map and closures are retired; other robots keep their maps and missions. Return Home uses the new start unless a surveyed start is configured."
+          : 'This requests a fleet map reset. Peer mapping requires the full mission reset instead.')
     );
     if (!confirmed) return;
 
@@ -213,8 +221,11 @@
     resetError = null;
     try {
       await actions.resetMap(robotId);
-      clearTrails();
-      await mapStore.reloadCurrentView();
+      if (robotId) trails.delete(robotId);
+      else clearTrails();
+      if (!robotId || mapStore.viewMode === 'global' || mapStore.viewRobot === robotId) {
+        await mapStore.reloadCurrentView();
+      }
       await mapStore.refreshStatus();
     } catch (error) {
       resetError = error instanceof Error ? error.message : 'Map reset failed';
@@ -636,10 +647,7 @@
     mapStore.costmapLayer(viewedCostmapRobotId, costmapKind)
   );
   const resetRobotBlocked = $derived(
-    resetPending ||
-      !resetRobot ||
-      resetRobot.nav_status === 'active' ||
-      resetRobot.goal !== null
+    resetPending || !resetRobot
   );
   const resetAllBlocked = $derived(
     resetPending ||
@@ -875,8 +883,8 @@
                  hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-35"
           title={resetRobot
             ? resetRobotBlocked
-              ? 'Stop this robot before resetting its map'
-              : `Delete ${robotDisplayName(resetRobot.robot_id)} map and optimisation keyframes`
+              ? 'A map reset is already in progress'
+              : `Stop and restart ${robotDisplayName(resetRobot.robot_id)} mapping from its current location`
             : 'Select exactly one robot'}
           disabled={resetRobotBlocked}
           onclick={() => resetRobotId && void resetMaps(resetRobotId)}

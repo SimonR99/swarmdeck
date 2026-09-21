@@ -98,3 +98,32 @@ def test_active_node_loss_during_later_activation_is_not_reported_ready():
         startup.bringup(
             states, lambda name, _: states[name], change, clock=clock, sleep=clock.sleep
         )
+
+
+@pytest.mark.parametrize("query_fails", [False, True])
+def test_shutdown_during_query_prevents_transitions_and_retry(query_fails):
+    clock = Clock()
+    stopping = False
+    queries = []
+    changes = []
+
+    def query(name, _):
+        nonlocal stopping
+        queries.append(name)
+        stopping = True
+        if query_fails:
+            raise RuntimeError("ROS context shut down during discovery")
+        return 2
+
+    with pytest.raises(startup.BringupCancelled):
+        startup.bringup(
+            ["controller"],
+            query,
+            lambda *args: changes.append(args),
+            clock=clock,
+            sleep=clock.sleep,
+            cancelled=lambda: stopping,
+        )
+    assert queries == ["controller"]
+    assert changes == []
+    assert clock() == 0

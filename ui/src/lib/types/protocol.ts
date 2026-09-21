@@ -472,6 +472,7 @@ export type ServerMessage =
   | CostmapPatch
   | { type: 'network_clear'; robot_id: string | null }
   | { type: 'costmap_clear'; robot_id: string | null }
+  | { type: 'robot_map_reset'; robot_id: string; mission_id: string; map_epoch: number }
   | SessionState
   | { type: 'fleet_change'; robots: RobotState[] }
   | { type: 'detection'; detection: Detection }

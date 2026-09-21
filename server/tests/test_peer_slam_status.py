@@ -1,5 +1,6 @@
 import pytest
 from autonomy.slam_status import peer_status
+from autonomy.map_epochs import robot_run_id
 from swarmdeck_server.fleet.registry import Registry
 
 MISSION = "12345678-1234-4234-8234-567812345678"
@@ -9,6 +10,8 @@ def report():
     return dict(
         robot_id="r0",
         mission_id=MISSION,
+        robot_map_epoch=0,
+        run_id=robot_run_id(MISSION, "r0", 0),
         keyframes=12,
         verified=3,
         rejected=8,

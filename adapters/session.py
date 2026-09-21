@@ -13,6 +13,7 @@ import json
 import time
 from collections.abc import Callable
 from typing import Any
+from contextlib import nullcontext
 
 from adapters.live_mapping import live_state
 
@@ -60,11 +61,39 @@ async def _offload(loop: asyncio.AbstractEventLoop, bridge: Any, name: str) -> A
     return await loop.run_in_executor(None, fn)
 
 
+def command_matches_map_epoch(bridge, msg):
+    kind = msg.get("type")
+    moving = (
+        kind in {"navigate_to", "plan_objective", "body_command"}
+        or (kind == "explore" and msg.get("enabled") is True)
+        or (
+            kind == "drive"
+            and (msg.get("linear", 0) != 0 or msg.get("angular", 0) != 0)
+        )
+    )
+    if not moving or not getattr(bridge, "onboard_mapping", False):
+        return True
+    reader = getattr(bridge, "_mapping_authority", None)
+    authority = None if reader is None else reader.current()
+    return authority is not None and (
+        msg.get("mission_id") == authority["mission_id"]
+        and msg.get("robot_map_epoch") == authority["robot_map_epoch"]
+        and msg.get("map_run_id") == authority["run_id"]
+    )
+
+
 async def dispatch_command(
     bridge: Any, msg: dict[str, Any], loop: asyncio.AbstractEventLoop
 ) -> None:
     """Map one adapter-protocol command onto the bridge. Unknown types: no-op."""
     kind = msg.get("type")
+    if not command_matches_map_epoch(bridge, msg):
+        _emit(
+            bridge,
+            "warning",
+            "Command rejected: robot map epoch changed or is unavailable",
+        )
+        return
     exploration = getattr(bridge, "exploration", None)
     if exploration is not None:
         if kind == "explore":
@@ -84,7 +113,9 @@ async def dispatch_command(
                     except (ValueError, TypeError) as exc:
                         _emit(bridge, "warning", f"Invalid exploration mission: {exc}")
                         return
-                exploration.start()
+                with getattr(bridge, "_goal_lock", nullcontext()):
+                    if command_matches_map_epoch(bridge, msg):
+                        exploration.start()
             else:
                 exploration.stop()
             return
@@ -109,10 +140,13 @@ async def dispatch_command(
             and callable(execute)
         ):
             try:
-                owned = claim(
-                    objective,
-                    msg.get("goal", {}) if objective == "navigate" else None,
-                )
+                with getattr(bridge, "_goal_lock", nullcontext()):
+                    if not command_matches_map_epoch(bridge, msg):
+                        return
+                    owned = claim(
+                        objective,
+                        msg.get("goal", {}) if objective == "navigate" else None,
+                    )
             except (TypeError, ValueError) as exc:
                 _emit(bridge, "warning", f"Invalid planning objective: {exc}")
                 return
@@ -127,6 +161,9 @@ async def dispatch_command(
                     _emit(bridge, "warning", f"Objective planning failed: {exc}")
 
             pending.add_done_callback(completed)
+            return
+        if getattr(bridge, "onboard_mapping", False):
+            _emit(bridge, "warning", "Onboard objective planner is unavailable")
             return
         if objective == "return_home":
             fn = getattr(bridge, "return_home", None)
@@ -143,18 +180,34 @@ async def dispatch_command(
             takes_path = len(inspect.signature(fn).parameters) > 1
         except (TypeError, ValueError):
             takes_path = False
-        if takes_path:
-            await loop.run_in_executor(None, fn, goal, msg.get("path"))
-        else:
-            await loop.run_in_executor(None, fn, goal)
+
+        def navigate_if_current():
+            with getattr(bridge, "_goal_lock", nullcontext()):
+                if not command_matches_map_epoch(bridge, msg):
+                    return
+                planner = getattr(bridge, "objective_planner", None)
+                claim = getattr(planner, "claim_objective", None)
+                execute = getattr(planner, "execute_claimed", None)
+                if not callable(claim) or not callable(execute):
+                    return fn(goal, msg.get("path")) if takes_path else fn(goal)
+                owned = claim("navigate", goal)
+            # Planning can block on MGG; never hold the cancellation lock while
+            # computing. execute_claimed checks the generation reserved above.
+            if owned is not None:
+                return execute(owned)
+
+        await loop.run_in_executor(None, navigate_if_current)
     elif kind == "cancel_goal":
         (getattr(bridge, "cancel_goal", None) or bridge.cancel)()
     elif kind == "drive":
         lin, ang = msg.get("linear", 0.0), msg.get("angular", 0.0)
-        latch = getattr(bridge, "note_drive_command", None)
-        if callable(latch):
-            latch(lin, ang)
-        bridge.drive(lin, ang)
+        with getattr(bridge, "_goal_lock", nullcontext()):
+            if not command_matches_map_epoch(bridge, msg):
+                return
+            latch = getattr(bridge, "note_drive_command", None)
+            if callable(latch):
+                latch(lin, ang)
+            bridge.drive(lin, ang)
     elif kind == "stop":
         bridge.stop()
     elif kind == "set_mode":
@@ -164,10 +217,17 @@ async def dispatch_command(
         if callable(fn):
             action = msg.get("action", "")
             height = msg.get("height")
-            if height is not None:
-                await loop.run_in_executor(None, lambda: fn(action, height=height))
-            else:
-                await loop.run_in_executor(None, fn, action)
+
+            def body_if_current():
+                with getattr(bridge, "_goal_lock", nullcontext()):
+                    if command_matches_map_epoch(bridge, msg):
+                        return (
+                            fn(action, height=height)
+                            if height is not None
+                            else fn(action)
+                        )
+
+            await loop.run_in_executor(None, body_if_current)
     elif kind == "reset":
         fn = getattr(bridge, "reset", None)
         if callable(fn):

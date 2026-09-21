@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from autonomy.contracts import IDENTITY_SE3
 from autonomy.replication import ReplicaStore
+from autonomy.map_epochs import robot_run_id
 from swarmdeck_server.api import autonomy_routes, replica_live, replica_views
 from swarmdeck_server.fleet.registry import Registry
 from tests.test_replica_components import peer, reseal, selected
@@ -39,6 +40,8 @@ def live_payload(robot_id, component_id, session, transform=IDENTITY_SE3):
     return dict(
         robot_id=robot_id,
         mission_id=session,
+        robot_map_epoch=0,
+        run_id=robot_run_id(session, robot_id, 0),
         component_id=component_id,
         navigation_frame=f"{robot_id}/map",
         solution_order=[0, -1],

@@ -31,6 +31,11 @@ from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 import numpy as np
 
 from .contracts import SCHEMA_VERSION, validate_se3
+from .map_epochs import (
+    robot_run_id,
+    snapshot_epoch_dependencies,
+    assert_map_epoch_dependencies,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .cslam import FrameState
@@ -66,6 +71,7 @@ class PublishedProduct:
     snapshot_id: str
     generated_at_ns: int
     artifacts: tuple[ProductArtifact, ...]
+    epoch_dependencies: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -240,18 +246,24 @@ def read_published_product(
     index_path, source_path = mola_root / "index.json", mola_root / "source.json"
     identity = (_file_identity(index_path), _file_identity(source_path))
     if memo is not None and None not in identity and memo.get("identity") == identity:
-        return memo.get("product")  # type: ignore[return-value]
-    product = _read_published_product(
-        index_path, source_path, max_bytes, attempts, retry_pause_s, sleep
-    )
-    if memo is not None:
-        if None not in identity and identity == (
-            _file_identity(index_path),
-            _file_identity(source_path),
-        ):
-            memo["identity"], memo["product"] = identity, product
-        else:
-            memo.clear()
+        product = memo.get("product")
+    else:
+        product = _read_published_product(
+            index_path, source_path, max_bytes, attempts, retry_pause_s, sleep
+        )
+        if memo is not None:
+            if None not in identity and identity == (
+                _file_identity(index_path),
+                _file_identity(source_path),
+            ):
+                memo["identity"], memo["product"] = identity, product
+            else:
+                memo.clear()
+    if product is not None:
+        try:
+            assert_map_epoch_dependencies(peer_root, dict(product.epoch_dependencies))
+        except (OSError, ValueError):
+            return None
     return product
 
 
@@ -291,9 +303,10 @@ def _read_published_product(
         try:
             manifests = _source_manifests(source)
             artifacts = _artifacts(index, manifests)
+            dependencies = tuple(sorted(snapshot_epoch_dependencies(source).items()))
         except ValueError:
             return None
-        return PublishedProduct(snapshot_id, generated_at_ns, artifacts)
+        return PublishedProduct(snapshot_id, generated_at_ns, artifacts, dependencies)
     return None
 
 
@@ -367,6 +380,8 @@ def build_authority(
     *,
     robot_id: str,
     mission_id: str,
+    robot_map_epoch: int,
+    run_id: str,
     participants: Sequence[str],
     navigation_frame: str,
     planning_frame: str,
@@ -375,6 +390,8 @@ def build_authority(
     peer_slam: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the authority message for one product and its frame state."""
+    if robot_run_id(mission_id, robot_id, robot_map_epoch) != run_id:
+        raise ValueError("authority run does not match robot map epoch")
 
     T_component_local = np.asarray(frame.T_component_local, dtype=np.float64)
     local_navigation = np.asarray(
@@ -385,6 +402,8 @@ def build_authority(
     authority: dict[str, object] = {
         "robot_id": robot_id,
         "mission_id": mission_id,
+        "robot_map_epoch": robot_map_epoch,
+        "run_id": run_id,
         "participants": list(participants),
         "component_id": artifact.component_id,
         "solution_order": list(frame.solution_order),

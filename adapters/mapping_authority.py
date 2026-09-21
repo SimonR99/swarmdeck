@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from contextlib import nullcontext
 import math
 import os
 import re
@@ -12,6 +13,7 @@ import time
 import numpy as np
 
 from autonomy.contracts import KeyframeId, validate_se3
+from autonomy.map_epochs import robot_run_id
 
 _INDEXED_FIELDS = frozenset(
     {
@@ -138,6 +140,10 @@ def expected_mission_id(robot_id):
 def accepts_authority_update(candidate, current, expected_mission=None):
     """Reject causal rollback while allowing identical heartbeats."""
     mission, solution, snapshot = authority_order(candidate)
+    epoch = candidate["robot_map_epoch"]
+    run_id = robot_run_id(mission, candidate["robot_id"], epoch)
+    if candidate["run_id"] != run_id:
+        return False
     if expected_mission is not None and mission != expected_mission:
         return False
     if current is None:
@@ -147,6 +153,9 @@ def accepts_authority_update(candidate, current, expected_mission=None):
     # documented mission transition restarts the adapter/reader.
     if mission != old_mission:
         return False
+    previous_epoch = current["robot_map_epoch"]
+    if epoch != previous_epoch:
+        return epoch > previous_epoch
     if old_solution is not None and (solution is None or solution < old_solution):
         return False
     if old_snapshot is not None and (snapshot is None or snapshot < old_snapshot):
@@ -213,6 +222,8 @@ class MappingAuthority:
         self.value, self.received_at = None, 0.0
         self.clock = time.monotonic
         self.expected_mission = expected_mission_id(bridge.id)
+        self.robot_map_epoch = -1
+        self.source_reset_stamp_ns = None
         self.planning_frame = planning_frame(bridge)
         self.publisher = None
         try:
@@ -246,11 +257,63 @@ class MappingAuthority:
         value = self.current()
         return None if value is None else authority_for_frame(value, frame)
 
+    def _discard_map_uploads(self):
+        for name in (
+            "grid",
+            "_cloud",
+            "_cloud_points",
+            "_cloud_rgb",
+            "_cloud_snapshot",
+            "_scan_points",
+            "_scan_origin",
+        ):
+            if hasattr(self.bridge, name):
+                setattr(self.bridge, name, None)
+        for name in ("_grid_dirty", "_cloud_dirty", "_scan_dirty"):
+            if hasattr(self.bridge, name):
+                setattr(self.bridge, name, False)
+        lock = getattr(self.bridge, "_costmap_lock", None)
+        if lock is not None:
+            with lock:
+                self.bridge._costmaps.clear()
+                self.bridge._costmap_dirty.clear()
+
+    def _advance_lifetime(self, epoch):
+        with getattr(self.bridge, "_goal_lock", nullcontext()):
+            if epoch > self.robot_map_epoch and self.robot_map_epoch >= 0:
+                exploration = getattr(self.bridge, "exploration", None)
+                if exploration is not None:
+                    exploration.stop()
+                self.bridge.cancel_goal()
+                self.bridge.drive(0.0, 0.0)
+                self.bridge._display_anchor = None
+                self.value = None
+                self.source_reset_stamp_ns = None
+                self._discard_map_uploads()
+            self.robot_map_epoch = epoch
+
     def receive(self, message):
         try:
             if len(message.data) > 32768:
                 return
             value = json.loads(message.data)
+            epoch = value["robot_map_epoch"]
+            if (
+                value["robot_id"] != self.bridge.id
+                or (
+                    self.expected_mission is not None
+                    and value["mission_id"] != self.expected_mission
+                )
+                or value["run_id"]
+                != robot_run_id(value["mission_id"], self.bridge.id, epoch)
+                or epoch < self.robot_map_epoch
+            ):
+                return
+            if self.expected_mission is None:
+                self.expected_mission = value["mission_id"]
+            if value.get("state") == "resetting":
+                self._advance_lifetime(epoch)
+                return
             if value["robot_id"] != self.bridge.id or value["navigation_frame"].lstrip(
                 "/"
             ) != self.bridge.map_frame.lstrip("/"):
@@ -266,6 +329,22 @@ class MappingAuthority:
             converted = (
                 snapshot_values(selected) if _INDEXED_FIELDS.issubset(value) else None
             )
+            cutoff = None
+            if epoch > 0:
+                stamp = value["source_reset_stamp"]
+                sec, nanosec = stamp["sec"], stamp["nanosec"]
+                if (
+                    type(sec) is not int
+                    or type(nanosec) is not int
+                    or sec < 0
+                    or not 0 <= nanosec < 10**9
+                ):
+                    return
+                cutoff = sec * 1_000_000_000 + nanosec
+            self._advance_lifetime(epoch)
+            if cutoff is not None and self.source_reset_stamp_ns is None:
+                self._discard_map_uploads()
+            self.source_reset_stamp_ns = cutoff
             if converted is not None and self.publisher is not None:
                 out = self.message_type()
                 out.component_id = value["component_id"]

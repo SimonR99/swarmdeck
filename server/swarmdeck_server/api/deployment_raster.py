@@ -200,6 +200,7 @@ class DeploymentRasterRefresher:
         from its live authority, for a verified component's transforms.
         Returns a small report (``status`` plus counts) for logs and tests.
         """
+        generation = map_routes.raster_generation()
         frames = frames or {}
         if not session_id:
             retired = map_routes.retire_server_scopes(keep=None)
@@ -283,9 +284,16 @@ class DeploymentRasterRefresher:
         except (OverflowError, ValueError) as exc:
             return self._skip(scope, key, str(exc), retired)
 
-        map_routes.publish_optimized_map(
-            scope, raster.meta, raster.cells, robots, transforms
+        published = map_routes.publish_optimized_map(
+            scope,
+            raster.meta,
+            raster.cells,
+            robots,
+            transforms,
+            expected_generation=generation,
         )
+        if not published:
+            return {"status": "superseded", "scope": scope, "retired": retired}
         self.built = key
         self.failed = None
         elapsed_ms = (time.perf_counter() - started) * 1000.0

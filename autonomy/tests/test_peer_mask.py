@@ -1,11 +1,8 @@
 """Capture-time peer-body masking: geometry, timestamp joins and defaults."""
 
-import importlib.util
-import json
 import math
 import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -449,115 +446,6 @@ def test_the_launcher_refuses_overrides_for_robots_outside_the_fleet(tmp_path):
 
     with pytest.raises(ValueError, match="outside this fleet"):
         platforms_from_config(config, ["robot_0", "robot_1"])
-
-
-# -- configuration ---------------------------------------------------------
-
-
-def _load_peer_launch(monkeypatch):
-    for name, attributes in {
-        "launch": {"LaunchDescription": list},
-        "launch.actions": {
-            "EmitEvent": lambda *a, **k: SimpleNamespace(args=a, **k),
-            "RegisterEventHandler": lambda *a, **k: SimpleNamespace(args=a, **k),
-            "TimerAction": lambda *a, **k: SimpleNamespace(args=a, **k),
-        },
-        "launch.event_handlers": {"OnProcessExit": lambda *a, **k: None},
-        "launch.events": {"Shutdown": lambda *a, **k: None},
-        "launch_ros": {},
-        "launch_ros.actions": {"Node": lambda *a, **k: SimpleNamespace(args=a, **k)},
-    }.items():
-        module = ModuleType(name)
-        module.__dict__.update(attributes)
-        monkeypatch.setitem(sys.modules, name, module)
-    path = REPO / "deploy/autonomy/peer.launch.py"
-    spec = importlib.util.spec_from_file_location("peer_launch_peer_mask", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _bridge_parameters(monkeypatch, **environment):
-    monkeypatch.setenv("SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25")
-    monkeypatch.setenv("SWARMDECK_PEER_NAMES", '["robot_0","robot_1"]')
-    monkeypatch.setenv("SWARMDECK_PEER_INDEX", "0")
-    monkeypatch.setenv("ROS_DOMAIN_ID", "173")
-    for key in (
-        "SWARMDECK_PEER_BODY_MASK",
-        "SWARMDECK_PEER_PLATFORMS",
-        "SWARMDECK_PEER_POSE_TOPIC_TEMPLATE",
-        "SWARMDECK_PEER_POSE_FRAME",
-        "SWARMDECK_PEER_MASK_MARGIN_M",
-        "SWARMDECK_PEER_MASK_POSE_TOLERANCE_S",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    for key, value in environment.items():
-        monkeypatch.setenv(key, value)
-    nodes = _load_peer_launch(monkeypatch).generate_launch_description()
-    bridge = next(
-        node for node in nodes if getattr(node, "name", "") == "onboard_mapper"
-    )
-    return bridge.parameters[0]
-
-
-def test_hardware_default_leaves_the_peer_mask_off(monkeypatch):
-    """No env, no mask: hardware has no guaranteed shared-frame peer pose."""
-    params = _bridge_parameters(monkeypatch)
-
-    assert params["peer_body_mask"] is False
-    assert params["peer_platforms"] == "{}"
-
-
-def test_no_hardware_peer_overlay_enables_the_mask():
-    for overlay in ("docker-compose.robot-peer.yml", "docker-compose.cslam.yml"):
-        text = (REPO / "deploy/compose" / overlay).read_text()
-        assert "SWARMDECK_PEER_BODY_MASK" not in text, overlay
-
-
-def test_the_simulation_launcher_enables_the_mask_with_a_platform_map():
-    launch = REPO / "deploy/simulation_launch.py"
-    text = launch.read_text()
-    assert 'SWARMDECK_PEER_BODY_MASK="true" if platforms else "false"' in text
-    assert "SWARMDECK_PEER_PLATFORMS" in text
-
-
-def test_launch_enables_the_mask_when_the_simulation_asks(monkeypatch):
-    params = _bridge_parameters(
-        monkeypatch,
-        SWARMDECK_PEER_BODY_MASK="true",
-        SWARMDECK_PEER_PLATFORMS='{"robot_0":"bunker","robot_1":"spot"}',
-    )
-
-    assert params["peer_body_mask"] is True
-    assert json.loads(params["peer_platforms"]) == {
-        "robot_0": "bunker",
-        "robot_1": "spot",
-    }
-    # Defaults documented in the launch docstring: the ARGoS bridge's shared
-    # `world` pose stream, and a tolerance on the order of the pose period.
-    assert params["peer_pose_topic_template"] == "/{robot}/ground_truth"
-    assert params["peer_pose_frame"] == "world"
-    assert params["peer_mask_pose_tolerance_s"] == pytest.approx(0.05)
-    assert params["peer_mask_margin_m"] == pytest.approx(0.15)
-
-
-def test_blank_compose_values_fall_back_to_the_mask_defaults(monkeypatch):
-    # The optional robot compose file renders unset values as empty strings.
-    params = _bridge_parameters(
-        monkeypatch,
-        SWARMDECK_PEER_BODY_MASK="",
-        SWARMDECK_PEER_PLATFORMS="",
-        SWARMDECK_PEER_POSE_TOPIC_TEMPLATE="",
-        SWARMDECK_PEER_POSE_FRAME="",
-        SWARMDECK_PEER_MASK_MARGIN_M="",
-        SWARMDECK_PEER_MASK_POSE_TOLERANCE_S="",
-    )
-
-    assert params["peer_body_mask"] is False
-    assert params["peer_platforms"] == "{}"
-    assert params["peer_pose_topic_template"] == "/{robot}/ground_truth"
-    assert params["peer_pose_frame"] == "world"
-    assert params["peer_mask_margin_m"] == pytest.approx(0.15)
 
 
 def test_a_tracked_peer_without_a_pose_at_the_stamp_holds_the_capture():

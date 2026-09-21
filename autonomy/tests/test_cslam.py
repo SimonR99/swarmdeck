@@ -39,6 +39,9 @@ def result(mission, clock, x, yaw_deg=0.0, optimizer=0):
     return NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0],
+        participant_robot_ids=[0],
         solution_clock=clock,
         optimizer_robot_id=optimizer,
         origin_robot_id=0,
@@ -95,6 +98,9 @@ def test_peer_correction_reuses_geometry_and_rejects_old_results(tmp_path):
     msg = NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0, 0],
+        participant_robot_ids=[0, 1],
         solution_clock=2,
         optimizer_robot_id=0,
         origin_robot_id=0,
@@ -138,6 +144,10 @@ def test_unanchored_solution_and_missing_initial_keyframe_fail_closed(tmp_path):
     msg = NS(
         success=True,
         mission_id=core.mission_id,
+        map_epoch=0,
+        robot_map_epochs=[0],
+        participant_robot_ids=[0],
+        origin_robot_id=0,
         solution_clock=1,
         optimizer_robot_id=0,
         anchor_estimates=[],
@@ -169,6 +179,9 @@ def test_identical_solver_results_do_not_rename_the_component_frame(tmp_path):
     msg = NS(
         success=True,
         mission_id=core.mission_id,
+        map_epoch=0,
+        robot_map_epochs=[0],
+        participant_robot_ids=[0],
         solution_clock=1,
         optimizer_robot_id=0,
         origin_robot_id=0,
@@ -258,7 +271,7 @@ def test_raw_simulation_capture_is_explicitly_paired_to_keyframe(tmp_path):
         10,
         10,
         CaptureClock.ROS_SIM_TIME,
-        mission,
+        core.run_id,
         True,
         source_contract="argos.photorealistic_lidar.hit_endpoints.single_tick.v1",
     )
@@ -475,6 +488,9 @@ def test_a_merge_is_adopted_inside_the_interval(tmp_path):
     own = NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0, 0],
+        participant_robot_ids=[1],
         solution_clock=1,
         optimizer_robot_id=1,
         origin_robot_id=1,
@@ -490,6 +506,9 @@ def test_a_merge_is_adopted_inside_the_interval(tmp_path):
     merged = NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0, 0],
+        participant_robot_ids=[0, 1],
         solution_clock=2,
         optimizer_robot_id=0,
         origin_robot_id=0,
@@ -538,6 +557,9 @@ def test_frame_history_records_the_frame_in_effect_at_each_revision(tmp_path):
     msg = NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0, 0],
+        participant_robot_ids=[0, 1],
         solution_clock=2,
         optimizer_robot_id=0,
         origin_robot_id=0,

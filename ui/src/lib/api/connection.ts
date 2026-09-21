@@ -6,7 +6,7 @@ import { settings } from '$lib/stores/settings.svelte';
 import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { MockFleet } from './mock';
-import { fetchJsonWithTimeout, resetRequestId } from './resetHttp';
+import { fetchJsonWithTimeout, resetRequestId, resetRobotMap } from './resetHttp';
 
 /**
  * Single connection to the backend. The local simulator is opt-in with
@@ -176,6 +176,9 @@ function dispatch(msg: ServerMessage) {
     case 'costmap_clear':
       mapStore.clearCostmaps(msg.robot_id);
       break;
+    case 'robot_map_reset':
+      mapStore.applyRobotMapReset(msg.robot_id, msg.mission_id, msg.map_epoch);
+      break;
     case 'detection':
       session.addDetection(msg.detection);
       break;
@@ -341,10 +344,8 @@ export const actions = {
     sendAction({ type: 'report_target', robot_id: robotId, payload: p });
   },
   async resetMap(robotId?: string) {
-    const endpoint = robotId
-      ? `/api/map/reset/${encodeURIComponent(robotId)}`
-      : '/api/map/reset';
-    const response = await fetch(endpoint, { method: 'POST' });
+    if (robotId) return resetRobotMap(robotId);
+    const response = await fetch('/api/map/reset', { method: 'POST' });
     const result = (await response.json()) as { error?: string; robots?: string[] };
     if (!response.ok) throw new Error(result.error ?? `map reset ${response.status}`);
     return result;

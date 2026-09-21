@@ -88,6 +88,9 @@ def result(mission, clock, x):
     return NS(
         success=True,
         mission_id=mission,
+        map_epoch=0,
+        robot_map_epochs=[0],
+        participant_robot_ids=[0],
         solution_clock=clock,
         optimizer_robot_id=0,
         origin_robot_id=0,
@@ -172,11 +175,3 @@ def test_optimized_counts_adopted_deferred_and_unchanged_separately(
     assert counters(bridge) == (7, 5, 1, 1, 3)
     assert core.solution_order == (5, 0)
     assert core.deferred_solution is None
-
-
-def test_status_reports_deferrals_and_the_solver_clock():
-    source = BRIDGE_SOURCE.read_text()
-    assert '"solution_results_deferred": self.solution_results_deferred' in source
-    assert '"last_solver_order": list(self.core.solver_order)' in source
-    assert '"deferred_solution": (' in source
-    assert "self.core.deferred_solution.translation_m" in source

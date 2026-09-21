@@ -17,7 +17,7 @@ import json
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -40,6 +40,11 @@ from .mapping import (
     XYZRGBA_F32_U8_ENCODING,
     decode_xyz_f32,
     decode_xyzrgba_f32_u8,
+)
+from .map_epochs import (
+    assert_map_epoch_dependencies,
+    read_map_epoch,
+    snapshot_epoch_dependencies,
 )
 
 
@@ -171,6 +176,7 @@ class IndexedGrid:
     columns: Mapping[tuple[int, int], tuple[float, ...]]
     resolution_m: float
     point_count: int
+    robot_map_epochs: Mapping[str, int] = field(default_factory=dict)
 
     def refreshed(
         self, *, source_stamp_ns: int, received_monotonic_ns: int
@@ -188,6 +194,7 @@ class IndexedGrid:
             "columns",
             "resolution_m",
             "point_count",
+            "robot_map_epochs",
         ):
             object.__setattr__(result, name, getattr(self, name))
         object.__setattr__(result, "source_stamp_ns", source_stamp_ns)
@@ -229,6 +236,12 @@ class IndexedGrid:
         object.__setattr__(self, "occupied", occupied)
         object.__setattr__(self, "free", free)
         object.__setattr__(self, "columns", MappingProxyType(columns))
+        epochs = dict(self.robot_map_epochs)
+        for robot, epoch in epochs.items():
+            if not isinstance(robot, str) or not robot:
+                raise ValueError("map dependency robot must be nonempty")
+            _strict_uint(epoch, "robot map epoch")
+        object.__setattr__(self, "robot_map_epochs", MappingProxyType(epochs))
 
 
 ChunkLoader = Callable[[str], bytes]
@@ -334,6 +347,7 @@ class IndexedMapView:
         max_roughness_m: float = 0.08,
         superseded_keep: int = 2,
         superseded_grace_ns: int = 15_000_000_000,
+        dependency_validator: Callable[[Mapping[str, int]], None] | None = None,
     ):
         positive = {
             "resolution_m": resolution_m,
@@ -369,6 +383,7 @@ class IndexedMapView:
         self.superseded_grace_ns = _strict_uint(
             superseded_grace_ns, "superseded_grace_ns"
         )
+        self._dependency_validator = dependency_validator
         self._lock = threading.RLock()
         self._chunk_cache: dict[str, np.ndarray] = {}
         self._index: IndexedGrid | None = None
@@ -449,7 +464,10 @@ class IndexedMapView:
         with self._lock:
             current = self._index
             if current is not None and current.key == grid.key:
-                if current.manifest_digest != grid.manifest_digest:
+                if (
+                    current.manifest_digest != grid.manifest_digest
+                    or current.robot_map_epochs != grid.robot_map_epochs
+                ):
                     self._unavailable_key = grid.key
                     self._unavailable_detail = (
                         "snapshot key was reused with different map content"
@@ -492,13 +510,13 @@ class IndexedMapView:
         if current is not None:
             self._superseded.append((current, now))
 
-    def _retained(self, key: SnapshotKey, now: int) -> IndexedGrid | None:
-        """The retained index for ``key`` while its grace lasts. Under the lock."""
+    def _retained(self, key: SnapshotKey, now: int) -> tuple[IndexedGrid, int] | None:
+        """Return an index and its superseding time while its grace lasts."""
 
         for grid, superseded_at in self._superseded:
             if grid.key == key:
                 if now - superseded_at <= self.superseded_grace_ns:
-                    return grid
+                    return grid, superseded_at
                 return None
         return None
 
@@ -521,6 +539,11 @@ class IndexedMapView:
             key, source_stamp_ns, submaps, tombstones = self._extract(
                 snapshot, component_id
             )
+            dependencies = (
+                {}
+                if isinstance(snapshot, MapSnapshot)
+                else snapshot_epoch_dependencies(snapshot)
+            )
         except Exception as exc:
             self.invalidate(str(exc))
             raise
@@ -534,7 +557,10 @@ class IndexedMapView:
             raise ValueError("received_monotonic_ns must be a non-negative integer")
         with self._lock:
             if self._index is not None and self._index.key == key:
-                if self._index.manifest_digest != manifest_digest:
+                if (
+                    self._index.manifest_digest != manifest_digest
+                    or self._index.robot_map_epochs != dependencies
+                ):
                     self._unavailable_key = key
                     self._unavailable_detail = (
                         "snapshot key was reused with different map content"
@@ -558,6 +584,7 @@ class IndexedMapView:
                 submaps,
                 chunk_loader,
                 received,
+                dependencies,
             )
         except Exception as exc:
             with self._lock:
@@ -588,7 +615,7 @@ class IndexedMapView:
                 QueryStatus.UNAVAILABLE, unavailable_key, detail=unavailable_detail
             )
         if retained is not None:
-            index = retained
+            index = retained[0]
         elif unavailable_key is not None:
             return QueryResult(
                 QueryStatus.STALE,
@@ -612,17 +639,22 @@ class IndexedMapView:
                 index.key,
                 detail="source stamp does not match indexed snapshot",
             )
-        # The coherent-read age proves the current index is still being
-        # refreshed. A retained index is not refreshed any more; its bound is
-        # the time it was superseded plus the grace, checked above.
-        if retained is None and request.max_snapshot_age_ns is not None:
-            age = max(0, now - index.received_monotonic_ns)
+        # Grace extends a predecessor that was still live when superseded; it
+        # must not revive one that expired while a successor was pending.
+        # Freeze the retained index's coherent-read age at supersession, then
+        # let the separately checked grace bound its remaining service.
+        if request.max_snapshot_age_ns is not None:
+            age_at = now if retained is None else retained[1]
+            age = max(0, age_at - index.received_monotonic_ns)
             if age > request.max_snapshot_age_ns:
                 return QueryResult(
                     QueryStatus.UNAVAILABLE,
                     index.key,
                     detail="indexed snapshot exceeded coherent-read age",
                 )
+        dependency_failure = self._dependency_failure(index)
+        if dependency_failure is not None:
+            return dependency_failure
         if len(request.samples) > self.max_samples:
             return QueryResult(
                 QueryStatus.UNAVAILABLE, index.key, detail="sample budget exceeded"
@@ -765,6 +797,9 @@ class IndexedMapView:
                 drop.extend([False] * remaining)
                 break
 
+        dependency_failure = self._dependency_failure(index)
+        if dependency_failure is not None:
+            return dependency_failure
         return QueryResult(
             QueryStatus.OK,
             index.key,
@@ -775,6 +810,15 @@ class IndexedMapView:
             tuple(step),
             tuple(drop),
         )
+
+    def _dependency_failure(self, index: IndexedGrid) -> QueryResult | None:
+        if self._dependency_validator is None:
+            return None
+        try:
+            self._dependency_validator(index.robot_map_epochs)
+        except (OSError, ValueError) as exc:
+            return QueryResult(QueryStatus.UNAVAILABLE, index.key, detail=str(exc))
+        return None
 
     def _terrain(
         self, index: IndexedGrid, sample: np.ndarray, half_body: np.ndarray
@@ -832,6 +876,7 @@ class IndexedMapView:
         submaps: tuple[_SubmapInput, ...],
         loader: ChunkLoader,
         received: int,
+        dependencies: Mapping[str, int],
     ) -> IndexedGrid:
         started = time.monotonic()
         occupied: set[tuple[int, int, int]] = set()
@@ -942,6 +987,7 @@ class IndexedMapView:
             immutable_columns,
             resolution,
             point_count,
+            dependencies,
         )
 
     @staticmethod
@@ -1192,6 +1238,12 @@ class SnapshotDirectorySource:
         value = json.loads(raw, parse_constant=reject_constant)
         if not isinstance(value, dict):
             raise ValueError("snapshot root must be an object")
+        epoch = read_map_epoch(self.peer_root)
+        if epoch is not None and value.get("run_id") != epoch["run_id"]:
+            raise ValueError("snapshot belongs to another robot map lifetime")
+        assert_map_epoch_dependencies(
+            self.peer_root, snapshot_epoch_dependencies(value)
+        )
         return value, raw
 
     def get_chunk(self, digest: str) -> bytes:

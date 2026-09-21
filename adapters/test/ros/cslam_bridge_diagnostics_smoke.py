@@ -39,11 +39,28 @@ def result(mission: str, clock: int, x: float):
     return NS(
         success=True,
         mission_id=mission,
+        publisher_robot_id=0,
+        map_epoch=4,
+        robot_map_epochs=[4, 0, 0],
+        participant_robot_ids=[0],
         solution_clock=clock,
         optimizer_robot_id=0,
         origin_robot_id=0,
         estimates=[value(0, 0, x)],
         anchor_estimates=[value(0, 0, x)],
+    )
+
+
+def closure(mission: str, first: int, second: int, success: bool):
+    epochs = [4, 0, 0]
+    return NS(
+        mission_id=mission,
+        publisher_robot_id=first,
+        map_epoch=epochs[first],
+        robot_map_epochs=epochs,
+        robot0_id=first,
+        robot1_id=second,
+        success=success,
     )
 
 
@@ -224,8 +241,9 @@ def main() -> None:
             "robot_0",
             0,
             mission,
-            {0: "robot_0"},
+            {0: "robot_0", 1: "r1", 2: "r2"},
             clock=lambda: now[0],
+            map_epoch=4,
         )
         core.capture(0, 1, IDENTITY_SE3, [[1.0, 0.0, 0.0]])
         bridge = NS(
@@ -241,12 +259,11 @@ def main() -> None:
             closures_by_peer={},
         )
 
-        Bridge.inter_robot_closure(bridge, NS(robot0_id=0, robot1_id=1, success=False))
-        assert bridge.closure_candidates == 0  # this single-peer bridge is uninvolved
-        core.robot_names[1] = "r1"
-        Bridge.inter_robot_closure(bridge, NS(robot0_id=0, robot1_id=1, success=False))
-        Bridge.inter_robot_closure(bridge, NS(robot0_id=1, robot1_id=0, success=True))
-        Bridge.inter_robot_closure(bridge, NS(robot0_id=1, robot1_id=2, success=True))
+        Bridge.inter_robot_closure(bridge, closure(mission, 0, 3, False))
+        assert bridge.closure_candidates == 0  # unknown robot is outside this fleet
+        Bridge.inter_robot_closure(bridge, closure(mission, 0, 1, False))
+        Bridge.inter_robot_closure(bridge, closure(mission, 1, 0, True))
+        Bridge.inter_robot_closure(bridge, closure(mission, 1, 2, True))
         assert bridge.closure_candidates == 2
         assert bridge.rejected_closures == 1
         assert bridge.verified_closures == 1

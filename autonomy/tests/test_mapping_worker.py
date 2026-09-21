@@ -1190,3 +1190,38 @@ def test_cli_parses_parallel_peers_flag_and_environment_default(
 
     with pytest.raises(ValueError, match="parallel_peers"):
         MolaWorker(Path("/maps"), mode="oneshot", parallel_peers=0)
+
+
+def test_reset_during_native_build_cannot_publish_retired_geometry(tmp_path):
+    from autonomy.map_epochs import claim_map_epoch, read_map_epoch, write_peer_epochs
+
+    mission = "00000000-0000-0000-0000-000000000001"
+    claim_map_epoch(tmp_path, mission, "robot_0")
+    peer = tmp_path / mission / "robot_0"
+    write_snapshot(peer, "a" * 64, [manifest("component:a", 1)])
+    snapshot = json.loads((peer / "snapshot.json").read_text())
+    snapshot["run_id"] = read_map_epoch(peer)["run_id"]
+    snapshot.update(
+        mission_id=mission,
+        robot_id="robot_0",
+        robot_map_epoch=0,
+        participant_robot_ids=["robot_0"],
+        robot_map_epochs={"robot_0": 0},
+    )
+    write_peer_epochs(peer, mission, {"robot_0": 0})
+    (peer / "snapshot.json").write_text(json.dumps(snapshot))
+    other = tmp_path / mission / "robot_1"
+    write_snapshot(other, "b" * 64, [manifest("component:b", 1)])
+    (other / "mola").mkdir()
+    (other / "mola/index.json").write_text("peer-product")
+
+    def resetting_import(command, _timeout):
+        Path(command[-1]).write_bytes(b"old native product")
+        claim_map_epoch(tmp_path, mission, "robot_0")
+
+    worker = MolaWorker(tmp_path, mode="oneshot", runner=resetting_import)
+    with pytest.raises(WorkerError, match="epoch advanced"):
+        worker.process_peer(peer)
+    assert not (peer / "mola/index.json").exists()
+    assert not (peer / "mola/source.json").exists()
+    assert (other / "mola/index.json").read_text() == "peer-product"

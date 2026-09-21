@@ -7,19 +7,14 @@ FROM ros:jazzy-ros-base AS mapping-contracts
 SHELL ["/bin/bash", "-c"]
 
 ARG MOLA_VERSION=2.9.0
-# Cache anchor, not the pin. The ROS apt repository no longer serves MOLA
-# 2.9.0 (only 3.2.0 remains), so the apt layer below can only be reused from
-# Docker's cache, and BuildKit keys that layer on every ARG declared above
-# it. This declaration reproduces the scope the cached layer was built with;
-# the real MGG pin is declared again just before its use. Changing this value
-# forces a fresh apt install, which fails until MOLA is upgraded or mirrored.
-ARG MGG_REV=902e868b1d7ec70be8ccfd0351b0d0a94e07c2ca
+# The signed June snapshot retains the qualified MOLA 2.9 packages. Never
+# depend on a historical Docker apt layer or mix them with current ROS packages.
+COPY deploy/docker/use-ros-snapshot.sh deploy/docker/ros-snapshot-key.asc /tmp/
+RUN bash /tmp/use-ros-snapshot.sh
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CMAKE_BUILD_PARALLEL_LEVEL=2
 
-# MOLA packages come from the ROS Jazzy repository already configured by the
-# base image. The version prefix prevents an unnoticed major/minor API update;
-# the Debian release suffix may change for a rebuild of the same upstream tag.
+# All ROS dependencies resolve from the same dated, authenticated repository.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git python3-colcon-common-extensions python3-numpy \
       libssl-dev nlohmann-json3-dev \
@@ -32,9 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Build only MGG's small generated wire-contract package. The mapping runtime
 # does not build or link the planner itself.
-# Declared just before its use: an ARG invalidates the cache of every RUN
-# that follows it, and the apt layers above must stay cached because the ROS
-# repository no longer serves the pinned MOLA release.
+# Keep the planner pin downstream of the independent ROS dependency layer.
 ARG MGG_REV=7004cd47c9197a44ab89d4ee1d7023418c957141
 COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
 RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
@@ -132,4 +125,5 @@ RUN --network=none source /opt/ros/jazzy/setup.bash \
     && timeout 45s env PYTHONPATH=/opt/swarmdeck:${PYTHONPATH} \
          python3 /usr/local/bin/mola-ros-query-smoke.py
 
+ENV PYTHONPATH=/opt/swarmdeck
 CMD ["bash"]

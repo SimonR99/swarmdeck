@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from adapters.peer_coordination import PeerCoordinator
 from adapters.exploration import PlannerPath, PlannerPose
+from autonomy.map_epochs import robot_run_id
 
 
 def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
@@ -44,6 +45,8 @@ def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
         return {
             "robot_id": "r0",
             "mission_id": mission,
+            "robot_map_epoch": 0,
+            "run_id": robot_run_id(mission, "r0", 0),
             "participants": ["r0"],
             "component_id": "component:test",
             "solution_order": [order, 0],
@@ -121,9 +124,12 @@ def test_authority_freshness_path_generation_and_correction(monkeypatch):
         "map", 100, (PlannerPose(0, 0, 0, 0, 0, 0, 1), PlannerPose(5, 0, 0, 0, 0, 0, 1))
     )
     assert coordinator.reserve(plan, 1) == "pending"
+    mission = str(uuid.uuid4())
     authority = {
         "robot_id": "r0",
-        "mission_id": str(uuid.uuid4()),
+        "mission_id": mission,
+        "robot_map_epoch": 0,
+        "run_id": robot_run_id(mission, "r0", 0),
         "participants": ["r0", "r1"],
         "component_id": "component:test",
         "solution_order": [1, 0],
@@ -257,6 +263,8 @@ def test_reordered_authority_preserves_newer_reservation_and_freshness(monkeypat
         return {
             "robot_id": "r0",
             "mission_id": mission,
+            "robot_map_epoch": 0,
+            "run_id": robot_run_id(mission, "r0", 0),
             "participants": ["r0", "r1"],
             "component_id": "component:test",
             "solution_order": list(order),
@@ -372,6 +380,8 @@ def test_stale_authority_and_report_do_not_create_fleet_completion(monkeypatch):
         return {
             "robot_id": "r0",
             "mission_id": mission,
+            "robot_map_epoch": 0,
+            "run_id": robot_run_id(mission, "r0", 0),
             "participants": ["r0", "r1"],
             "component_id": component,
             "solution_order": list(order),
@@ -441,6 +451,8 @@ def test_stale_lease_retains_and_validates_one_plan_authority_binding(monkeypatc
         return {
             "robot_id": "r0",
             "mission_id": mission,
+            "robot_map_epoch": 0,
+            "run_id": robot_run_id(mission, "r0", 0),
             "participants": ["r0"],
             "component_id": component,
             "solution_order": [order, 0],
@@ -559,6 +571,8 @@ def test_surveyed_start_poses_arbitrate_between_separate_components(monkeypatch)
                     {
                         "robot_id": robot,
                         "mission_id": mission,
+                        "robot_map_epoch": 0,
+                        "run_id": robot_run_id(mission, robot, 0),
                         "participants": ["r0", "r1"],
                         # Each robot holds its own map component.
                         "component_id": f"component:{robot}",
