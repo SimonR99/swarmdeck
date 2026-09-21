@@ -60,6 +60,12 @@ def robot_nodes(
         # retries an empty cycle with a backoff, so three cycles reach the
         # same decision in seconds instead of a minute of standing still.
         "auto_global_planner_low_gain_rounds": 3,
+        # The keyframe map carves free space at keyframes only, so a parked
+        # robot's body volume is mostly unobserved until it moves; admit
+        # lattice cells over mapped ground whose body volume is partly
+        # unknown (known occupied volume still rejects), as the qualified
+        # simulation policy did before the ros2 port.
+        "allow_unknown_lattice_body": sim_time,
     }
     overrides.update(planner_overrides or {})
     overrides.update(map_backend_parameters(robot))

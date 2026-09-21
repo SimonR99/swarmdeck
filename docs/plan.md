@@ -114,6 +114,15 @@ Terrain (step, inclination, clearance, ground support) is judged by
 built; there is no second validation of a finished route against another
 decode of the same product.
 
+Measured on Benchbot (Bistro, four robots, drift odometry) on 2026-09-21
+with the port at `13c2236`: robot_0 drove 43.6 m in 180 s of Explore on 13
+consecutive whole lattice paths of 4.8 to 11.0 m, each accepted and executed
+(the fork's cycles were half rejected on a snapshot race and returned 6 m
+lattice-boundary paths at best); the fleet moved 43.6 / 26.0 / 11.1 / 28.9 m.
+Parked after the trial the whole stack takes 2.8 cores against 13.2 before
+(duck detector 1.0, ARGoS 0.8, sim bridge and adapter 0.3, MGG 0.15, each
+Swarm-SLAM peer 0.13, mapping 0.0).
+
 ## Invariants
 
 These rules are non-negotiable. A failing trial is not a reason to weaken one.
