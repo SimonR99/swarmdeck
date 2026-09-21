@@ -34,7 +34,7 @@ def test_protocol_remains_cross_uid_accessible_under_restrictive_umask(tmp_path,
                 root,
                 tmp_path / "deployment.env",
                 [],
-                ["mgg", "mapping", "mapping-query", "peer0"],
+                ["mgg", "mapping", "peer0"],
                 robot_ids=["robot_0"],
             )
         else:
@@ -168,7 +168,7 @@ def deployment(tmp_path, monkeypatch):
             root,
             env,
             ["docker", "compose"],
-            ["sim", "mgg", "mapping", "mapping-query", "peer0", "peer1", "peer2"],
+            ["sim", "mgg", "mapping", "peer0", "peer1", "peer2"],
             "http://server",
             robot_ids=names,
         )

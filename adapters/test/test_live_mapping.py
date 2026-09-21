@@ -266,29 +266,6 @@ def test_rolling_home_keeps_global_route_while_local_chunk_advances():
     assert second["planned_path"] == second["local_planned_path"]
 
 
-def test_rolling_home_hides_completed_local_chunk_while_refining():
-    robot = stable_route_robot()
-    global_plan = robot._follow_path_display[1]
-    robot.objective_planner = SimpleNamespace(
-        decorate_state=lambda state: {
-            **state,
-            "nav_status": "active",
-            "objective_continuation": {
-                "objective": "return_home",
-                "phase": "planning",
-            },
-        },
-        global_display_plan=lambda: global_plan,
-    )
-    robot.planned_path = [{"x": 99, "y": 99}]
-
-    result = live_state(robot)
-
-    assert result["planned_path"] == []
-    assert result["local_planned_path"] == []
-    assert result["global_planned_path"][-1] == dict(x=12, y=0, z=0)
-
-
 def test_stable_route_has_fixed_component_geometry_across_rotating_map_gauge():
     robot = stable_route_robot()
 

@@ -171,7 +171,6 @@ async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> 
         robot.live_mapping = None
         robot.peer_slam = None
         robot.navigation_ready = False
-        robot.objective_continuation = None
         robot.goal = None
         robot.global_planned_path = []
         robot.local_planned_path = []

@@ -302,6 +302,11 @@ class RobotInterface:
         self.last_scan_tick = -1
         self.last_camera_tick = -1
         self.last_odom_tick = -1
+        # A parked robot's raycast repeats byte for byte. The projections of
+        # the previous readings are kept so an identical frame only costs a
+        # comparison and the messages, which consumers still expect per tick.
+        self.last_scan_raw: Optional[bytes] = None
+        self.last_scan_products: Optional[tuple] = None
         self.pending_teleport: Optional[tuple] = None
 
         # RELIABLE for everything this node publishes, sensor streams included.
@@ -671,19 +676,53 @@ class ArgosBridge(Node):
             # with identical stamps, which is the zero interval that defeats
             # the turn-rate gate downstream.
             if not duplicate and usable_scan:
-                arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
-                hit_mask = arr["hit"] != 0
-                hits = int(np.count_nonzero(hit_mask))
-                hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
+                if (
+                    raw == robot.last_scan_raw
+                    and robot.last_scan_products is not None
+                    and robot.last_scan_products[0] == _max_range
+                ):
+                    _, hits, cloud_data, points_sha256, scan_ranges, prox_ranges = (
+                        robot.last_scan_products
+                    )
+                else:
+                    arr = np.frombuffer(raw, dtype=LIDAR_DTYPE)
+                    hit_mask = arr["hit"] != 0
+                    hits = int(np.count_nonzero(hit_mask))
+                    hit_pts = arr[hit_mask] if hits else np.empty(0, dtype=LIDAR_DTYPE)
+                    cloud_data = points_sha256 = None
+                    if hits:
+                        out = np.empty((hits, 4), dtype="<f4")
+                        out[:, 0] = hit_pts["x"]
+                        out[:, 1] = hit_pts["y"]
+                        out[:, 2] = hit_pts["z"]
+                        out[:, 3] = hit_pts["ring"]
+                        cloud_data = out.tobytes()
+                        points_sha256 = hashlib.sha256(
+                            np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
+                        ).hexdigest()
+                    scan_ranges = project_laserscan_slice(
+                        hit_pts, range_max=float(_max_range)
+                    ).tolist()
+                    prox_ranges = project_laserscan_proximity(
+                        hit_pts,
+                        robot.lidar_x,
+                        robot.lidar_z,
+                        robot.base_height,
+                        prox_min_height=robot.prox_min_height,
+                        prox_range_max=robot.prox_range_max,
+                    ).tolist()
+                    robot.last_scan_raw = raw
+                    robot.last_scan_products = (
+                        _max_range,
+                        hits,
+                        cloud_data,
+                        points_sha256,
+                        scan_ranges,
+                        prox_ranges,
+                    )
 
                 # 1. PointCloud2 (Fast-LIVO2 and 3D consumers)
                 if hits:
-                    out = np.empty((hits, 4), dtype="<f4")
-                    out[:, 0] = hit_pts["x"]
-                    out[:, 1] = hit_pts["y"]
-                    out[:, 2] = hit_pts["z"]
-                    out[:, 3] = hit_pts["ring"]
-
                     cloud = PointCloud2()
                     cloud.header.stamp = scan_stamp
                     cloud.header.frame_id = robot.frame_lidar
@@ -698,12 +737,9 @@ class ArgosBridge(Node):
                     cloud.point_step = 16
                     cloud.row_step = 16 * hits
                     cloud.is_dense = True
-                    cloud.data = out.tobytes()
+                    cloud.data = cloud_data
                     robot.pub_points.publish(cloud)
                     if scan_tick_valid:
-                        points_sha256 = hashlib.sha256(
-                            np.ascontiguousarray(out[:, :3], dtype="<f4").tobytes()
-                        ).hexdigest()
                         robot.pub_capture.publish(
                             String(
                                 data=json.dumps(
@@ -733,10 +769,7 @@ class ArgosBridge(Node):
                             )
                         )
 
-                # 2. Planar LaserScan (SLAM Toolbox: horizontal ring slice in sensor frame)
-                scan_ranges = project_laserscan_slice(
-                    hit_pts, range_max=float(_max_range)
-                )
+                # 2. Planar LaserScan (horizontal ring slice in sensor frame)
                 scan_msg = LaserScan()
                 scan_msg.header.stamp = scan_stamp
                 scan_msg.header.frame_id = robot.frame_lidar
@@ -747,18 +780,10 @@ class ArgosBridge(Node):
                 scan_msg.scan_time = float(SCAN_TIME)
                 scan_msg.range_min = float(SCAN_RANGE_MIN)
                 scan_msg.range_max = float(_max_range)
-                scan_msg.ranges = scan_ranges.tolist()
+                scan_msg.ranges = scan_ranges
                 robot.pub_scan.publish(scan_msg)
 
                 # 3. Proximity 2.5D LaserScan (Nav2 obstacle band in base_link)
-                prox_ranges = project_laserscan_proximity(
-                    hit_pts,
-                    robot.lidar_x,
-                    robot.lidar_z,
-                    robot.base_height,
-                    prox_min_height=robot.prox_min_height,
-                    prox_range_max=robot.prox_range_max,
-                )
                 prox_msg = LaserScan()
                 prox_msg.header.stamp = scan_stamp
                 prox_msg.header.frame_id = robot.frame_base
@@ -769,7 +794,7 @@ class ArgosBridge(Node):
                 prox_msg.scan_time = float(SCAN_TIME)
                 prox_msg.range_min = float(SCAN_RANGE_MIN)
                 prox_msg.range_max = float(robot.prox_range_max)
-                prox_msg.ranges = prox_ranges.tolist()
+                prox_msg.ranges = prox_ranges
                 robot.pub_prox.publish(prox_msg)
 
         # -- camera ------------------------------------------------------------

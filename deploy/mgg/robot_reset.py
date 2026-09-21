@@ -110,8 +110,7 @@ class SourceResetter:
 
 def verify(node, robot, mission, minimum, deadline):
     import rclpy
-    from geometry_msgs.msg import Point
-    from mgg_msgs.srv import PlanObjective, QueryMapBatch
+    from mgg_msgs.srv import PlanObjective
     from std_msgs.msg import String
 
     authority = {}
@@ -129,7 +128,6 @@ def verify(node, robot, mission, minimum, deadline):
         String, f"/{robot}/map_authority", receive, 5
     )
     planner = node.create_client(PlanObjective, f"/{robot}/mgg/plan_objective")
-    query = node.create_client(QueryMapBatch, f"/{robot}/mapping/query_batch")
     last_error = "waiting for a fresh product-backed authority and planner"
     try:
         while time.monotonic() < deadline:
@@ -156,37 +154,11 @@ def verify(node, robot, mission, minimum, deadline):
                     and planner.service_is_ready()
                 ):
                     continue
-                request = QueryMapBatch.Request()
-                request.component_id = authority["component_id"]
-                request.epoch = authority["map_epoch"]
-                request.graph_revision = authority["mapping_graph_revision"]
-                request.geometry_revision = authority["geometry_revision"]
-                stamp = authority["map_source_stamp"]
-                request.source_stamp.sec = stamp["sec"]
-                request.source_stamp.nanosec = stamp["nanosec"]
-                transform = authority["T_component_navigation"]
-                request.samples = [
-                    Point(
-                        x=float(transform[0][3]),
-                        y=float(transform[1][3]),
-                        z=float(transform[2][3]),
-                    )
-                ]
-                request.body_size.x = request.body_size.y = request.body_size.z = 0.1
-                request.max_step_m = request.max_drop_m = 0.15
-                request.stop_at_unknown = False
-                reply = call(node, query, request, min(deadline, time.monotonic() + 2))
-                if reply.status != QueryMapBatch.Response.OK:
-                    last_error = (
-                        f"fresh indexed product is not queryable: {reply.status}"
-                    )
-                    continue
                 return {"map_epoch": epoch["map_epoch"], "run_id": epoch["run_id"]}
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 last_error = str(exc)
         raise TimeoutError(last_error)
     finally:
-        node.destroy_client(query)
         node.destroy_client(planner)
         node.destroy_subscription(subscription)
 

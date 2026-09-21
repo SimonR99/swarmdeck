@@ -18,8 +18,7 @@ flowchart TB
   Capture --> Peer["Peer Swarm-SLAM<br/>verified component correction"]
   Peer --> Chunks["Revisioned geometry<br/>and immutable snapshots"]
   Chunks --> MOLA["Native MOLA<br/>persistent products"]
-  MOLA --> Query["Bounded indexed query"]
-  Query --> MGG["MGG graph + grid planner<br/>frame = robot/odom"]
+  MOLA --> MGG["MGG grid + graph planner<br/>frame = robot/odom"]
   MGG --> Nav2["Nav2 trajectory controller<br/>FollowPath + local costmap"]
   Nav2 --> Adapter["Robot adapter<br/>command/action output"]
   Chunks --> Replica["Server replica"]
@@ -27,10 +26,14 @@ flowchart TB
   Server <--> UI["Svelte UI"]
 ```
 
-The planning hierarchy is graph planner, then grid planner, then local
-trajectory planner and controller. Exploration and coordination influence
+The planning hierarchy is MGG's grid and graph planner, then the local
+trajectory controller. MGG builds a grid graph around the robot on its own
+map, scores the leaves by volumetric gain and hands the whole shortest path to
+the best leaf to the controller; when no leaf sees anything new it routes over
+its global graph to the best frontier and hands that whole route over
+(Varadharajan and Beltrame, RA-L 2025). Exploration and coordination influence
 planning objectives; collision, terrain feasibility and actuator limits remain
-hard constraints.
+hard constraints, enforced as edge admissibility while the graphs are built.
 
 ### Ownership
 
@@ -39,7 +42,7 @@ hard constraints.
 | Continuous local motion estimate | One selected odometry frontend per robot and session | `adapters/`, estimator containers |
 | Collaborative keyframe poses and component membership | Peer Swarm-SLAM solution adapter | `deploy/cslam/`, `deploy/autonomy/` |
 | Occupancy, surface geometry, map revisions | Native MOLA mapper | `swarmdeck_ros/src/swarmdeck_mapping/` |
-| Snapshot contracts, coordination, indexed map queries | Peer mapping layer | `autonomy/`, `deploy/autonomy/` |
+| Snapshot contracts and coordination | Peer mapping layer | `autonomy/`, `deploy/autonomy/` |
 | Robot feasibility | Shared traversal model, used by both planners and the controller | `deploy/mgg/` |
 | Exploration routes and navigation goals | MGG graph and grid planning | `deploy/mgg/` |
 | Actuator commands and cancellation | Onboard command arbiter in the adapter | `adapters/` |
@@ -50,17 +53,17 @@ hard constraints.
 Adapters capture points in a sensor frame and associate them with the pose at
 the capture timestamp. Local odometry and navigation frames stay robot-owned.
 Peer Swarm-SLAM can establish a verified component frame and correction. The
-same correction identity and map revision flow into the MOLA product and the
-indexed query. The MOLA product is self-described: the worker publishes
-`mola/source.json` (the exact `snapshot.json` bytes it built from) and then
-`mola/index.json`, whose `source_sha256` names those bytes, so a finished build
-is always published even when the bridge has already replaced `snapshot.json`.
-Readers (the indexed map server and MGG's `MolaMap`) verify that pair and never
-read `snapshot.json`. MGG plans in the configured robot navigation frame, Nav2
-handles local obstacle avoidance, and the adapter owns the final command
-boundary.
+same correction identity and map revision flow into the MOLA product. The MOLA
+product is self-described: the worker publishes `mola/source.json` (the exact
+`snapshot.json` bytes it built from) and then `mola/index.json`, whose
+`source_sha256` names those bytes, so a finished build is always published
+even when the bridge has already replaced `snapshot.json`. MGG's `MolaMap`
+verifies that pair and never reads `snapshot.json`; it is the only reader, and
+it confirms an unchanged product by stat of that pair rather than by reloading
+it. MGG plans in the configured robot navigation frame, Nav2 handles local
+obstacle avoidance, and the adapter owns the final command boundary.
 
-The indexed-map key a robot advertises on `/<robot>/map_authority` is always a
+The product key a robot advertises on `/<robot>/map_authority` is always a
 published product. The bridge reads the MOLA worker's `mola/index.json` with
 its `mola/source.json` (a coherent pair: a mismatch means a publication in
 progress and is retried; `snapshot.json` is never read) and advertises the
@@ -72,61 +75,44 @@ key on disk finds geometry placed with the transform the key carries. Revision
 increments alone are not frame changes (invariant 11), so routes keep executing
 across product transitions.
 
-MGG is built from the `swarmdeck` branch of
-[MGGPlanner](https://github.com/MISTLab/MGGPlanner), currently pinned at commit
-`7004cd47c9197a44ab89d4ee1d7023418c957141` (the 59 ported commits over
-upstream `902e868` plus the authority tilt tolerance, the loader coherence retry, visibility retirement, validated-prefix navigation, the MOLA loader that reads the self-described product and keeps a compatible predecessor in service while a successor is pending, sweeps that may leave a neighbour's disc, indexed queries that finish on their captured key, and refusal of a validated prefix that makes no progress), selected by `MGG_REV` in `deploy/docker/Dockerfile.mgg`. Planner
-motion corrections are applied from `deploy/patches/mgg-motion-reliability.patch`
-without changing this pin or the sibling upstream checkout. `ccda9ce` is a
-revert: on 2026-09-19 a full-map raster global stage, a separate drop limit
-with footprint asymmetry, breadcrumb skipping, empty-section refusal and
-Navigate/Return Home graph connectors were added, trialled on benchbot and
-rolled back the same day at the operator's verdict (robots driving into
-obstacles, nonsensical targets, redundant components); the tree is
-`0e189ed` again, plus `b7927ea`, which restores only the refusal of an
-empty section (a loop fix, not a terrain policy), and `7558a98`, which
-ports three mechanisms of the original `mggplanner/src/rrg.cpp` that the
-ROS 2 packaging had dropped, under their upstream names: every accepted
-exploration path is added to the global graph (`addRefPathToGraph`,
-rrg.cpp:4808), the local graph's frontier paths are clustered and added
-(`addFrontiers`, rrg.cpp:2397), and when no local leaf has gain the robot
-routes over the global graph to the best-gain global frontier
-(`runGlobalPlanner`, rrg.cpp:5559-5846) instead of reporting exploration
-complete; plus one terrain measurement margin (0.02 m,
-`footprint_step_measurement_tolerance_m`) applied wherever the step limit
-is compared, including the limit sent to the indexed query, so a 0.165 m
-Bistro curb passes the 0.15 m simulated step; and `0da45b3`, which raises
-the authority tilt the MOLA loader tolerates from 0.02 rad to 0.05 rad,
-because an inter-robot merge leaves a robot's optimized frame tilted by
-about a degree (robot_0 measured 1.174 degrees on 2026-09-20) and every plan
-of that robot was refused with "footprint cell grid unavailable"; and
-`7c6b11e`, which refuses a plan or continuation once the planner's
-odometry is older than `odometry_stale_s` (5 s), because the planner's
-state is its last odometry message and a plan from where the robot was
-is completed by the controller at once where the robot is (the
-suspected shape of the intermittent 2.5 Hz replan loop), and names the
-distance and the odometry age in the route-window refusal; `b39b801`,
-which never lets an older odometry message overwrite a newer state (the
-subscription is reentrant and every callback waits on the planner mutex);
-and `5e9f2d0`, which restores the two remaining roadmap mechanisms of the
-original `rrg.cpp`: the global graph expansion timer
-(`expandGlobalGraphTimerCallback`, rrg.cpp:2535-2672: every 0.5 s, up to
-0.1 s of sampling around clusters of unvisited global vertices, new
-collision-free vertices wired in with `expandGraph` and typed frontier by
-their gain) and the odometry ingestion of `timerCallback`
-(rrg.cpp:5247-5290: every 0.5 m the robot's state joins the graph wired to
-every reachable neighbour, every 1 m event E1 marks the roadmap within 3 m
-visited). A roadmap edge stops at unknown space as upstream had it, and a
-reference path that is not the lattice's own is projected to the common
-driving height before it enters the roadmap. `0406633` (as `5934234`, which logs each section) straightens explicit
-and global-frontier routes with the same shortcut exploration paths get
-(upstream's improveFreePath on every homing route, rrg.cpp:4164), so a
-return no longer retraces the wobble of the trail that built the roadmap.
-`7004cd4` refuses a section whose proxy stepped back onto the robot (every
-reach met measured terrain) instead of emitting it empty: that empty
-section, completed at once by the controller, was the 2.5 Hz replan loop.
-`deploy/docker/build-mgg-msgs.sh` builds only `mgg_msgs` from the same pin, so
-service type hashes match across images.
+MGG is built from the `ros2` branch of
+[MGGPlanner](https://github.com/MISTLab/MGGPlanner), pinned by `MGG_REV` in
+`deploy/docker/Dockerfile.mgg` (and in `Dockerfile.sim` and
+`Dockerfile.robot-ros2`, which build only `mgg_msgs` from the same pin through
+`deploy/docker/build-mgg-msgs.sh`, so service type hashes match across
+images). No patch is applied. The `swarmdeck` branch (last pin `7004cd4`)
+carried route windows, proxies, validated prefixes, continuation tokens, a 2D
+corridor re-planner and an indexed map query service; on 2026-09-21 the
+operator's verdict was that those had turned MGG's plans into breadcrumbs, and
+the paper-neutral infrastructure was re-ported selectively onto `ros2` (the
+MOLA map backend, the global graph mechanisms, PCI external execution) with
+the planner node rewritten around whole plans:
+
+- the exploration service returns the whole lattice path to the best-gain
+  leaf (rrg.cpp:4357 `getBestPath`), shortcut where the map vouches for the
+  straight segment and resampled at `path_interpolation_distance`; the
+  accepted path and the lattice's frontier clusters join the global graph
+  (`addRefPathToGraph`, `addFrontiers`);
+- without a frontier among the leaves for `auto_global_planner_low_gain_rounds`
+  cycles (3 in `deploy/mgg/robot.launch.py`; upstream's 15 assumed a 10 Hz
+  replan loop) the global planner ranks the global frontiers by Dijkstra
+  distance and gain (`searchGlobalFrontier`, rrg.cpp:5559) and returns the
+  whole route to the best one, which stays the target until the robot is
+  within `global_frontier_reach_m` (5 m) of it; no reachable frontier is
+  exploration complete, which PCI reports as `complete`;
+- `plan_objective` (Navigate, Return Home) returns the whole Dijkstra route
+  over the global graph to a vertex placed at the exact goal with checked
+  edges (Return Home: the root, the first odometry); an unreachable goal is
+  refused, never approached by a stub;
+- between cycles the roadmap grows as rrg.cpp:5247 and 2535 had it (odometry
+  every 0.5 m wired to every reachable neighbour, event E1 every metre, the
+  expansion timer around unvisited clusters), and both the expansion and the
+  MOLA heartbeat idle while their inputs are unchanged.
+
+Terrain (step, inclination, clearance, ground support) is judged by
+`GroundProjection` over `MolaMap`'s surface records while the graphs are
+built; there is no second validation of a finished route against another
+decode of the same product.
 
 ## Invariants
 
@@ -169,9 +155,9 @@ These rules are non-negotiable. A failing trial is not a reason to weaken one.
     stay inside adapters.
 15. Selecting a backend that has no valid product returns unavailable. There is
     no silent fallback to a coarser map, to raw clouds, or to a relabelled frame.
-16. A coarse voxel index cannot enforce a fine step limit. The exact surface
-    query is the safety gate; 20 cm voxel centres alone cannot enforce a 10 cm
-    platform step limit.
+16. A coarse voxel index cannot enforce a fine step limit. The product's
+    surface records, read by MGG's `MolaMap`, are the safety gate; 20 cm voxel
+    centres alone cannot enforce a 10 cm platform step limit.
 17. Simulation terrain step settings are 0.15 m for Bunker and Scout and 0.30 m
     for Spot, with a 0.25 m drop limit for Bunker and Scout (a platform drives
     down a kerb it could not climb). These are simulator parameters, not
@@ -246,13 +232,9 @@ Each item names its acceptance gate.
       is not deadline exhaustion.
 - [ ] **Fleet motion acceptance.** Gate: four-robot startup, Navigate and Home
       succeed against independent simulation truth; cancellation and map
-      corrections stop or replan correctly. The 2026-09-21 checked-in MGG patch
-      fixes unobserved-goal driving height, finds useful measured endpoints on
-      sparse partial corridors, resumes from the endpoint actually emitted,
-      and admits bounded, fully checked breadcrumb connectors under the same
-      qualified simulation-ground policy used for motion. It does not raise
-      step, drop, occupancy, geofence or provisional-distance limits.
-      Benchbot: one cycle passed 3 m Navigate for all four; the final cycle
+      corrections stop or replan correctly. The measurements below are from
+      the `swarmdeck` branch's sectioned routes and predate the `ros2` port;
+      they have to be repeated with whole routes. Benchbot: one cycle passed 3 m Navigate for all four; the final cycle
       passed R0/R2/R3 while R1 refused an over-bound provisional connector.
       Final 8 m road goals passed for R0/R1; Scout stopped after a measured
       0.581 m rise and Spot refused a measured 1.266–1.573 m drop.
@@ -283,14 +265,12 @@ Each item names its acceptance gate.
       unimplemented; `queryIndexedMap` refuses height refinement and prefix
       truncation whenever speed limits are present, which must be resolved
       first.
-- [x] **Cold-start Navigate beyond the first ground ring.** Validated-prefix
-      sections with a continuation (MGG `swarmdeck`), adapter no-progress bound
-      of three sections, scene-change keyframes for parked robots, paced
-      retries for a momentarily unavailable planning or indexed map, and an
-      index that keeps serving while the next product is pending. Measured
-      2026-09-17 from a fresh grouped start: 16 of 18 goals at 3 m and five
-      headings per robot arrived within 0.32 m; both refusals named a goal on a
-      0.30 m and a 0.67 m rise.
+- [ ] **Cold-start Navigate beyond the first ground ring.** Was measured on
+      the `swarmdeck` branch's validated-prefix sections (2026-09-17: 16 of 18
+      goals at 3 m within 0.32 m). Those sections are gone; on the `ros2` port
+      a goal beyond the mapped ground is refused until the roadmap reaches it.
+      Gate: re-measure with whole routes; scene-change keyframes for parked
+      robots stay.
 - [x] **Peers as live obstacles for the global route.** Done 2026-09-17: each
       robot reports its position in the surveyed deployment frame and its
       peers' planners hold a 0.7 m transient disc around it (MGG `004c517`);
@@ -353,14 +333,14 @@ Each item names its acceptance gate.
       verified against recorded data. Until then those paths stay occupied-only.
 - [ ] **Physical robot qualification.** Gate: per-platform sensor and TF
       validation, ARM images, calibration, bounded peer traffic, and low-speed
-      controller trials, followed by the strict indexed terrain gate.
+      controller trials, followed by the strict terrain gate.
 - [ ] **Per-robot network gateways.** Gate: packet captures show no DDS
       discovery on fleet links; required collaboration survives server and peer
       loss within measured traffic budgets.
 - [ ] **Long-duration map capacity.** Gate: measure when a long mission reaches
-      the indexed-map input bounds (1,000,000 points, 2,000,000 voxels,
-      4,000,000 ray steps, eight seconds of build time) and what the planner does
-      past them; exceeding a bound currently returns `UNAVAILABLE`.
+      the MOLA product bounds (`map.mola.max_voxels` 2,000,000, 256 MiB of
+      grid, `map.mola.max_load_ms`) and what the planner does past them;
+      exceeding a bound currently leaves the planner without a map.
 - [ ] **Gaussian reconstruction from real captures.** Gate: measured alignment,
       held-out image quality, memory, training and rendering budgets, correction
       replacement and cancellation.
@@ -381,7 +361,7 @@ Each item names its acceptance gate.
       Only the target's old geometry, descriptors, graph references, closures
       and pair-cap state are retired; unrelated peers keep their own maps,
       runs and fleet mission. Native messages, in-flight optimizer results,
-      replica uploads, indexed queries and moving commands are epoch-fenced.
+      replica uploads, MOLA products and moving commands are epoch-fenced.
       `KeyframeId.session_id` carries the robot run UUID; the replica envelope's
       `session_id` remains the fleet mission. Return Home uses the new run's
       initial keyframe at the reset location, unless a surveyed home is set.

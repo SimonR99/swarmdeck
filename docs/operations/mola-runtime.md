@@ -13,17 +13,14 @@ flowchart LR
   Geometry --> Worker["Supervised worker: atomic product index"]
   Geometry --> Grid["Native occupied/free voxels + terrain samples"]
   Grid --> Worker
-  Worker --> Provider["MolaDirectorySource"]
-  Provider --> Query["Shared terrain query → MGG"]
+  Worker --> MGG["MGG planner reads native product"]
   Geometry --> Module["SwarmDeckMapSource: MOLA framework module"]
   Module --> Consumers["MOLA MapSource subscribers"]
 ```
 
 The native planner product adds occupied/free voxels and terrain samples to the
-point-geometry layer. Both the MOLA provider and the existing indexed provider
-use the same terrain-query implementation. In the simulation MOLA path, MGG
-reads this immutable native grid directly for graph/grid work, without an
-heights; strict queries and missing height evidence retain full voxel bounds.
+point-geometry layer. MGG reads this immutable native grid directly for
+graph/grid work, without an intermediate map-query process.
 Unknown cells remain unknown. The independent raw-cloud/depth mapper is disabled. The robot
 peer overlay remains hardware opt-in and keeps its planner-product defaults
 disabled until capture provenance is qualified. The read-only fleet component
@@ -130,29 +127,19 @@ captures neither carve nor retire. The `SDMGRID1` metadata carries
 must report zero retirements. Neither `min_clearing_traversals` nor the
 tolerance is recorded in the metadata.
 
-## Planner map provider
+## Planner product
 
-Enable native planner products and select their query provider together:
+Enable native planner products:
 
 ```bash
 export SWARMDECK_MOLA_PLANNER_MAPS=true
-export SWARMDECK_PLANNER_MAP_PROVIDER=mola
 ```
 
-The simulation launcher and mapping overlay pass these settings by default.
-Recreate the mapping worker and query services after changing them. Simulation
-defaults are `true` and `mola`; the physical robot peer overlay remains
-`false` and `indexed` until its capture contract is qualified. Selecting `mola`
-without a valid product returns unavailable, with no fallback. The standalone
-options are worker `--planner-maps` and query server `--map-provider mola`.
+The native builder reads corrected MOLA keyframe poses and exports a bounded
+binary `SDMGRID1` product containing occupied voxels, observed-free voxels and
+sorted surface-height samples. MGG reads the coherent product directly; the
+worker owns publication and there is no separate query process.
 
-The native builder reads corrected MOLA keyframe poses and the same immutable
-MRPT point buffers held by the map. It exports a bounded binary `SDMGRID1` file
-containing occupied voxels, observed-free voxels, and sorted surface-height
-samples. Unknown space is absent from both voxel sets; occupied wins when
-observations overlap. The product preserves multiple surfaces per column.
-`IndexedMapView` supplies the existing ground, slope, roughness, step, drop,
-clearance, freshness and query-budget behavior.
 
 The worker publishes each `.sdpg` planner product alongside its `.metricmap`
 in one atomic index. Both outputs must succeed before native state commits.
@@ -294,74 +281,24 @@ PYTHONPATH=. python3 tests/deployment/mola_benchmark.py \
   --binary /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
 ```
 
-Measured correction latencies, memory samples and per-robot publication and
-query timings are in the [acceptance log](acceptance-log.md).
+Measured correction latencies, memory samples and per-robot publication timings
+are in the [acceptance log](acceptance-log.md).
 
 ### Planner-product validation
 
-The native planner and Python provider pass the captured-point acceptance fixture
-in 0.24 seconds across four publications. It checks measured free space before a
-wall, occupied endpoints, unknown space beyond, missing/partial provenance,
-steps, drops, stacked floors, translated/yaw-corrected rays, geometry replacement
-and retraction. The local autonomy suite passes 121 tests.
+The native planner and worker pass the captured-point acceptance fixture across
+four publications. It checks measured free space before a wall, occupied
+endpoints, unknown space beyond, missing/partial provenance, steps, drops,
+stacked floors, translated/yaw-corrected rays, geometry replacement and
+retraction. The image build runs the native worker checks automatically.
 
-The provider reuses a decoded grid when its full filesystem identity and
-publication record are unchanged; replacement or mutation triggers the bounded
-read and hash again. Queries read the published grid without filesystem access.
-
-The image build runs the synthetic gate automatically. It also starts the actual
-ROS query server and calls MGG's generated `QueryMapBatch` service, checking
-FREE/OCCUPIED/UNKNOWN, stale revisions and unavailable results after index
-corruption. This test uses loopback in ROS domain 197 with networking disabled. To replay another dataset,
-first copy its map root to a disposable writable directory, then run:
-
-```bash
-PYTHONPATH=. timeout 90s python3 tests/deployment/mola_planner_acceptance.py \
-  --binary /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import \
-  --maps-root /tmp/copied-peer-maps \
-  --mission-id <mission-uuid>
-```
-
-Replay writes MOLA products into that copy. It does not run ROS or send robot
-commands. Omit the last two options for the synthetic acceptance fixture.
-
-The normal simulation launcher selects native MOLA products and the `mola`
-query provider. Physical ROS 2 profiles enable the `peer_mapping` profile after
-their capture, calibration, and frame contracts are qualified:
-```bash
-export SWARMDECK_PLANNER_MAP_PROVIDER=mola
-export SWARMDECK_MOLA_PLANNER_MAPS=true
-export SWARMDECK_MISSION_ID='replace-with-canonical-mission-uuid'
-export SWARMDECK_MAPS_ROOT=/maps
-export SWARMDECK_MAP_QUERY_POLL_S=0.5
-export SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S=3
-```
-
-Each MGG planner reads exactly one peer root,
+The native worker writes MOLA products under each peer root. Each MGG planner
+reads exactly one peer root,
 `${SWARMDECK_MAPS_ROOT}/${SWARMDECK_MISSION_ID}/${ROBOT_ID}`. The mission must
 be a canonical UUID, the robot ID must match the launcher's simple identifier
-grammar, and the maps root must be absolute.
-
-The onboard compose overlay supplies `SWARMDECK_MAPS_ROOT=/maps` and mounts the
-shared `peer_maps` volume read-only in the MGG service. The mapping worker owns
-the writable side and must publish native planner products first, with
-`SWARMDECK_MOLA_PLANNER_MAPS=true`. The `SWARMDECK_PLANNER_MAP_PROVIDER=mola`
-setting selects the separate mapping query service and is required by the MGG
-launcher in this mode. The query service polls every 0.5 seconds and rejects
-snapshots older than 15 seconds by default (`SWARMDECK_MAP_QUERY_POLL_S` and
-`SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S`). It also keeps answering a snapshot
-key for `SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S` (15 seconds,
-`--superseded-grace-s`) after a newer product replaced it, from the retained
-index for that key (at most two per component), because MGG validates a route
-under the key it planned with a second or two earlier; a source invalidation
-drops those retained indexes with the current one.
-
-MOLA mode always configures `/<robot>/mapping/query_batch` for final corridor
-but its 20 cm voxel centers cannot resolve the simulation fleet's 15 cm step
-limit. The final query uses MOLA's exact surface heights and checks the entire
-route.
-A missing or rejecting query service prevents path dispatch; the direct backend
-must not silently fall back to quantized terrain checks.
+grammar, and the maps root must be absolute. MGG reads the coherent native
+product directly and waits for a complete publication when the worker is
+between generations.
 
 The launch sets `map.resolution=0.20` for this backend, overriding the legacy
 Bistro cloud-map value of 0.15 m. The loader checks that the SDMGRID metadata
@@ -371,7 +308,7 @@ but `cloud_enabled=false` disables raw cloud and depth subscriptions and the
 cloud publication timer. This prevents duplicate sensor-cloud ingestion while
 MGG reads the immutable peer snapshot.
 
-### Asynchronous snapshot and query contract
+### Asynchronous publication contract
 
 `MolaMap` queues the newest authority request on a worker thread. Planner
 callbacks never decode the snapshot or grid. The worker reads
@@ -381,23 +318,9 @@ stamp identity and SHA-256 chain (`sha256(source.json)` must equal the index's
 `source_sha256`; a disagreeing pair is mid-replacement and is retried), then
 atomically publishes an immutable tree. It never reads the bridge's
 `snapshot.json`.
-A request for another component or epoch, or with a moved authority
-transform, retracts the prior tree while the replacement loads. A compatible
-successor (a newer revision of the same component under the same transform)
-keeps the prior tree in service until its product is decoded, and if the product
-on disk still carries the previous revision when the load budget runs out the
-prior tree stays in service with its validity clock refreshed
-(`retainedPredecessorCount()`); an older load cannot publish over a newer
-request.
-
-That native loader clock is not an extension of indexed-query authorization.
-The Python product reader retains a compatible `PublicationPending` predecessor
-only under its original coherent-read deadline; corrupt or incompatible
-artifacts are not retained. The index server checks durable epoch identity for
-the owner and every actual geometry participant before and after a query.
-A captured key cannot authorize a retired robot run, even while its bytes
-remain available. Adapter continuation retries preserve the existing token,
-deadline and authority fences rather than creating a fresh objective.
+A changed component, epoch or authority transform requires a matching product
+publication. Until that product is decoded, MGG reports planning unavailable;
+an older product never satisfies a newer identity.
 
 The product is ternary. Occupied voxels and qualified observed-free voxels are
 stored explicitly; unknown space is absent. Occupied wins if an observation
@@ -408,26 +331,18 @@ when the source carries the required first-return, deskew/not-required and
 single-capture provenance. Unqualified captures therefore produce an occupied-
 only product.
 
-The provider bounds both work and input size. Defaults are a 3 s snapshot TTL,
-2 s load deadline, 4 MiB each for the snapshot and index, a 256 MiB grid, and
-2,000,000 combined occupied/free voxels. The native parameters clamp TTL to
-0.1 to 60 s, load time to 1 to 10,000 ms, and each byte/count budget to its hard limit;
-malformed or over-limit metadata is rejected. A resident tree expires when its
-TTL elapses even if the authority heartbeat is unchanged, so a stale map cannot
-remain usable indefinitely.
+The native product bounds work and input size. Malformed or over-limit metadata
+is rejected, and a worker publication is accepted only after its artifact
+identity and source snapshot are coherent.
 
-`QueryMapBatch` accepts per-request `max_step_m` and `max_drop_m` bounds so the
-planner uses the platform's actual terrain capability. Current simulation
-profiles provide 0.15 m for Bunker and Scout and 0.30 m for Spot. The exact
-final query remains the safety gate; a coarse voxel index does not turn unknown
-space or an unsupported step into free terrain.
+MGG applies each platform's terrain limits while planning directly from the
+native product. Unknown space or an unsupported step is never treated as free
+terrain.
 
-The native test target also builds `mola_map_probe`, which accepts
-`mola_map_probe PEER_ROOT REQUEST.json` and reports `free`, `occupied`, or
-`unknown` for bounded sample points. `tests/deployment/mola_mgg_fixture.py`
-can generate real worker publications and matching `probe.json` requests in an
-empty temporary directory. Fixture generation and the native probe/build/motion
-gates are separate checks; this guide does not treat an unrun gate as passed.
+The native test target also builds `mola_map_probe`, which reports
+`free`, `occupied`, or `unknown` for bounded sample points. Fixture generation
+and the native probe/build/motion gates are separate checks; this guide does
+not treat an unrun gate as passed.
 
 With a test-enabled MGG image (`BUILD_TESTING=ON`, including its build tree), run
 the cross-image fixture on the machine holding both images:

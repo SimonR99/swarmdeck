@@ -40,13 +40,11 @@ the reset supervisor, and persists the exact Compose service set for `--status`,
 ```
 
 The mapping worker is persistent and native. The launcher sets
-`SWARMDECK_SLAM_BACKEND=cslam`, `SWARMDECK_MOLA_PLANNER_MAPS=true`, and
-`SWARMDECK_PLANNER_MAP_PROVIDER=mola`. The folded base Compose file also sets
-the simulation capture provider to `simulation`, creates a fresh mission/domain
-epoch, and keeps a reset supervisor for lifecycle recovery. The indexed query
-polls every 0.5 seconds. Advanced direct Compose usage is recorded in the
-[decentralized autonomy record](../archive/decentralized-autonomy.md); it must
-reproduce those mission, domain, capture-provider, and map-authority settings.
+`SWARMDECK_SLAM_BACKEND=cslam` and `SWARMDECK_MOLA_PLANNER_MAPS=true`. The
+folded base Compose file also sets the simulation capture provider to
+`simulation`, creates a fresh mission/domain epoch, and keeps a reset
+supervisor for lifecycle recovery. MGG reads the native MOLA planner product
+directly; no separate map-query service is started.
 A sparse cold-start scan cannot certify the whole robot body volume, and
 unknown or stale terrain remains subject to the planner's safety gates.
 
@@ -70,25 +68,15 @@ unset. The bridge status reports `peer_body_mask_points_dropped`,
 `peer_body_mask_points_dropped_by_peer` and
 `peer_body_mask_peers_skipped_stale`.
 
-Unchanged planner artifacts reuse their decoded grid without rereading or
-hashing the file. The cache checks file identity and the current publication;
-changed files undergo the full bounded read, hash, and validation again.
+MGG's `MolaMap` is the only reader of the MOLA product. It verifies the
+`mola/source.json` and `mola/index.json` pair, keeps a compatible predecessor
+in service while a successor decodes, and confirms an unchanged product by
+stat of that pair rather than by re-reading and re-hashing the grid. Corrupt
+or incompatible products fail closed; a changed product undergoes the full
+bounded read, hash and validation again.
 
-The Python reader keeps a compatible predecessor during `PublicationPending`
-only until its original coherent-read deadline; repeatedly seeing a pending
-successor cannot renew that age. Corrupt or incompatible products fail closed.
-Indexed queries check durable epochs for both the owner and actual geometry
-participants before and after execution. Rolling objective continuation waits
-out a transient publication gap with the same token, deadline and authority
-fences; an expired continuation is not resurrected.
-
-The pinned MGG source is supplemented by
-`deploy/patches/mgg-motion-reliability.patch`: exact unobserved goals inherit a
-checked driving plane before footprint validation, sparse partial corridors
-end on useful measured support, and continuation starts from the path endpoint
-actually emitted. The Home backbone uses bounded, fully checked breadcrumb
-connectors only under the explicitly qualified simulation-ground policy.
-Known occupancy, steps, drops and geofences remain refusals.
+The pinned MGG source is the `ros2` branch of MGGPlanner, unpatched. Known
+occupancy, steps, drops and geofences remain refusals.
 
 ROS apt dependencies come from signed snapshots rather than historical Docker
 cache layers: Jazzy 2026-06-18 and Humble 2026-07-02. The helper also downgrades

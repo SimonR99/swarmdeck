@@ -377,46 +377,6 @@ def test_legacy_state_clears_cached_live_metadata(setup):
     assert registry.robots["r0"].live_mapping is None
 
 
-@pytest.mark.parametrize(
-    "objective,phase",
-    [("navigate", "following_final"), ("return_home", "following_local")],
-)
-def test_complete_objective_phase_is_forwarded_and_terminal_state_clears_it(
-    setup, objective, phase
-):
-    _, registry, _, _ = setup
-    continuation = dict(
-        objective=objective,
-        phase=phase,
-        evidence_source="mgg_native",
-    )
-    registry.update_state(
-        dict(robot_id="r0", nav_status="active", objective_continuation=continuation)
-    )
-    assert registry.robots["r0"].to_state()["objective_continuation"] == continuation
-    registry.update_state(dict(robot_id="r0", nav_status="succeeded"))
-    assert registry.robots["r0"].to_state()["objective_continuation"] is None
-
-
-def test_long_split_paths_retain_destinations_in_fleet_state(setup):
-    _, registry, _, _ = setup
-    path = [dict(x=i / 10, y=0) for i in range(1001)]
-    registry.update_state(
-        dict(
-            robot_id="r0",
-            nav_status="active",
-            global_planned_path=path,
-            local_planned_path=path,
-        )
-    )
-    robot = registry.robots["r0"]
-    for shown in (robot.global_planned_path, robot.local_planned_path):
-        assert len(shown) == 200
-        assert shown[0] == path[0]
-        assert shown[-1] == path[-1]
-    assert len(path) == 1001
-
-
 @pytest.mark.parametrize("split", [False, True])
 def test_explicit_empty_route_clears_previous_route_during_planning(setup, split):
     _, registry, _, _ = setup
@@ -430,11 +390,6 @@ def test_explicit_empty_route_clears_previous_route_during_planning(setup, split
             robot_id="r0",
             nav_status="active",
             goal=dict(x=20, y=0),
-            objective_continuation=dict(
-                objective="navigate",
-                phase="planning",
-                evidence_source="mgg_native",
-            ),
             **{field: []},
         )
     )

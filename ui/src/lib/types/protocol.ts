@@ -97,11 +97,6 @@ export interface RobotState extends Stamps {
   navigation_ready?: boolean | null;
   /** Bounded native planner rejection, when the latest goal failed. */
   nav_failure_reason?: string | null;
-  objective_continuation?: {
-    objective: 'navigate' | 'return_home';
-    phase: 'planning' | 'following_local' | 'following_final';
-    evidence_source: string;
-  } | null;
   goal: Point | null;
   exploration_status?: "idle" | "starting" | "exploring" | "waiting" | "locally_exhausted" | "complete" | "blocked" | "stopped";
   exploration_reason?: string | null;

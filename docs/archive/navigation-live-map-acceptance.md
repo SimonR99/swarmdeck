@@ -127,8 +127,8 @@ All benchbot services were subsequently stopped at the operator's request on
 - Compose project: `planning-next`; UI 15173, API 18080, SLAM 18090, media 8190.
 - Fresh mission: `6f6afc5c-9a34-4eb4-8243-731629872d25`, ROS domain 201.
 - The run used one server and one ARGoS simulation, with four connected robots.
-- Native MOLA mapping is enabled; indexed corridor validation remains disabled
-  for this run (`SWARMDECK_INDEXED_MAP_QUERY=0`). Odometry uses simulated drift.
+- Native MOLA mapping is enabled and MGG reads the published product directly.
+  Odometry uses simulated drift.
 
 The planner image is `swarmdeck-mgg:partial-route-review`, image ID
 `sha256:b8586a1f1c0e117182331a4071f33ceb035e6d0e1ee6dd517ad3d257a8b26fbc`.

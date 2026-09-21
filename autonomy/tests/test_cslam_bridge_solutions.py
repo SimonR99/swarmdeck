@@ -175,3 +175,21 @@ def test_optimized_counts_adopted_deferred_and_unchanged_separately(
     assert counters(bridge) == (7, 5, 1, 1, 3)
     assert core.solution_order == (5, 0)
     assert core.deferred_solution is None
+
+
+def test_parked_scans_repeat_only_at_the_scene_change_period(bridge_module):
+    import math
+
+    parked_since = bridge_module.parked_since
+    rest = (1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+
+    def yawed(rad):
+        return (1.0, 2.0, 0.0, 0.0, 0.0, math.sin(rad / 2), math.cos(rad / 2))
+
+    assert not parked_since(None, rest, 10.0, 0.0)  # nothing normalized yet
+    assert parked_since(rest, rest, 10.0, 9.0)
+    assert parked_since(rest, yawed(0.04), 10.0, 9.0)
+    assert not parked_since(rest, yawed(0.06), 10.0, 9.0)
+    assert not parked_since(rest, (1.03, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0), 10.0, 9.0)
+    # A parked robot still feeds Swarm-SLAM's scene-change rule at its period.
+    assert not parked_since(rest, rest, 9.0 + bridge_module.PARKED_REPUBLISH_S, 9.0)

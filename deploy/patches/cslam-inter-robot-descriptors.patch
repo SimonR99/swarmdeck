@@ -1,0 +1,27 @@
+--- a/cslam/cslam/global_descriptor_loop_closure_detection.py
++++ b/cslam/cslam/global_descriptor_loop_closure_detection.py
+@@ -236,6 +236,11 @@
+         """Publish global descriptors message periodically
+         Doesn't publish if the descriptors are already known by neighboring robots
+         """
++        # With inter-robot detection switched off (budget of zero) nothing
++        # would consume a descriptor a neighbour receives; sending them
++        # only makes every neighbour match them (see the callback below).
++        if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:
++            return
+         if len(self.global_descriptors_buffer) > 0:
+             from_kf_id = self.neighbor_manager.select_from_which_kf_to_send(
+                 self.global_descriptors_buffer.peekitem(-1)[0])
+@@ -504,6 +509,12 @@
+         """
+         if not msg.descriptors or not self.epochs.accept(msg):
+             return
++        # Matching a neighbour's descriptor is a Scan Context search over
++        # every local keyframe, in Python. With inter-robot detection switched
++        # off the match is never selected, so the search is pure cost: four
++        # robots' keyframes kept a core busy for minutes after they parked.
++        if self.params["frontend.inter_robot_loop_closure_budget"] <= 0:
++            return
+         if any(d.robot_id != msg.publisher_robot_id or d.publisher_robot_id != msg.publisher_robot_id or
+                d.mission_id != msg.mission_id or d.map_epoch != msg.map_epoch or
+                not self.epochs.accept(d) for d in msg.descriptors):

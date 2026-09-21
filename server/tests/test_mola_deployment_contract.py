@@ -129,40 +129,6 @@ def test_robot_peer_worker_is_pinned_to_one_robot_and_uses_the_native_runtime():
     ]
 
 
-def test_mapping_query_remains_read_only_ros_sidecar():
-    central = _mapping_service("mapping-query")
-    peer = _peer_service("peer_mapping_query")
-    for service in (central, peer):
-        assert service["command"][0] == "swarmdeck-indexed-map-server"
-        assert service["volumes"]
-        assert service["image"] == "swarmdeck-mapping:mola-native"
-
-
-def test_central_mapping_query_bounds_are_passed_as_flags():
-    # Both liveness bounds ride the same environment names in the command so
-    # an operator override reaches the server exactly once.
-    service = _mapping_service("mapping-query")
-    env = service["environment"]
-    assert env["SWARMDECK_MAP_QUERY_POLL_S"] == "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
-    assert env["SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S"] == (
-        "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
-    )
-    assert env["SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S"] == (
-        "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
-    )
-    assert service["command"] == [
-        "swarmdeck-indexed-map-server",
-        "--maps-root",
-        "/maps",
-        "--poll-s",
-        "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}",
-        "--max-snapshot-age-s",
-        "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}",
-        "--superseded-grace-s",
-        "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}",
-    ]
-
-
 def test_remote_acceptance_requires_explicit_source_for_builds():
     script = (REPO / "tests/deployment/mola_remote_acceptance.sh").read_text()
     assert 'if [[ -n "${SOURCE:-}" && -z "${IMAGE:-}" ]]' in script

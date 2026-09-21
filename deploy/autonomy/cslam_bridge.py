@@ -96,6 +96,29 @@ MAX_RGBD_STREAM_BYTES = 64 * 1024 * 1024
 MAX_RGBD_MESSAGE_BYTES = 16 * 1024 * 1024
 RAW_CAPTURE_JOIN_GRACE_S = 0.5
 AUTHORITY_SENSOR_TTL_S = 3.0
+# A parked robot's scans are the same scan. Swarm-SLAM earns keyframes by
+# distance, and by scene change at most once per
+# keyframe_scene_change_min_period_s (cslam_lidar.yaml), so a scan that
+# repeats the previously normalized pose is only worth normalizing at that
+# period: everything in between would be deserialized, hashed, masked and
+# published for nothing.
+PARKED_TRANSLATION_M = 0.02
+PARKED_ROTATION_RAD = 0.05
+PARKED_REPUBLISH_S = 5.0
+
+
+def parked_since(previous, pose, now, last_at):
+    """True when `pose` repeats `previous` and the last normalization is recent.
+
+    `previous` and `pose` are (x, y, z, qx, qy, qz, qw) tuples.
+    """
+
+    if previous is None or now - last_at >= PARKED_REPUBLISH_S:
+        return False
+    if math.dist(previous[:3], pose[:3]) > PARKED_TRANSLATION_M:
+        return False
+    dot = abs(sum(a * b for a, b in zip(previous[3:], pose[3:])))
+    return 2.0 * math.acos(min(1.0, dot)) <= PARKED_ROTATION_RAD
 
 
 def create_steady_timer(node, period_s, callback):
@@ -256,6 +279,9 @@ class Bridge(Node):
         self.odom_pub = self.create_publisher(Odometry, "normalized_odom", 5)
         self.pending_cloud = None
         self.last_sensor_at = 0.0
+        self.last_normalized_pose = None
+        self.last_normalized_at = 0.0
+        self.captures_skipped_parked = 0
         self.clouds, self.odoms, self.capture_calibrations = {}, {}, {}
         self.color_images, self.depth_images = {}, {}
         self.color_info = None
@@ -731,6 +757,22 @@ class Bridge(Node):
         except TransformException:
             return  # never substitute a latest transform for capture-time TF
         self.pending_cloud = None
+        pose = (
+            local.transform.translation.x,
+            local.transform.translation.y,
+            local.transform.translation.z,
+            local.transform.rotation.x,
+            local.transform.rotation.y,
+            local.transform.rotation.z,
+            local.transform.rotation.w,
+        )
+        now = time.monotonic()
+        if parked_since(self.last_normalized_pose, pose, now, self.last_normalized_at):
+            # The sensor is live; only the repeated scan is not worth the work.
+            self.captures_skipped_parked += 1
+            with self._shared_lock:
+                self.last_sensor_at = now
+            return
         raw_xyz = point_cloud2.read_points_numpy(
             cloud, field_names=("x", "y", "z"), skip_nans=False
         )
@@ -793,9 +835,11 @@ class Bridge(Node):
         )
         self.odom_pub.publish(odom)
         self.cloud_pub.publish(out)
+        self.last_normalized_pose = pose
+        self.last_normalized_at = time.monotonic()
         with self._shared_lock:
             self.normalized_count += 1
-            self.last_sensor_at = time.monotonic()
+            self.last_sensor_at = self.last_normalized_at
 
     def key_cloud(self, msg):
         if (
@@ -1176,6 +1220,7 @@ class Bridge(Node):
             "peer_body_mask_margin_m": self.peer_mask_margin_m,
             "peer_body_mask_pose_tolerance_s": self.peer_mask_tolerance_s,
             "peer_body_mask_captures_held": self.captures_held_unmaskable,
+            "parked_scans_skipped": self.captures_skipped_parked,
             **(
                 idle_mask_counters()
                 if self.peer_mask is None

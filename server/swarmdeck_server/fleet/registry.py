@@ -76,7 +76,6 @@ class Robot:
     live_mapping: dict[str, Any] | None = None
     peer_slam: dict[str, Any] | None = None
     live_mapping_received_at: float = 0.0
-    objective_continuation: dict[str, Any] | None = None
     command_generation: int = 0
 
     last_seen: float = field(default_factory=time.monotonic)
@@ -120,7 +119,6 @@ class Robot:
             "nav_status": self.nav_status,
             "nav_failure_reason": self.nav_failure_reason,
             "navigation_ready": self.navigation_ready,
-            "objective_continuation": self.objective_continuation,
             "goal": self.goal,
             "planned_path": self.planned_path,
             "global_planned_path": self.global_planned_path,
@@ -166,7 +164,6 @@ class Registry:
         r.last_seen = time.monotonic()
         r.live_mapping = None
         r.peer_slam = None
-        r.objective_continuation = None
         r.nav_failure_reason = None
         r.navigation_ready = None
         self.robots[rid] = r
@@ -212,19 +209,6 @@ class Registry:
             r.live_mapping_received_at = r.last_seen
         except (KeyError, TypeError, ValueError, OverflowError):
             r.live_mapping = None
-        continuation = msg.get("objective_continuation")
-        r.objective_continuation = None
-        if (
-            isinstance(continuation, dict)
-            and continuation.get("objective") in {"navigate", "return_home"}
-            and continuation.get("phase")
-            in {"following_final", "following_local", "planning"}
-            and continuation.get("evidence_source") in {"mgg_native", "mola_indexed"}
-        ):
-            r.objective_continuation = {
-                key: continuation[key]
-                for key in ("objective", "phase", "evidence_source")
-            }
         if "pose" in msg:
             r.pose = msg["pose"]
         if r.home_pose is None and floor is not None and r.live_mapping:
@@ -355,7 +339,6 @@ class Registry:
         if robot is not None:
             robot.live_mapping = None
             robot.peer_slam = None
-            robot.objective_continuation = None
 
     def remove(self, robot_id: str) -> bool:
         """Remove a robot from the registry."""

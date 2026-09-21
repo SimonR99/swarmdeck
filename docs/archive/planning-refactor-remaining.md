@@ -105,16 +105,16 @@ were observed.
 
 MGG's `mola_snapshot` backend is the normal simulation provider. It reads the
 immutable native grid directly and preserves explicit occupied/free/unknown
-evidence. Navigate and Home retain a global graph route and refine bounded local
-sections; Explore retains its existing graph selector. Native regression tests
-cover measured-floor collision, route continuation, terrain checks, and request
-supersession. These tests do not establish successful fleet navigation.
+evidence. Navigate and Home return complete routes from the global graph;
+Explore retains its existing graph selector. Native regression tests cover
+measured-floor collision, terrain checks, and request supersession. These tests
+do not establish successful fleet navigation.
 
-Current motion qualification checks startup, distant Navigate, Return Home,
-and repeated exploration under the same terrain policy. Sparse floor evidence
-and base-versus-driving height conventions must agree across native projection,
-indexed queries, and route validation. Unchanged artifacts reuse their decoded
-grid while authority and correction checks remain enforced. The
+Current motion qualification checks startup, distant Navigate, Return Home, and
+repeated exploration under the same terrain policy. Sparse floor evidence and
+base-versus-driving height conventions must agree across native MOLA projection
+and route planning. Unchanged artifacts reuse their published product while
+authority and correction checks remain enforced.
 [acceptance record](../operations/navigation-live-map-acceptance.md) contains
 image identities, timings and failed motion cases.
 

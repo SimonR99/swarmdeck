@@ -50,7 +50,6 @@ OPTIONAL_SIMULATION_SERVICES = frozenset(
     {
         "fast_livo2",
         "mapping",
-        "mapping-query",
         *(f"peer{index}" for index in range(MAX_SIMULATION_PEERS)),
     }
 )
@@ -309,9 +308,7 @@ def process_environment(
         ),
         SWARMDECK_CAPTURE_PROVIDER="simulation",
         SWARMDECK_SLAM_BACKEND="cslam",
-        SWARMDECK_PLANNER_MAP_PROVIDER="mola",
         SWARMDECK_MOLA_PLANNER_MAPS="true",
-        SWARMDECK_INDEXED_MAP_QUERY="0",
     )
     if epoch:
         environment.update(
@@ -600,7 +597,6 @@ def build_spec(args: argparse.Namespace, project: str) -> dict:
         "mgg",
         *peers,
         "mapping",
-        "mapping-query",
     ]
     if args.odometry == "fast_livo2":
         services.append("fast_livo2")

@@ -856,24 +856,18 @@ def _cpp_constant(path: Path, name: str) -> int:
     return int(match.group(1).replace("'", ""))
 
 
-def test_point_budget_is_one_number_for_worker_native_runtime_and_reader() -> None:
-    """The loader, the planner grid, the product and its reader share a budget.
+def test_point_budget_is_one_number_for_worker_and_native_runtime() -> None:
+    """The worker, planner grid and native runtime share a point budget.
 
-    Until 2026-09-19 the grid build had its own 1,000,000 default while the
-    worker forwarded 2,000,000 to the loader, so a component between the two
-    loaded and then failed the planner grid on every build (benchbot mission
-    1a8cc114). The native runtime now derives every point limit from
-    ``--max-points-per-map``; this pins the defaults the worker, the native
-    headers and the Python product reader each carry to one value.
+    The native runtime derives every point limit from
+    ``--max-points-per-map``; this pins the defaults the worker, native
+    headers and product writer carry to one value.
     """
-
-    import autonomy.mola_mapping as mola_mapping
 
     mapping = Path(__file__).parents[2] / "swarmdeck_ros/src/swarmdeck_mapping"
     include = mapping / "include/swarmdeck_mapping"
     shared = _cpp_constant(include / "point_budget.hpp", "kMaxPointsPerMap")
     assert shared == worker_module.DEFAULT_MAX_POINTS_PER_MAP == 2_000_000
-    assert mola_mapping.MAX_POINTS == shared
     # The header defaults are spelled through the shared constant, not a
     # second literal.
     runtime_header = (include / "persistent_mola_runtime.hpp").read_text()

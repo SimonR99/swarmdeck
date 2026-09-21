@@ -175,7 +175,7 @@ class Supervisor:
         self.robot_services = {
             robot: f"peer{index}" for index, robot in enumerate(robot_ids or [])
         }
-        required = {"mgg", "mapping", "mapping-query", *self.robot_services.values()}
+        required = {"mgg", "mapping", *self.robot_services.values()}
         if not required.issubset(services):
             self.robot_services = {}
         # Publish the complete writable protocol tree before advertising a

@@ -15,10 +15,6 @@ def map_backend_parameters(robot):
     backend = os.environ.get("SWARMDECK_MGG_MAP_BACKEND", "mola_snapshot")
     if backend != "mola_snapshot":
         raise ValueError("SWARMDECK_MGG_MAP_BACKEND must be mola_snapshot")
-    if os.environ.get("SWARMDECK_PLANNER_MAP_PROVIDER", "mola") != "mola":
-        raise ValueError(
-            "MOLA graph planning requires SWARMDECK_PLANNER_MAP_PROVIDER=mola"
-        )
     mission = os.environ.get("SWARMDECK_MISSION_ID", "")
     if str(uuid.UUID(mission)) != mission:
         raise ValueError("MOLA graph planning requires a canonical mission UUID")
@@ -59,10 +55,11 @@ def robot_nodes(
     overrides = {
         "PlanningParams.global_frame_id": frame,
         "PlanningParams.robot_id": robot_index,
-        "mission_id": os.environ.get("SWARMDECK_MISSION_ID", ""),
-        "objective_body_evidence_policy": "observed_ground",
-        "objective_ground_evidence_policy": "provisional_unknown",
-        "indexed_map_query_service": f"/{robot}/mapping/query_batch",
+        # Upstream waits 15 cycles without a frontier before it repositions
+        # over the global graph, replanning at 10 Hz. PCI's external mode
+        # retries an empty cycle with a backoff, so three cycles reach the
+        # same decision in seconds instead of a minute of standing still.
+        "auto_global_planner_low_gain_rounds": 3,
     }
     overrides.update(planner_overrides or {})
     overrides.update(map_backend_parameters(robot))

@@ -21,14 +21,13 @@ def test_default_stack_has_one_backend_and_all_products(monkeypatch):
     assert "backend" not in spec
     assert spec["robot_names"] == ["robot_0", "robot_1", "robot_2", "robot_3"]
     assert {"peer0", "peer1", "peer2", "peer3"}.issubset(spec["services"])
-    assert {"mapping", "mapping-query", "mgg"}.issubset(spec["services"])
+    assert {"mapping", "mgg"}.issubset(spec["services"])
     assert "slam" not in spec["services"]
     assert spec["compose_files"] == [str(launch.COMPOSE / "docker-compose.yml")]
     environment = launch.process_environment(
         spec, {"SWARMDECK_MISSION_ID": "mission", "SWARMDECK_TEST_DOMAIN": "42"}
     )
     assert environment["SWARMDECK_SLAM_BACKEND"] == "cslam"
-    assert environment["SWARMDECK_PLANNER_MAP_PROVIDER"] == "mola"
     assert environment["SWARMDECK_MOLA_PLANNER_MAPS"] == "true"
     assert "SWARMDECK_MGG_MAP_BACKEND" not in environment
     assert json.loads(environment["SWARMDECK_PEER_NAMES"]) == spec["robot_names"]

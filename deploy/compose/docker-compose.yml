@@ -266,7 +266,6 @@ services:
       SWARMDECK_MGG_ENABLED: "1"
       SWARMDECK_PLANNING_BACKEND: mgg
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
-      SWARMDECK_PLANNER_MAP_PROVIDER: mola
       # Frontier reservations and peer keep-out discs are arbitrated in the
       # surveyed deployment frame (plan.md invariant 19).
       SWARMDECK_PEER_COORDINATION: "1"
@@ -394,7 +393,6 @@ services:
       SWARMDECK_SIM_RESET_DIR: /run/swarmdeck-reset
       SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
-      SWARMDECK_PLANNER_MAP_PROVIDER: mola
       SWARMDECK_MAPS_ROOT: /maps
     volumes:
       - ../../configs:/app/configs:ro
@@ -428,7 +426,6 @@ services:
       SWARMDECK_INTER_ROBOT_CLOSURES: "${SWARMDECK_INTER_ROBOT_CLOSURES:-false}"
       SWARMDECK_SLAM_BACKEND: "${SWARMDECK_SLAM_BACKEND:-cslam}"
       SWARMDECK_PLANNING_FRAME_TEMPLATE: "{robot}/odom"
-      SWARMDECK_PLANNER_MAP_PROVIDER: mola
       SWARMDECK_SERVER_URL: http://server:8080
     volumes:
       - ../../autonomy:/app/autonomy:ro
@@ -494,32 +491,6 @@ services:
       - --parallel-peers
       - "${SWARMDECK_MOLA_PARALLEL_PEERS:-4}"
     restart: unless-stopped
-  mapping-query:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.mapping
-    image: swarmdeck-mapping:mola-native
-    network_mode: service:sim
-    environment:
-      ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
-      SWARMDECK_MISSION_ID: "${SWARMDECK_MISSION_ID:?Set a fresh fleet mission UUID}"
-      SWARMDECK_PLANNER_MAP_PROVIDER: mola
-      SWARMDECK_MAP_QUERY_POLL_S: "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
-      SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S: "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
-      SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S: "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
-    volumes:
-      - peer_maps:/maps
-    command:
-      - swarmdeck-indexed-map-server
-      - --maps-root
-      - /maps
-      - --poll-s
-      - "${SWARMDECK_MAP_QUERY_POLL_S:-0.5}"
-      - --max-snapshot-age-s
-      - "${SWARMDECK_MAP_QUERY_MAX_SNAPSHOT_AGE_S:-15}"
-      - --superseded-grace-s
-      - "${SWARMDECK_MAP_QUERY_SUPERSEDED_GRACE_S:-15}"
 
 volumes:
   peer_maps:

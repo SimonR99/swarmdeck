@@ -36,8 +36,6 @@ def launch_module(monkeypatch):
         "SWARMDECK_MGG_MAP_BACKEND",
         "SWARMDECK_MISSION_ID",
         "SWARMDECK_MAPS_ROOT",
-        "SWARMDECK_PLANNER_MAP_PROVIDER",
-        "SWARMDECK_INDEXED_MAP_QUERY",
         "SWARMDECK_PLANNING_FRAME_TEMPLATE",
         "SWARMDECK_MGG_ROBOT",
     ):
@@ -70,7 +68,10 @@ def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
     assert overrides["map.mola.peer_root"] == f"/custom/maps/{mission}/robot_2"
     assert overrides["map.resolution"] == 0.20
     assert overrides["PlanningParams.global_frame_id"] == "robot_2/odom"
-    assert overrides["indexed_map_query_service"] == "/robot_2/mapping/query_batch"
+    assert "indexed_map_query_service" not in overrides
+    assert "objective_body_evidence_policy" not in overrides
+    assert "objective_ground_evidence_policy" not in overrides
+    assert overrides["auto_global_planner_low_gain_rounds"] == 3
     controller = next(
         node for node in nodes if getattr(node, "package", "") == "mgg_pci"
     )
@@ -106,13 +107,6 @@ def test_misspelled_backend_does_not_fall_back(launch_module, monkeypatch):
         launch_module.map_backend_parameters("robot_0")
 
 
-def test_mola_requires_matching_exact_terrain_provider(launch_module, monkeypatch):
-    monkeypatch.setenv("SWARMDECK_MGG_MAP_BACKEND", "mola_snapshot")
-    monkeypatch.setenv("SWARMDECK_PLANNER_MAP_PROVIDER", "indexed")
-    with pytest.raises(ValueError, match="SWARMDECK_PLANNER_MAP_PROVIDER=mola"):
-        launch_module.map_backend_parameters("robot_0")
-
-
 def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp_path):
     repo = Path(__file__).parents[2]
     monkeypatch.syspath_prepend(str(repo / "adapters/protocol"))
@@ -141,23 +135,7 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
         assert params["SensorParams.VLP16.fov"] == pytest.approx(
             [2.0 * 3.141592653589793, 2.0 * 0.2618]
         )
-        assert params["SensorParams.VLP16.rotations"] == [0.0, 0.0, 0.0]
-        assert params["grid_refinement_resolution_m"] == 0.5
-        assert params["objective_grid_timeout_ms"] == 4000
-        assert params["objective_grid_max_margin_m"] == 8.0
-    assert [params["PlanningParams.max_step_height"] for params in overrides] == [
-        0.15,
-        0.15,
-        0.30,
-    ]
     assert [params["PlanningParams.edge_length_max"] for params in overrides] == [
-        3.0,
-        2.0,
-        4.0,
-    ]
-    assert [
-        params["objective_start_support_max_distance_m"] for params in overrides
-    ] == [
         3.0,
         2.0,
         4.0,
@@ -201,10 +179,6 @@ def test_mola_initial_edges_reach_the_selected_lidars_first_ground_ring(
     assert [
         params["PlanningParams.edge_length_max"] for params in overrides
     ] == expected
-    assert [
-        params["objective_start_support_max_distance_m"] for params in overrides
-    ] == expected
-
     pathological_robot = SimpleNamespace(base_height=2.0, lidar_x=0.0, lidar_z=2.0)
     with pytest.raises(ValueError, match="exceeds bounded reach"):
         fleet_module.mola_initial_ground_reach(

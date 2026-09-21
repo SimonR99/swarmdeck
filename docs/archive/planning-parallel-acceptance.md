@@ -18,10 +18,9 @@ excludes unrelated local ROS 1, route-tracking, and hardware deployment work.
 - Test UI/API ports: `15174` / `18081`; SLAM: `18091`; media: `8192`.
 - Compose overlays: base, GPU, MGG, planning-test, peers, mapping, onboard-planning.
 - `SWARMDECK_CAPTURE_PROVIDER=simulation` admits proven instantaneous raw rays.
-- `SWARMDECK_MOLA_PLANNER_MAPS=true` and `SWARMDECK_PLANNER_MAP_PROVIDER=mola`
-  enable native grids and their ROS query service.
-- `SWARMDECK_INDEXED_MAP_QUERY=0`: motion still uses MGG's existing OctoMap.
-  This run does **not** qualify MOLA as the full exploration-map replacement.
+`SWARMDECK_MOLA_PLANNER_MAPS=true` enables native MOLA planner products, which
+MGG reads directly. This run does **not** qualify MOLA as the full exploration
+map replacement.
 - Mapping image: `swarmdeck-mapping:parallel-review`; MGG runtime:
   `swarmdeck-mgg:diagnostics-10`; simulator and peer images use `:planning`.
 
@@ -38,8 +37,6 @@ export.
 | Svelte/TypeScript check, replica loader/catalogue tests, production UI build | Passed; existing bundle-size warning remains |
 | Native mapping/framework CTests | All five passed |
 | Native importer, persistent JSONL, module loading, actual MOLA launcher | Passed |
-| Python worker → native planner artifact → provider | Four synthetic revisions passed, including corrected and missing evidence |
-| Actual ROS `QueryMapBatch` over native MOLA products | FREE/OCCUPIED/UNKNOWN, stale revision and corrupt publication checks passed |
 | Actual isolated ROS sensor-to-peer capture join | Capture-time TF, original geometry/provenance and coordination relay smoke passed |
 | UI HTTP contract against real ARGoS replicas | Passed without the fixture's skip condition |
 | Chromium Layers/component rendering | Four components selectable; real geometry rendered, then capped at 60,000 points in Low power |

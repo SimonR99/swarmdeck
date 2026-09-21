@@ -49,46 +49,6 @@ def test_harness_reads_the_validated_live_home_contract():
     assert acceptance_module().home_target(qualified) == (4.0, -2.0, 0.3)
 
 
-def test_rolling_home_ignores_local_controller_success():
-    completed = acceptance_module().objective_completed
-
-    assert not completed("home", "succeeded", 4, ["following_local"], "following_local")
-    assert not completed("home", "succeeded", 4, ["following_local"], None, True)
-    assert completed(
-        "home",
-        "succeeded",
-        4,
-        ["following_local", "following_final"],
-        None,
-        True,
-    )
-    assert completed("navigate", "succeeded", 1, [])
-    assert not completed(
-        "navigate",
-        "succeeded",
-        4,
-        ["following_local"],
-        "following_local",
-        False,
-        True,
-    )
-    assert not completed(
-        "navigate", "succeeded", 4, ["following_local"], None, False, True
-    )
-    assert completed(
-        "navigate",
-        "succeeded",
-        4,
-        ["following_local", "following_final"],
-        None,
-        False,
-        True,
-    )
-    assert not completed("home", "succeeded", 0, ["following_final"])
-    assert completed("home", "succeeded", 1, [])
-    assert not completed("home", "succeeded", 1, [], "planning")
-
-
 def test_endpoint_evidence_retains_worst_qualified_xy_error():
     module = acceptance_module()
     summary = {
@@ -154,40 +114,3 @@ def test_invalid_or_nonfinite_endpoint_evidence_fails_closed():
         assert not module.endpoint_error_is_acceptable(
             summary, "local_endpoint_error_m"
         )
-
-
-def test_rolling_route_allows_intermediate_local_endpoint_but_requires_final_exact():
-    module = acceptance_module()
-    summary = {
-        "observed_phases": ["following_local", "following_final"],
-        "local_endpoint_changes": 2,
-        # Intermediate chunks deliberately do not end at the requested goal.
-        "local_endpoint_error_m": 8.0,
-        "local_endpoint_error_m_invalid": False,
-        "final_local_endpoint_error_m": 0.01,
-        "final_local_endpoint_error_m_invalid": False,
-        "global_endpoint_error_m": 0.0,
-        "global_endpoint_error_m_invalid": False,
-    }
-
-    assert module.rolling_route_observed(summary)
-    assert module.rolling_route_evidence_is_complete(summary)
-
-    summary["final_local_endpoint_error_m"] = 0.1
-    assert not module.rolling_route_evidence_is_complete(summary)
-    summary["final_local_endpoint_error_m"] = 0.0
-    summary["global_endpoint_error_m"] = 0.1
-    assert not module.rolling_route_evidence_is_complete(summary)
-
-
-def test_default_navigate_uses_rolling_evidence_when_local_phase_is_observed():
-    module = acceptance_module()
-
-    assert module.rolling_route_observed(
-        {"observed_phases": ["following_local", "following_final"]},
-        required=False,
-    )
-    assert not module.rolling_route_observed(
-        {"observed_phases": ["following_final"]}, required=False
-    )
-    assert module.rolling_route_observed({"observed_phases": []}, required=True)

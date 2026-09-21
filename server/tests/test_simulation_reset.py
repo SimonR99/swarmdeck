@@ -480,5 +480,5 @@ def test_rendered_onboard_compose_uses_one_resettable_ros_domain():
     services = json.loads(rendered.stdout)["services"]
     assert {
         services[name]["environment"]["ROS_DOMAIN_ID"]
-        for name in ("sim", "mgg", "peer0", "mapping-query")
+        for name in ("sim", "mgg", "peer0")
     } == {"201"}

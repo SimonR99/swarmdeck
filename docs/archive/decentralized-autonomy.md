@@ -100,58 +100,23 @@ It now supervises a persistent native runtime and reuses keyframe geometry for
 pose-only revisions. The same runtime backs a loadable MOLA framework module;
 see the [MOLA runtime guide](mola-runtime.md) for configuration, limits and the
 remaining planner-map boundary.
-For the ARGoS stack, start both mapping consumers with:
+For the ARGoS stack, start the mapping worker and MGG:
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml \
-  -f deploy/compose/docker-compose.peers.yml \
-  -f deploy/compose/docker-compose.mapping.yml \
-  --profile argos up -d mapping mapping-query
+  --profile argos up -d mapping mgg
 ```
 
-`autonomy.indexed_mapping.IndexedMapView` separately builds an immutable sparse
-voxel view for MGG. It caches decoded chunks by SHA-256, so a pose-only graph
-revision rebuilds transformed indexes without rereading geometry. Replacement
-and retraction publish a new index and cannot leave an old occupied voxel active.
-The defaults bound input to 1,000,000 points, 2,000,000 total voxels, 4,000,000
-ray steps, eight seconds of background build time, 4,096 samples, 1,000,000
-queried body voxels, and 250 ms per service query. Exceeding any bound produces
-`UNAVAILABLE`; a revision mismatch produces `STALE`. Unknown space remains
-unknown. Five-degree angular ray selection retains only actual measured rays to
-keep dense spinning-lidar free-space indexing bounded.
-
-The ROS adapter is `deploy/autonomy/indexed_map_server.py` and serves
-`/<robot>/mapping/query_batch`. Requests contain component-frame samples and an
-exact `(component_id, epoch, graph_revision, geometry_revision, source_stamp)`
-key. `source_stamp` is the newest active submap's original ROS capture time. A
-canonical `SWARMDECK_MISSION_ID` is required, and discovery is restricted to
-`/maps/<mission>/`; historical missions on a persistent volume are never
-selected implicitly. The service separately tracks successful coherent reads
-with a local monotonic clock. Re-reading an unchanged snapshot refreshes that
-deadline without rebuilding the index or rereading chunks, so a stationary map
-does not expire while its producer and filesystem remain healthy. MGG
-transforms route samples with the authoritative `T_component_navigation`, calls
-once for a densified corridor, and rejects stale, unavailable, occupied,
-unknown, excessive step/drop, roughness, or insufficient measured-clearance
-results. Clearance is finite only when an overhead return bounds it or measured
-rays cover the complete requested body volume; occupied terrain points alone do
-not certify it. A `NaN` clearance remains unknown. The deterministic VLP-16
-test uses nine captures over four travelled metres: accumulated ground rays
-certify a Bunker-sized 1.6 m forward corridor, an unseen interval stays
-`UNKNOWN`, and a wall is `OCCUPIED`. A lone sparse scan generally cannot cover
-every body voxel, so enabling the indexed gate from a cold start can block
-exploration until another trusted controller has accumulated enough ray
-coverage. The gate remains opt-in for that reason.
-
-Terrain queries select the observed surface beneath the queried robot body,
-rather than the lowest return in the whole column. Local regression fixtures
-cover stacked floors, downward steps, missing ground, walls, and gentle ramps.
-Both body cells and terrain-column probes count toward the query work budget;
-oversized bodies and unrepresentable coordinates are rejected before allocation.
-In a local 15-sample flat-surface microbenchmark, 280 measured queries after
-20 warmups had median/p95 times of 0.481/0.512 ms versus 0.497/0.531 ms before
-the change. This small CPU fixture is not a Jetson latency or terrain-accuracy
-qualification.
+The worker publishes a self-described native MOLA planner product under each
+peer root. MGG reads that product directly. Occupied, observed-free and
+unknown terrain remain distinct, and incomplete publications are not used for
+planning.
+Native MOLA products preserve occupied, observed-free and unknown terrain.
+Clearance is finite only when measured returns bound the requested body volume;
+unknown terrain remains unknown and can block planning. Sparse scans therefore
+may require more captures before a route is available. The planner's terrain
+checks cover stacked floors, downward steps, missing ground, walls and ramps.
+Oversized bodies and unrepresentable coordinates are rejected before allocation.
 
 Swarm-SLAM repository commits are pinned in `deploy/cslam/upstream.repos`.
 The local patch adds mission and causal solution identities, checks successful
@@ -203,7 +168,7 @@ not establish fleet completion.
 
 To switch the isolated simulation from shadow mapping to onboard navigation,
 append `docker-compose.mapping.yml` and `docker-compose.onboard-planning.yml`
-to that invocation, and also start `mapping` and `mapping-query`. This pins the adapter to `SWARMDECK_MISSION_ID` and sets
+to that invocation. This pins the adapter to `SWARMDECK_MISSION_ID` and sets
 `SWARMDECK_MAPPING_AUTHORITY=onboard`, `SWARMDECK_PLANNING_BACKEND=mgg`, and
 `SWARMDECK_PEER_COORDINATION=1` on the adapter. The adapter stops uploading
 keyframes to the central optimizer and stops downloading its navigation grid.
@@ -212,134 +177,31 @@ operator connection. A grid must already have the exact configured navigation
 frame; the adapter never relabels an incompatible frame. Local maps and scan
 telemetry can still be uploaded for the dashboard.
 
-Authority readers reject older optimizer solution orders, older indexed map
-revisions, partial snapshots, and downgrades to legacy metadata. Equal coherent
-heartbeats renew the three-second monotonic freshness window; rejected messages
-cannot renew it or invalidate a newer target reservation. A live navigation-frame
-TF correction can legitimately change `T_component_navigation` without changing
-the immutable map revision, so it remains accepted; material corrections still
-invalidate the active reservation. `SWARMDECK_MISSION_ID`, when configured,
-selects the exact mission. Otherwise a reader pins its first accepted mission;
-changing missions requires restarting the adapter/reader, consistent with the
-fresh fleet mission and DDS domain required after native frontend restarts.
+Authority readers reject older optimizer solution orders, partial snapshots,
+and downgrades to legacy metadata. Equal coherent heartbeats renew the
+three-second monotonic freshness window; rejected messages cannot renew it or
+invalidate a newer target reservation.
+ A live navigation-frame TF correction can legitimately change
+`T_component_navigation` without changing the immutable map revision, so it
+remains accepted; material corrections still invalidate the active reservation.
+`SWARMDECK_MISSION_ID`, when configured, selects the exact mission. Otherwise a
+reader pins its first accepted mission; changing missions requires restarting
+the adapter/reader, consistent with the fresh fleet mission and DDS domain
+required after native frontend restarts.
 
-The indexed final corridor gate is enabled in the normal MOLA simulation stack.
-Other deployments select it with `SWARMDECK_INDEXED_MAP_QUERY=1`: sparse
-cold-start LiDAR coverage can leave the body volume unknown and prevent motion.
-Disabling the gate is an explicit deployment choice, never an automatic fallback
-after an indexed query fails. The selected map backend still governs graph/grid
-queries, and Nav2 provides local avoidance on ROS 2 robots.
+MGG reads native MOLA products directly in the normal simulation stack. Sparse
+cold-start LiDAR coverage can leave terrain unknown and prevent motion; this is
+reported by the planner rather than handled by a separate validation service.
+Adapters with MGG configured advertise `plan_objective`. The GUI sends Navigate
+and Return Home objectives directly to that robot. MGG returns a complete route
+from the native product, and Nav2 FollowPath executes that route with local
+avoidance. The server remains a replica and does not substitute cached map
+geometry or home coordinates.
 
-Adapters with MGG configured advertise `plan_objective`. The GUI then sends
-Navigate and Return Home objectives directly to that robot, without requiring
-a central A* route. Return Home resolves the initial keyframe through the fresh
-onboard correction; the server does not substitute its cached home coordinates.
-Nav2 FollowPath receives the current locally refined section of MGG's global
-route. The adapter requests the next section after arrival and retains the
-original Navigate or Home destination throughout. Removing the onboard overlay
-and restarting the adapter restores the legacy central map path.
-
-An executing Home route is cancelled when its navigation transform moves more
-than 2 cm or 0.02 radians, or its correction revision changes. The adapter
-retains the Home intent and requests a fresh route only while mission, component,
-map epoch, navigation frame, and home keyframe identity remain the same.
-One worker coalesces corrections and validates the latest indexed snapshot
-again immediately before dispatch. Stop, manual driving, and replacement goals
-invalidate that worker's command ownership.
-
-The recovery budget applies to each correction episode. A successful dispatch
-ends the episode; a later correction can start another. Configure the following
-keys under the adapter's `planning` section:
-
-| Setting | Default | Bound |
-| --- | --- | --- |
-| `authority_replan_max_attempts` | 3 | 1–20 attempts |
-| `authority_replan_deadline_s` | 15 s | 0.1–300 s, including cancellation and readiness |
-| `authority_replan_backoff_s` | 0.25 s | 0–10 s between attempts |
-
-In simulation, recovery waits for the old Nav2 action's terminal result;
-acceptance of a cancellation request does not establish that it has stopped.
-Unknown action outcomes prevent further objective dispatch and cannot trigger
-the reverse-escape behavior. Tracking is capped at eight unconfirmed actions;
-overflow also blocks dispatch. Hardware publishes zero and disables the
-adapter's Nav2 velocity relay while replanning, reopening it only after the
-current action is accepted and its result monitor is installed. Pending
-recovery does not emit a terminal failure between attempts; exhausted recovery
-reports failure. This does not relax terrain admission or make an initially
-blocked Home route traversable.
-
-MGG retains a bounded sequence of travelled poses while initial terrain support
-or a connecting edge is unavailable. It admits samples in travel order after
-map updates, preserving observed corners between regularly spaced samples.
-Interpolated samples still require mapped support and collision checks. A
-blocked sample holds back later samples; unchanged map revisions do not repeat
-that failed query. Nearby owned vertices can be reused only after checking the
-travelled transition and the connection to the existing vertex.
-
-| ROS parameter | Default | Bound |
-| --- | --- | --- |
-| `global_vertex_spacing` | 1 m | 0.01–100 m |
-| `global_backbone_pending_max_samples` | 128 | 8–4096 samples |
-| `global_backbone_pending_max_length_m` | 128 m | Vertex spacing through 10000 m |
-| `global_backbone_drain_max_samples` | 32 | 1–512 admissions per callback |
-
-The pending limits bound retained history, not the complete mission graph.
-Exceeding a history limit or receiving an unrepresentable displacement latches
-a diagnostic and blocks Return Home until the planner restarts under a fresh
-mission. Navigate can still use its local graph. These checks preserve evidence
-requirements; they do not infer free terrain from the robot having travelled
-through an area. The drain count bounds work between callbacks, without
-preempting an individual terrain query.
-
-Explicit Navigate and Return Home routes use `mgg_core::BoundedGridPlanner`
-through the transport-free `GridPlanner` interface. Direct terrain-checked
-segments remain the fast path. A blocked segment triggers deterministic local
-8-neighbor A* within a bounded rectangle; unknown space, unsupported ground,
-body collisions, excessive steps/inclines, and geofence violations cannot form
-a detour. The output retains the checked terrain polyline and exact final goal
-heading, then passes through base-height conversion and the optional indexed
-snapshot gate. Explore retains its existing selector and startup policy.
-
-| ROS parameter | Default | Bound |
-| --- | --- | --- |
-| `grid_refinement_resolution_m` | 0.25 m | Map resolution through `max(2 m, map resolution)` |
-| `grid_refinement_margin_m` | 1 m | 0–10 m around each segment |
-| `grid_refinement_max_cells` | 4096 | 16–65536 cells per segment |
-| `grid_refinement_max_expansions` | 2048 | 1–65536 expansions across the request |
-| `grid_refinement_timeout_ms` | 50 ms | 1–5000 ms, checked between map calls |
-
-The deadline is cooperative: an individual map callback is not preempted. The
-core accepts a cancellation callback, but the ROS wrapper does not wire one and
-the planning service has no cancel request. Stop invalidates the adapter's
-pending result and stops execution while the bounded planner call finishes.
-This is a local ground-plane search using the existing axis-aligned robot box and terrain support model, not a legged motion
-planner or a full 3D search. Each XY cell keeps its first observed support height;
-stacked-surface ambiguity can conservatively reject a feasible alternative.
-All corridor vertices and the exact destination must remain valid. A blocked
-vertex or a wall beyond the detour window returns `BLOCKED`; exclusion of the
-failed edge from a new topological search and path speed limits remain future
-work. Every projected segment receives a strict swept-box check at the actual
-body center, including robots with zero center offset. These queries enumerate
-all touched voxel keys and reject even one unknown voxel. Short swept AABB
-envelopes cover motion between samples, including diagonal voxel crossings;
-this adds conservative padding of at most one map resolution per axis.
-Legacy box queries retain their existing partial-unknown policy (25% for
-`getBoxStatus(..., true)`), and exploration continues through that interface.
-Their voxel enumeration also now includes both faces. The underlying ground
-predicate can conservatively reject some nonzero-offset footprints.
-
-Map callbacks also bound their work: boxes exceeding 1,048,576 voxel keys and
-strict sweeps exceeding an estimated 4,194,304 voxel visits return unknown.
-These limits prevent oversized geometry from monopolizing a callback between
-deadline checks; they are not hard real-time guarantees.
-
-Every fleet Explore command carries a shared run UUID and participant list.
-Robots exchange progress over `/swarmdeck/exploration_reports`. Completion means
-all participants freshly report exhaustion of reachable frontiers, with no
-assignments, in one verified component. Missing reports, disconnected components,
-and map corrections prevent a fleet-complete report. Stop exploration and Stop
-All invalidate exhausted status. This criterion does not certify coverage of
-unobservable or unreachable physical space.
+MGG returns a complete route for each objective from the current native product.
+The adapter submits that whole path to Nav2 FollowPath; the controller owns
+arrival and failure reporting. A changed map epoch or mission fences new
+planning requests, while the server remains a replica.
 
 ## Map persistence and replication
 
@@ -421,9 +283,9 @@ missions remain deployment policies to implement before long missions.
 `SWARMDECK_NAVIGATION_FRAME`, and `SWARMDECK_SENSOR_NAMESPACE` for its calibrated
 ROS graph. Hardware with global TF topics should set `SWARMDECK_TF_TOPIC=/tf`
 and `SWARMDECK_TF_STATIC_TOPIC=/tf_static`. Keep each robot's existing
-`ROS_DOMAIN_ID` as its local sensor, adapter, MGG, and indexed-query domain. Set
-one common, unused ROS domain across the participating robots as
-`SWARMDECK_PEER_DOMAIN_ID`; if it is omitted, the bridge retains the existing
+local sensor, adapter, MGG, and bridge processes in that local domain. Set one
+common, unused ROS domain across participating robots as
+`SWARMDECK_PEER_DOMAIN_ID`; if omitted, the bridge retains the existing
 single-domain behavior. The dual-domain bridge consumes raw cloud and TF only
 from the local domain, sends normalized cloud/odometry to Swarm-SLAM on the
 peer domain, and returns map authority and keyframe metadata locally. It relays
@@ -438,40 +300,18 @@ covariance or scan deskew interval, so these remain explicitly unknown at that
 boundary. Selecting a full calibrated odometry/capture provider is required for
 platform qualification.
 
-The same `peer_mapping` profile provides optional `peer_mola_mapping` and
-`peer_mapping_query` services on `onboard_peer_maps`. Start the three explicitly
-after building the current mapping image:
+The `peer_mapping` profile provides an optional `peer_mola_mapping` worker on
+`onboard_peer_maps`. Start the worker after building the current mapping image:
 
 ```bash
 docker compose -f deploy/compose/docker-compose.robot-peer.yml \
-  --profile peer_mapping up -d \
-  peer_mapping peer_mola_mapping peer_mapping_query
+  --profile peer_mapping up -d peer_mapping peer_mola_mapping
 ```
 
-Hardware adapters read autonomy selection from their YAML. Qualifying a robot
-for MGG planning and peer coordination therefore requires these explicit
-additions alongside its existing `exploration.planner` calibration:
-
-```yaml
-actions:
-  follow_path: /robot_namespace/follow_path  # real Nav2 FollowPath server
-planning:
-  backend: mgg
-exploration:
-  enabled: true
-  peer_coordination: true
-```
-
-Set `SWARMDECK_MAPPING_AUTHORITY=onboard` in that adapter's environment. The
-configured `follow_path` action must execute the complete MGG path; a robot with
-only waypoint, trajectory, or direct velocity control needs a qualified path
-adapter before enabling this configuration.
-
-The query service uses host networking, host IPC, the local ROS domain,
-and the exact mission UUID. The MOLA worker remains ROS-independent. Starting
-these services does not enable MGG's client; set `SWARMDECK_INDEXED_MAP_QUERY=1`
-only in a separately qualified MGG deployment after sufficient measured
-free-space coverage exists.
+The MOLA worker remains ROS-independent and writes native planner products for
+MGG to read directly. Hardware adapters still require the configured
+`follow_path` action to execute complete MGG paths and must be qualified against
+their capture, calibration and frame contracts.
 
 `SWARMDECK_SERVER_URL` is optional. Peer discovery and graph exchange must remain
 reachable without the dashboard or a server-hosted router. Test the actual
@@ -497,13 +337,11 @@ opacity is not occupancy and is not supplied to collision planning.
 ## Validation record
 
 Earlier baseline validation on 2026-09-09, before grid refinement, included the
-native MGG image, ROS planner suites, and a DDS fixture exercising full-path Explore, Navigate, cancellation,
-and late-response fencing. The indexed fixture checks the exact component
-transform and a 50 ms deadline against a delayed service response. The Python
-autonomy, adapter, replication, reconstruction, command-routing, and backend
-batch passed 332 tests from a clean export of the staged refactor, excluding
-unrelated workspace edits.
-Svelte type checks and the production build pass.
+native MGG image, ROS planner suites, and a DDS fixture exercising full-path
+Explore, Navigate, cancellation, and late-response fencing. The native MOLA
+worker fixture checked coherent SDMGRID1 publications and artifact identities.
+The Python autonomy and adapter suites passed from a clean export; Svelte type
+checks and the production build passed.
 The browser rendered a local 7,800-point replica fixture. Replica preview code
 loads on demand, limits rendering to 50,000 points and downloads to 64 MiB, and
 preserves the camera and cached geometry during pose-only updates.
@@ -519,17 +357,14 @@ The corrected image passed the joint-solution fixture in about 25 seconds.
 Bounded correspondence selection also prevents the prior multi-minute exact
 clique search; the inlier acceptance threshold remains unchanged.
 
-The native indexed-map ROS smoke checks actual generated request/response
-serialization, FREE/OCCUPIED/UNKNOWN arrays, and stale key/timestamp rejection.
-It caught and fixed a collision with rclpy's internal `_services` member that
-unit tests of the index alone could not detect. The local MOLA native build
-passed both C++ tests and serialized the Python fixture to a metric map.
-The native dual-domain bridge smoke publishes conflicting `odom -> base_link`
-transforms on the local sensor and shared peer domains. Normalized odometry uses
-the local transform, raw TF/cloud never appears on the peer domain, normalized
-capture reaches the peer domain, and authority/keyframe metadata returns only
-to the local domain. Exact intention and exploration-report JSON crosses in
-each permitted direction once; oversized payloads are rejected.
+The native MOLA worker fixture checks coherent SDMGRID1 publications and
+artifact identities. The native dual-domain bridge smoke publishes conflicting
+`odom -> base_link` transforms on the local sensor and shared peer domains.
+Normalized odometry uses the local transform, raw TF/cloud never appears on the
+peer domain, normalized capture reaches the peer domain, and authority/keyframe
+metadata returns only to the local domain. Exact intention and
+exploration-report JSON crosses in each permitted direction once; oversized
+payloads are rejected.
 
 On the authorized amd64 workstation, ROS Jazzy Swarm-SLAM compiled with the
 versioned message patch and its native Open3D/TEASER/message imports passed.

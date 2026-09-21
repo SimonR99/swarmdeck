@@ -18,20 +18,11 @@ ENV CMAKE_BUILD_PARALLEL_LEVEL=2
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git python3-colcon-common-extensions python3-numpy \
       libssl-dev nlohmann-json3-dev \
-      ros-jazzy-rosidl-default-generators \
       "ros-jazzy-mola=${MOLA_VERSION}-*" \
       "ros-jazzy-mola-kernel=${MOLA_VERSION}-*" \
       "ros-jazzy-mola-metric-maps=${MOLA_VERSION}-*" \
       "ros-jazzy-mola-launcher=${MOLA_VERSION}-*" \
     && rm -rf /var/lib/apt/lists/*
-
-# Build only MGG's small generated wire-contract package. The mapping runtime
-# does not build or link the planner itself.
-# Keep the planner pin downstream of the independent ROS dependency layer.
-ARG MGG_REV=7004cd47c9197a44ab89d4ee1d7023418c957141
-COPY deploy/docker/build-mgg-msgs.sh /tmp/build-mgg-msgs.sh
-RUN bash /tmp/build-mgg-msgs.sh "$MGG_REV" \
-    && rm -rf /tmp/mgg-msgs-source
 
 FROM mapping-contracts AS mapping-runtime
 
@@ -49,15 +40,11 @@ COPY deploy/autonomy/mola_worker.py /opt/swarmdeck/deploy/autonomy/mola_worker.p
 COPY deploy/autonomy/mola_process.py /opt/swarmdeck/deploy/autonomy/mola_process.py
 COPY deploy/autonomy/mola_worker.py /usr/local/bin/swarmdeck-mola-worker
 COPY deploy/autonomy/mola_process.py /usr/local/bin/mola_process.py
-COPY deploy/autonomy/indexed_map_server.py /opt/swarmdeck/deploy/autonomy/indexed_map_server.py
-COPY deploy/autonomy/run_indexed_map_server.sh /usr/local/bin/swarmdeck-indexed-map-server
 COPY tests/deployment/mola_jsonl_smoke.py /usr/local/bin/mola-jsonl-smoke.py
 COPY tests/deployment/mola_launcher_smoke.py /usr/local/bin/mola-launcher-smoke.py
-COPY tests/deployment/mola_planner_acceptance.py /usr/local/bin/mola-planner-acceptance.py
 
 RUN chmod 0755 /usr/local/bin/swarmdeck-mola-worker /usr/local/bin/mola_process.py \
-    /usr/local/bin/swarmdeck-indexed-map-server /usr/local/bin/mola-jsonl-smoke.py \
-    /usr/local/bin/mola-launcher-smoke.py /usr/local/bin/mola-planner-acceptance.py
+    /usr/local/bin/mola-jsonl-smoke.py /usr/local/bin/mola-launcher-smoke.py
 
 RUN source /opt/ros/jazzy/setup.bash \
     && colcon build --packages-select swarmdeck_mapping swarmdeck_mola \
@@ -109,21 +96,6 @@ RUN PYTHONPATH=/opt/swarmdeck python3 src/swarmdeck_mapping/test/make_fixture.py
          --fixture /tmp/launcher-fixture \
          --config /mapping_ws/install/swarmdeck_mola/share/swarmdeck_mola/config/external-map.yaml \
          --timeout 10
-
-# Exercise the native SDMGRID1 planner artifact through the deployment worker
-# and MOLA directory provider. This is a bounded, no-ROS, no-motion fixture.
-RUN source /opt/ros/jazzy/setup.bash \
-    && timeout 45s env PYTHONPATH=/opt/swarmdeck \
-         python3 /usr/local/bin/mola-planner-acceptance.py \
-         --binary /mapping_ws/install/swarmdeck_mapping/bin/swarmdeck-mola-import
-
-# Verify the generated MGG service contract against the actual query server.
-# Both ROS processes stay on loopback in a separate domain and send no motion.
-COPY tests/deployment/mola_ros_query_smoke.py /usr/local/bin/mola-ros-query-smoke.py
-RUN --network=none source /opt/ros/jazzy/setup.bash \
-    && source /opt/swarmdeck-mgg-msgs/local_setup.bash \
-    && timeout 45s env PYTHONPATH=/opt/swarmdeck:${PYTHONPATH} \
-         python3 /usr/local/bin/mola-ros-query-smoke.py
 
 ENV PYTHONPATH=/opt/swarmdeck
 CMD ["bash"]

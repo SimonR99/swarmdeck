@@ -18,6 +18,8 @@ try:
 except ImportError:  # Direct execution inside the MGG container.
     from reset_protocol import open_lock, prepare_reset_directories
 
+STATUS_HEARTBEAT_NS = 1_000_000_000
+
 
 def read_json(path: Path) -> dict:
     try:
@@ -88,6 +90,7 @@ class PlannerSupervisor:
         prepare_reset_directories(root, names)
         self.processes: dict[str, subprocess.Popen] = {}
         self.runs: dict[str, str | None] = {}
+        self.statuses: dict[str, tuple[dict, int]] = {}
         self.reset_source = reset_source
 
     def stop(self, robot: str) -> None:
@@ -224,23 +227,34 @@ class PlannerSupervisor:
                         self.runs[robot] = run_id
                 except (OSError, ValueError, RuntimeError) as exc:
                     state, error = "failed", str(exc)
+            status = {
+                "version": 1,
+                "robot_id": robot,
+                "mission_id": self.mission_id,
+                "request_id": desired.get("request_id"),
+                "state": state,
+                "run_id": run_id,
+                "pid": process.pid if process else None,
+                "map_epoch": epoch.get("map_epoch"),
+                "source_reset_run_id": source_reset.get("source_reset_run_id"),
+                "source_reset_stamp": source_reset.get("source_reset_stamp"),
+                "error": error,
+            }
+            # deploy/simulation_reset.py treats a status older than 3 s as
+            # stale, so an unchanged status is rewritten (two fsyncs) once a
+            # second rather than on every 0.2 s step.
+            previous = self.statuses.get(robot)
+            now_ns = time.time_ns()
+            if (
+                previous is not None
+                and previous[0] == status
+                and now_ns - previous[1] < STATUS_HEARTBEAT_NS
+            ):
+                continue
             atomic_json(
-                directory / "mgg-status.json",
-                {
-                    "version": 1,
-                    "robot_id": robot,
-                    "mission_id": self.mission_id,
-                    "request_id": desired.get("request_id"),
-                    "state": state,
-                    "run_id": run_id,
-                    "pid": process.pid if process else None,
-                    "map_epoch": epoch.get("map_epoch"),
-                    "source_reset_run_id": source_reset.get("source_reset_run_id"),
-                    "source_reset_stamp": source_reset.get("source_reset_stamp"),
-                    "error": error,
-                    "updated_at_ns": time.time_ns(),
-                },
+                directory / "mgg-status.json", {**status, "updated_at_ns": now_ns}
             )
+            self.statuses[robot] = (status, now_ns)
 
     def close(self) -> None:
         for robot in tuple(self.processes):

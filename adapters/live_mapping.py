@@ -96,10 +96,6 @@ def _display_navigation(bridge, state, authority, anchored=True):
         retained is not None
         and retained[0] == generation
         and state.get("nav_status") == "active"
-        and not (
-            global_plan is not None
-            and (state.get("objective_continuation") or {}).get("phase") == "planning"
-        )
     ):
         plan = retained[1]
         try:
@@ -122,10 +118,8 @@ def _display_navigation(bridge, state, authority, anchored=True):
             global_points = []
         state["global_planned_path"] = global_points
         state["local_planned_path"] = local_points
-        # Bridge state may still retain the controller's completed chunk while
-        # the next native refinement RPC is pending. Keep the compatibility
-        # path aligned with the executable local window instead of replaying
-        # that stale chunk beside the persistent global route.
+        # Whole-route objective plans are displayed alongside the local
+        # controller path; both are current full-path views.
         state["planned_path"] = local_points
     elif retained is not None:
         # Legacy full FollowPath routes remain both the compatibility and

@@ -1375,6 +1375,14 @@ def create_adapter_node():
     )
 
 
+def spin_events(node) -> None:
+    from rclpy.experimental import EventsExecutor
+
+    executor = EventsExecutor()
+    executor.add_node(node)
+    executor.spin()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -1460,8 +1468,11 @@ def main() -> None:
             f"({bridge.robot_type}, r={bridge.footprint_radius} m)"
         )
 
-    # ROS spins in its own thread; asyncio owns the protocol side.
-    threading.Thread(target=lambda: rclpy.spin(node), daemon=True).start()
+    # ROS spins in its own thread; asyncio owns the protocol side. The events
+    # executor dispatches each message as it arrives; the default executor
+    # rebuilds a wait set over every subscription, timer and client of all
+    # four robots per message, which was the adapter's whole parked CPU.
+    threading.Thread(target=lambda: spin_events(node), daemon=True).start()
     try:
         asyncio.run(main_async(bridges, f"ws://{args.host}:{args.port}/adapter"))
     except KeyboardInterrupt:

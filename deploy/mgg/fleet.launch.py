@@ -13,7 +13,8 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 
 MOLA_MAP_RESOLUTION_M = 0.2
-GRID_REFINEMENT_RESOLUTION_M = 0.5
+# GridGraphLocal resolution in mgg_argos/config/bistro.yaml.
+LATTICE_RESOLUTION_M = 0.5
 MAX_INITIAL_GROUND_REACH_M = 5.0
 
 
@@ -38,10 +39,7 @@ def mola_initial_ground_reach(robot, lidar):
     )
     if required > MAX_INITIAL_GROUND_REACH_M:
         raise ValueError("MOLA lidar ground blind radius exceeds bounded reach")
-    return (
-        math.ceil(required / GRID_REFINEMENT_RESOLUTION_M)
-        * GRID_REFINEMENT_RESOLUTION_M
-    )
+    return math.ceil(required / LATTICE_RESOLUTION_M) * LATTICE_RESOLUTION_M
 
 
 def simulation_robot_prefix(fleet):
@@ -101,10 +99,6 @@ def generate_launch_description():
                 + 0.175,
                 "PlanningParams.max_step_height": spec.max_step_height,
                 "PlanningParams.edge_length_max": initial_ground_reach,
-                "objective_start_support_max_distance_m": initial_ground_reach,
-                "grid_refinement_resolution_m": GRID_REFINEMENT_RESOLUTION_M,
-                "objective_grid_timeout_ms": 4000,
-                "objective_grid_max_margin_m": 8.0,
                 "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
                 "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
                 "PlanningParams.max_inclination": math.radians(30),

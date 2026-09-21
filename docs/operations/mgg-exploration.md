@@ -45,9 +45,7 @@ Each robot gets its own namespace, normally `/<robot_id>/mgg`:
 | `status` | `std_msgs/msg/String` | Timestamped JSON lifecycle state: starting, exploring, waiting, complete, blocked, stopped |
 | `command_path` | `nav_msgs/msg/Path` | PCI's current exploration path; transient-local QoS |
 | `mggplanner` | `mgg_msgs/srv/PlannerSrv` | Internal PCI-to-planner request |
-| `plan_objective` | `mgg_msgs/srv/PlanObjective` | Plan a graph route for Navigate or Return Home and refine its first local section |
-| `refine_objective_route` | `mgg_msgs/srv/RefineObjectiveRoute` | Refine the next section of the retained graph route after local arrival |
-| `validate_objective_route` | `mgg_msgs/srv/ValidateObjectiveRoute` | Check the remaining local route against current terrain and obstacles |
+| `plan_objective` | `mgg_msgs/srv/PlanObjective` | The whole route over the global graph for Navigate or Return Home |
 | `map_odometry` | `nav_msgs/msg/Odometry` | Robot pose in the planner's map frame |
 | `mapping_cloud` | `sensor_msgs/msg/PointCloud2` | Live sensor clouds, retaining each sensor’s frame/stamp |
 
