@@ -135,8 +135,8 @@ export class Robot3DManager {
     // Raise chevron above the chassis
     chevronGeo.translate(0, 0, 0.12);
 
-    // Use the transparent render queue at full opacity so terrain, costmaps,
-    // and splats cannot cover the fill while leaving only its outline visible.
+    // Use the transparent render queue at full opacity so terrain and splats
+    // cannot cover the fill while leaving only its outline visible.
     const chevronMat = new THREE.MeshBasicMaterial({
       color: threeColor,
       transparent: true, opacity: 1,

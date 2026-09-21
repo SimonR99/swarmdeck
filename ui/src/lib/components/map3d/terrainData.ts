@@ -1,8 +1,14 @@
 /** Pure, bounded map preparation; also runs in the terrain worker. Coordinates are Z-up metres. */
+// Point budgets are what the terrain is built from, not what it draws: the
+// voxel budget then coarsens the map until it fits. A hundred keyframes of
+// tunnel are two million points; sampled to 60,000 they were a sprinkle that
+// read as "only the last scan", so even the low tier keeps enough to show a
+// whole single-robot map, and the voxel size, not the point count, is what a
+// slow machine feels.
 export const QUALITY = {
-  low: { points: 60000, voxels: 8000, splats: 30000, dpr: 1, fps: 30 },
-  balanced: { points: 160000, voxels: 20000, splats: 80000, dpr: 1.5, fps: 45 },
-  high: { points: 300000, voxels: 40000, splats: 150000, dpr: 2, fps: 60 }
+  low: { points: 250000, voxels: 30000, splats: 30000, dpr: 1, fps: 30 },
+  balanced: { points: 600000, voxels: 80000, splats: 80000, dpr: 1.5, fps: 45 },
+  high: { points: 1200000, voxels: 160000, splats: 150000, dpr: 2, fps: 60 }
 } as const;
 export type Quality = keyof typeof QUALITY;
 export interface CloudInput {

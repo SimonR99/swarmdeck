@@ -26,8 +26,6 @@ export interface Map3DOptions {
   showSensors: boolean;
   showPlans: boolean;
   showNetwork: boolean;
-  showCostmap: boolean;
-  costmapKind: 'global' | 'local';
   ceilingCutoff: number;
   renderMode: Map3DRenderMode;
   colorMode: Map3DColorMode;

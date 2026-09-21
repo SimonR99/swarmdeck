@@ -31,9 +31,6 @@ def make_bridge(sim):
     bridge._nav_quiet_unknown = False
     bridge._last_drive_at = 12.0
     bridge._upload_lock = threading.Lock()
-    bridge._costmap_lock = threading.Lock()
-    bridge._costmaps = {}
-    bridge._costmap_dirty = set()
     bridge._service_clients = {}
     bridge._reset_report = None
     bridge.http_url = "http://server:8080"
@@ -81,18 +78,6 @@ def test_reset_readiness_requires_follow_path_and_planner_service(sim):
     assert bridge.navigation_ready() is False
     bridge.objective_planner.client.service_is_ready.return_value = True
     assert bridge.navigation_ready() is True
-
-
-def test_costmap_upload_is_skipped_while_reset_holds_quiescence_lock(sim):
-    bridge = make_bridge(sim)
-    bridge._costmap_lock = threading.Lock()
-    bridge._upload_lock.acquire()
-    try:
-        bridge.upload_costmaps()
-    finally:
-        bridge._upload_lock.release()
-
-    assert bridge._costmaps == {}
 
 
 class _Twist:

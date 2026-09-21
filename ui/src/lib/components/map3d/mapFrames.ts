@@ -32,7 +32,7 @@ export function routePositions(
 }
 
 
-/** Costmaps and network grids are always in their source robot's map frame. */
+/** Network grids are always in their source robot's map frame. */
 export function decalPose(
   info: { width: number; height: number; resolution: number; origin: { x: number; y: number } },
   transform?: MapTransform

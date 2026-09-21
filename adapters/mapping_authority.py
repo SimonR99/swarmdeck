@@ -257,13 +257,6 @@ class MappingAuthority:
         value = self.current()
         return None if value is None else authority_for_frame(value, frame)
 
-    def _discard_map_uploads(self):
-        lock = getattr(self.bridge, "_costmap_lock", None)
-        if lock is not None:
-            with lock:
-                self.bridge._costmaps.clear()
-                self.bridge._costmap_dirty.clear()
-
     def _advance_lifetime(self, epoch):
         with getattr(self.bridge, "_goal_lock", nullcontext()):
             if epoch > self.robot_map_epoch and self.robot_map_epoch >= 0:
@@ -275,7 +268,6 @@ class MappingAuthority:
                 self.bridge._display_anchor = None
                 self.value = None
                 self.source_reset_stamp_ns = None
-                self._discard_map_uploads()
             self.robot_map_epoch = epoch
 
     def receive(self, message):
@@ -328,8 +320,6 @@ class MappingAuthority:
                     return
                 cutoff = sec * 1_000_000_000 + nanosec
             self._advance_lifetime(epoch)
-            if cutoff is not None and self.source_reset_stamp_ns is None:
-                self._discard_map_uploads()
             self.source_reset_stamp_ns = cutoff
             if converted is not None and self.publisher is not None:
                 out = self.message_type()
@@ -357,7 +347,7 @@ class MappingAuthority:
                 self.publisher.publish(out)
             self.value = value
             self.received_at = self.clock()
-        except (ValueError, TypeError, KeyError, AttributeError):
+        except (ValueError, TypeError, KeyError):
             return
 
 

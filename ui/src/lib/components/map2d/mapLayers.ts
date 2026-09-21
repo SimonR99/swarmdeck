@@ -13,7 +13,6 @@ import { detectionCatalog } from '$lib/stores/detection.svelte';
 import { review } from '$lib/stores/review.svelte';
 import { robotDisplayName } from '$lib/robotDisplayName';
 import type {
-  CostmapKind,
   DetectionEntity,
   DetectionProposal,
   Footprint,
@@ -393,62 +392,6 @@ export function drawNetworkHeatmap(
   }
 }
 
-/** Draw one robot's global or rolling local Nav2 costmap over the map. */
-export function drawCostmap(
-  ctx: CanvasRenderingContext2D,
-  view: Viewport,
-  showCostmap: boolean,
-  robotId: string | null,
-  kind: CostmapKind
-) {
-  if (!showCostmap || !mapStore.info || !robotId || !fleet.isEnabled(robotId)) return;
-  const layer = mapStore.costmapLayer(robotId, kind);
-  if (!layer) return;
-
-  const maxY = layer.info.origin.y + layer.info.height * layer.info.resolution;
-  const width =
-    (layer.info.width * layer.info.resolution / (mapStore.info.resolution || 1)) * view.scale;
-  const height =
-    (layer.info.height * layer.info.resolution / (mapStore.info.resolution || 1)) * view.scale;
-
-  ctx.save();
-  ctx.translate(view.tx, view.ty);
-  if (view.rotation) ctx.rotate(view.rotation);
-  ctx.globalAlpha = 0.68;
-  ctx.imageSmoothingEnabled = view.scale < 1;
-
-  // Global grids use the collaborative frame and need T_world_map for a
-  // robot-local costmap: the displayed raster's own frame for that robot,
-  // as the robots are placed, else the legacy merged map's status
-  // transforms. Both local grid sources (raw SLAM and optimized robot:<id>)
-  // use the selected robot's map frame already.
-  const useRobotTransform = mapStore.viewMode === 'global';
-  const tf = useRobotTransform
-    ? overlayFrameOnGlobalGrid(robotId, mapStore.info?.transforms)
-    : undefined;
-  if (tf) {
-    const originGrid = mapStore.viewToGrid(tf.x, tf.y);
-    if (originGrid) {
-      ctx.translate(originGrid.gx * view.scale, originGrid.gy * view.scale);
-      if (tf.yaw) ctx.rotate(-tf.yaw);
-      const localGx = (layer.info.origin.x / mapStore.info.resolution) * view.scale;
-      const localGy = (-(maxY / mapStore.info.resolution)) * view.scale;
-      ctx.drawImage(layer.canvas, localGx, localGy, width, height);
-    }
-  } else {
-    const topLeft = mapStore.viewToGrid(layer.info.origin.x, maxY);
-    if (topLeft) {
-      ctx.drawImage(
-        layer.canvas,
-        topLeft.gx * view.scale,
-        topLeft.gy * view.scale,
-        width,
-        height
-      );
-    }
-  }
-  ctx.restore();
-}
 
 export interface RobotLayerOptions {
   info: MapInfo;

@@ -118,10 +118,6 @@ def _bridge(mod, cfg_override=None):
     bridge._camera_info = None
     bridge._camera_color_info = None
     bridge._camera_depth_cloud = None
-    bridge._costmap_warned_at = {}
-    bridge._costmap_lock = threading.Lock()
-    bridge._costmaps = {}
-    bridge._costmap_dirty = set()
     bridge._last_depth_warning_at = 0.0
     bridge._pose_warned = False
     bridge._odom_pose = {"x": 4.0, "y": -2.0, "yaw": 0.5}
@@ -140,21 +136,6 @@ class _ImmediateFuture:
 
     def result(self):
         return self.value
-
-
-def _occupancy_grid(frame="map"):
-    return SimpleNamespace(
-        header=SimpleNamespace(
-            frame_id=frame, stamp=SimpleNamespace(sec=12, nanosec=34)
-        ),
-        info=SimpleNamespace(
-            resolution=0.05,
-            width=20,
-            height=10,
-            origin=SimpleNamespace(position=SimpleNamespace(x=-1.0, y=-2.0)),
-        ),
-        data=[-1, 0, 100] * 66 + [-1, 0],
-    )
 
 
 def _trigger_client(order, name):
@@ -1147,17 +1128,3 @@ def test_pose_lookup_uses_navigation_frame_and_base_frame(mod):
     assert pose["x"] == pytest.approx(1.25)
     assert pose["y"] == pytest.approx(-0.75)
     assert pose["yaw"] == pytest.approx(0.5)
-
-
-def test_local_costmap_is_normalized_and_uploaded(mod, monkeypatch):
-    bridge = _bridge(mod, {"navigation_frame": "odom"})
-    bridge._on_costmap(_occupancy_grid("odom"), "local")
-    assert bridge._costmaps["local"].frame_id == "odom"
-    assert "local" in bridge._costmap_dirty
-
-    response = MagicMock()
-    response.read.return_value = b"ok"
-    monkeypatch.setattr(mod.urllib.request, "urlopen", lambda *a, **k: response)
-    bridge.upload_costmaps()
-    assert "local" not in bridge._costmap_dirty
-    response.read.assert_called_once()

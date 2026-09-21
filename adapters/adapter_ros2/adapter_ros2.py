@@ -48,7 +48,6 @@ from contextlib import nullcontext
 import time
 import urllib.parse
 import urllib.request
-import zlib
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +55,6 @@ import numpy as np
 import rclpy
 import websockets
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion, Twist
-from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -100,7 +98,6 @@ from adapters.runtime import (
 )
 from adapters.session import run_adapter_session
 from adapters.navigation_result import navigation_failure_reason
-from adapters.costmap import CostmapSnapshot, normalize_costmap
 from ros2_defaults import DEFAULTS
 
 # The detector needs OpenCV and the inference sidecar's client; a robot image
@@ -203,10 +200,6 @@ class HardwareBridge(
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, node)
 
-        self._costmaps: dict[str, CostmapSnapshot] = {}
-        self._costmap_dirty: set[str] = set()
-        self._costmap_lock = threading.Lock()
-        self._costmap_warned_at: dict[str, float] = {}
         self.planned_path: list[dict[str, float]] = []
         self._global_planned_path: list[dict[str, float]] = []
         self._local_planned_path: list[dict[str, float]] = []
@@ -272,13 +265,6 @@ class HardwareBridge(
         if topics.get("local_plan"):
             node.create_subscription(
                 NavPath, topics["local_plan"], self._on_local_plan, 10
-            )
-        if topics.get("local_costmap"):
-            node.create_subscription(
-                OccupancyGrid,
-                topics["local_costmap"],
-                lambda msg: self._on_costmap(msg, "local"),
-                qos_profile_sensor_data,
             )
         if topics.get("battery"):
             battery_topic = topics["battery"]
@@ -483,54 +469,6 @@ class HardwareBridge(
         return caps
 
     # ------------------------------------------------------------- ROS inputs
-
-    def _warn_costmap(self, kind: str, reason: str) -> None:
-        now = time.monotonic()
-        if now - self._costmap_warned_at.get(kind, 0.0) < 10.0:
-            return
-        self._costmap_warned_at[kind] = now
-        self.node.get_logger().warn(
-            f"[{self.id}] {kind} costmap unavailable for overlay: {reason}"
-        )
-
-    def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
-        """Capture Nav2's planner view without changing navigation inputs."""
-        source = str(
-            getattr(getattr(msg, "header", None), "frame_id", "") or ""
-        ).lstrip("/")
-        target = str(self.navigation_frame or "").lstrip("/")
-        transform = (0.0, 0.0, 0.0)
-        if source and source != target:
-            try:
-                stamp = getattr(getattr(msg, "header", None), "stamp", None)
-                tf_time = (
-                    rclpy.time.Time.from_msg(stamp)
-                    if stamp is not None
-                    else rclpy.time.Time()
-                )
-                tf = self.tf_buffer.lookup_transform(
-                    target, source, tf_time, timeout=Duration(seconds=0.1)
-                )
-                t = tf.transform
-                transform = (
-                    float(t.translation.x),
-                    float(t.translation.y),
-                    float(yaw_of(t.rotation)),
-                )
-            except Exception as exc:
-                self._warn_costmap(kind, f"no {target} <- {source} transform: {exc}")
-                return
-        try:
-            snapshot = normalize_costmap(
-                msg, target_frame=target or source, transform=transform
-            )
-        except (TypeError, ValueError) as exc:
-            self._warn_costmap(kind, str(exc))
-            return
-        with getattr(self, "_goal_lock", nullcontext()):
-            with self._costmap_lock:
-                self._costmaps[kind] = snapshot
-                self._costmap_dirty.add(kind)
 
     def _on_plan(self, msg: NavPath) -> None:
         self._receive_plan(msg, local=False)
@@ -1846,47 +1784,6 @@ class HardwareBridge(
             self._call_trigger("stop")
 
     # ------------------------------------------------------------- uploads
-
-    def upload_costmaps(self) -> None:
-        """Push the newest global/local Nav2 snapshots to the read-only overlay."""
-        headers = {"Content-Type": "application/octet-stream"}
-        with self._costmap_lock:
-            pending = [
-                (kind, self._costmaps[kind])
-                for kind in tuple(self._costmap_dirty)
-                if kind in self._costmaps
-            ]
-            for kind, _ in pending:
-                self._costmap_dirty.discard(kind)
-
-        for kind, snapshot in pending:
-            body = zlib.compress(
-                np.ascontiguousarray(snapshot.cells, dtype=np.int8).tobytes(), 1
-            )
-            frame = urllib.parse.quote(snapshot.frame_id, safe="")
-            url = (
-                f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
-                f"&kind=local&resolution={snapshot.resolution}"
-                f"&width={snapshot.width}&height={snapshot.height}"
-                f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
-                f"&frame_id={frame}"
-            )
-            try:
-                urllib.request.urlopen(
-                    urllib.request.Request(
-                        url,
-                        data=body,
-                        headers=headers,
-                    ),
-                    timeout=float(self.cfg.get("upload_timeout_s", 25.0)),
-                ).read()
-            except Exception as exc:
-                with self._costmap_lock:
-                    if self._costmaps.get(kind) is snapshot:
-                        self._costmap_dirty.add(kind)
-                self.node.get_logger().warn(
-                    f"[{self.id}] {kind} costmap upload failed: {exc}"
-                )
 
 
 async def run_robot(bridge: HardwareBridge, ws_url: str) -> None:

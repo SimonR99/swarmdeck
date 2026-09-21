@@ -19,7 +19,6 @@ export class Map3DLayers {
   private trailsGroup = new THREE.Group();
   private detectionsGroup = new THREE.Group();
   private loopClosuresGroup = new THREE.Group();
-  private costmapMesh: THREE.Mesh | null = null;
   private networkMesh: THREE.Mesh | null = null;
   private signatures = new Map<string, string>();
   public cursorReticle: THREE.Group;
@@ -144,9 +143,7 @@ export class Map3DLayers {
     showTrails: boolean;
     showPlans: boolean;
     showSensors: boolean;
-    showCostmap: boolean;
     showNetwork: boolean;
-    costmapKind: 'local';
     time: number;
     getGroundZ?: (x: number, y: number) => number;
   }) {
@@ -211,7 +208,7 @@ export class Map3DLayers {
       ])
     )
       this.updateLoopClosures(options.showPlans);
-    this.updateDecals(options.showCostmap, options.showNetwork, options.costmapKind);
+    this.updateNetworkDecal(options.showNetwork);
   }
 
   public invalidate() {
@@ -475,52 +472,8 @@ export class Map3DLayers {
     }
   }
 
-  private updateDecals(
-    showCostmap: boolean,
-    showNetwork: boolean,
-    costmapKind: 'local'
-  ) {
-    // 3D Costmap ground decal
-    const viewedCostmapRobotId =
-      mapStore.viewMode === 'local' && mapStore.viewRobot
-        ? mapStore.viewRobot
-        : (fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null);
-    const costmapLayer = viewedCostmapRobotId
-      ? mapStore.costmapLayer(viewedCostmapRobotId, costmapKind)
-      : null;
 
-    if (showCostmap && costmapLayer && costmapLayer.canvas) {
-      if (!this.costmapMesh) {
-        const geo = new THREE.PlaneGeometry(1, 1);
-        const mat = new THREE.MeshBasicMaterial({
-          transparent: true,
-          opacity: 0.65,
-          side: THREE.DoubleSide,
-          depthWrite: false, depthTest: false
-        });
-        this.costmapMesh = new THREE.Mesh(geo, mat);
-        this.costmapMesh.renderOrder = 20;
-        this.group.add(this.costmapMesh);
-      }
-      this.costmapMesh.visible = true;
-      const material = this.costmapMesh.material as THREE.MeshBasicMaterial;
-      if (!material.map || material.map.image !== costmapLayer.canvas) {
-        material.map?.dispose();
-        material.map = new THREE.CanvasTexture(costmapLayer.canvas);
-        material.needsUpdate = true;
-      }
-      if (this.costmapMesh.userData.seq !== costmapLayer.seq) material.map.needsUpdate = true;
-      this.costmapMesh.userData.seq = costmapLayer.seq;
-
-      const pose = decalPose(costmapLayer.info, mapStore.info?.transforms?.[costmapLayer.robotId]);
-      this.costmapMesh.scale.set(pose.width, pose.height, 1);
-      this.costmapMesh.rotation.z = pose.yaw;
-      this.costmapMesh.position.set(pose.x, pose.y, 0.2);
-    } else if (this.costmapMesh) {
-      this.costmapMesh.visible = false;
-    }
-
-    // 3D Network heatmap decal
+  private updateNetworkDecal(showNetwork: boolean) {
     const networkLayer = mapStore.networkLayer;
     if (showNetwork && networkLayer && networkLayer.canvas) {
       if (!this.networkMesh) {

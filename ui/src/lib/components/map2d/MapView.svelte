@@ -47,7 +47,6 @@
   import {
     drawLoopClosures,
     drawMetricGrid,
-    drawCostmap,
     drawNetworkHeatmap,
     metricGridSpacing,
     drawReviewedObjects,
@@ -90,8 +89,6 @@
   let showSensors = $state(false);
   let showPlans = $state(true);
   let showNetwork = $state(false);
-  let showCostmap = $state(false);
-  let costmapKind = $state<'local'>('local');
   let resetPending = $state(false);
   let resetError = $state<string | null>(null);
 
@@ -374,7 +371,6 @@
         ctx.drawImage(mask, 0, 0, gw, gh);
       }
       ctx.restore();
-      drawCostmap(ctx, view, showCostmap, viewedCostmapRobotId, costmapKind);
       drawNetworkHeatmap(ctx, screenOf, view, showNetwork);
     }
 
@@ -633,14 +629,6 @@
       ? fleet.get(mapStore.viewRobot)?.network ?? null
       : (fleet.selected[0] ? fleet.get(fleet.selected[0])?.network : fleet.robots[0]?.network) ?? null
   );
-  const viewedCostmapRobotId = $derived(
-    mapStore.viewMode === 'local' && mapStore.viewRobot
-      ? mapStore.viewRobot
-      : fleet.selected[0] ?? fleet.robots[0]?.robot_id ?? null
-  );
-  const viewedCostmap = $derived(
-    mapStore.costmapLayer(viewedCostmapRobotId, 'local')
-  );
   const resetRobotBlocked = $derived(
     resetPending || !resetRobot
   );
@@ -681,8 +669,6 @@
         {showSensors}
         {showPlans}
         {showNetwork}
-        {showCostmap}
-        {costmapKind}
         {trails}
         onCameraInteraction={() => (follow = false)}
         onCursorChange={(coords) => (cursorWorld = coords)}
@@ -787,14 +773,6 @@
         >
           <span class="flex items-center gap-2"><Wifi class="h-3.5 w-3.5" /> Network heatmap</span>
           <span class="font-semibold {showNetwork ? 'text-accent' : 'text-fg-dim'}">{showNetwork ? 'ON' : 'OFF'}</span>
-        </button>
-        <button
-          class="mt-1 flex h-9 w-full items-center justify-between rounded-[--radius-control] bg-surface-2/60 px-1.5 text-fg-muted hover:bg-surface-2"
-          title="Read-only local controller costmap for the selected robot"
-          onclick={() => (showCostmap = !showCostmap)}
-        >
-          <span class="flex items-center gap-2"><ScanLine class="h-3.5 w-3.5" /> Local costmap</span>
-          <span class="font-semibold {showCostmap ? 'text-accent' : 'text-fg-dim'}">{showCostmap ? 'ON' : 'OFF'}</span>
         </button>
         <button
           class="flex h-9 w-full items-center justify-between rounded-[--radius-control] px-1.5 text-fg-muted hover:bg-surface-2"
@@ -927,22 +905,6 @@
     </div>
   {/if}
 
-  {#if showCostmap && viewedCostmap}
-    <div
-      class="pointer-events-none absolute top-3 right-3 z-20 rounded-[--radius-control] border border-border
-             bg-surface/90 px-2.5 py-1.5 text-[9px] text-fg-dim shadow-sm backdrop-blur-xl"
-    >
-      <div class="mb-1 flex items-center justify-between gap-4">
-        <span class="font-semibold uppercase tracking-[0.07em]">Nav2 {costmapKind} cost</span>
-        <span class="font-mono text-fg-muted">#{viewedCostmap.seq}</span>
-      </div>
-      <div
-        class="h-1.5 w-44 rounded-full"
-        style="background:linear-gradient(90deg, rgb(250 194 55 / 35%), rgb(250 121 41 / 70%), rgb(250 48 27 / 95%))"
-      ></div>
-      <div class="mt-0.5 flex justify-between"><span>Inflation</span><span>Lethal</span></div>
-    </div>
-  {/if}
 
   <!-- View controls keep the same meaning in 2D and 3D. -->
   <div class="panel-glow absolute bottom-3 right-3 z-20 flex flex-col overflow-hidden rounded-[--radius-panel] border border-transparent bg-surface/95 p-1">

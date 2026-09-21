@@ -8,7 +8,7 @@ import {
   type OptimizedScope
 } from './optimizedScopes';
 import { fleet } from '$lib/stores/fleet.svelte';
-import type { CostmapPatch, NetworkPatch, MapStatus, Pose, SlamGraph } from '$lib/types/protocol';
+import type { NetworkPatch, MapStatus, Pose, SlamGraph } from '$lib/types/protocol';
 
 export type { OptimizedScope } from './optimizedScopes';
 
@@ -61,16 +61,6 @@ export interface NetworkLayerEntry {
 }
 const networkLayers = new Map<string, NetworkLayerEntry>();
 
-export interface CostmapLayerEntry {
-  canvas: HTMLCanvasElement;
-  ctx: CanvasRenderingContext2D;
-  info: RasterInfo;
-  robotId: string;
-  kind: 'local';
-  seq: number;
-  updatedAt: number;
-}
-const costmapLayers = new Map<string, CostmapLayerEntry>();
 
 function ensureCanvas(width: number, height: number) {
   if (!canvas) canvas = document.createElement('canvas');
@@ -148,25 +138,10 @@ function networkImageData(values: Uint8Array, width: number, height: number): Im
   return image;
 }
 
-function costmapColor(cost: number): [number, number, number, number] {
-  if (cost < 0) return [0, 0, 0, 0];
-  const alpha = Math.round(40 + Math.max(0, Math.min(100, cost)) * 1.7);
-  return [220, 65, 65, Math.min(220, alpha)];
-}
-
-function costmapImageData(values: Int8Array, width: number, height: number): ImageData {
-  const image = new ImageData(width, height);
-  for (let i = 0; i < values.length; i++) image.data.set(costmapColor(values[i]), i * 4);
-  return image;
-}
 
 function clearNetworkLayer(robotId: string | null = null) {
   if (robotId === null) networkLayers.clear();
   else networkLayers.delete(robotId);
-}
-function clearCostmapLayer(robotId: string | null = null) {
-  if (robotId === null) costmapLayers.clear();
-  else for (const key of costmapLayers.keys()) if (key.startsWith(`${robotId}:`)) costmapLayers.delete(key);
 }
 
 /**
@@ -228,13 +203,7 @@ export const mapStore = {
       ? state.viewRobot : fleet.selected[0] ?? fleet.robots[0]?.robot_id;
     return id ? networkLayers.get(id) ?? null : null;
   },
-  get costmapLayers() { void state.revision; return Array.from(costmapLayers.values()); },
-  costmapLayer(robotId: string | null, kind: 'local') {
-    void state.revision;
-    return robotId ? costmapLayers.get(`${robotId}:${kind}`) ?? null : null;
-  },
   clearNetwork(robotId: string | null = null) { clearNetworkLayer(robotId); state.revision++; },
-  clearCostmaps(robotId: string | null = null) { clearCostmapLayer(robotId); state.revision++; },
   get robotMapEpochs() { return state.robotMapEpochs; },
 
   applySlamGraph(robotId: string, graph: SlamGraph) {
@@ -247,54 +216,12 @@ export const mapStore = {
     if (state.robotMapEpochs[robotId] === identity) return;
     state.robotMapEpochs = { ...state.robotMapEpochs, [robotId]: identity };
     clearNetworkLayer(robotId);
-    clearCostmapLayer(robotId);
     delete state.slamGraphs[robotId];
     state.optimizedScopes = state.optimizedScopes.filter((entry) => !entry.robots.includes(robotId));
     if (state.viewMode === 'global' || state.viewRobot === robotId) void this.reloadCurrentView();
     state.revision++;
   },
 
-  applyCostmap(patch: CostmapPatch) {
-    if (patch.kind !== 'local' || !Number.isInteger(patch.width) || !Number.isInteger(patch.height) ||
-      patch.width <= 0 || patch.height <= 0 || !Number.isFinite(patch.resolution) || patch.resolution <= 0) return;
-    const cells = patch.width * patch.height;
-    if (cells > 16_000_000) return;
-    const key = `${patch.robot_id}:local`;
-    const previous = costmapLayers.get(key);
-    if (previous && patch.seq < previous.seq) return;
-    let values: Int8Array;
-    try {
-      const encoded = Uint8Array.from(atob(patch.data), (c) => c.charCodeAt(0));
-      const inflated = inflate(encoded);
-      if (inflated.byteLength !== cells) throw new Error('size mismatch');
-      values = new Int8Array(inflated.buffer, inflated.byteOffset, inflated.byteLength);
-    } catch {
-      console.warn('[swarmdeck] ignored malformed local costmap');
-      return;
-    }
-    let entry = previous;
-    if (!entry || entry.info.width !== patch.width || entry.info.height !== patch.height) {
-      const layerCanvas = document.createElement('canvas');
-      layerCanvas.width = patch.width; layerCanvas.height = patch.height;
-      const layerCtx = layerCanvas.getContext('2d');
-      if (!layerCtx) return;
-      entry = {
-        canvas: layerCanvas, ctx: layerCtx,
-        info: { resolution: patch.resolution, width: patch.width, height: patch.height, origin: patch.origin, seq: patch.seq },
-        robotId: patch.robot_id, kind: 'local', seq: patch.seq,
-        updatedAt: patch.updated_at ? patch.updated_at * 1000 : Date.now()
-      };
-      costmapLayers.set(key, entry);
-    }
-    entry.info.resolution = patch.resolution;
-    entry.info.origin = patch.origin;
-    entry.info.seq = patch.seq;
-    entry.seq = patch.seq;
-    entry.updatedAt = patch.updated_at ? patch.updated_at * 1000 : Date.now();
-    entry.ctx.clearRect(0, 0, patch.width, patch.height);
-    entry.ctx.putImageData(costmapImageData(values, patch.width, patch.height), 0, 0);
-    state.revision++;
-  },
 
   applyNetworkPatch(patch: NetworkPatch) {
     let values: Uint8Array;
@@ -451,6 +378,5 @@ export const mapStore = {
     state.statusUpdatedAt = 0; state.viewMode = 'global'; state.viewRobot = null;
     state.viewPreference = 'auto'; state.optimizedScopes = []; state.globalOptimizedScope = null;
     state.robotMapEpochs = {}; state.slamGraphs = {};
-    loadGeneration++; canvas = null; ctx = null; clearNetworkLayer(); clearCostmapLayer();
   }
 };

@@ -34,7 +34,6 @@ from ..fleet.registry import registry
 from ..mapsvc.service import map_service
 from .broadcast import JsonBroadcaster
 from .deployment_raster import deployment_raster_loop
-from .map_routes import costmap_snapshots, reset_costmaps, take_costmap_patches
 
 # Protocol 2 optionally carries peer SLAM status; protocol 1 remains accepted.
 PROTOCOL_VERSION = 2
@@ -51,7 +50,6 @@ async def lifespan(_: FastAPI):
     tasks = [
         asyncio.create_task(state_loop()),
         asyncio.create_task(network_loop()),
-        asyncio.create_task(costmap_loop()),
         asyncio.create_task(session_loop()),
         asyncio.create_task(deployment_raster_loop()),
     ]
@@ -114,9 +112,9 @@ CAMERA_STALE_S = 3.0
 _camera_watchers: dict[Any, str] = {}
 
 # How long to wait for adapters to report `reset_done` before clearing server
-# state. The adapters reset simulator poses, odometry, and local costmaps.
+# state. The adapters reset simulator poses, odometry, and navigation state.
 # Generous, because waiting too little can clear state while an adapter still
-# holds the old local products.
+# holds old navigation products.
 RESET_TIMEOUT_S = 25.0
 
 # Robots that have been sent `reset` and have not yet answered. Mutated from the
@@ -155,7 +153,6 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
             rid, pose.get("x", 0.0), pose.get("y", 0.0), pose.get("yaw", 0.0)
         )
     map_service.__dict__.update(new_service.__dict__)
-    reset_costmaps()
     _camera_frames.clear()
     _detections.clear()
     # Deliberately does NOT persist. This runs at startup, before load_review(),
@@ -453,14 +450,6 @@ async def network_loop() -> None:
                 await broadcast(patch)
 
 
-async def costmap_loop() -> None:
-    """Fan out local Nav2 costmap snapshots."""
-    while True:
-        await asyncio.sleep(0.5)
-        for patch in take_costmap_patches():
-            await broadcast(patch)
-
-
 async def session_loop() -> None:
     ticks = 0
     while True:
@@ -546,10 +535,10 @@ def cancel_departures() -> None:
 async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
     """Put the simulation back to its start state.
 
-    Adapters reset the simulator's model poses, odometry filter, and local
-    costmaps, then report `reset_done`. Only after that acknowledgement does the
+    Adapters reset the simulator's model poses, odometry filter, and navigation
+    state, then report `reset_done`. Only after that acknowledgement does the
     backend clear deployment raster and telemetry state. Clearing first would
-    race with an in-flight local product.
+    race with an in-flight navigation product.
 
     Backend state is cleared even when an adapter never answers. A stuck adapter
     must not leave the operator staring at stale state forever; robots that
@@ -625,8 +614,6 @@ async def reset_fleet(request_id: str | None = None) -> dict[str, Any]:
         silent = sorted(_reset_pending)
         _reset_pending.clear()
 
-        reset_costmaps()
-        await broadcast({"type": "costmap_clear", "robot_id": None})
         await broadcast({"type": "network_clear", "robot_id": None})
         _detections.clear()
         # Validated objects describe the world before the reset. Keeping them
@@ -898,20 +885,6 @@ async def reset_all_maps() -> Response:
     return await handler()
 
 
-@app.get("/api/map/costmap/{robot_id}/{kind}")
-async def get_costmap(robot_id: str, kind: str) -> Response:
-    from .map_routes import get_costmap as handler
-
-    return await handler(robot_id, kind)
-
-
-@app.post("/api/adapter/costmap")
-async def post_costmap(request: Request) -> Any:
-    from .map_routes import post_costmap as handler
-
-    return await handler(request)
-
-
 @app.get("/api/map/optimized")
 async def get_optimized_index() -> dict[str, Any]:
     from .map_routes import get_optimized_index as handler
@@ -1015,7 +988,6 @@ def gui_snapshot() -> list[dict[str, Any]]:
         session_state(),
         {"type": "settings_state", "settings": settings_store.value},
         review_state(),
-        *costmap_snapshots(),
         *({"type": "alert", "alert": alert} for alert in _alerts.values()),
     ]
 

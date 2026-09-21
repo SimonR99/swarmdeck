@@ -41,7 +41,6 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-import zlib
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +48,6 @@ import numpy as np
 import rospy
 import websockets
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from sensor_msgs.msg import (
     BatteryState,
     CameraInfo,
@@ -86,7 +84,6 @@ from adapters.runtime import (
     yaw_of,
 )
 from adapters.session import run_adapter_session
-from adapters.costmap import CostmapSnapshot, normalize_costmap
 from ros1_defaults import DEFAULTS
 
 # The detector needs OpenCV and the inference sidecar's client; a robot image
@@ -143,10 +140,6 @@ class HardwareBridge(
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer)
 
-        self._costmaps: dict[str, CostmapSnapshot] = {}
-        self._costmap_dirty: set[str] = set()
-        self._costmap_lock = threading.Lock()
-        self._costmap_warned_at: dict[str, float] = {}
         self.planned_path: list[dict[str, float]] = []
         self.battery: float | None = None
         self.nav_status = "idle"
@@ -193,13 +186,6 @@ class HardwareBridge(
         # independently declare TRANSIENT_LOCAL or it silently gets nothing.
         if topics.get("odom"):
             rospy.Subscriber(topics["odom"], Odometry, self._on_odom, queue_size=10)
-        if topics.get("local_costmap"):
-            rospy.Subscriber(
-                topics["local_costmap"],
-                OccupancyGrid,
-                lambda msg: self._on_costmap(msg, "local"),
-                queue_size=1,
-            )
         if topics.get("plan"):
             rospy.Subscriber(topics["plan"], NavPath, self._on_plan, queue_size=10)
         if topics.get("battery"):
@@ -332,50 +318,6 @@ class HardwareBridge(
         return caps
 
     # ------------------------------------------------------------- ROS inputs
-
-    def _warn_costmap(self, kind: str, reason: str) -> None:
-        now = time.monotonic()
-        if now - self._costmap_warned_at.get(kind, 0.0) < 10.0:
-            return
-        self._costmap_warned_at[kind] = now
-        rospy.logwarn(f"[{self.id}] {kind} costmap unavailable for overlay: {reason}")
-
-    def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
-        """Capture Nav2's planner view without changing navigation inputs."""
-        source = str(
-            getattr(getattr(msg, "header", None), "frame_id", "") or ""
-        ).lstrip("/")
-        target = str(self.navigation_frame or "").lstrip("/")
-        transform = (0.0, 0.0, 0.0)
-        if source and source != target:
-            try:
-                header = getattr(msg, "header", None)
-                stamp = getattr(header, "stamp", rospy.Time(0))
-                try:
-                    tf = self.tf_buffer.lookup_transform(
-                        target, source, stamp, rospy.Duration(0.1)
-                    )
-                except Exception:
-                    tf = self.tf_buffer.lookup_transform(target, source, rospy.Time(0))
-                t = tf.transform
-                transform = (
-                    float(t.translation.x),
-                    float(t.translation.y),
-                    float(yaw_of(t.rotation)),
-                )
-            except Exception as exc:
-                self._warn_costmap(kind, f"no {target} <- {source} transform: {exc}")
-                return
-        try:
-            snapshot = normalize_costmap(
-                msg, target_frame=target or source, transform=transform
-            )
-        except (TypeError, ValueError) as exc:
-            self._warn_costmap(kind, str(exc))
-            return
-        with self._costmap_lock:
-            self._costmaps[kind] = snapshot
-            self._costmap_dirty.add(kind)
 
     def _on_plan(self, msg: NavPath) -> None:
         """Publish the planner's intended route, in `navigation_frame`.
@@ -887,45 +829,6 @@ class HardwareBridge(
         self.mode = "idle"
 
     # ------------------------------------------------------------- uploads
-
-    def upload_costmaps(self) -> None:
-        """Push the newest global/local Nav2 snapshots to the read-only overlay."""
-        with self._costmap_lock:
-            pending = [
-                (kind, self._costmaps[kind])
-                for kind in tuple(self._costmap_dirty)
-                if kind in self._costmaps
-            ]
-            pending = [(kind, snap) for kind, snap in pending if kind == "local"]
-            for kind, _ in pending:
-                self._costmap_dirty.discard(kind)
-
-        for kind, snapshot in pending:
-            body = zlib.compress(
-                np.ascontiguousarray(snapshot.cells, dtype=np.int8).tobytes(), 1
-            )
-            frame = urllib.parse.quote(snapshot.frame_id, safe="")
-            url = (
-                f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
-                f"&kind=local&resolution={snapshot.resolution}"
-                f"&width={snapshot.width}&height={snapshot.height}"
-                f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
-                f"&frame_id={frame}"
-            )
-            try:
-                urllib.request.urlopen(
-                    urllib.request.Request(
-                        url,
-                        data=body,
-                        headers={"Content-Type": "application/octet-stream"},
-                    ),
-                    timeout=float(self.cfg.get("upload_timeout_s", 25.0)),
-                ).read()
-            except Exception as exc:
-                with self._costmap_lock:
-                    if self._costmaps.get(kind) is snapshot:
-                        self._costmap_dirty.add(kind)
-                rospy.logwarn(f"[{self.id}] {kind} costmap upload failed: {exc}")
 
     def session_state_tick(self) -> None:
         self._check_topic_nav_progress()

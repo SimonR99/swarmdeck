@@ -40,8 +40,6 @@ topics:
   plan: /aslan_0/plan
   # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /aslan_0/local_plan
-  # Nav2 costmaps are visualization-only snapshots.
-  local_costmap: /aslan_0/local_costmap/costmap
   cmd_vel: /cmd_vel
   battery: /bunker_status
   # OAK-D on USB (03e7:2485). The default camera service runs the RGB-D profile

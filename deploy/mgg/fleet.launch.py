@@ -99,6 +99,9 @@ def generate_launch_description():
                 + 0.175,
                 "PlanningParams.max_step_height": spec.max_step_height,
                 "PlanningParams.edge_length_max": initial_ground_reach,
+                # The lidar's ground blind radius: the root may hang that far
+                # from the first supported vertex at a standing start.
+                "hanging_root_edge_length_max": initial_ground_reach,
                 "BoundedSpaceParams.Global.min_val": [-60.0, -60.0, -3.0],
                 "BoundedSpaceParams.Global.max_val": [60.0, 60.0, 3.0],
                 "PlanningParams.max_inclination": math.radians(30),

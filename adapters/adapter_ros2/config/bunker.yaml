@@ -60,9 +60,6 @@ topics:
   plan: /botman_0/plan
   # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /botman_0/local_plan
-  # Nav2 costmaps are visualization-only snapshots; the adapter never republishes
-  # them to the planner or merges them into SwarmDeck's occupancy map.
-  local_costmap: /botman_0/local_costmap/costmap
   cmd_vel: /cmd_vel       # bunker_messenger.hpp's absolute subscription
   # The base driver exposes battery_voltage in BunkerStatus, mapped to percentage (23.0V empty -> 29.2V full).
   battery: /bunker_status

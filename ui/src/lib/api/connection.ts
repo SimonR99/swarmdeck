@@ -159,14 +159,8 @@ function dispatch(msg: ServerMessage) {
     case 'network_patch':
       mapStore.applyNetworkPatch(msg);
       break;
-    case 'costmap':
-      mapStore.applyCostmap(msg);
-      break;
     case 'network_clear':
       mapStore.clearNetwork(msg.robot_id);
-      break;
-    case 'costmap_clear':
-      mapStore.clearCostmaps(msg.robot_id);
       break;
     case 'robot_map_reset':
       mapStore.applyRobotMapReset(msg.robot_id, msg.mission_id, msg.map_epoch);
@@ -411,7 +405,6 @@ export const actions = {
   },
   discardRobot(robotId: string) {
     fleet.remove(robotId);
-    mapStore.clearCostmaps(robotId);
     mapStore.clearNetwork(robotId);
     sendAction({ type: 'discard_robot', robot_id: robotId });
     void fetch(`/api/fleet/${encodeURIComponent(robotId)}`, { method: 'DELETE' }).catch(() => {});

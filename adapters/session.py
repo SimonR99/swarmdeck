@@ -247,7 +247,6 @@ async def _tx_maps(bridge: Any, send: Callable, cfg: dict[str, Any]) -> None:
     last_settings = 0.0
     while True:
         now = time.monotonic()
-        await _offload(loop, bridge, "upload_costmaps")
         extra = getattr(bridge, "session_maps_tick", None)
         if callable(extra):
             await extra(now, send, loop)

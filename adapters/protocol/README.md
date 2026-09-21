@@ -19,12 +19,10 @@ dashboard consumes the same replica products. Video uses RTSP.
 | Direction | Endpoint | Data |
 |---|---|---|
 | bidirectional | `WS /adapter` | Registration, telemetry, detections, commands |
-| adapter -> backend | `POST /api/adapter/costmap?robot_id=<id>&kind=local` | Local controller costmap overlay |
 | adapter -> backend | `POST /api/autonomy/chunks/<sha256>` | Replica geometry chunk |
 | adapter -> backend | `POST /api/autonomy/replicas` | Replica manifest |
 | adapter -> MediaMTX | `RTSP :8554/<robot_id>` | Video |
 
-Only `kind=local` is accepted for costmap uploads.
 
 ## Registration
 

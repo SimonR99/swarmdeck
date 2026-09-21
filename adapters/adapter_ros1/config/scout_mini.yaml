@@ -60,10 +60,6 @@ topics:
   # what this stack's own rover_scout_adapter.py subscribes to for pose — prefer it over
   # scout_base_node's raw `odom` wheel odometry.
   odom: /odometry/filtered
-  # No OccupancyGrid publisher exists in rover_agx.launch.
-  # Live registered cloud from LVI-SAM used for raytraced 2D map, 3D keyframes, and 3D visualization.
-  # This ROS 1 profile has no Nav2 costmap publisher.
-  local_costmap: ""
   # localPlanner's selected local path — the route it actually intends to drive,
   # ~100 poses at 10 Hz. Published in `chassis_link` (a VEHICLE frame, 0.476 m
   # below os_sensor — the same offset as the planner's own sensorOffsetZ), not

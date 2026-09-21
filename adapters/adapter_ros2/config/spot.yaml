@@ -60,8 +60,6 @@ topics:
   camera_color_info: ""
   camera_depth_points: ""
   nav_cmd_vel: ""
-  # Spot uses its trajectory stack rather than Nav2; no costmap topics.
-  local_costmap: ""
 
 # Click-to-pose is Clearpath /trajectory, the same action
 # spot_high_level_controller uses. Goals are TF'd map -> body.

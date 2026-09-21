@@ -20,7 +20,6 @@ DEFAULTS: dict[str, Any] = deep_merge(
             "odom": "odom",
             "plan": "plan",
             "local_plan": "",
-            "local_costmap": "",
             "cmd_vel": "cmd_vel",
             "battery": "",
             "camera": "",

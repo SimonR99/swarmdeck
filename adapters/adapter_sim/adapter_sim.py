@@ -32,7 +32,6 @@ import rclpy
 import websockets
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from nav2_msgs.action import FollowPath
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -65,7 +64,6 @@ from adapters.runtime import (
 from adapters.session import run_adapter_session
 from adapters.navigation_result import navigation_failure_reason
 from adapters.route_progress import route_progress_tick
-from adapters.costmap import CostmapSnapshot, normalize_costmap
 
 from sim_cslam import (
     SLAM_GRAPHS,
@@ -192,7 +190,7 @@ def camera_point_to_map(
 # the robot's ability to accept the NEXT command is the whole objective, not
 # quietly re-attempting a command that already failed.
 
-ESCAPE_SPEED = -0.15  # m/s, reverse. Slow: this runs without a costmap.
+ESCAPE_SPEED = -0.15  # m/s, reverse slowly during recovery.
 ESCAPE_DISTANCE = 0.45  # m of retreat before the escape is considered done
 # Wall-clock, and the retreat happens in simulation time, so this has to allow
 # for the real-time factor as well as for a robot that creeps. Measured on the
@@ -305,10 +303,6 @@ class RobotBridge(
         self.nav_status = "idle"
         self._nav_failure_reason: str | None = None
         self.mode = "idle"
-        self._costmaps: dict[str, CostmapSnapshot] = {}
-        self._costmap_dirty: set[str] = set()
-        self._costmap_lock = threading.Lock()
-        self._costmap_warned_at: dict[str, float] = {}
         self._camera_frame: Image | None = None
         self._camera_dirty = False
         self._camera_encoding_warned = False
@@ -367,12 +361,6 @@ class RobotBridge(
             depth=1,
             reliability=QoSReliabilityPolicy.RELIABLE,
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        node.create_subscription(
-            OccupancyGrid,
-            f"/{robot_id}/local_costmap/costmap",
-            lambda msg: self._on_costmap(msg, "local"),
-            qos_profile_sensor_data,
         )
         node.create_subscription(NavPath, f"/{robot_id}/plan", self._on_plan, 10)
         # Three streams off one `rgbd_camera`, bridged by session.launch.py. The
@@ -441,39 +429,6 @@ class RobotBridge(
                 f"[{self.id}] no {self.id}/odom -> {self.id}/base_link TF; using odometry topic"
             )
         return dict(pose)
-
-    def _warn_costmap(self, kind: str, reason: str) -> None:
-        now = time.monotonic()
-        if now - self._costmap_warned_at.get(kind, 0.0) < 10.0:
-            return
-        self._costmap_warned_at[kind] = now
-        self.node.get_logger().warn(
-            f"[{self.id}] {kind} costmap unavailable for overlay: {reason}"
-        )
-
-    def _on_costmap(self, msg: OccupancyGrid, kind: str) -> None:
-        """Capture Nav2's planner view without changing navigation inputs."""
-        source = str(
-            getattr(getattr(msg, "header", None), "frame_id", "") or ""
-        ).lstrip("/")
-        target = f"{self.id}/odom"
-        transform = (0.0, 0.0, 0.0)
-        if source and source != target:
-            expected_odom = f"{self.id}/odom"
-            if kind != "local" or source != expected_odom:
-                expected = expected_odom if kind == "local" else target
-                self._warn_costmap(
-                    kind, f"unsupported frame {source!r}; expected {expected!r}"
-                )
-                return
-        try:
-            snapshot = normalize_costmap(msg, target_frame=target, transform=transform)
-        except (TypeError, ValueError) as exc:
-            self._warn_costmap(kind, str(exc))
-            return
-        with self._costmap_lock:
-            self._costmaps[kind] = snapshot
-            self._costmap_dirty.add(kind)
 
     def _on_camera(self, msg: Image) -> None:
         self._camera_frame = msg
@@ -915,10 +870,6 @@ class RobotBridge(
     def _arm_escape(self) -> None:
         """Begin reversing out of a pose Nav2 could not plan from.
 
-        Armed on any aborted goal rather than on a costmap test, because this
-        adapter's costmap copy is visualization-only: Nav2 owns navigation, and
-        duplicating its inflation maths here to second-guess it would be a
-        second source of truth to keep in step. Reversing 0.45 m is harmless
         for the failures this does not apply to, and it is the only thing that
         helps for the one it does.
         """
@@ -1242,53 +1193,6 @@ class RobotBridge(
         if now - last_nav > 5.0:
             self._session_last_nav_health = now
             await loop.run_in_executor(None, self.recover_nav_if_down)
-
-    def upload_costmaps(self) -> None:
-        """Push the newest global/local Nav2 snapshots to the read-only overlay."""
-        headers = {"Content-Type": "application/octet-stream"}
-        if not self._upload_lock.acquire(blocking=False):
-            return
-        try:
-            with self._costmap_lock:
-                pending = [
-                    (kind, self._costmaps[kind])
-                    for kind in tuple(self._costmap_dirty)
-                    if kind in self._costmaps
-                ]
-                pending = [(kind, snap) for kind, snap in pending if kind == "local"]
-                for kind, _ in pending:
-                    self._costmap_dirty.discard(kind)
-
-            for kind, snapshot in pending:
-                body = zlib.compress(
-                    np.ascontiguousarray(snapshot.cells, dtype=np.int8).tobytes(), 1
-                )
-                frame = urllib.parse.quote(snapshot.frame_id, safe="")
-                url = (
-                    f"{self.http_url}/api/adapter/costmap?robot_id={self.id}"
-                    f"&kind=local&resolution={snapshot.resolution}"
-                    f"&width={snapshot.width}&height={snapshot.height}"
-                    f"&origin_x={snapshot.origin_x}&origin_y={snapshot.origin_y}"
-                    f"&frame_id={frame}"
-                )
-                try:
-                    urllib.request.urlopen(
-                        urllib.request.Request(
-                            url,
-                            data=body,
-                            headers=headers,
-                        ),
-                        timeout=self._cfg_timeout("upload_timeout_s"),
-                    ).read()
-                except Exception as exc:
-                    with self._costmap_lock:
-                        if self._costmaps.get(kind) is snapshot:
-                            self._costmap_dirty.add(kind)
-                    self.node.get_logger().warn(
-                        f"[{self.id}] {kind} costmap upload failed: {exc}"
-                    )
-        finally:
-            self._upload_lock.release()
 
     def process_camera(self) -> None:
         """Run perception on the newest local camera image.

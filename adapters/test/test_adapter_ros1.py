@@ -62,10 +62,6 @@ def _bridge(mod, cfg_override=None):
     bridge.navigation_frame = cfg["navigation_frame"]
     bridge.base_frame = cfg["base_frame"]
     bridge.tf_buffer = MagicMock()
-    bridge._costmap_lock = __import__("threading").Lock()
-    bridge._costmaps = {}
-    bridge._costmap_dirty = set()
-    bridge._costmap_warned_at = {}
     bridge._pose_warned = False
     bridge._odom_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
     bridge._odom_frame = bridge.navigation_frame
@@ -100,31 +96,6 @@ def _bridge(mod, cfg_override=None):
     bridge._scan_origin = None
     bridge._scan_dirty = False
     return bridge
-
-
-def _occupancy_grid(frame="odom"):
-    return type(
-        "Grid",
-        (),
-        {
-            "header": type("Header", (), {"frame_id": frame, "stamp": 0.0})(),
-            "info": type(
-                "Info",
-                (),
-                {
-                    "resolution": 0.05,
-                    "width": 20,
-                    "height": 10,
-                    "origin": type(
-                        "Origin",
-                        (),
-                        {"position": type("P", (), {"x": -1.0, "y": -2.0})()},
-                    )(),
-                },
-            )(),
-            "data": [-1, 0, 100] * 66 + [-1, 0],
-        },
-    )()
 
 
 def test_config_merge_is_deep_not_shallow(mod):
@@ -588,17 +559,3 @@ def test_pose_lookup_uses_navigation_frame_and_base_frame(mod):
     assert pose["x"] == pytest.approx(1.25)
     assert pose["y"] == pytest.approx(-0.75)
     assert pose["yaw"] == pytest.approx(0.5)
-
-
-def test_local_costmap_is_normalized_and_uploaded(mod, monkeypatch):
-    bridge = _bridge(mod)
-    bridge._on_costmap(_occupancy_grid(), "local")
-    assert bridge._costmaps["local"].frame_id == "odom"
-    assert "local" in bridge._costmap_dirty
-
-    response = MagicMock()
-    response.read.return_value = b"ok"
-    monkeypatch.setattr(mod.urllib.request, "urlopen", lambda *a, **k: response)
-    bridge.upload_costmaps()
-    assert "local" not in bridge._costmap_dirty
-    response.read.assert_called_once()

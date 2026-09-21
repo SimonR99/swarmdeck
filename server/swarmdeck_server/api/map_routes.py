@@ -1,4 +1,4 @@
-"""Map endpoints for deployment-frame raster products and local costmaps.
+"""Map endpoints for deployment-frame raster products.
 
 Replica keyframes are the only source of optimized maps.  This module contains
 no occupancy-map merge, SLAM ingress, or server-side planning code.
@@ -7,19 +7,14 @@ no occupancy-map merge, SLAM ingress, or server-side planning code.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import math
 import os
 import threading
 import time
-import zlib
-from dataclasses import dataclass
-from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
-from fastapi import Request, Response
+from fastapi import Response
 from fastapi.responses import JSONResponse
 
 from ..events.logger import events
@@ -193,8 +188,6 @@ async def retire_robot_epoch(robot_id: str, mission_id: str, map_epoch: int) -> 
             _server_scopes.discard(scope)
     await registry.send(robot_id, {"type": "stop", **stamps()})
     await map_service.reset_robot_async(robot_id)
-    reset_costmaps(robot_id)
-    await broadcast({"type": "costmap_clear", "robot_id": robot_id})
     await broadcast({"type": "network_clear", "robot_id": robot_id})
     await broadcast(
         {
@@ -315,143 +308,9 @@ async def reset_all_maps() -> Response:
         )
     reset = await map_service.reset_robot_async()
     reset_optimized_maps()
-    reset_costmaps()
-    await broadcast({"type": "costmap_clear", "robot_id": None})
     await broadcast({"type": "network_clear", "robot_id": None})
     events.log("map_reset", {"scope": "all", "robots": reset})
     return JSONResponse({"ok": True, "scope": "all", "robots": reset})
-
-
-@dataclass
-class CostmapEntry:
-    robot_id: str
-    kind: str
-    meta: GridMeta
-    cells: np.ndarray
-    frame_id: str
-    seq: int = 0
-    updated_at: float = 0.0
-    dirty: bool = True
-
-
-_costmaps: dict[tuple[str, str], CostmapEntry] = {}
-_costmap_lock = threading.Lock()
-
-
-def _costmap_payload(entry: CostmapEntry) -> dict[str, Any]:
-    top_down = np.flipud(entry.cells)
-    return {
-        "type": "costmap",
-        "robot_id": entry.robot_id,
-        "kind": entry.kind,
-        "seq": entry.seq,
-        "resolution": entry.meta.resolution,
-        "origin": {"x": entry.meta.origin_x, "y": entry.meta.origin_y},
-        "width": entry.meta.width,
-        "height": entry.meta.height,
-        "frame_id": entry.frame_id,
-        "updated_at": entry.updated_at,
-        "data": base64.b64encode(
-            zlib.compress(np.ascontiguousarray(top_down, dtype=np.int8).tobytes(), 1)
-        ).decode("ascii"),
-    }
-
-
-def costmap_snapshots() -> list[dict[str, Any]]:
-    with _costmap_lock:
-        return [_costmap_payload(entry) for entry in _costmaps.values()]
-
-
-def take_costmap_patches() -> list[dict[str, Any]]:
-    with _costmap_lock:
-        entries = [entry for entry in _costmaps.values() if entry.dirty]
-        for entry in entries:
-            entry.dirty = False
-        return [_costmap_payload(entry) for entry in entries]
-
-
-def reset_costmaps(robot_id: str | None = None) -> None:
-    with _costmap_lock:
-        if robot_id is None:
-            _costmaps.clear()
-        else:
-            for key in list(_costmaps):
-                if key[0] == robot_id:
-                    del _costmaps[key]
-
-
-async def get_costmap(robot_id: str, kind: str) -> Response:
-    if kind != "local":
-        return JSONResponse(
-            {"error": "only local costmaps are supported"}, status_code=400
-        )
-    with _costmap_lock:
-        entry = _costmaps.get((robot_id, kind))
-        if entry is None:
-            return JSONResponse({"error": "costmap not available"}, status_code=404)
-        payload = _costmap_payload(entry)
-    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
-
-
-def _inflate(body: bytes) -> bytes:
-    decompressor = zlib.decompressobj()
-    raw = decompressor.decompress(body, MAX_UPLOAD_BYTES)
-    if decompressor.unconsumed_tail:
-        raise ValueError("upload exceeds the maximum decompressed size")
-    return raw
-
-
-async def post_costmap(request: Request) -> Any:
-    rid = request.query_params.get("robot_id", "")
-    kind = request.query_params.get("kind", "")
-    if not rid:
-        return JSONResponse({"error": "robot_id required"}, status_code=400)
-    if kind != "local":
-        return JSONResponse(
-            {"error": "only local costmaps are supported"}, status_code=400
-        )
-    try:
-        resolution = float(request.query_params.get("resolution", 0.0))
-        width = int(request.query_params.get("width", 0))
-        height = int(request.query_params.get("height", 0))
-        origin_x = float(request.query_params.get("origin_x", 0.0))
-        origin_y = float(request.query_params.get("origin_y", 0.0))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "malformed costmap metadata"}, status_code=400)
-    if (
-        not math.isfinite(resolution)
-        or resolution <= 0.0
-        or width <= 0
-        or height <= 0
-        or width * height > MAX_UPLOAD_BYTES
-        or not math.isfinite(origin_x)
-        or not math.isfinite(origin_y)
-    ):
-        return JSONResponse(
-            {"error": "invalid costmap dimensions or geometry"}, status_code=400
-        )
-    try:
-        cells = np.frombuffer(_inflate(await request.body()), dtype=np.int8)
-    except (zlib.error, ValueError) as exc:
-        return JSONResponse({"error": f"malformed costmap: {exc}"}, status_code=400)
-    if cells.size != width * height:
-        return JSONResponse({"error": "costmap size mismatch"}, status_code=400)
-    normalized = np.where(cells < 0, -1, np.clip(cells, 0, 100)).astype(np.int8)
-    key = (rid, kind)
-    with _costmap_lock:
-        previous = _costmaps.get(key)
-        entry = CostmapEntry(
-            rid,
-            kind,
-            GridMeta(resolution, width, height, origin_x, origin_y),
-            np.ascontiguousarray(normalized.reshape(height, width)).copy(),
-            str(request.query_params.get("frame_id", "") or "").lstrip("/"),
-            (previous.seq + 1) if previous else 1,
-            time.time(),
-            True,
-        )
-        _costmaps[key] = entry
-    return {"ok": True, "kind": kind, "seq": entry.seq, "cells": int(cells.size)}
 
 
 def _prune_optimized_maps(scopes: Any) -> list[str]:

@@ -29,10 +29,6 @@ topics:
   plan: /asimov_0/plan
   # DWB's selected local trajectory, preferred for the dashboard route.
   local_plan: /asimov_0/local_plan
-  # Nav2 costmaps are visualization-only snapshots; the adapter never
-  # republishes them to the planner or merges them into SwarmDeck's occupancy
-  # map.
-  local_costmap: /asimov_0/local_costmap/costmap
   cmd_vel: /cmd_vel
   # Nav2 writes only cmd_vel_nav; the adapter relays it to the real /cmd_vel
   # only while a goal is active (see AdapterLinkMixin._on_nav_cmd_vel).

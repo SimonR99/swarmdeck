@@ -12,7 +12,7 @@
    * - Ceiling cutoff slider to remove roofs and inspect interior rooms
    * - 3D global & local routes, movement trails, sensor arcs, and footprints
    * - 3D holographic waypoint beacons and detection crystals
-   * - 3D tactical terrain grid, costmap, and network heatmaps
+   * - 3D tactical terrain grid and network heatmaps
    */
   import { onMount, untrack } from 'svelte';
   import * as THREE from 'three';
@@ -55,8 +55,6 @@
     showSensors = false,
     showPlans = true,
     showNetwork = false,
-    showCostmap = false,
-    costmapKind = 'local',
     trails = new Map<string, { x: number; y: number }[]>(),
     onCameraInteraction,
     onCursorChange
@@ -69,8 +67,6 @@
     showSensors?: boolean;
     showPlans?: boolean;
     showNetwork?: boolean;
-    showCostmap?: boolean;
-    costmapKind?: 'local';
     trails?: Map<string, { x: number; y: number }[]>;
     onCameraInteraction?: () => void;
     onCursorChange?: (coords: { x: number; y: number } | null) => void;
@@ -98,7 +94,7 @@
 
   // Render & Color Modes
   let renderMode = $state<Map3DRenderMode>('voxels');
-  let quality = $state<Quality>('low');
+  let quality = $state<Quality>('balanced');
   let hasRgb = $state(false);
   let gaussianCount = $state(0);
   let gaussianStatus = $state('No reconstruction loaded');
@@ -391,7 +387,15 @@
     ceilingMin = bounds.minZ;
     ceilingMax = Math.max(bounds.maxZ, bounds.minZ + 0.1);
     if (resetView && points) {
-      ceilingCutoff = Math.min(ceilingMax + 0.2, ceilingMin + 2.3);
+      // The opening cut hides the ceiling of a single-storey interior. It is
+      // measured from the floor the points stand on (their 10th z-percentile),
+      // not the lowest point: a descending tunnel or a drifting robot's frame
+      // puts the minimum metres below the floor, and a cut 2.3 m above that
+      // left only the deepest fragment visible. A map spanning more than one
+      // storey has no single plane to open it with, so it starts uncut.
+      const zs = Array.from({ length: points }, (_, i) => data.xyz[i * 3 + 2]).sort((a, b) => a - b);
+      const floor = zs[Math.floor(zs.length * 0.1)];
+      ceilingCutoff = ceilingMax - floor > 4.0 ? ceilingMax + 0.2 : Math.min(ceilingMax + 0.2, floor + 2.3);
       scene.setCeiling(ceilingCutoff);
       scene.fitMap();
       firstCloud = false;
@@ -754,9 +758,7 @@
         showTrails: showTrails && !tacticalReplica,
         showPlans: showPlans && (!tacticalReplica || liveTactical),
         showSensors: showSensors && (!tacticalReplica || liveTactical),
-        showCostmap: showCostmap && !tacticalReplica,
         showNetwork: showNetwork && !tacticalReplica,
-        costmapKind,
         time,
         getGroundZ
       });

@@ -15,7 +15,7 @@ import type { Point, Pose, RobotState } from '../src/lib/types/protocol.ts';
 const transform = { x: 10, y: 20, yaw: Math.PI / 2 };
 
 
-test('local costmap decals preserve the raster frame transform', () => {
+test('network decals preserve the raster frame transform', () => {
   const pose = decalPose({width: 2, height: 4, resolution: 1, origin:{x:0,y:0}}, transform);
   assert.equal(pose.x, 8); assert.equal(pose.y, 21);
   assert.equal(pose.yaw, Math.PI / 2);
@@ -158,7 +158,7 @@ test('nothing known about the global map places nobody on it', () => {
   );
 });
 
-test('a costmap requires transform provenance from the displayed raster header', () => {
+test('network heatmaps require transform provenance from the displayed raster header', () => {
   const rasterFrames = { robot_2: { x: -0.02, y: -2.0, yaw: 0.0015 } };
   assert.deepEqual(overlayFrameOnGlobalGrid('robot_2', rasterFrames), rasterFrames.robot_2);
   assert.equal(overlayFrameOnGlobalGrid('robot_2', undefined), undefined);

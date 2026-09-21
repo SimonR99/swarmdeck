@@ -31,7 +31,6 @@ DEFAULTS: dict[str, Any] = deep_merge(
             "nav_stop": "",
             "nav_cmd_vel": "",
             "nav_joy": "",
-            "local_costmap": "",
         },
         "nav_joy_throttle": 0.5,
         "nav_joy_reverse_steering": False,
