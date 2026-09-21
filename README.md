@@ -51,21 +51,14 @@ rendering, or sensor timing:
 
 ```bash
 ./scripts/sim-up --scenario bistro --drift
+./scripts/sim-up --scenario subt_finals --drift  # DARPA SubT Finals tunnels
 ./scripts/sim-up --dev                 # 3 robots, DRI rendering, drift
 ./scripts/sim-up --gpu --fast-livo2    # estimator-backed NVIDIA run
-./scripts/sim-up --legacy-cloud --drift # explicit legacy central-cloud path
 ./scripts/sim-up --status
 ./scripts/sim-up --down
 ```
 
-`make up-sim` remains a compatibility wrapper; its `SCENARIO`, `RENDER`,
-`ODOMETRY`, `TARGETS`, and `EXPLORE` variables are passed to the same launcher.
-A fresh mission UUID and ROS domain are selected for each MOLA run, and the
-reset supervisor keeps the stack lifecycle consistent. The normal launcher
-uses MOLA; the old cloud/OctoMap path is available only through
-`--legacy-cloud`. See [simulation](docs/architecture/simulation.md) and
-[simulation performance](docs/operations/simulation-performance.md) for
-sensor, rendering, and timing tradeoffs.
+
 
 ### Host development
 

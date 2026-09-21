@@ -112,7 +112,11 @@ different building.
 
 ## Environments and Scenarios
 
-SwarmDeck supports two simulation environments:
+SwarmDeck supports three simulation environments. The two prebuilt ones are
+rows of one table, `scenario/worlds.py` (assets, transform, lamps, exposure,
+deployment, targets); `make_argos_session.py` renders whichever row the
+config's `world:` names, and `session.launch.py` and the visual test ask the
+same table whether a world is prebuilt or procedural.
 
 1. **Procedural Indoor World (`world: procedural`, default)**:
    - Configured in `configs/4robot.yaml`, `configs/3robot.yaml`, etc.
@@ -146,6 +150,36 @@ make up-argos-bistro-dri      # Intel/AMD DRI
 
 # Capture Bistro visual test dashboard:
 make visual-test-bistro       # -> /tmp/swarmdeck_visual/fleet_visual_dashboard.png
+```
+
+3. **DARPA SubT Finals Prize Round World 01 (`world: subt_finals`)**:
+   - Configured in `configs/4robot_subt_finals.yaml`.
+   - The Finals staging hangar and the 450 m tunnel circuit behind it, from the
+     argos3 fork's `photorealism/environments/finals_prize_round_world_01`
+     are regenerated there, not vendored). Mounted into the `argos` and `sim`
+     containers at `/app/argos3-environments/finals_prize_round_world_01`;
+     `SWARMDECK_SUBT_FINALS_DIR` overrides the host path.
+   - Visual (`finals_prize_round_world_01.glb`, 3.7 M triangles) and collision
+     (`.collision.glb`, the tiles' own lower-poly colliders, 1.3 M) are
+     different files at one transform, checked by the scenario tests.
+   - Underground: no sky, no sun, 88 SDF lamps in the staging area and the lit
+     tiles; the rest is dark, as in the competition (the robots there carried
+     their own lights). Exposure `aperture="2" shutter_speed="0.04"
+     sensitivity="400"`.
+   - The fleet deploys in the staging hangar (floor z = -0.01, walls at
+     y = ±5.5, back wall x = -20, all measured through the collision mesh with
+     Jolt ray casts), two columns at x = -14.5 / -16.5, y = ±1, facing +x:
+     the tunnel leaves through a 3.3 m gate at (-10.5, 0). robot_0 is at the
+     head of the group. Detection targets stand along the walls of the first
+     tunnel tile (0.7 m off each wall) and in the hangar's back corners;
+     `MeshSurface(below=1.0)` keeps them on the floor rather than the 3.5 m
+     ceiling.
+
+```bash
+make up-argos-subt            # software rendering
+make up-argos-subt-gpu        # NVIDIA GPU
+make up-argos-subt-dri        # Intel/AMD DRI
+make visual-test-subt         # -> /tmp/swarmdeck_visual/fleet_visual_dashboard.png
 ```
 
 ## Rates

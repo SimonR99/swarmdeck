@@ -17,17 +17,14 @@
 # ==============================================================================
 
 .PHONY: help \
-        install ui ui-build server slam install-slam mock demo \
         build-server up-server down-server \
         build-argos up-argos down-argos up-argos-gpu up-argos-dri up-argos-dev \
         up-argos-bistro up-argos-bistro-dri up-argos-bistro-gpu \
-        build-sim up-sim down-sim \
+        up-argos-subt up-argos-subt-dri up-argos-subt-gpu \
         build-mock up-mock down-mock \
         up-agent down-agent \
         build-deploy up-deploy down-deploy deploy \
-        docker-up-gpu docker-up-cslam docker-down docker-logs docker-ps \
         docker-test docker-test-launch \
-        test test-slam test-ui visual-test visual-test-bistro sim tunnel clean \
         local-ai-up local-ai-pull local-ai-shadow local-ai-eval local-ai-down
 
 # ------------------------------------------------------------------------------
@@ -66,28 +63,30 @@ help:
 	@echo "  make ui                  Run frontend dev server (http://localhost:5173)"
 	@echo "  make ui-build            Production build of the Svelte frontend"
 	@echo "  make server              Run backend server on host (http://localhost:8080)"
-	@echo "  make slam                Run pose-graph SLAM backend (http://localhost:8090)"
 	@echo "  make mock                Run synthetic mock fleet adapter (N=4, no ROS)"
 	@echo "  make demo                Launch server + mock + ui simultaneously on host"
 	@echo ""
 	@echo "Simulation (Docker Compose + ARGoS 3):"
-	@echo "  make up-sim              Modular launch: SCENARIO=[default|bistro|3robot] RENDER=[software|gpu|dri]"
+	@echo "  make up-sim              Modular launch: SCENARIO=[default|bistro|subt_finals|3robot] RENDER=[software|gpu|dri]"
 	@echo "  make up-argos            4-robot indoor scene with software Vulkan (portable)"
 	@echo "  make up-argos-gpu        4-robot indoor scene with NVIDIA GPU hardware acceleration"
 	@echo "  make up-argos-dri        4-robot indoor scene with Intel/AMD DRI hardware acceleration"
 	@echo "  make up-argos-bistro     Amazon Bistro scene with software Vulkan"
 	@echo "  make up-argos-bistro-gpu Amazon Bistro scene with NVIDIA GPU acceleration"
 	@echo "  make up-argos-bistro-dri Amazon Bistro scene with Intel/AMD DRI acceleration"
+	@echo "  make up-argos-subt       DARPA SubT Finals tunnels with software Vulkan"
+	@echo "  make up-argos-subt-gpu   DARPA SubT Finals tunnels with NVIDIA GPU acceleration"
+	@echo "  make up-argos-subt-dri   DARPA SubT Finals tunnels with Intel/AMD DRI acceleration"
 	@echo "  make up-argos-dev        Fast dev mode: 3 robots, synthetic drift, no estimator"
 	@echo "  make down-argos          Stop ARGoS simulation stack"
 	@echo ""
 	@echo "Core Backend Services:"
-	@echo "  make up-server           Docker: Backend server + Web UI + SLAM back-end"
+	@echo "  make up-server           Docker: Backend server + Web UI"
 	@echo "  make down-server         Docker: Stop core backend services"
 	@echo "  make up-mock             Docker: Synthetic mock fleet adapter"
 	@echo ""
 	@echo "Physical Fleet Deployment (over SSH):"
-	@echo "  make up-deploy           Start operator stack (server + UI + SLAM + Zenoh router)"
+	@echo "  make up-deploy           Start operator stack (server + UI + Zenoh router)"
 	@echo "  make down-deploy         Stop operator deployment stack"
 	@echo "  make deploy ROBOT=name   Deploy to robot: botman, aslan, scout, spot, asimov, all"
 	@echo "                           Options: DEPLOY_ARGS='--dry-run' (or: --no-build, --no-reset)"
@@ -185,16 +184,17 @@ up-argos-bistro-gpu:
 up-argos-bistro-dri:
 	./scripts/sim-up --scenario bistro --render dri --odometry fast_livo2
 
+up-argos-subt:
+	./scripts/sim-up --scenario subt_finals --render software --odometry fast_livo2
+
+up-argos-subt-gpu:
+	./scripts/sim-up --scenario subt_finals --render gpu --odometry fast_livo2
+
+up-argos-subt-dri:
+	./scripts/sim-up --scenario subt_finals --render dri --odometry fast_livo2
+
 down-argos:
 	./scripts/sim-up --down
-
-# Legacy Gazebo simulation path
-build-sim:
-	$(COMPOSE) --profile gazebo build gazebo
-
-down-sim:
-	$(COMPOSE) --profile gazebo stop gazebo
-	$(COMPOSE) --profile gazebo rm -f gazebo
 
 # ------------------------------------------------------------------------------
 # 5. Physical Fleet Deployment (Operator-Side over SSH)
@@ -278,21 +278,20 @@ docker-test-launch:
 # ------------------------------------------------------------------------------
 test:
 	$(CLEANENV) server/.venv/bin/pytest -q
-	$(MAKE) test-slam
 	$(MAKE) test-ui
 
 test-ui:
 	cd ui && npm run check
 	cd ui && npm run test:map3d
 
-test-slam:
-	cd slam && $(CLEANENV) .venv/bin/python -m pytest tests/ -q
-
 visual-test:
 	python3 tests/integration/run_visual_test.py
 
 visual-test-bistro:
 	python3 tests/integration/run_visual_test.py --config configs/4robot_bistro.yaml
+
+visual-test-subt:
+	python3 tests/integration/run_visual_test.py --config configs/4robot_subt_finals.yaml
 
 RUNTIME_DIR ?= /tmp/swarmdeck
 sim:

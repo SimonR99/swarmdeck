@@ -685,3 +685,87 @@ def test_bistro_small_props_remain_visible_without_static_colliders(bistro_tree)
         assert any(Path(p.get("model")).stem == name for p in props)
         assert not any(Path(m.get("file")).stem == name for m in meshes)
     assert sum("rubber_duck" in m.get("file") for m in meshes) == 2
+
+
+# --------------------------------------------------------------- subt finals
+
+
+SUBT_CONFIG = REPO / "configs" / "4robot_subt_finals.yaml"
+
+
+@pytest.fixture(scope="module")
+def subt_tree():
+    return ElementTree.fromstring(mas.generate_argos_xml(SUBT_CONFIG))
+
+
+def test_subt_world_selected_by_config_or_by_name(subt_tree):
+    """`world: subt_finals` in the config, or --world subt_finals from
+    session.launch.py, both load the Finals mesh; neither adds the flat
+    floor plane, whose z=0 would cut through the hangar floor at -0.01."""
+    by_name = ElementTree.fromstring(
+        mas.generate_argos_xml(CONFIG, world_gltf="subt_finals")
+    )
+    for tree in (subt_tree, by_name):
+        mesh = tree.find("./arena/mesh[@id='world_mesh']")
+        assert "finals_prize_round_world_01.collision.glb" in mesh.get("file")
+        assert tree.find("./physics_engines/jolt/floor") is None
+
+
+def test_subt_collision_and_visual_share_one_transform(subt_tree):
+    """The collision file is not the visual file (the tiles ship lower-poly
+    colliders), so agreement has to be on the transform alone."""
+    mesh = subt_tree.find("./arena/mesh[@id='world_mesh']")
+    prop = next(
+        p
+        for p in subt_tree.findall("./media/photorealism/scenery/prop")
+        if "finals_prize_round_world_01.glb" in p.get("model", "")
+    )
+    assert Path(mesh.get("file")).parent == Path(prop.get("model")).parent
+    assert mesh.get("position") == prop.get("position") == "0,0,0"
+    assert mesh.get("orientation") == prop.get("orientation") == "0,0,90"
+
+
+def test_subt_fleet_deploys_in_the_hangar_facing_the_tunnel(subt_tree):
+    """The staging hangar spans x in [-20, -11] and y within +-5.5 (measured
+    through the collision mesh); the tunnel leaves it through a 3.3 m gate at
+    (-10.5, 0) along +x. Every robot must stand inside, point at the gate,
+    and clear the floor at z = -0.01."""
+    arena = subt_tree.find("arena")
+    bodies = {
+        e.get("id"): e.find("body")
+        for e in arena
+        if e.tag in ("bunker", "scout_mini", "spot")
+    }
+    assert len(bodies) == 4
+    for body in bodies.values():
+        x, y, z = (float(v) for v in body.get("position").split(","))
+        assert -19.5 < x < -11.5 and abs(y) < 4.5
+        assert 0.1 <= z <= 0.3
+        yaw, _p, _r = (float(v) for v in body.get("orientation").split(","))
+        assert yaw == pytest.approx(0.0, abs=1e-6)
+    # The head of the group, released first by fleet-wide Explore, is the
+    # robot nearest the gate.
+    front = max(bodies, key=lambda rid: float(bodies[rid].get("position").split(",")[0]))
+    assert front == "robot_0"
+
+
+def test_subt_is_lit_by_its_own_lamps_only(subt_tree):
+    pr = subt_tree.find("media/photorealism")
+    assert pr.get("draw_floor") == "false"
+    assert float(pr.find("sun").get("intensity")) == 0.0
+    assert pr.find("environment") is None
+    lamps = pr.findall("lights/spot") + pr.findall("lights/point")
+    assert len(lamps) == 88, "the importer found 88 SDF lights in this world"
+    assert all(float(l.get("intensity")) > 0 for l in lamps)
+
+
+def test_subt_targets_stand_on_the_tunnel_floor_not_the_ceiling(subt_tree):
+    """The first tunnel tile has its floor at z = 0 and its ceiling 3.5 m up;
+    a placement that took the highest surface would hang every target from
+    the roof."""
+    props = subt_tree.findall("./media/photorealism/scenery/prop")
+    targets = [p for p in props if "finals_prize_round_world_01" not in p.get("model")]
+    assert len(targets) == 10
+    for prop in targets:
+        z = float(prop.get("position").split(",")[2])
+        assert -0.02 < z < 0.25, prop.get("model")

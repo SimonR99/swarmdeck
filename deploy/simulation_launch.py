@@ -60,6 +60,8 @@ ALIASES = {
     "4robot": "configs/4robot.yaml",
     "bistro": "configs/4robot_bistro.yaml",
     "4robot_bistro": "configs/4robot_bistro.yaml",
+    "subt_finals": "configs/4robot_subt_finals.yaml",
+    "4robot_subt_finals": "configs/4robot_subt_finals.yaml",
     "3robot": "configs/3robot.yaml",
     "dev": "configs/3robot.yaml",
 }

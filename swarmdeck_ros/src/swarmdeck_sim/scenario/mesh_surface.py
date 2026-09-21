@@ -1,4 +1,4 @@
-"""Sample Bistro's GLB triangles for placement; no runtime physics dependency.
+"""Sample a world's GLB triangles for placement; no runtime physics dependency.
 
 Only embedded, static glTF 2.0 triangle meshes are supported. Unsupported
 geometry fails explicitly instead of silently placing colliders at z=0.
@@ -118,19 +118,48 @@ class GlbGeometry:
                 yield vertices[indices.reshape(-1, 3)]
 
 
-class BistroSurface:
-    def __init__(self, path):
-        triangles = list(GlbGeometry(path).triangles(material_prefix="pavement"))
+class MeshSurface:
+    """The ground of a mesh world, for standing detection targets on it.
+
+    `material_prefix` keeps only the triangles whose glTF material name starts
+    with it (Bistro's "pavement"); None keeps everything, which is what a
+    material-less collision mesh needs. `z_offset` is the world's z translation
+    in the experiment, so heights come out in ARGoS coordinates. `below` caps
+    the surfaces considered ground: in a tunnel the highest triangle over a
+    point is the ceiling.
+    """
+
+    def __init__(self, path, *, material_prefix=None, z_offset=0.0, below=None):
+        triangles = list(GlbGeometry(path).triangles(material_prefix=material_prefix))
         if not triangles:
-            raise ValueError("Bistro has no pavement geometry for object placement")
+            what = f"'{material_prefix}' material" if material_prefix else "geometry"
+            raise ValueError(f"{path}: no ground {what} for object placement")
         self.triangles = np.concatenate(triangles)
-        self.triangles[:, :, 2] -= 0.3  # Bistro scenery translation, shared by the XML.
+        self.triangles[:, :, 2] += z_offset
+        self.below = below
         a, b, c = self.triangles.transpose(1, 0, 2)
         self.den = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (
             a[:, 1] - c[:, 1]
         )
         self.lo = self.triangles.min(axis=1)
         self.hi = self.triangles.max(axis=1)
+
+    def _restricted(self, x_min, x_max, y_min, y_max):
+        """A view over the triangles whose xy box meets the given box, so a
+        footprint's samples do not each scan a million-triangle world."""
+        keep = (
+            (self.hi[:, 0] >= x_min)
+            & (self.lo[:, 0] <= x_max)
+            & (self.hi[:, 1] >= y_min)
+            & (self.lo[:, 1] <= y_max)
+        )
+        sub = MeshSurface.__new__(MeshSurface)
+        sub.triangles = self.triangles[keep]
+        sub.den = self.den[keep]
+        sub.lo = self.lo[keep]
+        sub.hi = self.hi[keep]
+        sub.below = self.below
+        return sub
 
     def height(self, x, y):
         keep = (
@@ -150,8 +179,10 @@ class BistroSurface:
         ) / d
         heights = u * a[:, 2] + v * b[:, 2] + (1 - u - v) * c[:, 2]
         hits = (u >= -1e-7) & (v >= -1e-7) & (u + v <= 1 + 1e-7)
+        if self.below is not None:
+            hits &= heights <= self.below
         if not hits.any():
-            raise ValueError(f"No Bistro pavement below target at ({x:g}, {y:g})")
+            raise ValueError(f"No ground below target at ({x:g}, {y:g})")
         return float(heights[hits].max())
 
     def place(self, model, x, y, yaw):
@@ -161,8 +192,10 @@ class BistroSurface:
         xs = np.linspace(lo[0], hi[0], max(2, math.ceil((hi[0] - lo[0]) / 0.05) + 1))
         ys = np.linspace(lo[1], hi[1], max(2, math.ceil((hi[1] - lo[1]) / 0.05) + 1))
         co, si = math.cos(yaw), math.sin(yaw)
+        reach = math.hypot(max(abs(lo[0]), abs(hi[0])), max(abs(lo[1]), abs(hi[1])))
+        local = self._restricted(x - reach, x + reach, y - reach, y + reach)
         ground = max(
-            self.height(x + co * a - si * b, y + si * a + co * b)
+            local.height(x + co * a - si * b, y + si * a + co * b)
             for a in xs
             for b in ys
         )

@@ -218,17 +218,20 @@ services:
       SWARMDECK_SOFTWARE_RENDER: "${SWARMDECK_SOFTWARE_RENDER:-true}"
     volumes:
       # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
-      # which is the layout find_bistro_assets_dir() already looks for. They
+      # which is a layout scenario/worlds.py already looks for. They
       # are far too large to vendor. Mounted at the same path in both the
       # generator and the renderer, because the generated .argos embeds the
       # resolved path and ARGoS must be able to open it too.
       - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
+      # SubT Finals assets (~60 MB of glTF) live in the sibling argos3 checkout,
+      # regenerated there by photorealism/environments/import_fuel_world.py.
+      # Same both-sides mount as Bistro, for the same reason.
+      - ${SWARMDECK_SUBT_FINALS_DIR:-../../../argos3/src/plugins/simulator/photorealism/environments/finals_prize_round_world_01}:/app/argos3-environments/finals_prize_round_world_01:ro
       - swarmdeck_runtime:/run/swarmdeck
     # A blown-out render or a diverged estimator is not fixed by restarting
     # into the same state, and a restart loop hides the log that says why.
     restart: "no"
 
-  # ROS 2 Jazzy: the bridge ARGoS dials, per-robot SLAM and Nav2, adapter_sim.
   sim:
     profiles: ["argos"]
     build:
@@ -289,11 +292,12 @@ services:
       VIDEO_HEIGHT: "${VIDEO_HEIGHT:-240}"
     volumes:
       # Bistro assets (2.6 GB) live in the sibling argos3-examples checkout,
-      # which is the layout find_bistro_assets_dir() already looks for. They
+      # which is a layout scenario/worlds.py already looks for. They
       # are far too large to vendor. Mounted at the same path in both the
       # generator and the renderer, because the generated .argos embeds the
       # resolved path and ARGoS must be able to open it too.
       - ${SWARMDECK_BISTRO_DIR:-../../../argos3-examples/experiments/bistro_exploration/assets}:/app/argos3-examples/experiments/bistro_exploration/assets:ro
+      - ${SWARMDECK_SUBT_FINALS_DIR:-../../../argos3/src/plugins/simulator/photorealism/environments/finals_prize_round_world_01}:/app/argos3-environments/finals_prize_round_world_01:ro
       - ../../sessions:/app/sessions
       - ../../configs:/app/configs:ro
       - ../../swarmdeck_ros/src:/app/swarmdeck_ros/src:ro

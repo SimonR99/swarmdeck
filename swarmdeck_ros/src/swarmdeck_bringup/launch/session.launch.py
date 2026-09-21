@@ -27,18 +27,18 @@ INFLATION_MARGIN = 0.25
 def prebuilt_world(cfg: dict) -> str | None:
     """Which building the ARGoS backend loads.
 
-    `world: bistro` selects the Amazon Lumberyard Bistro scenario, whose assets
-    are mounted rather than generated; the name is returned. Anything else
-    (including no key at all) is the procedural indoor world, which
-    make_argos_world.py writes from the session seed, and None is returned.
-    Accepts the mapping form (`world: {name: bistro}`) as well.
+    `world: bistro` or `world: subt_finals` selects a prebuilt world (see
+    swarmdeck_sim/scenario/worlds.py), whose assets are mounted rather than
+    generated; the name is returned. Anything else (including no key at all)
+    is the procedural indoor world, which make_argos_world.py writes from the
+    session seed, and None is returned.
     """
-    world_cfg = cfg.get("world") or cfg.get("environment") or "procedural"
-    if isinstance(world_cfg, dict):
-        name = world_cfg.get("name") or world_cfg.get("type", "procedural")
-    else:
-        name = world_cfg
-    return "bistro" if str(name).lower() == "bistro" else None
+    scenario = REPO / "swarmdeck_ros" / "src" / "swarmdeck_sim" / "scenario"
+    sys.path.insert(0, str(scenario))
+    from worlds import mesh_world  # noqa: E402
+
+    world = mesh_world(cfg)
+    return world.name if world is not None else None
 
 
 def argos_actions(

@@ -301,16 +301,10 @@ def main() -> int:
     import yaml
 
     cfg_data = yaml.safe_load(cfg_path.read_text()) if cfg_path.is_file() else {}
-    world_cfg = cfg_data.get("world") or cfg_data.get("environment") or "procedural"
-    if isinstance(world_cfg, dict):
-        world_name = str(
-            world_cfg.get("name") or world_cfg.get("type", "procedural")
-        ).lower()
-    else:
-        world_name = str(world_cfg).lower()
-    is_bistro = world_name == "bistro"
+    sys.path.insert(0, str(SCENARIO))
+    from worlds import mesh_world  # noqa: E402
 
-    if not is_bistro:
+    if mesh_world(cfg_data) is None:
         subprocess.run(
             [
                 sys.executable,
