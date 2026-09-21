@@ -417,8 +417,6 @@ def test_sim_tick_restarts_the_clock_for_a_replacement_route(sim_module, clock):
     first.cancel_goal_async.assert_not_called()
 
 
-
-
 def test_sim_tick_waits_for_the_controller_to_accept_the_goal(sim_module, clock):
     """Before acceptance there is no handle to cancel, so there is no verdict."""
     bridge = _sim_bridge(sim_module, route_progress_timeout_s=30.0)

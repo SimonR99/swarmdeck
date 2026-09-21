@@ -187,7 +187,6 @@ class AdapterHelloMixin:
         )
 
 
-
 def yaw_of(q) -> float:
     """Return planar yaw from a ROS quaternion-like object."""
     return math.atan2(
@@ -210,8 +209,6 @@ def stamp_seconds(header) -> float | None:
     except (AttributeError, TypeError, ValueError):
         return None
     return value if value > 0.0 and math.isfinite(value) else None
-
-
 
 
 def cloud_xyz(msg) -> np.ndarray:

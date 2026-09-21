@@ -40,7 +40,6 @@ def test_projection_rejects_occluded_behind_and_out_of_image_points():
     assert not mask.any()
 
 
-
 def test_pose_export_inverts_camera_pose_and_preserves_metric_depth(tmp_path):
     capture = tmp_path / "capture"
     capture.mkdir()
@@ -380,7 +379,6 @@ def test_job_publication_is_served_with_source_metadata_and_stale_rejection(
     assert Path(after_stale.path).read_bytes() == target.read_bytes()
 
 
-
 def test_rgbd_projection_preserves_observation_mask_and_rejects_occlusion():
     from types import SimpleNamespace as NS
     from adapters.reconstruction import colorize_ros_rgbd
@@ -410,8 +408,6 @@ def test_rgbd_projection_preserves_observation_mask_and_rejects_occlusion():
         [148, 148, 148, 0],
         [148, 148, 148, 0],
     ]
-
-
 
 
 @pytest.mark.parametrize(

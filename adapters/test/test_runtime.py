@@ -56,7 +56,6 @@ def test_stamp_seconds_accepts_both_ros_timestamp_shapes():
     assert stamp_seconds(types.SimpleNamespace(stamp=None)) is None
 
 
-
 def test_cloud_xyz_honours_field_offsets_and_drops_nonfinite_rows():
     fields = [
         types.SimpleNamespace(name="intensity", offset=0),

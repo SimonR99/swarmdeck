@@ -48,7 +48,9 @@ class MapService:
             }
         return {"transforms": transforms, "members": sorted(transforms)}
 
-    def robot_to_world(self, robot_id: str, point: dict[str, float]) -> dict[str, float]:
+    def robot_to_world(
+        self, robot_id: str, point: dict[str, float]
+    ) -> dict[str, float]:
         with self._state_lock:
             tx, ty, yaw = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
         c, s = math.cos(yaw), math.sin(yaw)
@@ -59,7 +61,9 @@ class MapService:
             result["yaw"] = self._wrap_yaw(float(point["yaw"]) + yaw)
         return result
 
-    def world_to_robot(self, robot_id: str, point: dict[str, float]) -> dict[str, float]:
+    def world_to_robot(
+        self, robot_id: str, point: dict[str, float]
+    ) -> dict[str, float]:
         with self._state_lock:
             tx, ty, yaw = self.transforms.get(robot_id, (0.0, 0.0, 0.0))
         c, s = math.cos(yaw), math.sin(yaw)

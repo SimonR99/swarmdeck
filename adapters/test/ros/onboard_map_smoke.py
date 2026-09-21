@@ -42,7 +42,9 @@ def main() -> None:
         OccupancyGrid, "/probe/local_costmap", qos
     )
     node.create_subscription(OccupancyGrid, "/probe/map", bridge._on_map, qos)
-    node.create_subscription(OccupancyGrid, "/probe/local_costmap", received.append, qos)
+    node.create_subscription(
+        OccupancyGrid, "/probe/local_costmap", received.append, qos
+    )
     source = node.create_publisher(OccupancyGrid, "/probe/map", qos)
     executor = SingleThreadedExecutor()
     executor.add_node(node)

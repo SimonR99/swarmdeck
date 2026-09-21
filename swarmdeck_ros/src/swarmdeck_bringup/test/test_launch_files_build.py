@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("launch", reason="ROS 2 launch not installed outside the image")
-pytest.importorskip("launch_ros", reason="ROS 2 launch_ros not installed outside the image")
+pytest.importorskip(
+    "launch_ros", reason="ROS 2 launch_ros not installed outside the image"
+)
 
 SRC = Path(__file__).resolve().parents[2]
 LAUNCH_FILES = sorted(SRC.rglob("launch/*.launch.py"))

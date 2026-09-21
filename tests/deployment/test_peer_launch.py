@@ -106,5 +106,3 @@ def test_each_peer_start_claims_fresh_persisted_run(monkeypatch, tmp_path):
     # Replaying an earlier reset request cannot make a crashed frontend reuse
     # its keyframe namespace.
     assert start()["map_epoch"] == 8
-
-

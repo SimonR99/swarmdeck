@@ -358,8 +358,7 @@ class Registry:
         moving = (
             msg.get("type") in {"plan_objective", "body_command"}
             or (
-                msg.get("type") == "drive"
-                and (msg.get("linear") or msg.get("angular"))
+                msg.get("type") == "drive" and (msg.get("linear") or msg.get("angular"))
             )
             or (msg.get("type") == "explore" and msg.get("enabled"))
         )

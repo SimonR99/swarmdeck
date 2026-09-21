@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "swarmdeck_nav/scripts/lifecycle_startup.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[2] / "swarmdeck_nav/scripts/lifecycle_startup.py"
+)
 spec = importlib.util.spec_from_file_location("navigation_startup", SCRIPT)
 startup = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(startup)
@@ -39,7 +41,11 @@ def test_lost_configuration_response_recovers_without_double_transition():
         states, lambda name, _: states[name], change, clock=clock, sleep=clock.sleep
     )
     assert set(states.values()) == {3}
-    assert all(changes.count((name, transition)) == 1 for name in states for transition in (1, 3))
+    assert all(
+        changes.count((name, transition)) == 1
+        for name in states
+        for transition in (1, 3)
+    )
 
 
 def test_mixed_active_and_inactive_nodes_are_not_reset_or_reconfigured():

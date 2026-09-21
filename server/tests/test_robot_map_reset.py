@@ -51,6 +51,7 @@ def test_targeted_epoch_retirement_clears_only_target(monkeypatch):
         return None
 
     from swarmdeck_server.api import app
+
     monkeypatch.setattr(app, "CONFIG", {"map": {"start_poses": {"r0": {}}}})
     monkeypatch.setattr(app, "broadcast", publish)
     asyncio.run(map_routes.retire_robot_epoch("r0", mission, 2))

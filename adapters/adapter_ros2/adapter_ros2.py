@@ -103,7 +103,6 @@ from adapters.navigation_result import navigation_failure_reason
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from ros2_defaults import DEFAULTS
 
-
 # The detector needs OpenCV and the inference sidecar's client; a robot image
 # built without them still runs, just without perception.
 try:
@@ -265,7 +264,9 @@ class HardwareBridge(
         self._pose_warned = False
 
         if topics.get("odom"):
-            node.create_subscription(Odometry, topics["odom"], self._on_odom, qos_profile_sensor_data)
+            node.create_subscription(
+                Odometry, topics["odom"], self._on_odom, qos_profile_sensor_data
+            )
         if topics.get("plan"):
             node.create_subscription(NavPath, topics["plan"], self._on_plan, 10)
         if topics.get("local_plan"):
@@ -575,7 +576,9 @@ class HardwareBridge(
                     if stamp is not None
                     else rclpy.time.Time()
                 )
-                tf = self.tf_buffer.lookup_transform(self.navigation_frame, frame, tf_time)
+                tf = self.tf_buffer.lookup_transform(
+                    self.navigation_frame, frame, tf_time
+                )
             except Exception as exc:
                 if not self._plan_frame_warned:
                     self._plan_frame_warned = True
@@ -806,7 +809,10 @@ class HardwareBridge(
                 )
                 try:
                     tf = self.tf_buffer.lookup_transform(
-                        self.navigation_frame, frame_id, stamp, timeout=Duration(seconds=0.1)
+                        self.navigation_frame,
+                        frame_id,
+                        stamp,
+                        timeout=Duration(seconds=0.1),
                     )
                 except Exception:
                     tf = self.tf_buffer.lookup_transform(
@@ -860,7 +866,9 @@ class HardwareBridge(
             if not self._pose_warned:
                 self._pose_warned = True
                 if getattr(self, "_odom_frame", "") == self.navigation_frame:
-                    detail = f"using direct {self.navigation_frame}-frame odometry instead"
+                    detail = (
+                        f"using direct {self.navigation_frame}-frame odometry instead"
+                    )
                 else:
                     detail = (
                         "falling back to raw odometry, which DRIFTS. Check that SLAM "

@@ -53,7 +53,10 @@ def authority_home(
         raise ValueError("authority robot_id does not match the requested robot")
     if mission_id is not None and authority.get("mission_id") != mission_id:
         raise ValueError("authority mission_id does not match the requested mission")
-    if authority.get("navigation_frame", "").lstrip("/") != f"{robot_id}/navigation_frame":
+    if (
+        authority.get("navigation_frame", "").lstrip("/")
+        != f"{robot_id}/navigation_frame"
+    ):
         raise ValueError(
             "authority navigation_frame does not match the robot map frame"
         )

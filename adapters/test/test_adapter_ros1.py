@@ -32,6 +32,7 @@ _STUBBED = [
     "cv2",
 ]
 
+
 @pytest.fixture(scope="module")
 def mod():
     saved = {name: sys.modules.get(name) for name in _STUBBED}
@@ -51,6 +52,7 @@ def mod():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+
 
 def _bridge(mod, cfg_override=None):
     cfg = mod.deep_merge(mod.DEFAULTS, cfg_override or {})
@@ -99,6 +101,7 @@ def _bridge(mod, cfg_override=None):
     bridge._scan_dirty = False
     return bridge
 
+
 def _occupancy_grid(frame="odom"):
     return type(
         "Grid",
@@ -113,7 +116,9 @@ def _occupancy_grid(frame="odom"):
                     "width": 20,
                     "height": 10,
                     "origin": type(
-                        "Origin", (), {"position": type("P", (), {"x": -1.0, "y": -2.0})()}
+                        "Origin",
+                        (),
+                        {"position": type("P", (), {"x": -1.0, "y": -2.0})()},
                     )(),
                 },
             )(),
@@ -121,10 +126,12 @@ def _occupancy_grid(frame="odom"):
         },
     )()
 
+
 def test_config_merge_is_deep_not_shallow(mod):
     merged = mod.deep_merge(mod.DEFAULTS, {"topics": {"odom": "wheel_odom"}})
     assert merged["topics"]["odom"] == "wheel_odom"
     assert merged["topics"]["cmd_vel"] == "cmd_vel"
+
 
 def test_hello_uses_the_shared_protocol_envelope(mod):
     from adapters.runtime import PROTOCOL_VERSION, TRANSPORT_DEFAULTS
@@ -135,6 +142,7 @@ def test_hello_uses_the_shared_protocol_envelope(mod):
     assert msg["adapter"] == "adapter_ros1/0.1.0"
     assert "reset" not in msg["capabilities"]
     assert bridge.cfg["ping_interval_s"] == TRANSPORT_DEFAULTS["ping_interval_s"]
+
 
 def test_capabilities_reflect_configuration_only(mod):
     """Protocol rule 4: never advertise a capability you cannot honour."""
@@ -167,8 +175,10 @@ def test_capabilities_reflect_configuration_only(mod):
     )
     assert bare.capabilities() == []
 
+
 def _stamp(seconds: float):
     return type("Stamp", (), {"to_sec": lambda self: seconds})()
+
 
 def _depth_image(mod, *, stamp: float, frame: str = "map"):
     values = mod.np.full((8, 8), 2000, dtype="<u2")
@@ -187,6 +197,7 @@ def _depth_image(mod, *, stamp: float, frame: str = "map"):
         },
     )()
 
+
 def test_drive_watchdog_stops_a_robot_whose_operator_vanished(mod):
     """The failure this prevents is a robot that keeps driving after link loss."""
     import time
@@ -202,11 +213,13 @@ def test_drive_watchdog_stops_a_robot_whose_operator_vanished(mod):
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 
+
 def test_drive_watchdog_leaves_an_active_operator_alone(mod):
     bridge = _bridge(mod, {"drive_timeout_s": 5.0})
     bridge.drive(0.3, 0.0)
     bridge.drive_watchdog()
     assert bridge.mode == "teleop"
+
 
 def test_goal_done_ignores_stale_generations(mod):
     """A superseded goal's late server response must not clobber a newer one.
@@ -226,6 +239,7 @@ def test_goal_done_ignores_stale_generations(mod):
     ), "a stale done_cb must not overwrite newer state"
     assert bridge.goal == {"x": 1.0, "y": 2.0}
 
+
 def test_cancel_goal_bumps_generation_and_clears_state(mod):
     bridge = _bridge(mod, {"actions": {"navigate_to_pose": "move_base"}})
     bridge._goal_generation = 0
@@ -237,6 +251,7 @@ def test_cancel_goal_bumps_generation_and_clears_state(mod):
     assert bridge.nav_status == "cancelled"
     assert bridge.mode == "idle"
     bridge.nav_client.cancel_goal.assert_called_once()
+
 
 def test_nav_goal_topic_takes_priority_over_actionlib(mod):
     """A robot only ever has one real navigation stack — configuring both by
@@ -251,6 +266,7 @@ def test_nav_goal_topic_takes_priority_over_actionlib(mod):
     assert bridge.pub_nav_goal is not None
     assert bridge.nav_client is None
     assert "navigate" in bridge.capabilities()
+
 
 def test_navigate_to_topic_publishes_pose_and_releases_any_prior_stop(mod):
     bridge = _bridge(
@@ -267,6 +283,7 @@ def test_navigate_to_topic_publishes_pose_and_releases_any_prior_stop(mod):
     bridge.pub_nav_stop.publish.assert_called_once()
     mod.Int8.assert_any_call(data=0)
 
+
 def test_topic_nav_progress_declares_arrival_within_tolerance(mod):
     bridge = _bridge(
         mod,
@@ -281,6 +298,7 @@ def test_topic_nav_progress_declares_arrival_within_tolerance(mod):
     assert bridge.goal is None
     assert bridge.mode == "idle"
 
+
 def test_topic_nav_progress_stays_active_when_far(mod):
     bridge = _bridge(
         mod,
@@ -294,6 +312,7 @@ def test_topic_nav_progress_stays_active_when_far(mod):
     assert bridge.nav_status == "active"
     assert bridge.goal == {"x": 5.0, "y": 5.0}
 
+
 def test_cancel_goal_halts_a_topic_based_nav_stack(mod):
     bridge = _bridge(
         mod, {"topics": {"nav_goal": "move_base_simple/goal", "nav_stop": "stop"}}
@@ -306,6 +325,7 @@ def test_cancel_goal_halts_a_topic_based_nav_stack(mod):
     assert bridge.goal is None
     bridge.pub_nav_stop.publish.assert_called_once()
     mod.Int8.assert_any_call(data=1)
+
 
 def test_teleop_preempts_an_active_topic_based_nav_goal(mod):
     """Operator input must always win over autonomy sharing the same cmd_vel."""
@@ -321,6 +341,7 @@ def test_teleop_preempts_an_active_topic_based_nav_goal(mod):
     assert bridge.mode == "teleop"
     mod.Int8.assert_any_call(data=1)
 
+
 def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
     """drive(0, 0) is sent routinely (deadman, initial state) — it must not
     spuriously cancel a goal that isn't even active."""
@@ -333,8 +354,10 @@ def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
     bridge.pub_nav_stop.publish.assert_not_called()
     assert bridge.nav_status == "idle"
 
+
 def _bearing_of(sent) -> float:
     return math.degrees(math.atan2(sent.axes[2], sent.axes[1]))
+
 
 def test_teleop_preempts_move_base_without_a_nav_stop_topic(mod):
     """Operator motion must cancel autonomy on EVERY ROS 1 nav stack.
@@ -364,6 +387,7 @@ def test_teleop_preempts_move_base_without_a_nav_stop_topic(mod):
     assert bridge.nav_status == "cancelled"
     bridge.nav_client.cancel_goal.assert_called_once()
 
+
 def test_teleop_does_not_cancel_when_nothing_is_navigating(mod):
     """Driving an idle robot must not emit a spurious cancellation."""
     bridge = _bridge(
@@ -377,6 +401,7 @@ def test_teleop_does_not_cancel_when_nothing_is_navigating(mod):
 
     assert bridge.mode == "teleop"
     bridge.nav_client.cancel_goal.assert_not_called()
+
 
 def _plan_msg(frame, points, stamp=0.0):
     """A nav_msgs/Path stand-in: header.frame_id plus (x, y, z) poses."""
@@ -392,12 +417,14 @@ def _plan_msg(frame, points, stamp=0.0):
         msg.poses.append(pose)
     return msg
 
+
 def _plan_bridge(mod, frame="odom"):
     bridge = _bridge(mod, {"navigation_frame": frame, "topics": {"plan": "/path"}})
     bridge.planned_path = []
     bridge._plan_frame_warned = False
     bridge.tf_buffer = MagicMock()
     return bridge
+
 
 def test_plan_in_navigation_frame_is_passed_through(mod):
     """A plan already in navigation_frame needs no transform lookup."""
@@ -406,6 +433,7 @@ def test_plan_in_navigation_frame_is_passed_through(mod):
 
     assert bridge.planned_path == [{"x": 1.0, "y": 2.0}, {"x": 3.0, "y": 4.0}]
     bridge.tf_buffer.lookup_transform.assert_not_called()
+
 
 def test_plan_in_a_vehicle_frame_is_transformed_into_navigation_frame(mod):
     """A local planner vehicle-frame path is transformed into navigation_frame."""
@@ -424,6 +452,7 @@ def test_plan_in_a_vehicle_frame_is_transformed_into_navigation_frame(mod):
 
     assert bridge.planned_path == [{"x": 10.0, "y": 6.0}, {"x": 10.0, "y": 7.0}]
 
+
 def test_plan_is_dropped_rather_than_drawn_in_the_wrong_frame(mod):
     """No transform means no route — never the untransformed coordinates.
 
@@ -439,6 +468,7 @@ def test_plan_is_dropped_rather_than_drawn_in_the_wrong_frame(mod):
 
     assert bridge.planned_path == []
 
+
 def test_empty_plan_clears_the_route(mod):
     """local_planner publishes an empty path when it finds no clear route."""
     bridge = _plan_bridge(mod)
@@ -451,6 +481,7 @@ def test_empty_plan_clears_the_route(mod):
     assert bridge.planned_path == []
     assert bridge._local_planned_path == []
     assert bridge._global_planned_path == [{"x": 5.0, "y": 2.0}]
+
 
 def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
     """Same deadman as adapter_ros2, same reason — see the Botman accident.
@@ -477,6 +508,7 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 
+
 def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
     bridge = _bridge(
         mod,
@@ -489,6 +521,7 @@ def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
     assert bridge.nav_status == "active"
     bridge._on_nav_cmd_vel(MagicMock())
     assert bridge.pub_cmd.publish.call_count == 1
+
 
 def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
     """A restarted adapter must not leave a driving robot behind.
@@ -514,6 +547,7 @@ def test_stop_for_exit_cancels_and_zeroes_before_the_process_dies(mod):
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 
+
 def _give_route_map(bridge):
     import time
     from types import SimpleNamespace
@@ -528,6 +562,7 @@ def _give_route_map(bridge):
             origin_y=-15.0,
         ),
     )
+
 
 def test_hardware_capabilities_never_advertise_reset(mod):
     bridge = _bridge(mod)

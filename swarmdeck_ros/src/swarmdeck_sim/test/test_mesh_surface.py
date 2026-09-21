@@ -27,7 +27,9 @@ def test_sloped_surface_places_the_whole_footprint_above_ground(tmp_path):
     # Offset model origin: bottom at .2, not zero.
     prop.add_box(Material("prop", (0.8, 0.2, 0.2)), (0, 0, 0.4), (1, 0.2, 0.4))
     prop.export_glb(tmp_path / "prop.glb")
-    surface = MeshSurface(tmp_path / "road.glb", material_prefix="pavement", z_offset=-0.3)
+    surface = MeshSurface(
+        tmp_path / "road.glb", material_prefix="pavement", z_offset=-0.3
+    )
     assert surface.height(0, 0) == pytest.approx(0.1)
     assert surface.place(tmp_path / "prop.glb", 0, 0, 0) == pytest.approx(
         0.15 - 0.2 + 0.005
@@ -55,7 +57,9 @@ def test_ceiling_is_not_ground_when_a_cap_is_given(tmp_path):
     tunnel.add_box(Material("rock", (0.3, 0.3, 0.3)), (0, 0, 3.5), (4, 4, 0.1))
     tunnel.export_glb(tmp_path / "tunnel.glb")
     assert MeshSurface(tmp_path / "tunnel.glb").height(0, 0) == pytest.approx(3.55)
-    assert MeshSurface(tmp_path / "tunnel.glb", below=1.0).height(0, 0) == pytest.approx(0.0)
+    assert MeshSurface(tmp_path / "tunnel.glb", below=1.0).height(
+        0, 0
+    ) == pytest.approx(0.0)
 
 
 def test_glb_export_axis_conversion_preserves_model_dimensions(tmp_path):

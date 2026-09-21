@@ -52,7 +52,9 @@ def test_dev_selects_three_peers_and_never_fast_livo2():
     assert spec["render"] == "dri"
     assert spec["odometry"] == "drift"
     assert [service for service in spec["services"] if service.startswith("peer")] == [
-        "peer0", "peer1", "peer2"
+        "peer0",
+        "peer1",
+        "peer2",
     ]
     assert "fast_livo2" not in spec["services"]
 
@@ -60,10 +62,13 @@ def test_dev_selects_three_peers_and_never_fast_livo2():
 def test_custom_scenario_mounts_config_and_selects_exact_peers(tmp_path):
     config = tmp_path / "two.yaml"
     config.write_text("fleet:\n  robot_count: 2\n  robot_prefix: rover_\n")
-    spec = launch.build_spec(arguments("--scenario", str(config), "--fast-livo2"), "test")
+    spec = launch.build_spec(
+        arguments("--scenario", str(config), "--fast-livo2"), "test"
+    )
     assert spec["robot_names"] == ["rover_0", "rover_1"]
     assert [service for service in spec["services"] if service.startswith("peer")] == [
-        "peer0", "peer1"
+        "peer0",
+        "peer1",
     ]
     overlay = Path(spec["compose_files"][-1])
     assert str(config) in overlay.read_text()
@@ -79,7 +84,15 @@ def test_custom_scenario_rejects_more_than_four_peers(tmp_path):
 def test_state_loader_rejects_obsolete_versions(tmp_path, monkeypatch):
     monkeypatch.setattr(launch, "STATE_ROOT", tmp_path)
     (tmp_path / "test.json").write_text(
-        json.dumps({"version": 1, "project": "test", "compose_files": [], "services": [], "reset_services": []})
+        json.dumps(
+            {
+                "version": 1,
+                "project": "test",
+                "compose_files": [],
+                "services": [],
+                "reset_services": [],
+            }
+        )
     )
     with pytest.raises(ValueError, match="obsolete"):
         launch.load_state("test")

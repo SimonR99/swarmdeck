@@ -745,7 +745,9 @@ def test_subt_fleet_deploys_in_the_hangar_facing_the_tunnel(subt_tree):
         assert yaw == pytest.approx(0.0, abs=1e-6)
     # The head of the group, released first by fleet-wide Explore, is the
     # robot nearest the gate.
-    front = max(bodies, key=lambda rid: float(bodies[rid].get("position").split(",")[0]))
+    front = max(
+        bodies, key=lambda rid: float(bodies[rid].get("position").split(",")[0])
+    )
     assert front == "robot_0"
 
 

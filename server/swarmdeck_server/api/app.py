@@ -443,7 +443,6 @@ async def state_loop() -> None:
                 await clear_alert(sid)
 
 
-
 async def network_loop() -> None:
     """1 Hz per-robot Wi-Fi heatmap patches."""
     while True:
@@ -874,54 +873,63 @@ async def get_sim_reset() -> dict[str, Any]:
 @app.get("/api/map/status")
 async def get_map_status() -> dict[str, Any]:
     from .map_routes import get_map_status as handler
+
     return await handler()
 
 
 @app.post("/api/map/reset/{robot_id}")
 async def reset_robot_map(robot_id: str, request_id: str | None = None) -> Response:
     from .map_routes import reset_robot_map as handler
+
     return await handler(robot_id, request_id)
 
 
 @app.get("/api/map/reset/{robot_id}")
 async def get_robot_map_reset(robot_id: str, request_id: str | None = None) -> Response:
     from .map_routes import get_robot_map_reset as handler
+
     return await handler(robot_id, request_id)
 
 
 @app.post("/api/map/reset")
 async def reset_all_maps() -> Response:
     from .map_routes import reset_all_maps as handler
+
     return await handler()
 
 
 @app.get("/api/map/costmap/{robot_id}/{kind}")
 async def get_costmap(robot_id: str, kind: str) -> Response:
     from .map_routes import get_costmap as handler
+
     return await handler(robot_id, kind)
 
 
 @app.post("/api/adapter/costmap")
 async def post_costmap(request: Request) -> Any:
     from .map_routes import post_costmap as handler
+
     return await handler(request)
 
 
 @app.get("/api/map/optimized")
 async def get_optimized_index() -> dict[str, Any]:
     from .map_routes import get_optimized_index as handler
+
     return await handler()
 
 
 @app.get("/api/map/optimized/{scope}")
 async def get_optimized_map(scope: str) -> Response:
     from .map_routes import get_optimized_map as handler
+
     return await handler(scope)
 
 
 @app.get("/api/map/gaussians")
 async def get_gaussians(request: Request) -> Response:
     from .reconstruction_routes import get_gaussians as handler
+
     return await handler(request)
 
 
@@ -1091,6 +1099,7 @@ async def handle_gui_message(msg: dict[str, Any], source: Any = None) -> None:
             )
             return
         from .objective_commands import send_objective
+
         await send_objective(registry, rid, "return_home")
         return
     elif kind == "cancel_goal":
@@ -1515,7 +1524,6 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             if not det.get("hidden", False):
                 await broadcast({"type": "detection", "detection": det})
 
-
     elif kind == "reset_done":
         # The adapter has finished resetting and has dropped its cached
         # grid, so the backend may now clear without the old map coming
@@ -1531,7 +1539,6 @@ async def handle_adapter_message(msg: dict[str, Any], ws: WebSocket) -> bool:
             _reset_pending.discard(rid)
             if not _reset_pending and _reset_done is not None:
                 _reset_done.set()
-
 
     # Unknown types are ignored, not fatal (protocol rule 3).
     return False

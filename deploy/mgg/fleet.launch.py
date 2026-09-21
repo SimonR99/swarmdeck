@@ -32,22 +32,35 @@ def mola_initial_ground_reach(robot, lidar):
         raise ValueError("MOLA initial ground reach requires finite sensor geometry")
     if sensor_height <= 0.0 or not 0.0 < lidar.vfov < math.pi / 2.0:
         raise ValueError("MOLA initial ground reach requires a downward 3D lidar")
-    required = abs(sensor_height / math.tan(lidar.vfov) - abs(robot.lidar_x)) + MOLA_MAP_RESOLUTION_M
+    required = (
+        abs(sensor_height / math.tan(lidar.vfov) - abs(robot.lidar_x))
+        + MOLA_MAP_RESOLUTION_M
+    )
     if required > MAX_INITIAL_GROUND_REACH_M:
         raise ValueError("MOLA lidar ground blind radius exceeds bounded reach")
-    return math.ceil(required / GRID_REFINEMENT_RESOLUTION_M) * GRID_REFINEMENT_RESOLUTION_M
+    return (
+        math.ceil(required / GRID_REFINEMENT_RESOLUTION_M)
+        * GRID_REFINEMENT_RESOLUTION_M
+    )
 
 
 def simulation_robot_prefix(fleet):
     prefix = fleet.get("robot_prefix", "robot_")
-    if not isinstance(prefix, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", prefix) is None:
-        raise ValueError("fleet.robot_prefix must contain only ROS namespace characters")
+    if (
+        not isinstance(prefix, str)
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", prefix) is None
+    ):
+        raise ValueError(
+            "fleet.robot_prefix must contain only ROS namespace characters"
+        )
     return prefix
 
 
 def generate_launch_description():
     here = Path(__file__).parent
-    spec = importlib.util.spec_from_file_location("mgg_robot_launch", here / "robot.launch.py")
+    spec = importlib.util.spec_from_file_location(
+        "mgg_robot_launch", here / "robot.launch.py"
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     sys.path.insert(0, "/app/swarmdeck_ros/src")
@@ -83,7 +96,9 @@ def generate_launch_description():
             {
                 "SensorParams.VLP16.center_offset": [spec.lidar_x, 0.0, spec.lidar_z],
                 **sensor_overrides,
-                "PlanningParams.max_ground_height": spec.base_height + spec.max_step_height + 0.175,
+                "PlanningParams.max_ground_height": spec.base_height
+                + spec.max_step_height
+                + 0.175,
                 "PlanningParams.max_step_height": spec.max_step_height,
                 "PlanningParams.edge_length_max": initial_ground_reach,
                 "objective_start_support_max_distance_m": initial_ground_reach,
@@ -101,7 +116,9 @@ def generate_launch_description():
         RegisterEventHandler(
             OnProcessExit(
                 target_action=node,
-                on_exit=[EmitEvent(event=Shutdown(reason="robot planner child exited"))],
+                on_exit=[
+                    EmitEvent(event=Shutdown(reason="robot planner child exited"))
+                ],
             )
         )
         for node in nodes

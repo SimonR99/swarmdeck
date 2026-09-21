@@ -44,6 +44,8 @@ _STUBBED = [
     "spot_msgs.action",
     "spot_msgs.srv",
 ]
+
+
 @pytest.fixture(scope="module")
 def mod():
     saved = {name: sys.modules.get(name) for name in _STUBBED}
@@ -63,6 +65,7 @@ def mod():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = value
+
 
 def _bridge(mod, cfg_override=None):
     cfg = mod.deep_merge(mod.DEFAULTS, cfg_override or {})
@@ -127,6 +130,7 @@ def _bridge(mod, cfg_override=None):
     bridge.t0 = 0.0
     return bridge
 
+
 class _ImmediateFuture:
     def __init__(self, value):
         self.value = value
@@ -136,6 +140,7 @@ class _ImmediateFuture:
 
     def result(self):
         return self.value
+
 
 def _occupancy_grid(frame="map"):
     return SimpleNamespace(
@@ -150,6 +155,7 @@ def _occupancy_grid(frame="map"):
         ),
         data=[-1, 0, 100] * 66 + [-1, 0],
     )
+
 
 def _trigger_client(order, name):
     client = MagicMock()
@@ -168,11 +174,13 @@ def _trigger_client(order, name):
     client.call_async.side_effect = call_async
     return client
 
+
 def _identity_tf():
     rot = type("Q", (), {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0})()
     trans = type("P", (), {"x": 0.0, "y": 0.0, "z": 0.0})()
     transform = type("X", (), {"rotation": rot, "translation": trans})()
     return type("TF", (), {"transform": transform})()
+
 
 def _yaw_tf(yaw):
     rot = type(
@@ -189,11 +197,10 @@ def _yaw_tf(yaw):
     transform = type("X", (), {"rotation": rot, "translation": trans})()
     return type("TF", (), {"transform": transform})()
 
+
 def test_trajectory_goal_is_transformed_into_body(mod):
     """spot_driver rejects any Trajectory frame_id other than body."""
-    bridge = _bridge(
-        mod, {"actions": {"trajectory": "/trajectory"}}
-    )
+    bridge = _bridge(mod, {"actions": {"trajectory": "/trajectory"}})
     bridge.tf_buffer.lookup_transform.return_value = _identity_tf()
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -208,11 +215,10 @@ def test_trajectory_goal_is_transformed_into_body(mod):
     assert bridge.nav_status == "active"
     assert bridge.goal == {"x": 1.5, "y": -2.0}
 
+
 def test_trajectory_point_goal_preserves_current_heading(mod):
     """A click without yaw must not silently become absolute map yaw zero."""
-    bridge = _bridge(
-        mod, {"actions": {"trajectory": "/trajectory"}}
-    )
+    bridge = _bridge(mod, {"actions": {"trajectory": "/trajectory"}})
     bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.8)
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -222,10 +228,9 @@ def test_trajectory_point_goal_preserves_current_heading(mod):
     assert msg.target_pose.pose.orientation.z == pytest.approx(0.0)
     assert msg.target_pose.pose.orientation.w == pytest.approx(1.0)
 
+
 def test_trajectory_explicit_yaw_is_still_honoured(mod):
-    bridge = _bridge(
-        mod, {"actions": {"trajectory": "/trajectory"}}
-    )
+    bridge = _bridge(mod, {"actions": {"trajectory": "/trajectory"}})
     bridge.tf_buffer.lookup_transform.return_value = _yaw_tf(-0.8)
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -238,6 +243,7 @@ def test_trajectory_explicit_yaw_is_still_honoured(mod):
     assert msg.target_pose.pose.orientation.w == pytest.approx(
         __import__("math").cos(-0.8 / 2.0)
     )
+
 
 @pytest.mark.parametrize("code, message", [(4, "Failed to make progress"), (105, "")])
 def test_follow_path_result_exposes_nav2_failure_reason(
@@ -271,6 +277,7 @@ def test_follow_path_result_exposes_nav2_failure_reason(
     assert bridge.nav_status == "failed"
     assert bridge._nav_failure_reason == f"Failed to make progress; error_code={code}"
 
+
 def test_stale_follow_path_result_cannot_replace_current_failure_reason(
     mod, monkeypatch
 ):
@@ -296,10 +303,9 @@ def test_stale_follow_path_result_cannot_replace_current_failure_reason(
     assert bridge.nav_status == "idle"
     assert bridge._nav_failure_reason == "current goal failure"
 
+
 def test_trajectory_goal_without_tf_is_dropped(mod):
-    bridge = _bridge(
-        mod, {"actions": {"trajectory": "/trajectory"}}
-    )
+    bridge = _bridge(mod, {"actions": {"trajectory": "/trajectory"}})
     bridge.tf_buffer.lookup_transform.side_effect = RuntimeError("no TF")
     bridge.traj_client.server_is_ready.return_value = True
 
@@ -307,6 +313,7 @@ def test_trajectory_goal_without_tf_is_dropped(mod):
 
     bridge.traj_client.send_goal_async.assert_not_called()
     assert bridge.nav_status == "failed"
+
 
 def test_cancel_trajectory_calls_spot_stop(mod):
     """Clearpath's ROS 2 Trajectory server does not honour cancel/preempt."""
@@ -335,6 +342,7 @@ def test_cancel_trajectory_calls_spot_stop(mod):
     assert bridge.nav_status == "cancelled"
     assert bridge.goal is None
 
+
 def test_cancel_trajectory_does_not_wait_for_stop_response(mod):
     """Manual drive must publish even while Spot's /stop call is in flight."""
     bridge = _bridge(
@@ -362,6 +370,7 @@ def test_cancel_trajectory_does_not_wait_for_stop_response(mod):
     assert manual.angular.z == pytest.approx(0.1)
     assert bridge.mode == "teleop"
 
+
 def test_drive_watchdog_stops_a_robot_whose_operator_vanished(mod):
     """The failure this prevents is a robot that keeps driving after link loss."""
     import time
@@ -377,11 +386,13 @@ def test_drive_watchdog_stops_a_robot_whose_operator_vanished(mod):
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 
+
 def test_drive_watchdog_leaves_an_active_operator_alone(mod):
     bridge = _bridge(mod, {"drive_timeout_s": 5.0})
     bridge.drive(0.3, 0.0)
     bridge.drive_watchdog()
     assert bridge.mode == "teleop"
+
 
 def _plan_msg(frame, points):
     msg = MagicMock()
@@ -395,6 +406,7 @@ def _plan_msg(frame, points):
         pose.pose.position.z = z
         msg.poses.append(pose)
     return msg
+
 
 def test_conditional_follow_path_submission_failure_keeps_reserved_generation(mod):
     bridge = _bridge(
@@ -414,6 +426,7 @@ def test_conditional_follow_path_submission_failure_keeps_reserved_generation(mo
     assert bridge.mode == "idle"
     assert bridge.goal is None
     assert bridge.planned_path == []
+
 
 def test_immediate_follow_path_rejection_leaves_terminal_failure(mod):
     bridge = _bridge(
@@ -435,6 +448,7 @@ def test_immediate_follow_path_rejection_leaves_terminal_failure(mod):
     assert bridge.goal is None
     assert bridge.planned_path == []
 
+
 def _ownership_plan(frame="map"):
     from adapters.exploration import PlannerPath, PlannerPose
 
@@ -446,6 +460,7 @@ def _ownership_plan(frame="map"):
             PlannerPose(2.0, 2.5, 0.0, 0.0, 0.0, 0.1, 0.995),
         ),
     )
+
 
 def test_stale_conditional_follow_path_does_not_preempt_newer_goal(mod):
     bridge = _bridge(
@@ -472,6 +487,7 @@ def test_stale_conditional_follow_path_does_not_preempt_newer_goal(mod):
     assert bridge.goal == {"x": 8.0, "y": 9.0}
     assert bridge.planned_path == [{"x": 8.0, "y": 9.0}]
     assert bridge.nav_status == "active"
+
 
 def test_cancel_while_follow_path_readiness_is_pending_wins_without_blocking(mod):
     bridge = _bridge(
@@ -517,6 +533,7 @@ def test_cancel_while_follow_path_readiness_is_pending_wins_without_blocking(mod
     bridge.path_client.send_goal_async.assert_not_called()
     assert bridge.nav_status == "cancelled"
     assert bridge.mode == "idle"
+
 
 def test_stop_while_follow_path_readiness_is_pending_estops_hardware(mod):
     """The inherited protocol Stop must preempt a worker waiting on Nav2."""
@@ -572,6 +589,7 @@ def test_stop_while_follow_path_readiness_is_pending_estops_hardware(mod):
     # readiness worker is unwinding.
     bridge.pub_cmd.publish.assert_called()
 
+
 def test_manual_drive_during_pending_follow_path_invalidates_cancelled_generation(mod):
     """Teleop must supersede a planner handoff even after planner cancellation."""
     bridge = _bridge(
@@ -614,6 +632,7 @@ def test_manual_drive_during_pending_follow_path_invalidates_cancelled_generatio
     assert bridge.mode == "teleop"
     bridge.pub_cmd.publish.assert_called_once()
 
+
 def test_follow_path_expiry_during_readiness_prevents_send(mod, monkeypatch):
     bridge = _bridge(
         mod,
@@ -654,6 +673,7 @@ def test_follow_path_expiry_during_readiness_prevents_send(mod, monkeypatch):
     bridge.path_client.send_goal_async.assert_not_called()
     assert bridge._goal_generation == 6
 
+
 def test_stale_readiness_failure_preserves_estop(mod):
     bridge = _bridge(
         mod,
@@ -673,6 +693,7 @@ def test_stale_readiness_failure_preserves_estop(mod):
     assert bridge._goal_generation == 10
     assert bridge.nav_status == "estop"
     assert bridge.mode == "idle"
+
 
 def test_accepted_callback_after_cancel_is_canceled_without_resurrecting_state(mod):
     bridge = _bridge(mod, {"actions": {"follow_path": "follow_path"}})
@@ -697,6 +718,7 @@ def test_accepted_callback_after_cancel_is_canceled_without_resurrecting_state(m
     assert bridge.goal is None
     assert bridge.planned_path == []
 
+
 def test_cancel_nav_goal_disables_relay_and_publishes_zero(mod):
     bridge = _bridge(
         mod,
@@ -720,6 +742,7 @@ def test_cancel_nav_goal_disables_relay_and_publishes_zero(mod):
     assert zero.linear.x == 0.0
     assert zero.angular.z == 0.0
 
+
 def test_stale_conditional_cancel_does_not_zero_newer_motion(mod):
     bridge = _bridge(
         mod,
@@ -739,6 +762,7 @@ def test_stale_conditional_cancel_does_not_zero_newer_motion(mod):
     assert bridge._goal_generation == 8
     assert bridge._nav_execution_enabled is True
     assert bridge.nav_status == "active"
+
 
 def test_stale_conditional_cancel_and_status_cannot_change_newer_state(mod):
     bridge = _bridge(mod, {"actions": {"follow_path": "follow_path"}})
@@ -760,6 +784,7 @@ def test_stale_conditional_cancel_and_status_cannot_change_newer_state(mod):
     assert bridge.nav_status == "active"
     assert bridge.mode == "nav"
 
+
 def test_empty_follow_path_fails_without_canceling_active_motion(mod):
     from adapters.exploration import PlannerPath
 
@@ -774,6 +799,7 @@ def test_empty_follow_path_fails_without_canceling_active_motion(mod):
     handle.cancel_goal_async.assert_not_called()
     bridge.path_client.send_goal_async.assert_not_called()
     assert bridge.nav_status == "idle"
+
 
 def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
     """Nav2 output must not reach the driver outside an active action goal."""
@@ -795,6 +821,7 @@ def test_nav_cmd_vel_relay_forwards_only_while_navigating(mod):
     bridge._on_nav_cmd_vel(twist)
     bridge.pub_cmd.publish.assert_called_once_with(twist)
 
+
 def test_teleop_cancels_an_active_action_goal(mod):
     bridge = _bridge(mod, {"actions": {"follow_path": "follow_path"}})
     handle = MagicMock()
@@ -810,6 +837,7 @@ def test_teleop_cancels_an_active_action_goal(mod):
     assert bridge.goal is None
     assert bridge.mode == "teleop"
 
+
 def test_stale_accepted_action_response_is_cancelled(mod):
     bridge = _bridge(mod, {"actions": {"follow_path": "follow_path"}})
     bridge._goal_generation = 2
@@ -823,6 +851,7 @@ def test_stale_accepted_action_response_is_cancelled(mod):
     handle.cancel_goal_async.assert_called_once_with()
     assert bridge._goal_handle is None
 
+
 def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
     """drive(0, 0) is sent routinely (deadman, initial state) — it must not
     spuriously cancel a goal that isn't even active."""
@@ -831,6 +860,7 @@ def test_teleop_zero_command_does_not_touch_an_idle_nav_state(mod):
 
     bridge.drive(0.0, 0.0)
     assert bridge.nav_status == "idle"
+
 
 def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
     """The Botman accident, 2026-08-12: a goal ran on after the link dropped.
@@ -864,6 +894,7 @@ def test_link_watchdog_stops_autonomy_when_the_operator_link_goes_stale(mod):
     last = bridge.pub_cmd.publish.call_args[0][0]
     assert last.linear.x == 0.0 and last.angular.z == 0.0
 
+
 def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
     """A deadman that trips on a working link is worse than none."""
     bridge = _bridge(
@@ -880,6 +911,7 @@ def test_link_watchdog_leaves_a_healthy_link_navigating(mod):
     bridge._on_nav_cmd_vel(MagicMock())
     assert bridge.pub_cmd.publish.call_count == 1
 
+
 def test_link_watchdog_ignores_a_robot_that_is_not_navigating(mod):
     """No goal, nothing to cancel — teleop keeps its own separate deadman."""
     import time
@@ -891,6 +923,7 @@ def test_link_watchdog_ignores_a_robot_that_is_not_navigating(mod):
     bridge.link_watchdog()
     assert bridge.nav_status == "idle"
     bridge.pub_cmd.publish.assert_not_called()
+
 
 def _link_bridge(mod, hooks):
     """A bridge that is nothing but the surface `run_robot` drives."""
@@ -959,6 +992,7 @@ def _link_bridge(mod, hooks):
 
     return _Bridge()
 
+
 def _settings_response(mod, monkeypatch, settings: dict):
     """Serve one /api/settings body to refresh_settings()."""
     import contextlib
@@ -973,6 +1007,7 @@ def _settings_response(mod, monkeypatch, settings: dict):
         yield Response()
 
     monkeypatch.setattr(mod.urllib.request, "urlopen", urlopen)
+
 
 def test_losing_the_socket_cancels_the_goal_before_zeroing_cmd_vel(mod, monkeypatch):
     """A robot that keeps driving after losing its operator is the one that hurts
@@ -1024,10 +1059,12 @@ def test_losing_the_socket_cancels_the_goal_before_zeroing_cmd_vel(mod, monkeypa
     assert order[0] == "cancel", f"cancel must precede the zero Twist, got {order}"
     assert ("drive", 0.0, 0.0) in order, f"cmd_vel was never zeroed, got {order}"
 
+
 def _stamp(seconds: float):
     return type(
         "Stamp", (), {"sec": int(seconds), "nanosec": int((seconds % 1) * 1e9)}
     )()
+
 
 def _depth_image(mod, *, stamp: float, frame: str = "map"):
     values = mod.np.full((8, 8), 2000, dtype="<u2")
@@ -1046,6 +1083,7 @@ def _depth_image(mod, *, stamp: float, frame: str = "map"):
         },
     )()
 
+
 def _route_bridge(mod):
     bridge = _bridge(
         mod,
@@ -1057,6 +1095,7 @@ def _route_bridge(mod):
     bridge.map_pose = lambda: dict(bridge.pose)
     return bridge
 
+
 def _route_plan(frame="map"):
     from adapters.exploration import PlannerPath, PlannerPose
 
@@ -1065,6 +1104,7 @@ def _route_plan(frame="map"):
         1,
         tuple(PlannerPose(0.5 * i, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) for i in range(21)),
     )
+
 
 def _submit_route(bridge, plan, expected_generation=None):
     handle = MagicMock()
@@ -1077,12 +1117,14 @@ def _submit_route(bridge, plan, expected_generation=None):
     assert bridge._goal_handle is handle
     return generation, handle
 
+
 def _rock_hardware(bridge, clock, seconds, at=2.5):
     for tick in range(int(round(seconds / 0.2))):
         clock[0] += 0.2
         bridge._last_link_at = clock[0]
         bridge.pose = {"x": at - (0.3 if tick % 2 else 0.0), "y": 0.0, "yaw": 0.0}
         bridge._watchdogs()
+
 
 def test_hardware_capabilities_never_advertise_reset(mod):
     bridge = _bridge(mod)

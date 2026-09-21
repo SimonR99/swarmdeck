@@ -55,8 +55,10 @@ def test_tf_base_link_is_preferred_over_the_wheel_odometry_topic(bridge_cls):
     bridge = make_bridge(bridge_cls)
     bridge._on_tf(
         tf_message(
-            [("robot_0/map", "robot_0/odom", 99.0, 99.0, 0.0),
-             ("robot_0/odom", "robot_0/base_link", 10.56, 0.18, 0.0)]
+            [
+                ("robot_0/map", "robot_0/odom", 99.0, 99.0, 0.0),
+                ("robot_0/odom", "robot_0/base_link", 10.56, 0.18, 0.0),
+            ]
         )
     )
     bridge._on_odom(
@@ -70,7 +72,11 @@ def test_tf_base_link_is_preferred_over_the_wheel_odometry_topic(bridge_cls):
         )
     )
 
-    assert bridge.map_pose() == {"x": pytest.approx(10.56), "y": pytest.approx(0.18), "yaw": 0.0}
+    assert bridge.map_pose() == {
+        "x": pytest.approx(10.56),
+        "y": pytest.approx(0.18),
+        "yaw": 0.0,
+    }
 
 
 def test_wheel_odometry_is_a_loud_fallback_when_tf_is_missing(bridge_cls):
@@ -92,11 +98,7 @@ def test_wheel_odometry_is_a_loud_fallback_when_tf_is_missing(bridge_cls):
 
 def test_transforms_for_other_robots_are_ignored(bridge_cls):
     bridge = make_bridge(bridge_cls)
-    bridge._on_tf(
-        tf_message(
-            [("robot_1/odom", "robot_1/base_link", 99.0, 99.0, 1.0)]
-        )
-    )
+    bridge._on_tf(tf_message([("robot_1/odom", "robot_1/base_link", 99.0, 99.0, 1.0)]))
 
     assert bridge._odom_to_base is None
     assert bridge.map_pose() == {"x": 0.0, "y": 0.0, "yaw": 0.0}

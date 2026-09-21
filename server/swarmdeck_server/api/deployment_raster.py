@@ -17,7 +17,6 @@ are capped before chunks are read, raster cell count is bounded, and decoded
 chunks are cached by hash because chunks are immutable while placements move.
 """
 
-
 from __future__ import annotations
 
 import asyncio

@@ -36,7 +36,9 @@ def test_stable_reservation_ignores_map_gauge_and_rejects_planning_shift(
         )
 
     node = NS(create_publisher=publisher, create_subscription=lambda *args: None)
-    coordinator = PeerCoordinator(NS(node=node, id="r0", navigation_frame="r0/navigation_frame"), {})
+    coordinator = PeerCoordinator(
+        NS(node=node, id="r0", navigation_frame="r0/navigation_frame"), {}
+    )
     now = [0.0]
     coordinator.clock = lambda: now[0]
     mission = str(uuid.uuid4())

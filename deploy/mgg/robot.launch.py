@@ -16,7 +16,9 @@ def map_backend_parameters(robot):
     if backend != "mola_snapshot":
         raise ValueError("SWARMDECK_MGG_MAP_BACKEND must be mola_snapshot")
     if os.environ.get("SWARMDECK_PLANNER_MAP_PROVIDER", "mola") != "mola":
-        raise ValueError("MOLA graph planning requires SWARMDECK_PLANNER_MAP_PROVIDER=mola")
+        raise ValueError(
+            "MOLA graph planning requires SWARMDECK_PLANNER_MAP_PROVIDER=mola"
+        )
     mission = os.environ.get("SWARMDECK_MISSION_ID", "")
     if str(uuid.UUID(mission)) != mission:
         raise ValueError("MOLA graph planning requires a canonical mission UUID")

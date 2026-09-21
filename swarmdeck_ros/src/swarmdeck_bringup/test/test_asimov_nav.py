@@ -20,6 +20,8 @@ def test_bounded_startup_is_enabled_for_simulation_only(robot, launch_path):
     session_source = SESSION.read_text()
     hardware_source = launch_path.read_text()
 
-    assert 'DeclareLaunchArgument("bounded_startup", default_value="false")' in nav_source
+    assert (
+        'DeclareLaunchArgument("bounded_startup", default_value="false")' in nav_source
+    )
     assert '"bounded_startup": "true"' in session_source
     assert '"bounded_startup"' not in hardware_source, robot

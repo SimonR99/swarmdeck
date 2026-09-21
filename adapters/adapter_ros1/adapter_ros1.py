@@ -89,7 +89,6 @@ from adapters.session import run_adapter_session
 from adapters.costmap import CostmapSnapshot, normalize_costmap
 from ros1_defaults import DEFAULTS
 
-
 # The detector needs OpenCV and the inference sidecar's client; a robot image
 # built without them still runs, just without perception.
 try:
@@ -196,8 +195,10 @@ class HardwareBridge(
             rospy.Subscriber(topics["odom"], Odometry, self._on_odom, queue_size=10)
         if topics.get("local_costmap"):
             rospy.Subscriber(
-                topics["local_costmap"], OccupancyGrid,
-                lambda msg: self._on_costmap(msg, "local"), queue_size=1
+                topics["local_costmap"],
+                OccupancyGrid,
+                lambda msg: self._on_costmap(msg, "local"),
+                queue_size=1,
             )
         if topics.get("plan"):
             rospy.Subscriber(topics["plan"], NavPath, self._on_plan, queue_size=10)

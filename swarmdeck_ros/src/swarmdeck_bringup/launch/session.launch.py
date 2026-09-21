@@ -24,6 +24,8 @@ REPO = Path(__file__).resolve().parents[4]
 BRINGUP_DELAY = 20.0
 ROBOT_STAGGER = 10.0
 INFLATION_MARGIN = 0.25
+
+
 def prebuilt_world(cfg: dict) -> str | None:
     """Which building the ARGoS backend loads.
 
@@ -183,9 +185,14 @@ def sensor_mount_transforms(ns: str, robot) -> list[Node]:
             name=name,
             namespace=ns,
             arguments=[
-                "--x", x, "--z", z,
-                "--frame-id", f"{ns}/base_link",
-                "--child-frame-id", f"{ns}/base_link/{sensor}",
+                "--x",
+                x,
+                "--z",
+                z,
+                "--frame-id",
+                f"{ns}/base_link",
+                "--child-frame-id",
+                f"{ns}/base_link/{sensor}",
             ],
             parameters=[{"use_sim_time": True}],
             remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
@@ -216,7 +223,13 @@ def setup(context, *args, **kwargs):
         try:
             persisted = json.loads((REPO / "sessions" / "settings.json").read_text())
             count = int(persisted.get("robot_count", count))
-        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, OSError):
+        except (
+            FileNotFoundError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            OSError,
+        ):
             pass
     count = max(1, min(count, 5))
     prefix = cfg.get("fleet", {}).get("robot_prefix", "robot_")

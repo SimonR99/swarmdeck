@@ -97,7 +97,8 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
     if robot is None:
         return JSONResponse({"error": f"Robot '{robot_id}' not found"}, status_code=404)
     from .map_routes import robot_command_error
-    if (error := robot_command_error(robot_id)):
+
+    if error := robot_command_error(robot_id):
         return JSONResponse({"error": error}, status_code=409)
     if not app.registry.can(robot_id, "plan_objective"):
         return JSONResponse(
@@ -116,6 +117,7 @@ async def post_robot_goal(robot_id: str, request: Request) -> Any:
             status_code=409,
         )
     from .objective_commands import send_objective
+
     if not await send_objective(app.registry, robot_id, "navigate", goal):
         return JSONResponse(
             {"error": f"Failed to send navigation goal to {robot_id}"},

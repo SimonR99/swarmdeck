@@ -42,16 +42,12 @@ def launch_module(monkeypatch):
         "SWARMDECK_MGG_ROBOT",
     ):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv(
-        "SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25"
-    )
+    monkeypatch.setenv("SWARMDECK_MISSION_ID", "6f6afc5c-9a34-4eb4-8243-731629872d25")
     path = Path(__file__).parents[2] / "deploy/mgg/robot.launch.py"
     spec = importlib.util.spec_from_file_location("mgg_launch_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
 
 
 def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
@@ -75,8 +71,11 @@ def test_mola_launch_binds_exact_robot_and_mission(launch_module, monkeypatch):
     assert overrides["map.resolution"] == 0.20
     assert overrides["PlanningParams.global_frame_id"] == "robot_2/odom"
     assert overrides["indexed_map_query_service"] == "/robot_2/mapping/query_batch"
-    controller = next(node for node in nodes if getattr(node, "package", "") == "mgg_pci")
+    controller = next(
+        node for node in nodes if getattr(node, "package", "") == "mgg_pci"
+    )
     assert controller.parameters[-1]["world_frame"] == "robot_2/odom"
+
 
 @pytest.mark.parametrize(
     "mission", ["", "../old-mission", "6F6AFC5C-9A34-4EB4-8243-731629872D25"]
@@ -156,7 +155,9 @@ def test_sim_fleet_models_the_selected_lidar_fov(launch_module, monkeypatch, tmp
         2.0,
         4.0,
     ]
-    assert [params["objective_start_support_max_distance_m"] for params in overrides] == [
+    assert [
+        params["objective_start_support_max_distance_m"] for params in overrides
+    ] == [
         3.0,
         2.0,
         4.0,
@@ -326,8 +327,6 @@ def test_sim_mgg_rejects_planar_lidar_gain_models(
         fleet_module.generate_launch_description()
 
 
-
-
 @pytest.mark.parametrize("template", ["", "odom", "{other}/odom", "{robot}/bad frame"])
 def test_invalid_planning_frame_fails_at_launch(launch_module, monkeypatch, template):
     monkeypatch.setenv("SWARMDECK_PLANNING_FRAME_TEMPLATE", template)
@@ -341,5 +340,3 @@ def test_invalid_planning_frame_fails_at_launch(launch_module, monkeypatch, temp
             "params",
             True,
         )
-
-

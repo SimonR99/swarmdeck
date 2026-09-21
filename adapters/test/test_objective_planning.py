@@ -1096,7 +1096,9 @@ def test_return_home_authority_identity_change_fails_closed(monkeypatch, replace
         mission_id=replacement.get("mission_id", "mission-1"),
         landmark_id=replacement.get("landmark_id", "kf-home"),
         map_epoch=replacement.get("map_epoch", 0),
-        navigation_frame=replacement.get("navigation_frame", "robot_1/navigation_frame"),
+        navigation_frame=replacement.get(
+            "navigation_frame", "robot_1/navigation_frame"
+        ),
     )
 
     planner._check_active_authority()

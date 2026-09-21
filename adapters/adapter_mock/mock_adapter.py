@@ -65,7 +65,9 @@ class MockRobot:
         self.nav_status = "idle"
         self.host = host
         self.t0 = time.monotonic()
-        self.session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"swarmdeck-mock:{self.id}"))
+        self.session_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"swarmdeck-mock:{self.id}")
+        )
         self.revision = 0
         self.points = _points()
         payload = _chunk(self.points)
@@ -92,7 +94,11 @@ class MockRobot:
             "type": "robot_state",
             "robot_id": self.id,
             "t_mono": round(time.monotonic() - self.t0, 4),
-            "pose": {"x": round(self.x, 3), "y": round(self.y, 3), "yaw": round(self.yaw, 4)},
+            "pose": {
+                "x": round(self.x, 3),
+                "y": round(self.y, 3),
+                "yaw": round(self.yaw, 4),
+            },
             "battery": round(self.battery, 3),
             "mode": self.mode,
             "nav_status": self.nav_status,
@@ -109,28 +115,92 @@ class MockRobot:
                 "robot_id": self.id,
                 "T_component_navigation": IDENTITY_SE3,
             },
-            "network": {"interface": "mock-wlan0", "quality_pct": round(quality, 1), "rssi_dbm": round(-90 + quality * 0.4, 1), "ssid": "SwarmFleet-AP1", "ping_ms": round(8 + (100 - quality) * 0.8, 1)},
+            "network": {
+                "interface": "mock-wlan0",
+                "quality_pct": round(quality, 1),
+                "rssi_dbm": round(-90 + quality * 0.4, 1),
+                "ssid": "SwarmFleet-AP1",
+                "ping_ms": round(8 + (100 - quality) * 0.8, 1),
+            },
         }
 
     def slam_graph(self) -> dict:
         elapsed = time.monotonic() - self.t0
-        return {"type": "slam_graph", "robot_id": self.id, "t_mono": round(elapsed, 4), "keyframes": int(elapsed * 1.5), "in_common_frame": bool(self.peers), "residual": 0.04, "inter_robot": self.peers}
+        return {
+            "type": "slam_graph",
+            "robot_id": self.id,
+            "t_mono": round(elapsed, 4),
+            "keyframes": int(elapsed * 1.5),
+            "in_common_frame": bool(self.peers),
+            "residual": 0.04,
+            "inter_robot": self.peers,
+        }
 
     def replica_envelope(self) -> dict:
         revision = ComponentRevision(f"component:{self.id}", 0, self.revision)
         keyframe = KeyframeId(self.id, robot_run_id(self.session_id, self.id, 0), 0)
         submap_id = SubmapId(self.id, self.session_id, 0)
-        bounds = ((float(self.points[:, 0].min()), float(self.points[:, 1].min()), float(self.points[:, 2].min())), (float(self.points[:, 0].max()), float(self.points[:, 1].max()), float(self.points[:, 2].max())))
-        chunk = ChunkRef(self.chunk_sha256, XYZ_F32_ENCODING, len(self.chunk_data), bounds, len(self.points))
-        submap = SubmapRevision(submap_id, 0, revision, IDENTITY_SE3, (keyframe,), (chunk,), bounds, 0.08, observed_at_ns=time.time_ns())
-        manifest = MapManifest("onboard", "persistent_geometry", self.id, revision, self.chunk_sha256, (submap,), (chunk,), ())
+        bounds = (
+            (
+                float(self.points[:, 0].min()),
+                float(self.points[:, 1].min()),
+                float(self.points[:, 2].min()),
+            ),
+            (
+                float(self.points[:, 0].max()),
+                float(self.points[:, 1].max()),
+                float(self.points[:, 2].max()),
+            ),
+        )
+        chunk = ChunkRef(
+            self.chunk_sha256,
+            XYZ_F32_ENCODING,
+            len(self.chunk_data),
+            bounds,
+            len(self.points),
+        )
+        submap = SubmapRevision(
+            submap_id,
+            0,
+            revision,
+            IDENTITY_SE3,
+            (keyframe,),
+            (chunk,),
+            bounds,
+            0.08,
+            observed_at_ns=time.time_ns(),
+        )
+        manifest = MapManifest(
+            "onboard",
+            "persistent_geometry",
+            self.id,
+            revision,
+            self.chunk_sha256,
+            (submap,),
+            (chunk,),
+            (),
+        )
         snapshot_id = hashlib.sha256(
             json.dumps(
                 [manifest.to_dict()], sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
         snapshot = MapSnapshot(snapshot_id, time.time_ns(), (manifest,))
-        return {"version": 1, "robot_id": self.id, "session_id": self.session_id, "map_epoch": 0, "run_id": robot_run_id(self.session_id, self.id, 0), "anchor": asdict(keyframe), "participant_robot_ids": [self.id], "robot_map_epochs": {self.id: 0}, "revision": self.revision, "solution_order": [0, self.revision], "component_id": f"component:{self.id}", "chunks": [{"sha256": self.chunk_sha256, "size": len(self.chunk_data)}], "snapshot": snapshot.to_dict()}
+        return {
+            "version": 1,
+            "robot_id": self.id,
+            "session_id": self.session_id,
+            "map_epoch": 0,
+            "run_id": robot_run_id(self.session_id, self.id, 0),
+            "anchor": asdict(keyframe),
+            "participant_robot_ids": [self.id],
+            "robot_map_epochs": {self.id: 0},
+            "revision": self.revision,
+            "solution_order": [0, self.revision],
+            "component_id": f"component:{self.id}",
+            "chunks": [{"sha256": self.chunk_sha256, "size": len(self.chunk_data)}],
+            "snapshot": snapshot.to_dict(),
+        }
 
     def publish_replica(self) -> None:
         self.replica.sync(self.replica_envelope(), lambda digest: self.chunk_data)
@@ -140,12 +210,33 @@ async def run_robot(robot: MockRobot, ws_url: str) -> None:
     while True:
         try:
             async with websockets.connect(ws_url) as ws:
-                await ws.send(json.dumps(hello_message(robot_id=robot.id, robot_type=robot.type, adapter="adapter_mock/0.1.0", ros="none", capabilities=["plan_objective", "camera", "battery", "network", "estop"], footprint_radius=0.35, coordinate_frame="local")))
+                await ws.send(
+                    json.dumps(
+                        hello_message(
+                            robot_id=robot.id,
+                            robot_type=robot.type,
+                            adapter="adapter_mock/0.1.0",
+                            ros="none",
+                            capabilities=[
+                                "plan_objective",
+                                "camera",
+                                "battery",
+                                "network",
+                                "estop",
+                            ],
+                            footprint_radius=0.35,
+                            coordinate_frame="local",
+                        )
+                    )
+                )
 
                 async def rx() -> None:
                     async for raw in ws:
                         msg = json.loads(raw)
-                        if msg.get("type") == "plan_objective" and msg.get("objective") == "navigate":
+                        if (
+                            msg.get("type") == "plan_objective"
+                            and msg.get("objective") == "navigate"
+                        ):
                             robot.target = msg.get("goal") or {}
                             robot.nav_status, robot.mode = "active", "nav"
                         elif msg.get("type") in {"cancel_goal", "stop"}:
@@ -164,7 +255,9 @@ async def run_robot(robot: MockRobot, ws_url: str) -> None:
                             await ws.send(json.dumps(robot.slam_graph()))
                         if now - last_replica > 5:
                             last_replica = now
-                            await asyncio.get_running_loop().run_in_executor(None, robot.publish_replica)
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, robot.publish_replica
+                            )
                         await asyncio.sleep(0.2)
 
                 await asyncio.gather(rx(), tx())
@@ -182,7 +275,9 @@ async def main() -> None:
     base = args.host if "://" in args.host else f"http://{args.host}:{args.port}"
     ws_host = base.split("://", 1)[1]
     ws_url = f"ws://{ws_host}/adapter"
-    robots = [MockRobot(i, base, min(args.robots, 5)) for i in range(min(args.robots, 5))]
+    robots = [
+        MockRobot(i, base, min(args.robots, 5)) for i in range(min(args.robots, 5))
+    ]
     print(f"[adapter_mock] {len(robots)} robots -> {ws_url}")
     await asyncio.gather(*(run_robot(r, ws_url) for r in robots))
 

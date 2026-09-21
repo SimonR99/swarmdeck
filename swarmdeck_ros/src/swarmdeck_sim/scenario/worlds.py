@@ -92,7 +92,11 @@ BISTRO = MeshWorld(
     title="Amazon Lumberyard Bistro",
     env_vars=("SWARMDECK_BISTRO_DIR", "BISTRO_ASSETS_DIR", "BISTRO_DIR"),
     candidates=(
-        REPO.parent / "argos3-examples" / "experiments" / "bistro_exploration" / "assets",
+        REPO.parent
+        / "argos3-examples"
+        / "experiments"
+        / "bistro_exploration"
+        / "assets",
         REPO / "argos" / "assets" / "bistro",
         Path("/app/argos3-examples/experiments/bistro_exploration/assets"),
         Path("/argos3-examples/experiments/bistro_exploration/assets"),

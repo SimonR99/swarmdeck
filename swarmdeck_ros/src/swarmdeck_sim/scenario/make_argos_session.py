@@ -65,7 +65,6 @@ from spawn_fleet import (  # noqa: E402
 )
 from worlds import MESH_WORLDS, MeshWorld, world_name  # noqa: E402
 
-
 # Small detection props are visible sensor targets, not infinite-mass barriers.
 NONBLOCKING_TARGET_CLASSES = frozenset(
     {"wooden_block", "filament_spool", "disc_cone", "pool_noodle"}

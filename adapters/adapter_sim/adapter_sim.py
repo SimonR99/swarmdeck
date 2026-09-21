@@ -369,7 +369,8 @@ class RobotBridge(
             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
         )
         node.create_subscription(
-            OccupancyGrid, f"/{robot_id}/local_costmap/costmap",
+            OccupancyGrid,
+            f"/{robot_id}/local_costmap/costmap",
             lambda msg: self._on_costmap(msg, "local"),
             qos_profile_sensor_data,
         )
@@ -420,16 +421,25 @@ class RobotBridge(
         odom_frame = f"{self.id}/odom"
         base_frame = f"{self.id}/base_link"
         for stamped in msg.transforms:
-            if stamped.header.frame_id != odom_frame or stamped.child_frame_id != base_frame:
+            if (
+                stamped.header.frame_id != odom_frame
+                or stamped.child_frame_id != base_frame
+            ):
                 continue
             t = stamped.transform
-            self._odom_to_base = {"x": t.translation.x, "y": t.translation.y, "yaw": yaw_of(t.rotation)}
+            self._odom_to_base = {
+                "x": t.translation.x,
+                "y": t.translation.y,
+                "yaw": yaw_of(t.rotation),
+            }
 
     def map_pose(self) -> dict[str, float]:
         pose = self._odom_to_base or self._odom_topic_pose
         if self._odom_to_base is None and not self._warned_no_tf_base:
             self._warned_no_tf_base = True
-            self.node.get_logger().warn(f"[{self.id}] no {self.id}/odom -> {self.id}/base_link TF; using odometry topic")
+            self.node.get_logger().warn(
+                f"[{self.id}] no {self.id}/odom -> {self.id}/base_link TF; using odometry topic"
+            )
         return dict(pose)
 
     def _warn_costmap(self, kind: str, reason: str) -> None:
@@ -1227,11 +1237,7 @@ class RobotBridge(
         last_graph = getattr(self, "_session_last_graph", 0.0)
         if graph is not None and now - last_graph > 3.0:
             self._session_last_graph = now
-            await send(
-                slam_graph_payload(
-                    self.id, self.t0, graph, None, now
-                )
-            )
+            await send(slam_graph_payload(self.id, self.t0, graph, None, now))
         last_nav = getattr(self, "_session_last_nav_health", 0.0)
         if now - last_nav > 5.0:
             self._session_last_nav_health = now

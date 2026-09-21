@@ -71,7 +71,6 @@ def test_reset_refuses_and_reports_supervisor_required(sim):
     assert bridge.take_reset_report() is None
 
 
-
 def test_reset_readiness_requires_follow_path_and_planner_service(sim):
     bridge = make_bridge(sim)
     bridge.path_client = MagicMock()
@@ -82,7 +81,6 @@ def test_reset_readiness_requires_follow_path_and_planner_service(sim):
     assert bridge.navigation_ready() is False
     bridge.objective_planner.client.service_is_ready.return_value = True
     assert bridge.navigation_ready() is True
-
 
 
 def test_costmap_upload_is_skipped_while_reset_holds_quiescence_lock(sim):

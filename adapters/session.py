@@ -161,7 +161,9 @@ async def dispatch_command(
             return
         if objective in ("return_home", "navigate"):
             fn = getattr(
-                bridge, "return_home" if objective == "return_home" else "plan_objective", None
+                bridge,
+                "return_home" if objective == "return_home" else "plan_objective",
+                None,
             )
             if callable(fn):
                 # The epoch check and the call share one lock hold on the

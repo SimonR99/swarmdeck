@@ -39,8 +39,6 @@ def consolidate_voxel_centroids(
     return centroids.astype(np.float32)
 
 
-
-
 def network_robot_ids(service: Any) -> list[str]:
     with service._state_lock:
         return list(service._network_grids)
@@ -137,5 +135,3 @@ def grid_png(meta: GridMeta, cells: np.ndarray) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(img).save(buf, format="PNG", optimize=True)
     return buf.getvalue()
-
-

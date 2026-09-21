@@ -17,11 +17,14 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
 try:
     import websockets
 except ModuleNotFoundError:
+
     class _WebSockets:
         connect = None
+
     websockets = _WebSockets()
 
 ROBOT_IDS = frozenset(f"robot_{index}" for index in range(4))

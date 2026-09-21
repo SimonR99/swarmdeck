@@ -454,6 +454,7 @@ def test_persistent_local_costmap_client_keeps_replies_across_resets(monkeypatch
     rclpy.spin_once = lambda *args, **kwargs: None
     rclpy.spin_until_future_complete = lambda node, future, timeout_sec: None
     monkeypatch.setitem(sys.modules, "rclpy", rclpy)
+
     def create_client(kind, name):
         def send(request):
             effects.append(name)
@@ -482,9 +483,13 @@ def test_persistent_local_costmap_client_keeps_replies_across_resets(monkeypatch
         assert source.reset(time.monotonic() + 1, quiesced=True) == {
             "source_reset_stamp": {"sec": 9, "nanosec": 1},
         }
-    assert effects == [
-        "/robot_1/local_costmap/clear_entirely_local_costmap",
-    ] * 2
+    assert (
+        effects
+        == [
+            "/robot_1/local_costmap/clear_entirely_local_costmap",
+        ]
+        * 2
+    )
 
 
 def test_quiesce_waits_for_trajectory_controller_before_cancelling_target(
@@ -540,5 +545,3 @@ def test_quiesce_waits_for_trajectory_controller_before_cancelling_target(
     )
     robot_reset.quiesce(node, "robot_1", 1)
     assert effects == [controller, "/robot_1/cmd_vel"]
-
-

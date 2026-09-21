@@ -173,7 +173,9 @@ def live_state(bridge):
     from autonomy.live_mapping import PATH_FIELDS, display_path, validate_live_mapping
 
     try:
-        if authority["navigation_frame"].lstrip("/") != bridge.navigation_frame.lstrip("/"):
+        if authority["navigation_frame"].lstrip("/") != bridge.navigation_frame.lstrip(
+            "/"
+        ):
             return state
         payload = {
             **authority,

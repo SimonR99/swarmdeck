@@ -289,6 +289,7 @@ def new_epoch() -> dict[str, str]:
             )
         return read_deployment_env(ENV_FILE)
 
+
 def process_environment(
     spec: dict, epoch: dict[str, str] | None = None
 ) -> dict[str, str]:
@@ -325,7 +326,6 @@ def command(spec: dict) -> list[str]:
     for path in spec["compose_files"]:
         result.extend(("-f", path))
     return result
-
 
 
 def state_path(project: str) -> Path:
