@@ -3,6 +3,7 @@ import {
   isComponentScope,
   optimizedScopeLabel,
   selectGlobalOptimizedScope,
+  robotOptimizedScope,
   unmergedRobotIds,
   type OptimizedScope
 } from './optimizedScopes';
@@ -168,7 +169,17 @@ function clearCostmapLayer(robotId: string | null = null) {
   else for (const key of costmapLayers.keys()) if (key.startsWith(`${robotId}:`)) costmapLayers.delete(key);
 }
 
-function globalScope() {
+/**
+ * The raster on show: a robot's own map (`robot:<id>`, its component in its
+ * own frame) in local mode, the fleet map otherwise. Local falls back to the
+ * fleet map until the server has rasterized that robot's component.
+ */
+function shownScope() {
+  if (state.viewMode === 'local' && state.viewRobot) {
+    const own = robotOptimizedScope(state.viewRobot);
+    const entry = state.optimizedScopes.find((scope) => scope.scope === own);
+    if (entry) return entry;
+  }
   return selectGlobalOptimizedScope(state.optimizedScopes);
 }
 
@@ -201,9 +212,12 @@ export const mapStore = {
     return unmergedRobotIds(state.optimizedScopes, state.globalOptimizedScope).filter((id) => fleet.isEnabled(id));
   },
   get viewLabel() {
-    return state.viewMode === 'local' && state.viewRobot
-      ? `Follow ${state.viewRobot.replace(/^robot_/, 'R')} on map`
-      : `Deployment map · ${state.optimizedScopes.find((entry) => entry.scope === state.globalOptimizedScope)?.robots.length ?? 0} robots`;
+    const shown = state.optimizedScopes.find((entry) => entry.scope === state.globalOptimizedScope);
+    if (state.viewMode === 'local' && state.viewRobot) {
+      const own = shown?.scope === robotOptimizedScope(state.viewRobot);
+      return `${state.viewRobot.replace(/^robot_/, 'R')} · ${own ? 'own map' : 'fleet map (own map pending)'}`;
+    }
+    return `Deployment map · ${shown?.robots.length ?? 0} robots`;
   },
   get canvas() { return canvas; },
   get occupied() { return null as Uint8Array | null; },
@@ -343,7 +357,7 @@ export const mapStore = {
   },
 
   async loadGlobalOptimized(): Promise<boolean> {
-    const scope = globalScope();
+    const scope = shownScope();
     if (!scope || state.viewMode !== 'global' && state.viewMode !== 'local') return false;
     const generation = loadGeneration;
     try {
@@ -352,7 +366,7 @@ export const mapStore = {
       const fallback: RasterInfo = { ...scope, seq: scope.seq ?? state.seq };
       const info = parseRasterInfo(response.headers, fallback);
       const bitmap = await createImageBitmap(await response.blob());
-      if (generation !== loadGeneration || scope.scope !== globalScope()?.scope) { bitmap.close(); return false; }
+      if (generation !== loadGeneration || scope.scope !== shownScope()?.scope) { bitmap.close(); return false; }
       ensureCanvas(info.width, info.height);
       ctx?.clearRect(0, 0, info.width, info.height);
       ctx?.drawImage(bitmap, 0, 0, info.width, info.height);
@@ -376,15 +390,16 @@ export const mapStore = {
     try {
       const previous = state.globalOptimizedScope;
       await this.loadOptimizedScopes();
-      const next = globalScope()?.scope ?? null;
-      if (next !== previous || !state.ready) await this.loadGlobalOptimized();
+      const next = shownScope();
+      const seqChanged = next !== undefined && next.seq !== undefined && next.seq !== state.seq;
+      if (next?.scope !== previous || seqChanged || !state.ready) await this.loadGlobalOptimized();
     } finally {
       globalRefreshInFlight = false;
     }
   },
 
   async refreshLocalView() {
-    // Local is a camera/follow mode over the same verified raster.
+    // Local shows the robot's own raster; the same refresh path selects it.
     if (state.viewMode === 'local') await this.refreshGlobalOptimizedView();
   },
 

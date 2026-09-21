@@ -143,11 +143,14 @@ class DeploymentRasterRefresher:
         self.rasterize = rasterize
         self.built: tuple[str, str] | None = None
         self.failed: tuple[str, str] | None = None
+        # Per-robot rasters, keyed by scope: the snapshot they were built from.
+        self.robot_built: dict[str, str] = {}
         self.chunks = _ChunkCache(cache_bytes)
 
     def reset(self) -> None:
         self.built = None
         self.failed = None
+        self.robot_built.clear()
         self.chunks.clear()
 
     # ------------------------------------------------------------ event loop
@@ -211,10 +214,24 @@ class DeploymentRasterRefresher:
             scope = merged if merged.startswith("component:") else f"component:{merged}"
         else:
             scope = replica_views.deployment_component_id(session_id)
-        retired = map_routes.retire_server_scopes(keep=scope)
+        # Each robot's own component is also rasterized (``robot:<id>``) for
+        # the 2D local view: the map that robot navigates, in its own frame.
+        robot_scopes = {
+            robot: f"robot:{robot}"
+            for robot, (_component, _transform) in frames.items()
+        }
+        retired = map_routes.retire_server_scopes(keep={scope, *robot_scopes.values()})
         if retired:
             log.info("Retired fleet raster(s) %s", ", ".join(retired))
             self.chunks.clear()
+            self.robot_built = {
+                key: value
+                for key, value in self.robot_built.items()
+                if key not in retired
+            }
+        robot_reports = self.refresh_robots(
+            session_id, catalogue, frames, robot_scopes, generation
+        )
 
         try:
             if merged is not None:
@@ -233,6 +250,7 @@ class DeploymentRasterRefresher:
                         "status": "no composite",
                         "scope": scope,
                         "retired": retired,
+                        "robot_rasters": robot_reports,
                     }
                 view = replica_views.deployment_view(catalogue, session_id, placements)
                 if view is None:
@@ -240,6 +258,7 @@ class DeploymentRasterRefresher:
                         "status": "no composite",
                         "scope": scope,
                         "retired": retired,
+                        "robot_rasters": robot_reports,
                     }
                 # ``members`` carries each placement's T_world_navigation: the
                 # same transform ``robot_state`` applies to that robot's
@@ -252,13 +271,26 @@ class DeploymentRasterRefresher:
         except (OverflowError, ValueError, LookupError, TypeError) as exc:
             # A merge in progress raises LookupError until every publisher
             # carries the same accepted solution; the last raster stays.
-            return self._skip(scope, (session_id, "catalogue"), str(exc), retired)
+            return {
+                **self._skip(scope, (session_id, "catalogue"), str(exc), retired),
+                "robot_rasters": robot_reports,
+            }
 
         key = (session_id, str(view["snapshot_id"]))
         if key == self.built and map_routes.has_optimized_map(scope):
-            return {"status": "unchanged", "scope": scope, "retired": retired}
+            return {
+                "status": "unchanged",
+                "scope": scope,
+                "retired": retired,
+                "robot_rasters": robot_reports,
+            }
         if key == self.failed:
-            return {"status": "skipped", "scope": scope, "retired": retired}
+            return {
+                "status": "skipped",
+                "scope": scope,
+                "retired": retired,
+                "robot_rasters": robot_reports,
+            }
 
         started = time.perf_counter()
         try:
@@ -269,7 +301,10 @@ class DeploymentRasterRefresher:
                 points, rays=(gathered["origins"], gathered["spans"])
             )
         except (OverflowError, ValueError) as exc:
-            return self._skip(scope, key, str(exc), retired)
+            return {
+                **self._skip(scope, key, str(exc), retired),
+                "robot_rasters": robot_reports,
+            }
 
         published = map_routes.publish_optimized_map(
             scope,
@@ -311,7 +346,63 @@ class DeploymentRasterRefresher:
             "missing_chunks": gathered["missing_chunks"],
             "elapsed_ms": elapsed_ms,
             "retired": retired,
+            "robot_rasters": robot_reports,
         }
+
+    def refresh_robots(
+        self,
+        session_id: str,
+        catalogue,
+        frames: Mapping[str, tuple[str, Any]],
+        robot_scopes: Mapping[str, str],
+        generation: int,
+    ) -> dict[str, str]:
+        """Rasterize each robot's own component into ``robot:<id>``.
+
+        The raster frame is the robot's component frame, so its transform
+        header is ``T_component_navigation``: the same matrix the robot's
+        live authority carries, which the 2D overlay applies to its pose.
+        """
+        reports: dict[str, str] = {}
+        for robot, (component, transform) in frames.items():
+            scope = robot_scopes[robot]
+            try:
+                view = catalogue.view(session_id, component)
+            except (LookupError, TypeError, ValueError) as exc:
+                reports[robot] = f"skipped: {exc}"
+                continue
+            snapshot = str(view.get("snapshot_id") or "")
+            if not snapshot:
+                reports[robot] = "skipped: no publication identity"
+                continue
+            if self.robot_built.get(scope) == snapshot and map_routes.has_optimized_map(
+                scope
+            ):
+                reports[robot] = "unchanged"
+                continue
+            try:
+                points, gathered = composite_world_points(
+                    view, self._chunk_points, max_points=self.max_points
+                )
+                raster: KeyframeRaster = self.rasterize(
+                    points, rays=(gathered["origins"], gathered["spans"])
+                )
+            except (OverflowError, ValueError) as exc:
+                reports[robot] = f"skipped: {exc}"
+                continue
+            if map_routes.publish_optimized_map(
+                scope,
+                raster.meta,
+                raster.cells,
+                (robot,),
+                {robot: se2_of(transform)},
+                expected_generation=generation,
+            ):
+                self.robot_built[scope] = snapshot
+                reports[robot] = "built"
+            else:
+                reports[robot] = "superseded"
+        return reports
 
     def _skip(
         self, scope: str, key: tuple[str, str], detail: str, retired: list[str]

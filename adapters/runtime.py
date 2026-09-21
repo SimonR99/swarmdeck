@@ -604,6 +604,17 @@ class AdapterTelemetryMixin:
                 "completion_state",
                 "unknown",
             ),
+            "exploration_coordination": (
+                coordinator.summary()
+                if (
+                    coordinator := getattr(
+                        getattr(self, "exploration", None), "coordinator", None
+                    )
+                )
+                is not None
+                and callable(getattr(coordinator, "summary", None))
+                else None
+            ),
             "nav_status": self.nav_status,
             "nav_failure_reason": getattr(self, "_nav_failure_reason", None),
             "goal": self.goal,

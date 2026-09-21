@@ -316,6 +316,28 @@ def rasterize_points(
     )
 
 
+def level_source_floors(
+    points: np.ndarray, sources: np.ndarray, *, percentile: float = GROUND_PERCENTILE
+) -> np.ndarray:
+    """Shift each source's points so that its own floor sits at z = 0.
+
+    A robot's odometry frame starts at its base link, so every platform
+    carries its floor at a different height (measured on Bistro: Bunker
+    -0.37 m, Scout -0.29 m, Spot -0.66 m). Composed unchanged, a neighbour's
+    floor lands inside the obstacle band wherever coverage overlaps and paints
+    the road occupied. The per-source ground percentile is subtracted; the
+    raster only reads heights relative to each cell's own ground, so a
+    uniform shift per source changes nothing else.
+    """
+    if len(points) == 0:
+        return points
+    levelled = np.array(points, dtype=np.float64, copy=True)
+    for source in np.unique(sources):
+        rows = sources == source
+        levelled[rows, 2] -= np.percentile(levelled[rows, 2], percentile)
+    return levelled
+
+
 def composite_world_points(
     view: Mapping[str, Any],
     chunk_points: Callable[[Mapping[str, Any]], np.ndarray | None],
@@ -342,6 +364,8 @@ def composite_world_points(
             f"composite declares {declared} points, above the {max_points} budget"
         )
     parts: list[np.ndarray] = []
+    part_sources: list[np.ndarray] = []
+    source_ids: dict[str, int] = {}
     origins: list[np.ndarray] = []
     spans: list[tuple[int, int]] = []
     chunks = 0
@@ -352,6 +376,10 @@ def composite_world_points(
         if transform.shape != (4, 4):
             raise ValueError("submap transform must be a 4x4 matrix")
         rotation, translation = transform[:3, :3], transform[:3, 3]
+        # Submap ids are ``<robot>/<run>/submap/<seq>`` (KeyframeId.stable_id);
+        # the robot is the source whose floor is levelled.
+        robot = str(submap.get("submap_id", "")).split("/", 1)[0]
+        source = source_ids.setdefault(robot, len(source_ids))
         first = gathered
         for chunk in submap["chunks"]:
             chunks += 1
@@ -363,11 +391,14 @@ def composite_world_points(
                 parts.append(
                     np.asarray(local, dtype=np.float64) @ rotation.T + translation
                 )
+                part_sources.append(np.full(len(local), source, dtype=np.int32))
                 gathered += len(local)
         if gathered > first:
             origins.append(translation)
             spans.append((first, gathered))
     points = np.concatenate(parts) if parts else np.zeros((0, 3), dtype=np.float64)
+    if len(source_ids) > 1:
+        points = level_source_floors(points, np.concatenate(part_sources))
     return points, {
         "chunks": chunks,
         "missing_chunks": missing,

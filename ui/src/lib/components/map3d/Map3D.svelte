@@ -254,6 +254,13 @@
   const replicaLoader = new ReplicaTacticalLoader();
   const replicaRevision = new ReplicaRevisionTracker();
   let replicaNeedsRebuild = false;
+  // A composite's revision advances with every member keyframe, which during
+  // exploration is about once a second across the fleet. Rebuilding the
+  // terrain that often flickers and wastes the worker; geometry-only
+  // revisions are picked up on this cadence, while a selection or frame
+  // change still rebuilds at once through the direct fetchCloud() calls.
+  const REPLICA_REVISION_POLL_MS = 5000;
+  let lastCloudBuildAt = 0;
   let renderedOwnerIds: string[] = [];
   const seenMapEpochs = new Map<string, string>();
   $effect(() => {
@@ -418,6 +425,7 @@
       replicaRevision.commit(loaded);
       replicaCloud = { view: loaded.view, partial: loaded.partial, frameKey: loaded.frameKey };
       replicaNeedsRebuild = false;
+      lastCloudBuildAt = performance.now();
       error = null;
     } catch (cause) {
       if (!controller.signal.aborted && id === generation) {
@@ -832,7 +840,9 @@
     );
     const poll = window.setInterval(() => {
       if (!active) return;
-      void fetchCloud();
+      if (replicaNeedsRebuild || performance.now() - lastCloudBuildAt >= REPLICA_REVISION_POLL_MS) {
+        void fetchCloud();
+      }
       void refreshLiveReplica();
     }, 1000);
 

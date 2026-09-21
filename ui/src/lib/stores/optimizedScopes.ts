@@ -12,6 +12,7 @@ export interface OptimizedScope {
 
 const COMPONENT_PREFIX = 'component:';
 const DEPLOYMENT_PREFIX = 'deployment:';
+const ROBOT_PREFIX = 'robot:';
 
 export function isComponentScope(scope: string): boolean {
   return scope.startsWith(COMPONENT_PREFIX);
@@ -19,6 +20,11 @@ export function isComponentScope(scope: string): boolean {
 
 export function isDeploymentScope(scope: string): boolean {
   return scope.startsWith(DEPLOYMENT_PREFIX);
+}
+
+/** The server's per-robot raster of that robot's own component, in its own frame. */
+export function robotOptimizedScope(robotId: string): string {
+  return `${ROBOT_PREFIX}${robotId}`;
 }
 
 /** 0 for a verified component, 1 for the deployment fallback, else unranked. */
@@ -84,7 +90,9 @@ export function unmergedRobotIds(
   return ids;
 }
 
-/** How the operator sees a scope: the composite by its role, not its session id. */
+/** How the operator sees a scope: the composite and a robot's own map by their role. */
 export function optimizedScopeLabel(scope: string): string {
-  return isDeploymentScope(scope) ? 'deployment composite' : scope;
+  if (isDeploymentScope(scope)) return 'deployment composite';
+  if (scope.startsWith(ROBOT_PREFIX)) return `${scope.slice(ROBOT_PREFIX.length)} own map`;
+  return scope;
 }

@@ -67,6 +67,7 @@ class PeerCoordinator:
         self.token, self.generation, self.invalid_token = None, -1, None
         self.invalid_token_reason = None
         self.last_decision_reason = "unassigned"
+        self.decisions = {"granted": 0, "conflict": 0, "pending": 0}
         self.reservation_transform = None
         self.reservation_signature = None
         self.last_publish = 0.0
@@ -250,6 +251,7 @@ class PeerCoordinator:
             "expired": "pending",
             "unassigned": "pending",
         }[decision]
+        self.decisions[decision if decision in self.decisions else "pending"] += 1
         if decision == "conflict":
             self.last_decision_reason = f"conflict won by {winner}"
         else:
@@ -520,3 +522,55 @@ class PeerCoordinator:
             ) != {self.authority["component_id"]}:
                 return "incomplete"
         return state
+
+    def summary(self):
+        """What the operator can act on: the frame arbitration runs in, who is
+        heard, the local claim and how it fared, and the peers' progress."""
+        now = self.clock()
+        arbiter = self.arbiter
+        authority_fresh = self.authority is not None and now - self.received_at <= 3.0
+        local = None
+        if arbiter is not None and arbiter.local is not None:
+            decision, winner = arbiter.decision_with_winner()
+            local = {
+                "target": [round(float(v), 2) for v in arbiter.local.target],
+                "radius_m": arbiter.local.radius_m,
+                "decision": decision,
+                "winner": winner,
+            }
+        leases = {}
+        if arbiter is not None:
+            for robot, (claim, expires_at) in arbiter.leases.items():
+                if robot != self.bridge.id and expires_at > now:
+                    leases[robot] = [round(float(v), 2) for v in claim.target]
+        return {
+            "frame": (
+                None
+                if not authority_fresh
+                else (
+                    "deployment"
+                    if self.deployment_from_map is not None
+                    else "component"
+                )
+            ),
+            "component_id": arbiter.component_id if arbiter is not None else None,
+            "peers_heard": sorted(arbiter.heads) if arbiter is not None else [],
+            "peer_leases": leases,
+            "peer_bodies": sorted(
+                robot
+                for robot, (_x, _y, at) in self.peer_positions.items()
+                if now - at <= 3.0
+            ),
+            "local": local,
+            "last_decision": self.last_decision_reason,
+            "decisions": dict(self.decisions),
+            "reports": (
+                {
+                    robot: report.state
+                    for robot, (report, _at) in self.completion.reports.items()
+                }
+                if self.completion is not None
+                else {}
+            ),
+            "completion": self.completion_state,
+        }

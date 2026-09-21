@@ -74,8 +74,8 @@ test('the unmerged hint skips the members of a displayed deployment composite', 
   assert.deepEqual(unmergedRobotIds(scopes, 'deployment:other'), ['robot_0', 'robot_1', 'robot_2']);
 });
 
-test('the composite is named by its role, other scopes verbatim', () => {
+test('the composite and a robot own map are named by their role, components verbatim', () => {
   assert.equal(optimizedScopeLabel(`deployment:${session}`), 'deployment composite');
   assert.equal(optimizedScopeLabel('component:0'), 'component:0');
-  assert.equal(optimizedScopeLabel('robot:robot_0'), 'robot:robot_0');
+  assert.equal(optimizedScopeLabel('robot:robot_0'), 'robot_0 own map');
 });

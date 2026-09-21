@@ -52,6 +52,34 @@ export interface Stamps {
   t_sess: number;
 }
 
+/**
+ * One robot's view of frontier reservation arbitration. Leases are settled
+ * between robots that share a frame: a verified component, or the surveyed
+ * deployment frame when the scenario provides one; `frame` is null while the
+ * robot's map authority is missing or stale.
+ */
+export interface ExplorationCoordination {
+  frame: 'deployment' | 'component' | null;
+  component_id: string | null;
+  /** Robots whose intentions have been received in this mission. */
+  peers_heard: string[];
+  /** Live reservation targets held by peers, in the arbitration frame. */
+  peer_leases: Record<string, [number, number, number]>;
+  /** Peers whose current position is known and handed to the planner as a keep-out disc. */
+  peer_bodies: string[];
+  local: {
+    target: [number, number, number];
+    radius_m: number;
+    decision: 'granted' | 'pending' | 'conflict' | 'expired' | 'unassigned';
+    winner: string | null;
+  } | null;
+  last_decision: string;
+  decisions: { granted: number; conflict: number; pending: number };
+  /** Latest exploration state reported by each participant of the current run. */
+  reports: Record<string, string>;
+  completion: 'unknown' | 'incomplete' | 'complete';
+}
+
 export interface RobotState extends Stamps {
   type: 'robot_state';
   robot_id: string;
@@ -86,6 +114,8 @@ export interface RobotState extends Stamps {
     by_peer: Record<string, number>;
   } | null;
   fleet_exploration_status?: "unknown" | "incomplete" | "complete";
+  /** Frontier reservation arbitration as the robot's own coordinator sees it. */
+  exploration_coordination?: ExplorationCoordination | null;
   home_pose?: (Point & { yaw: number }) | null;
   planned_path: Point[];
   /** Global planner route, usually the full route to the goal. */

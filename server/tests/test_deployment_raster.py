@@ -170,6 +170,56 @@ def test_refresh_writes_the_scope_with_member_robots_and_world_navigation(setup)
     assert cell_at(meta, cells, 9.9, 4.5) == -1
 
 
+def test_each_robot_own_component_is_rasterized_in_its_frame_beside_the_fleet(setup):
+    # The 2D local view shows the map a robot navigates: its own component,
+    # in its own frame, so a Bistro kerb it refused is where it saw it, not
+    # where the surveyed placement puts it. The transform header is that
+    # robot's live T_component_navigation; the fleet raster stays.
+    session, refresher, registry = (
+        setup["session"],
+        setup["refresher"],
+        setup["registry"],
+    )
+    shift = [
+        [1.0, 0.0, 0.0, 2.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    registry.update_state(
+        dict(
+            robot_id="robot_1",
+            pose=dict(x=1, y=1),
+            live_mapping=live_payload(
+                "robot_1", setup["components"]["robot_1"], session, shift
+            ),
+        )
+    )
+    frames = deployment_raster.component_frames(session)
+    report = refresher.refresh(session, placements(session), frames)
+    assert report["status"] == "built"
+    assert report["robot_rasters"] == {"robot_0": "built", "robot_1": "built"}
+    assert scope_of(session) in map_routes._optimized
+    meta, cells, robots, transforms = map_routes._optimized["robot:robot_1"]
+    assert robots == ("robot_1",)
+    assert transforms == {"robot_1": {"x": 2.0, "y": 0.0, "yaw": 0.0}}
+    # robot_1's 1 m by 0.2 m floor patch lies at its own origin, unplaced;
+    # the margin above it is unknown.
+    assert cell_at(meta, cells, 0.5, 0.1) == 0
+    assert (
+        cell_at(meta, cells, 0.5, meta.origin_y + meta.resolution * (meta.height - 1))
+        == -1
+    )
+    # Unchanged sources are not rebuilt; a retired mission drops every scope.
+    again = refresher.refresh(session, placements(session), frames)
+    assert again["robot_rasters"] == {"robot_0": "unchanged", "robot_1": "unchanged"}
+    assert set(refresher.refresh(None, {})["retired"]) >= {
+        "robot:robot_0",
+        "robot:robot_1",
+        scope_of(session),
+    }
+
+
 def test_refresh_rebuilds_only_when_the_composite_changes(setup):
     session, refresher, calls = setup["session"], setup["refresher"], setup["calls"]
     assert refresher.refresh(session, placements(session))["status"] == "built"
@@ -305,7 +355,7 @@ def test_slam_scope_list_never_prunes_the_deployment_scope():
     assert map_routes._prune_optimized_maps(["robot:a"]) == ["component:1"]
     assert sorted(map_routes._optimized) == sorted([scope, "component:2"])
     assert map_routes.retire_server_scopes(keep="component:2") == [scope]
-    assert map_routes.retire_deployment_scopes(keep=None) == ["component:2"]
+    assert map_routes.retire_server_scopes(keep=None) == ["component:2"]
     assert map_routes._optimized == {}
     assert map_routes.DEPLOYMENT_SCOPE_PREFIX == replica_views.DEPLOYMENT_PREFIX
     with pytest.raises(ValueError, match="outside"):

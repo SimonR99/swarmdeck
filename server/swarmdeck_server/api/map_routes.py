@@ -15,6 +15,7 @@ import threading
 import time
 import zlib
 from dataclasses import dataclass
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -81,20 +82,19 @@ def publish_optimized_map(
     return True
 
 
-def retire_server_scopes(keep: str | None = None) -> list[str]:
+def retire_server_scopes(keep: str | Iterable[str] | None = None) -> list[str]:
+    kept = {keep} if isinstance(keep, str) else set(keep or ())
     with _optimized_lock:
         dead = sorted(
-            scope for scope in _optimized if is_server_scope(scope) and scope != keep
+            scope
+            for scope in _optimized
+            if is_server_scope(scope) and scope not in kept
         )
         for scope in dead:
             _optimized.pop(scope, None)
             _server_scopes.discard(scope)
             _optimized_seq.pop(scope, None)
     return dead
-
-
-def retire_deployment_scopes(keep: str | None = None) -> list[str]:
-    return retire_server_scopes(keep)
 
 
 def has_optimized_map(scope: str) -> bool:

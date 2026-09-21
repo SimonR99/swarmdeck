@@ -184,6 +184,52 @@ def test_composite_points_are_placed_by_each_submap_transform():
     assert reads == []
 
 
+def test_composite_levels_each_robot_floor_before_rasterizing():
+    # Two robots cover the same 1 m square of flat road. Each odometry frame
+    # starts at its own base link and drifts in z as it travels, so in the
+    # composite one floor sits 0.4 m under the other. Unlevelled, the higher
+    # floor is inside the obstacle band of every shared cell and the road
+    # rasterizes occupied (measured on Bistro: 42% of known cells against
+    # 10% for any single robot).
+    floor = np.array(
+        [[x * 0.1, y * 0.1, 0.0] for x in range(10) for y in range(10)],
+        dtype=np.float32,
+    )
+
+    def lift(dz):
+        return [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, dz],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+
+    view = {
+        "selected": {
+            "submaps": [
+                {
+                    "submap_id": "robot_0/run/submap/0",
+                    "T_component_submap": lift(-0.3),
+                    "chunks": [{"sha256": "a", "encoding": "xyz", "point_count": 100}],
+                },
+                {
+                    "submap_id": "robot_3/run/submap/0",
+                    "T_component_submap": lift(-0.7),
+                    "chunks": [{"sha256": "b", "encoding": "xyz", "point_count": 100}],
+                },
+            ]
+        }
+    }
+    points, _stats = kr.composite_world_points(
+        view, lambda chunk: floor, max_points=200
+    )
+    raster = kr.rasterize_points(points, cell_m=0.2)
+    assert raster.occupied_cells == 0
+    assert raster.known_cells > 0
+    stacked = np.concatenate([floor - [0, 0, 0.3], floor - [0, 0, 0.7]])
+    assert kr.rasterize_points(stacked, cell_m=0.2).occupied_cells == raster.known_cells
+
+
 def test_keyframe_rays_sweep_free_space_up_to_the_return_and_no_further():
     # One keyframe at the origin, 0.5 m up, whose returns are a ground ring at
     # 6 m (in the height band) and a canopy ring at 3 m (out of it), plus a

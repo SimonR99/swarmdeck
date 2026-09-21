@@ -61,6 +61,7 @@ class Robot:
     exploration_status: str = "idle"
     exploration_reason: str | None = None
     fleet_exploration_status: str = "unknown"
+    exploration_coordination: dict | None = None
     home_pose: dict[str, float] | None = None
     battery: float | None = None
     mode: str = "idle"
@@ -110,6 +111,9 @@ class Robot:
             "live_mapping": self.live_mapping if self.online else None,
             "fleet_exploration_status": (
                 self.fleet_exploration_status if self.online else "unknown"
+            ),
+            "exploration_coordination": (
+                self.exploration_coordination if self.online else None
             ),
             "battery": self.battery,
             "mode": self.mode,
@@ -264,6 +268,10 @@ class Registry:
             )
         if msg.get("fleet_exploration_status") in {"unknown", "incomplete", "complete"}:
             r.fleet_exploration_status = msg["fleet_exploration_status"]
+        coordination = msg.get("exploration_coordination")
+        r.exploration_coordination = (
+            coordination if isinstance(coordination, dict) else None
+        )
         if "nav_status" in msg:
             r.nav_status = msg["nav_status"]
             if r.nav_status == "failed" and isinstance(
