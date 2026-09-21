@@ -39,8 +39,11 @@ services:
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
       FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       EXPLORE_SECONDS: "0"
-      SWARMDECK_ODOMETRY: drift
-      SWARMDECK_CONFIG: /app/configs/4robot_bistro.yaml
+      # The scenario and the odometry model come from the deployment's env
+      # file, so a reset can switch worlds (Bistro, SubT Finals) without
+      # editing this overlay; the defaults are the Bistro trials' settings.
+      SWARMDECK_ODOMETRY: "${SWARMDECK_ODOMETRY:-drift}"
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot_bistro.yaml}"
   argos:
     image: swarmdeck-argos:planning
     devices: !reset []
@@ -52,4 +55,4 @@ services:
     image: swarmdeck-mgg:planning
     environment:
       ROS_DOMAIN_ID: "${SWARMDECK_TEST_DOMAIN:-173}"
-      SWARMDECK_CONFIG: /app/configs/4robot_bistro.yaml
+      SWARMDECK_CONFIG: "${SWARMDECK_CONFIG:-/app/configs/4robot_bistro.yaml}"
